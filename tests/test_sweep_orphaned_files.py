@@ -22,7 +22,7 @@ from src.app.services import blob_store
 from src.scripts import sweep_orphaned_files as sweeper
 from tests.conftest import db_available
 from tests.helpers.fake_s3 import FakeS3Client, select_s3_backend
-from tests.helpers.generators import create_species, create_user, create_user_picture, set_avatar_columns
+from tests.helpers.generators import create_species, create_user, create_user_picture
 
 REFERENCED = "dive-files/aa/referenced"
 ORPHAN = "dive-files/bb/orphan"
@@ -222,13 +222,10 @@ class TestReferencedKeys:
 
     @pytest.mark.asyncio
     async def test_every_picture_key_counts_as_referenced(self, db: Session, async_db: AsyncSession) -> None:
-        """Both files of both pictures, and a key only the `user` row's avatar column holds -
-        what the build before `user_picture` writes, which this one must not sweep."""
+        """Both files of both pictures."""
         diver = create_user(db)
         avatar = create_user_picture(db, diver, kind="avatar")
         portrait = create_user_picture(db, diver, kind="portrait")
-        column_key = f"user-avatars/cc/{uuid7()}_{'c' * 64}"
-        set_avatar_columns(db, diver, key=column_key, sha256="c" * 64)
 
         referenced = await sweeper._referenced_keys(async_db)
 
@@ -237,7 +234,6 @@ class TestReferencedKeys:
             avatar.original_storage_key,
             portrait.rendition_storage_key,
             portrait.original_storage_key,
-            column_key,
         } <= referenced
 
     @pytest.mark.asyncio

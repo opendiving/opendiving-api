@@ -20,7 +20,7 @@ from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.invitation import Invitation
 from ...models.invite_request import InviteRequest
-from ...models.user import USER_AVATAR_STORAGE_KEY, User, user_table
+from ...models.user import User
 from ...models.user_picture import UserPicture
 from ...models.user_session import UserSession
 from ...schemas.gear_service import ServiceStatus
@@ -353,8 +353,7 @@ async def _collect_stored_file_keys(db: AsyncSession, user_id: int) -> list[str]
     the diver's face in the store is a privacy hole inside an erasure feature - and it is
     why `DELETE /user` can leave them alone: that route only flags the row, and
     `POST /auth/restore` inside the grace period should bring back a whole account rather
-    than a faceless one. The avatar's key is also still a column on the `user` row, which the
-    build before `user_picture` writes, so that is read too, deduplicated against the rows.
+    than a faceless one.
     """
     dive_file_keys = (await db.execute(select(DiveFile.storage_key).where(DiveFile.user_id == user_id))).scalars().all()
     certification_file_keys = (
@@ -375,11 +374,8 @@ async def _collect_stored_file_keys(db: AsyncSession, user_id: int) -> list[str]
             )
         )
     ).all()
-    column_key = (
-        await db.execute(select(USER_AVATAR_STORAGE_KEY).where(user_table.c.id == user_id))
-    ).scalar_one_or_none()
-    picture_file_keys = {key for row in picture_keys for key in row if key} | ({column_key} if column_key else set())
-    return [*dive_file_keys, *certification_file_keys, *sorted(picture_file_keys)]
+    picture_file_keys = [key for row in picture_keys for key in row if key]
+    return [*dive_file_keys, *certification_file_keys, *picture_file_keys]
 
 
 async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cutoff: datetime) -> bool:

@@ -46,7 +46,6 @@ from uuid6 import uuid7
 
 from ..core.db.database import release_read_transaction
 from ..core.utils.uploads import read_upload_within_limit, safe_filename
-from ..models.user import USER_AVATAR_SHA256, USER_AVATAR_STORAGE_KEY, user_table
 from ..models.user_picture import UserPicture
 from ..schemas.user_picture import PictureCrop, PictureKind
 from . import blob_store
@@ -500,8 +499,6 @@ async def _write(
         blob_store.delete_after_commit(
             db, [key for key in (existing.original_storage_key, existing.rendition_storage_key) if key]
         )
-    if frame is AVATAR_FRAME:
-        await _write_avatar_columns(db, user_id=user_id, key=rendition_key, sha256=rendition_sha256)
     await db.commit()
     return rendition_sha256
 
@@ -557,8 +554,6 @@ async def recrop_picture(db: AsyncSession, *, user_id: int, frame: Frame, crop: 
         raise PictureChangedError("The picture changed while it was being adjusted. Reload it and try again.")
 
     blob_store.delete_after_commit(db, held.rendition_storage_key)
-    if frame is AVATAR_FRAME:
-        await _write_avatar_columns(db, user_id=user_id, key=rendition_key, sha256=rendition_sha256)
     await db.commit()
     return rendition_sha256
 
@@ -595,8 +590,6 @@ async def delete_picture(db: AsyncSession, *, user_id: int, frame: Frame) -> boo
         return False
 
     blob_store.delete_after_commit(db, [key for key in (held.original_storage_key, held.rendition_storage_key) if key])
-    if frame is AVATAR_FRAME:
-        await _write_avatar_columns(db, user_id=user_id, key=None, sha256=None)
     await db.commit()
     return True
 
@@ -670,17 +663,6 @@ async def seed_google_avatar(db: AsyncSession, *, user_id: int, stored: StoredAv
             rendition_sha256=stored.sha256,
             created_at=datetime.now(UTC),
         )
-    )
-    await _write_avatar_columns(db, user_id=user_id, key=stored.storage_key, sha256=stored.sha256)
-
-
-async def _write_avatar_columns(db: AsyncSession, *, user_id: int, key: str | None, sha256: str | None) -> None:
-    """Keep the `user` row's avatar columns naming the avatar's rendition, for the build
-    before `user_picture`, which reads them, and the purge and sweeper, which count them."""
-    await db.execute(
-        update(user_table)
-        .where(user_table.c.id == user_id)
-        .values({USER_AVATAR_STORAGE_KEY: key, USER_AVATAR_SHA256: sha256, user_table.c.updated_at: datetime.now(UTC)})
     )
 
 

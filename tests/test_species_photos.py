@@ -1423,7 +1423,7 @@ class TestTheDigestIsTheContract:
     ) -> None:
         """The species page renders the credit, so `SpeciesRead` carries its parts - and the
         blob key and the operational timestamp stay server-side, exactly as `UserRead` carries
-        `avatar_sha256` and never `avatar_storage_key`."""
+        `avatar_sha256` and never the rendition's storage key."""
         from src.app.schemas.species import SpeciesRead
 
         # A fresh key per run: `ux_species_photo_storage_key` is unique and these rows persist

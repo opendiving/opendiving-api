@@ -47,7 +47,6 @@ from ..app.core.db.database import local_session
 from ..app.models.certification_file import CertificationFile
 from ..app.models.dive_file import DiveFile
 from ..app.models.species import Species
-from ..app.models.user import USER_AVATAR_STORAGE_KEY
 from ..app.models.user_picture import UserPicture
 from ..app.services import blob_store
 
@@ -99,9 +98,7 @@ async def _referenced_keys(session: AsyncSession) -> set[str]:
     were three, and the fourth arriving is exactly the moment nobody re-reads the docstring.
 
     The nullable columns filter their NULLs out - a species with no photo or a picture with no
-    original must not contribute a `None` to a set the tree is diffed against. The avatar's
-    key on the `user` row is counted beside the picture rows while the build before
-    `user_picture`, which writes it, may still be serving.
+    original must not contribute a `None` to a set the tree is diffed against.
     """
     dive_keys = (await session.execute(select(DiveFile.storage_key))).scalars().all()
     card_keys = (await session.execute(select(CertificationFile.storage_key))).scalars().all()
@@ -115,24 +112,12 @@ async def _referenced_keys(session: AsyncSession) -> set[str]:
         .scalars()
         .all()
     )
-    avatar_column_keys = (
-        (await session.execute(select(USER_AVATAR_STORAGE_KEY).where(USER_AVATAR_STORAGE_KEY.is_not(None))))
-        .scalars()
-        .all()
-    )
     species_photo_keys = (
         (await session.execute(select(Species.photo_storage_key).where(Species.photo_storage_key.is_not(None))))
         .scalars()
         .all()
     )
-    return (
-        set(dive_keys)
-        | set(card_keys)
-        | set(rendition_keys)
-        | set(original_keys)
-        | set(avatar_column_keys)
-        | set(species_photo_keys)
-    )
+    return set(dive_keys) | set(card_keys) | set(rendition_keys) | set(original_keys) | set(species_photo_keys)
 
 
 def _classify(referenced: set[str], *, now: float) -> tuple[list[str], int, int]:

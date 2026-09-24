@@ -1,12 +1,10 @@
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import update
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app import models
-from src.app.models.user import USER_AVATAR_SHA256, USER_AVATAR_STORAGE_KEY, user_table
 from tests.conftest import fake, unique_email, unique_username
 
 
@@ -56,16 +54,6 @@ def create_user_picture(
         picture.original_filename = "me.jpg"
         picture.crop_x, picture.crop_y, picture.crop_width, picture.crop_height = 0, 0, 9, 9
     return _persist(db, picture)
-
-
-def set_avatar_columns(db: Session, user: models.User, *, key: str | None, sha256: str | None) -> None:
-    """Write the `user` row's avatar columns, which are off the mapper."""
-    db.execute(
-        update(user_table)
-        .where(user_table.c.id == user.id)
-        .values({USER_AVATAR_STORAGE_KEY: key, USER_AVATAR_SHA256: sha256})
-    )
-    db.commit()
 
 
 def create_dive_site(db: Session, user: models.User) -> models.DiveSite:
