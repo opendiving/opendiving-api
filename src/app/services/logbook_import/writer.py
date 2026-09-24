@@ -3,8 +3,9 @@
 Everything worth deciding was decided in `planner.py`; this module issues the statements.
 That split is what makes the preview honest - the report a diver approves is produced by
 the same pass that decides what to write - and it is why the only notes added here are the
-two a plan genuinely cannot predict: a restored file whose bytes do not match their digest,
-and one whose bytes are not a format this app stores.
+ones a plan genuinely cannot predict: a restored file whose bytes do not match their digest,
+one whose bytes are not a format this app stores, and whether the portrait the diver took was
+still theirs to replace when the write reached it.
 
 **Atomicity is in rows, and the blobs sit deliberately outside it.** Nothing here commits;
 the caller does, once, at the end - so a failed, refused or interrupted import writes no
@@ -89,6 +90,7 @@ from ..dive_recordings import (
 from ..dive_stats import recalculate_dive_stats
 from ..gear_service import recalculate_service_schedule
 from ..gear_stats import recalculate_gear_dive_counts
+from ..user_pictures import write_imported_portrait
 from .planner import (
     MAX_NOTES,
     Action,
@@ -170,7 +172,9 @@ class _Writer:
         self._ids[(collection, record.source_uuid)] = row_id
         return row_id
 
-    def _note(self, code: ImportNoteCode, message: str, *, collection: str, uuid: uuid_pkg.UUID) -> None:
+    def _note(
+        self, code: ImportNoteCode, message: str, *, collection: str | None = None, uuid: uuid_pkg.UUID | None = None
+    ) -> None:
         if len(self._plan.notes) >= MAX_NOTES:
             self._plan.notes_dropped += 1
             return
@@ -240,6 +244,7 @@ class _Writer:
 
     async def write(self) -> None:
         await self._write_check_in()
+        await self._write_portrait()
         await self._write_trips()
         await self._write_courses()
         await self._write_sites()
@@ -258,6 +263,26 @@ class _Writer:
         if self._plan.check_in_values:
             await self._db.execute(
                 update(User).where(User.id == self._user_id).values(**self._plan.check_in_values, updated_at=self._now)
+            )
+
+    async def _write_portrait(self) -> None:
+        portrait = self._plan.portrait
+        if portrait is None or not portrait.take:
+            return
+        if await write_imported_portrait(
+            self._db,
+            user_id=self._user_id,
+            picture=portrait.picture,
+            filename=portrait.filename,
+            held=portrait.held,
+        ):
+            self._note(
+                ImportNoteCode.CHECK_IN_DETAIL_WRITTEN, "The portrait chosen in the preview was saved to this account."
+            )
+        else:
+            self._note(
+                ImportNoteCode.PORTRAIT_KEPT,
+                "This account's portrait was kept: it changed while the archive's was being saved.",
             )
 
     async def _write_trips(self) -> None:

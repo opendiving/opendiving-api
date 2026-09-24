@@ -156,25 +156,6 @@ class ImportInsurance(_ReadModel):
     expires_on: date | None = None
 
 
-class ImportDiver(_ReadModel):
-    """Whose logbook the document is. Its identity and settings are read and reported, and
-    never applied; its check-in details are offered in the preview and written as the diver
-    confirms them - see `DECISIONS.md`. Every member is optional because §6.1 makes them
-    so: a converter whose source records nothing about an owner omits the whole object
-    rather than minting identity for a person."""
-
-    uuid: uuid_pkg.UUID | None = None
-    name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    username: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
-    email: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
-    born_on: date | None = None
-    emergency_contacts: Annotated[list[ImportEmergencyContact], Field(default_factory=list), _Collection]
-    insurances: Annotated[list[ImportInsurance], Field(default_factory=list), _Collection]
-    created_at: datetime | None = None
-    extensions: dict[str, Any] | None = None
-
-
 class ImportStoredFile(_ReadModel):
     """Metadata for a binary. In a bare document there is nothing behind it, which is why
     `archive_path` is what tells the two paths apart (spec §6.7)."""
@@ -187,6 +168,26 @@ class ImportStoredFile(_ReadModel):
         str | None, Field(default=None, min_length=_SHA256_LENGTH, max_length=_SHA256_LENGTH, pattern=r"^[0-9a-f]+$")
     ]
     archive_path: str | None = None
+    extensions: dict[str, Any] | None = None
+
+
+class ImportDiver(_ReadModel):
+    """Whose logbook the document is. Its identity and settings are read and reported, and
+    never applied; its check-in details and its portrait are offered in the preview and
+    written as the diver confirms them - see `DECISIONS.md`. Every member is optional
+    because §6.1 makes them so: a converter whose source records nothing about an owner
+    omits the whole object rather than minting identity for a person."""
+
+    uuid: uuid_pkg.UUID | None = None
+    name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    username: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
+    email: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
+    born_on: date | None = None
+    emergency_contacts: Annotated[list[ImportEmergencyContact], Field(default_factory=list), _Collection]
+    insurances: Annotated[list[ImportInsurance], Field(default_factory=list), _Collection]
+    portrait_file: ImportStoredFile | None = None
+    created_at: datetime | None = None
     extensions: dict[str, Any] | None = None
 
 
@@ -584,8 +585,12 @@ class ImportNoteCode(StrEnum):
     # An emergency contact or an insurance in the document is not offered: it names nobody
     # or no insurer, or it comes after the first and the account holds one of each.
     CHECK_IN_DETAIL_DROPPED = "check_in_detail_dropped"
-    # A check-in detail the diver confirmed in the preview was written to the account.
+    # A check-in detail the diver confirmed in the preview was written to the account; the
+    # portrait they took from the archive among them.
     CHECK_IN_DETAIL_WRITTEN = "check_in_detail_written"
+    # The diver took the archive's portrait, and the account's changed after the preview they
+    # chose from, so the account's was kept.
+    PORTRAIT_KEPT = "portrait_kept"
 
 
 class ImportNote(BaseModel):
@@ -624,14 +629,16 @@ class ImportCollectionReport(BaseModel):
 
 
 class ImportFileReport(BaseModel):
-    """The binaries, which follow different rules from the records that reference them.
+    """The logbook's binaries - dive-computer files and card images - which follow different
+    rules from the records that reference them.
 
     A bare document carries file *metadata* and no bytes, so `restored` is zero and
     `not_contained` is every referenced file - which is not an error, just a smaller
-    restore. Only an archive can put bytes back.
+    restore. Only an archive can put bytes back. The diver's portrait is not among them: it
+    is offered apart, beside the check-in details.
     """
 
-    referenced: Annotated[int, Field(description="Stored files the document names")]
+    referenced: Annotated[int, Field(description="Dive-computer files and card images the document names")]
     restored: Annotated[int, Field(description="Files whose bytes were written to this instance")]
     not_contained: Annotated[int, Field(description="Files with no bytes in this document - import the archive")]
     skipped: Annotated[int, Field(description="Files whose bytes are here but could not be stored")]
@@ -830,6 +837,44 @@ class ImportCheckInSubmission(BaseModel):
         return errors
 
 
+# ---------------------------------------------------------------- the portrait
+
+
+class ImportPortraitOffer(BaseModel):
+    """The archive's portrait beside the account's, for the diver to take or keep.
+
+    Beside the check-in details rather than among them: a client that knows only those never
+    sends a choice, and the account keeps its portrait.
+    """
+
+    account_sha256: Annotated[
+        str | None,
+        Field(
+            description="The account's portrait as its digest - the `?v=` of `GET /user/portrait` - or `null` "
+            "without one. Send it back as the choice's `account_sha256`."
+        ),
+    ]
+    proposed: Annotated[
+        str,
+        Field(description="The archive's portrait as a `data:image/webp;base64,` URL, framed as it would be stored"),
+    ]
+
+
+class ImportPortraitChoice(BaseModel):
+    """What the diver chose for the archive's portrait, sent back beside the token.
+
+    `account_sha256` is the account's portrait as the preview showed it, so a portrait
+    replaced or removed since is kept whatever the choice.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    choice: Literal["take", "keep"]
+    account_sha256: Annotated[
+        str | None, Field(min_length=_SHA256_LENGTH, max_length=_SHA256_LENGTH, pattern=r"^[0-9a-f]+$")
+    ]
+
+
 class ImportReport(BaseModel):
     """The body of both responses: the same shape whether it is a plan or a result.
 
@@ -903,6 +948,14 @@ class ImportPreview(ImportReport):
             default_factory=list,
             description="One entry per check-in detail the document carries, the account's value beside the "
             "proposal. Send back the ones the diver keeps or edits as `check_in_details`; nothing else is written.",
+        ),
+    ]
+    portrait: Annotated[
+        ImportPortraitOffer | None,
+        Field(
+            default=None,
+            description="The archive's portrait, offered beside the account's. `null` when the upload carries none "
+            "it can offer - `notes` say why - or carries the account's own, framed the same.",
         ),
     ]
 

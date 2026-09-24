@@ -56,14 +56,35 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _picture(kind: PictureKind, *, original: tuple[str, str] | None = None) -> UserPicture:
-    """A picture row: a rendition always, and an original `(key, content type)` when given."""
+def _picture(kind: PictureKind, *, original: tuple[str, str] | None = None, data: bytes = b"") -> UserPicture:
+    """A picture row: a rendition always, and an original `(key, content type)` when given,
+    whose digest and size are `data`'s."""
     picture = UserPicture(
         user_id=1, kind=kind.value, rendition_storage_key=f"{kind.value}/rendition", rendition_sha256="0" * 64
     )
     if original is not None:
         picture.original_storage_key, picture.original_content_type = original
+        picture.original_sha256, picture.original_byte_size = _digest(data), len(data)
+        picture.original_filename = f"{kind.value}.jpg"
+        picture.crop_x, picture.crop_y, picture.crop_width, picture.crop_height = 0, 0, 7, 9
     return picture
+
+
+def _with_both_pictures(bundle: Any, monkeypatch: Any) -> Any:
+    """`bundle` with an avatar and a portrait, each keeping its original, in the store."""
+    blobs = {"user-avatars/ab/original": AVATAR_ORIGINAL_BYTES, "user-portraits/cd/original": PORTRAIT_BYTES}
+    monkeypatch.setattr("src.app.services.export.archive.blob_store.get", AsyncMock(side_effect=blobs.__getitem__))
+    bundle.pictures.update(
+        {
+            PictureKind.AVATAR: _picture(
+                PictureKind.AVATAR, original=("user-avatars/ab/original", "image/png"), data=AVATAR_ORIGINAL_BYTES
+            ),
+            PictureKind.PORTRAIT: _picture(
+                PictureKind.PORTRAIT, original=("user-portraits/cd/original", "image/jpeg"), data=PORTRAIT_BYTES
+            ),
+        }
+    )
+    return bundle
 
 
 def _install_blob_loaders(monkeypatch: Any) -> None:
@@ -137,7 +158,7 @@ class TestInventory:
         """Checked against the `sha256` the database stored - carried through
         `logbook.divejson` - rather than one computed here, so the assertion covers the
         whole round trip: column, metadata, member."""
-        archive = await _build(_bundle_matching_the_stub_blobs(), monkeypatch)
+        archive = await _build(_with_both_pictures(_bundle_matching_the_stub_blobs(), monkeypatch), monkeypatch)
         envelope = json.loads(archive.read("logbook.divejson"))
 
         stored = [
@@ -149,7 +170,8 @@ class TestInventory:
         stored += [
             cert[side] for cert in envelope["certifications"] for side in ("front_file", "back_file") if side in cert
         ]
-        assert len(stored) == 3
+        stored.append(envelope["diver"]["portrait_file"])
+        assert len(stored) == 4
 
         members = archive.namelist()
         for entry in stored:
@@ -158,7 +180,9 @@ class TestInventory:
 
     @pytest.mark.asyncio
     async def test_no_blob_is_in_the_archive_the_document_does_not_name(self, monkeypatch):
-        archive = await _build(_bundle_matching_the_stub_blobs(), monkeypatch)
+        """Every member but the generated documents is a stored binary the document names -
+        the avatar the one exception, which stays the account's own and has no member."""
+        archive = await _build(_with_both_pictures(_bundle_matching_the_stub_blobs(), monkeypatch), monkeypatch)
         envelope = json.loads(archive.read("logbook.divejson"))
         named = {
             file["archive_path"]
@@ -172,7 +196,9 @@ class TestInventory:
             for side in ("front_file", "back_file")
             if side in cert
         }
-        blobs = {name for name in archive.namelist() if name.startswith(("files/", "certifications/"))}
+        named.add(envelope["diver"]["portrait_file"]["archive_path"])
+        exempt = {"logbook.divejson", "dives.uddf", "avatar.png"}
+        blobs = {name for name in archive.namelist() if name not in exempt and not name.startswith("csv/")}
         assert blobs == named
 
     @pytest.mark.asyncio

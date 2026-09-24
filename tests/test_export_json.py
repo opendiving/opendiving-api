@@ -37,10 +37,12 @@ from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.trip import Trip
+from src.app.models.user_picture import UserPicture
 from src.app.schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION, ExportCourse, ExportEnvelope
 from src.app.schemas.location import LocationRead
 from src.app.schemas.trip import TripPartRead
 from src.app.schemas.user import CHECK_IN_FIELDS
+from src.app.schemas.user_picture import PictureKind
 from src.app.services.dive_profiles import MERGE_PARSER_KEY, LoadedProfile
 from src.app.services.export.envelope import write_divejson
 from src.app.services.export.paths import plan_archive_paths
@@ -1306,6 +1308,71 @@ class TestUnresolvableReferences:
         bundle.gear_item_by_id.clear()
         document = await _render(bundle, monkeypatch)
         assert document["gear_sets"][0]["gear_uuids"] == []
+
+
+PORTRAIT_UUID = uuid_pkg.UUID("0198a6f0-1111-7002-8000-000000000002")
+
+
+def _portrait(**overrides: Any) -> UserPicture:
+    """A portrait row holding its original and crop, as every portrait does."""
+    picture = UserPicture(
+        user_id=1,
+        kind=PictureKind.PORTRAIT.value,
+        rendition_storage_key="user-portraits/ab/rendition",
+        rendition_sha256="d" * 64,
+        original_storage_key="user-portraits/ab/original",
+        original_sha256="e" * 64,
+        original_byte_size=2_345_678,
+        original_content_type="image/jpeg",
+        original_filename="IMG_4471.JPG",
+        crop_x=0,
+        crop_y=72,
+        crop_width=3024,
+        crop_height=3888,
+        uuid=PORTRAIT_UUID,
+    )
+    for column, value in overrides.items():
+        setattr(picture, column, value)
+    return picture
+
+
+class TestThePortrait:
+    """The diver's `portrait_file` (spec §6.1): the original, whole, with this app's crop
+    beside it under the producer key."""
+
+    @pytest.mark.asyncio
+    async def test_the_diver_carries_the_original_and_the_crop_rides_this_producer_s_key(self, monkeypatch):
+        document = await _render(build_bundle(pictures={PictureKind.PORTRAIT: _portrait()}), monkeypatch)
+
+        assert document["diver"]["portrait_file"] == {
+            "uuid": str(PORTRAIT_UUID),
+            "original_filename": "IMG_4471.JPG",
+            "content_type": "image/jpeg",
+            "byte_size": 2_345_678,
+            "sha256": "e" * 64,
+            "extensions": {"opendiving": {"crop": {"x": 0, "y": 72, "width": 3024, "height": 3888}}},
+        }
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_inside_an_archive_it_names_the_member_the_archive_writes(self, monkeypatch):
+        bundle = build_bundle(pictures={PictureKind.PORTRAIT: _portrait(original_content_type="image/png")})
+
+        document = await _render(bundle, monkeypatch, paths=plan_archive_paths(bundle))
+
+        assert document["diver"]["portrait_file"]["archive_path"] == "portrait.png"
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_the_avatar_has_no_member(self, monkeypatch):
+        """It stays the account's own identity; the archive carries its file, the document
+        does not name it."""
+        avatar = _portrait(kind=PictureKind.AVATAR.value, rendition_storage_key="user-avatars/ab/rendition")
+        bundle = build_bundle(pictures={PictureKind.AVATAR: avatar})
+
+        document = await _render(bundle, monkeypatch, paths=plan_archive_paths(bundle))
+
+        assert "portrait_file" not in document["diver"]
 
 
 class TestStoredFiles:

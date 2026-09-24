@@ -19,6 +19,7 @@ document from a *later* minor version, one carrying a value this app refuses, on
 trip's, and the reference implementation is by construction unable to exercise them.
 """
 
+import base64
 import hashlib
 import io
 import json
@@ -33,6 +34,7 @@ import divejson
 import pytest
 import pytest_asyncio
 from fastapi import UploadFile
+from PIL import Image
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, undefer
@@ -59,6 +61,7 @@ from src.app.models.gear_set_item import GearSetItem
 from src.app.models.species import Species
 from src.app.models.trip import Trip
 from src.app.models.trip_part import TripPart
+from src.app.models.user_picture import UserPicture
 from src.app.schemas.certification import CertificationAgency
 from src.app.schemas.dive import DiveUpdateRequest
 from src.app.schemas.logbook_import import (
@@ -66,10 +69,13 @@ from src.app.schemas.logbook_import import (
     ImportCheckInInsurance,
     ImportCheckInSubmission,
     ImportNoteCode,
+    ImportPortraitChoice,
 )
 from src.app.schemas.user import CHECK_IN_FIELDS
+from src.app.schemas.user_picture import PictureCrop, PictureKind
+from src.app.services import blob_store
 from src.app.services.export import load_export_bundle, write_divejson, write_uddf
-from src.app.services.export.archive import DIVEJSON_NAME
+from src.app.services.export.archive import DIVEJSON_NAME, write_archive
 from src.app.services.export.paths import plan_archive_paths
 from src.app.services.logbook_import import (
     ImportTooLargeError,
@@ -82,6 +88,7 @@ from src.app.services.logbook_import import (
 from src.app.services.logbook_import import reader as import_reader
 from src.app.services.logbook_import.planner import _DIVE_BOUNDS, _MIXTURE_BOUNDS
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
+from src.app.services.user_pictures import PORTRAIT_FRAME, recrop_picture, store_picture
 from tests.conftest import db_available
 from tests.helpers.generators import (
     create_certification,
@@ -97,6 +104,7 @@ from tests.helpers.generators import (
     create_trip,
     create_user,
 )
+from tests.helpers.images import gif, phone_jpeg
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="Postgres is not reachable")
 
@@ -147,6 +155,7 @@ async def _apply(
     data: bytes,
     filename: str = "logbook.divejson",
     check_in: ImportCheckInSubmission | None = None,
+    portrait: ImportPortraitChoice | None = None,
 ) -> Any:
     """Plan and write in one transaction, exactly as `POST /import/logbook` does.
 
@@ -155,7 +164,9 @@ async def _apply(
     unresolvable. `resolution_ran=True` is what tells the planner to say so.
     """
     with await load_import(_upload(data, filename)) as loaded:
-        plan = await plan_import(db, user_id=user_id, loaded=loaded, resolution_ran=True, check_in=check_in)
+        plan = await plan_import(
+            db, user_id=user_id, loaded=loaded, resolution_ran=True, check_in=check_in, portrait=portrait
+        )
         await write_import(db, user_id=user_id, loaded=loaded, plan=plan)
         await db.commit()
         return plan
@@ -2652,6 +2663,320 @@ class TestTheCheckInDetails:
         assert _details(preview)["insurance"].proposed.number == "DE-4471902"
         assert await _check_in_row(async_db, owner.id) == FILLED_CHECK_IN
         assert ImportNoteCode.CHECK_IN_DETAIL_WRITTEN not in _codes(plan)
+
+
+# A portrait-orientation phone photo, 480x640 upright, and a crop of it that is not the centred
+# one - so a test can tell the carried crop from the fallback.
+SOURCE_PORTRAIT = phone_jpeg(size=(640, 480), orientation=6)
+SOURCE_CROP = PictureCrop(x=50, y=100, width=350, height=450)
+# Another picture altogether, framed by its own centred crop.
+OTHER_PORTRAIT = phone_jpeg(size=(320, 240), orientation=None)
+OTHER_CROP = PictureCrop(x=67, y=0, width=186, height=240)
+
+
+async def _give_portrait(db: AsyncSession, user_id: int, data: bytes, crop: PictureCrop) -> None:
+    upload = UploadFile(file=io.BytesIO(data), filename="IMG_4471.JPG", size=len(data))
+    await store_picture(db, user_id=user_id, frame=PORTRAIT_FRAME, upload=upload, crop=crop)
+
+
+async def _portrait_row(db: AsyncSession, user_id: int) -> Any:
+    return (
+        await db.execute(
+            select(
+                UserPicture.uuid,
+                UserPicture.rendition_storage_key,
+                UserPicture.rendition_sha256,
+                UserPicture.original_storage_key,
+                UserPicture.original_sha256,
+                UserPicture.original_filename,
+                UserPicture.crop_x,
+                UserPicture.crop_y,
+                UserPicture.crop_width,
+                UserPicture.crop_height,
+            ).where(UserPicture.user_id == user_id, UserPicture.kind == PictureKind.PORTRAIT.value)
+        )
+    ).one_or_none()
+
+
+def _crop_of(row: Any) -> PictureCrop:
+    return PictureCrop(x=row.crop_x, y=row.crop_y, width=row.crop_width, height=row.crop_height)
+
+
+async def _archive(db: AsyncSession, user_id: int) -> bytes:
+    """The account's whole-export archive, as `GET /export/archive` builds it."""
+    bundle = await load_export_bundle(db, user_id=user_id)
+    buffer = await write_archive(db, bundle, exported_at=datetime.now(UTC))
+    try:
+        return buffer.read()
+    finally:
+        buffer.close()
+
+
+def _foreign_archive(member: bytes | None, *, sha256: str | None = None, extensions: Any = None) -> bytes:
+    """An archive another producer wrote: a diver whose portrait is `member`."""
+    stored: dict[str, Any] = {
+        "uuid": str(uuid7()),
+        "original_filename": "face.jpg",
+        "content_type": "image/jpeg",
+        "byte_size": len(member or b""),
+        "sha256": sha256 or hashlib.sha256(member or b"").hexdigest(),
+        "archive_path": "face.jpg",
+    }
+    if extensions is not None:
+        stored["extensions"] = extensions
+    document = json.dumps({"format": "divejson", "version": "1.0", "diver": {"portrait_file": stored}}).encode()
+    return _zip_of(document, {} if member is None else {"face.jpg": member})
+
+
+def _take(offered: str | None) -> ImportPortraitChoice:
+    return ImportPortraitChoice(choice="take", account_sha256=offered)
+
+
+class TestThePortrait:
+    """The archive's portrait, offered beside the account's and written only as chosen.
+
+    Never counted among the files, which are the logbook's; the avatar is never imported.
+    """
+
+    @pytest.fixture(autouse=True)
+    def volume(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.setattr(blob_store.settings, "FILE_STORAGE_DIR", str(tmp_path))
+        return tmp_path
+
+    @pytest.mark.asyncio
+    async def test_the_preview_offers_the_archive_s_beside_the_account_s(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        source, destination = create_user(db), create_user(db)
+        await _give_portrait(async_db, source.id, SOURCE_PORTRAIT, SOURCE_CROP)
+        await _give_portrait(async_db, destination.id, OTHER_PORTRAIT, OTHER_CROP)
+        archive = await _archive(async_db, source.id)
+
+        plan = await _preview(async_db, destination.id, archive, "logbook.zip")
+        offer = await plan.portrait_offer()
+
+        assert offer is not None
+        assert offer.account_sha256 == (await _portrait_row(async_db, destination.id)).rendition_sha256
+        prefix = "data:image/webp;base64,"
+        with Image.open(io.BytesIO(base64.b64decode(offer.proposed.removeprefix(prefix)))) as image:
+            assert image.size == (280, 360), "drawn at the carried 7:9 crop, reduced to travel inline"
+        assert plan.files_referenced == 0
+
+    @pytest.mark.asyncio
+    async def test_taking_it_stores_the_archive_s_original_under_its_crop(
+        self, db: Session, async_db: AsyncSession, volume: Path
+    ) -> None:
+        source, destination = create_user(db), create_user(db)
+        await _give_portrait(async_db, source.id, SOURCE_PORTRAIT, SOURCE_CROP)
+        await _give_portrait(async_db, destination.id, OTHER_PORTRAIT, OTHER_CROP)
+        archive = await _archive(async_db, source.id)
+        offer = await (await _preview(async_db, destination.id, archive, "logbook.zip")).portrait_offer()
+        assert offer is not None
+        before = await _portrait_row(async_db, destination.id)
+
+        plan = await _apply(async_db, destination.id, archive, "logbook.zip", portrait=_take(offer.account_sha256))
+
+        after = await _portrait_row(async_db, destination.id)
+        assert after.original_sha256 == (await _portrait_row(async_db, source.id)).original_sha256
+        assert _crop_of(after) == SOURCE_CROP
+        assert after.original_filename == "IMG_4471.JPG"
+        assert after.uuid != before.uuid
+        assert not (volume / before.original_storage_key).exists()
+        assert not (volume / before.rendition_storage_key).exists()
+        assert ImportNoteCode.CHECK_IN_DETAIL_WRITTEN in _codes(plan)
+        assert plan.files_referenced == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "extensions",
+        [
+            None,
+            {"opendiving": {"crop": {"x": 0, "y": 0, "width": 700, "height": 900}}},
+            {"opendiving": {"crop": "centre"}},
+            {"opendiving": "not an entry"},
+        ],
+        ids=["no crop", "a crop outside the image", "no rectangle", "no entry"],
+    )
+    async def test_an_original_without_a_crop_that_fits_gets_the_centred_one(
+        self, db: Session, async_db: AsyncSession, extensions: Any
+    ) -> None:
+        destination = create_user(db)
+
+        await _apply(
+            async_db,
+            destination.id,
+            _foreign_archive(OTHER_PORTRAIT, extensions=extensions),
+            "logbook.zip",
+            portrait=_take(None),
+        )
+
+        row = await _portrait_row(async_db, destination.id)
+        assert _crop_of(row) == OTHER_CROP
+        assert row.original_filename == "face.jpg"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("choice", ["keep", None])
+    async def test_keeping_it_or_sending_no_choice_leaves_the_account_s(
+        self, db: Session, async_db: AsyncSession, choice: str | None
+    ) -> None:
+        """No choice is what the web build before the portrait's row sends - beside the facts
+        it does send, which are written."""
+        source, destination = create_user(db), create_user(db)
+        _fill_check_in(db, source, phone="+20 100 123 4567")
+        await _give_portrait(async_db, source.id, SOURCE_PORTRAIT, SOURCE_CROP)
+        await _give_portrait(async_db, destination.id, OTHER_PORTRAIT, OTHER_CROP)
+        archive = await _archive(async_db, source.id)
+        before = await _portrait_row(async_db, destination.id)
+
+        await _apply(
+            async_db,
+            destination.id,
+            archive,
+            "logbook.zip",
+            check_in=ImportCheckInSubmission(phone="+20 100 123 4567"),
+            portrait=None if choice is None else ImportPortraitChoice(choice="keep", account_sha256=None),
+        )
+
+        assert await _portrait_row(async_db, destination.id) == before
+        assert (await _check_in_row(async_db, destination.id))["phone"] == "+20 100 123 4567"
+
+    @pytest.mark.asyncio
+    async def test_a_portrait_changed_since_the_preview_is_kept_with_a_note(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        source, destination = create_user(db), create_user(db)
+        await _give_portrait(async_db, source.id, SOURCE_PORTRAIT, SOURCE_CROP)
+        archive = await _archive(async_db, source.id)
+        offer = await (await _preview(async_db, destination.id, archive, "logbook.zip")).portrait_offer()
+        assert offer is not None and offer.account_sha256 is None
+        await _give_portrait(async_db, destination.id, OTHER_PORTRAIT, OTHER_CROP)
+        before = await _portrait_row(async_db, destination.id)
+
+        plan = await _apply(async_db, destination.id, archive, "logbook.zip", portrait=_take(offer.account_sha256))
+
+        assert await _portrait_row(async_db, destination.id) == before
+        assert ImportNoteCode.PORTRAIT_KEPT in _codes(plan)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("had_one", [False, True], ids=["an empty slot filled", "a portrait replaced"])
+    async def test_one_changed_between_the_plan_and_the_write_is_kept_too(
+        self, db: Session, async_db: AsyncSession, had_one: bool
+    ) -> None:
+        """The statement names the portrait the plan read, so a change that lands in between
+        matches nothing, and the files put for the archive's go after the commit."""
+        source, destination = create_user(db), create_user(db)
+        await _give_portrait(async_db, source.id, SOURCE_PORTRAIT, SOURCE_CROP)
+        if had_one:
+            await _give_portrait(
+                async_db,
+                destination.id,
+                phone_jpeg(size=(160, 120), orientation=None),
+                PictureCrop(x=33, y=0, width=93, height=120),
+            )
+        archive = await _archive(async_db, source.id)
+        seen = await _portrait_row(async_db, destination.id)
+
+        with await load_import(_upload(archive, "logbook.zip")) as loaded:
+            plan = await plan_import(
+                async_db,
+                user_id=destination.id,
+                loaded=loaded,
+                resolution_ran=True,
+                portrait=_take(None if seen is None else seen.rendition_sha256),
+            )
+            await _give_portrait(async_db, destination.id, OTHER_PORTRAIT, OTHER_CROP)
+            changed = await _portrait_row(async_db, destination.id)
+            keys_before = set(blob_store.iter_keys())
+            await write_import(async_db, user_id=destination.id, loaded=loaded, plan=plan)
+            await async_db.commit()
+
+        assert plan.portrait is not None and plan.portrait.take
+        assert await _portrait_row(async_db, destination.id) == changed
+        assert ImportNoteCode.PORTRAIT_KEPT in _codes(plan)
+        assert set(blob_store.iter_keys()) == keys_before
+
+    @pytest.mark.asyncio
+    async def test_a_bare_document_notes_it_and_offers_nothing(self, db: Session, async_db: AsyncSession) -> None:
+        source, destination = create_user(db), create_user(db)
+        await _give_portrait(async_db, source.id, SOURCE_PORTRAIT, SOURCE_CROP)
+        document = await _export(async_db, source.id)
+
+        preview = await _preview(async_db, destination.id, document)
+        plan = await _apply(async_db, destination.id, document, portrait=_take(None))
+
+        assert preview.portrait is None
+        assert ImportNoteCode.FILE_NOT_CONTAINED in _codes(preview)
+        assert (preview.files_referenced, preview.files_not_contained) == (0, 0)
+        assert ImportNoteCode.FILE_NOT_CONTAINED in _codes(plan)
+        assert await _portrait_row(async_db, destination.id) is None
+
+    @pytest.mark.asyncio
+    async def test_this_app_s_own_archive_back_in_changes_nothing(self, db: Session, async_db: AsyncSession) -> None:
+        """The original's digest survives the strip, so the archive's is the account's own and
+        is not offered; applied twice, the portrait keeps its uuid and its files - and so the
+        next export's `portrait_file`."""
+        owner = create_user(db)
+        await _give_portrait(async_db, owner.id, SOURCE_PORTRAIT, SOURCE_CROP)
+        archive = await _archive(async_db, owner.id)
+        before = await _portrait_row(async_db, owner.id)
+
+        preview = await _preview(async_db, owner.id, archive, "logbook.zip")
+        first = await _apply(async_db, owner.id, archive, "logbook.zip", portrait=_take(before.rendition_sha256))
+        second = await _apply(async_db, owner.id, archive, "logbook.zip", portrait=_take(before.rendition_sha256))
+
+        assert preview.portrait is None
+        assert await _portrait_row(async_db, owner.id) == before
+        for plan in (first, second):
+            assert _codes(plan).isdisjoint({ImportNoteCode.CHECK_IN_DETAIL_WRITTEN, ImportNoteCode.PORTRAIT_KEPT})
+
+    @pytest.mark.asyncio
+    async def test_its_own_original_under_another_crop_is_a_re_crop(
+        self, db: Session, async_db: AsyncSession, volume: Path
+    ) -> None:
+        owner = create_user(db)
+        await _give_portrait(async_db, owner.id, SOURCE_PORTRAIT, SOURCE_CROP)
+        archive = await _archive(async_db, owner.id)
+        await recrop_picture(
+            async_db, user_id=owner.id, frame=PORTRAIT_FRAME, crop=PictureCrop(x=0, y=0, width=420, height=540)
+        )
+        before = await _portrait_row(async_db, owner.id)
+        offer = await (await _preview(async_db, owner.id, archive, "logbook.zip")).portrait_offer()
+        assert offer is not None
+
+        await _apply(async_db, owner.id, archive, "logbook.zip", portrait=_take(offer.account_sha256))
+
+        after = await _portrait_row(async_db, owner.id)
+        assert (after.uuid, after.original_storage_key, after.original_sha256) == (
+            before.uuid,
+            before.original_storage_key,
+            before.original_sha256,
+        )
+        assert _crop_of(after) == SOURCE_CROP
+        assert after.rendition_storage_key != before.rendition_storage_key
+        assert not (volume / before.rendition_storage_key).exists()
+        assert (volume / after.original_storage_key).exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("member", "sha256"),
+        [(gif(), None), (OTHER_PORTRAIT, "0" * 64), (None, "0" * 64)],
+        ids=["not a JPEG or PNG", "not the bytes the digest names", "missing from the archive"],
+    )
+    async def test_a_portrait_that_cannot_be_stored_is_noted_and_never_offered(
+        self, db: Session, async_db: AsyncSession, member: bytes | None, sha256: str | None
+    ) -> None:
+        """Noted at the preview, where the pipeline first runs, and the apply agrees."""
+        destination = create_user(db)
+        archive = _foreign_archive(member, sha256=sha256)
+
+        preview = await _preview(async_db, destination.id, archive, "logbook.zip")
+        plan = await _apply(async_db, destination.id, archive, "logbook.zip", portrait=_take(None))
+
+        for report in (preview, plan):
+            assert report.portrait is None
+            assert ImportNoteCode.FILE_SKIPPED in _codes(report)
+            assert (report.files_referenced, report.files_skipped) == (0, 0)
+        assert await _portrait_row(async_db, destination.id) is None
 
 
 class TestTheBoundsCensus:

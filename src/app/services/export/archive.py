@@ -66,7 +66,6 @@ from .. import blob_store
 from ..blob_store import BlobMissingError
 from ..certification_files import load_certification_file
 from ..dive_files import load_dive_file
-from ..user_pictures import RENDITION_CONTENT_TYPE, picture_filename
 from .envelope import write_divejson
 from .loader import ExportBundle
 from .paths import ArchivePaths, plan_archive_paths
@@ -222,24 +221,16 @@ async def _write_blobs(
     tool someone reaches for when their storage is half-dead, so failing the whole archive
     over it would take away the one thing still working.
 
-    The pictures come off the rows already in the bundle, the original where one is kept -
-    it is what the diver uploaded, and the rendition can be drawn again from it - and the
-    rendition otherwise. `ZIP_STORED` like the rest: deflating an already-compressed image
-    burns CPU to save nothing.
+    The pictures are the members `paths` planned for them, `ZIP_STORED` like the rest:
+    deflating an already-compressed image burns CPU to save nothing.
     """
-    for kind, picture in sorted(bundle.pictures.items()):
-        if picture.original_storage_key is not None and picture.original_content_type is not None:
-            key, content_type = picture.original_storage_key, picture.original_content_type
-        else:
-            key, content_type = picture.rendition_storage_key, RENDITION_CONTENT_TYPE
+    for kind, picture in paths.pictures.items():
         try:
-            data = await blob_store.get(key)
+            data = await blob_store.get(picture.storage_key)
         except BlobMissingError:
             logger.error("Skipping the %s: its stored file is missing from the volume", kind.value)
             continue
-        archive.writestr(
-            _member(picture_filename(kind, content_type), exported_at, compress_type=zipfile.ZIP_STORED), data
-        )
+        archive.writestr(_member(picture.name, exported_at, compress_type=zipfile.ZIP_STORED), data)
 
     for dive in bundle.dives:
         for recording in bundle.recordings_by_dive.get(dive.id, []):

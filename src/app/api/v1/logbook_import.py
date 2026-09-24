@@ -7,8 +7,8 @@ here rather than in the service layer because each is an HTTP concern:
 - **The caller's own account, and nothing else.** No `username` or `user_uuid` parameter:
   the bearer token names the only logbook there is to import into, so there is no
   authorization decision to get wrong. The document's own diver identity and settings are
-  read, reported and never applied; its check-in details are written only as the diver
-  confirms them in the preview.
+  read, reported and never applied; its check-in details and its portrait are written only
+  as the diver confirms them in the preview.
 - **Any format the converter reads, and the app's own two.** A DiveJSON document, the
   full-export archive, a UDDF file, a Subsurface `.ssrf`, a FIT, a Suunto app export, a
   Suunto DM5 XML export, or a zip whose members are all one of those - a watch writes one file per dive, and one file
@@ -48,7 +48,7 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import UnprocessableEntityException
 from ...core.security import create_logbook_import_token, verify_logbook_import_token
 from ...core.utils.rate_limit import enforce_rate_limit
-from ...schemas.logbook_import import ImportCheckInSubmission, ImportPreview, ImportResult
+from ...schemas.logbook_import import ImportCheckInSubmission, ImportPortraitChoice, ImportPreview, ImportResult
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
     invalidate_course_caches,
@@ -138,8 +138,8 @@ async def preview_logbook_import(
     existing record of yours already carries that identifier, or that name), **restored** (a
     record you deleted here, coming back under its original identifier) or **skipped**.
     `notes` explains every decision that is not a plain create, one sentence at a time, and
-    `files` says how many stored binaries the logbook references and how many of them it
-    actually contains - only the full-export archive carries any.
+    `files` says how many dive-computer files and card images the logbook references and how
+    many of them it actually contains - only the full-export archive carries any.
 
     `conversion` is present when the file was not DiveJSON already, and says what the
     conversion could not carry: findings grouped by kind and message, each with up to three
@@ -149,6 +149,11 @@ async def preview_logbook_import(
     birth, phone, emergency contact, dive insurance - with your account's value beside the
     proposal. An emergency contact or an insurance is proposed whole: your own where every
     part the logbook gives matches it, otherwise the logbook's alone.
+
+    `portrait` is the archive's portrait beside your account's, when the archive carries one
+    it can offer: yours as the digest `GET /user/portrait` answers to, the archive's as an
+    inline image framed as it would be stored. It is absent when the archive's is your own,
+    framed the same, and a portrait that cannot be offered is explained in `notes`.
 
     The `token` in the response goes to `POST /import/logbook` with the same file. It says
     which bytes this report describes and nothing more: the import re-reads, re-converts and
@@ -164,6 +169,7 @@ async def preview_logbook_import(
             archive=loaded.is_archive,
             token=create_logbook_import_token(user_uuid=current_user["uuid"], sha256=loaded.digest),
             check_in_details=plan.check_in_details,
+            portrait=await plan.portrait_offer(),
             **_body(plan, loaded),
         )
 
@@ -179,6 +185,13 @@ async def apply_logbook_import(
         Form(
             description="The check-in details to write, as JSON: the preview's proposals as kept or edited. A "
             "detail left out is not written, and `null` clears it."
+        ),
+    ] = None,
+    portrait: Annotated[
+        Json[ImportPortraitChoice] | None,
+        Form(
+            description="The choice made for the preview's `portrait`, as JSON: `take` or `keep`, with the "
+            "`account_sha256` the preview showed. Left out, the account keeps its portrait."
         ),
     ] = None,
 ) -> ImportResult:
@@ -202,6 +215,10 @@ async def apply_logbook_import(
     `check_in_details` and only then - a detail not sent, or one the logbook does not carry,
     stays as it is. What is sent meets the bounds `PATCH /user` does, and an emergency
     contact without a name or an insurance without a provider is a 422.
+
+    The archive's portrait replaces your account's only when `portrait` says `take`, and
+    only while your portrait is still the one the preview showed; otherwise yours is kept,
+    and a note says so when you had chosen the archive's.
     """
     if check_in_details is not None and (anchor_errors := check_in_details.anchor_errors()):
         raise RequestValidationError(
@@ -229,6 +246,7 @@ async def apply_logbook_import(
             resolution_ran=True,
             newly_resolved_aphia_ids=newly_resolved,
             check_in=check_in_details,
+            portrait=portrait,
         )
         await write_import(db, user_id=current_user["id"], loaded=loaded, plan=plan)
         await db.commit()
