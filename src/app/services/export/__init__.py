@@ -17,7 +17,7 @@
 - `tabular.py` writes the **CSV** set, headed by the flat `dives.csv` a diver opens in a
   spreadsheet.
 - `archive.py` puts all of the above in one zip alongside every stored dive-computer
-  export and c-card image.
+  export and c-card image, and both pictures.
 
 All four read one `ExportBundle` (`loader.py`), which is the single batched query pass.
 

@@ -1,11 +1,14 @@
 import logging
 import uuid as uuid_pkg
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Cookie, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Cookie, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,12 +51,12 @@ from ...schemas.user import (
     EMERGENCY_CONTACT_FIELDS,
     INSURANCE_FIELDS,
     AccountDeletionResponse,
-    AvatarRead,
     UserRead,
     UserUpdate,
     lacks_its_anchor,
 )
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
+from ...schemas.user_picture import PictureCrop, PictureCropRequest, PictureKind, PictureRead
 from ...services.dive_activity import dive_activity
 from ...services.dive_gas import gas_use_history
 from ...services.email_service import (
@@ -62,15 +65,21 @@ from ...services.email_service import (
     send_email_changed_notification,
 )
 from ...services.species_life_list import species_life_list
-from ...services.user_avatars import (
-    AVATAR_CONTENT_TYPE,
-    AVATAR_FILENAME,
-    MAX_AVATAR_UPLOAD_SIZE,
-    UnsupportedAvatarImageError,
-    delete_user_avatar,
-    get_stored_avatar,
-    read_avatar_bytes,
-    store_user_avatar,
+from ...services.user_pictures import (
+    AVATAR_FRAME,
+    MAX_PICTURE_UPLOAD_SIZE,
+    PORTRAIT_FRAME,
+    InvalidCropError,
+    PictureChangedError,
+    StoredPictureFile,
+    UnsupportedPictureError,
+    copy_avatar_to_portrait,
+    delete_picture,
+    get_original,
+    get_rendition,
+    read_picture_bytes,
+    recrop_picture,
+    store_picture,
 )
 
 logger = logging.getLogger(__name__)
@@ -181,92 +190,89 @@ async def patch_user(
     return {"message": "User updated"}
 
 
-# -------------- avatar --------------
+# -------------- pictures --------------
 #
-# Three routes rather than a field on `PATCH /user`, for the reason every stored payload
-# here gets its own: the bytes live in the blob store - a volume or a bucket, on
-# `FILE_STORAGE_BACKEND` - and the row carries a key, so the write has an ordering rule
-# (file first, row second) and the delete has the mirror of it.
-# A JSON PATCH that could null the key would leave the file behind.
+# The avatar and the check-in portrait, five routes each and the portrait's copy, rather
+# than fields on `PATCH /user`, for the reason every stored payload here gets its own: the
+# bytes live in the blob store and the row carries keys, so the write has an ordering rule
+# (files first, row second) and the delete has the mirror of it. A JSON PATCH that could null
+# a key would leave the file behind.
 #
-# Self-scoped like the rest of `/user` - no uuid anywhere, so there is no ownership check
-# to get backwards. Serving *another* diver's avatar is a separate, viewer-facing route
-# for whenever buddies or sharing arrive; nothing renders one today.
+# Self-scoped like the rest of `/user` - no uuid anywhere, so there is no ownership check to
+# get backwards. Serving *another* diver's picture is a separate, viewer-facing route for
+# whenever one is needed; nothing renders one today.
+
+_PICTURE_CACHE_CONTROL = "private, max-age=300"
+_MAX_UPLOAD_MB = MAX_PICTURE_UPLOAD_SIZE // (1024 * 1024)
+_CROP_DESCRIPTION = (
+    'The crop, as JSON: `{"x": 0, "y": 72, "width": 3024, "height": 3888}` - a rectangle in the upright '
+    "image's pixels, at the picture's ratio"
+)
 
 
-@router.put("/user/avatar", response_model=AvatarRead)
-async def write_user_avatar(
-    request: Request,
-    current_user: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_get_db)],
-    file: Annotated[
-        UploadFile,
-        File(description=f"Profile picture (JPEG, PNG, WEBP or GIF, max {MAX_AVATAR_UPLOAD_SIZE // (1024 * 1024)} MB)"),
-    ],
-) -> AvatarRead:
-    """Set or replace the caller's profile picture.
-
-    `PUT` because this is a whole-slot idempotent replace - there is one avatar per
-    account and uploading again overwrites it.
-
-    **What comes back out is not what went in.** The image is decoded, oriented from its
-    EXIF, cropped square, bounded to 512 px and re-encoded as WebP, which is what strips
-    the metadata a phone photo carries - GPS included. Anything that will not decode as one
-    of the four accepted formats is a 415; anything over the size limit is a 413.
-
-    The response carries the stored image's digest, which is its version: append it to
-    `GET /user/avatar` as `?v=` so a replacement lands on a URL the browser has not cached.
-    """
+def _form_crop(raw: str | None) -> PictureCrop | None:
+    """A multipart form carries the crop as a JSON string; a bad one is the same 422 a bad
+    JSON body gets, pointed at the field."""
+    if raw is None:
+        return None
     try:
-        digest = await store_user_avatar(db=db, user_id=current_user["id"], upload=file)
-    except UnsupportedAvatarImageError as exc:
+        return PictureCrop.model_validate_json(raw)
+    except ValidationError as exc:
+        raise RequestValidationError(
+            [{**error, "loc": ("body", "crop", *error["loc"])} for error in exc.errors(include_url=False)]
+        ) from exc
+
+
+@contextmanager
+def _picture_errors(crop: PictureCrop | None) -> Iterator[None]:
+    """The service's refusals, as the statuses the routes promise."""
+    try:
+        yield
+    except UnsupportedPictureError as exc:
         raise HTTPException(status_code=415, detail=str(exc)) from exc
+    except InvalidCropError as exc:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("body", "crop"),
+                    "msg": str(exc),
+                    "input": crop.model_dump() if crop else None,
+                }
+            ]
+        ) from exc
+    except PictureChangedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    return AvatarRead(sha256=digest)
 
+async def _serve_picture(request: Request, stored: StoredPictureFile | None, *, kind: PictureKind) -> Response:
+    """One of a picture's files, to its owner.
 
-@router.get("/user/avatar")
-async def read_user_avatar(
-    request: Request,
-    current_user: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_get_db)],
-    v: Annotated[
-        str | None,
-        Query(description="Opaque cache-busting version token; ignored by the server"),
-    ] = None,
-) -> Response:
-    """Serve the caller's own avatar - one WebP, always.
+    Deliberately *not* `@cache`d, for the same reason as the card download: Redis here holds
+    serialized API responses, and parking binaries in it evicts what the cache is for. The
+    `ETag`/`If-None-Match` pair does that job in the browser instead.
 
-    Deliberately *not* `@cache`d, for the same reason as the card download: Redis here
-    holds serialized API responses, and parking binaries in it evicts what the cache is
-    for. The `ETag`/`If-None-Match` pair does that job in the browser instead.
-
-    `v` is read by nothing here, and is declared so the contract is visible rather than
-    looking like a stray parameter. The response is cacheable for five minutes and the
-    avatar can be *replaced* at this same URL, so the client passes the digest from
-    `UserRead.avatar_sha256` and each version gets its own cache entry.
-
-    The key and the digest come from a narrow read here rather than from `current_user`,
-    which is a snapshot taken when the request began. Serving from the snapshot would let a
-    replacement commit and unlink the old blob mid-request, turning a routine race into a
-    `BlobMissingError` - which is a loud 500 by design, because a row naming bytes that are
-    gone is data loss and answering 404 is how nobody ever investigates it.
+    The key and the digest come from a narrow read in the route rather than from
+    `current_user`, which is a snapshot taken when the request began. Serving from the
+    snapshot would let a replacement commit and unlink the old blob mid-request, turning a
+    routine race into a `BlobMissingError` - which is a loud 500 by design, because a row
+    naming bytes that are gone is data loss and answering 404 is how nobody ever
+    investigates it.
     """
-    stored = await get_stored_avatar(db=db, user_id=current_user["id"])
     if stored is None:
-        raise NotFoundException("No avatar set")
+        raise NotFoundException(f"No {kind.value} set")
 
     etag = f'"{stored.sha256}"'
     if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=300"})
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": _PICTURE_CACHE_CONTROL})
 
     return Response(
-        content=await read_avatar_bytes(stored),
-        media_type=AVATAR_CONTENT_TYPE,
+        content=await read_picture_bytes(stored),
+        media_type=stored.content_type,
         headers={
             # `attachment`, not `inline`: the clients fetch this through their API client
             # and render from a blob URL, so nothing ever navigates here directly.
-            "Content-Disposition": content_disposition_attachment(AVATAR_FILENAME, default="avatar"),
+            "Content-Disposition": content_disposition_attachment(stored.filename, default=kind.value),
             "X-Content-Type-Options": "nosniff",
             # `frame-ancestors` is spelled out because it does not fall back to
             # `default-src`: a response with its own policy opts out of
@@ -275,9 +281,107 @@ async def read_user_avatar(
             "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
             # `private` because this is one diver's picture and no shared cache should keep
             # a copy; the `ETag` makes re-validation after 5 minutes cheap.
-            "Cache-Control": "private, max-age=300",
+            "Cache-Control": _PICTURE_CACHE_CONTROL,
             "ETag": etag,
         },
+    )
+
+
+_VERSION_DESCRIPTION = "Opaque cache-busting version token; ignored by the server"
+
+
+@router.put("/user/avatar", response_model=PictureRead)
+async def write_user_avatar(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    file: Annotated[
+        UploadFile,
+        File(
+            description=f"Profile picture, max {_MAX_UPLOAD_MB} MB: a JPEG or PNG with a crop, "
+            "or a JPEG, PNG, WEBP or GIF without one"
+        ),
+    ],
+    crop: Annotated[str | None, Form(description=f"{_CROP_DESCRIPTION}, 1:1")] = None,
+) -> PictureRead:
+    """Set or replace the caller's profile picture.
+
+    `PUT` because this is a whole-slot idempotent replace - there is one avatar per account
+    and uploading again overwrites it.
+
+    **With a crop, the file is kept as the original** - a JPEG or PNG, stripped of its
+    metadata (location included) without touching a pixel - and the picture shown everywhere
+    is rendered from it through the crop: oriented, cropped, bounded to 512 px and encoded as
+    WebP. `PATCH /user/avatar` re-crops it later. **Without one**, nothing is kept but that
+    rendition, drawn from the centred square of any of four formats. A crop outside the image
+    or off 1:1 is a 422; a file that will not decode, or an original that is not a JPEG or
+    PNG, a 415; anything over the size limit a 413.
+
+    The response carries the rendition's digest, which is its version: append it to
+    `GET /user/avatar` as `?v=` so a replacement lands on a URL the browser has not cached.
+    """
+    picture_crop = _form_crop(crop)
+    with _picture_errors(picture_crop):
+        digest = await store_picture(
+            db=db, user_id=current_user["id"], frame=AVATAR_FRAME, upload=file, crop=picture_crop
+        )
+    return PictureRead(sha256=digest)
+
+
+@router.patch("/user/avatar", response_model=PictureRead)
+async def adjust_user_avatar(
+    request: Request,
+    body: PictureCropRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> PictureRead:
+    """Re-crop the caller's profile picture from the original it holds, which is untouched.
+
+    404 when the avatar holds no original - one stored before originals were kept, seeded
+    from Google, or uploaded without a crop - and 409 if it is replaced or removed while
+    this renders. Answers the new rendition's digest, as `PUT` does.
+    """
+    with _picture_errors(body.crop):
+        digest = await recrop_picture(db=db, user_id=current_user["id"], frame=AVATAR_FRAME, crop=body.crop)
+    if digest is None:
+        raise NotFoundException("The avatar has no original to adjust")
+    return PictureRead(sha256=digest)
+
+
+@router.get("/user/avatar")
+async def read_user_avatar(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[str | None, Query(description=_VERSION_DESCRIPTION)] = None,
+) -> Response:
+    """Serve the caller's own avatar - its rendition, one WebP, always.
+
+    `v` is read by nothing here, and is declared so the contract is visible rather than
+    looking like a stray parameter. The response is cacheable for five minutes and the
+    avatar can be *replaced* at this same URL, so the client passes the digest from
+    `UserRead.avatar_sha256` and each version gets its own cache entry.
+    """
+    return await _serve_picture(
+        request, await get_rendition(db=db, user_id=current_user["id"], frame=AVATAR_FRAME), kind=PictureKind.AVATAR
+    )
+
+
+@router.get("/user/avatar/original")
+async def read_user_avatar_original(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[str | None, Query(description=_VERSION_DESCRIPTION)] = None,
+) -> Response:
+    """Serve the original the caller's avatar is rendered from, for adjusting its crop.
+
+    The file as uploaded, less its metadata, under its own name and type; 404 when none is
+    held. Pass `UserRead.avatar_original_sha256` as `v`, since a replaced original is
+    served at this same URL.
+    """
+    return await _serve_picture(
+        request, await get_original(db=db, user_id=current_user["id"], frame=AVATAR_FRAME), kind=PictureKind.AVATAR
     )
 
 
@@ -287,15 +391,127 @@ async def erase_user_avatar(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Remove the caller's profile picture, leaving the account itself alone.
+    """Remove the caller's profile picture, its original with it, leaving the account alone.
 
     404 when there was nothing to remove, the shape the card-file delete established. No
     confirmation step anywhere near this: re-uploading undoes it.
     """
-    if not await delete_user_avatar(db=db, user_id=current_user["id"]):
+    if not await delete_picture(db=db, user_id=current_user["id"], frame=AVATAR_FRAME):
         raise NotFoundException("No avatar set")
 
     return {"message": "Avatar removed"}
+
+
+@router.put("/user/portrait", response_model=PictureRead)
+async def write_user_portrait(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    file: Annotated[UploadFile, File(description=f"Portrait, a JPEG or PNG, max {_MAX_UPLOAD_MB} MB")],
+    crop: Annotated[str, Form(description=f"{_CROP_DESCRIPTION}, 7:9")],
+) -> PictureRead:
+    """Set or replace the caller's portrait: the identification photo a dive shop's desk
+    sees on the check-in page, and never where the profile picture appears.
+
+    The file is kept as the original, stripped of its metadata (location included) without
+    touching a pixel, and what is shown is rendered from it through the crop: oriented,
+    cropped at 7:9 - 35x45 mm in proportion, the passport photo's shape - bounded to 900 px
+    high, filled with white where it is transparent, and encoded as WebP. The crop is
+    required, and a crop outside the image or off 7:9 is a 422; a file that is not a JPEG
+    or PNG, or will not decode, a 415; anything over the size limit a 413.
+
+    Answers the rendition's digest, the `?v=` for `GET /user/portrait`.
+    """
+    picture_crop = _form_crop(crop)
+    with _picture_errors(picture_crop):
+        digest = await store_picture(
+            db=db, user_id=current_user["id"], frame=PORTRAIT_FRAME, upload=file, crop=picture_crop
+        )
+    return PictureRead(sha256=digest)
+
+
+@router.post("/user/portrait/from-avatar", response_model=PictureRead)
+async def copy_user_avatar_to_portrait(
+    request: Request,
+    body: PictureCropRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> PictureRead:
+    """Make the profile picture's original the portrait's too, cropped at 7:9.
+
+    A copy under keys of its own, carrying the original's name and type, so removing or
+    replacing either picture later leaves the other whole. Replaces any portrait there is.
+    404 while the avatar holds no original, which is what an avatar seeded from Google or
+    stored before originals were kept looks like - upload the portrait instead.
+    """
+    with _picture_errors(body.crop):
+        digest = await copy_avatar_to_portrait(db=db, user_id=current_user["id"], crop=body.crop)
+    if digest is None:
+        raise NotFoundException("The avatar has no original to copy")
+    return PictureRead(sha256=digest)
+
+
+@router.patch("/user/portrait", response_model=PictureRead)
+async def adjust_user_portrait(
+    request: Request,
+    body: PictureCropRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> PictureRead:
+    """Re-crop the caller's portrait from its original, which is untouched.
+
+    404 without a portrait, 409 if it is replaced or removed while this renders.
+    """
+    with _picture_errors(body.crop):
+        digest = await recrop_picture(db=db, user_id=current_user["id"], frame=PORTRAIT_FRAME, crop=body.crop)
+    if digest is None:
+        raise NotFoundException("No portrait set")
+    return PictureRead(sha256=digest)
+
+
+@router.get("/user/portrait")
+async def read_user_portrait(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[str | None, Query(description=_VERSION_DESCRIPTION)] = None,
+) -> Response:
+    """Serve the caller's own portrait - its 7:9 rendition, one WebP. Pass
+    `UserRead.portrait_sha256` as `v`, as for the avatar."""
+    return await _serve_picture(
+        request,
+        await get_rendition(db=db, user_id=current_user["id"], frame=PORTRAIT_FRAME),
+        kind=PictureKind.PORTRAIT,
+    )
+
+
+@router.get("/user/portrait/original")
+async def read_user_portrait_original(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[str | None, Query(description=_VERSION_DESCRIPTION)] = None,
+) -> Response:
+    """Serve the original the caller's portrait is rendered from, for adjusting its crop.
+    Pass `UserRead.portrait_original_sha256` as `v`."""
+    return await _serve_picture(
+        request,
+        await get_original(db=db, user_id=current_user["id"], frame=PORTRAIT_FRAME),
+        kind=PictureKind.PORTRAIT,
+    )
+
+
+@router.delete("/user/portrait")
+async def erase_user_portrait(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, str]:
+    """Remove the caller's portrait and its original. 404 when there was none."""
+    if not await delete_picture(db=db, user_id=current_user["id"], frame=PORTRAIT_FRAME):
+        raise NotFoundException("No portrait set")
+
+    return {"message": "Portrait removed"}
 
 
 @router.post("/user/email-change/request", response_model=EmailChangeRequestResponse)

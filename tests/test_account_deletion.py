@@ -33,7 +33,13 @@ from src.app.models.user import User
 from src.app.services import blob_store
 from tests.conftest import db_available
 from tests.helpers.fake_s3 import select_s3_backend
-from tests.helpers.generators import create_dive, create_dive_recording, create_user
+from tests.helpers.generators import (
+    create_dive,
+    create_dive_recording,
+    create_user,
+    create_user_picture,
+    set_avatar_columns,
+)
 from tests.helpers.mocks import fake_request
 
 
@@ -533,21 +539,28 @@ class TestPurgeDeletedAccountsAgainstPostgres:
         assert not blob_store.exists(card_key), "the c-card scan outlived the account"
 
     @pytest.mark.asyncio
-    async def test_the_avatar_goes_with_the_account(self, db: Session) -> None:
-        """The third key source, and the one that is not a cascaded child at all - it is a
-        column on the row being deleted, so nothing about the cascade would ever surface it.
+    async def test_both_pictures_go_with_the_account(self, db: Session) -> None:
+        """The third key source: every file of both pictures, and the avatar key the `user`
+        row still carries for the build before `user_picture`, which may name a file no row
+        does. The rows go down the cascade, so nothing about it would surface their keys.
 
-        `DELETE /user` deliberately leaves it alone (a restore inside the grace period
-        should bring back a whole account, not a faceless one), which makes this the only
-        thing that ever removes a diver's portrait from the volume.
+        `DELETE /user` deliberately leaves the pictures alone (a restore inside the grace
+        period should bring back a whole account, not a faceless one), which makes this the
+        only thing that ever removes a diver's face from the store.
         """
         diver = create_user(db)
-        avatar_key = blob_store.new_key("user-avatars", sha256="e" * 64)
-        await blob_store.put(avatar_key, b"a normalized webp, notionally")
-        diver.avatar_storage_key = avatar_key
-        diver.avatar_sha256 = "e" * 64
-        db.commit()
-        assert blob_store.exists(avatar_key)
+        avatar = create_user_picture(db, diver, kind="avatar")
+        portrait = create_user_picture(db, diver, kind="portrait")
+        column_key = blob_store.new_key("user-avatars", sha256="e" * 64)
+        set_avatar_columns(db, diver, key=column_key, sha256="e" * 64)
+        keys = [
+            column_key,
+            avatar.rendition_storage_key,
+            portrait.rendition_storage_key,
+            *(key for key in (avatar.original_storage_key, portrait.original_storage_key) if key),
+        ]
+        for key in keys:
+            await blob_store.put(key, b"a picture, notionally")
 
         self._request_deletion(db, diver, days_ago=settings.ACCOUNT_DELETION_GRACE_DAYS + 1)
         diver_id = diver.id
@@ -557,4 +570,4 @@ class TestPurgeDeletedAccountsAgainstPostgres:
         await blob_store._await_pending_removals()
 
         assert db.get(User, diver_id) is None
-        assert not blob_store.exists(avatar_key), "the diver's portrait outlived the account"
+        assert [key for key in keys if blob_store.exists(key)] == [], "a picture outlived the account"

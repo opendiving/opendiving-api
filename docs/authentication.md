@@ -235,7 +235,7 @@ sequenceDiagram
         U->>FE: Confirms/edits name, picks username
         FE->>API: POST /auth/complete
         API->>Google: Fetch the picture the onboarding token names
-        API->>DB: Create User (avatar columns set) + AuthenticationProvider\n(provider=google, provider_user_id=sub)
+        API->>DB: Create User + its avatar (user_picture) + AuthenticationProvider\n(provider=google, provider_user_id=sub)
         API-->>FE: status=authenticated + access_token
     end
     FE->>U: Redirect to /dashboard

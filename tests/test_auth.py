@@ -37,7 +37,7 @@ from src.app.schemas.auth import (
     GoogleAuthRequest,
     ProfileCompletionRequest,
 )
-from src.app.services.user_avatars import StoredAvatar
+from src.app.services.user_pictures import StoredAvatar
 from tests.helpers.mocks import (
     GOOGLE_CODE_VERIFIER,
     claimed_used_at_sql,
@@ -1172,11 +1172,13 @@ class TestCompleteProfile:
 
     @staticmethod
     async def _complete_with_avatar(mock_db, imported, *, avatar="https://lh3.googleusercontent.com/a/photo"):
-        """Run `POST /auth/complete` for a Google identity whose token carries `avatar`,
-        with the import itself stubbed, and hand back what `crud_users.create` was given."""
+        """Run `POST /auth/complete` for a Google identity whose token carries `avatar`, with
+        the import itself stubbed, and hand back the seed's mock and the import's. The seed
+        records how many commits had happened when it ran."""
         token_data = OnboardingTokenData(
             email="new@example.com", provider="google", provider_user_id="g-1", name="New Person", avatar=avatar
         )
+        commits_at_seed: list[int] = []
 
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as mock_verify,
@@ -1185,6 +1187,7 @@ class TestCompleteProfile:
             patch("src.app.api.v1.auth.seed_default_presets", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.import_google_avatar", new_callable=AsyncMock) as mock_import,
+            patch("src.app.api.v1.auth.seed_google_avatar", new_callable=AsyncMock) as mock_seed,
         ):
             mock_verify.return_value = token_data
             mock_users.exists = AsyncMock(return_value=False)
@@ -1192,6 +1195,7 @@ class TestCompleteProfile:
             mock_providers.create = AsyncMock(return_value=None)
             mock_import.return_value = imported
             mock_db.commit = AsyncMock(return_value=None)
+            mock_seed.side_effect = lambda *args, **kwargs: commits_at_seed.append(mock_db.commit.await_count)
 
             outcome = await complete_profile(
                 _request(),
@@ -1200,38 +1204,37 @@ class TestCompleteProfile:
                 mock_db,
             )
 
-            return outcome, mock_users.create.call_args.kwargs["object"], mock_import
+            return outcome, mock_seed, mock_import, commits_at_seed
 
     @pytest.mark.asyncio
     async def test_a_google_picture_becomes_the_new_accounts_avatar(self, mock_db):
-        """The columns are set on the row being created, not written afterwards: the blob is
-        already on the volume by this point, so the account's single commit is what makes it
-        referenced - the write-file-then-commit-row ordering, unchanged."""
+        """Seeded inside the account's transaction, before its one commit: the blob is
+        already in the store by this point, so that commit is what makes it referenced - the
+        write-file-then-commit-row ordering."""
         imported = StoredAvatar(storage_key="user-avatars/ab/nonce_abc", sha256="ab" * 32)
 
-        outcome, created, mock_import = await self._complete_with_avatar(mock_db, imported)
+        outcome, mock_seed, mock_import, commits_at_seed = await self._complete_with_avatar(mock_db, imported)
 
         assert outcome.status == "authenticated"
         mock_import.assert_awaited_once_with("https://lh3.googleusercontent.com/a/photo")
-        assert created.avatar_storage_key == "user-avatars/ab/nonce_abc"
-        assert created.avatar_sha256 == "ab" * 32
+        mock_seed.assert_awaited_once_with(mock_db, user_id=42, stored=imported)
+        assert commits_at_seed == [0]
 
     @pytest.mark.asyncio
     async def test_an_import_that_fails_still_creates_the_account(self, mock_db):
         """`import_google_avatar` answers `None` for every failure it can have, and this is
         why: a sign-up must not hinge on a CDN. The diver gets initials, not an error."""
-        outcome, created, _ = await self._complete_with_avatar(mock_db, None)
+        outcome, mock_seed, _, _ = await self._complete_with_avatar(mock_db, None)
 
         assert outcome.status == "authenticated"
-        assert created.avatar_storage_key is None
-        assert created.avatar_sha256 is None
+        mock_seed.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_an_email_signup_has_no_picture_to_import(self, mock_db):
-        _, created, mock_import = await self._complete_with_avatar(mock_db, None, avatar=None)
+        _, mock_seed, mock_import, _ = await self._complete_with_avatar(mock_db, None, avatar=None)
 
         mock_import.assert_awaited_once_with(None)
-        assert created.avatar_storage_key is None
+        mock_seed.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_concurrent_onboarding_rolls_back_and_raises_duplicate(self, mock_db):

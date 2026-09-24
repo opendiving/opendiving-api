@@ -7,6 +7,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, Str
 
 from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 from .dive_form_preset import DiveFormField, canonical_hidden_fields
+from .user_picture import PictureCrop
 
 
 class UnitSystem(StrEnum):
@@ -114,12 +115,22 @@ class UserRead(PublicUUIDSchema):
     name: Annotated[str, Field(min_length=2, max_length=30, examples=["User Userson"])]
     username: Annotated[str, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userson"])]
     email: Annotated[EmailStr, Field(examples=["user.userson@example.com"])]
-    # Null means this diver has no picture and the clients draw initials. Non-null is both
-    # "there is one" and the version token to append to `GET /user/avatar` as `?v=`, so a
-    # replaced avatar lands on a fresh URL and an unchanged one is never re-downloaded.
-    # There is no URL here on purpose: the bytes need a bearer token, so the clients fetch
-    # them through their API client rather than putting a src on an `<img>`.
+    # The two pictures, read with the account in one query (`read_account`). Each
+    # `*_sha256` is its rendition's digest: null means there is no picture - initials for
+    # the avatar, an empty frame for the portrait - and non-null is the version token to
+    # append to `GET /user/{avatar,portrait}` as `?v=`, so a replaced picture lands on a
+    # fresh URL. There is no URL here on purpose: the bytes need a bearer token, so the
+    # clients fetch them through their API client rather than putting a src on an `<img>`.
+    #
+    # `*_original_sha256` and `*_crop` are null together, when no original is held. The
+    # digest is what offers "Adjust" and the `?v=` of `GET /user/{avatar,portrait}/original`;
+    # the crop is where the adjustment opens.
     avatar_sha256: str | None = None
+    avatar_original_sha256: str | None = None
+    avatar_crop: PictureCrop | None = None
+    portrait_sha256: str | None = None
+    portrait_original_sha256: str | None = None
+    portrait_crop: PictureCrop | None = None
     # Feeds the settings page's gear-reminder toggle. The `= True` is what `/openapi.json`
     # publishes as the field's default; it is *not* a fallback for a database missing the
     # column, which is what this said for a while. `get_current_user` selects every mapped
@@ -182,13 +193,6 @@ class UserCreateInternal(UserBase):
     below rather than this schema.
     """
 
-    # Set together or not at all, and only by the Google import in `POST /auth/complete`
-    # (`services.user_avatars.import_google_avatar`), which has already written the blob by
-    # the time the row is created - the write-file-then-commit-row ordering. An email
-    # sign-up has no picture to import and starts with initials.
-    avatar_storage_key: str | None = None
-    avatar_sha256: str | None = None
-
 
 class UserBootstrapCreateInternal(UserCreateInternal):
     """The first account on an empty instance, which is the operator's.
@@ -218,10 +222,10 @@ class UserUpdate(RejectsExplicitNulls):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Every field here maps to a `NOT NULL` column. The avatar columns are deliberately
-    # absent from this schema altogether - they are written by `PUT`/`DELETE /user/avatar`,
-    # which own the blob beside them, and a PATCH that could null the key while leaving the
-    # file on the volume is exactly the orphan this app has a sweeper for.
+    # Every field here maps to a `NOT NULL` column. Neither picture is here at all - each is
+    # written by its own routes under `/user/avatar` and `/user/portrait`, which own the blobs
+    # beside the row, and a PATCH that could null a key while leaving the file in the store
+    # is exactly the orphan this app has a sweeper for.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (
         "name",
         "username",
@@ -300,19 +304,6 @@ class UserAdminUpdate(UserUpdate):
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (*UserUpdate.NON_NULLABLE_FIELDS, "email")
 
     email: Annotated[EmailStr | None, Field(examples=["user.userberg@example.com"], default=None)]
-
-
-class AvatarRead(BaseModel):
-    """`PUT /user/avatar`'s body: the stored image's hex digest, and nothing else.
-
-    The same value `UserRead.avatar_sha256` carries, returned here so a client that has
-    just uploaded can render the new picture without waiting on a `GET /user` round trip -
-    it is the `ETag` on the download route and the `?v=` token that gives each version its
-    own cache entry. Nothing about the *upload* is echoed back: byte size, content type and
-    original filename all stop being true the moment the bytes are re-encoded.
-    """
-
-    sha256: Annotated[str, Field(examples=["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"])]
 
 
 class AccountDeletionResponse(BaseModel):

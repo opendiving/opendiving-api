@@ -1,9 +1,10 @@
-"""Image fixtures for the avatar tests.
+"""Image fixtures for the picture tests.
 
 Built rather than committed as files, for the same reason `tests/helpers/fit.py` builds FIT
 binaries: a fixture whose bytes are checked in is a fixture nobody can read the intent of,
 and every one of these exists to exercise a specific branch of
-`services/user_avatars._normalize`.
+`services/user_pictures._normalize` or of the metadata strip in
+`services/picture_originals.py`.
 
 `png_declaring` is the interesting one. Two of the branches are about images too large to
 process, and the check that catches them is header-only by design - so the fixture only has
@@ -34,7 +35,7 @@ def jpeg_with_exif(*, orientation: int = 6) -> bytes:
     """A JPEG carrying an orientation tag and a GPS block - a phone photo, in miniature.
 
     Both halves matter. The orientation has to be *applied* (the picture comes out upright)
-    and the GPS has to be *gone* (a diver's avatar must not carry where it was taken).
+    and the GPS has to be *gone* (a diver's picture must not carry where it was taken).
     """
     edge = MARKED_JPEG_SIZE
     image = Image.new("RGB", (edge, edge), "red")
@@ -135,4 +136,100 @@ def bmp() -> bytes:
     """A perfectly valid image in a format the `formats=` allowlist does not name."""
     buffer = io.BytesIO()
     Image.new("RGB", (8, 8), "red").save(buffer, format="BMP")
+    return buffer.getvalue()
+
+
+# Where a phone photo's metadata lives beyond its EXIF, for the strip to remove. Each is a
+# well-formed segment or chunk of its kind; none of them is anything the image needs.
+XMP_PAYLOAD = b"http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta><exif:GPSLatitude>10,0N</exif:GPSLatitude></x:xmpmeta>"
+IPTC_PAYLOAD = b"Photoshop 3.0\x008BIM\x04\x04\x00\x00\x00\x00\x00\x0c\x1c\x02\x5a\x00\x06Dahab!"
+C2PA_PAYLOAD = b"JP\x00\x01\x00\x00\x00\x01jumbc2pa stds.exif GPSLatitude thumbnail"
+COMMENT_PAYLOAD = b"taken at home"
+MOTION_PHOTO_VIDEO = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64
+
+
+def jpeg_segment(marker: int, payload: bytes) -> bytes:
+    return bytes((0xFF, marker)) + struct.pack(">H", len(payload) + 2) + payload
+
+
+def with_jpeg_segments(jpeg: bytes, *segments: bytes, trailer: bytes = b"") -> bytes:
+    """`jpeg` with `segments` inserted straight after its SOI, and `trailer` after its EOI."""
+    return jpeg[:2] + b"".join(segments) + jpeg[2:] + trailer
+
+
+def png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", zlib.crc32(chunk_type + data))
+
+
+def with_png_chunks(png: bytes, *chunks: bytes, trailer: bytes = b"") -> bytes:
+    """`png` with `chunks` inserted straight after its IHDR, and `trailer` after its IEND."""
+    after_ihdr = 8 + 12 + _IHDR_DATA_LENGTH
+    return png[:after_ihdr] + b"".join(chunks) + png[after_ihdr:] + trailer
+
+
+def phone_jpeg(*, size: tuple[int, int] = (64, 48), orientation: int | None = 6) -> bytes:
+    """A camera JPEG as it arrives: EXIF with an orientation and a GPS block, XMP and IPTC
+    beside it, C2PA Content Credentials and a comment, and a motion photo's video after EOI.
+
+    Stored landscape with its left half green and right half red, so under orientation 6 the
+    upright picture is green on top - which is what makes "was it turned" readable off two
+    pixels of the rendition.
+    """
+    width, height = size
+    image = Image.new("RGB", size, "red")
+    image.paste(Image.new("RGB", (width // 2, height), "green"), (0, 0))
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[0x0112] = orientation
+    exif[0x8825] = {1: "N", 2: (10.0, 0.0, 0.0), 3: "E", 4: (123.0, 0.0, 0.0)}
+    exif[0x010F] = "PhoneMaker"
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", exif=exif, quality=90)
+    return with_jpeg_segments(
+        buffer.getvalue(),
+        jpeg_segment(0xE1, XMP_PAYLOAD),
+        jpeg_segment(0xED, IPTC_PAYLOAD),
+        jpeg_segment(0xEB, C2PA_PAYLOAD),
+        jpeg_segment(0xFE, COMMENT_PAYLOAD),
+        trailer=MOTION_PHOTO_VIDEO,
+    )
+
+
+def screenshot_png(*, size: tuple[int, int] = (40, 30), alpha: bool = False, orientation: int | None = 8) -> bytes:
+    """A PNG carrying what PNGs carry: an eXIf with an orientation and GPS, text and XMP
+    chunks, an unknown ancillary chunk, and bytes after IEND."""
+    image = Image.new("RGBA" if alpha else "RGB", size, (0, 0, 255, 0) if alpha else "blue")
+    image.paste((255, 255, 0, 255) if alpha else (255, 255, 0), (0, 0, size[0] // 2, size[1] // 2))
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[0x0112] = orientation
+    exif[0x8825] = {1: "N", 2: (10.0, 0.0, 0.0)}
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", exif=exif)
+    return with_png_chunks(
+        buffer.getvalue(),
+        png_chunk(b"tEXt", b"Comment\x00taken at home"),
+        png_chunk(b"iTXt", b"XML:com.adobe.xmp\x00\x00\x00\x00\x00" + XMP_PAYLOAD),
+        png_chunk(b"prVt", b"a vendor's private chunk"),
+        trailer=b"trailing bytes",
+    )
+
+
+def solid_png(*, size: tuple[int, int], mode: str = "RGB") -> bytes:
+    """A PNG of `size` that compresses to almost nothing, for the caps' full-size cases."""
+    buffer = io.BytesIO()
+    Image.new(mode, size, (20, 120, 200, 255) if mode == "RGBA" else (20, 120, 200)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def gif() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("P", (8, 8), 0).save(buffer, format="GIF")
+    return buffer.getvalue()
+
+
+def plain_jpeg(*, size: tuple[int, int] = (16, 16)) -> bytes:
+    """A JPEG with no metadata of any kind."""
+    buffer = io.BytesIO()
+    Image.new("RGB", size, "teal").save(buffer, format="JPEG")
     return buffer.getvalue()

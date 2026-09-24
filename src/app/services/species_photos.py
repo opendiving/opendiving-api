@@ -2,7 +2,7 @@
 is stored, and how it is read back.
 
 The **only** module that knows a `Species` row has a picture at all. It sits beside
-`services/user_avatars.py` at the same layer - that one knows what is stored against a
+`services/user_pictures.py` at the same layer - that one knows what is stored against a
 `user` row, this one against a `species` row, and `services/blob_store.py` knows where and
 how for both - and it follows the same ordering rule: write the file, then commit the row.
 
@@ -11,7 +11,7 @@ Commons, hands the answers here, and stores what comes back. The split is the on
 modules' names describe: outbound there, decisions and bytes here.
 
 **What is stored is a scaled copy of a Commons file and nothing else.** Never cropped,
-never overlaid, never composited - which is why this does not reuse `user_avatars._normalize`
+never overlaid, never composited - which is why this does not reuse `user_pictures._normalize`
 however similar the decode fencing looks. That is a licence property rather than an aesthetic
 one: 24 of 40 sampled files are ShareAlike, and while displaying and scaling an image is not
 adaptation, cropping and compositing move toward it. Any square-card presentation is the
@@ -19,7 +19,7 @@ browser's business at render time.
 
 Pillow parses untrusted bytes here exactly as it does next door, so the decode is fenced the
 same four ways: a `formats` allowlist, a cap on the bytes read, a cap on the pixels the header
-*claims*, and a cap on what will actually be rasterized. See `user_avatars` for why the last
+*claims*, and a cap on what will actually be rasterized. See `user_pictures` for why the last
 two are different questions.
 """
 
@@ -45,9 +45,10 @@ from . import blob_store
 
 logger = logging.getLogger(__name__)
 
-# The key prefix every species photo is stored under - the fourth kind on the volume, after
-# `dive-files`, `certification-files` and `user-avatars`. See `blob_store.new_key`, and
-# `src/scripts/sweep_orphaned_files.py`, which has to know about every one of them.
+# The key prefix every species photo is stored under, one kind on the volume beside
+# `dive-files`, `certification-files`, `user-avatars` and `user-portraits`. See
+# `blob_store.new_key`, and `src/scripts/sweep_orphaned_files.py`, which has to know about every
+# one of them.
 KEY_KIND = "species-photos"
 
 # **Commons thumbnail widths are bucketed, not arbitrary**, which is the one thing about this
@@ -89,13 +90,13 @@ MAX_PHOTO_DOWNLOAD_BYTES = 4 * 1024 * 1024
 
 PHOTO_CONTENT_TYPE = "image/webp"
 
-# Only these parsers are ever invoked, for the reason `user_avatars.ALLOWED_FORMATS` gives:
+# Only these parsers are ever invoked, for the reason `user_pictures.ALLOWED_FORMATS` gives:
 # Pillow ships dozens, several with a CVE history, and `formats=` is what keeps them
 # unreachable from an anonymous byte string. Commons serves its thumbnails as JPEG or PNG.
 ALLOWED_FORMATS = ["JPEG", "PNG", "WEBP", "GIF"]
 
 # The header's claim, checked before any pixel is decoded - the bomb check, same 50 MP figure
-# and same reasoning as `user_avatars.MAX_AVATAR_PIXELS`.
+# and same reasoning as `user_pictures.MAX_PICTURE_PIXELS`.
 MAX_PHOTO_PIXELS = 50_000_000
 
 # What will actually be rasterized, which is the question that governs memory. Far below the
@@ -104,7 +105,7 @@ MAX_PHOTO_PIXELS = 50_000_000
 # anything above it is not a thumbnail of the file we asked for.
 MAX_PHOTO_DECODE_PIXELS = 2_000_000
 
-# One photo decoded at a time per worker, for the reason `user_avatars._DECODE_LIMITER` gives:
+# One photo decoded at a time per worker, for the reason `user_pictures._DECODE_LIMITER` gives:
 # without it the ceiling is the app's own 100-token threadpool, and a hundred concurrent
 # decodes is not a number a 1 GB install survives whatever the per-decode figure is.
 _DECODE_LIMITER = anyio.CapacityLimiter(1)
@@ -421,7 +422,7 @@ def is_photo_byte_source(url: str) -> bool:
     attacker-supplied in the ordinary sense. This is the second fence anyway, because the
     first one's failure mode is server-side request forgery: an `imageinfo` reply that could
     name `http://169.254.169.254/...` and be fetched from inside the network is the entire
-    class of bug. Same shape and same reasoning as `user_avatars._is_google_avatar_url`.
+    class of bug. Same shape and same reasoning as `user_pictures._is_google_avatar_url`.
 
     **Membership in `PHOTO_BYTE_HOSTS`, comparing the whole hostname.** That it holds two names
     rather than one makes it no less an exact-match allowlist: `upload.wikimedia.org.evil.example`
@@ -444,7 +445,7 @@ def _normalize(data: bytes) -> bytes:
     file itself declares, and re-encoding. The re-encode also strips the metadata, which is
     ordinary hygiene rather than a licence matter here.
 
-    The three rejections are `user_avatars._normalize`'s three, for its reasons: Pillow raises
+    The three rejections are `user_pictures._normalize`'s three, for its reasons: Pillow raises
     `DecompressionBombError` from inside `Image.open` for the very largest inputs, so the open
     sits inside the `try`; `MAX_PHOTO_PIXELS` judges what the header claims; and
     `MAX_PHOTO_DECODE_PIXELS` judges what will actually be rasterized. There is no `draft`
@@ -505,7 +506,7 @@ async def save_photo_attempt(db: AsyncSession, *, species_id: int, photo: Fetche
     a failed attempt is what makes the second run report zero.
 
     File first, row second, replaced file unlinked after the commit: the ordering rule
-    `store_user_avatar` states, for its reason. A crash between the first two strands an
+    `user_pictures` states, for its reason. A crash between the first two strands an
     unreferenced file, which the sweeper reclaims; the reverse order would leave a committed
     row naming bytes that do not exist.
 

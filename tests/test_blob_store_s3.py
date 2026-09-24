@@ -232,7 +232,7 @@ class TestHasAnyKey:
         """`user-avatars/...` sorts after `tmp/...`, so the first single-key request returns
         the probe and only the second one sees the avatar."""
         s3.objects[f"{blob_store.TMP_DIRNAME}/.writable-1"] = b""
-        await blob_store.put("user-avatars/ab/portrait", DATA)
+        await blob_store.put("user-avatars/ab/avatar", DATA)
 
         assert blob_store.has_any_key() is True
 

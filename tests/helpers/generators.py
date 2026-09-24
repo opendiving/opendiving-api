@@ -1,10 +1,12 @@
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app import models
+from src.app.models.user import USER_AVATAR_SHA256, USER_AVATAR_STORAGE_KEY, user_table
 from tests.conftest import fake, unique_email, unique_username
 
 
@@ -32,6 +34,38 @@ def _persist[RowT](db: Session, row: RowT) -> RowT:
     db.commit()
     db.refresh(row)
     return row
+
+
+def create_user_picture(
+    db: Session, user: models.User, *, kind: str = "avatar", with_original: bool = True
+) -> models.UserPicture:
+    """A picture row naming keys nothing has written: a rendition, and an original with a
+    square crop unless `with_original` is off."""
+    key_kind = "user-avatars" if kind == "avatar" else "user-portraits"
+    picture = models.UserPicture(
+        user_id=user.id,
+        kind=kind,
+        rendition_storage_key=f"{key_kind}/aa/{uuid7()}_{'a' * 64}",
+        rendition_sha256="a" * 64,
+    )
+    if with_original:
+        picture.original_storage_key = f"{key_kind}/bb/{uuid7()}_{'b' * 64}"
+        picture.original_sha256 = "b" * 64
+        picture.original_byte_size = 1
+        picture.original_content_type = "image/jpeg"
+        picture.original_filename = "me.jpg"
+        picture.crop_x, picture.crop_y, picture.crop_width, picture.crop_height = 0, 0, 9, 9
+    return _persist(db, picture)
+
+
+def set_avatar_columns(db: Session, user: models.User, *, key: str | None, sha256: str | None) -> None:
+    """Write the `user` row's avatar columns, which are off the mapper."""
+    db.execute(
+        update(user_table)
+        .where(user_table.c.id == user.id)
+        .values({USER_AVATAR_STORAGE_KEY: key, USER_AVATAR_SHA256: sha256})
+    )
+    db.commit()
 
 
 def create_dive_site(db: Session, user: models.User) -> models.DiveSite:

@@ -239,7 +239,7 @@ class SpeciesUpdate(BaseModel):
     something this codebase can express.
 
     **The `photo_*` columns are deliberately absent from this schema altogether**, the same
-    call `UserUpdate` makes about the avatar pair and for the same reason: they are written
+    call `UserUpdate` makes about the pictures and for the same reason: they are written
     by `services.species_photos`, which owns the blob beside them, and an edit that could
     null the key while leaving the file on the volume is exactly the orphan this app has a
     sweeper for. Re-fetching a photo is a backfill run, not a form field.

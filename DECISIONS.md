@@ -809,9 +809,8 @@ The field is on **both** `UserRead` (so `GET /user` feeds the settings toggle) a
 `UserUpdate` is `extra="forbid"`, so missing it there makes the toggle 422 instead of save.
 
 `UserRead`'s `= True` is not a fallback for a database lacking the column: `get_current_user` calls
-`crud_users.get` with no `schema_to_select` (`api/dependencies.py`), so FastCRUD selects every
-mapped column and Postgres raises `UndefinedColumn` before any response model is reached. The
-default exists for `/openapi.json`.
+`read_account` (`crud/crud_users.py`), which selects every mapped column, so Postgres raises
+`UndefinedColumn` before any response model is reached. The default exists for `/openapi.json`.
 
 The column carries `server_default="true"` because it is `NOT NULL`: whatever adds it to a table
 with rows must supply a value, and only a server-side default is part of the DDL. `default=True` is
@@ -1806,9 +1805,9 @@ that roll back are the real fix.
 ## A session's subject is the user's `uuid`, because a username can change hands
 
 The token subject is `str(user.uuid)`, the immutable `uuid7` from `PublicUUIDMixin`;
-`get_current_user` is one `crud_users.get(uuid=..., is_deleted=False)`, and `TokenData.user_uuid` is
-typed `uuid.UUID`. `create_access_token`/`create_refresh_token` add only `exp` and `token_type`, so
-the subject roots `fetch_owned_or_raise`'s ownership model.
+`get_current_user` looks the live account up by `uuid` (`read_account`), and `TokenData.user_uuid`
+is typed `uuid.UUID`. `create_access_token`/`create_refresh_token` add only `exp` and `token_type`,
+so the subject roots `fetch_owned_or_raise`'s ownership model.
 
 A username is not stable: `PATCH /user` frees it instantly, so a token naming it locks the renamer
 out, authenticates the name's next holder, and lets an attacker keep a token parked on a handle via
@@ -2360,10 +2359,10 @@ there evicts everything the cache exists for — the argument of *"Deliberately 
 `read_dive_file`. There is nothing to invalidate it on: an export goes stale on every write, so
 `invalidate_dive_caches` would need a sibling per table for a hit rate near zero. And a cached whole
 account is *"`@cache` and per-request authorization don't mix directly"* at maximum blast radius —
-one key, one user's entire logbook, certification-card scans included.
+one key, one user's entire logbook, certification-card scans and the portrait included.
 
 `no-store` rather than `private` because `private` lets the browser keep a copy on disk, and a zip
-of ID-like card images should not sit in a cache directory.
+of ID-like card images and an identification photo should not sit in a cache directory.
 
 ## The export spools to a temp file rather than streaming live
 
@@ -2435,10 +2434,11 @@ unchanged logbook are byte-identical and diffable.
 ## The archive includes certification card images, and that is worth saying out loud
 
 `certifications/` in the export zip holds both sides of every stored c-card: scans of ID-like
-documents carrying the diver's name, certification number and often a photograph. Nothing new leaves
-the owner's hands — the endpoint is owner-only over a bearer token, has no user parameter, and
-answers `no-store` — but a saved export is a folder of identity documents in a downloads directory.
-That changes what "export" implies for a user, so the endpoint's docstring, which `/openapi.json`
+documents carrying the diver's name, certification number and often a photograph. The root
+`portrait.jpg` or `portrait.png` is an identification photo in its own right. Nothing new leaves the
+owner's hands — the endpoint is owner-only over a bearer token, has no user parameter, and answers
+`no-store` — but a saved export is a folder of identity documents in a downloads directory. That
+changes what "export" implies for a user, so the endpoint's docstring, which `/openapi.json`
 publishes, says so as well as this section. The CSV and UDDF downloads carry no images for the same
 reason: the two files a diver is likely to share contain none of this, and the one that does is the
 one labelled "everything".
@@ -4024,16 +4024,17 @@ own rate limit — see the docstring on `complete_profile`. `services/auth_servi
 
 ## File payloads live on the files volume, not in Postgres
 
-Uploaded dive-computer exports (`dive_file`), c-card images (`certification_file`) and avatars are
-blobs behind `blob_store` — under `FILE_STORAGE_DIR` (`/data/files`, a Docker named volume) by
-default — named by a `storage_key` the row carries, never `bytea` columns, which bloat backup size
-and restore time. Any further move of stored bytes is a real data migration: the project's own
-instance runs `main` and holds data. The trade given up is "one `pg_dump` is the whole logbook".
-Backup is two artifacts, in order: dump the database first, copy the files second. Files are written
-before their rows commit and never mutated, so a later copy is a superset of what the dump
-references, except a file deleted between the two steps, which leaves one dangling row; the
-backup-and-restore guide names that window and offers "stop the stack first" as the exact option.
-Atomicity between bytes and rows is replaced by that ordering rule and the sweeper.
+Uploaded dive-computer exports (`dive_file`), c-card images (`certification_file`) and the avatar
+and portrait (`user_picture`) are blobs behind `blob_store` — under `FILE_STORAGE_DIR`
+(`/data/files`, a Docker named volume) by default — named by a `storage_key` the row carries, never
+`bytea` columns, which bloat backup size and restore time. Any further move of stored bytes is a
+real data migration: the project's own instance runs `main` and holds data. The trade given up is
+"one `pg_dump` is the whole logbook". Backup is two artifacts, in order: dump the database first,
+copy the files second. Files are written before their rows commit and never mutated, so a later copy
+is a superset of what the dump references, except a file deleted between the two steps, which leaves
+one dangling row; the backup-and-restore guide names that window and offers "stop the stack first"
+as the exact option. Atomicity between bytes and rows is replaced by that ordering rule and the
+sweeper.
 
 ## A filesystem volume, not an object store
 
@@ -4596,13 +4597,11 @@ spending the token and restoring the row are one transaction.
 the loser inserts a duplicate `token_blacklist.token`, and that `IntegrityError` maps to the same
 "already used" 401 — `_RESTORE_REJECTED` is one constant so both checks say one sentence.
 
-## Avatars are the third kind on the files volume, and Pillow re-encodes every one
+## Avatars are the third kind on the files volume, and portraits sit beside them
 
-A diver's picture is uploaded to `PUT /user/avatar`, stored on the files volume under the
-`user-avatars/` kind, and served to its owner by `GET /user/avatar`. The `user` row carries two
-nullable columns, `avatar_storage_key` and `avatar_sha256`; there is no `profile_image_url`. This is
-the "future kind" the key layout in *"File payloads live on the files volume, not in Postgres"* is
-built for, and nothing at the `blob_store` layer changes for it.
+A diver's avatar and check-in portrait are stored under the `user-avatars/` and `user-portraits/`
+kinds, written by `PUT /user/avatar` and `PUT /user/portrait` and served to their owner by `GET`.
+There is no `profile_image_url`, and nothing at the `blob_store` layer changes for them.
 
 Gravatar is rejected: off by default, a default install had no pictures; on, it disclosed a SHA-256
 of every signed-in user's email plus their IP to Automattic on every page, and changing a picture
@@ -4610,111 +4609,111 @@ meant an account on someone else's website. There is no `GRAVATAR_ENABLED` passt
 install bundle's `docker-compose.yml`, `example.env` or `docs/configuration.md`, and *Third-party
 calls* from the browser is map tiles and nothing else.
 
-## Two columns, not a `user_avatar` table
+## One `user_picture` table, not columns on `user`
 
-A table mirroring `certification_file` is rejected. That table earns its rows by holding two per
-parent (`side`), display metadata (`byte_size`, `original_filename`, `content_type`) and bulk
-fetches for list views. An avatar is a strictly 1:1 optional attribute, its served content type is
-always WebP, and size and original filename mean nothing once the bytes are re-encoded. The deciding
-argument is the read side: `UserRead` needs the avatar's existence and version on every read, and
-`get_current_user` already selects every mapped `user` column, so a column rides free where a table
-costs a join on the hottest dependency in the app.
+Each picture keeps an original with a type, a size, a name and a crop beside its rendition: some
+twenty nullable columns for two pictures on the hottest row. One row per `(user_id, kind)`, every
+key column uniquely indexed, as on the file tables: two rows naming one key would let either's
+replacement unlink the other's bytes. `get_current_user` joins the two rows in its one query
+(`read_account`) for `UserRead`. *Rejected:* digest columns on `user` beside the table, two sources
+of truth to spare a join on two rows.
 
-`avatar_storage_key` carries the same unique index as the file tables, for the same reason: two rows
-naming one key would let either's replacement unlink the other's bytes. Postgres allows any number
-of NULLs in a unique index, so accounts without a picture are unaffected.
+`user.avatar_storage_key` and `avatar_sha256` stay on the table and off the mapper while a build
+that maps them may still serve, since it selects every column it maps. Every avatar change writes
+them, and the purge and the sweeper count their key.
 
-## Avatars: The bytes that arrive are never the bytes that are stored
+## A picture keeps its original, stripped, and shows a rendition drawn from it
 
-Every upload is decoded, EXIF-oriented, centre-cropped square, bounded to 512 px and re-encoded as
-WebP at quality 85. Privacy first: re-encoding strips EXIF, and a phone photo's EXIF carries GPS.
-The client cannot be trusted with it — the web app is one caller of an API that also serves iOS and
-whatever else somebody writes — so the guarantee is server-side. This is the opposite stance to card
-files, which are archival documents stored byte for byte; an avatar is a derived display artifact
-and the original is not kept.
-
-Bounding is the second reason: without decoding, a 10 MB 8000×8000 upload is served forever on every
-header mount, while one ~512 px WebP is 10–40 KB and covers every mount the clients have (36–80 px,
-doubled on retina).
+The upload is kept after a lossless strip (`services/picture_originals.py`) that keeps what the
+image needs — pixel data, colour and transparency, and an EXIF cut to its Orientation tag — and
+drops every other segment or chunk and every byte after the image. It decodes to the diver's pixels,
+carries no location, and stripping it again changes no byte. The rendition every screen shows is
+drawn from original and crop: oriented, cropped, bounded (512 px square, 900 px high at 7:9), WebP,
+the portrait filled with white where transparent. A client cannot be trusted with either step. An
+avatar uploaded without a crop, and the Google seed, keep no original and render the centred square.
 
 `pillow-heif` is rejected as cards reject HEIC: a native-library dependency for a case iOS pickers
 already transcode around.
 
 ## Pillow parses untrusted bytes, and the two oversized bands are not one check
 
-Three fences: an explicit `formats=["JPEG", "PNG", "WEBP", "GIF"]` allowlist so only four parsers
-are reachable from an anonymous byte string; a 50 MP cap read from `Image.size` before any pixel is
-decoded; and the 10 MB `read_upload_within_limit` on the read. Decode and encode run in
-`anyio.to_thread.run_sync`.
+Three fences: a `formats=` allowlist — JPEG and PNG for an original, WebP and GIF besides for an
+avatar without a crop — so only those parsers are reachable; a 50 MP cap read from `Image.size`
+before any pixel is decoded; and the 10 MB `read_upload_within_limit`.
 
 The second band is the trap. Above `Image.MAX_IMAGE_PIXELS * 2` (178,956,970 px) Pillow raises
 `DecompressionBombError` from inside `Image.open` itself, before the app's cap runs, so the open
 sits inside the same `try` and maps to the same 415; uncaught it is a 500 that a pixel-cap test with
-an under-threshold fixture never sees. `tests/test_user_avatars.py` covers the bomb band twice, once
-against Pillow's real limit and once with `MAX_IMAGE_PIXELS` lowered under an ordinary image, so the
-`except` clause executes. Both fixtures are 74-byte PNGs whose IHDR declares the dimensions; the
-checks are header-only.
+an under-threshold fixture never sees. `tests/test_user_pictures.py` covers the bomb band twice,
+once against Pillow's real limit and once with `MAX_IMAGE_PIXELS` lowered under an ordinary image,
+so the `except` clause executes, both from 74-byte PNGs whose IHDR declares the dimensions.
 
-## Avatars: The pixel cap bounds what is *accepted*, not what is allocated
+## Pictures: The pixel caps bound what is *accepted*, not what is allocated
 
-A 50 MP raster is 150 MB from a ~150 KB PNG; a pixel cap is no memory bound.
-`draft(None, (512, 512))`, `exif_transpose(..., in_place=True)` and a mode-guarded `convert` spare
-RGB extra copies; `Image.resize` and `Image.reduce` premultiply `LA`/`RGBA` into a full-size copy
-before the `box=` crop.
+A 50 MP raster is 150 MB from a ~150 KB PNG. `MAX_PICTURE_PIXELS` (50 MP) judges the header, before
+`draft` makes a dishonest declaration cheap. The decode caps judge the post-`draft` size: only JPEG
+honours `draft`, so a phone photo passes and a large PNG is what they bound. An original's is
+4032×3024, the 12 MP photo it is named for; one decode there peaks ~110 MB for an RGBA PNG, measured
+in the API's container. WebP and GIF originals cost up to three times that and are refused. An
+avatar without a crop keeps four formats and 1536×1536.
 
-`MAX_AVATAR_PIXELS` (50 MP) judges the header, before `draft` makes a dishonest declaration cheap.
-`MAX_AVATAR_DECODE_PIXELS` (1536×1536) judges the post-`draft` size before decoding. Only JPEG
-honours `draft`, so phone photos pass and large PNG/WebP/GIF are refused; `draft` halves only while
-both edges stay ≥ 512, so a JPEG panorama wider than ~2.25:1 is refused too, so the error gives no
-format advice.
-
-`_DECODE_LIMITER`, an `anyio.CapacityLimiter(1)` passed to `run_sync`, makes the worst decode (~90
-MB, RGBA WebP) a per-worker ceiling (~360 MB across four workers) instead of
-`core/setup.set_threadpool_tokens`' 100. Measure new image paths per format in a fresh process
-(`ru_maxrss`).
+`_DECODE_LIMITER`, an `anyio.CapacityLimiter(1)` passed to `run_sync`, makes the worst decode a
+per-worker ceiling (~440 MB across four workers) instead of the threadpool's 100. Measure new image
+paths per format in a fresh process (`ru_maxrss`).
 
 ## The retired key is read from the database, never from `current_user`
 
-`store_user_avatar` takes no `current_user` argument and reads the key it replaces with a fresh
-narrow `select`. That dict is resolved once per request by `get_current_user`, so a second upload
-overlapping the first would name a key already retired, and unlinking it destroys the other
-request's committed blob. The narrow read leaves only two uploads overlapping the function, which
-costs an orphan and never a live file because `blob_store.new_key` mints a fresh nonce per write.
+The picture writes read the keys they replace with a fresh narrow `select`. `current_user` is
+resolved once per request, so a second upload overlapping the first would name keys already retired,
+and unlinking them destroys the other request's committed blobs. The narrow read costs at worst an
+orphan, since `blob_store.new_key` mints a fresh nonce per write.
 
-`delete_user_avatar` repeats the key it read in its `UPDATE`'s `WHERE`, so a delete racing a
-replacement matches no row and answers "nothing to remove" rather than clearing columns it did not
-write.
+`delete_picture` repeats the key it read in its `DELETE`'s `WHERE`, so a remove racing a replacement
+matches no row and answers "nothing to remove". `recrop_picture` repeats both keys in its
+`UPDATE`'s, unlinks the rendition it drew and answers 409.
 
-The download route reads key and digest in one narrow select: serving from the `current_user`
-snapshot lets a concurrent replace unlink the old blob mid-request, turning a race into
-`BlobMissingError`, deliberately a loud 500. The 304 path stops at that query.
+The download routes read key and digest in one narrow select: serving from the snapshot lets a
+concurrent replace unlink the old blob mid-request, turning a race into `BlobMissingError`,
+deliberately a loud 500. The 304 path stops at that query.
 
 ## The Google picture is imported once, at account creation, and never again
 
 `GoogleUserInfo.avatar` rides the onboarding JWT to `POST /auth/complete`, where the bytes are
-fetched and normalized so the row is born with its avatar columns. `put()` precedes the route's
-single commit, so a rollback strands only a nonce-keyed orphan for the sweeper;
-`release_read_transaction` runs first, since the duplicate checks autobegan a transaction that must
-not idle across the fetch.
+fetched and normalized so the account is born with its avatar: a rendition-only row, the URL naming
+no file to keep as an original. `put()` precedes the route's single commit, so a rollback strands
+only an orphan for the sweeper; `release_read_transaction` runs first. Nothing seeds the portrait: a
+Google profile picture is the decorative kind it is not.
 
-Server-side fetch rules: the URL comes from a verified token, must be `https` on a host that is or
-ends in `.googleusercontent.com`, no redirects, 5 s timeout, read capped at the upload limit. Every
-failure is non-fatal: the account is created without a picture. Inline, not an arq job: one bounded
-fetch, once per account.
+The URL comes from a verified token and must be `https` on a host that is or ends in
+`.googleusercontent.com`; no redirects, 5 s timeout, read capped at the upload limit. Every failure
+is non-fatal: the account is created without a picture.
 
 Later sign-ins never re-import; silently replacing an uploaded picture would be Gravatar again.
-`AuthOutcome` has no `avatar` field; `OnboardingTokenData` keeps it, the URL being an input to
-account creation no client renders.
+`AuthOutcome` has no `avatar` field; only `OnboardingTokenData` carries the URL.
 
-## Avatars: Erase, purge, sweep, export
+## Pictures: Erase, purge, sweep, export
 
-`DELETE /user` leaves the avatar alone: it flags the row for the grace period, and
+`DELETE /user` leaves both pictures alone: it flags the row for the grace period, and
 `POST /auth/restore` brings back a whole account rather than a faceless one, as it does dives and
-cards. The purge's `_collect_stored_file_keys` reads the key off the `user` row before the `DELETE`,
-with no join, or a purged account leaves its portrait on the volume inside an erasure feature. The
-sweeper's referenced set has a third source, the only one on a nullable column, so that select
-filters the NULLs out. The export archive carries a root `avatar.webp`, `ZIP_STORED` like the other
-already-compressed blobs, with the usual log-and-skip on `BlobMissingError`.
+cards. The rows go down the cascade, so the purge's `_collect_stored_file_keys` reads every key they
+hold, and the avatar column's, before the `DELETE`; otherwise a purged account leaves its face in
+the store inside an erasure feature. The sweeper counts the same keys, filtering the NULLs out. The
+export archive carries each picture at its root, `ZIP_STORED`: the original where one is kept, named
+`avatar.jpg` or `portrait.png` by kind and stored type rather than the diver's filename, and
+`avatar.webp` otherwise, with the usual log-and-skip on `BlobMissingError`.
+
+## An original is what a picture keeps, and a copy is a copy
+
+Applications show a picture at different sizes and ratios, so no one of them should decide the crop
+every reader gets: the original is what is kept and exported, and a crop travels beside it. An
+original also has an honest `original_filename`, which a rendition this server drew does not.
+*Rejected:* keeping the rendition only, which makes every adjustment a re-upload and every export a
+file whose name is invented.
+
+`POST /user/portrait/from-avatar` copies the avatar's original under portrait keys of its own, a
+read and a put, since the store has no copy. *Rejected:* one key shared by both rows, which lets
+either picture's replace or remove unlink the other's bytes, and which no per-column index or
+set-union sweep would notice.
 
 ## The admin bootstrap's `Table` copy is drift-checked in both directions
 
@@ -4819,9 +4818,9 @@ You are utilizing". Cite the file's own licence version, not 4.0 by default.
 ## Species photos: The stored bytes are a scaled copy and nothing else
 
 Never cropped, overlaid or composited, so `services/species_photos.py` does not reuse
-`user_avatars._normalize` despite similar decode fencing. A licence property: most sampled files are
-ShareAlike, and while displaying and scaling is not adaptation, cropping and compositing move toward
-it. Square-card presentation is the browser's business.
+`user_pictures._normalize` despite similar decode fencing. A licence property: most sampled files
+are ShareAlike, and while displaying and scaling is not adaptation, cropping and compositing move
+toward it. Square-card presentation is the browser's business.
 
 One stored width, from Commons' own buckets. Thumbnail widths are bucketed (120/250/330/500/960), an
 off-bucket URL answers HTTP 400, and `imageinfo`'s `thumbwidth` reports the width asked for rather
@@ -6093,7 +6092,7 @@ Six invalidators run after commit: `invalidate_dive_caches`, `invalidate_certifi
 
 A document's owner — name, username, email, `created_at` — and its preferences under this producer's
 key are never applied: changing a live account's identity or settings as a side effect of a restore
-is a worse surprise than setting them once. The archive's `avatar.webp` is not restored either.
+is a worse surprise than setting them once. The archive's pictures are not restored either.
 
 The check-in details — date of birth, phone, emergency contact, insurance — are shown in the preview
 beside the account's, and the apply writes exactly those the diver submits (§6.1's SHOULD NOT). The
@@ -6350,7 +6349,7 @@ message as a whole-message literal. The project's hosted instance answers `proje
 request: after the account lookup it calls the `live_session_for` that `/auth/refresh` calls, and
 `None` raises the same `UnauthorizedException` as every other failure there. One error for every
 cause, so nobody gets an oracle for which `sid`s exist. The cost is a third indexed read on a path
-already making two (`verify_token`'s blacklist `exists`, `crud_users.get`): `user_session.uuid` is
+already making two (`verify_token`'s blacklist `exists`, `read_account`): `user_session.uuid` is
 unique and live sessions cap at 100 per account. Reusing `live_session_for` rather than restating
 `_live` also buys the `user_id` clause. A token with no `sid` is refused;
 `services.auth_service.issue_tokens`, the only mint site, always sets one. The `| None` stays in
