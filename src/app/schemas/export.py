@@ -36,8 +36,9 @@ Where it differs from the API's own read shapes, and why:
   meant to outlive it. Spec §5.3 makes that the format's rule and adds referential
   closure: every uuid a record names is defined in the same document.
 - **Whatever the format has no core member for rides `extensions.opendiving`** (spec
-  §5.5): the diver's account preferences, and which parser read a stored dive-computer
-  file. A writer may not invent core members, so this is the sanctioned slot.
+  §5.5): the diver's account preferences, which parser read a stored dive-computer file,
+  and the crop this app frames the portrait with. A writer may not invent core members, so
+  this is the sanctioned slot.
 
 The one derived value in here is `archive_path`, which is a fact about the zip rather than
 about the logbook.
@@ -137,6 +138,34 @@ class ExportInsurance(BaseModel):
     expires_on: date | None = None
 
 
+class ExportStoredFile(PublicUUIDSchema):
+    """A binary the source logbook stores: a dive-computer export, one side of a c-card, or
+    the diver's portrait.
+
+    `sha256` is the stored digest of the bytes, not one computed at export time, so
+    checking an extracted file against it verifies the whole round trip - database column
+    to zip member - rather than just that the zip is internally consistent.
+
+    `archive_path` is **absent** outside an archive: there is no container for the path to
+    point into, and the format has one spelling of "not applicable" (spec §6.7). Which
+    parser read a dive-computer file rides `extensions.opendiving.parser_key` - parser
+    registries are application-specific and have no core member - and the portrait's crop
+    rides `extensions.opendiving.crop`, in the upright original's pixels.
+
+    A dive-computer file hangs off a **recording** rather than off the dive, and a recording
+    may carry several: the same computer exported twice in two formats is one record in two
+    spellings. Each keeps its own `uuid`, which is what makes them addressable across a
+    round trip and what §3's uuid-uniqueness rule is checked against.
+    """
+
+    original_filename: str
+    content_type: str
+    byte_size: int
+    sha256: str
+    archive_path: str | None = None
+    extensions: ExportExtensions = None
+
+
 class ExportDiver(PublicUUIDSchema):
     """Whose logbook this is.
 
@@ -144,6 +173,10 @@ class ExportDiver(PublicUUIDSchema):
     of birth, the phone, and the emergency contact and the insurance as one-element arrays,
     since the account stores one of each and the format orders several. Each is absent where
     the diver filled nothing in.
+
+    `portrait_file` is the check-in portrait's original, whole: the format leaves the framing
+    to each reader, so this app's crop rides the file's own `extensions.opendiving` and an
+    import into this app keeps it. The avatar has no member.
 
     `units`, `gear_service_emails` and the dive form's hidden fields and presets are
     application preferences rather than logbook data, so the format gives them no core
@@ -159,33 +192,8 @@ class ExportDiver(PublicUUIDSchema):
     born_on: date | None = None
     emergency_contacts: list[ExportEmergencyContact] | None = None
     insurances: list[ExportInsurance] | None = None
+    portrait_file: ExportStoredFile | None = None
     created_at: datetime
-    extensions: ExportExtensions = None
-
-
-class ExportStoredFile(PublicUUIDSchema):
-    """A binary the source logbook stores: a dive-computer export, or one side of a c-card.
-
-    `sha256` is the stored digest of the bytes, not one computed at export time, so
-    checking an extracted file against it verifies the whole round trip - database column
-    to zip member - rather than just that the zip is internally consistent.
-
-    `archive_path` is **absent** outside an archive: there is no container for the path to
-    point into, and the format has one spelling of "not applicable" (spec §6.7). Which
-    parser read a dive-computer file rides `extensions.opendiving.parser_key` - parser
-    registries are application-specific and have no core member.
-
-    A dive-computer file hangs off a **recording** rather than off the dive, and a recording
-    may carry several: the same computer exported twice in two formats is one record in two
-    spellings. Each keeps its own `uuid`, which is what makes them addressable across a
-    round trip and what §3's uuid-uniqueness rule is checked against.
-    """
-
-    original_filename: str
-    content_type: str
-    byte_size: int
-    sha256: str
-    archive_path: str | None = None
     extensions: ExportExtensions = None
 
 

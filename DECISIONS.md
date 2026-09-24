@@ -2392,7 +2392,9 @@ only the per-sample `cns` channel goes out); gas `role`, gear sets, service reco
 courses (no elements; `<divetrip>` is not a course); species (`<observations>` demands UDDF's
 mixed-rank taxonomy mapped from the WoRMS `phylum`/`class_name` strings `models/species.py` passes
 through — a mapping this repo would get quietly wrong; `species.csv` carries them); the emergency
-contact and the policy number (no elements; `<membership memberid>` is not a policy).
+contact and the policy number (no elements; `<membership memberid>` is not a policy); the portrait
+(`<owner>` has no image element, and its one route to an image, `<notes><link>` to `<mediadata>`,
+carries no role).
 
 Allowed: `po2_limit` maps to `<mix><maximumpo2>`, so `_MixKey` includes it;
 `informationbeforedive/link` is `maxOccurs="unbounded"`, so every site goes out in visit order.
@@ -6040,8 +6042,8 @@ Each restored member is verified against the manifest digest before writing; a m
 reports it.
 
 Content types are not the document's: a card image's is sniffed as `store_certification_file` does,
-a dive file's comes from this build's parser registry via `parser_key` (see
-`create_dive_file_token`).
+and the portrait's as an upload's; a dive file's comes from this build's parser registry via
+`parser_key` (see `create_dive_file_token`).
 
 A stored file's uuid is not preserved; nothing resolves a file by it, and
 `ux_dive_file_user_id_sha256` enforces identity.
@@ -6091,13 +6093,14 @@ Six invalidators run after commit: `invalidate_dive_caches`, `invalidate_certifi
 
 A document's owner — name, username, email, `created_at` — and its preferences under this producer's
 key are never applied: changing a live account's identity or settings as a side effect of a restore
-is a worse surprise than setting them once. The archive's pictures are not restored either.
+is a worse surprise than setting them once. The archive's avatar is not restored either.
 
-The check-in details — date of birth, phone, emergency contact, insurance — are shown in the preview
-beside the account's, and the apply writes exactly those the diver submits (§6.1's SHOULD NOT). The
-importer cannot tell a restore from a buddy's file, so writing on the document's say-so would take a
-stranger's contact. An object is proposed whole, never merged member by member, which would pair one
-insurer's name with another's policy number.
+The check-in details — date of birth, phone, emergency contact, insurance, portrait — are shown in
+the preview beside the account's, and the apply writes exactly those the diver submits (§6.1's
+SHOULD NOT). The importer cannot tell a restore from a buddy's file, so writing on the document's
+say-so would take a stranger's contact or face. An object is proposed whole, never merged member by
+member, which would pair one insurer's name with another's policy number. The portrait travels
+beside the facts rather than among them, so a client that knows only the facts keeps the account's.
 
 Rejected: restore-means-restore for preferences; filling only empty details.
 

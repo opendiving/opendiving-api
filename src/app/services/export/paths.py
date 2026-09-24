@@ -18,6 +18,8 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from ...schemas.user_picture import PictureKind
+from ..user_pictures import RENDITION_CONTENT_TYPE, picture_filename
 from .loader import ExportBundle
 
 DIVE_FILE_DIRECTORY = "files"
@@ -61,6 +63,14 @@ def _slug(value: str, *, default: str) -> str:
     return cleaned.strip("-") or default
 
 
+@dataclass(frozen=True, slots=True)
+class PictureMember:
+    """One picture's root member: which stored file it is read from, and its name."""
+
+    storage_key: str
+    name: str
+
+
 @dataclass(slots=True)
 class ArchivePaths:
     """Every stored binary's path inside the archive, keyed the way it is addressed.
@@ -68,14 +78,15 @@ class ArchivePaths:
     `dive_files` is keyed by **file row id**, not by dive: a dive holds as many exports as
     its recordings hold, and both readers of this map - the archive writer and the
     `archive_path` member `logbook.divejson` records - address one file at a time. A
-    certification still has at most one image per side. Between them these two maps name
+    certification still has at most one image per side. Between them these three maps name
     every member the archive carries beyond the generated documents
-    (`logbook.divejson`, `dives.uddf` and the nine files in `tabular.CSV_WRITERS`) and the
-    two pictures, whose names are fixed (`user_pictures.picture_filename`).
+    (`logbook.divejson`, `dives.uddf` and the nine files in `tabular.CSV_WRITERS`).
     """
 
     dive_files: dict[int, str] = field(default_factory=dict)
     certification_files: dict[tuple[int, str], str] = field(default_factory=dict)
+    # At the root, under names fixed by kind and stored type, so they collide with nothing.
+    pictures: dict[PictureKind, PictureMember] = field(default_factory=dict)
 
 
 # ext4, APFS and NTFS all cap one path component at 255 bytes, and `original_filename` is
@@ -151,5 +162,14 @@ def plan_archive_paths(bundle: ExportBundle) -> ArchivePaths:
             paths.certification_files[(certification.id, file_info.side.value)] = _claim(
                 taken, CERTIFICATION_DIRECTORY, stem, extension
             )
+
+    for kind, picture in sorted(bundle.pictures.items()):
+        # The original where one is kept - what the diver uploaded, from which the rendition
+        # can be drawn again - and the rendition otherwise, which only an avatar can lack.
+        if picture.original_storage_key is not None and picture.original_content_type is not None:
+            key, content_type = picture.original_storage_key, picture.original_content_type
+        else:
+            key, content_type = picture.rendition_storage_key, RENDITION_CONTENT_TYPE
+        paths.pictures[kind] = PictureMember(storage_key=key, name=picture_filename(kind, content_type))
 
     return paths

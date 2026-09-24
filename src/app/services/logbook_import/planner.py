@@ -30,6 +30,7 @@ Four rules run through everything below, and each is the format's rather than th
   of a whole upload live in `reader.py`.
 """
 
+import hashlib
 import math
 import uuid as uuid_pkg
 from collections.abc import Callable, Iterable, Sequence
@@ -38,11 +39,13 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid6 import uuid7
 
 from ...core.utils.datetime_offset import split_local_start_time
+from ...core.utils.uploads import safe_filename
 from ...models.certification import Certification
 from ...models.course import Course
 from ...models.dive import Dive
@@ -78,12 +81,15 @@ from ...schemas.logbook_import import (
     ImportLocation,
     ImportNote,
     ImportNoteCode,
+    ImportPortraitChoice,
+    ImportPortraitOffer,
     ImportProfile,
     ImportSpecies,
     ImportStoredFile,
     ImportTrip,
 )
 from ...schemas.user import CHECK_IN_FIELDS
+from ...schemas.user_picture import PictureCrop
 from ..certification_files import MAX_CARD_FILE_SIZE
 from ..dive_files import MAX_DIVE_FILE_SIZE
 from ..dive_parsers import PARSER_BY_KEY
@@ -107,6 +113,17 @@ from ..dive_recordings import (
     is_same_dive_strict,
     is_same_recording,
     load_candidates,
+)
+from ..user_pictures import (
+    MAX_PICTURE_UPLOAD_SIZE,
+    PORTRAIT_FRAME,
+    HeldPicture,
+    ImportedPicture,
+    InvalidCropError,
+    UnsupportedPictureError,
+    get_held_picture,
+    preview_data_url,
+    process_imported_original,
 )
 from .check_in import propose, to_write
 from .reader import LoadedImport
@@ -316,6 +333,20 @@ class PlannedRecordingMatch:
     mixtures: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class PlannedPortrait:
+    """The archive's portrait, read, verified and rendered, and the account's as it stood.
+
+    Planned whenever there is one to offer, preview and apply alike, so the apply's notes
+    agree with the preview's; `take` is whether the apply writes it.
+    """
+
+    picture: ImportedPicture
+    filename: str
+    held: HeldPicture | None
+    take: bool = False
+
+
 @dataclass(slots=True)
 class PlannedRecord:
     """One record of the document, and what will become of it.
@@ -362,6 +393,19 @@ class ImportPlan:
     # account columns the apply writes from what the diver submitted - see `check_in.py`.
     check_in_details: list[ImportCheckInDetail] = field(default_factory=list)
     check_in_values: dict[str, Any] = field(default_factory=dict)
+    # The archive's portrait, beside the check-in details and never counted among the files:
+    # those are the logbook's, and the report's file counts say so.
+    portrait: PlannedPortrait | None = None
+
+    async def portrait_offer(self) -> ImportPortraitOffer | None:
+        """The preview's portrait fields, the archive's drawn small enough to travel inline."""
+        if self.portrait is None:
+            return None
+        held = self.portrait.held
+        return ImportPortraitOffer(
+            account_sha256=None if held is None else held.rendition_sha256,
+            proposed=await preview_data_url(self.portrait.picture.rendition),
+        )
 
     def collection_reports(self) -> list[ImportCollectionReport]:
         reports = []
@@ -547,6 +591,7 @@ class _Planner:
         resolution_ran: bool = False,
         newly_resolved_aphia_ids: frozenset[int] = frozenset(),
         check_in: ImportCheckInSubmission | None = None,
+        portrait: ImportPortraitChoice | None = None,
     ) -> None:
         self._db = db
         self._user_id = user_id
@@ -561,6 +606,8 @@ class _Planner:
         self._check_in = check_in
         self._check_in_details: list[ImportCheckInDetail] = []
         self._check_in_values: dict[str, Any] = {}
+        self._portrait_choice = portrait
+        self._portrait: PlannedPortrait | None = None
         self._records: dict[str, dict[uuid_pkg.UUID, PlannedRecord]] = {name: {} for name in COLLECTIONS}
         self._notes: list[ImportNote] = []
         self._notes_dropped = 0
@@ -996,6 +1043,7 @@ class _Planner:
 
     async def plan(self) -> ImportPlan:
         await self._plan_diver()
+        await self._plan_portrait()
         await self._plan_trips()
         await self._plan_courses()
         await self._plan_sites()
@@ -1018,6 +1066,7 @@ class _Planner:
             files_skipped=self._files_skipped,
             check_in_details=self._check_in_details,
             check_in_values=self._check_in_values,
+            portrait=self._portrait,
         )
 
     async def _plan_diver(self) -> None:
@@ -1039,6 +1088,79 @@ class _Planner:
         account = row._asdict()
         self._check_in_details = propose(diver, account, self._note)
         self._check_in_values = to_write(self._check_in_details, self._check_in, account, self._note)
+
+    async def _plan_portrait(self) -> None:
+        """The archive's portrait, offered beside the account's and taken only as chosen.
+
+        Read, verified and rendered here, where the preview runs, so a file the pipeline
+        refuses is noted before the diver chooses anything and the apply, re-running this,
+        agrees. Never counted among the files. An archive portrait that is the account's own
+        original is offered only where its crop differs, and then as a re-crop.
+        """
+        diver = self._document.diver
+        stored = None if diver is None else diver.portrait_file
+        if stored is None:
+            return
+        if not self._loaded.is_archive or stored.archive_path is None:
+            self._note(
+                ImportNoteCode.FILE_NOT_CONTAINED,
+                "The portrait is named by the document but not contained in it. Import the archive to be offered it.",
+            )
+            return
+        data = self._portrait_bytes(stored, stored.archive_path)
+        if data is None:
+            return
+        try:
+            picture = await process_imported_original(data, PORTRAIT_FRAME, _carried_crop(stored))
+        except UnsupportedPictureError, InvalidCropError:
+            self._note(
+                ImportNoteCode.FILE_SKIPPED,
+                "The portrait is not a JPEG or PNG this app can store, so it is not offered.",
+            )
+            return
+
+        held = await get_held_picture(self._db, user_id=self._user_id, frame=PORTRAIT_FRAME)
+        if held is not None and held.original_sha256 == picture.original_sha256 and held.crop == picture.crop:
+            return
+        planned = PlannedPortrait(
+            picture=picture, filename=safe_filename(stored.original_filename, default="portrait"), held=held
+        )
+        choice = self._portrait_choice
+        if choice is not None and choice.choice == "take":
+            if choice.account_sha256 == (None if held is None else held.rendition_sha256):
+                planned = replace(planned, take=True)
+            else:
+                self._note(
+                    ImportNoteCode.PORTRAIT_KEPT,
+                    "This account's portrait was kept: it changed after the preview the archive's was chosen in.",
+                )
+        self._portrait = planned
+
+    def _portrait_bytes(self, stored: ImportStoredFile, archive_path: str) -> bytes | None:
+        """The archive's portrait, checked against its digest and the upload ceiling, or `None`
+        with a note saying why not - `_plan_card_file`'s checks, made here rather than by the
+        writer because the preview renders it."""
+        size = self._loaded.member_size(archive_path)
+        if stored.sha256 is None:
+            reason = "The portrait carries no digest to verify it against, so it is not offered."
+        elif size is None:
+            reason = "The portrait is named by the document but missing from the archive, so it is not offered."
+        elif size > MAX_PICTURE_UPLOAD_SIZE:
+            reason = (
+                f"The portrait is larger than the {MAX_PICTURE_UPLOAD_SIZE // (1024 * 1024)} MB this app stores, so "
+                "it is not offered."
+            )
+        elif (data := self._loaded.read_member(archive_path)) is None or (
+            hashlib.sha256(data).hexdigest() != stored.sha256
+        ):
+            reason = (
+                "The portrait could not be read out of the archive or does not match the digest the document "
+                "recorded, so it is not offered."
+            )
+        else:
+            return data
+        self._note(ImportNoteCode.FILE_SKIPPED, reason)
+        return None
 
     async def _plan_trips(self) -> None:
         existing = await self._rows_by_uuid(Trip, [trip.uuid for trip in self._document.trips])
@@ -2314,6 +2436,17 @@ class _Planner:
         )
 
 
+def _carried_crop(stored: ImportStoredFile) -> PictureCrop | None:
+    """The crop this app wrote beside a portrait, or `None` for anything else under the key."""
+    entry = _producer_entry(stored, "crop")
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return PictureCrop.model_validate(entry)
+    except ValidationError:
+        return None
+
+
 def _producer_entry(stored: ImportStoredFile, member: str) -> Any:
     """One value out of this producer's extension entry (spec §5.5).
 
@@ -2335,11 +2468,12 @@ async def plan_import(
     resolution_ran: bool = False,
     newly_resolved_aphia_ids: frozenset[int] = frozenset(),
     check_in: ImportCheckInSubmission | None = None,
+    portrait: ImportPortraitChoice | None = None,
 ) -> ImportPlan:
     """Plan an import of `loaded` into `user_id`'s logbook. Writes nothing.
 
-    `check_in` is what the diver confirmed in the preview; the apply passes it and the
-    preview, which has nothing submitted yet, does not.
+    `check_in` and `portrait` are what the diver confirmed in the preview; the apply passes
+    them and the preview, which has nothing submitted yet, does not.
     """
     planner = _Planner(
         db,
@@ -2348,6 +2482,7 @@ async def plan_import(
         resolution_ran=resolution_ran,
         newly_resolved_aphia_ids=newly_resolved_aphia_ids,
         check_in=check_in,
+        portrait=portrait,
     )
     return await planner.plan()
 

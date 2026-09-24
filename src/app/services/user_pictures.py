@@ -14,6 +14,9 @@ re-encoded, which is what a client cannot be trusted to do and why it happens he
 holds for the web app, iOS and anything else. "Adjust your photo" is a new crop over the
 same original.
 
+An import brings a portrait's original out of an archive through the same pipeline, framed
+by the crop it carried where that fits and by the centred one otherwise.
+
 The one exception keeps no original: an avatar uploaded without a crop, and the one seeded
 from Google at sign-up. Those render the centred square every avatar upload rendered before
 originals were kept, from today's formats under today's cap. A portrait always has a crop.
@@ -21,15 +24,17 @@ originals were kept, from today's formats under today's cap. A portrait always h
 Pillow parses untrusted bytes, so the decode is fenced on four sides: an explicit `formats`
 allowlist so only a few battle-tested parsers are ever reachable, a byte cap on the read
 itself, a cap on the pixel count the header *claims*, and a second cap on what will
-actually be rasterized once the decoder has been asked to do it cheaply. See `_normalize`
+actually be rasterized once the decoder has been asked to do it cheaply. See `_render`
 for why those last two are not the same check, and `MAX_ORIGINAL_DECODE_PIXELS` for why a
 cap in pixels is not a cap in bytes of memory.
 """
 
+import base64
 import hashlib
 import io
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
@@ -90,7 +95,7 @@ MAX_PICTURE_PIXELS = 50_000_000
 # API's own container (Linux, Pillow 12.3): that counter is a monotonic high-water mark, and
 # macOS reads it higher. At the cap, through `_prepare_original` with the strip included and
 # either frame: ~110 MB for a 5 MB RGBA PNG, the worst a 5 MB file can be - `resize`
-# premultiplies a full-size copy on the alpha paths, see `_normalize` - ~60 MB for an RGB one,
+# premultiplies a full-size copy on the alpha paths, see `_render` - ~60 MB for an RGB one,
 # and ~25 MB for a 10 MB camera JPEG, which `draft` decodes at a quarter. `_DECODE_LIMITER`
 # makes that one decode per worker, so the shipped image's four workers reach ~440 MB above
 # their own resident sets only when four worst-case PNGs arrive at once, against a documented
@@ -142,6 +147,10 @@ RENDITION_CONTENT_TYPE = "image/webp"
 # a thread - and every byte it saves is paid back on every render.
 _WEBP_QUALITY = 85
 _WEBP_METHOD = 6
+
+# An import preview's copy of the archive's portrait travels inside the JSON, so it is drawn
+# at the size a preview shows it rather than the rendition's.
+PREVIEW_MAX_HEIGHT = 360
 
 # Guards on the one URL this server will fetch an image from (see `import_google_avatar`).
 _GOOGLE_AVATAR_HOST = "googleusercontent.com"
@@ -211,6 +220,29 @@ class _Prepared:
     original_content_type: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ImportedPicture:
+    """An original an import read out of an archive: stripped, and rendered through the crop
+    it will be stored with."""
+
+    original: bytes
+    original_sha256: str
+    original_content_type: str
+    rendition: bytes
+    crop: PictureCrop
+
+
+@dataclass(frozen=True, slots=True)
+class HeldPicture:
+    """What one picture's row holds, as an import found it before choosing to replace it."""
+
+    rendition_storage_key: str
+    rendition_sha256: str
+    original_storage_key: str | None
+    original_sha256: str | None
+    crop: PictureCrop | None
+
+
 def picture_filename(kind: PictureKind, content_type: str) -> str:
     """`avatar.webp`, `portrait.jpg`: the name a picture's file goes by as a rendition's
     download and as an archive member. The kind and the stored type, never the diver's
@@ -235,11 +267,42 @@ def _check_crop(crop: PictureCrop, size: tuple[int, int], frame: Frame) -> None:
         raise InvalidCropError(f"The crop has to be {ratio_width}:{ratio_height}.")
 
 
-def _normalize(data: bytes, frame: Frame = AVATAR_FRAME, crop: PictureCrop | None = None) -> bytes:
-    """Decode, orient, crop, bound and re-encode as WebP. Runs in a worker thread.
+def _centred_crop(size: tuple[int, int], frame: Frame) -> PictureCrop:
+    """The largest crop at the frame's ratio, centred on an upright image of `size`."""
+    width, height = size
+    ratio_width, ratio_height = frame.ratio
+    if width * ratio_height >= height * ratio_width:
+        crop_width, crop_height = max(1, height * ratio_width // ratio_height), height
+    else:
+        crop_width, crop_height = width, max(1, width * ratio_height // ratio_width)
+    return PictureCrop(x=(width - crop_width) // 2, y=(height - crop_height) // 2, width=crop_width, height=crop_height)
 
-    With a crop, `data` is a stripped original and the crop frames it. Without one it is an
-    avatar that keeps no original, rendered as the centred square it always was.
+
+def _fits(crop: PictureCrop, size: tuple[int, int], frame: Frame) -> bool:
+    try:
+        _check_crop(crop, size, frame)
+    except InvalidCropError:
+        return False
+    return True
+
+
+def _normalize(data: bytes, frame: Frame = AVATAR_FRAME, crop: PictureCrop | None = None) -> bytes:
+    """`_render` through a crop the caller already holds, or through none for an avatar."""
+    rendition, _ = _render(data, frame, None if crop is None else lambda _upright: crop)
+    return rendition
+
+
+def _render(
+    data: bytes, frame: Frame, crop_for: Callable[[tuple[int, int]], PictureCrop] | None
+) -> tuple[bytes, PictureCrop | None]:
+    """Decode, orient, crop, bound and re-encode as WebP. Runs in a worker thread. Returns
+    the rendition and the crop it was drawn through.
+
+    With `crop_for`, `data` is a stripped original, framed by the crop `crop_for` answers
+    for its upright size - a crop the caller already holds, or, for an import, the one it
+    carried when that fits and the centred one when not. The size is only known once the
+    header is read, and asking for it here keeps the image to one open. Without `crop_for`
+    it is an avatar that keeps no original, rendered as the centred square it always was.
 
     Every rejection of the image raises `UnsupportedPictureError`, which the routes map to
     one 415; a crop that does not fit raises `InvalidCropError`, their 422. Three of the
@@ -277,11 +340,14 @@ def _normalize(data: bytes, frame: Frame = AVATAR_FRAME, crop: PictureCrop | Non
     resampling alpha correctly. Hence the decode caps, which are what make the ceiling hold
     whatever the mode.
     """
-    if crop is None and frame is not AVATAR_FRAME:
+    if crop_for is None and frame is not AVATAR_FRAME:
         raise TypeError("only an avatar is rendered without a crop")
     formats, decode_cap = (
-        (ALLOWED_FORMATS, MAX_AVATAR_DECODE_PIXELS) if crop is None else (ORIGINAL_FORMATS, MAX_ORIGINAL_DECODE_PIXELS)
+        (ALLOWED_FORMATS, MAX_AVATAR_DECODE_PIXELS)
+        if crop_for is None
+        else (ORIGINAL_FORMATS, MAX_ORIGINAL_DECODE_PIXELS)
     )
+    crop: PictureCrop | None = None
     try:
         with Image.open(io.BytesIO(data), formats=formats) as image:
             width, height = image.size
@@ -300,8 +366,9 @@ def _normalize(data: bytes, frame: Frame = AVATAR_FRAME, crop: PictureCrop | Non
                     f"That image is too large to process ({width}x{height}). Please use a smaller photo."
                 )
 
-            if crop is not None:
+            if crop_for is not None:
                 upright = _upright_size(image, width, height)
+                crop = crop_for(upright)
                 _check_crop(crop, upright, frame)
 
             ImageOps.exif_transpose(image, in_place=True)
@@ -339,24 +406,47 @@ def _normalize(data: bytes, frame: Frame = AVATAR_FRAME, crop: PictureCrop | Non
 
             out = io.BytesIO()
             rendered.save(out, format="WEBP", quality=_WEBP_QUALITY, method=_WEBP_METHOD)
-            return out.getvalue()
+            return out.getvalue(), crop
     except Image.DecompressionBombError as exc:
         raise UnsupportedPictureError("That image describes far too many pixels to process.") from exc
     except (OSError, ValueError, SyntaxError) as exc:
-        accepted = "a JPEG, PNG, WEBP or GIF" if crop is None else "a JPEG or PNG"
+        accepted = "a JPEG, PNG, WEBP or GIF" if crop_for is None else "a JPEG or PNG"
         raise UnsupportedPictureError(f"Unsupported image. Upload {accepted}.") from exc
 
 
-def _prepare_original(data: bytes, frame: Frame, crop: PictureCrop) -> _Prepared:
-    """Strip an original and render it through `crop`. Runs in a worker thread."""
+def _strip(data: bytes) -> tuple[bytes, str]:
+    """An original with its metadata stripped, and its content type."""
     content_type = sniff_original(data)
     if content_type is None:
         raise UnsupportedPictureError("Unsupported image. Upload a JPEG or PNG.")
     try:
-        original = strip_metadata(data, content_type)
+        return strip_metadata(data, content_type), content_type
     except DamagedImageError as exc:
         raise UnsupportedPictureError(f"That image is damaged: {exc}.") from exc
+
+
+def _prepare_original(data: bytes, frame: Frame, crop: PictureCrop) -> _Prepared:
+    """Strip an original and render it through `crop`. Runs in a worker thread."""
+    original, content_type = _strip(data)
     return _Prepared(rendition=_normalize(original, frame, crop), original=original, original_content_type=content_type)
+
+
+def _prepare_import(data: bytes, frame: Frame, carried: PictureCrop | None) -> ImportedPicture:
+    """Strip an imported original and render it through the crop it carried, or through the
+    centred one when it carried none that fits. Runs in a worker thread."""
+    original, content_type = _strip(data)
+
+    def crop_for(upright: tuple[int, int]) -> PictureCrop:
+        return carried if carried is not None and _fits(carried, upright, frame) else _centred_crop(upright, frame)
+
+    rendition, crop = _render(original, frame, crop_for)
+    return ImportedPicture(
+        original=original,
+        original_sha256=hashlib.sha256(original).hexdigest(),
+        original_content_type=content_type,
+        rendition=rendition,
+        crop=cast(PictureCrop, crop),
+    )
 
 
 async def process_avatar(data: bytes) -> bytes:
@@ -378,6 +468,30 @@ async def process_original(data: bytes, frame: Frame, crop: PictureCrop) -> _Pre
     if not data:
         raise UnsupportedPictureError("The uploaded file is empty.")
     return await anyio.to_thread.run_sync(_prepare_original, data, frame, crop, limiter=_DECODE_LIMITER)
+
+
+async def process_imported_original(data: bytes, frame: Frame, carried: PictureCrop | None) -> ImportedPicture:
+    """An imported original, stripped and rendered through `carried` where it fits the image
+    at the frame's ratio and through the centred crop otherwise - which is also what a
+    document from any other producer gets, carrying no crop of this app's."""
+    if not data:
+        raise UnsupportedPictureError("The file is empty.")
+    return await anyio.to_thread.run_sync(_prepare_import, data, frame, carried, limiter=_DECODE_LIMITER)
+
+
+def _shrink(rendition: bytes, max_height: int) -> bytes:
+    with Image.open(io.BytesIO(rendition), formats=["WEBP"]) as image:
+        image.thumbnail((image.width, max_height), Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        image.save(out, format="WEBP", quality=_WEBP_QUALITY, method=_WEBP_METHOD)
+        return out.getvalue()
+
+
+async def preview_data_url(rendition: bytes) -> str:
+    """A rendition this module drew, reduced to `PREVIEW_MAX_HEIGHT` and spelled as a
+    `data:` URL a page can show without another request."""
+    small = await anyio.to_thread.run_sync(_shrink, rendition, PREVIEW_MAX_HEIGHT)
+    return f"data:{RENDITION_CONTENT_TYPE};base64,{base64.b64encode(small).decode('ascii')}"
 
 
 async def store_picture(
@@ -504,6 +618,111 @@ async def _write(
         await _write_avatar_columns(db, user_id=user_id, key=rendition_key, sha256=rendition_sha256)
     await db.commit()
     return rendition_sha256
+
+
+async def get_held_picture(db: AsyncSession, *, user_id: int, frame: Frame) -> HeldPicture | None:
+    """One picture's keys, digests and crop, or `None` without one."""
+    row = (
+        await db.execute(
+            select(
+                UserPicture.rendition_storage_key,
+                UserPicture.rendition_sha256,
+                UserPicture.original_storage_key,
+                UserPicture.original_sha256,
+                UserPicture.crop_x,
+                UserPicture.crop_y,
+                UserPicture.crop_width,
+                UserPicture.crop_height,
+            ).where(UserPicture.user_id == user_id, UserPicture.kind == frame.kind.value)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    crop = (
+        None
+        if row.crop_x is None
+        else PictureCrop(x=row.crop_x, y=row.crop_y, width=row.crop_width, height=row.crop_height)
+    )
+    return HeldPicture(
+        rendition_storage_key=row.rendition_storage_key,
+        rendition_sha256=row.rendition_sha256,
+        original_storage_key=row.original_storage_key,
+        original_sha256=row.original_sha256,
+        crop=crop,
+    )
+
+
+async def write_imported_portrait(
+    db: AsyncSession, *, user_id: int, picture: ImportedPicture, filename: str, held: HeldPicture | None
+) -> bool:
+    """Make `picture` the account's portrait, over what `held` says the portrait was when the
+    import was planned. Returns whether it was written. The avatar is never imported.
+
+    **Inside the import's transaction**: no commit, and no `release_read_transaction`, since
+    the caller writes a whole logbook and commits once. The files are still put before that
+    commit and the retired ones unlinked after it.
+
+    Where `held` already holds this original - the same digest - only the crop and the
+    rendition change, as an adjustment does: the original, its key and the row's uuid stay,
+    so restoring this app's own archive leaves the next export's `portrait_file` as it was.
+    Otherwise it is a replacement under a fresh uuid.
+
+    The statement matches only the rendition key `held` names, or only an empty slot when
+    `held` is `None`, so a portrait another request changed since the plan was made is left
+    alone, and the files put for this one are unlinked after the commit instead.
+    """
+    frame = PORTRAIT_FRAME
+    rendition_sha256 = hashlib.sha256(picture.rendition).hexdigest()
+    rendition_key = blob_store.new_key(frame.key_kind, sha256=rendition_sha256)
+    values: dict[str, object] = {
+        "rendition_storage_key": rendition_key,
+        "rendition_sha256": rendition_sha256,
+        **_crop_columns(picture.crop),
+    }
+    put = [rendition_key]
+    retired: list[str | None] = []
+    if held is not None and held.original_sha256 == picture.original_sha256:
+        retired = [held.rendition_storage_key]
+    else:
+        original_key = blob_store.new_key(frame.key_kind, sha256=picture.original_sha256)
+        values |= {
+            "uuid": uuid7(),
+            "original_storage_key": original_key,
+            "original_sha256": picture.original_sha256,
+            "original_byte_size": len(picture.original),
+            "original_content_type": picture.original_content_type,
+            "original_filename": filename,
+        }
+        await blob_store.put(original_key, picture.original)
+        put.append(original_key)
+        if held is not None:
+            retired = [held.original_storage_key, held.rendition_storage_key]
+    await blob_store.put(rendition_key, picture.rendition)
+
+    now = datetime.now(UTC)
+    if held is None:
+        written = await db.execute(
+            pg_insert(UserPicture)
+            .values(user_id=user_id, kind=frame.kind.value, created_at=now, **values)
+            .on_conflict_do_nothing(index_elements=[UserPicture.user_id, UserPicture.kind])
+            .returning(UserPicture.id)
+        )
+    else:
+        written = await db.execute(
+            update(UserPicture)
+            .where(
+                UserPicture.user_id == user_id,
+                UserPicture.kind == frame.kind.value,
+                UserPicture.rendition_storage_key == held.rendition_storage_key,
+            )
+            .values(**values, updated_at=now)
+            .returning(UserPicture.id)
+        )
+    if written.scalar_one_or_none() is None:
+        blob_store.delete_after_commit(db, put)
+        return False
+    blob_store.delete_after_commit(db, [key for key in retired if key])
+    return True
 
 
 async def recrop_picture(db: AsyncSession, *, user_id: int, frame: Frame, crop: PictureCrop) -> str | None:

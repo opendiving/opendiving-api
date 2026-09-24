@@ -71,6 +71,7 @@ from ...schemas.gear_service import ServiceKind
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LocationRead, location_from_row
 from ...schemas.trip import TripPartRead
 from ...schemas.user import EMERGENCY_CONTACT_FIELDS, INSURANCE_FIELDS, is_blank
+from ...schemas.user_picture import PictureKind
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
 from .loader import ExportBundle, ExportFileRow, ExportRecordingRow
 from .paths import ArchivePaths
@@ -259,7 +260,37 @@ def _insurances(user: User) -> list[ExportInsurance] | None:
     return [ExportInsurance(provider=provider, number=_filled(number), expires_on=expires_on)]
 
 
-def _diver(bundle: ExportBundle) -> ExportDiver:
+def _portrait_file(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportStoredFile | None:
+    """The portrait's original as a Stored File, with the crop this app frames it with.
+
+    The original rather than the rendition: the format carries the picture whole and leaves
+    the framing to each reader (spec §6.1), and the rendition's bytes are this app's, with no
+    filename the diver gave them. The crop is this app's framing, so it rides this producer's
+    key, where an import into this app reads it back.
+    """
+    picture = bundle.pictures.get(PictureKind.PORTRAIT)
+    if (
+        picture is None
+        or picture.original_sha256 is None
+        or picture.original_content_type is None
+        or picture.original_byte_size is None
+        or picture.original_filename is None
+    ):
+        return None
+    member = None if paths is None else paths.pictures.get(PictureKind.PORTRAIT)
+    crop = {"x": picture.crop_x, "y": picture.crop_y, "width": picture.crop_width, "height": picture.crop_height}
+    return ExportStoredFile(
+        uuid=picture.uuid,
+        original_filename=picture.original_filename,
+        content_type=picture.original_content_type,
+        byte_size=picture.original_byte_size,
+        sha256=picture.original_sha256,
+        archive_path=None if member is None else member.name,
+        extensions={DIVEJSON_PRODUCER_KEY: {"crop": crop}},
+    )
+
+
+def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
     user = bundle.user
     return ExportDiver(
         uuid=user.uuid,
@@ -270,6 +301,7 @@ def _diver(bundle: ExportBundle) -> ExportDiver:
         born_on=user.date_of_birth,
         emergency_contacts=_emergency_contacts(user),
         insurances=_insurances(user),
+        portrait_file=_portrait_file(bundle, paths),
         created_at=user.created_at,
         # The account-level preferences. They are here because `/export/archive` says
         # nothing in the account is reachable only through the app - and under this
@@ -703,14 +735,14 @@ async def write_divejson(
     `dives.uddf` already work.
 
     `paths` is the archive's member layout, which fills in each stored file's
-    `archive_path`. `None` leaves those *absent*; only `archive.py` passes a layout today,
-    and without one there is no zip for a path to point into.
+    `archive_path`, the portrait's included. `None` leaves those *absent*; only `archive.py`
+    passes a layout today, and without one there is no zip for a path to point into.
     """
     yield b'{"format": ' + _encode(DIVEJSON_FORMAT) + b",\n"
     yield b'"version": ' + _encode(DIVEJSON_VERSION) + b",\n"
     yield b'"exported_at": ' + _encode(exported_at) + b",\n"
     yield b'"generator": ' + _encode(ExportGenerator(name=settings.APP_NAME, version=settings.APP_VERSION)) + b",\n"
-    yield b'"diver": ' + _encode(_diver(bundle)) + b",\n"
+    yield b'"diver": ' + _encode(_diver(bundle, paths)) + b",\n"
 
     yield b'"dives": ['
     for index, dive in enumerate(bundle.dives):

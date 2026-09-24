@@ -42,7 +42,12 @@ from src.app.core.db.database import async_get_db
 from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.security import create_logbook_import_token
 from src.app.core.setup import create_application
-from src.app.schemas.logbook_import import ImportBornOnDetail, ImportCheckInInsurance, ImportInsuranceDetail
+from src.app.schemas.logbook_import import (
+    ImportBornOnDetail,
+    ImportCheckInInsurance,
+    ImportInsuranceDetail,
+    ImportPortraitOffer,
+)
 from src.app.services.logbook_import import reader
 
 PREVIEW_PATH = "/api/v1/import/logbook/preview"
@@ -242,6 +247,25 @@ class TestPreview:
                 "proposed": {"provider": "Aqua Med", "number": None, "expires_on": None},
             },
         ]
+
+    def test_it_carries_the_planner_s_portrait_beside_the_section(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        from src.app.services.logbook_import.planner import ImportPlan
+
+        offer = ImportPortraitOffer(account_sha256="a" * 64, proposed="data:image/webp;base64,UklGRg==")
+
+        async def portrait_offer(self: Any) -> ImportPortraitOffer:
+            return offer
+
+        monkeypatch.setattr(ImportPlan, "portrait_offer", portrait_offer)
+
+        body = client.post(PREVIEW_PATH, files=_files()).json()
+
+        assert body["portrait"] == offer.model_dump()
+
+    def test_a_logbook_with_no_portrait_to_offer_says_null(self, signed_in: Any, client: TestClient) -> None:
+        assert client.post(PREVIEW_PATH, files=_files()).json()["portrait"] is None
 
     def test_a_file_that_is_not_divejson_is_415(self, signed_in: Any, client: TestClient) -> None:
         response = client.post(PREVIEW_PATH, files=_files(b'{"format": "uddf", "version": "3.2.2"}'))
@@ -698,17 +722,68 @@ class TestApply:
 
         assert response.status_code == 422
 
-    def _planned_check_in(self, monkeypatch: Any) -> list[Any]:
+    def _planned_check_in(self, monkeypatch: Any, argument: str = "check_in") -> list[Any]:
         """Wraps the stubbed planner to record the submission the route hands it."""
         seen: list[Any] = []
         stub = import_route.plan_import
 
         async def recording_plan(db: Any, **kwargs: Any) -> Any:
-            seen.append(kwargs.get("check_in"))
+            seen.append(kwargs.get(argument))
             return await stub(db, **kwargs)
 
         monkeypatch.setattr(import_route, "plan_import", recording_plan)
         return seen
+
+    def test_the_portrait_choice_reaches_the_planner(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        seen = self._planned_check_in(monkeypatch, "portrait")
+        chosen = {"choice": "take", "account_sha256": "a" * 64}
+
+        response = client.post(
+            APPLY_PATH, files=_files(), data={"token": self._token(), "portrait": json.dumps(chosen)}
+        )
+
+        assert response.status_code == 200
+        (choice,) = seen
+        assert choice.model_dump() == chosen
+
+    def test_an_apply_without_a_portrait_choice_chooses_nothing(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """What the web build before the portrait's row sends, beside its facts: the account
+        keeps its portrait."""
+        seen = self._planned_check_in(monkeypatch, "portrait")
+
+        client.post(
+            APPLY_PATH,
+            files=_files(),
+            data={"token": self._token(), "check_in_details": json.dumps({"born_on": "1988-04-12"})},
+        )
+
+        assert seen == [None]
+
+    @pytest.mark.parametrize(
+        "chosen",
+        [
+            {"choice": "swap", "account_sha256": None},
+            {"choice": "take"},
+            {"choice": "take", "account_sha256": "not a digest"},
+            {"choice": "take", "account_sha256": None, "crop": {"x": 0}},
+        ],
+        ids=["an unknown choice", "no digest", "a malformed digest", "a member it does not know"],
+    )
+    def test_a_malformed_portrait_choice_is_a_422(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any, chosen: dict[str, Any]
+    ) -> None:
+        seen = self._planned_check_in(monkeypatch, "portrait")
+
+        response = client.post(
+            APPLY_PATH, files=_files(), data={"token": self._token(), "portrait": json.dumps(chosen)}
+        )
+
+        assert response.status_code == 422
+        assert seen == []
 
     def test_the_confirmed_check_in_details_reach_the_planner(
         self, signed_in: Any, client: TestClient, monkeypatch: Any

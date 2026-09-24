@@ -18,6 +18,7 @@ The store/delete group is about ordering (files before row, unlink after commit)
 snapshot rather than from the database would let one upload unlink another's committed blobs.
 """
 
+import base64
 import hashlib
 import importlib.util
 import io
@@ -66,12 +67,14 @@ from src.app.services.user_pictures import (
     UnsupportedPictureError,
     _is_google_avatar_url,
     _normalize,
+    _prepare_import,
     _prepare_original,
     copy_avatar_to_portrait,
     delete_picture,
     get_original,
     get_rendition,
     import_google_avatar,
+    preview_data_url,
     recrop_picture,
     seed_google_avatar,
     store_picture,
@@ -571,6 +574,79 @@ class TestRenderingThroughACrop:
         four formats, rendered as it always was."""
         assert _open(_normalize(webp_with_alpha(size=(64, 64)))).size == (64, 64)
         assert MAX_AVATAR_DECODE_PIXELS < MAX_ORIGINAL_DECODE_PIXELS
+
+
+class TestAnImportedOriginal:
+    """An archive's portrait keeps the crop it carried where that fits, and gets the
+    centred one otherwise - the only crop a document from any other producer can have."""
+
+    def test_a_carried_crop_that_fits_frames_it(self) -> None:
+        imported = _prepare_import(
+            phone_jpeg(size=(4032, 3024), orientation=6), PORTRAIT_FRAME, PORTRAIT_CROP_OF_A_TURNED_PHONE_PHOTO
+        )
+
+        assert imported.crop == PORTRAIT_CROP_OF_A_TURNED_PHONE_PHOTO
+        assert _open(imported.rendition).size == (700, 900)
+
+    @pytest.mark.parametrize(
+        ("orientation", "centred"),
+        [(6, PORTRAIT_CROP_OF_A_TURNED_PHONE_PHOTO), (None, PORTRAIT_CROP_OF_A_LANDSCAPE_PHOTO)],
+    )
+    def test_without_one_the_largest_centred_crop_of_the_upright_image_frames_it(
+        self, orientation: int | None, centred: PictureCrop
+    ) -> None:
+        imported = _prepare_import(phone_jpeg(size=(4032, 3024), orientation=orientation), PORTRAIT_FRAME, None)
+
+        assert imported.crop == centred
+
+    @pytest.mark.parametrize(
+        "carried",
+        [PictureCrop(x=900, y=0, width=3024, height=3888), PictureCrop(x=0, y=0, width=3024, height=3024)],
+        ids=["outside the image", "off the ratio"],
+    )
+    def test_a_carried_crop_that_does_not_fit_gives_way_to_the_centred_one(self, carried: PictureCrop) -> None:
+        imported = _prepare_import(phone_jpeg(size=(4032, 3024), orientation=6), PORTRAIT_FRAME, carried)
+
+        assert imported.crop == PORTRAIT_CROP_OF_A_TURNED_PHONE_PHOTO
+
+    def test_a_sliver_still_gets_a_crop(self) -> None:
+        """A picture narrower than the ratio's smallest step rounds to a pixel, not to none."""
+        imported = _prepare_import(plain_png(size=(40, 1)), PORTRAIT_FRAME, None)
+
+        assert imported.crop == PictureCrop(x=19, y=0, width=1, height=1)
+
+    def test_the_original_is_stripped_and_its_digest_is_of_what_is_kept(self) -> None:
+        source = phone_jpeg(size=(64, 48), orientation=6)
+
+        imported = _prepare_import(source, PORTRAIT_FRAME, None)
+
+        assert imported.original == strip_metadata(source, "image/jpeg")
+        assert imported.original_sha256 == hashlib.sha256(imported.original).hexdigest()
+        assert imported.original_content_type == "image/jpeg"
+
+    def test_stripping_what_this_app_stored_gives_back_its_digest(self) -> None:
+        """What makes this app's own archive restore as the same original."""
+        stored = _prepare_import(phone_jpeg(size=(64, 48), orientation=6), PORTRAIT_FRAME, None).original
+
+        assert _prepare_import(stored, PORTRAIT_FRAME, None).original_sha256 == hashlib.sha256(stored).hexdigest()
+
+    @pytest.mark.parametrize("source", [gif(), webp_with_alpha(size=(70, 90)), b"not a picture"])
+    def test_anything_but_a_jpeg_or_a_png_is_refused(self, source: bytes) -> None:
+        with pytest.raises(UnsupportedPictureError):
+            _prepare_import(source, PORTRAIT_FRAME, None)
+
+    @pytest.mark.asyncio
+    async def test_the_preview_copy_is_a_small_webp_inline(self) -> None:
+        rendition = _prepare_import(
+            phone_jpeg(size=(4032, 3024), orientation=6), PORTRAIT_FRAME, PORTRAIT_CROP_OF_A_TURNED_PHONE_PHOTO
+        ).rendition
+
+        url = await preview_data_url(rendition)
+
+        prefix = "data:image/webp;base64,"
+        assert url.startswith(prefix)
+        with _open(base64.b64decode(url.removeprefix(prefix))) as image:
+            assert (image.format, image.size) == ("WEBP", (280, 360))
 
 
 def _session(*, held: SimpleNamespace | None = None, rowcount: int = 1) -> AsyncMock:

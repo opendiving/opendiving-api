@@ -53,6 +53,9 @@ reading the XSD, and each is exported in `logbook.divejson`/CSV instead:
   person to call, and `insuranceType` is a name, aliases, two dates and notes - no number.
   `<membership memberid>` is not one either: a membership is not a policy, and a reader
   could not tell a club from an insurer.
+- **The portrait.** `<owner>` has no image element, and its one route to an image - a
+  `<notes><link>` to a `<mediadata><image>` - names no role, so a reader could not tell a
+  face from a boat.
 - **Gas `role`, tank `usage`, service schedules and training courses.** No slot for any
   of them. A course is the one that looks close to having one - `<divetrip>` carries a
   name and a date range - but a training course is not a trip, and folding it in would

@@ -445,7 +445,7 @@ def _normalize(data: bytes) -> bytes:
     file itself declares, and re-encoding. The re-encode also strips the metadata, which is
     ordinary hygiene rather than a licence matter here.
 
-    The three rejections are `user_pictures._normalize`'s three, for its reasons: Pillow raises
+    The three rejections are `user_pictures._render`'s three, for its reasons: Pillow raises
     `DecompressionBombError` from inside `Image.open` for the very largest inputs, so the open
     sits inside the `try`; `MAX_PHOTO_PIXELS` judges what the header claims; and
     `MAX_PHOTO_DECODE_PIXELS` judges what will actually be rasterized. There is no `draft`
