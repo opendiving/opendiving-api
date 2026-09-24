@@ -105,8 +105,8 @@ class Species(Base, PublicUUIDMixin, TimestampMixin):
     # different hyperlinks - the licence and the source - and one string can carry at most
     # one. The clients compose it.
     #
-    # Unique like `user.avatar_storage_key` and for the same reason: two rows naming one key
-    # would let either one's replacement unlink the other's bytes. Nullable, and Postgres
+    # Unique like `user_picture`'s key columns and for the same reason: two rows naming one
+    # key would let either one's replacement unlink the other's bytes. Nullable, and Postgres
     # allows any number of NULLs in a unique index, so the photo-less majority is unaffected.
     photo_storage_key: Mapped[str | None] = mapped_column(String(255), default=None)
     # Doubles as the ETag on the download route and as the whole client contract: non-null

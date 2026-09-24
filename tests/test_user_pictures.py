@@ -20,21 +20,24 @@ snapshot rather than from the database would let one upload unlink another's com
 
 import base64
 import hashlib
-import importlib.util
 import io
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import anyio
 import httpx
 import pytest
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 from PIL import Image
-from sqlalchemy import inspect, select, text
+from sqlalchemy import Connection, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
@@ -43,11 +46,11 @@ from src.app.api import router as api_router
 from src.app.api.dependencies import get_current_user
 from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
-from src.app.core.db.migrations import MIGRATIONS_PATH
+from src.app.core.db.migrations import alembic_config
 from src.app.core.setup import create_application
 from src.app.crud.crud_users import read_account
-from src.app.models.user import USER_AVATAR_SHA256, USER_AVATAR_STORAGE_KEY, User, user_table
-from src.app.models.user_picture import UserPicture
+from src.app.models.user import User
+from src.app.models.user_picture import _ORIGINAL_COLUMNS, UserPicture
 from src.app.schemas.user import UserRead
 from src.app.schemas.user_picture import PictureCrop
 from src.app.services import blob_store, user_pictures
@@ -80,7 +83,7 @@ from src.app.services.user_pictures import (
     store_picture,
 )
 from tests.conftest import db_available
-from tests.helpers.generators import create_user, set_avatar_columns
+from tests.helpers.generators import create_user, create_user_picture
 from tests.helpers.images import (
     C2PA_PAYLOAD,
     COMMENT_PAYLOAD,
@@ -1333,35 +1336,17 @@ class TestPictureRoutes:
         assert response.status_code == 422
 
 
-def test_neither_avatar_column_is_mapped() -> None:
-    """No request's query can select them: FastCRUD selects every mapped column, so a mapped
-    one would be selected on every signed-in request and break the day it is dropped."""
-    mapped = {attribute.key for attribute in inspect(User).column_attrs}
-
-    assert {"avatar_storage_key", "avatar_sha256"} & mapped == set()
-    assert {"avatar_storage_key", "avatar_sha256"} <= set(user_table.c.keys())
-
-
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestAgainstPostgres:
     """The round trips with a real session, real rows and a real volume.
 
-    What only a real database can settle: the row and the `user` columns actually land, the
-    `after_commit` hook actually unlinks (the mocked sessions above never commit, by design),
-    and a replacement retires exactly the files it replaced.
+    What only a real database can settle: the row actually lands, the `after_commit` hook
+    actually unlinks (the mocked sessions above never commit, by design), and a replacement
+    retires exactly the files it replaced.
     """
 
-    @staticmethod
-    async def _columns(async_db: AsyncSession, user_id: int) -> tuple[str | None, str | None]:
-        row = (
-            await async_db.execute(
-                select(USER_AVATAR_STORAGE_KEY, USER_AVATAR_SHA256).where(user_table.c.id == user_id)
-            )
-        ).one()
-        return row[0], row[1]
-
     @pytest.mark.asyncio
-    async def test_an_avatar_with_a_crop_keeps_its_original_and_writes_the_columns(
+    async def test_an_avatar_with_a_crop_keeps_its_original(
         self, db: Session, async_db: AsyncSession, volume: Path
     ) -> None:
         diver = create_user(db)
@@ -1382,7 +1367,6 @@ class TestAgainstPostgres:
         assert original.filename == "Me at Dahab.jpg"
         assert original.content_type == "image/jpeg"
         assert await user_pictures.read_picture_bytes(original) == strip_metadata(source, "image/jpeg")
-        assert await self._columns(async_db, diver.id) == (rendition.storage_key, digest)
 
     @pytest.mark.asyncio
     async def test_the_account_read_carries_each_pictures_fields(
@@ -1477,27 +1461,6 @@ class TestAgainstPostgres:
         ).scalar_one() == uuid_before
 
     @pytest.mark.asyncio
-    async def test_an_avatar_adjustment_moves_the_columns_with_the_row(
-        self, db: Session, async_db: AsyncSession, volume: Path
-    ) -> None:
-        diver = create_user(db)
-        await store_picture(
-            async_db,
-            user_id=diver.id,
-            frame=AVATAR_FRAME,
-            upload=_upload(plain_png(size=(32, 32))),
-            crop=_square((32, 32)),
-        )
-
-        digest = await recrop_picture(
-            async_db, user_id=diver.id, frame=AVATAR_FRAME, crop=PictureCrop(x=0, y=0, width=16, height=16)
-        )
-
-        rendition = await get_rendition(async_db, user_id=diver.id, frame=AVATAR_FRAME)
-        assert rendition is not None and rendition.sha256 == digest
-        assert await self._columns(async_db, diver.id) == (rendition.storage_key, digest)
-
-    @pytest.mark.asyncio
     async def test_the_copy_keeps_its_own_files_and_outlives_the_avatar(
         self, db: Session, async_db: AsyncSession, volume: Path
     ) -> None:
@@ -1535,7 +1498,7 @@ class TestAgainstPostgres:
         )
 
     @pytest.mark.asyncio
-    async def test_delete_clears_the_row_and_the_columns_and_unlinks_both_files(
+    async def test_delete_clears_the_row_and_unlinks_both_files(
         self, db: Session, async_db: AsyncSession, volume: Path
     ) -> None:
         diver = create_user(db)
@@ -1547,14 +1510,11 @@ class TestAgainstPostgres:
         await blob_store._await_pending_removals()
 
         assert await get_rendition(async_db, user_id=diver.id, frame=AVATAR_FRAME) is None
-        assert await self._columns(async_db, diver.id) == (None, None)
         assert list(blob_store.iter_keys()) == []
         assert await delete_picture(async_db, user_id=diver.id, frame=AVATAR_FRAME) is False
 
     @pytest.mark.asyncio
-    async def test_the_google_seed_writes_a_rendition_only_row_and_the_columns(
-        self, db: Session, async_db: AsyncSession
-    ) -> None:
+    async def test_the_google_seed_writes_a_rendition_only_row(self, db: Session, async_db: AsyncSession) -> None:
         diver = create_user(db)
         seeded = StoredAvatar(storage_key=f"user-avatars/ab/{uuid7()}_{'a' * 64}", sha256="a" * 64)
 
@@ -1567,62 +1527,190 @@ class TestAgainstPostgres:
             seeded.storage_key,
             seeded.sha256,
         )
-        assert await self._columns(async_db, diver.id) == (seeded.storage_key, seeded.sha256)
 
 
-_REVISION = "272bb184cbdd_a_portrait_beside_the_avatar_and_both"
+# The revision that moved the avatar into `user_picture` and kept its columns, and the one
+# that drops them.
+_TABLE_REVISION = "272bb184cbdd"
+_COLUMNS_REVISION = "dd420c8df9de"
+_AVATAR_COLUMNS = ("avatar_storage_key", "avatar_sha256")
 
 
-def _revision_sql(name: str) -> str:
-    """One of the revision's statements, loaded by path - `migrations/versions/` is not an
-    importable package, and a second copy of the SQL here could quietly stop matching."""
-    spec = importlib.util.spec_from_file_location(_REVISION, MIGRATIONS_PATH / "versions" / f"{_REVISION}.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return cast(str, getattr(module, name))
+def _revision(revision: str) -> Any:
+    """A revision's module, through Alembic's script directory: `migrations/versions/` is
+    not an importable package, and a second copy of its SQL here could quietly stop matching."""
+    return ScriptDirectory.from_config(alembic_config()).get_revision(revision).module
+
+
+@contextmanager
+def _with_the_avatar_columns(db: Session) -> Iterator[Connection]:
+    """The schema `dd420c8df9de` upgrades from, for one transaction that is never committed.
+
+    The suite's database is at head, where the columns are gone, so this runs that revision's
+    own `downgrade()` to bring them back, and rolls everything back afterwards - DDL too,
+    Postgres's being transactional. Nothing inside may commit: that would strand the
+    suite's schema behind head.
+    """
+    connection = db.connection()
+    try:
+        with Operations.context(MigrationContext.configure(connection)):
+            _revision(_COLUMNS_REVISION).downgrade()
+            yield connection
+    finally:
+        db.rollback()
+
+
+def _set_columns(connection: Connection, user_id: int, key: str | None, sha256: str | None) -> None:
+    connection.execute(
+        text('UPDATE "user" SET avatar_storage_key = :key, avatar_sha256 = :sha256 WHERE id = :id'),
+        {"key": key, "sha256": sha256, "id": user_id},
+    )
+
+
+def _columns(connection: Connection, user_id: int) -> tuple[str | None, str | None]:
+    row = connection.execute(
+        text('SELECT avatar_storage_key, avatar_sha256 FROM "user" WHERE id = :id'), {"id": user_id}
+    ).one()
+    return row[0], row[1]
+
+
+def _avatar_row(connection: Connection, user_id: int) -> dict[str, Any] | None:
+    row = (
+        connection.execute(
+            select(*UserPicture.__table__.columns).where(UserPicture.user_id == user_id, UserPicture.kind == "avatar")
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return None if row is None else dict(row)
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
-class TestTheRevisionsDataPath:
-    """The flagship's stored avatars move into rows on upgrade, and back on downgrade."""
+class TestTheAvatarsMoveIntoRows:
+    """`272bb184cbdd`: the flagship's stored avatars move into rows on upgrade, and back on
+    downgrade. It still runs for an instance upgrading from a release before it."""
 
     def test_every_stored_avatar_becomes_a_row_naming_the_same_file(self, db: Session) -> None:
         diver, bare = create_user(db), create_user(db)
         key = f"user-avatars/ab/{uuid7()}_{'e' * 64}"
-        set_avatar_columns(db, diver, key=key, sha256="e" * 64)
-        db.execute(text("DELETE FROM user_picture WHERE user_id IN (:a, :b)"), {"a": diver.id, "b": bare.id})
-        db.commit()
 
-        db.execute(text(_revision_sql("BACKFILL") + " AND id IN (:a, :b)"), {"a": diver.id, "b": bare.id})
-        db.commit()
+        with _with_the_avatar_columns(db) as connection:
+            _set_columns(connection, diver.id, key, "e" * 64)
+            connection.execute(
+                text("DELETE FROM user_picture WHERE user_id IN (:a, :b)"), {"a": diver.id, "b": bare.id}
+            )
 
-        rows = db.execute(select(UserPicture).where(UserPicture.user_id.in_((diver.id, bare.id)))).scalars().all()
-        assert [(row.user_id, row.kind, row.rendition_storage_key, row.rendition_sha256) for row in rows] == [
-            (diver.id, "avatar", key, "e" * 64)
-        ]
-        assert (rows[0].original_storage_key, rows[0].crop_x, rows[0].uuid is not None) == (None, None, True)
-        columns = db.execute(
-            select(USER_AVATAR_STORAGE_KEY, USER_AVATAR_SHA256).where(user_table.c.id == diver.id)
-        ).one()
-        assert tuple(columns) == (key, "e" * 64)
+            connection.execute(
+                text(_revision(_TABLE_REVISION).BACKFILL + " AND id IN (:a, :b)"), {"a": diver.id, "b": bare.id}
+            )
+
+            row = _avatar_row(connection, diver.id)
+            assert row is not None
+            assert (row["rendition_storage_key"], row["rendition_sha256"]) == (key, "e" * 64)
+            assert (row["original_storage_key"], row["crop_x"], row["uuid"] is not None) == (None, None, True)
+            assert _avatar_row(connection, bare.id) is None
+            assert _columns(connection, diver.id) == (key, "e" * 64)
 
     def test_the_downgrade_copies_each_avatar_back_into_the_columns(self, db: Session) -> None:
         diver = create_user(db)
-        picture = UserPicture(
-            user_id=diver.id,
-            kind="avatar",
-            rendition_storage_key=f"user-avatars/cd/{uuid7()}_{'c' * 64}",
-            rendition_sha256="c" * 64,
-        )
-        db.add(picture)
-        db.commit()
-        set_avatar_columns(db, diver, key=None, sha256=None)
+        picture = create_user_picture(db, diver, with_original=False)
 
-        db.execute(text(_revision_sql("RESTORE") + ' AND "user".id = :id'), {"id": diver.id})
-        db.commit()
+        with _with_the_avatar_columns(db) as connection:
+            _set_columns(connection, diver.id, None, None)
 
+            connection.execute(text(_revision(_TABLE_REVISION).RESTORE + ' AND "user".id = :id'), {"id": diver.id})
+
+            assert _columns(connection, diver.id) == (picture.rendition_storage_key, picture.rendition_sha256)
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestTheAvatarColumnsGo:
+    """`dd420c8df9de`: each account's avatar row is made to match its columns, the file the
+    build before `272bb184cbdd` last wrote, and then the columns are dropped."""
+
+    def test_the_columns_and_their_index_are_gone(self, db: Session) -> None:
         columns = db.execute(
-            select(USER_AVATAR_STORAGE_KEY, USER_AVATAR_SHA256).where(user_table.c.id == diver.id)
-        ).one()
-        assert tuple(columns) == (picture.rendition_storage_key, "c" * 64)
+            text("SELECT column_name FROM information_schema.columns WHERE table_name = 'user'")
+        ).scalars()
+        indexes = db.execute(text("SELECT indexname FROM pg_indexes WHERE tablename = 'user'")).scalars()
+
+        assert set(_AVATAR_COLUMNS) & set(columns) == set()
+        assert "ux_user_avatar_storage_key" not in set(indexes)
+        assert set(_AVATAR_COLUMNS) & set(User.__table__.columns.keys()) == set()
+
+    def test_a_row_that_agrees_with_its_columns_is_left_as_it_is(self, db: Session) -> None:
+        """What every avatar changed through `272bb184cbdd`'s build looks like, original and
+        crop included."""
+        diver = create_user(db)
+        create_user_picture(db, diver)
+
+        with _with_the_avatar_columns(db) as connection:
+            before = _avatar_row(connection, diver.id)
+
+            _revision(_COLUMNS_REVISION).upgrade()
+
+            assert before is not None and before["original_storage_key"] is not None
+            assert _avatar_row(connection, diver.id) == before
+
+    def test_a_removed_avatar_loses_the_row_it_outlived(self, db: Session) -> None:
+        diver = create_user(db)
+        create_user_picture(db, diver)
+        portrait = create_user_picture(db, diver, kind="portrait")
+
+        with _with_the_avatar_columns(db) as connection:
+            _set_columns(connection, diver.id, None, None)
+
+            _revision(_COLUMNS_REVISION).upgrade()
+
+            assert _avatar_row(connection, diver.id) is None
+            assert (
+                connection.execute(
+                    select(UserPicture.rendition_storage_key).where(
+                        UserPicture.user_id == diver.id, UserPicture.kind == "portrait"
+                    )
+                ).scalar_one()
+                == portrait.rendition_storage_key
+            )
+
+    def test_a_replaced_avatar_takes_the_columns_file_and_no_original(self, db: Session) -> None:
+        """The build that replaced it kept no original, so the row's original and crop frame
+        a file that is no longer the picture; a replaced picture takes a fresh uuid."""
+        diver = create_user(db)
+        create_user_picture(db, diver)
+        key = f"user-avatars/dd/{uuid7()}_{'d' * 64}"
+
+        with _with_the_avatar_columns(db) as connection:
+            before = _avatar_row(connection, diver.id)
+            _set_columns(connection, diver.id, key, "d" * 64)
+
+            _revision(_COLUMNS_REVISION).upgrade()
+
+            after = _avatar_row(connection, diver.id)
+            assert before is not None and after is not None
+            assert (after["rendition_storage_key"], after["rendition_sha256"]) == (key, "d" * 64)
+            assert [after[column] for column in _ORIGINAL_COLUMNS] == [None] * len(_ORIGINAL_COLUMNS)
+            assert after["uuid"] != before["uuid"]
+
+    def test_a_first_avatar_without_a_row_gets_one(self, db: Session) -> None:
+        diver = create_user(db)
+        key = f"user-avatars/ff/{uuid7()}_{'f' * 64}"
+
+        with _with_the_avatar_columns(db) as connection:
+            _set_columns(connection, diver.id, key, "f" * 64)
+
+            _revision(_COLUMNS_REVISION).upgrade()
+
+            row = _avatar_row(connection, diver.id)
+            assert row is not None
+            assert (row["rendition_storage_key"], row["rendition_sha256"]) == (key, "f" * 64)
+            assert [row[column] for column in _ORIGINAL_COLUMNS] == [None] * len(_ORIGINAL_COLUMNS)
+            assert row["uuid"] is not None
+
+    def test_the_downgrade_copies_each_avatar_back_into_the_columns(self, db: Session) -> None:
+        with_avatar, portrait_only = create_user(db), create_user(db)
+        avatar = create_user_picture(db, with_avatar)
+        create_user_picture(db, portrait_only, kind="portrait")
+
+        with _with_the_avatar_columns(db) as connection:
+            assert _columns(connection, with_avatar.id) == (avatar.rendition_storage_key, avatar.rendition_sha256)
+            assert _columns(connection, portrait_only.id) == (None, None)

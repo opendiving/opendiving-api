@@ -26,6 +26,17 @@ Alembic's `ConfigParser` rejects a percent-encoded password with
 password. CI runs `alembic upgrade head` then `alembic check`. Primary keys never carry
 `unique=True`: the DDL compiler drops it, but autogenerate reports it missing forever.
 
+## A column the serving build maps is dropped a deploy after it is unmapped
+
+A zero-downtime deploy runs `alembic upgrade head` while the previous build still serves, and that
+build selects every column it maps (`read_account`, on every signed-in request), so dropping one in
+the revision that unmaps it fails those requests until the switch. The first deploy keeps the column
+on the table and off the mapper (`exclude_properties`), writing it while the previous build reads
+it; the second drops it once the first is serving, after reconciling whatever the previous build
+wrote alone during that overlap. The second deploy's own overlap still fails the first build's
+writes and reads of the column until the switch: a failed write or job run, where the one-step drop
+fails every request.
+
 ## Domain `CheckConstraint`s need a manual `ALTER TABLE` on existing DBs
 
 `DiveMixture` (`oxygen`/`helium` 0–100, `oxygen + helium <= 100`, `volume > 0`,
@@ -4620,10 +4631,6 @@ replacement unlink the other's bytes. `get_current_user` joins the two rows in i
 (`read_account`) for `UserRead`. *Rejected:* digest columns on `user` beside the table, two sources
 of truth to spare a join on two rows.
 
-`user.avatar_storage_key` and `avatar_sha256` stay on the table and off the mapper while a build
-that maps them may still serve, since it selects every column it maps. Every avatar change writes
-them, and the purge and the sweeper count their key.
-
 ## A picture keeps its original, stripped, and shows a rendition drawn from it
 
 The upload is kept after a lossless strip (`services/picture_originals.py`) that keeps what the
@@ -4698,11 +4705,11 @@ Later sign-ins never re-import; silently replacing an uploaded picture would be 
 `DELETE /user` leaves both pictures alone: it flags the row for the grace period, and
 `POST /auth/restore` brings back a whole account rather than a faceless one, as it does dives and
 cards. The rows go down the cascade, so the purge's `_collect_stored_file_keys` reads every key they
-hold, and the avatar column's, before the `DELETE`; otherwise a purged account leaves its face in
-the store inside an erasure feature. The sweeper counts the same keys, filtering the NULLs out. The
-export archive carries each picture at its root, `ZIP_STORED`: the original where one is kept, named
-`avatar.jpg` or `portrait.png` by kind and stored type rather than the diver's filename, and
-`avatar.webp` otherwise, with the usual log-and-skip on `BlobMissingError`.
+hold before the `DELETE`; otherwise a purged account leaves its face in the store inside an erasure
+feature. The sweeper counts the same keys, filtering the NULLs out. The export archive carries each
+picture at its root, `ZIP_STORED`: the original where one is kept, named `avatar.jpg` or
+`portrait.png` by kind and stored type rather than the diver's filename, and `avatar.webp`
+otherwise, with the usual log-and-skip on `BlobMissingError`.
 
 ## An original is what a picture keeps, and a copy is a copy
 

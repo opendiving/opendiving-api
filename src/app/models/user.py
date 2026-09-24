@@ -1,7 +1,6 @@
 from datetime import date
-from typing import cast
 
-from sqlalchemy import JSON, Boolean, Column, Date, Index, String, Table, func
+from sqlalchemy import JSON, Boolean, Date, Index, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -96,21 +95,10 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # be on that list and are hard-deleted now, so they have no such column to cover.
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True, kw_only=True)
 
-    __mapper_args__ = {"exclude_properties": ["avatar_storage_key", "avatar_sha256"]}
-
     @declared_attr.directive
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
-            # The avatar's rendition, as it was stored before `user_picture` held it. On the
-            # table and off the mapper (`__mapper_args__`): the build before this one selects
-            # every column it maps on every signed-in request, so the columns stay until that
-            # build has stopped serving, and no request of this one selects them. Written
-            # beside the avatar's row on every change so the two agree, and read by the purge
-            # and the sweeper alone.
-            Column("avatar_storage_key", String(255), nullable=True),
-            Column("avatar_sha256", String(64), nullable=True),
-            Index("ux_user_avatar_storage_key", "avatar_storage_key", unique=True),
             # `ix_user_email` beside it is a plain b-tree on the raw column, which no
             # `lower(email)` predicate can use - so every case-insensitive account lookup
             # would be a sequential scan of this table without this one. The invitation path
@@ -127,9 +115,3 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # index only makes the lookup cheap.
             Index("ix_user_email_lower", func.lower(cls.email)),
         )
-
-
-# The avatar's two columns, for the statements that still write and read them.
-user_table = cast(Table, User.__table__)
-USER_AVATAR_STORAGE_KEY = user_table.c.avatar_storage_key
-USER_AVATAR_SHA256 = user_table.c.avatar_sha256

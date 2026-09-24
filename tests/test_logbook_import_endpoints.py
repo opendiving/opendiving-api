@@ -660,7 +660,7 @@ class TestTheConversionReport:
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
         """The converter's note list is unbounded and the report's is not, so the cap has to
-        live on the grouping - which is also why these are not a twelfth `ImportNoteCode`."""
+        live on the grouping - which is also why these are not another `ImportNoteCode`."""
         convert = reader._convert
 
         def with_extra_findings(buffer: Any, *, source_format: str | None) -> Any:
