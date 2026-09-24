@@ -106,8 +106,8 @@ class SpeciesRead(SpeciesBase, SpeciesPhotoCredit, PublicUUIDSchema):
 
     Carries the whole credit because the species page renders it. **`photo_storage_key` and
     `photo_fetched_at` are deliberately absent**, exactly as `UserRead` carries
-    `avatar_sha256` and never `avatar_storage_key`: an internal blob key and an operational
-    timestamp are not part of any client contract.
+    `avatar_sha256` and never the rendition's storage key: an internal blob key and an
+    operational timestamp are not part of any client contract.
     """
 
     created_at: datetime

@@ -38,7 +38,6 @@ from tests.helpers.generators import (
     create_dive_recording,
     create_user,
     create_user_picture,
-    set_avatar_columns,
 )
 from tests.helpers.mocks import fake_request
 
@@ -540,9 +539,8 @@ class TestPurgeDeletedAccountsAgainstPostgres:
 
     @pytest.mark.asyncio
     async def test_both_pictures_go_with_the_account(self, db: Session) -> None:
-        """The third key source: every file of both pictures, and the avatar key the `user`
-        row still carries for the build before `user_picture`, which may name a file no row
-        does. The rows go down the cascade, so nothing about it would surface their keys.
+        """The third key source: every file of both pictures. The rows go down the cascade,
+        so nothing about it would surface their keys.
 
         `DELETE /user` deliberately leaves the pictures alone (a restore inside the grace
         period should bring back a whole account, not a faceless one), which makes this the
@@ -551,10 +549,7 @@ class TestPurgeDeletedAccountsAgainstPostgres:
         diver = create_user(db)
         avatar = create_user_picture(db, diver, kind="avatar")
         portrait = create_user_picture(db, diver, kind="portrait")
-        column_key = blob_store.new_key("user-avatars", sha256="e" * 64)
-        set_avatar_columns(db, diver, key=column_key, sha256="e" * 64)
         keys = [
-            column_key,
             avatar.rendition_storage_key,
             portrait.rendition_storage_key,
             *(key for key in (avatar.original_storage_key, portrait.original_storage_key) if key),
