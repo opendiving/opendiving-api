@@ -9,7 +9,7 @@ from ..core.db.database import async_get_db
 from ..core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnauthorizedException
 from ..core.security import TokenType, oauth2_scheme, token_session_id, verify_token
 from ..crud.crud_user_sessions import live_session_for
-from ..crud.crud_users import crud_users
+from ..crud.crud_users import read_account
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,9 @@ async def get_current_user(
     below compares against the `id` it returns - so it has to name an account that cannot
     change hands. It keys on the immutable `uuid` the token carries as its subject; it
     used to key on the username, which `PATCH /user` can change and release for anyone
-    else to claim (see `services.auth_service.issue_tokens` and DECISIONS.md).
+    else to claim (see `services.auth_service.issue_tokens` and DECISIONS.md). It is one query
+    that carries both pictures' `UserRead` fields with the account (`read_account`), since
+    `GET /user` returns this dict as it is.
 
     **The `sid` is checked against the database on every authenticated request**, which is
     what makes `DELETE /user/session/{uuid}` take effect on the revoked device's next request
@@ -51,7 +53,7 @@ async def get_current_user(
     if token_data is None:
         raise UnauthorizedException("User not authenticated.")
 
-    user = await crud_users.get(db=db, uuid=token_data.user_uuid, is_deleted=False)
+    user = await read_account(db, uuid=token_data.user_uuid)
     if not user:
         raise UnauthorizedException("User not authenticated.")
 

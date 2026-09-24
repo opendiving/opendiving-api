@@ -22,7 +22,7 @@ from src.app.services import blob_store
 from src.scripts import sweep_orphaned_files as sweeper
 from tests.conftest import db_available
 from tests.helpers.fake_s3 import FakeS3Client, select_s3_backend
-from tests.helpers.generators import create_species, create_user
+from tests.helpers.generators import create_species, create_user, create_user_picture, set_avatar_columns
 
 REFERENCED = "dive-files/aa/referenced"
 ORPHAN = "dive-files/bb/orphan"
@@ -209,9 +209,9 @@ class TestReferencedKeys:
 
     Every test above stubs `_referenced_keys` out, which is right for testing the refusal
     logic and wrong for the one thing that makes this script dangerous: a key source the
-    query forgets is a live file the sweep offers to delete. The two nullable-column sources
-    are covered here, avatars and species photos, because they are also the only ones that can
-    quietly contribute a `None` to the set instead of a key.
+    query forgets is a live file the sweep offers to delete. The nullable-column sources are
+    covered here, the pictures and species photos, because they are also the only ones that
+    can quietly contribute a `None` to the set instead of a key.
 
     Species photos are the case worth having a test for rather than a note: they are the only
     kind on a **global** table, so forgetting them would offer to delete a photo shared by
@@ -221,19 +221,30 @@ class TestReferencedKeys:
     """
 
     @pytest.mark.asyncio
-    async def test_an_avatar_key_counts_as_referenced(self, db: Session, async_db: AsyncSession) -> None:
+    async def test_every_picture_key_counts_as_referenced(self, db: Session, async_db: AsyncSession) -> None:
+        """Both files of both pictures, and a key only the `user` row's avatar column holds -
+        what the build before `user_picture` writes, which this one must not sweep."""
         diver = create_user(db)
-        diver.avatar_storage_key = f"user-avatars/aa/{uuid7()}_{'a' * 64}"
-        diver.avatar_sha256 = "a" * 64
-        db.commit()
+        avatar = create_user_picture(db, diver, kind="avatar")
+        portrait = create_user_picture(db, diver, kind="portrait")
+        column_key = f"user-avatars/cc/{uuid7()}_{'c' * 64}"
+        set_avatar_columns(db, diver, key=column_key, sha256="c" * 64)
 
         referenced = await sweeper._referenced_keys(async_db)
 
-        assert diver.avatar_storage_key in referenced
+        assert {
+            avatar.rendition_storage_key,
+            avatar.original_storage_key,
+            portrait.rendition_storage_key,
+            portrait.original_storage_key,
+            column_key,
+        } <= referenced
 
     @pytest.mark.asyncio
-    async def test_an_account_without_one_contributes_nothing(self, db: Session, async_db: AsyncSession) -> None:
-        create_user(db)
+    async def test_a_picture_without_an_original_contributes_nothing_more(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        create_user_picture(db, create_user(db), with_original=False)
 
         referenced = await sweeper._referenced_keys(async_db)
 

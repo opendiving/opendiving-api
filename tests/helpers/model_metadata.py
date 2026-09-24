@@ -107,6 +107,11 @@ NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
         "Everybody's row rather than one diver's, and nothing in the app deletes a species by design "
         "(see `models/species.py`)."
     ),
+    "UserPicture": (
+        "One of an account's two pictures, addressed by its kind under `/user/avatar` and "
+        "`/user/portrait` rather than by uuid. `DELETE` there owns its lifecycle, along with the "
+        "blobs it writes to whichever store `FILE_STORAGE_BACKEND` selects."
+    ),
     "UserSession": (
         "There is a `DELETE /user/session/{uuid}`, and it **revokes rather than removes**: it stamps "
         "`revoked_at`, and the hourly sweep is what deletes the row afterwards. So the three behaviour "

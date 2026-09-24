@@ -1,6 +1,7 @@
 from datetime import date
+from typing import cast
 
-from sqlalchemy import JSON, Boolean, Date, Index, String, func
+from sqlalchemy import JSON, Boolean, Column, Date, Index, String, Table, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -21,24 +22,6 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # `AuthenticationProvider`, one row per linked provider. This is what lets the same
     # account be reached via either method without the `User` row itself needing to
     # know which ones are in use.
-    # The diver's avatar, or `NULL` for the initials fallback. Two columns rather than a
-    # `user_avatar` table: this is a strictly 1:1 optional attribute with no metadata worth
-    # keeping (the served type is always WebP, and byte size and original filename stop
-    # meaning anything once the upload has been re-encoded - see
-    # `services/user_avatars.py`), and `get_current_user` already selects every mapped
-    # column, so a column rides along free where a table would cost a join on the hottest
-    # dependency in the app.
-    #
-    # `avatar_storage_key` is where the bytes are in the configured blob store,
-    # `user-avatars/{sha256[:2]}/{nonce}_{sha256}`, minted by `blob_store.new_key`. The
-    # nonce is per write, deliberately not this row's uuid: the row survives replacement,
-    # so a key derived from it could be re-minted after being retired and a post-commit
-    # unlink could then destroy a live blob.
-    avatar_storage_key: Mapped[str | None] = mapped_column(String(255), default=None)
-    # Hex SHA-256 of the **stored** (normalized) bytes, not of what was uploaded. It is
-    # the download route's `ETag`, and `UserRead` publishes it as the version token the
-    # clients append as `?v=` - so it doubles as "does this account have a picture".
-    avatar_sha256: Mapped[str | None] = mapped_column(String(64), default=None)
     is_superuser: Mapped[bool] = mapped_column(default=False)
 
     # Whether to email this user when their gear is due for servicing (see
@@ -85,9 +68,10 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     dive_form_hidden_fields: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
 
     # What a dive shop's desk asks for, held once so a diver stops writing it out on
-    # arrival. Columns on the account rather than a diver-owned table: one of each, no
-    # history worth keeping, and `get_current_user` already selects every mapped column -
-    # the same trade the avatar pair above is here on.
+    # arrival. Columns on the account rather than a diver-owned table: one value each, no
+    # metadata and no history worth keeping, and `get_current_user` already selects every
+    # mapped column. The two pictures are the opposite case - each keeps an original with a
+    # name, a type and a crop - which is why they have `user_picture`.
     #
     # Every one is nullable, so none carries a `server_default`: that pair exists for a
     # `NOT NULL` column being added over rows that already exist (see `gear_service_emails`
@@ -112,14 +96,20 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # be on that list and are hard-deleted now, so they have no such column to cover.
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True, kw_only=True)
 
+    __mapper_args__ = {"exclude_properties": ["avatar_storage_key", "avatar_sha256"]}
+
     @declared_attr.directive
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
-            # One row per stored file, the same guard `dive_file` and `certification_file`
-            # carry: two rows naming one key would let either one's replacement unlink the
-            # other's bytes. Nullable, and Postgres lets a unique index hold any number of
-            # NULLs, so every account without a picture is unaffected.
+            # The avatar's rendition, as it was stored before `user_picture` held it. On the
+            # table and off the mapper (`__mapper_args__`): the build before this one selects
+            # every column it maps on every signed-in request, so the columns stay until that
+            # build has stopped serving, and no request of this one selects them. Written
+            # beside the avatar's row on every change so the two agree, and read by the purge
+            # and the sweeper alone.
+            Column("avatar_storage_key", String(255), nullable=True),
+            Column("avatar_sha256", String(64), nullable=True),
             Index("ux_user_avatar_storage_key", "avatar_storage_key", unique=True),
             # `ix_user_email` beside it is a plain b-tree on the raw column, which no
             # `lower(email)` predicate can use - so every case-insensitive account lookup
@@ -137,3 +127,9 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # index only makes the lookup cheap.
             Index("ix_user_email_lower", func.lower(cls.email)),
         )
+
+
+# The avatar's two columns, for the statements that still write and read them.
+user_table = cast(Table, User.__table__)
+USER_AVATAR_STORAGE_KEY = user_table.c.avatar_storage_key
+USER_AVATAR_SHA256 = user_table.c.avatar_sha256

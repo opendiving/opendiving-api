@@ -111,7 +111,7 @@ from ...services.dive_form_presets import seed_default_presets
 from ...services.email_service import send_magic_link_email
 from ...services.passkey_service import finish_sign_in, start_sign_in
 from ...services.registration_gate import admit_or_refuse, refuse_uninvited
-from ...services.user_avatars import import_google_avatar
+from ...services.user_pictures import import_google_avatar, seed_google_avatar
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -745,8 +745,6 @@ async def complete_profile(
             "name": body.name,
             "username": body.username,
             "email": token_data.email,
-            "avatar_storage_key": avatar.storage_key if avatar else None,
-            "avatar_sha256": avatar.sha256 if avatar else None,
         }
         user_internal = UserBootstrapCreateInternal(**user_fields) if bootstrap else UserCreateInternal(**user_fields)
 
@@ -760,6 +758,8 @@ async def complete_profile(
             ),
             commit=False,
         )
+        if avatar is not None:
+            await seed_google_avatar(db, user_id=created_user.id, stored=avatar)
         # The three default dive-form presets, in the same transaction as the account:
         # a registration either creates the account with them or creates nothing. This is
         # the one place self-service registration makes a `User` row, so it is the one

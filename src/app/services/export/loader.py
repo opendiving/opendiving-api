@@ -62,10 +62,12 @@ from ...models.gear_set_item import GearSetItem
 from ...models.species import Species
 from ...models.trip import Trip
 from ...models.user import User
+from ...models.user_picture import UserPicture
 from ...schemas.certification import CertificationFileInfo
 from ...schemas.dive import DiveFileInfo
 from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.trip import TripPartRead
+from ...schemas.user_picture import PictureKind
 from ..certification_files import get_file_infos_for_certifications
 from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
 from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, get_file_infos_for_recordings
@@ -159,6 +161,8 @@ class ExportBundle:
     # they are response shapes, and a response has the `ETag` for that.
     dive_file_sha256: dict[int, str]
     cert_file_sha256: dict[tuple[int, str], str]
+    # The account's avatar and portrait rows, by kind, for the files the archive carries.
+    pictures: dict[PictureKind, UserPicture]
 
     trip_by_id: dict[int, Trip] = field(init=False)
     course_by_id: dict[int, Course] = field(init=False)
@@ -405,6 +409,10 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         ),
         dive_file_sha256=await _dive_file_digests(db, dive_ids),
         cert_file_sha256=await _certification_file_digests(db, [cert.id for cert in certifications]),
+        pictures={
+            PictureKind(picture.kind): picture
+            for picture in (await db.execute(select(UserPicture).where(UserPicture.user_id == user_id))).scalars()
+        },
     )
 
 

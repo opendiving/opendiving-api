@@ -23,8 +23,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.app.models.certification import Certification
+from src.app.models.user_picture import UserPicture
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
 from src.app.schemas.dive import DiveFileInfo
+from src.app.schemas.user_picture import PictureKind
 from src.app.services.blob_store import BlobMissingError
 from src.app.services.certification_files import LoadedCardFile, get_file_infos_for_certifications
 from src.app.services.dive_files import LoadedDiveFile
@@ -45,15 +47,23 @@ from tests.helpers.export import (
 DIVE_FILE_BYTES = b'{"DeviceLog": {"Header": {}}}'
 CARD_FRONT_BYTES = b"\xff\xd8\xff\xe0front"
 CARD_BACK_BYTES = b"\x89PNG\r\n\x1a\nback"
-AVATAR_BYTES = b"RIFF\x00\x00\x00\x00WEBPportrait"
+AVATAR_BYTES = b"RIFF\x00\x00\x00\x00WEBPavatar"
+AVATAR_ORIGINAL_BYTES = b"\x89PNG\r\n\x1a\navatar"
+PORTRAIT_BYTES = b"\xff\xd8\xff\xe0portrait"
 
 
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-async def _fake_read_avatar(stored: Any) -> bytes:
-    return AVATAR_BYTES
+def _picture(kind: PictureKind, *, original: tuple[str, str] | None = None) -> UserPicture:
+    """A picture row: a rendition always, and an original `(key, content type)` when given."""
+    picture = UserPicture(
+        user_id=1, kind=kind.value, rendition_storage_key=f"{kind.value}/rendition", rendition_sha256="0" * 64
+    )
+    if original is not None:
+        picture.original_storage_key, picture.original_content_type = original
+    return picture
 
 
 def _install_blob_loaders(monkeypatch: Any) -> None:
@@ -166,13 +176,33 @@ class TestInventory:
         assert blobs == named
 
     @pytest.mark.asyncio
-    async def test_the_avatar_is_a_root_member_when_the_account_has_one(self, monkeypatch):
+    async def test_each_picture_is_a_root_member_named_for_what_is_stored(self, monkeypatch):
         """The archive is the only artifact carrying the blobs, and "download everything"
-        has to mean the whole account - the picture included."""
-        bundle = full_bundle()
-        bundle.user.avatar_storage_key = "user-avatars/ab/nonce_abc"
-        bundle.user.avatar_sha256 = _digest(AVATAR_BYTES)
-        monkeypatch.setattr("src.app.services.export.archive.read_avatar_bytes", _fake_read_avatar)
+        has to mean the whole account - both pictures included. The original where one is
+        kept, under the kind and the stored type rather than the diver's filename; the
+        rendition for an avatar that kept none."""
+        blobs = {"user-avatars/ab/original": AVATAR_ORIGINAL_BYTES, "user-portraits/cd/original": PORTRAIT_BYTES}
+        monkeypatch.setattr("src.app.services.export.archive.blob_store.get", AsyncMock(side_effect=blobs.__getitem__))
+        bundle = build_bundle(
+            pictures={
+                PictureKind.AVATAR: _picture(PictureKind.AVATAR, original=("user-avatars/ab/original", "image/png")),
+                PictureKind.PORTRAIT: _picture(
+                    PictureKind.PORTRAIT, original=("user-portraits/cd/original", "image/jpeg")
+                ),
+            }
+        )
+
+        archive = await _build(bundle, monkeypatch)
+
+        assert archive.read("avatar.png") == AVATAR_ORIGINAL_BYTES
+        assert archive.read("portrait.jpg") == PORTRAIT_BYTES
+        assert archive.getinfo("portrait.jpg").compress_type == zipfile.ZIP_STORED
+        assert "avatar.webp" not in archive.namelist()
+
+    @pytest.mark.asyncio
+    async def test_an_avatar_without_an_original_travels_as_its_rendition(self, monkeypatch):
+        monkeypatch.setattr("src.app.services.export.archive.blob_store.get", AsyncMock(return_value=AVATAR_BYTES))
+        bundle = build_bundle(pictures={PictureKind.AVATAR: _picture(PictureKind.AVATAR)})
 
         archive = await _build(bundle, monkeypatch)
 
@@ -180,27 +210,31 @@ class TestInventory:
         assert archive.getinfo("avatar.webp").compress_type == zipfile.ZIP_STORED
 
     @pytest.mark.asyncio
-    async def test_an_account_without_one_has_no_such_member(self, monkeypatch):
+    async def test_an_account_without_pictures_has_no_such_members(self, monkeypatch):
         archive = await _build(full_bundle(), monkeypatch)
 
-        assert "avatar.webp" not in archive.namelist()
+        assert not [name for name in archive.namelist() if name.startswith(("avatar.", "portrait."))]
 
     @pytest.mark.asyncio
-    async def test_an_avatar_missing_from_the_volume_costs_the_member_not_the_archive(self, monkeypatch):
+    async def test_a_picture_missing_from_the_volume_costs_the_member_not_the_archive(self, monkeypatch):
         """The archive's recorded stance on `BlobMissingError`: losing a member beats
         losing the export, which is the one tool still working when a volume is half-dead."""
-        bundle = full_bundle()
-        bundle.user.avatar_storage_key = "user-avatars/ab/nonce_abc"
-        bundle.user.avatar_sha256 = _digest(AVATAR_BYTES)
 
-        async def missing(stored: Any) -> bytes:
-            raise BlobMissingError(stored.storage_key)
+        async def missing(key: str) -> bytes:
+            raise BlobMissingError(key)
 
-        monkeypatch.setattr("src.app.services.export.archive.read_avatar_bytes", missing)
+        monkeypatch.setattr("src.app.services.export.archive.blob_store.get", missing)
+        bundle = build_bundle(
+            pictures={
+                PictureKind.PORTRAIT: _picture(
+                    PictureKind.PORTRAIT, original=("user-portraits/cd/original", "image/jpeg")
+                )
+            }
+        )
 
         archive = await _build(bundle, monkeypatch)
 
-        assert "avatar.webp" not in archive.namelist()
+        assert "portrait.jpg" not in archive.namelist()
         assert archive.testzip() is None
 
     @pytest.mark.asyncio

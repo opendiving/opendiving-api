@@ -7,7 +7,9 @@ logbook.divejson     the complete structured export, a DiveJSON 1.0 document -
                      the same bytes GET /export/divejson serves; see schemas/export.py
 dives.uddf           the same bytes GET /export/uddf serves
 csv/dives.csv        the flat spreadsheet view, plus eight normalized files beside it
-avatar.webp          the diver's profile picture, if they have one
+avatar.<ext>         the diver's profile picture, if they have one: its original where
+                     one is kept, a JPEG or PNG, and otherwise the WebP shown in the app
+portrait.<ext>       the check-in portrait's original, a JPEG or PNG, if there is one
 files/...            every stored dive-computer export, under a per-dive name
 certifications/...   both sides of every stored c-card
 ```
@@ -44,9 +46,10 @@ c-cards are JPEG/PNG/PDF, so deflating them burns CPU proportional to the whole 
 to save nothing. The generated documents *do* deflate, and XML and CSV compress about
 ten to one.
 
-**Certification images are personal documents.** The archive is served only to their
-owner, over a bearer token, and never cached (see `api/v1/export.py`) - but "export" now
-means a zip that includes ID-like scans, which is worth stating rather than discovering.
+**Certification images and the portrait are personal documents.** The archive is served
+only to their owner, over a bearer token, and never cached (see `api/v1/export.py`) - but
+"export" means a zip that includes ID-like scans and an identification photo, which is
+worth stating rather than discovering.
 """
 
 import logging
@@ -59,10 +62,11 @@ from typing import IO
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...schemas.certification import CertificationSide
+from .. import blob_store
 from ..blob_store import BlobMissingError
 from ..certification_files import load_certification_file
 from ..dive_files import load_dive_file
-from ..user_avatars import AVATAR_FILENAME, StoredAvatar, read_avatar_bytes
+from ..user_pictures import RENDITION_CONTENT_TYPE, picture_filename
 from .envelope import write_divejson
 from .loader import ExportBundle
 from .paths import ArchivePaths, plan_archive_paths
@@ -218,18 +222,24 @@ async def _write_blobs(
     tool someone reaches for when their storage is half-dead, so failing the whole archive
     over it would take away the one thing still working.
 
-    The avatar comes off the `user` row already in the bundle rather than out of a query
-    of its own, and it is `ZIP_STORED` like the rest: it is a WebP, and deflating an
-    already-compressed image burns CPU to save nothing.
+    The pictures come off the rows already in the bundle, the original where one is kept -
+    it is what the diver uploaded, and the rendition can be drawn again from it - and the
+    rendition otherwise. `ZIP_STORED` like the rest: deflating an already-compressed image
+    burns CPU to save nothing.
     """
-    if bundle.user.avatar_storage_key and bundle.user.avatar_sha256:
-        avatar_ref = StoredAvatar(storage_key=bundle.user.avatar_storage_key, sha256=bundle.user.avatar_sha256)
-        try:
-            avatar = await read_avatar_bytes(avatar_ref)
-        except BlobMissingError:
-            logger.error("Skipping the profile picture: its stored file is missing from the volume")
+    for kind, picture in sorted(bundle.pictures.items()):
+        if picture.original_storage_key is not None and picture.original_content_type is not None:
+            key, content_type = picture.original_storage_key, picture.original_content_type
         else:
-            archive.writestr(_member(AVATAR_FILENAME, exported_at, compress_type=zipfile.ZIP_STORED), avatar)
+            key, content_type = picture.rendition_storage_key, RENDITION_CONTENT_TYPE
+        try:
+            data = await blob_store.get(key)
+        except BlobMissingError:
+            logger.error("Skipping the %s: its stored file is missing from the volume", kind.value)
+            continue
+        archive.writestr(
+            _member(picture_filename(kind, content_type), exported_at, compress_type=zipfile.ZIP_STORED), data
+        )
 
     for dive in bundle.dives:
         for recording in bundle.recordings_by_dive.get(dive.id, []):

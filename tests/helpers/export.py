@@ -28,11 +28,13 @@ from src.app.models.gear_set import GearSet
 from src.app.models.species import Species
 from src.app.models.trip import Trip
 from src.app.models.user import User
+from src.app.models.user_picture import UserPicture
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
 from src.app.schemas.dive import DiveFileInfo
 from src.app.schemas.dive_mixture import DiveMixtureRead
 from src.app.schemas.location import LocationRead
 from src.app.schemas.trip import TripPartRead
+from src.app.schemas.user_picture import PictureKind
 from src.app.services.dive_profiles import ProfileGasAttribution
 from src.app.services.export.loader import ExportBundle, ExportFileRow, ExportRecordingRow
 
@@ -213,6 +215,7 @@ def build_bundle(
     cert_files_by_cert: dict[int, list[CertificationFileInfo]] | None = None,
     dive_file_sha256: dict[int, str] | None = None,
     cert_file_sha256: dict[tuple[int, str], str] | None = None,
+    pictures: dict[PictureKind, UserPicture] | None = None,
 ) -> ExportBundle:
     """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive".
 
@@ -260,6 +263,7 @@ def build_bundle(
         cert_files_by_cert=cert_files_by_cert or {},
         dive_file_sha256=dive_file_sha256,
         cert_file_sha256=cert_file_sha256,
+        pictures=pictures or {},
     )
 
 

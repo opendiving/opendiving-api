@@ -55,7 +55,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         - Headers already set by the endpoint are left alone, the same contract
           `ClientCacheMiddleware` keeps with `Cache-Control`. The binary-download
           responses (`dives.py`, `certifications.py`, `export.py`, and `users.py`'s
-          avatar) set a much stricter `default-src 'none'; sandbox`, and they name
+          pictures) set a much stricter `default-src 'none'; sandbox`, and they name
           `frame-ancestors 'none'` themselves - it does *not* fall back to `default-src`,
           so a policy that omits it grants framing however strict the rest of it is.
           Deliberately not counted here: the list grows, and a number in a docstring is

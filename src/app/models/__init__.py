@@ -27,5 +27,6 @@ from .trip import Trip
 from .trip_part import TripPart
 from .user import User
 from .user_dive_stats import UserDiveStats
+from .user_picture import UserPicture
 from .user_session import UserSession
 from .webauthn_credential import WebauthnCredential

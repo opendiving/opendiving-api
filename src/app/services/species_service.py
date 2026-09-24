@@ -2248,7 +2248,7 @@ async def _commons_imageinfo(file_title: str) -> tuple[str, species_photos.Photo
 async def _fetch_photo_bytes(url: str) -> bytes | None:
     """Fetch the image bytes, or `None` for every way of not getting them.
 
-    Modelled on `user_avatars.import_google_avatar`: redirects are not followed, the read is
+    Modelled on `user_pictures.import_google_avatar`: redirects are not followed, the read is
     capped, and the host is checked against an allowlist before anything leaves. The allowlist
     is the SSRF fence and it is hard-coded in `species_photos`, unlike the API endpoint beside
     it, which is a setting. It admits the two hosts one `imageinfo` reply can name and nothing

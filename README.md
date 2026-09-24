@@ -198,15 +198,15 @@ for it — generated from the routes themselves, so they describe the API as it 
 than as a list here last remembered it.
 
 The families: **auth** (email link or six-digit code, Google, passkeys, refresh, sign-out, account
-restore) and **user** (profile, avatar, email change, dive statistics, gas-use history, the species
-life list, account deletion); **dives**, the bulk of it, with their **recordings** — attach an
-export, read one recording's per-sample profile back, fold two dives into one — alongside **trips**,
-**dive sites**, the shared **species** catalog a dive can reference, and a **geocoding** helper for
-naming a site pinned on a map; **gear** as items, sets, service schedules and service records;
-**certifications** with their card images and the **courses** that issued them; **export** in
-DiveJSON, UDDF, CSV or full-archive form and **import** back from either of the first and the last,
-or from any format the converter reads; **invitations**, which exist only where the operator has
-closed registration (`REGISTRATION_MODE`, documented with the rest of the settings in
+restore) and **user** (profile, avatar, check-in portrait, email change, dive statistics, gas-use
+history, the species life list, account deletion); **dives**, the bulk of it, with their
+**recordings** — attach an export, read one recording's per-sample profile back, fold two dives into
+one — alongside **trips**, **dive sites**, the shared **species** catalog a dive can reference, and
+a **geocoding** helper for naming a site pinned on a map; **gear** as items, sets, service schedules
+and service records; **certifications** with their card images and the **courses** that issued them;
+**export** in DiveJSON, UDDF, CSV or full-archive form and **import** back from either of the first
+and the last, or from any format the converter reads; **invitations**, which exist only where the
+operator has closed registration (`REGISTRATION_MODE`, documented with the rest of the settings in
 `src/.env.example`) — a member sends and revokes their own, and the routes answer 404 on an open
 instance; and **admin**, the operator's own — the queue of people who have asked to be let in, and
 inviting or removing them in a batch — which is the one family gated on `is_superuser` rather than

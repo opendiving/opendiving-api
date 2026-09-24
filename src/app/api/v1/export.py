@@ -12,7 +12,8 @@ layer because each is an HTTP concern:
   megabytes evicting everything the cache exists for - and *"`@cache` and per-request
   authorization don't mix directly"* (DECISIONS.md) makes a cached whole-account payload
   the worst possible thing to get wrong. `no-store` rather than `private` because the file
-  includes c-card scans, which have no business sitting in a browser's disk cache.
+  includes c-card scans and the check-in portrait, which have no business sitting in a
+  browser's disk cache.
 - **Rate limited.** An archive walks every blob the caller owns; unthrottled it is a
   cheap way to make a shared instance do a lot of I/O. The bounds are generous - this is
   a button a diver presses once, not a polled endpoint.
@@ -199,12 +200,14 @@ async def export_archive(
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> StreamingResponse:
     """Download everything: a zip holding the DiveJSON document, the UDDF one, the
-    full CSV set, every stored dive-computer file and both sides of every c-card.
+    full CSV set, every stored dive-computer file, both sides of every c-card, and the
+    originals of the profile picture and the check-in portrait.
 
     This is the complete copy - nothing in the account is reachable only through the app
     after taking it, bar an emergency contact with no name or an insurance with no provider,
     which DiveJSON cannot carry until they are completed. **It includes the certification
-    card images**, which are personal documents, so treat the file accordingly.
+    card images and the portrait**, which are personal documents, so treat the file
+    accordingly.
     """
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
