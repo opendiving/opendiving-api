@@ -4705,10 +4705,9 @@ export archive carries each picture at its root, `ZIP_STORED`: the original wher
 ## An original is what a picture keeps, and a copy is a copy
 
 Applications show a picture at different sizes and ratios, so no one of them should decide the crop
-every reader gets: the original is what is kept and exported, and a crop travels beside it. An
-original also has an honest `original_filename`, which a rendition this server drew does not.
-*Rejected:* keeping the rendition only, which makes every adjustment a re-upload and every export a
-file whose name is invented.
+every reader gets: the original is what is kept and what the archive carries, and the crop is stored
+beside it. *Rejected:* keeping the rendition only, which makes every adjustment a re-upload and
+hands every other reader this app's crop.
 
 `POST /user/portrait/from-avatar` copies the avatar's original under portrait keys of its own, a
 read and a put, since the store has no copy. *Rejected:* one key shared by both rows, which lets

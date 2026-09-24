@@ -28,8 +28,8 @@ class UserPicture(Base, PublicUUIDMixin, TimestampMixin):
     A row holds no original only for an avatar stored before originals were kept, one seeded
     from Google, or one uploaded without a crop; every portrait holds one.
 
-    `uuid` is minted afresh with every new original: it is the Stored File uuid an export
-    names, and a replaced picture is a different file.
+    `uuid` is minted afresh by every write that replaces the picture, and kept by an
+    adjustment: a replaced picture is a different file, a re-cropped one is not.
 
     Bytes live in the blob store under `user-avatars/` and `user-portraits/`; the keys are
     minted per write by `blob_store.new_key`, never derived from this row, which survives

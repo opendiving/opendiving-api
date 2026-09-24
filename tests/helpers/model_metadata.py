@@ -109,9 +109,8 @@ NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
     ),
     "UserPicture": (
         "One of an account's two pictures, addressed by its kind under `/user/avatar` and "
-        "`/user/portrait` rather than by uuid - the uuid is the Stored File uuid an export names. "
-        "`DELETE` there owns its lifecycle, along with the blobs it writes to whichever store "
-        "`FILE_STORAGE_BACKEND` selects."
+        "`/user/portrait` rather than by uuid. `DELETE` there owns its lifecycle, along with the "
+        "blobs it writes to whichever store `FILE_STORAGE_BACKEND` selects."
     ),
     "UserSession": (
         "There is a `DELETE /user/session/{uuid}`, and it **revokes rather than removes**: it stamps "

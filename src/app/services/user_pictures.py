@@ -482,8 +482,7 @@ async def _write(
 
     now = datetime.now(UTC)
     values = {
-        # Minted with each new original: a replaced picture is a different file, and this is
-        # the uuid an export names it by.
+        # Minted with every replacement: a replaced picture is a different file.
         "uuid": uuid7(),
         "rendition_storage_key": rendition_key,
         "rendition_sha256": rendition_sha256,
