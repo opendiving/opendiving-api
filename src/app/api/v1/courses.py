@@ -17,7 +17,7 @@ from ...core.schemas import validate_date_range
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
-from ...crud.crud_contacts import ContactRef, get_contact_refs_by_ids
+from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import COURSE_SEARCH_COLUMNS, crud_courses, get_courses_page
 from ...schemas.certification import CertificationAgency, validate_agency_pairing
 from ...schemas.course import (
@@ -30,11 +30,10 @@ from ...schemas.course import (
 )
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
-    invalidate_contact_caches,
     invalidate_course_caches,
     invalidate_dive_caches,
 )
-from ...services.contact_links import CONTACT_NOT_FOUND, contact_link_updates
+from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
 
 router = APIRouter(tags=["courses"])
 
@@ -44,27 +43,22 @@ _CONTACT_FK_CONSTRAINT = "course_contact_id_fkey"
 
 
 def _to_public_course(
-    db_course: CourseReadInternal | dict[str, Any], *, user_uuid: uuid_pkg.UUID, contact: ContactRef | None = None
+    db_course: CourseReadInternal | dict[str, Any],
+    *,
+    user_uuid: uuid_pkg.UUID,
+    contact_uuid: uuid_pkg.UUID | None = None,
 ) -> CourseRead:
     """Convert an internal course representation (integer PK/FK) into its public shape
     (owning user and contact referenced by `uuid`).
 
-    `contact` is resolved by the caller, batched across a page where there is one. Its
-    name fills the read-only `training_center` the previous web build prints.
+    `contact_uuid` is resolved by the caller, batched across a page where there is one.
     """
     data = db_course if isinstance(db_course, dict) else db_course.model_dump()
     return CourseRead(
         **{k: v for k, v in data.items() if k not in ("id", "user_id", "contact_id")},
         user_uuid=user_uuid,
-        contact_uuid=None if contact is None else contact.uuid,
-        training_center=None if contact is None else contact.name,
+        contact_uuid=contact_uuid,
     )
-
-
-async def _contact_of(db: AsyncSession, contact_id: int | None, user_id: int) -> ContactRef | None:
-    if contact_id is None:
-        return None
-    return (await get_contact_refs_by_ids(db=db, contact_ids=[contact_id], user_id=user_id)).get(contact_id)
 
 
 async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> NoReturn:
@@ -163,20 +157,15 @@ async def write_course(
     (`course_uuid` on `POST`/`PATCH /dive` and `/certification`), not from here.
 
     `contact_uuid` names who ran the course; one that isn't the caller's own - or doesn't
-    exist - is a 422. `training_center` is deprecated and read only when `contact_uuid` is
-    absent: a name resolves to the caller's contact of that name, or creates one.
+    exist - is a 422.
     """
-    link = await contact_link_updates(
-        db,
-        user_id=current_user["id"],
-        fields_set=course.model_fields_set,
-        contact_uuid=course.contact_uuid,
-        training_center=course.training_center,
-    )
+    contact_id: int | None = None
+    if course.contact_uuid is not None:
+        contact_id = await resolve_contact_reference(db, contact_uuid=course.contact_uuid, user_id=current_user["id"])
     course_internal = CourseCreateInternal(
-        **course.model_dump(exclude={"contact_uuid", "training_center"}),
+        **course.model_dump(exclude={"contact_uuid"}),
         user_id=current_user["id"],
-        contact_id=link.updates.get("contact_id"),
+        contact_id=contact_id,
     )
     try:
         created = await crud_courses.create(
@@ -185,14 +174,9 @@ async def write_course(
     except IntegrityError as e:
         await _refuse_a_vanished_contact(db, e)
     await invalidate_course_caches(current_user["id"])
-    if link.created_contact:
-        await invalidate_contact_caches(current_user["id"])
 
-    created_course = cast(CourseReadInternal, created)
     return _to_public_course(
-        created_course,
-        user_uuid=current_user["uuid"],
-        contact=await _contact_of(db, created_course.contact_id, current_user["id"]),
+        cast(CourseReadInternal, created), user_uuid=current_user["uuid"], contact_uuid=course.contact_uuid
     )
 
 
@@ -251,11 +235,11 @@ async def _cached_read_courses(
         agency=agency,
         status=status,
     )
-    contact_by_id = await get_contact_refs_by_ids(
+    contact_uuid_by_id = await get_contact_uuids_by_ids(
         db=db, contact_ids=[row["contact_id"] for row in courses_data["data"]], user_id=user_id
     )
     courses_data["data"] = [
-        _to_public_course(row, user_uuid=user_uuid, contact=contact_by_id.get(row["contact_id"])).model_dump()
+        _to_public_course(row, user_uuid=user_uuid, contact_uuid=contact_uuid_by_id.get(row["contact_id"])).model_dump()
         for row in courses_data["data"]
     ]
 
@@ -351,9 +335,8 @@ async def _cached_read_course(
         raise NotFoundException("Course not found")
     db_course = cast(CourseReadInternal, db_course)
 
-    return _to_public_course(
-        db_course, user_uuid=owner_uuid, contact=await _contact_of(db, db_course.contact_id, user_id)
-    )
+    contact_uuid_by_id = await get_contact_uuids_by_ids(db=db, contact_ids=[db_course.contact_id], user_id=user_id)
+    return _to_public_course(db_course, user_uuid=owner_uuid, contact_uuid=contact_uuid_by_id.get(db_course.contact_id))
 
 
 @router.get("/course/{uuid}", response_model=CourseRead)
@@ -393,12 +376,11 @@ async def patch_course(
     `start_date`/`end_date` likewise, so moving either one past the stored other is a 422
     rather than a course that ends before it began. Passing `null` for `contact_uuid`
     unlinks the course's contact, which is distinct from omitting the key; a contact that
-    isn't the caller's own is a 422. A deprecated `training_center` counts only without
-    `contact_uuid`, and a blank one changes nothing.
+    isn't the caller's own is a 422.
     """
     db_course = await _get_owned_course(db, uuid, current_user)
 
-    update_data = values.model_dump(exclude={"contact_uuid", "training_center"}, exclude_unset=True)
+    update_data = values.model_dump(exclude={"contact_uuid"}, exclude_unset=True)
     if "agency" in update_data or "agency_other" in update_data:
         _validate_merged_agency_pairing(
             update_data.get("agency", db_course.agency),
@@ -410,14 +392,12 @@ async def patch_course(
             update_data.get("end_date", db_course.end_date),
         )
 
-    link = await contact_link_updates(
-        db,
-        user_id=db_course.user_id,
-        fields_set=values.model_fields_set,
-        contact_uuid=values.contact_uuid,
-        training_center=values.training_center,
-    )
-    update_data |= link.updates
+    if "contact_uuid" in values.model_fields_set:
+        update_data["contact_id"] = (
+            None
+            if values.contact_uuid is None
+            else await resolve_contact_reference(db, contact_uuid=values.contact_uuid, user_id=db_course.user_id)
+        )
 
     if update_data:
         try:
@@ -425,8 +405,6 @@ async def patch_course(
         except IntegrityError as e:
             await _refuse_a_vanished_contact(db, e)
         await invalidate_course_caches(db_course.user_id)
-    if link.created_contact:
-        await invalidate_contact_caches(db_course.user_id)
 
     return {"message": "Course updated"}
 

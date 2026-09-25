@@ -83,31 +83,6 @@ ContactPhone = Annotated[str | None, Field(default=None, max_length=CONTACT_PHON
 
 CONTACT_UUID_DESCRIPTION = "Public id of the contact - the dive center, school or club - that ran it"
 
-# -------------- the training-center shim --------------
-# The web build deployed before the contact picker still posts a `training_center` string
-# on a course or certification and prints one back. Until the build that sends
-# `contact_uuid` is live, the course and certification writes accept that string and
-# resolve it to a contact (`resolve_or_create_contact`), and their reads serve the linked
-# contact's name under it. Absent, `null` and blank are no change, so an edit from that
-# build can set a contact and never clear one. Both halves come out together once that
-# build is gone.
-TrainingCenterShim = Annotated[
-    str | None,
-    Field(
-        default=None,
-        max_length=CONTACT_NAME_MAX,
-        description="Deprecated: a training center's name, resolved to a contact by name. Send `contact_uuid`.",
-    ),
-]
-TRAINING_CENTER_READ_DESCRIPTION = "Deprecated: the linked contact's name. Read `contact_uuid`."
-
-
-def training_center_name(value: str | None) -> str | None:
-    """The shim's string as a name to resolve, or `None` for the no-change cases."""
-    name = (value or "").strip()
-    return name or None
-
-
 # -------------- address --------------
 #: The members an address carries, in the order the columns behind it are declared.
 ADDRESS_FIELDS = ("street", "city", "postcode", "region", "country")

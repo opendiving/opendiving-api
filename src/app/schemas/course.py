@@ -13,7 +13,7 @@ from ..core.schemas import (
     validate_date_range,
 )
 from .certification import CertificationAgency, validate_agency_pairing
-from .contact import CONTACT_UUID_DESCRIPTION, TRAINING_CENTER_READ_DESCRIPTION, TrainingCenterShim
+from .contact import CONTACT_UUID_DESCRIPTION
 
 
 class CourseStatus(StrEnum):
@@ -93,10 +93,6 @@ class CourseRead(CourseBase, PublicUUIDSchema):
 
     user_uuid: uuid_pkg.UUID
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
-    # Read-only: the linked contact's name, for the web build that still prints a training
-    # center and echoes it back on save, where the write half reuses the contact of that name.
-    # Comes out with that write half once the build that sends `contact_uuid` is live.
-    training_center: Annotated[str | None, Field(default=None, description=TRAINING_CENTER_READ_DESCRIPTION)]
     created_at: datetime
 
 
@@ -118,15 +114,14 @@ class CourseReadInternal(CourseBase, PublicUUIDSchema):
 class CourseCreate(CourseBase):
     """Request body for creating a course.
 
-    `contact_uuid` and the shim's `training_center` sit here and on `CourseUpdateRequest`,
-    never on `CourseBase`: `CourseCreateInternal` inherits the base and is CRUDAdmin's form,
-    and every read inherits it too - the trap `CertificationCreate`'s docstring records.
+    `contact_uuid` sits here and on `CourseUpdateRequest`, never on `CourseBase`:
+    `CourseCreateInternal` inherits the base and is CRUDAdmin's form, and every read
+    inherits it too - the trap `CertificationCreate`'s docstring records.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
-    training_center: TrainingCenterShim
 
 
 class CourseCreateInternal(CourseBase):
@@ -176,7 +171,6 @@ class CourseUpdateRequest(CourseUpdate):
     """
 
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
-    training_center: TrainingCenterShim
 
 
 class CourseUpdateInternal(CourseUpdate):

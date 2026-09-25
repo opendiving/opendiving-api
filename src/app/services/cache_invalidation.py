@@ -84,10 +84,8 @@ async def invalidate_contact_caches(user_id: int) -> None:
     `..._contact:{uuid}`), so one pattern covers the lot, as for courses.
 
     A contact's reads embed nothing, and the five hosts that reference one carry only its
-    uuid, so a rename reaches no other family - with one exception while the course and
-    certification reads still serve a training-center name for the previous web build:
-    `patch_contact` drops those two families as well. Deleting a contact drops all five
-    hosts' families, the `ON DELETE SET NULL` having rewritten their rows.
+    uuid, so a rename reaches no other family. Deleting a contact drops all five hosts'
+    families, the `ON DELETE SET NULL` having rewritten their rows.
     """
     await delete_keys_by_pattern(f"user_{user_id}_contact*")
 
