@@ -11,6 +11,7 @@ is exercised end to end by hand (see DECISIONS.md), not here.
 
 import hashlib
 import io
+import json
 import uuid as uuid_pkg
 from dataclasses import astuple
 from datetime import UTC, datetime, timedelta
@@ -29,7 +30,8 @@ from src.app.core.security import ALGORITHM, SECRET_KEY, TokenType, create_dive_
 from src.app.core.utils.uploads import read_upload_within_limit
 from src.app.crud.crud_dive_mixtures import get_mixtures_for_dive, get_mixtures_for_dives
 from src.app.models.dive import Dive
-from src.app.schemas.dive import DiveFileInfo, DiveTechScalars
+from src.app.models.dive_recording import DiveRecording
+from src.app.schemas.dive import DiveFileInfo, DiveTechScalars, RecordingReadouts
 from src.app.schemas.dive_mixture import DiveMixtureRead, GasRole
 from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from src.app.services import dive_files as dive_files_module
@@ -1363,3 +1365,90 @@ class TestARecordingsProfileIsAttributedBeforeItIsCapped:
         # And the channel really was thinned, so the mean could not have come off it.
         assert len(stored_depth.t) < len(depths)
         assert extraction.profile.gas_attribution[0].mean_depth_cm != round(sum(stored_depth.v) / len(stored_depth.v))
+
+
+def _suunto_app_export(header: str, *first_depth_at: str) -> bytes:
+    """A Suunto app export whose `Header.DateTime` is `header` and whose depth samples fall
+    at the given instants - the only format whose samples carry an offset below a second."""
+    samples = [{"Depth": 1.2 + index, "TimeISO8601": moment} for index, moment in enumerate(first_depth_at)]
+    body = {"DeviceLog": {"Header": {"DateTime": header, "Duration": 1800}, "Samples": samples}}
+    return json.dumps(body).encode()
+
+
+def _loaded(content: bytes) -> LoadedDiveFile:
+    return LoadedDiveFile(
+        data=content,
+        content_type="application/json",
+        original_filename="export.json",
+        sha256=_digest(content),
+        parser_key=SuuntoJsonParser.key,
+    )
+
+
+class TestEachFileIsPlacedOnTheRecordingsStart:
+    """A recording's axis counts from its stored start - the `started_at` the export writes -
+    and each file is moved onto it by its own start's offset, measured on the clock
+    `delta_seconds` uses."""
+
+    HEADER = "2025-05-31T12:59:06.000+02:00"
+    START = datetime(2025, 5, 31, 10, 59, 6, tzinfo=UTC)
+
+    def _depth_times(self, content: bytes, start_time: datetime | None, offset: int | None) -> list[int]:
+        extraction = extract_recording([_loaded(content)], start_time=start_time, utc_offset_minutes=offset)
+        assert extraction.profile is not None and extraction.profile.depth is not None
+        return extraction.profile.depth.t
+
+    def test_a_first_reading_keeps_the_offset_its_file_states(self) -> None:
+        content = _suunto_app_export(self.HEADER, "2025-05-31T12:59:06.160+02:00", "2025-05-31T13:19:06.160+02:00")
+
+        assert self._depth_times(content, self.START, 120) == [160, 1_200_160]
+
+    def test_an_offset_less_imported_recording_keeps_the_profile_intact(self) -> None:
+        """The recording came in from a document with a wall clock and no offset; the file
+        carries one. Compared as instants the two are two hours apart and the profile would
+        be pushed off its own dive - the wall clocks agree, which is what is compared."""
+        content = _suunto_app_export(self.HEADER, "2025-05-31T12:59:06.160+02:00")
+        wall_clock = datetime(2025, 5, 31, 12, 59, 6, tzinfo=UTC)
+
+        assert self._depth_times(content, wall_clock, None) == [160]
+
+    def test_a_file_whose_clock_started_later_is_moved_later(self) -> None:
+        """The corpus's Ocean: its JSON starts at `.67` of the second its FIT starts on."""
+        content = _suunto_app_export("2025-05-31T12:59:06.670+02:00", "2025-05-31T12:59:06.830+02:00")
+
+        assert self._depth_times(content, self.START, 120) == [830]
+
+    def test_a_reading_before_the_recordings_start_is_clamped_to_it(self) -> None:
+        content = _suunto_app_export(
+            "2025-05-31T12:59:05.000+02:00", "2025-05-31T12:59:05.500+02:00", "2025-05-31T12:59:16.000+02:00"
+        )
+
+        assert self._depth_times(content, self.START, 120) == [0, 10_000]
+
+    def test_a_recording_with_no_stored_start_takes_the_first_files(self) -> None:
+        first = _suunto_app_export(self.HEADER, "2025-05-31T12:59:06.160+02:00")
+        second = json.dumps(
+            {
+                "DeviceLog": {
+                    "Header": {"DateTime": "2025-05-31T12:59:08.000+02:00"},
+                    "Samples": [{"Temperature": 299.15, "TimeISO8601": "2025-05-31T12:59:08.000+02:00"}],
+                }
+            }
+        ).encode()
+
+        extraction = extract_recording([_loaded(first), _loaded(second)], start_time=None, utc_offset_minutes=None)
+
+        assert extraction.profile is not None
+        assert extraction.profile.depth is not None and extraction.profile.temperature is not None
+        assert extraction.profile.depth.t == [160]
+        assert extraction.profile.temperature.t == [2000]
+
+
+class TestTheReadoutFieldsAreTheRecordings:
+    def test_they_are_the_read_schemas_and_the_recordings_columns(self) -> None:
+        """Written onto `dive_recording` by name, so a readout that is not one of its columns
+        would raise at attach time, on a real upload."""
+        assert set(READOUT_FIELDS) == set(RecordingReadouts.model_fields)
+        assert set(READOUT_FIELDS) <= set(ParsedDiveSchema.model_fields)
+        assert set(READOUT_FIELDS) <= set(DiveRecording.__table__.columns.keys())
+        assert not set(READOUT_FIELDS) & set(Dive.__table__.columns.keys())

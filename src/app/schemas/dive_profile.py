@@ -58,9 +58,9 @@ TTS_SCALE = 1  # seconds
 PPO2_SCALE = 100
 # Tenths of a percent, because the two Suunto exports of one dive disagree about the
 # resolution: the JSON records `0.069` where the XML rounds to `7`, and the finer reading
-# is the one worth keeping. Not the same quantity as `dive.cns_start`/`cns_end`, which are
-# the device's own dive-level figures in whole percent and are neither derived from this
-# channel nor a source for it.
+# is the one worth keeping. Not the same quantity as a recording's `cns_start`/`cns_end`,
+# which are the device's own dive-level figures in whole percent and are neither derived from
+# this channel nor a source for it.
 CNS_SCALE = 10
 # Whole percent, and **the unit rather than a range**: a gradient factor is uncapped above.
 # A Suunto Ocean's `gf99` reaches 12 575 on a decompression ascent while the surface

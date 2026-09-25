@@ -900,8 +900,8 @@ class TestTheDecompressionMembersRoundTrip:
         it, and neither number says which of the two is wrong."""
         _, document = seeded
         parsed = json.loads(document)
-        # With a device, because §3's rule 4 counts three members and the model is not one
-        # of them - a recording carrying only a model describes nothing and is dropped whole.
+        # With a device, because §3's rule 4 counts no setting - a recording carrying only a
+        # model describes nothing and is dropped whole.
         parsed["dives"][0]["recordings"] = [
             {"device": {"brand": "Shearwater"}, "deco_model": {"gf_low": 85, "gf_high": 50, "name": "ZHL-16C"}}
         ]
@@ -939,15 +939,18 @@ class TestTheDecompressionMembersRoundTrip:
         assert (recording.deco_gf_low, recording.deco_gf_high) == (None, None)
 
     @pytest.mark.asyncio
-    async def test_a_recording_carrying_only_a_mode_and_a_model_describes_nothing(
+    async def test_a_recording_carrying_only_settings_describes_nothing(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
-        """§3's rule 4 counts `device`, `profile` and `source_files`, and the spec says
-        outright that these two are not on its list: a mode with no device, no samples and no
-        file behind it is a setting nothing recorded a dive with. The dive still imports."""
+        """§3's rule 4 counts `device`, `profile`, `source_files` and a readout, and the spec
+        says outright that the settings are not on its list: a mode, a model or a salinity
+        with nothing recorded behind it is a setting nothing recorded a dive with. The dive
+        still imports."""
         _, document = seeded
         parsed = json.loads(document)
-        parsed["dives"][0]["recordings"] = [{"mode": "gauge", "deco_model": {"algorithm": "buhlmann"}}]
+        parsed["dives"][0]["recordings"] = [
+            {"mode": "gauge", "deco_model": {"algorithm": "buhlmann"}, "salinity": "en13319"}
+        ]
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())

@@ -230,6 +230,33 @@ class TestConformance:
         assert _issues(document) == []
 
 
+class TestTheFormatChange:
+    @pytest.mark.asyncio
+    async def test_the_document_marks_its_axis_as_milliseconds(self, monkeypatch):
+        """Under this producer's key at the root, last - what this app's own reader keys on to
+        tell its exports from the ones written in seconds before the axis moved."""
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+
+        assert list(document)[-1] == "extensions"
+        assert document["extensions"] == {"opendiving": {"profile_axis": "milliseconds"}}
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_recordings_salinity_is_written_and_a_stored_one_outside_it_is_not(self, monkeypatch):
+        bundle = full_bundle()
+        recording = bundle.recordings_by_dive[2][0]
+        bundle.recordings_by_dive[2][0] = replace(recording, salinity="en13319", readouts={"cns_end": 9.0})
+        bundle.recordings_by_dive[1][0] = replace(bundle.recordings_by_dive[1][0], salinity="brine")
+
+        document = await _render(bundle, monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+
+        written = document["dives"][1]["recordings"][0]
+        assert (written["salinity"], written["cns_end"]) == ("en13319", 9.0)
+        assert list(written)[:4] == ["device", "mode", "deco_model", "salinity"]
+        assert "salinity" not in document["dives"][0]["recordings"][0]
+        _assert_conforms(document)
+
+
 class TestTheDeclaredShape:
     @pytest.mark.asyncio
     async def test_the_streamed_bytes_validate_against_export_envelope(self, monkeypatch):

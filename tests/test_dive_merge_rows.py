@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -244,6 +244,26 @@ class TestOneComputersTwoRecordsFoldIntoOne:
         assert times[FIRST_PART_SAMPLES] == RESTART_DELTA * 1000
         assert times[FIRST_PART_SAMPLES] - times[FIRST_PART_SAMPLES - 1] == 43_000
         assert profile.duration == 3_163_000
+
+    @pytest.mark.asyncio
+    async def test_the_absorbed_records_readouts_fill_the_survivors_blanks(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """The fold keeps one recording, and the other half's figures fill what it lacks -
+        fill, never overwrite, the rule every second record of one recording follows."""
+        first, second = await _two_halves(async_db, db, diver)
+        await async_db.execute(
+            update(DiveRecording).where(DiveRecording.dive_id == first.id).values(cns_start=3.0, cns_end=5.0)
+        )
+        await async_db.execute(
+            update(DiveRecording).where(DiveRecording.dive_id == second.id).values(cns_end=11.0, otu_end=22.0)
+        )
+        await async_db.commit()
+
+        await _merge(async_db, diver, first, second)
+
+        [recording] = await _recordings(async_db, first)
+        assert (recording.cns_start, recording.cns_end, recording.otu_end) == (3.0, 5.0, 22.0)
 
     @pytest.mark.asyncio
     async def test_the_folded_samples_are_marked_as_a_merge(

@@ -733,6 +733,17 @@ class TestWaypoints:
         assert _text(waypoints[1], f"{UDDF}depth") == "18"
 
     @pytest.mark.asyncio
+    async def test_a_millisecond_that_is_not_a_whole_second_goes_out_as_a_fraction(self, schema, monkeypatch):
+        """`<divetime>` is `xs:float` seconds, so the stored axis goes out exact - a Suunto app
+        export's first depth 160 ms after its start is `0.16`, and a whole second is written
+        as it always was."""
+        profile = {"depth": {"t": [160, 1_200_000, 4_000_020], "v": [0, 1800, 300]}}
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}divetime") for w in waypoints] == ["0.16", "1200", "4000.02"]
+
+    @pytest.mark.asyncio
     async def test_readings_between_depth_samples_snap_to_the_nearest(self, schema, monkeypatch):
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: OFF_GRID_PROFILE}, monkeypatch)
         schema.validate(document)

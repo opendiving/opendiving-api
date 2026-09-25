@@ -32,7 +32,7 @@ from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
-from src.app.schemas.dive import DecoAlgorithm, DiveMode, RecordingUpdateRequest
+from src.app.schemas.dive import DecoAlgorithm, DiveMode, DiveRead, RecordingUpdateRequest
 from src.app.schemas.dive_profile import ProfileProvenance
 from src.app.schemas.parsed_dive import ParsedDecoModel
 from src.app.services import blob_store
@@ -264,6 +264,19 @@ class TestWhereAFileLands:
         assert recordings[1].id == stored.recording_id
         assert await _cns_end(async_db, dive) == 9.0
         assert recordings[1].cns_end == 44.0
+
+    @pytest.mark.asyncio
+    async def test_the_read_shape_carries_each_recordings_readouts_and_none_on_the_dive(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
+        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        await _attach(async_db, diver, dive, other, filename="second.xml")
+
+        recordings = (await get_recordings_for_dives(async_db, dive_ids=[dive.id]))[dive.id]
+
+        assert [(row.cns_end, row.salinity) for row in recordings] == [(9.0, None), (44.0, None)]
+        assert "cns_end" not in DiveRead.model_fields
 
     @pytest.mark.asyncio
     async def test_re_uploading_repairs_a_file_that_vanished_from_the_volume(

@@ -437,7 +437,7 @@ class ReaderNote:
 
 # `divejson convert` names itself with this constant; its releases before this one wrote the
 # profile axis in seconds and the readouts on the dive, under the same member names.
-_CONVERTER_NAME = "divejson convert"
+_CONVERTER_GENERATOR = "divejson convert"
 _CONVERTER_MILLISECONDS_SINCE = (0, 13, 0)
 _RELEASE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 _READOUTS = ("surface_pressure", "cns_start", "cns_end", "otu_start", "otu_end")
@@ -472,7 +472,7 @@ def _written_before_the_axis_moved(raw: dict[str, Any]) -> bool:
     generator = _members(raw, "generator")
     version = generator.get("version")
     release = _RELEASE.match(version) if isinstance(version, str) else None
-    if generator.get("name") != _CONVERTER_NAME or release is None:
+    if generator.get("name") != _CONVERTER_GENERATOR or release is None:
         return False
     return tuple(int(part or 0) for part in release.groups()) < _CONVERTER_MILLISECONDS_SINCE
 
