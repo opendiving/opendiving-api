@@ -59,7 +59,7 @@ from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.user import User
 from src.app.schemas.certification import CertificationAgency
-from src.app.schemas.course import CourseCreate, CourseReadInternal, CourseStatus, CourseUpdate
+from src.app.schemas.course import CourseCreate, CourseReadInternal, CourseStatus, CourseUpdate, CourseUpdateRequest
 from tests.conftest import db_available
 from tests.helpers.generators import create_certification, create_course, create_dive
 
@@ -157,7 +157,7 @@ async def _patch(body: dict[str, Any]) -> dict[str, str]:
     return await courses_module.patch_course(
         request=MagicMock(),
         uuid=uuid7(),
-        values=CourseUpdate.model_validate(body),
+        values=CourseUpdateRequest.model_validate(body),
         current_user=_current_user(),
         db=MagicMock(),
     )
@@ -241,7 +241,7 @@ class TestCourseSchema:
         with pytest.raises(ValidationError, match="cannot be null"):
             CourseUpdate.model_validate({"status": None})
 
-    @pytest.mark.parametrize("field", ["start_date", "end_date", "instructor_name", "training_center", "agency"])
+    @pytest.mark.parametrize("field", ["start_date", "end_date", "instructor_name", "instructor_number", "agency"])
     def test_the_update_schema_still_clears_a_nullable_field(self, field: str) -> None:
         """Clearing these is a real edit - an instructor misremembered, a course that
         turned out to be `planned` after all, an agency the course never ran under."""

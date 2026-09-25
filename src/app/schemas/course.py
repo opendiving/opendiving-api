@@ -13,6 +13,7 @@ from ..core.schemas import (
     validate_date_range,
 )
 from .certification import CertificationAgency, validate_agency_pairing
+from .contact import CONTACT_UUID_DESCRIPTION, TRAINING_CENTER_READ_DESCRIPTION, TrainingCenterShim
 
 
 class CourseStatus(StrEnum):
@@ -67,10 +68,6 @@ class CourseBase(BaseModel):
     end_date: Annotated[date | None, Field(default=None, examples=["2026-03-06"])]
     instructor_name: Annotated[str | None, Field(default=None, max_length=255)]
     instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
-    training_center: Annotated[
-        str | None,
-        Field(default=None, max_length=255, description="Dive shop, resort or club that ran the course"),
-    ]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
     @model_validator(mode="after")
@@ -95,6 +92,11 @@ class CourseRead(CourseBase, PublicUUIDSchema):
     status: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     user_uuid: uuid_pkg.UUID
+    contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    # Read-only: the linked contact's name, for the web build that still prints a training
+    # center and echoes it back on save, where the write half reuses the contact of that name.
+    # Comes out with that write half once the build that sends `contact_uuid` is live.
+    training_center: Annotated[str | None, Field(default=None, description=TRAINING_CENTER_READ_DESCRIPTION)]
     created_at: datetime
 
 
@@ -109,17 +111,30 @@ class CourseReadInternal(CourseBase, PublicUUIDSchema):
 
     id: int
     user_id: int
+    contact_id: int | None = None
     created_at: datetime
 
 
 class CourseCreate(CourseBase):
+    """Request body for creating a course.
+
+    `contact_uuid` and the shim's `training_center` sit here and on `CourseUpdateRequest`,
+    never on `CourseBase`: `CourseCreateInternal` inherits the base and is CRUDAdmin's form,
+    and every read inherits it too - the trap `CertificationCreate`'s docstring records.
+    """
+
     model_config = ConfigDict(extra="forbid")
+
+    contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    training_center: TrainingCenterShim
 
 
 class CourseCreateInternal(CourseBase):
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
+    # The column, not the uuid, so the admin create form gets a field it can fill.
+    contact_id: int | None = None
 
 
 class CourseUpdate(RejectsExplicitNulls):
@@ -148,8 +163,20 @@ class CourseUpdate(RejectsExplicitNulls):
     end_date: Annotated[date | None, Field(default=None)]
     instructor_name: Annotated[str | None, Field(default=None, max_length=255)]
     instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
-    training_center: Annotated[str | None, Field(default=None, max_length=255)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+
+
+class CourseUpdateRequest(CourseUpdate):
+    """Request body for `PATCH /course/{uuid}`, including re-pointing it at a contact.
+
+    Separate from `CourseUpdate`, which is CRUDAdmin's Course form and the shape
+    `test_update_explicit_nulls.py` sweeps against the table's columns - the split
+    `CertificationUpdateRequest` makes for `course_uuid`. Omit `contact_uuid` and the link
+    is left alone; send `null` and it is cleared.
+    """
+
+    contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    training_center: TrainingCenterShim
 
 
 class CourseUpdateInternal(CourseUpdate):

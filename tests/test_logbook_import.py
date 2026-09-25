@@ -43,6 +43,7 @@ from uuid6 import uuid7
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.models.certification import Certification
+from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
@@ -3430,6 +3431,7 @@ class TestTheIntegerColumnCensus:
         ("dive", "user_id"): "the caller's",
         ("dive", "trip_id"): "resolved from a row this import wrote",
         ("dive", "course_id"): "resolved from a row this import wrote",
+        ("dive", "contact_id"): "resolved from a row this import wrote",
         ("dive", "utc_offset_minutes"): "derived from a parsed UTC offset, which Python bounds at a day",
         ("dive_mixture", "id"): "the sequence's",
         ("dive_mixture", "dive_id"): "resolved from a row this import wrote",
@@ -3468,6 +3470,7 @@ class TestTheIntegerColumnCensus:
         ("gear_service_record", "user_id"): "the caller's",
         ("gear_service_record", "gear_item_id"): "resolved from a row this import wrote",
         ("gear_service_record", "gear_service_schedule_id"): "resolved from a row this import wrote",
+        ("gear_service_record", "contact_id"): "resolved from a row this import wrote",
         ("gear_service_record", "dive_count_at_service"): "bounded by `_Planner._count`",
         ("gear_item", "id"): "the sequence's",
         ("gear_item", "user_id"): "the caller's",
@@ -3476,6 +3479,9 @@ class TestTheIntegerColumnCensus:
         ("trip", "user_id"): "the caller's",
         ("course", "id"): "the sequence's",
         ("course", "user_id"): "the caller's",
+        ("course", "contact_id"): "resolved from a row this import wrote, or one the caller already had",
+        ("contact", "id"): "the sequence's",
+        ("contact", "user_id"): "the caller's",
         ("dive_site", "id"): "the sequence's",
         ("dive_site", "user_id"): "the caller's",
         ("gear_set", "id"): "the sequence's",
@@ -3483,6 +3489,7 @@ class TestTheIntegerColumnCensus:
         ("certification", "id"): "the sequence's",
         ("certification", "user_id"): "the caller's",
         ("certification", "course_id"): "resolved from a row this import wrote",
+        ("certification", "contact_id"): "resolved from a row this import wrote, or one the caller already had",
         ("user_dive_stats", "id"): "the sequence's",
         ("user_dive_stats", "user_id"): "the caller's",
         ("user_dive_stats", "total_dives"): "a count of rows, derived by `recalculate_dive_stats`",
@@ -3490,6 +3497,7 @@ class TestTheIntegerColumnCensus:
         ("trip_part", "id"): "the sequence's",
         ("trip_part", "trip_id"): "resolved from a row this import wrote",
         ("trip_part", "position"): "the list index, not the document's",
+        ("trip_part", "accommodation_contact_id"): "resolved from a row this import wrote",
         ("dive_file", "id"): "the sequence's",
         ("dive_file", "user_id"): "the caller's",
         ("dive_file", "recording_id"): "resolved from a row this import wrote",
@@ -3529,6 +3537,7 @@ class TestTheIntegerColumnCensus:
             DiveMixture,
             DiveRecording,
             DiveProfile,
+            Contact,
             Trip,
             TripPart,
             Course,

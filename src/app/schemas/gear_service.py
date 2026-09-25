@@ -213,7 +213,15 @@ class GearServiceRecordBase(BaseModel):
     kind: Annotated[ServiceKind, Field(examples=[ServiceKind.SERVICE])]
     serviced_on: Annotated[date, Field(examples=["2026-03-14"], description="When the work was done")]
     label: Annotated[str | None, Field(default=None, max_length=LABEL_MAX_LENGTH)]
-    performed_by: Annotated[str | None, Field(default=None, max_length=255, examples=["Blue Ocean Dive Resort"])]
+    performed_by: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=255,
+            examples=["Ahmed", "self"],
+            description="Who did the work - a technician's name, or `self`. The shop is `contact_uuid`.",
+        ),
+    ]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
 
@@ -229,6 +237,9 @@ class GearServiceRecordRead(GearServiceRecordBase, PublicUUIDSchema):
     # column - the other two are a live `gear_service_schedule_id` reading back as null,
     # which is why nothing should infer the FK's state from this field.
     gear_service_schedule_uuid: uuid_pkg.UUID | None = None
+    contact_uuid: Annotated[
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact - the shop - that did the work")
+    ]
     dive_count_at_service: int = 0
     created_at: datetime
 
@@ -240,6 +251,7 @@ class GearServiceRecordReadInternal(GearServiceRecordBase, PublicUUIDSchema):
     user_id: int
     gear_item_id: int
     gear_service_schedule_id: int | None = None
+    contact_id: int | None = None
     dive_count_at_service: int = 0
     created_at: datetime
 
@@ -259,6 +271,9 @@ class GearServiceRecordCreate(GearServiceRecordBase):
     gear_service_schedule_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Schedule this satisfies; inferred when omitted")
     ]
+    contact_uuid: Annotated[
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact - the shop - that did the work")
+    ]
 
 
 class GearServiceRecordCreateInternal(GearServiceRecordBase):
@@ -267,6 +282,7 @@ class GearServiceRecordCreateInternal(GearServiceRecordBase):
     user_id: int
     gear_item_id: int
     gear_service_schedule_id: int | None = None
+    contact_id: int | None = None
     dive_count_at_service: int = 0
 
 
@@ -287,6 +303,21 @@ class GearServiceRecordUpdate(RejectsExplicitNulls):
     label: Annotated[str | None, Field(default=None, max_length=LABEL_MAX_LENGTH)]
     performed_by: Annotated[str | None, Field(default=None, max_length=255)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+
+
+class GearServiceRecordUpdateRequest(GearServiceRecordUpdate):
+    """Request body for `PATCH /gear-service-record/{uuid}`, including re-pointing it at a
+    contact.
+
+    Separate from `GearServiceRecordUpdate`, which is CRUDAdmin's form and the shape
+    `test_update_explicit_nulls.py` sweeps against the table's columns - the split
+    `CertificationUpdateRequest` makes for `course_uuid`. Omit `contact_uuid` and the link
+    is left alone; send `null` and it is cleared.
+    """
+
+    contact_uuid: Annotated[
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact - the shop - that did the work")
+    ]
 
 
 class GearServiceRecordUpdateInternal(GearServiceRecordUpdate):

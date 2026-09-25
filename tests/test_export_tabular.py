@@ -23,6 +23,7 @@ from src.app.models.course import Course
 from src.app.services.export.tabular import (
     BOM,
     CERTIFICATIONS_HEADER,
+    CONTACTS_HEADER,
     COURSES_HEADER,
     CSV_WRITERS,
     DIVE_SITES_HEADER,
@@ -34,6 +35,7 @@ from src.app.services.export.tabular import (
     TRIPS_HEADER,
     _utc_offset,
     write_certifications_csv,
+    write_contacts_csv,
     write_courses_csv,
     write_dive_sites_csv,
     write_dives_csv,
@@ -64,6 +66,7 @@ _NORMALIZED_FILES = (
     (write_gear_items_csv, GEAR_ITEMS_HEADER),
     (write_gear_service_csv, GEAR_SERVICE_HEADER),
     (write_certifications_csv, CERTIFICATIONS_HEADER),
+    (write_contacts_csv, CONTACTS_HEADER),
 )
 
 
@@ -264,6 +267,37 @@ class TestTheNormalizedFiles:
         rows = _parse(_render(write_trips_csv(full_bundle())))
         assert rows[1][TRIPS_HEADER.index("location")] == "Sharm el-Sheikh, Egypt; Ras Mohammed"
 
+    def test_a_trips_accommodations_are_joined_into_one_cell(self):
+        """Part by part, on the `location` cell's terms; a part with nowhere to stay adds
+        nothing rather than an empty entry."""
+        rows = _parse(_render(write_trips_csv(full_bundle())))
+        assert rows[1][TRIPS_HEADER.index("accommodations")] == "Blue Ocean Resort"
+
+    def test_the_records_that_name_a_contact_carry_its_name(self):
+        """A CSV carries names, as `dives.csv`'s `course` does; `contacts.csv` has the uuid."""
+        bundle = full_bundle()
+        courses = _parse(_render(write_courses_csv(bundle)))
+        certifications = _parse(_render(write_certifications_csv(bundle)))
+        service = _parse(_render(write_gear_service_csv(bundle)))
+
+        assert courses[1][COURSES_HEADER.index("contact")] == "Blue Ocean"
+        assert certifications[1][CERTIFICATIONS_HEADER.index("contact")] == "Blue Ocean"
+        # The schedule row has no shop; the record names the shop beside the person.
+        contact, performed_by = GEAR_SERVICE_HEADER.index("contact"), GEAR_SERVICE_HEADER.index("performed_by")
+        assert [(row[performed_by], row[contact]) for row in service[1:]] == [("", ""), ("Ahmed", "Gear Hub")]
+
+    def test_contacts_spread_the_address_across_its_columns(self):
+        rows = _parse(_render(write_contacts_csv(full_bundle())))
+        by_name = {row[0]: dict(zip(CONTACTS_HEADER, row, strict=True)) for row in rows[1:]}
+
+        assert list(by_name) == ["Blue Ocean", "Blue Ocean Resort", "Gear Hub"]
+        resort = by_name["Blue Ocean Resort"]
+        assert resort["roles"] == "dive_center; accommodation"
+        assert (resort["city"], resort["region"], resort["country"]) == ("Dahab", "South Sinai", "Egypt")
+        assert resort["contact_uuid"] == str(UUIDS["contact-resort"])
+        # A name and a role and nothing else - the school the migration made of a string.
+        assert by_name["Blue Ocean"]["country"] == ""
+
     def test_dive_sites_count_visits_not_dives(self):
         """Yolanda is the second site of one dive and the only site of another."""
         rows = _parse(_render(write_dive_sites_csv(full_bundle())))
@@ -384,9 +418,9 @@ class TestTheNormalizedFiles:
     def test_every_file_carries_the_byte_order_mark_not_just_dives(self):
         """`dive-sites.csv`, `trips.csv`, `courses.csv` and `certifications.csv` hold the
         same free text as `dives.csv`, and a diver who unzips the archive and double-clicks
-        one hits the same Excel mojibake. Pinned across all nine so a file added later
-        cannot quietly be the exception."""
+        one hits the same Excel mojibake. Pinned across every file, and the count with it, so
+        a file added later cannot quietly be the exception."""
         bundle = full_bundle()
-        assert len(CSV_WRITERS) == 9
+        assert len(CSV_WRITERS) == 10
         for filename, writer in CSV_WRITERS:
             assert _render(writer(bundle)).startswith(BOM), filename

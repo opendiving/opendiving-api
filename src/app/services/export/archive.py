@@ -23,8 +23,8 @@ stream without a temp file at all but costs a runtime dependency and a `Content-
 hurts; do not start there.
 
 **The CSV members are written on the event loop.** `_write_text_stream` drains a whole
-synchronous generator with no await in it, so each of the nine is an uninterrupted
-stretch of CPU - about 7 ms for the largest (`dives.csv`) over a 500-dive corpus, and
+synchronous generator with no await in it, so each CSV is an uninterrupted stretch of
+CPU - about 7 ms for the largest (`dives.csv`) over a 500-dive corpus, and
 proportional from there. Unlike `/export/csv`, which hands its drain to a thread, this one
 sits inside the open `ZipFile` and cannot simply be moved off; the two document writers
 above do interleave, because each awaits `load_profile` per dive. Small enough to leave,

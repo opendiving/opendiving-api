@@ -2,11 +2,11 @@
 
 Every writer in this package (UDDF, CSV, `logbook.divejson`) needs the same graph, so it is
 read once into an `ExportBundle` and handed to all three rather than each of them
-issuing its own queries. The read is deliberately flat: a fixed twenty-three `SELECT`s over
-whole tables scoped to one `user_id`, with no per-dive query anywhere. A logbook is a few
-hundred dives and a handful of sites, trips, courses and gear items, so "load the lot" costs
-less
-than the round trips a lazier shape would need - and the archive walks all of it anyway.
+issuing its own queries. The read is deliberately flat: a fixed set of `SELECT`s over whole
+tables scoped to one `user_id`, with no per-dive query anywhere. A logbook is a few hundred
+dives and a handful of sites, trips, courses, contacts and gear items, so "load the lot"
+costs less than the round trips a lazier shape would need - and the archive walks all of it
+anyway.
 
 **The two things this does not load are the binary payloads**: uploaded exports and card
 images live in the blob store rather than in the database at all now (this reads only
@@ -44,6 +44,7 @@ from ...crud.crud_trip_parts import get_parts_for_trips
 from ...crud.crud_trips import EARLIEST_PART_START
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
+from ...models.contact import Contact
 from ...models.course import Course
 from ...models.dive import Dive
 from ...models.dive_dive_site import DiveDiveSite
@@ -167,6 +168,8 @@ class ExportBundle:
     cert_file_sha256: dict[tuple[int, str], str]
     # The account's avatar and portrait rows, by kind, for the files the archive carries.
     pictures: dict[PictureKind, UserPicture]
+    # By name, as `GET /contacts` lists them.
+    contacts: list[Contact]
 
     trip_by_id: dict[int, Trip] = field(init=False)
     course_by_id: dict[int, Course] = field(init=False)
@@ -174,6 +177,8 @@ class ExportBundle:
     gear_item_by_id: dict[int, GearItem] = field(init=False)
     species_by_id: dict[int, Species] = field(init=False)
     schedule_by_id: dict[int, GearServiceSchedule] = field(init=False)
+    contact_by_id: dict[int, Contact] = field(init=False)
+    contact_by_uuid: dict[uuid_pkg.UUID, Contact] = field(init=False)
 
     def __post_init__(self) -> None:
         # `object.__setattr__` because the dataclass is frozen: these are lookup indexes
@@ -185,6 +190,8 @@ class ExportBundle:
         object.__setattr__(self, "gear_item_by_id", {item.id: item for item in self.gear_items})
         object.__setattr__(self, "species_by_id", {species.id: species for species in self.species})
         object.__setattr__(self, "schedule_by_id", {schedule.id: schedule for schedule in self.schedules})
+        object.__setattr__(self, "contact_by_id", {contact.id: contact for contact in self.contacts})
+        object.__setattr__(self, "contact_by_uuid", {contact.uuid: contact for contact in self.contacts})
 
     def sites_for(self, dive: Dive) -> list[DiveSite]:
         """A dive's sites in visit order; index 0 is the primary site."""
@@ -227,6 +234,13 @@ class ExportBundle:
         when the course goes, so a stale id never reaches this.
         """
         return None if row.course_id is None else self.course_by_id.get(row.course_id)
+
+    def contact_for(self, row: Dive | Course | Certification | GearServiceRecord) -> Contact | None:
+        """The contact a dive, course, certification or service record names, or `None` -
+        the FK's `ON DELETE SET NULL` clears the column when the contact goes, so a stale
+        id never reaches this. A trip part names its accommodation by uuid, already
+        resolved when the parts were read: `contact_by_uuid` is its lookup."""
+        return None if row.contact_id is None else self.contact_by_id.get(row.contact_id)
 
 
 async def _ordered_ids_by_dive(
@@ -417,6 +431,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
             PictureKind(picture.kind): picture
             for picture in (await db.execute(select(UserPicture).where(UserPicture.user_id == user_id))).scalars()
         },
+        contacts=await _owned(db, Contact, user_id=user_id, order_by=(Contact.name, Contact.id)),
     )
 
 

@@ -158,11 +158,13 @@ class TestTheCanonicalForm:
 
     def test_declaration_order_is_form_order(self) -> None:
         """Not alphabetical, and not the order anything was added: a client takes its panel
-        rows from this, so the enum's order is part of the contract.
+        rows from this, so the enum's order is part of the contract. The contact sits right
+        after the course because a migration inserted it into stored sets beside it.
         """
-        assert list(DiveFormField)[:4] == [
+        assert list(DiveFormField)[:5] == [
             DiveFormField.TRIP_UUID,
             DiveFormField.COURSE_UUID,
+            DiveFormField.CONTACT_UUID,
             DiveFormField.DIVE_SITE_UUIDS,
             DiveFormField.MAX_DEPTH,
         ]

@@ -1,6 +1,6 @@
 """Unit tests for the `search=` surface behind the dive form's pickers
-(`api/v1/dive_sites.py`, `api/v1/trips.py`, `api/v1/courses.py`, `api/v1/gear_items.py`,
-`core/utils/search.py`, `core/utils/owned_resource_cache.py`).
+(`api/v1/dive_sites.py`, `api/v1/trips.py`, `api/v1/courses.py`, `api/v1/contacts.py`,
+`api/v1/gear_items.py`, `core/utils/search.py`, `core/utils/owned_resource_cache.py`).
 
 Like the other suites here these cover the pure-logic pieces - the `LIKE` escaping, the
 shape of the search `WHERE` clause, and the cache keys - rather than the endpoints on
@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import ColumnElement, select
 from sqlalchemy.dialects import postgresql
 
+from src.app.api.v1.contacts import _contact_cache
 from src.app.api.v1.courses import _course_cache
 from src.app.api.v1.dive_sites import DIVE_SITE_SEARCH_COLUMNS, _dive_site_cache
 from src.app.api.v1.gear_items import GEAR_ITEM_SEARCH_COLUMNS
@@ -22,8 +23,10 @@ from src.app.api.v1.trips import _trip_cache
 from src.app.core.utils.owned_resource_cache import OwnedResourceCache
 from src.app.core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE, clamp_pagination
 from src.app.core.utils.search import escape_like, search_clause
+from src.app.crud.crud_contacts import CONTACT_SEARCH_COLUMNS
 from src.app.crud.crud_courses import COURSE_SEARCH_COLUMNS
 from src.app.crud.crud_gear_items import crud_gear_items
+from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
@@ -70,6 +73,7 @@ class TestSearchClause:
         [
             (DiveSite, DIVE_SITE_SEARCH_COLUMNS, "dive_site"),
             (GearItem, GEAR_ITEM_SEARCH_COLUMNS, "gear_item"),
+            (Contact, CONTACT_SEARCH_COLUMNS, "contact"),
         ],
     )
     def test_matches_the_term_against_any_of_its_columns(
@@ -122,12 +126,12 @@ class TestOwnedResourceSearchConditions:
 
 
 class TestListCacheKeys:
-    @pytest.mark.parametrize("resource", [_dive_site_cache, _trip_cache, _course_cache])
+    @pytest.mark.parametrize("resource", [_dive_site_cache, _trip_cache, _course_cache, _contact_cache])
     def test_the_search_term_is_part_of_the_key(self, resource: OwnedResourceCache) -> None:
         # Two different searches on the same page must not serve each other's results.
         assert ":search:{search}" in resource.list_cache_key_prefix
 
-    @pytest.mark.parametrize("resource", [_dive_site_cache, _trip_cache, _course_cache])
+    @pytest.mark.parametrize("resource", [_dive_site_cache, _trip_cache, _course_cache, _contact_cache])
     def test_page_and_page_size_are_still_part_of_the_key(self, resource: OwnedResourceCache) -> None:
         prefix = resource.list_cache_key_prefix
 
@@ -140,6 +144,7 @@ class TestListCacheKeys:
             (_dive_site_cache, "user_{user_id}_dive_sites:"),
             (_trip_cache, "user_{user_id}_trips:"),
             (_course_cache, "user_{user_id}_courses:"),
+            (_contact_cache, "user_{user_id}_contacts:"),
         ],
     )
     def test_the_key_stays_under_the_users_invalidation_wildcard(
@@ -174,6 +179,7 @@ V1_ROUTES_DIR = Path(__file__).resolve().parents[1] / "src" / "app" / "api" / "v
 PAGINATED_LIST_ROUTES: dict[str, tuple[str, ...]] = {
     "admin.py": ("read_invite_requests",),
     "certifications.py": ("read_certifications",),
+    "contacts.py": ("read_contacts",),
     "courses.py": ("read_courses",),
     "dive_form_presets.py": ("read_dive_form_presets",),
     "dive_sites.py": ("read_dive_sites",),
@@ -294,6 +300,7 @@ class TestPageSizeCaps:
         (DiveSite, DIVE_SITE_SEARCH_COLUMNS),
         (Trip, ("name",)),
         (Course, COURSE_SEARCH_COLUMNS),
+        (Contact, CONTACT_SEARCH_COLUMNS),
         (GearItem, GEAR_ITEM_SEARCH_COLUMNS),
     ],
 )

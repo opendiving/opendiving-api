@@ -17,6 +17,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from src.app.models.certification import Certification
+from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.dive_form_preset import DiveFormPreset
@@ -71,6 +72,9 @@ UUIDS = {
             "recording",
             "recording-second",
             "recording-readouts",
+            "contact-school",
+            "contact-resort",
+            "contact-shop",
         )
     )
 }
@@ -219,6 +223,7 @@ def build_bundle(
     dive_file_sha256: dict[int, str] | None = None,
     cert_file_sha256: dict[tuple[int, str], str] | None = None,
     pictures: dict[PictureKind, UserPicture] | None = None,
+    contacts: list[Contact] | None = None,
 ) -> ExportBundle:
     """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive".
 
@@ -267,6 +272,7 @@ def build_bundle(
         dive_file_sha256=dive_file_sha256,
         cert_file_sha256=cert_file_sha256,
         pictures=pictures or {},
+        contacts=contacts or [],
     )
 
 
@@ -317,6 +323,44 @@ def full_bundle() -> ExportBundle:
         ),
         1,
     )
+    # Three contacts, one per slot a UDDF writer has: a resort that is a dive center with
+    # rooms and carries every member (a `<divebase>`, and the first part's accommodation), a
+    # shop and nothing else (a `<shop>`), and a school that is a name and nothing more - the
+    # shape the migration made of every training-center string, which UDDF reads back as a
+    # placeholder. Ordered by name, matching `load_export_bundle`.
+    school = _with_id(
+        Contact(user_id=1, name="Blue Ocean", roles=["school"], uuid=UUIDS["contact-school"], created_at=CREATED_AT),
+        3,
+    )
+    resort = _with_id(
+        Contact(
+            user_id=1,
+            name="Blue Ocean Resort",
+            roles=["dive_center", "accommodation"],
+            phone="+20 69 364 0000",
+            email="info@blueocean.example",
+            website="https://blueocean.example",
+            address_street="Mashraba",
+            address_city="Dahab",
+            address_region="South Sinai",
+            address_country="Egypt",
+            notes="Ask for Ahmed.",
+            uuid=UUIDS["contact-resort"],
+            created_at=CREATED_AT,
+        ),
+        1,
+    )
+    shop = _with_id(
+        Contact(
+            user_id=1,
+            name="Gear Hub",
+            roles=["shop"],
+            phone="+44 20 7946 0000",
+            uuid=UUIDS["contact-shop"],
+            created_at=CREATED_AT,
+        ),
+        2,
+    )
     # Three parts, deliberately unalike, because each is a branch a writer has to take.
     # The first place is as the geocoder returned it, box and all; the second is what the
     # diver typed when the provider had nothing, the free-text escape hatch every writer
@@ -338,6 +382,7 @@ def full_bundle() -> ExportBundle:
                 bbox_west=34.2,
                 bbox_east=34.4,
             ),
+            accommodation_uuid=UUIDS["contact-resort"],
         ),
         TripPartRead(
             start_date=date(2026, 6, 2),
@@ -361,7 +406,7 @@ def full_bundle() -> ExportBundle:
             end_date=date(2026, 3, 6),
             instructor_name="Jae Kim",
             instructor_number="TDI-88121",
-            training_center="Blue Ocean",
+            contact_id=3,
             notes="Two deco dives to 45 m",
             uuid=UUIDS["course"],
             created_at=CREATED_AT,
@@ -428,7 +473,8 @@ def full_bundle() -> ExportBundle:
             serviced_on=date(2026, 1, 1),
             dive_count_at_service=40,
             gear_service_schedule_id=1,
-            performed_by="Blue Ocean",
+            performed_by="Ahmed",
+            contact_id=2,
             notes="Full strip",
             uuid=UUIDS["record"],
             created_at=CREATED_AT,
@@ -443,6 +489,7 @@ def full_bundle() -> ExportBundle:
             certification_number="1234567",
             certified_on=date(2019, 6, 1),
             course_id=1,
+            contact_id=3,
             notes="",
             uuid=UUIDS["certification"],
             created_at=CREATED_AT,
@@ -466,6 +513,7 @@ def full_bundle() -> ExportBundle:
         altitude=0,
         trip_id=1,
         course_id=1,
+        contact_id=1,
         notes='Strong current, "the wall" was worth it.\nSaw a thresher.',
         entry_latitude=27.727800,
         entry_longitude=34.256400,
@@ -626,6 +674,7 @@ def full_bundle() -> ExportBundle:
             make_dive_form_preset(1, "Recreational", ["altitude", "mixture.po2_limit"]),
             make_dive_form_preset(2, "Technical", []),
         ],
+        contacts=[school, resort, shop],
     )
 
 

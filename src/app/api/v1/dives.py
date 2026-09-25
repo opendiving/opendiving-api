@@ -29,6 +29,7 @@ from ...core.utils.datetime_offset import (
 )
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.uploads import content_disposition_attachment, read_upload_within_limit
+from ...crud.crud_contacts import get_contact_refs_by_ids
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
@@ -76,6 +77,7 @@ from ...schemas.dive_profile import RecordingProfileRead
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
+from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
 from ...services.dive_files import (
     MAX_DIVE_FILE_SIZE,
     DiveFileAlreadyLinkedError,
@@ -178,6 +180,8 @@ def _fk_error_detail(exc: IntegrityError) -> str:
         return "Trip not found."
     if "dive_course_id_fkey" in msg:
         return "Course not found."
+    if "dive_contact_id_fkey" in msg:
+        return CONTACT_NOT_FOUND
     if "dive_site_id_fkey" in msg:
         return "Dive site not found."
     if "gear_item_id_fkey" in msg:
@@ -253,7 +257,7 @@ def _mixture_error_detail(exc: IntegrityError) -> str:
 
 
 async def _link_updates(db: AsyncSession, values: DiveUpdateRequest, owner_id: int) -> dict[str, int | None]:
-    """The `trip_id`/`course_id` half of a PATCH's update data.
+    """The `trip_id`/`course_id`/`contact_id` half of a PATCH's update data.
 
     Both are optional references the caller names by public uuid, and both have to tell an
     explicit `null` (detach) from an omitted key (leave alone) - which is what
@@ -284,6 +288,13 @@ async def _link_updates(db: AsyncSession, values: DiveUpdateRequest, owner_id: i
             if course_id is None:
                 raise UnprocessableEntityException("Course not found.")
             updates["course_id"] = course_id
+
+    if "contact_uuid" in values.model_fields_set:
+        updates["contact_id"] = (
+            None
+            if values.contact_uuid is None
+            else await resolve_contact_reference(db, contact_uuid=values.contact_uuid, user_id=owner_id)
+        )
 
     return updates
 
@@ -325,23 +336,29 @@ def _to_public_start_time(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+# The internal keys a public dive drops in favour of the uuids it resolves them to.
+_INTERNAL_KEYS = frozenset({"id", "user_id", "trip_id", "course_id", "contact_id"})
+
+
 def _to_public_dive(
     db_dive: DiveReadInternal | dict[str, Any],
     *,
     user_uuid: uuid_pkg.UUID,
     trip_uuid: uuid_pkg.UUID | None,
     course_uuid: uuid_pkg.UUID | None,
+    contact_uuid: uuid_pkg.UUID | None,
     dive_sites: list[DiveSiteInfo],
     gear_items: list[GearItemInfo],
 ) -> DiveRead:
     """Convert an internal dive representation (integer FKs) into its public shape
-    (owning user, trip and training course referenced by `uuid`)."""
+    (owning user, trip, training course and contact referenced by `uuid`)."""
     data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveRead(
-        **{k: v for k, v in data.items() if k not in ("id", "user_id", "trip_id", "course_id")},
+        **{k: v for k, v in data.items() if k not in _INTERNAL_KEYS},
         user_uuid=user_uuid,
         trip_uuid=trip_uuid,
         course_uuid=course_uuid,
+        contact_uuid=contact_uuid,
         dive_sites=dive_sites,
         gear_items=gear_items,
     )
@@ -353,6 +370,7 @@ def _to_public_dive_with_mixtures(
     user_uuid: uuid_pkg.UUID,
     trip_uuid: uuid_pkg.UUID | None,
     course_uuid: uuid_pkg.UUID | None,
+    contact_uuid: uuid_pkg.UUID | None,
     dive_sites: list[DiveSiteInfo],
     gear_items: list[GearItemInfo],
     mixtures: list[DiveMixtureRead],
@@ -374,10 +392,11 @@ def _to_public_dive_with_mixtures(
     """
     data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveReadWithMixtures(
-        **{k: v for k, v in data.items() if k not in ("id", "user_id", "trip_id", "course_id")},
+        **{k: v for k, v in data.items() if k not in _INTERNAL_KEYS},
         user_uuid=user_uuid,
         trip_uuid=trip_uuid,
         course_uuid=course_uuid,
+        contact_uuid=contact_uuid,
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
@@ -546,6 +565,10 @@ async def write_dive(
         if course_id is None:
             raise UnprocessableEntityException("Course not found.")
 
+    contact_id: int | None = None
+    if dive.contact_uuid is not None:
+        contact_id = await resolve_contact_reference(db, contact_uuid=dive.contact_uuid, user_id=current_user["id"])
+
     site_id_by_uuid = await resolve_dive_site_ids_for_user(
         db=db, dive_site_uuids=dive.dive_site_uuids, user_id=current_user["id"]
     )
@@ -575,6 +598,7 @@ async def write_dive(
             "species_uuids",
             "trip_uuid",
             "course_uuid",
+            "contact_uuid",
         }
     )
     utc_start_time, utc_offset_minutes = split_start_time(dive.start_time)
@@ -584,6 +608,7 @@ async def write_dive(
         user_id=current_user["id"],
         trip_id=trip_id,
         course_id=course_id,
+        contact_id=contact_id,
         utc_offset_minutes=utc_offset_minutes,
     )
     try:
@@ -633,6 +658,7 @@ async def write_dive(
         user_uuid=current_user["uuid"],
         trip_uuid=dive.trip_uuid,
         course_uuid=dive.course_uuid,
+        contact_uuid=dive.contact_uuid,
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
@@ -699,7 +725,8 @@ async def _cached_read_dives(
         **filters,
     )
 
-    # Enrich each dive with its dive site(s), gear and trip/course uuids via batched lookups.
+    # Enrich each dive with its dive site(s), gear and trip/course/contact uuids via batched
+    # lookups.
     dive_ids = [d["id"] for d in dives_data["data"]]
     sites_by_dive = await get_dive_sites_for_dives(db=db, dive_ids=dive_ids)
     gear_by_dive = await get_gear_items_for_dives(db=db, dive_ids=dive_ids)
@@ -707,6 +734,9 @@ async def _cached_read_dives(
     trip_uuid_by_id = await get_trip_uuids_by_ids(db=db, trip_ids=referenced_trip_ids, user_id=user_id)
     referenced_course_ids = [d["course_id"] for d in dives_data["data"] if d["course_id"] is not None]
     course_uuid_by_id = await get_course_uuids_by_ids(db=db, course_ids=referenced_course_ids, user_id=user_id)
+    contact_by_id = await get_contact_refs_by_ids(
+        db=db, contact_ids=[d["contact_id"] for d in dives_data["data"]], user_id=user_id
+    )
 
     dives_data["data"] = [
         _to_public_dive(
@@ -714,6 +744,7 @@ async def _cached_read_dives(
             user_uuid=user_uuid,
             trip_uuid=trip_uuid_by_id.get(dive["trip_id"]) if dive["trip_id"] is not None else None,
             course_uuid=course_uuid_by_id.get(dive["course_id"]) if dive["course_id"] is not None else None,
+            contact_uuid=contact.uuid if (contact := contact_by_id.get(dive["contact_id"])) is not None else None,
             dive_sites=sites_by_dive.get(dive["id"], []),
             gear_items=gear_by_dive.get(dive["id"], []),
         ).model_dump()
@@ -932,6 +963,10 @@ async def _cached_read_dive(
         course_uuid_by_id = await get_course_uuids_by_ids(db=db, course_ids=[db_dive["course_id"]], user_id=user_id)
         course_uuid = course_uuid_by_id.get(db_dive["course_id"])
 
+    contact = (await get_contact_refs_by_ids(db=db, contact_ids=[db_dive["contact_id"]], user_id=user_id)).get(
+        db_dive["contact_id"]
+    )
+
     mixtures = await get_mixtures_for_dive(db=db, dive_id=db_dive["id"])
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=db_dive["id"])
     gear_items = await get_gear_items_for_dive(db=db, dive_id=db_dive["id"])
@@ -958,6 +993,7 @@ async def _cached_read_dive(
         user_uuid=owner_uuid,
         trip_uuid=trip_uuid,
         course_uuid=course_uuid,
+        contact_uuid=None if contact is None else contact.uuid,
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
@@ -1061,7 +1097,8 @@ async def patch_dive(
     - are replaced wholesale when present rather than merged, so sending a shorter list
     removes the difference and omitting the key entirely leaves it alone. Passing `null` for
     `trip_uuid` detaches the dive from its trip, which is distinct from omitting the key.
-    Passing `null` for `course_uuid` detaches it from its training course the same way.
+    Passing `null` for `course_uuid` detaches it from its training course the same way, and
+    `null` for `contact_uuid` from its contact.
     Referencing anything the caller doesn't own is a 422, as are the DB's domain
     constraints.
 
@@ -1079,7 +1116,15 @@ async def patch_dive(
     owner_id = db_dive.user_id
 
     update_data = values.model_dump(
-        exclude={"mixtures", "dive_site_uuids", "gear_item_uuids", "species_uuids", "trip_uuid", "course_uuid"},
+        exclude={
+            "mixtures",
+            "dive_site_uuids",
+            "gear_item_uuids",
+            "species_uuids",
+            "trip_uuid",
+            "course_uuid",
+            "contact_uuid",
+        },
         exclude_unset=True,
     )
 

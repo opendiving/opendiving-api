@@ -80,7 +80,7 @@ class ArchivePaths:
     `archive_path` member `logbook.divejson` records - address one file at a time. A
     certification still has at most one image per side. Between them these three maps name
     every member the archive carries beyond the generated documents
-    (`logbook.divejson`, `dives.uddf` and the nine files in `tabular.CSV_WRITERS`).
+    (`logbook.divejson`, `dives.uddf` and the files in `tabular.CSV_WRITERS`).
     """
 
     dive_files: dict[int, str] = field(default_factory=dict)

@@ -1,9 +1,10 @@
 import uuid as uuid_pkg
 from datetime import date
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NoReturn, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
@@ -16,6 +17,7 @@ from ...core.schemas import validate_date_range
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
+from ...crud.crud_contacts import ContactRef, get_contact_refs_by_ids
 from ...crud.crud_courses import COURSE_SEARCH_COLUMNS, crud_courses, get_courses_page
 from ...schemas.certification import CertificationAgency, validate_agency_pairing
 from ...schemas.course import (
@@ -24,22 +26,57 @@ from ...schemas.course import (
     CourseRead,
     CourseReadInternal,
     CourseStatus,
-    CourseUpdate,
+    CourseUpdateRequest,
 )
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
+    invalidate_contact_caches,
     invalidate_course_caches,
     invalidate_dive_caches,
 )
+from ...services.contact_links import CONTACT_NOT_FOUND, contact_link_updates
 
 router = APIRouter(tags=["courses"])
 
+# The one foreign key a course write can set, resolved by a separate query - so a contact
+# deleted between the resolve and the write reaches Postgres as a violation of this.
+_CONTACT_FK_CONSTRAINT = "course_contact_id_fkey"
 
-def _to_public_course(db_course: CourseReadInternal | dict[str, Any], *, user_uuid: uuid_pkg.UUID) -> CourseRead:
+
+def _to_public_course(
+    db_course: CourseReadInternal | dict[str, Any], *, user_uuid: uuid_pkg.UUID, contact: ContactRef | None = None
+) -> CourseRead:
     """Convert an internal course representation (integer PK/FK) into its public shape
-    (owning user referenced by `uuid`)."""
+    (owning user and contact referenced by `uuid`).
+
+    `contact` is resolved by the caller, batched across a page where there is one. Its
+    name fills the read-only `training_center` the previous web build prints.
+    """
     data = db_course if isinstance(db_course, dict) else db_course.model_dump()
-    return CourseRead(**{k: v for k, v in data.items() if k not in ("id", "user_id")}, user_uuid=user_uuid)
+    return CourseRead(
+        **{k: v for k, v in data.items() if k not in ("id", "user_id", "contact_id")},
+        user_uuid=user_uuid,
+        contact_uuid=None if contact is None else contact.uuid,
+        training_center=None if contact is None else contact.name,
+    )
+
+
+async def _contact_of(db: AsyncSession, contact_id: int | None, user_id: int) -> ContactRef | None:
+    if contact_id is None:
+        return None
+    return (await get_contact_refs_by_ids(db=db, contact_ids=[contact_id], user_id=user_id)).get(contact_id)
+
+
+async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> NoReturn:
+    """Turn a lost `contact_id` reference into the 422 a foreign or missing uuid gets.
+
+    Rolls back first, as `certifications.py` does for its course: the failed statement
+    leaves the session in an aborted transaction. Re-raises anything else untouched.
+    """
+    await db.rollback()
+    if _CONTACT_FK_CONSTRAINT in str(exc.orig):
+        raise UnprocessableEntityException(CONTACT_NOT_FOUND) from exc
+    raise exc
 
 
 # Kept for its `list_cache_key_prefix` and `invalidate_list` only - `read_list`/`read_item`
@@ -124,14 +161,39 @@ async def write_course(
 
     Dives and certifications are linked to a course from their own endpoints
     (`course_uuid` on `POST`/`PATCH /dive` and `/certification`), not from here.
-    """
-    course_internal = CourseCreateInternal(**course.model_dump(), user_id=current_user["id"])
-    created = await crud_courses.create(
-        db=db, object=course_internal, schema_to_select=CourseReadInternal, return_as_model=True
-    )
-    await invalidate_course_caches(current_user["id"])
 
-    return _to_public_course(cast(CourseReadInternal, created), user_uuid=current_user["uuid"])
+    `contact_uuid` names who ran the course; one that isn't the caller's own - or doesn't
+    exist - is a 422. `training_center` is deprecated and read only when `contact_uuid` is
+    absent: a name resolves to the caller's contact of that name, or creates one.
+    """
+    link = await contact_link_updates(
+        db,
+        user_id=current_user["id"],
+        fields_set=course.model_fields_set,
+        contact_uuid=course.contact_uuid,
+        training_center=course.training_center,
+    )
+    course_internal = CourseCreateInternal(
+        **course.model_dump(exclude={"contact_uuid", "training_center"}),
+        user_id=current_user["id"],
+        contact_id=link.updates.get("contact_id"),
+    )
+    try:
+        created = await crud_courses.create(
+            db=db, object=course_internal, schema_to_select=CourseReadInternal, return_as_model=True
+        )
+    except IntegrityError as e:
+        await _refuse_a_vanished_contact(db, e)
+    await invalidate_course_caches(current_user["id"])
+    if link.created_contact:
+        await invalidate_contact_caches(current_user["id"])
+
+    created_course = cast(CourseReadInternal, created)
+    return _to_public_course(
+        created_course,
+        user_uuid=current_user["uuid"],
+        contact=await _contact_of(db, created_course.contact_id, current_user["id"]),
+    )
 
 
 # Every dimension this list varies on has to appear in the key, or one filter's page is
@@ -189,7 +251,13 @@ async def _cached_read_courses(
         agency=agency,
         status=status,
     )
-    courses_data["data"] = [_to_public_course(row, user_uuid=user_uuid).model_dump() for row in courses_data["data"]]
+    contact_by_id = await get_contact_refs_by_ids(
+        db=db, contact_ids=[row["contact_id"] for row in courses_data["data"]], user_id=user_id
+    )
+    courses_data["data"] = [
+        _to_public_course(row, user_uuid=user_uuid, contact=contact_by_id.get(row["contact_id"])).model_dump()
+        for row in courses_data["data"]
+    ]
 
     response: dict[str, Any] = paginated_response(crud_data=courses_data, page=page, items_per_page=items_per_page)
     return response
@@ -281,8 +349,11 @@ async def _cached_read_course(
     db_course = await crud_courses.get(db=db, uuid=uuid, schema_to_select=CourseReadInternal, return_as_model=True)
     if db_course is None:
         raise NotFoundException("Course not found")
+    db_course = cast(CourseReadInternal, db_course)
 
-    return _to_public_course(cast(CourseReadInternal, db_course), user_uuid=owner_uuid)
+    return _to_public_course(
+        db_course, user_uuid=owner_uuid, contact=await _contact_of(db, db_course.contact_id, user_id)
+    )
 
 
 @router.get("/course/{uuid}", response_model=CourseRead)
@@ -310,7 +381,7 @@ async def read_course(
 async def patch_course(
     request: Request,
     uuid: uuid_pkg.UUID,
-    values: CourseUpdate,
+    values: CourseUpdateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
@@ -320,11 +391,14 @@ async def patch_course(
     `agency_other` are validated as a pair against the resulting values, so clearing one
     while the other still requires it is a 422 rather than a half-updated row - and
     `start_date`/`end_date` likewise, so moving either one past the stored other is a 422
-    rather than a course that ends before it began.
+    rather than a course that ends before it began. Passing `null` for `contact_uuid`
+    unlinks the course's contact, which is distinct from omitting the key; a contact that
+    isn't the caller's own is a 422. A deprecated `training_center` counts only without
+    `contact_uuid`, and a blank one changes nothing.
     """
     db_course = await _get_owned_course(db, uuid, current_user)
 
-    update_data = values.model_dump(exclude_unset=True)
+    update_data = values.model_dump(exclude={"contact_uuid", "training_center"}, exclude_unset=True)
     if "agency" in update_data or "agency_other" in update_data:
         _validate_merged_agency_pairing(
             update_data.get("agency", db_course.agency),
@@ -336,9 +410,23 @@ async def patch_course(
             update_data.get("end_date", db_course.end_date),
         )
 
+    link = await contact_link_updates(
+        db,
+        user_id=db_course.user_id,
+        fields_set=values.model_fields_set,
+        contact_uuid=values.contact_uuid,
+        training_center=values.training_center,
+    )
+    update_data |= link.updates
+
     if update_data:
-        await crud_courses.update(db=db, object=update_data, uuid=uuid)
+        try:
+            await crud_courses.update(db=db, object=update_data, uuid=uuid)
+        except IntegrityError as e:
+            await _refuse_a_vanished_contact(db, e)
         await invalidate_course_caches(db_course.user_id)
+    if link.created_contact:
+        await invalidate_contact_caches(db_course.user_id)
 
     return {"message": "Course updated"}
 

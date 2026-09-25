@@ -40,6 +40,7 @@ from ...crud.crud_dive_species import replace_species_for_dive
 from ...crud.crud_gear_set_items import replace_gear_items_for_set
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
+from ...models.contact import Contact
 from ...models.course import Course
 from ...models.dive import Dive
 from ...models.dive_file import DiveFile
@@ -246,6 +247,7 @@ class _Writer:
     async def write(self) -> None:
         await self._write_check_in()
         await self._write_portrait()
+        await self._write_contacts()
         await self._write_trips()
         await self._write_courses()
         await self._write_sites()
@@ -286,15 +288,35 @@ class _Writer:
                 "This account's portrait was kept: it changed while the archive's was being saved.",
             )
 
+    async def _write_contacts(self) -> None:
+        for record in self._plan.writable("contacts"):
+            await self._write_row("contacts", Contact, record)
+
+    def _contact_id(self, record: PlannedRecord) -> int | None:
+        """The contact a record names: a row the planner already matched by name, or one a
+        reference resolves to."""
+        return record.children.get("contact_id") or self._id("contacts", record.children.get("contact_uuid"))
+
     async def _write_trips(self) -> None:
         for record in self._plan.writable("trips"):
             trip_id = await self._write_row("trips", Trip, record)
             parts = record.children.get("parts") or []
             if parts:
-                await self._db.execute(insert(TripPart), [{"trip_id": trip_id, **row} for row in parts])
+                await self._db.execute(
+                    insert(TripPart),
+                    [
+                        {
+                            "trip_id": trip_id,
+                            **{column: value for column, value in row.items() if column != "accommodation_uuid"},
+                            "accommodation_contact_id": self._id("contacts", row.get("accommodation_uuid")),
+                        }
+                        for row in parts
+                    ],
+                )
 
     async def _write_courses(self) -> None:
         for record in self._plan.writable("courses"):
+            record.values["contact_id"] = self._contact_id(record)
             await self._write_row("courses", Course, record)
 
     async def _write_sites(self) -> None:
@@ -331,6 +353,7 @@ class _Writer:
             record.values["gear_item_id"] = gear_item_id
             schedule_id = self._id("gear_service_schedules", record.children.get("schedule_uuid"))
             record.values["gear_service_schedule_id"] = schedule_id
+            record.values["contact_id"] = self._contact_id(record)
             await self._write_row("gear_service_records", GearServiceRecord, record)
             # **Whether or not this import wrote that schedule.** A record attached to a rule
             # the caller already had moves its due dates exactly as one attached to a rule
@@ -344,6 +367,7 @@ class _Writer:
     async def _write_certifications(self) -> None:
         for record in self._plan.writable("certifications"):
             record.values["course_id"] = self._id("courses", record.children.get("course_uuid"))
+            record.values["contact_id"] = self._contact_id(record)
             certification_id = await self._write_row("certifications", Certification, record)
             for side in (CertificationSide.FRONT, CertificationSide.BACK):
                 planned = record.children.get(side.value)
@@ -384,6 +408,7 @@ class _Writer:
 
             record.values["trip_id"] = self._id("trips", record.children.get("trip_uuid"))
             record.values["course_id"] = self._id("courses", record.children.get("course_uuid"))
+            record.values["contact_id"] = self._contact_id(record)
             dive_id = await self._write_row("dives", Dive, record)
 
             await replace_mixtures_for_dive(

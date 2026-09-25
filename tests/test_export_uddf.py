@@ -394,7 +394,10 @@ class TestDiveContent:
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         links = _dive(_tree(document), 0).findall(f"{UDDF}informationbeforedive/{UDDF}link")
         sites = _tree(document).findall(f"{UDDF}divesite/{UDDF}site")
-        assert [link.get("ref") for link in links] == [site.get("id") for site in sites]
+        # The dive's contact follows its sites, never ahead of the primary one.
+        assert [link.get("ref") for link in links] == [site.get("id") for site in sites] + [
+            f"contact-{UUIDS['contact-resort']}"
+        ]
 
     @pytest.mark.asyncio
     async def test_a_dive_with_no_recorded_depth_still_gets_the_mandatory_element(self, monkeypatch):

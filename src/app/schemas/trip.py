@@ -16,9 +16,10 @@ MAX_TRIP_PARTS = 20
 
 
 class TripPartInput(BaseModel):
-    """One stretch of a trip on the way in: an optional date range and an optional place.
+    """One stretch of a trip on the way in: an optional date range, an optional place and
+    an optional accommodation.
 
-    Both halves are optional and each absence means something. Dates and no location is a
+    Every member is optional and each absence means something. Dates and no location is a
     transit day or a week nobody geocoded; a location and no dates is a stop whose timing
     the diver has not filled in. A part carries no name of its own - `location.name` is
     the place's name, and a part without one is identified by its dates or its ordinal.
@@ -29,6 +30,10 @@ class TripPartInput(BaseModel):
     start_date: Annotated[date | None, Field(default=None, examples=["2024-06-01"])]
     end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"])]
     location: LocationInput | None = None
+    accommodation_uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(default=None, description="Public id of the contact the diver stayed at during this part"),
+    ]
 
     @model_validator(mode="after")
     def check_date_range(self) -> TripPartInput:
@@ -43,6 +48,10 @@ class TripPartRead(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
     location: LocationRead | None = None
+    accommodation_uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(default=None, description="Public id of the contact the diver stayed at during this part"),
+    ]
 
 
 class TripBase(BaseModel):

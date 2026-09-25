@@ -39,7 +39,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import ValidationError
+from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid6 import uuid7
@@ -48,6 +48,7 @@ from ...core.schemas import NOTES_MAX_LENGTH
 from ...core.utils.datetime_offset import split_dive_start_time, split_local_start_time
 from ...core.utils.uploads import safe_filename
 from ...models.certification import Certification
+from ...models.contact import Contact
 from ...models.course import Course
 from ...models.dive import Dive
 from ...models.dive_file import DiveFile
@@ -61,6 +62,7 @@ from ...models.species import Species
 from ...models.trip import Trip
 from ...models.user import User
 from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, CertificationAgency, CertificationSide
+from ...schemas.contact import ADDRESS_FIELDS, CONTACT_ADDRESS_PREFIX, canonical_roles, check_website
 from ...schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND, SINGLE_SERIES_CHANNELS, ProfileEventType
 from ...schemas.export import DIVEJSON_PRODUCER_KEY
 from ...schemas.gear_item import GearType
@@ -70,6 +72,7 @@ from ...schemas.logbook_import import (
     ImportCheckInDetail,
     ImportCheckInSubmission,
     ImportCollectionReport,
+    ImportContact,
     ImportCourse,
     ImportDecoModel,
     ImportDive,
@@ -143,14 +146,17 @@ COLLECTIONS: tuple[str, ...] = (
     "gear_service_schedules",
     "gear_service_records",
     "certifications",
+    "contacts",
 )
 
 # References only ever point *backwards* along this order, so one pass resolves everything:
-# a dive names a trip, a course, sites, gear and species; a gear set, a schedule and a
-# service record name gear; a certification names a course. Nothing here is recursive,
-# which is what makes a fixed order enough rather than a graph walk - and it is the order
-# `writer.py` writes in, so a reference always resolves to a row that already exists.
+# a trip's parts, a course, a service record, a certification and a dive name a contact; a
+# dive names a trip, a course, sites, gear and species; a gear set, a schedule and a service
+# record name gear; a certification names a course. Nothing here is recursive, which is what
+# makes a fixed order enough rather than a graph walk - and it is the order `writer.py`
+# writes in, so a reference always resolves to a row that already exists.
 _RESOLUTION_ORDER: tuple[str, ...] = (
+    "contacts",
     "trips",
     "courses",
     "sites",
@@ -162,6 +168,8 @@ _RESOLUTION_ORDER: tuple[str, ...] = (
     "certifications",
     "dives",
 )
+
+_EMAIL = TypeAdapter(EmailStr)
 
 # How many notes a report carries. A logbook whose every record has something to say about
 # it would otherwise produce a response larger than the document it describes; the counts
@@ -638,6 +646,11 @@ class _Planner:
         self._recording_matches: list[PlannedRecordingMatch] = []
         # `None` until asked. See `_has_recordings`.
         self._account_has_recordings: bool | None = None
+        # The caller's contacts by name, and the names this document's contacts - and the
+        # training centers of an export made before contacts existed - have claimed so far.
+        # Filled by `_plan_contacts`, which runs before anything that references a contact.
+        self._contact_index: dict[tuple[str, ...], int] = {}
+        self._contact_aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
 
     # ------------------------------------------------------------------ notes
 
@@ -1074,6 +1087,7 @@ class _Planner:
             self._note(note.code, note.message, collection=note.collection, uuid=note.uuid)
         await self._plan_diver()
         await self._plan_portrait()
+        await self._plan_contacts()
         await self._plan_trips()
         await self._plan_courses()
         await self._plan_sites()
@@ -1192,6 +1206,133 @@ class _Planner:
         self._note(ImportNoteCode.FILE_SKIPPED, reason)
         return None
 
+    async def _plan_contacts(self) -> None:
+        existing = await self._rows_by_uuid(Contact, [contact.uuid for contact in self._document.contacts])
+        self._contact_index = await self._existing_by_key(Contact, (Contact.name,), lambda row: _key(row[0]))
+        for contact in self._document.contacts:
+            self._claim_document_uuid("contacts", contact)
+            self._records["contacts"][contact.uuid] = self._plan_contact(contact, existing)
+
+    def _plan_contact(self, contact: ImportContact, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
+        collection = "contacts"
+        if not (contact.name or "").strip():
+            return self._skip(collection, contact.uuid, "A contact needs a name, and this one has none.")
+        record = self._resolve(collection, contact.uuid, existing)
+        if record.action is Action.CREATE:
+            contact_key = _key(contact.name)
+            record = self._claim_unique(
+                collection,
+                record,
+                self._contact_index,
+                self._contact_aliases,
+                contact_key,
+                "contact",
+                index_key=contact_key,
+            )
+        if record.action not in (Action.CREATE, Action.RESTORE):
+            return record
+
+        record.values = {
+            "user_id": self._user_id,
+            "name": contact.name,
+            # Already stripped of values outside the vocabulary by the reader (§5.6); a set,
+            # so written in vocabulary order with repeats folded, as the write schema does.
+            "roles": [role.value for role in canonical_roles(contact.roles or [])],
+            "phone": contact.phone,
+            "email": self._contact_email(contact),
+            "website": self._contact_website(contact),
+            **self._address(contact),
+            "notes": self._notes_text(collection, contact.uuid, contact.notes),
+            "created_at": self._created_at(contact.created_at),
+        }
+        return record
+
+    def _contact_email(self, contact: ImportContact) -> str | None:
+        """The email as `EmailStr` accepts it, or `None` and a note. The format checks for an
+        `@` and nothing more; the app's write schema checks the address, and a value this app
+        could not have written itself is dropped rather than stored."""
+        if contact.email is None:
+            return None
+        try:
+            return str(_EMAIL.validate_python(contact.email))
+        except ValidationError:
+            self._dropped("contacts", contact.uuid, "The email address was not one this app can store, and was dropped")
+            return None
+
+    def _contact_website(self, contact: ImportContact) -> str | None:
+        """The website as an absolute `http(s)` URL, or `None` and a note - no scheme is
+        guessed, a bare host being as likely a typo as a site."""
+        try:
+            return check_website(contact.website)
+        except ValueError:
+            self._dropped(
+                "contacts", contact.uuid, "The website was not an absolute http or https address, and was dropped"
+            )
+            return None
+
+    def _address(self, contact: ImportContact) -> dict[str, Any]:
+        """The address as its five columns, every one named, or none of it without a country
+        - the anchor both formats require and `ck_contact_address_has_country` enforces."""
+        columns: dict[str, Any] = {f"{CONTACT_ADDRESS_PREFIX}{field}": None for field in ADDRESS_FIELDS}
+        address = contact.address
+        if address is None:
+            return columns
+        if not (address.country or "").strip():
+            if any(getattr(address, field) for field in ADDRESS_FIELDS):
+                self._dropped("contacts", contact.uuid, "The address named no country, and was dropped")
+            return columns
+        return {f"{CONTACT_ADDRESS_PREFIX}{field}": getattr(address, field) for field in ADDRESS_FIELDS}
+
+    def _contact_link(
+        self,
+        collection: str,
+        record_uuid: uuid_pkg.UUID,
+        contact_uuid: uuid_pkg.UUID | None,
+        training_center: str | None,
+    ) -> dict[str, Any]:
+        """A course's or certification's contact, from its reference or - in an export made
+        before contacts were records - from its training-center string.
+
+        The reference wins where both are present. A legacy string names a contact by its
+        trimmed name, claimed against the caller's contacts and this document's own as any
+        contact is: one the caller already has is linked by row id (`contact_id`), and any
+        other is planned as a new contact with the `school` role, which the next record naming
+        the same string then shares. Planned here, never created: a preview predicts. So the
+        contacts collection's counts include the contacts an old export's training centers
+        make, beyond the records its `contacts[]` carries.
+        """
+        if contact_uuid is not None:
+            return {"contact_uuid": self._reference(collection, record_uuid, "contacts", contact_uuid)}
+        name = (training_center or "").strip()
+        if not name:
+            return {}
+        legacy_key = _key(name)
+        row_id = self._contact_index.get(legacy_key)
+        if row_id is not None:
+            return {"contact_id": row_id}
+        owner = self._contact_aliases.get(legacy_key)
+        if owner is not None:
+            return {"contact_uuid": owner}
+        source_uuid = uuid7()
+        self._contact_aliases[legacy_key] = source_uuid
+        self._records["contacts"][source_uuid] = PlannedRecord(
+            action=Action.CREATE,
+            source_uuid=source_uuid,
+            uuid=source_uuid,
+            values={
+                "user_id": self._user_id,
+                "name": name,
+                "roles": ["school"],
+                **{f"{CONTACT_ADDRESS_PREFIX}{field}": None for field in ADDRESS_FIELDS},
+                "phone": None,
+                "email": None,
+                "website": None,
+                "notes": "",
+                "created_at": datetime.now(UTC),
+            },
+        )
+        return {"contact_uuid": source_uuid}
+
     async def _plan_trips(self) -> None:
         existing = await self._rows_by_uuid(Trip, [trip.uuid for trip in self._document.trips])
         index = await self._existing_by_key(Trip, (Trip.name,), lambda row: _key(row[0]))
@@ -1247,7 +1388,16 @@ class _Planner:
             place = self._place(
                 "trips", trip.uuid, part.location, label="trip part's location", centre_label="trip part's"
             )
-            rows.append({"position": len(rows), "start_date": part.starts_on, "end_date": ends_on, **place})
+            rows.append(
+                {
+                    "position": len(rows),
+                    "start_date": part.starts_on,
+                    "end_date": ends_on,
+                    **place,
+                    # Resolved to a row id by the writer, which writes contacts first.
+                    "accommodation_uuid": self._reference("trips", trip.uuid, "contacts", part.accommodation_uuid),
+                }
+            )
         return rows
 
     async def _plan_courses(self) -> None:
@@ -1291,10 +1441,10 @@ class _Planner:
             "end_date": end_date,
             "instructor_name": course.instructor_name,
             "instructor_number": course.instructor_number,
-            "training_center": course.training_center,
             "notes": self._notes_text("courses", course.uuid, course.notes),
             "created_at": self._created_at(course.created_at),
         }
+        record.children = self._contact_link("courses", course.uuid, course.contact_uuid, course.training_center)
         return record
 
     async def _plan_sites(self) -> None:
@@ -1632,6 +1782,7 @@ class _Planner:
         }
         record.children = {
             "gear_uuid": gear_uuid,
+            "contact_uuid": self._reference(collection, service.uuid, "contacts", service.contact_uuid),
             # Absent when the record predates its rule or the rule was deleted - history
             # outlives the rule (spec §6.15), which is why the FK is `ON DELETE SET NULL`.
             "schedule_uuid": self._reference(
@@ -1676,11 +1827,13 @@ class _Planner:
             "expires_on": certification.expires_on,
             "instructor_name": certification.instructor_name,
             "instructor_number": certification.instructor_number,
-            "training_center": certification.training_center,
             "notes": self._notes_text("certifications", certification.uuid, certification.notes),
             "created_at": self._created_at(certification.created_at),
         }
         record.children = {
+            **self._contact_link(
+                collection, certification.uuid, certification.contact_uuid, certification.training_center
+            ),
             "course_uuid": self._reference(collection, certification.uuid, "courses", certification.course_uuid),
             CertificationSide.FRONT.value: self._plan_card_file(
                 collection, certification.uuid, certification.front_file
@@ -1961,6 +2114,7 @@ class _Planner:
         record.children = {
             "trip_uuid": self._reference(collection, dive.uuid, "trips", dive.trip_uuid),
             "course_uuid": self._reference(collection, dive.uuid, "courses", dive.course_uuid),
+            "contact_uuid": self._reference(collection, dive.uuid, "contacts", dive.contact_uuid),
             "site_uuids": self._reference_list(collection, dive.uuid, "sites", dive.site_uuids),
             "gear_uuids": self._reference_list(collection, dive.uuid, "gear", dive.gear_uuids),
             "species_ids": self._plan_species_links(dive),

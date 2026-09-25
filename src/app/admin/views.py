@@ -2,6 +2,7 @@ from crudadmin import CRUDAdmin
 
 from ..models.auth_audit_event import AuthAuditEvent
 from ..models.certification import Certification
+from ..models.contact import Contact
 from ..models.course import Course
 from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
@@ -24,6 +25,7 @@ from ..models.user_dive_stats import UserDiveStats
 from ..models.user_session import UserSession
 from ..schemas.auth_audit_event import AuthAuditEventCreateInternal
 from ..schemas.certification import CertificationCreateInternal, CertificationUpdate
+from ..schemas.contact import ContactCreateInternal, ContactUpdate
 from ..schemas.course import CourseCreateInternal, CourseUpdate
 from ..schemas.dive import DiveCreateInternal, DiveUpdateInternal
 from ..schemas.dive_dive_site import DiveDiveSiteCreate, DiveDiveSiteUpdate
@@ -119,8 +121,8 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view"},
     )
 
-    # `DiveSite`, `Trip`, `Course`, `GearItem`, `GearSet`, `GearServiceSchedule` and
-    # `DiveFormPreset` are registered without `"delete"`, and that is not squeamishness about
+    # `DiveSite`, `Trip`, `Course`, `Contact`, `GearItem`, `GearSet`, `GearServiceSchedule`
+    # and `DiveFormPreset` are registered without `"delete"`, and that is not squeamishness about
     # a superuser having the power. FastCRUD's `delete` branches on whether the model carries
     # `is_deleted`, and since they hard-delete it takes the `DELETE FROM` branch - so the button that
     # used to flag one row now destroys the row, its schedules, its service records and
@@ -142,11 +144,10 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view", "create", "update"},
     )
 
-    # `CourseUpdate`, not a `*UpdateRequest`: unlike a dive or a certification, a course
-    # carries no non-column reference for a request schema to add, so the API's PATCH body
-    # and the admin form are the same shape. `ck_course_date_range` is what stops this form
-    # storing an inverted date range - the merged-value check lives on the route, which the
-    # panel does not go through.
+    # `CourseUpdate`, the column-only schema, not the API's `CourseUpdateRequest`, whose
+    # `contact_uuid` is a reference this form could not resolve. `ck_course_date_range` is
+    # what stops this form storing an inverted date range - the merged-value check lives on
+    # the route, which the panel does not go through.
     admin.add_view(
         model=Course,
         create_schema=CourseCreateInternal,
@@ -154,9 +155,18 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view", "create", "update"},
     )
 
-    # `DiveFormPresetUpdate`, not a `*UpdateRequest`: like a course, a preset carries no
-    # non-column reference for a request schema to add, so the API's PATCH body and the
-    # admin form are the same shape.
+    # The address is flat here, as the table has it; `ck_contact_address_has_country` is
+    # what stops this form storing a street with no country, the nested request shape's rule.
+    admin.add_view(
+        model=Contact,
+        create_schema=ContactCreateInternal,
+        update_schema=ContactUpdate,
+        allowed_actions={"view", "create", "update"},
+    )
+
+    # `DiveFormPresetUpdate`, not a `*UpdateRequest`: a preset carries no non-column
+    # reference for a request schema to add, so the API's PATCH body and the admin form are
+    # the same shape.
     admin.add_view(
         model=DiveFormPreset,
         create_schema=DiveFormPresetCreateInternal,

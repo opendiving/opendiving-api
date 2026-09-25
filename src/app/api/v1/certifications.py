@@ -17,6 +17,7 @@ from ...crud.crud_certifications import (
     get_certifications_page,
     get_expiring_overview_for_user,
 )
+from ...crud.crud_contacts import ContactRef, get_contact_refs_by_ids
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
 from ...schemas.certification import (
     CertificationCreate,
@@ -29,7 +30,7 @@ from ...schemas.certification import (
     CertificationUpdateRequest,
     validate_agency_pairing,
 )
-from ...services.cache_invalidation import invalidate_certification_caches
+from ...services.cache_invalidation import invalidate_certification_caches, invalidate_contact_caches
 from ...services.certification_files import (
     UnsupportedCardFileError,
     delete_certification_file,
@@ -39,6 +40,7 @@ from ...services.certification_files import (
     load_certification_file,
     store_certification_file,
 )
+from ...services.contact_links import CONTACT_NOT_FOUND, contact_link_updates
 
 router = APIRouter(tags=["certifications"])
 
@@ -48,21 +50,25 @@ router = APIRouter(tags=["certifications"])
 # is not the case this card is sized for, and `truncated` tells them so.
 EXPIRING_OVERVIEW_LIMIT = 200
 
-# The one integrity failure a certification write can hit. `course_id` is the only FK on
-# this table that a request can set, and it is resolved by a separate query - so a course
-# hard-deleted in the window between `resolve_course_id_for_user` and the write reaches
-# Postgres as a violation of this constraint.
+# The two integrity failures a certification write can hit. `course_id` and `contact_id`
+# are the only FKs on this table that a request can set, and each is resolved by a separate
+# query - so a course or contact hard-deleted in the window between the resolve and the
+# write reaches Postgres as a violation of one of these constraints.
 #
 # 422 rather than a raw 500, and the same sentence a foreign or missing uuid already gets:
 # from the caller's side the two are the same thing, and the dive routes answer that way
-# for the identical FK (`_fk_error_detail` in `dives.py`). This is the narrow shape of
+# for the identical FKs (`_fk_error_detail` in `dives.py`). This is the narrow shape of
 # that helper rather than a copy of it - the other constraints on this table are `NOT
 # NULL`s the schemas already refuse, so there is nothing else here to translate.
-_COURSE_FK_CONSTRAINT = "certification_course_id_fkey"
+_FK_CONSTRAINT_MESSAGES = {
+    "certification_course_id_fkey": "Course not found.",
+    "certification_contact_id_fkey": CONTACT_NOT_FOUND,
+}
 
 
-async def _refuse_a_vanished_course(db: AsyncSession, exc: IntegrityError) -> NoReturn:
-    """Turn a lost `course_id` reference into the 422 the rest of the API gives for one.
+async def _refuse_a_vanished_reference(db: AsyncSession, exc: IntegrityError) -> NoReturn:
+    """Turn a lost `course_id` or `contact_id` reference into the 422 the rest of the API
+    gives for one.
 
     Rolls back first: the failed statement leaves the session in an aborted transaction,
     and anything the route did afterwards (a cache invalidation, say) would run against a
@@ -73,8 +79,9 @@ async def _refuse_a_vanished_course(db: AsyncSession, exc: IntegrityError) -> No
     wrong thing - the failure `_fk_error_detail`'s own comment records.
     """
     await db.rollback()
-    if _COURSE_FK_CONSTRAINT in str(exc.orig):
-        raise UnprocessableEntityException("Course not found.") from exc
+    for constraint, detail in _FK_CONSTRAINT_MESSAGES.items():
+        if constraint in str(exc.orig):
+            raise UnprocessableEntityException(detail) from exc
     raise exc
 
 
@@ -83,6 +90,7 @@ def _to_public_certification(
     *,
     user_uuid: uuid_pkg.UUID,
     course_uuid: uuid_pkg.UUID | None = None,
+    contact: ContactRef | None = None,
     files: list[CertificationFileInfo] | None = None,
 ) -> CertificationRead:
     """Convert an internal certification representation (integer FKs) into its public
@@ -94,13 +102,16 @@ def _to_public_certification(
     skip the lookup entirely, a brand-new certification provably having none.
     `course_uuid` is passed in for the same reason: this stays a synchronous pure
     function, and each caller resolves the value the cheapest way it can - batched across
-    a page for the readers, straight off the request body for the create path.
+    a page for the readers, straight off the request body for the create path. `contact`
+    too, whose name fills the read-only `training_center` the previous web build prints.
     """
     data = db_certification if isinstance(db_certification, dict) else db_certification.model_dump()
     return CertificationRead(
-        **{k: v for k, v in data.items() if k not in ("id", "user_id", "course_id")},
+        **{k: v for k, v in data.items() if k not in ("id", "user_id", "course_id", "contact_id")},
         user_uuid=user_uuid,
         course_uuid=course_uuid,
+        contact_uuid=None if contact is None else contact.uuid,
+        training_center=None if contact is None else contact.name,
         files=files or [],
     )
 
@@ -151,9 +162,11 @@ async def write_certification(
     """Create a certification. Card images are attached afterwards with
     `PUT /certification/{uuid}/file/{side}` - see that route for why.
 
-    `course_uuid` optionally links the card to the training course that issued it; one
-    that isn't the caller's own - or doesn't exist - is a 422, the same answer
-    `POST /dive` gives for a trip it cannot resolve.
+    `course_uuid` optionally links the card to the training course that issued it, and
+    `contact_uuid` to who ran it; one that isn't the caller's own - or doesn't exist - is a
+    422, the same answer `POST /dive` gives for a trip it cannot resolve. `training_center`
+    is deprecated and read only when `contact_uuid` is absent: a name resolves to the
+    caller's contact of that name, or creates one.
     """
     course_id: int | None = None
     if certification.course_uuid is not None:
@@ -162,24 +175,39 @@ async def write_certification(
         )
         if course_id is None:
             raise UnprocessableEntityException("Course not found.")
+    link = await contact_link_updates(
+        db,
+        user_id=current_user["id"],
+        fields_set=certification.model_fields_set,
+        contact_uuid=certification.contact_uuid,
+        training_center=certification.training_center,
+    )
 
     certification_internal = CertificationCreateInternal(
-        **certification.model_dump(exclude={"course_uuid"}),
+        **certification.model_dump(exclude={"course_uuid", "contact_uuid", "training_center"}),
         user_id=current_user["id"],
         course_id=course_id,
+        contact_id=link.updates.get("contact_id"),
     )
     try:
         created = await crud_certifications.create(
             db=db, object=certification_internal, schema_to_select=CertificationReadInternal, return_as_model=True
         )
     except IntegrityError as e:
-        await _refuse_a_vanished_course(db, e)
+        await _refuse_a_vanished_reference(db, e)
     await invalidate_certification_caches(current_user["id"])
+    if link.created_contact:
+        await invalidate_contact_caches(current_user["id"])
 
+    created_certification = cast(CertificationReadInternal, created)
+    contact_by_id = await get_contact_refs_by_ids(
+        db=db, contact_ids=[created_certification.contact_id], user_id=current_user["id"]
+    )
     return _to_public_certification(
-        cast(CertificationReadInternal, created),
+        created_certification,
         user_uuid=current_user["uuid"],
         course_uuid=certification.course_uuid,
+        contact=contact_by_id.get(created_certification.contact_id),
     )
 
 
@@ -228,11 +256,15 @@ async def _cached_read_certifications(
     )
     referenced_course_ids = [item["course_id"] for item in data["data"] if item["course_id"] is not None]
     course_uuid_by_id = await get_course_uuids_by_ids(db=db, course_ids=referenced_course_ids, user_id=user_id)
+    contact_by_id = await get_contact_refs_by_ids(
+        db=db, contact_ids=[item["contact_id"] for item in data["data"]], user_id=user_id
+    )
     data["data"] = [
         _to_public_certification(
             item,
             user_uuid=user_uuid,
             course_uuid=course_uuid_by_id.get(item["course_id"]) if item["course_id"] is not None else None,
+            contact=contact_by_id.get(item["contact_id"]),
             files=files_by_certification[item["id"]],
         ).model_dump()
         for item in data["data"]
@@ -299,9 +331,14 @@ async def _cached_read_certification(
             db=db, course_ids=[db_certification.course_id], user_id=user_id
         )
         course_uuid = course_uuid_by_id.get(db_certification.course_id)
+    contact_by_id = await get_contact_refs_by_ids(db=db, contact_ids=[db_certification.contact_id], user_id=user_id)
 
     return _to_public_certification(
-        db_certification, user_uuid=owner_uuid, course_uuid=course_uuid, files=files[db_certification.id]
+        db_certification,
+        user_uuid=owner_uuid,
+        course_uuid=course_uuid,
+        contact=contact_by_id.get(db_certification.contact_id),
+        files=files[db_certification.id],
     )
 
 
@@ -339,11 +376,12 @@ async def patch_certification(
     clearing one while the other still requires it is a 422 rather than a half-updated
     row. Passing `null` for `course_uuid` detaches the card from its training course,
     which is distinct from omitting the key; a course that isn't the caller's own is a
-    422.
+    422. `contact_uuid` works the same way, and a deprecated `training_center` counts only
+    without it - a blank one changes nothing.
     """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
-    update_data = values.model_dump(exclude={"course_uuid"}, exclude_unset=True)
+    update_data = values.model_dump(exclude={"course_uuid", "contact_uuid", "training_center"}, exclude_unset=True)
     if "agency" in update_data or "agency_other" in update_data:
         _validate_agency_pairing(
             update_data.get("agency", db_certification.agency),
@@ -364,12 +402,23 @@ async def patch_certification(
                 raise UnprocessableEntityException("Course not found.")
             update_data["course_id"] = course_id
 
+    link = await contact_link_updates(
+        db,
+        user_id=db_certification.user_id,
+        fields_set=values.model_fields_set,
+        contact_uuid=values.contact_uuid,
+        training_center=values.training_center,
+    )
+    update_data |= link.updates
+
     if update_data:
         try:
             await crud_certifications.update(db=db, object=update_data, uuid=uuid)
         except IntegrityError as e:
-            await _refuse_a_vanished_course(db, e)
+            await _refuse_a_vanished_reference(db, e)
         await invalidate_certification_caches(db_certification.user_id)
+    if link.created_contact:
+        await invalidate_contact_caches(db_certification.user_id)
 
     return {"message": "Certification updated"}
 

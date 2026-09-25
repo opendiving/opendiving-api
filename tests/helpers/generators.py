@@ -70,6 +70,15 @@ def create_dive_site(db: Session, user: models.User) -> models.DiveSite:
     )
 
 
+def create_contact(db: Session, user: models.User, *, roles: list[str] | None = None) -> models.Contact:
+    """A contact of this user's, named uniquely because `ux_contact_user_id_name_lower`
+    would refuse a second run's row of the same name."""
+    return _persist(
+        db,
+        models.Contact(user_id=user.id, name=f"Blue Ocean {uuid7().hex[-8:]}", roles=roles or ["dive_center"]),
+    )
+
+
 def create_trip(db: Session, user: models.User) -> models.Trip:
     """A trip with one dated part, which is the shape the migration gives every trip that
     had no place - and the shape every caller here was getting when a trip held its own

@@ -87,8 +87,9 @@ batched by `loader.py`.
 import bisect
 import uuid as uuid_pkg
 import xml.etree.ElementTree as ET
+from collections import Counter
 from collections.abc import AsyncIterator, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
@@ -96,6 +97,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
 from ...core.utils.datetime_offset import combine_dive_start_time
+from ...models.contact import Contact
 from ...models.dive import Dive
 from ...models.gear_item import GearItem
 from ...schemas.dive import DiveMode
@@ -476,6 +478,8 @@ def _diver_element(bundle: ExportBundle) -> ET.Element:
     # No `<contact><email>`, although the schema has the slot: a UDDF file is the thing a
     # diver hands to a dive shop or uploads to divelogs.de, and their address riding along
     # in it would be a surprise. It is in `logbook.divejson`, which is the diver's own copy.
+    # A contact's email *is* written (`_contact_contents`): that is the listing on a shop's
+    # sign, which the diver chose to record, not the diver's own address.
     if not is_blank(user.phone):
         _sub(_sub(owner, "contact"), "phone", user.phone)
     equipment = _equipment_element(bundle)
@@ -489,10 +493,81 @@ def _diver_element(bundle: ExportBundle) -> ET.Element:
     return diver
 
 
+def _is_shop(contact: Contact) -> bool:
+    """Whether a contact goes out as a `<shop>`: its roles exactly `["shop"]`. That is the one
+    slot that says its role back; every other contact is a `<divebase>`, the only slot with
+    an address, a contact block and notes that anything may link to."""
+    return list(contact.roles) == ["shop"]
+
+
+def _contact_contents(element: ET.Element, contact: Contact) -> None:
+    """A contact's `<address>`, `<contact>` and `<notes>`, in the order a base, a shop and a
+    part's copy all declare them.
+
+    The address only with its country, which `addressType` requires and the column
+    constraint guarantees whenever anything else is stored. One `<contact>` holds whichever
+    of the phone, the email and the website are present.
+    """
+    if contact.address_country:
+        address = _sub(element, "address")
+        # `addressType` is an `xs:all`; this is its declaration order, `region` being
+        # UDDF's `<province>`.
+        for value, tag in (
+            (contact.address_street, "street"),
+            (contact.address_city, "city"),
+            (contact.address_postcode, "postcode"),
+            (contact.address_country, "country"),
+            (contact.address_region, "province"),
+        ):
+            if value:
+                _sub(address, tag, value)
+    # `contactType` is an `xs:sequence`, and this is its order.
+    listed = [
+        (tag, value)
+        for tag, value in (("phone", contact.phone), ("email", contact.email), ("homepage", contact.website))
+        if value
+    ]
+    if listed:
+        block = _sub(element, "contact")
+        for tag, value in listed:
+            _sub(block, tag, value)
+    if contact.notes:
+        _sub(_sub(element, "notes"), "para", contact.notes)
+
+
+def _contact_element(parent: ET.Element, tag: str, contact: Contact) -> None:
+    """One contact as a `<divebase>` or a `<shop>`.
+
+    `roles` has no element; the slot says `dive_center` or `shop` back and a part's copy
+    `accommodation`. A base carrying only a name that no dive links and no copy names reads
+    back as the placeholder a reader skips - every school only a course or a card names,
+    those having no slot at all - which is the mapping working rather than a loss to hide.
+    The reference converter reports both; this writer, like the rest of it, has no report
+    channel.
+    """
+    element = _sub(parent, tag, id=_uddf_id("contact", contact.uuid))
+    _sub(element, "name", contact.name)
+    _contact_contents(element, contact)
+
+
+def _business_element(bundle: ExportBundle) -> ET.Element | None:
+    shops = [contact for contact in bundle.contacts if _is_shop(contact)]
+    if not shops:
+        return None
+    business = ET.Element("business")
+    for contact in shops:
+        _contact_element(business, "shop", contact)
+    return business
+
+
 def _divesite_element(bundle: ExportBundle) -> ET.Element | None:
-    if not bundle.dive_sites:
+    bases = [contact for contact in bundle.contacts if not _is_shop(contact)]
+    if not (bundle.dive_sites or bases):
         return None
     divesite = ET.Element("divesite")
+    # Bases first: `<divesite>` is an `xs:sequence` of bases and then sites.
+    for contact in bases:
+        _contact_element(divesite, "divebase", contact)
     for site in bundle.dive_sites:
         element = _sub(divesite, "site", id=_uddf_id("site", site.uuid))
         _sub(element, "name", site.name)
@@ -520,7 +595,46 @@ def _divesite_element(bundle: ExportBundle) -> ET.Element | None:
     return divesite
 
 
-def _trippart_element(trip_element: ET.Element, part: TripPartRead | None) -> ET.Element:
+@dataclass
+class _Stays:
+    """Where the parts stayed, and the copies written so far.
+
+    A part's accommodation goes out as an inline `<accomodation>` copy, which a reader folds
+    back into its contact by trimmed, case-folded **name** - so where two contacts share one,
+    a copy of either would come back as whichever the reader met first, and a part staying
+    at one of them gets no copy. Rare from this app, whose names are unique
+    case-insensitively, but two can still differ in surrounding whitespace.
+    """
+
+    bundle: ExportBundle
+    shared: set[str] = field(init=False)
+    copies: int = 0
+
+    def __post_init__(self) -> None:
+        names = Counter(contact.name.strip().casefold() for contact in self.bundle.contacts)
+        self.shared = {name for name, count in names.items() if count > 1}
+
+    def of(self, part: TripPartRead) -> Contact | None:
+        if part.accommodation_uuid is None:
+            return None
+        contact = self.bundle.contact_by_uuid.get(part.accommodation_uuid)
+        if contact is None or contact.name.strip().casefold() in self.shared:
+            return None
+        return contact
+
+    def copy_into(self, element: ET.Element, contact: Contact) -> None:
+        """The copy, under `accommodation-<n>` numbered in document order - an `xs:ID` has to
+        be document-unique and the contact's own id is its base's - and the part's `type`:
+        `boat` for a liveaboard, where the diver slept on the boat, else `hotel`. XSD
+        spelling, one m."""
+        copy = _sub(element, "accomodation", id=f"accommodation-{self.copies}")
+        self.copies += 1
+        _sub(copy, "name", contact.name)
+        _contact_contents(copy, contact)
+        element.set("type", "boat" if "liveaboard" in contact.roles else "hotel")
+
+
+def _trippart_element(trip_element: ET.Element, part: TripPartRead | None, stays: _Stays) -> ET.Element:
     """One `<trippart>`, which is what a part is - the mapping is close to an identity.
 
     `<name>` is mandatory (`trippartType` extends `simpleNamedType`) but is an
@@ -556,6 +670,10 @@ def _trippart_element(trip_element: ET.Element, part: TripPartRead | None) -> ET
         if location.latitude is not None and location.longitude is not None:
             _sub(geography, "latitude", _num(location.latitude))
             _sub(geography, "longitude", _num(location.longitude))
+    # After `<geography>` and before the notes the caller adds: `trippartType`'s sequence.
+    stay = None if part is None else stays.of(part)
+    if stay is not None:
+        stays.copy_into(element, stay)
     return element
 
 
@@ -563,6 +681,7 @@ def _divetrip_element(bundle: ExportBundle) -> ET.Element | None:
     if not bundle.trips:
         return None
     divetrip = ET.Element("divetrip")
+    stays = _Stays(bundle)
     for trip in bundle.trips:
         element = _sub(divetrip, "trip", id=_uddf_id("trip", trip.uuid))
         _sub(element, "name", trip.name)
@@ -571,7 +690,9 @@ def _divetrip_element(bundle: ExportBundle) -> ET.Element | None:
         # gets one - nameless and dateless, standing for the trip itself. Without the
         # floor the document would be silently invalid, and no fixture would catch it:
         # every trip in every corpus document has a place.
-        elements = [_trippart_element(element, part) for part in parts] or [_trippart_element(element, None)]
+        elements = [_trippart_element(element, part, stays) for part in parts] or [
+            _trippart_element(element, None, stays)
+        ]
         if trip.notes:
             # On the first part only. The reader joins every part's notes, so writing them
             # on each one returns them N times through a round trip.
@@ -873,6 +994,12 @@ def _dive_element(
     # that only reads one still reads the primary site because it is first.
     for site in bundle.sites_for(dive):
         _sub(before, "link", ref=_uddf_id("site", site.uuid))
+    # Who the dive was dived with, **after** the sites, so the first link is still the
+    # primary site for the importer that reads one. The XSD's `<link>` here is a bare
+    # `xs:IDREF`, so naming a base or a shop is schema-valid.
+    contact = bundle.contact_for(dive)
+    if contact is not None:
+        _sub(before, "link", ref=_uddf_id("contact", contact.uuid))
     if dive.dive_number > 0:
         # `xs:positiveInteger`. Nothing in the schema stops a dive being numbered 0, and
         # a 0 would make the whole document invalid rather than one element wrong.
@@ -960,6 +1087,7 @@ async def write_uddf(db: AsyncSession, bundle: ExportBundle, *, exported_at: dat
 
     header: Iterable[ET.Element | None] = (
         _generator_element(exported_at),
+        _business_element(bundle),
         _diver_element(bundle),
         _divesite_element(bundle),
         _divetrip_element(bundle),

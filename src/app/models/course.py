@@ -56,14 +56,18 @@ class Course(Base, PublicUUIDMixin, TimestampMixin):
     # `__table_args__` below.
     start_date: Mapped[date | None] = mapped_column(Date, default=None)
     end_date: Mapped[date | None] = mapped_column(Date, default=None)
-    # The same three fields a certification carries, with the same names and lengths
+    # The same fields a certification carries, with the same names and lengths
     # (`models/certification.py`), so the two never drift apart in vocabulary. The
     # duplication is deliberate rather than something to normalize away: imported history
     # arrives certification-first, with no course to hang the fields on, so a certification
     # has to stand alone.
     instructor_name: Mapped[str | None] = mapped_column(String(255), default=None)
     instructor_number: Mapped[str | None] = mapped_column(String(64), default=None)
-    training_center: Mapped[str | None] = mapped_column(String(255), default=None)
+    # Who ran the course - a school, a dive center, a club. `ON DELETE SET NULL`, the shape
+    # of `dive.course_id`: deleting the contact unlinks the course.
+    contact_id: Mapped[int | None] = mapped_column(
+        ForeignKey("contact.id", ondelete="SET NULL"), default=None, index=True
+    )
     notes: Mapped[str] = mapped_column(Text, default="")
 
     @declared_attr.directive

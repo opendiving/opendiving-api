@@ -365,7 +365,7 @@ class TestWhatUddfCannotHold:
         assert (course["agency"], course["status"]) == ("tdi", "completed")
         assert (course["starts_on"], course["ends_on"]) == ("2026-03-02", "2026-03-06")
         assert (course["instructor_name"], course["instructor_number"]) == ("Jae Kim", "TDI-88121")
-        assert course["training_center"] == "Blue Ocean"
+        assert course["contact_uuid"] == str(UUIDS["contact-school"])
 
     @pytest.mark.asyncio
     async def test_the_account_preferences_travel_under_this_producer_s_key(self, monkeypatch):

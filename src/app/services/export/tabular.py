@@ -73,6 +73,8 @@ DIVES_HEADER = (
     # The course a training dive was logged on, as its *name* - the same shape as `trip`
     # beside it. `courses.csv` carries the uuid that actually joins the two files.
     "course",
+    # Who the dive was dived with, by name on the same terms; `contacts.csv` has the uuid.
+    "contact",
     "dive_sites",
     "species",
     "cylinders",
@@ -169,6 +171,7 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
     )
     trip = bundle.trip_for(dive)
     course = bundle.course_for(dive)
+    contact = bundle.contact_for(dive)
     recordings = bundle.recordings_by_dive.get(dive.id, [])
     source_files = "; ".join(file.info.original_filename for recording in recordings for file in recording.files)
     readouts = recordings[0].readouts if recordings else {}
@@ -187,6 +190,7 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         dive.altitude,
         None if trip is None else trip.name,
         None if course is None else course.name,
+        None if contact is None else contact.name,
         "; ".join(site.name for site in bundle.sites_for(dive)),
         # Scientific names, not the common ones a diver reads on the dive page: they are
         # unambiguous, every row has one (a common name is often null), and a spreadsheet
@@ -255,7 +259,7 @@ def write_mixtures_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(MIXTURES_HEADER, rows())
 
 
-TRIPS_HEADER = ("name", "location", "start_date", "end_date", "dives", "notes", "trip_uuid")
+TRIPS_HEADER = ("name", "location", "accommodations", "start_date", "end_date", "dives", "notes", "trip_uuid")
 
 
 def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
@@ -278,6 +282,14 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
                 # file means *list* by. A spreadsheet column is not a place to put a nested
                 # shape, and `logbook.divejson` is where the structured places are.
                 trip_place_names(parts),
+                # Where the diver stayed, part by part, joined the same way; a part with no
+                # accommodation adds nothing.
+                "; ".join(
+                    contact.name
+                    for part in parts
+                    if part.accommodation_uuid is not None
+                    and (contact := bundle.contact_by_uuid.get(part.accommodation_uuid)) is not None
+                ),
                 None if start_date is None else start_date.isoformat(),
                 None if end_date is None else end_date.isoformat(),
                 counts.get(trip.id, 0),
@@ -296,7 +308,8 @@ COURSES_HEADER = (
     "end_date",
     "instructor_name",
     "instructor_number",
-    "training_center",
+    # Who ran it, by name: a CSV carries names, as `course` does in `dives.csv`.
+    "contact",
     "dives",
     "certifications",
     "notes",
@@ -334,7 +347,7 @@ def write_courses_csv(bundle: ExportBundle) -> Iterator[str]:
                 None if course.end_date is None else course.end_date.isoformat(),
                 course.instructor_name,
                 course.instructor_number,
-                course.training_center,
+                None if (contact := bundle.contact_for(course)) is None else contact.name,
                 dive_counts.get(course.id, 0),
                 certification_counts.get(course.id, 0),
                 course.notes,
@@ -447,6 +460,8 @@ GEAR_SERVICE_HEADER = (
     "label",
     "serviced_on",
     "performed_by",
+    # The shop that did the work, by name, beside the person in `performed_by`.
+    "contact",
     "interval_months",
     "interval_dives",
     "last_service_on",
@@ -486,6 +501,7 @@ def write_gear_service_csv(bundle: ExportBundle) -> Iterator[str]:
                 schedule.label,
                 None,
                 None,
+                None,
                 schedule.interval_months,
                 schedule.interval_dives,
                 None if schedule.last_service_on is None else schedule.last_service_on.isoformat(),
@@ -503,6 +519,7 @@ def write_gear_service_csv(bundle: ExportBundle) -> Iterator[str]:
                 record.label,
                 record.serviced_on.isoformat(),
                 record.performed_by,
+                None if (contact := bundle.contact_for(record)) is None else contact.name,
                 None,
                 None,
                 None,
@@ -524,7 +541,7 @@ CERTIFICATIONS_HEADER = (
     "expires_on",
     "instructor_name",
     "instructor_number",
-    "training_center",
+    "contact",
     # The course that issued this card, as its *name* - the same shape as `dives.csv`'s
     # `course` column, and new surface rather than a mirror of anything: a certification
     # has never carried a reference before.
@@ -547,13 +564,55 @@ def write_certifications_csv(bundle: ExportBundle) -> Iterator[str]:
                 None if certification.expires_on is None else certification.expires_on.isoformat(),
                 certification.instructor_name,
                 certification.instructor_number,
-                certification.training_center,
+                None if (contact := bundle.contact_for(certification)) is None else contact.name,
                 None if (course := bundle.course_for(certification)) is None else course.name,
                 certification.notes,
                 str(certification.uuid),
             )
 
     return _rows_to_csv(CERTIFICATIONS_HEADER, rows())
+
+
+CONTACTS_HEADER = (
+    "name",
+    "roles",
+    "phone",
+    "email",
+    "website",
+    "street",
+    "city",
+    "postcode",
+    "region",
+    "country",
+    "notes",
+    "contact_uuid",
+)
+
+
+def write_contacts_csv(bundle: ExportBundle) -> Iterator[str]:
+    """One row per contact, roles joined with the `;` these files mean *list* by and the
+    address spread across its own columns, so a spreadsheet can filter by country."""
+
+    def rows() -> Iterator[tuple[Any, ...]]:
+        for contact in bundle.contacts:
+            yield (
+                contact.name,
+                # The stored strings, as `gear-service.csv` writes a kind: a CSV has no
+                # vocabulary to keep.
+                "; ".join(contact.roles),
+                contact.phone,
+                contact.email,
+                contact.website,
+                contact.address_street,
+                contact.address_city,
+                contact.address_postcode,
+                contact.address_region,
+                contact.address_country,
+                contact.notes,
+                str(contact.uuid),
+            )
+
+    return _rows_to_csv(CONTACTS_HEADER, rows())
 
 
 # The archive's `csv/` directory, in the order the files are added to it.
@@ -567,4 +626,5 @@ CSV_WRITERS = (
     ("gear-items.csv", write_gear_items_csv),
     ("gear-service.csv", write_gear_service_csv),
     ("certifications.csv", write_certifications_csv),
+    ("contacts.csv", write_contacts_csv),
 )

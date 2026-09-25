@@ -36,10 +36,10 @@ class DefaultPreset(NamedTuple):
 DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
     DefaultPreset(
         # Keeps the required three plus dive site, maximum depth and notes: where, how deep,
-        # and what it was like - a holiday diver's whole logbook entry. Trip is hidden
-        # because it asks about a record the diver has to have created first, and bottom
-        # temperature because reading one off a computer is the point at which this stops
-        # being the shortest form the app can offer. The six per-cylinder keys only matter
+        # and what it was like - a holiday diver's whole logbook entry. Trip, course and
+        # contact are hidden because each asks about a record the diver has to have created
+        # first, and bottom temperature because reading one off a computer is the point at
+        # which this stops being the shortest form the app can offer. The six per-cylinder keys only matter
         # once Gas Mixtures is shown again, and they are hidden so that showing it gives a
         # plain tank card rather than a technical one - helium among them, since a holiday
         # diver's cylinder holds air or nitrox and the answer is always zero.
@@ -47,6 +47,7 @@ DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
         hidden_fields=(
             DiveFormField.TRIP_UUID,
             DiveFormField.COURSE_UUID,
+            DiveFormField.CONTACT_UUID,
             DiveFormField.AVG_DEPTH,
             DiveFormField.BOTTOM_TEMPERATURE,
             DiveFormField.VISIBILITY,

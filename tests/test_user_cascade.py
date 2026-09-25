@@ -32,6 +32,7 @@ from src.app.core.db.database import Base
 from src.app.models.auth_audit_event import AuthAuditEvent
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
+from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
@@ -51,6 +52,7 @@ from src.app.models.user_session import UserSession
 from src.app.schemas.auth_audit_event import AuthEventType
 from tests.conftest import db_available
 from tests.helpers.generators import (
+    create_contact,
     create_course,
     create_dive,
     create_dive_form_preset,
@@ -91,7 +93,7 @@ class TestDeletingAUserTakesEverythingWithIt:
     that hang off those - then a single `DELETE`.
 
     Most of them are the ten `48781087b2b3` had to redeclare. The rest are tables added
-    since - `course`, then `user_session` and `auth_audit_event` - each of which declared
+    since - `course`, then `user_session`, `auth_audit_event` and `contact` - each of which declared
     `ON DELETE CASCADE` from the outset, which is exactly the case the metadata sweep above
     cannot distinguish from a table that got it right by accident, so they are seeded here
     too. (No count in this sentence on purpose: the previous one said "eleven" and was one
@@ -120,6 +122,7 @@ class TestDeletingAUserTakesEverythingWithIt:
         # a second one here would make that sweep's "one row each" arithmetic wrong.
         create_trip(db, diver)
         create_course(db, diver)
+        create_contact(db, diver)
         item = create_gear_item(db, diver)
         schedule = create_gear_service_schedule(db, diver, item)
         create_gear_service_record(db, diver, item, schedule=schedule)
@@ -193,6 +196,7 @@ class TestDeletingAUserTakesEverythingWithIt:
         for model in (
             AuthAuditEvent,
             Certification,
+            Contact,
             Course,
             Dive,
             DiveFile,
@@ -210,7 +214,7 @@ class TestDeletingAUserTakesEverythingWithIt:
 
     def test_the_rows_that_hang_off_those_go_too(self, db: Session, populated_diver: User) -> None:
         """A cascade that stopped one level short would leave these orphaned rather than
-        raising, so counting only the eleven above would pass while they stayed."""
+        raising, so counting only the tables above would pass while they stayed."""
         second_order = {
             model: int(db.execute(select(func.count()).select_from(model)).scalar_one())
             for model in (CertificationFile, DiveDiveSite, GearSetItem, TripPart)

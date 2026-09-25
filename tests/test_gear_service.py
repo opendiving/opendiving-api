@@ -716,6 +716,7 @@ class TestAVanishedGearItemDoesNotFiveHundred:
             "serviced_on": date(2026, 1, 1),
             "dive_count_at_service": 0,
             "performed_by": None,
+            "contact_id": None,
             "notes": "",
             "created_at": datetime(2026, 1, 1, tzinfo=UTC),
         }
