@@ -691,7 +691,9 @@ class ImportCollectionReport(BaseModel):
     """What would happen (preview) or did happen (apply) to one envelope collection.
 
     The four counts are disjoint and sum to the number of records the document carries in
-    this collection. `restored` is its own figure and never hides inside `created` or
+    this collection - and for `contacts`, the contacts made of the training centers an
+    export written before contacts existed names on its courses and certifications, which it
+    carries as strings rather than records. `restored` is its own figure and never hides inside `created` or
     `skipped`: un-deleting is the one thing this feature does that no other surface in the
     app can, and a diver restoring a backup is entitled to see it counted.
     """

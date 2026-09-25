@@ -13,9 +13,10 @@ them.
 **The backfill reads live rows only.** One contact per distinct trimmed, lowercased string
 per diver, across every course and every certification that is not soft-deleted - named with
 the first spelling seen, trimmed (courses before cards, lowest id first), with the `school`
-role, since the column documented who *ran the course*. Every course and every card is then
-linked by that string, hidden cards included, so a hidden card is linked where a live row made
-the contact and nowhere else. A string only hidden cards carry goes with the column: a contact
+role, since the column documented who *ran the course* - not `dive_center`, which a club or a
+university that taught it is not. Every course and every card is then linked by that string,
+hidden cards included, so a hidden card is linked where a live row made the contact and nowhere
+else. A string only hidden cards carry goes with the column: a contact
 the diver cannot trace to anything they can see would be the one row in their list with no
 explanation. `d7a49b1c58e2` reads deleted rows too and says why; its reason - child rows that
 need a parent before a `NOT NULL` - has no counterpart here.

@@ -676,8 +676,8 @@ class _Planner:
         records**, and the second is remapped. The first keeps the identity, so every
         reference to it resolves where the document's own order says it should.
 
-        Mutating the parsed record is what keeps the ten planning functions from each having
-        to know about this; it is the reader's copy of the document and nothing else reads
+        Mutating the parsed record is what keeps the planning functions from each having to
+        know about this; it is the reader's copy of the document and nothing else reads
         it afterwards.
         """
         if record.uuid not in self._records[collection]:

@@ -7093,15 +7093,6 @@ equal sets are two equal lists; reads widen it to `list[str]`. A set rather than
 because a resort is a dive center with rooms and a scalar could never become a set later.
 *Rejected:* a single `type` with a `resort` member, which files one party two ways.
 
-## Training-center strings became `school` contacts, from live rows only
-
-Revision `a9b7dc451f00` made one contact per distinct trimmed, lowercased `training_center` per
-diver, across courses and live certifications, with the `school` role - the column documented who
-ran the course. Every row, hidden cards included, was then linked by its string, so a hidden card is
-linked only where a live row made the contact; a string only hidden cards carried went with the
-column. *Rejected:* reading hidden cards too, which fills a diver's contacts with names nothing they
-can see references; and `dive_center`, which a club or a university is not.
-
 ## The course and certification writes honour a training-center string for one web build
 
 Until the web build that sends `contact_uuid` is live, `CourseCreate`, `CourseUpdateRequest`,
