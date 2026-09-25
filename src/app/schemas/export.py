@@ -318,7 +318,7 @@ class ExportRecording(BaseModel):
     deco_model: ExportDecoModel | None = None
     salinity: Salinity | None = None
     started_at: Annotated[
-        DiveLocalStartTime | None,
+        datetime | None,
         Field(
             default=None,
             description="This device's own start, when it differs from the dive's. Absent means the dive's (§6.4a).",
@@ -356,10 +356,11 @@ class ExportDive(PublicUUIDSchema):
     """
 
     number: int
-    # Offset-aware wherever the source recorded an offset, and offset-less where it did
-    # not - spec §5.2's local date-time, which the writer emits verbatim from the column
-    # pair rather than fabricating a zone for. `exported_at` on the envelope is the one
-    # member that must always carry one, and it is generated rather than recorded.
+    # Offset-aware wherever the source recorded an offset, offset-less where it did not -
+    # spec §5.2's local date-time - and a bare date where it recorded no time of day, each
+    # written verbatim from the stored columns rather than fabricating a zone or a clock.
+    # `exported_at` on the envelope is the one member that must always carry one, and it is
+    # generated rather than recorded.
     started_at: DiveLocalStartTime
     duration: Annotated[int, Field(description="Dive duration in seconds, as logged")]
     notes: str | None = None

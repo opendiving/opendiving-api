@@ -302,10 +302,13 @@ class RecordingFacts:
     seconds. `sampled_span` is separately the profile's span, in the axis's milliseconds,
     which the same-recording gate compares and the strict gate does not: the same file is
     3 051 logged seconds and 3 473 sampled ones, so the two questions need two numbers.
+
+    `start_time` is `None` only on a stored side: a recording whose source stated no start,
+    which on a date-only dive is every recording that did not state its own.
     """
 
     device: DeviceIdentity
-    start_time: datetime
+    start_time: datetime | None
     utc_offset_minutes: int | None = None
     duration: int | None = None
     max_depth: float | None = None
@@ -342,6 +345,12 @@ def is_same_recording(incoming: RecordingFacts, stored: RecordingFacts) -> bool:
     what recorded it. The residual risk is two computers of unknown model started within two
     seconds *and* recording spans within two seconds of each other, which the second clause
     makes remote and which the attach form's own choice makes harmless.
+
+    **A stored recording with no start is matched on device and span alone**, the start clause
+    skipped rather than failed. That is the recording a date-only dive's import leaves when
+    its document states no start for it, and refusing it would turn that dive and the file
+    that later records it into two recordings of one computer; `fill_start` then gives it the
+    file's start.
     """
     if not stored.device.is_empty and not same_device(incoming.device, stored.device):
         return False
@@ -351,8 +360,10 @@ def is_same_recording(incoming: RecordingFacts, stored: RecordingFacts) -> bool:
         and incoming.device.dive_number != stored.device.dive_number
     ):
         return False
-    if _start_delta(incoming, stored) > SAME_RECORDING_START_TOLERANCE:
-        return False
+    if stored.start_time is not None:
+        delta = start_delta(incoming, stored)
+        if delta is None or delta > SAME_RECORDING_START_TOLERANCE:
+            return False
     if incoming.sampled_span is not None and stored.sampled_span is not None:
         return abs(incoming.sampled_span - stored.sampled_span) <= SAME_RECORDING_SPAN_TOLERANCE
     return True
@@ -390,7 +401,8 @@ def is_same_dive_strict(incoming: RecordingFacts, stored: RecordingFacts) -> boo
         return False
 
     longer = max(incoming.duration or 0, stored.duration or 0)
-    return _start_delta(incoming, stored) <= max(STRICT_START_FLOOR, longer / 2)
+    delta = start_delta(incoming, stored)
+    return delta is not None and delta <= max(STRICT_START_FLOOR, longer / 2)
 
 
 def is_same_dive_loose(incoming: RecordingFacts, stored: RecordingFacts) -> bool:
@@ -402,10 +414,14 @@ def is_same_dive_loose(incoming: RecordingFacts, stored: RecordingFacts) -> bool
     early.
     """
     longer = max(incoming.duration or 0, stored.duration or 0)
-    return _start_delta(incoming, stored) <= max(STRICT_START_FLOOR, longer / 2)
+    delta = start_delta(incoming, stored)
+    return delta is not None and delta <= max(STRICT_START_FLOOR, longer / 2)
 
 
-def _start_delta(incoming: RecordingFacts, stored: RecordingFacts) -> float:
+def start_delta(incoming: RecordingFacts, stored: RecordingFacts) -> float | None:
+    """|Δ| between two sides' starts, or `None` when either states none - a window cannot hold it."""
+    if incoming.start_time is None or stored.start_time is None:
+        return None
     return delta_seconds(incoming.start_time, incoming.utc_offset_minutes, stored.start_time, stored.utc_offset_minutes)
 
 

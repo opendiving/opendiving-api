@@ -22,11 +22,11 @@ family's path shape.
 
 from typing import Any
 
-from sqlalchemy import ARRAY, Integer, func, or_, select
+from sqlalchemy import ARRAY, Boolean, Integer, func, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.utils.datetime_offset import combine_start_time
+from ..core.utils.datetime_offset import combine_dive_start_time
 from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like
 from ..models.dive import Dive
 from ..models.dive_species import DiveSpecies
@@ -68,18 +68,23 @@ def _offset_of_the(order: Any) -> Any:
     instant, so a diver with two logs at one timestamp does not get a different offset run to
     run.
 
-    The conversion itself still happens in Python, through `combine_start_time`. Deliberately, and
-    the same call `dive_activity` explains: `core/utils/datetime_offset.py` is documented as the
-    single place that conversion happens, and the failure mode of a second copy of it in SQL is a
-    list that quietly disagrees with the dive pages it was built from.
+    The conversion itself still happens in Python, through `combine_dive_start_time`. Deliberately,
+    and the same call `dive_activity` explains: `core/utils/datetime_offset.py` is documented as
+    the single place that conversion happens, and the failure mode of a second copy of it in SQL
+    is a list that quietly disagrees with the dive pages it was built from.
 
     A NULL offset - the logbook importer's offset-unknown state - travels this path intact and
     needs no special case at either end: a Postgres array may hold NULL elements, so the
-    subscript yields `None`, and `combine_start_time` reads that as "the column holds the wall
-    clock" and hands it back naive. `SpeciesLifeListEntry`'s two timestamps are plain `datetime`s
-    for exactly that reason, and would have to stay so even if this aggregate were rewritten.
+    subscript yields `None`, and the combiner reads that as "the column holds the wall clock" and
+    hands it back naive. `SpeciesLifeListEntry`'s two timestamps admit that naive value, and a
+    bare date too - `_date_only_of_the` pairs the flag the same way.
     """
     return func.array_agg(aggregate_order_by(Dive.utc_offset_minutes, order, Dive.id.asc()), type_=ARRAY(Integer))[1]
+
+
+def _date_only_of_the(order: Any) -> Any:
+    """`start_date_only` of the same dive `_offset_of_the` picks, by the same ordering."""
+    return func.array_agg(aggregate_order_by(Dive.start_date_only, order, Dive.id.asc()), type_=ARRAY(Boolean))[1]
 
 
 def _search_clause(search: str) -> Any:
@@ -143,6 +148,8 @@ async def species_life_list(
                     last_seen,
                     _offset_of_the(Dive.start_time.asc()).label("first_offset"),
                     _offset_of_the(Dive.start_time.desc()).label("last_offset"),
+                    _date_only_of_the(Dive.start_time.asc()).label("first_date_only"),
+                    _date_only_of_the(Dive.start_time.desc()).label("last_date_only"),
                 ),
                 user_id=user_id,
             )
@@ -165,8 +172,8 @@ async def species_life_list(
                 rank=row.rank,
                 photo_sha256=row.photo_sha256,
                 dive_count=row.dive_count,
-                first_seen=combine_start_time(row.first_seen, row.first_offset),
-                last_seen=combine_start_time(row.last_seen, row.last_offset),
+                first_seen=combine_dive_start_time(row.first_seen, row.first_offset, row.first_date_only),
+                last_seen=combine_dive_start_time(row.last_seen, row.last_offset, row.last_date_only),
             ).model_dump()
             for row in rows
         ],

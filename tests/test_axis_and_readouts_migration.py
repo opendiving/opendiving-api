@@ -1,10 +1,8 @@
-"""Revision `ce09bc7d4c64` run for real, against a database of its own.
+"""Revision `ce09bc7d4c64` run for real, against a database of its own
+(`tests/helpers/migrations.py`).
 
 The suite's database is at head, where the dive columns this revision moves are already
-gone, so each test here migrates a fresh database to the revision below, seeds it in that
-schema, and upgrades and downgrades it through the Alembic CLI - a subprocess, because
-`settings` is built once at import and the database it names is what `migrations/env.py`
-connects to. What is worth pinning is what Postgres does with the data moves, and that
+gone. What is worth pinning is what Postgres does with the data moves, and that
 `downgrade()` puts each one back.
 
 Automatically skipped if no database is reachable - see `test_dive_check_constraints.py`.
@@ -12,20 +10,16 @@ Automatically skipped if no database is reachable - see `test_dive_check_constra
 
 import importlib.util
 import json
-import os
-import subprocess
-import sys
-import uuid
 from collections.abc import Iterator
 from types import ModuleType
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, text
 
-from src.app.core.config import postgres_uri, settings
 from src.app.core.db.migrations import MIGRATIONS_PATH
 from tests.conftest import db_available
+from tests.helpers.migrations import alembic, migrate, scratch_database
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -42,49 +36,10 @@ def _revision() -> ModuleType:
     return module
 
 
-def _engine(database: str, **options: Any) -> Engine:
-    return create_engine(
-        settings.POSTGRES_SYNC_PREFIX
-        + postgres_uri(
-            settings.POSTGRES_USER,
-            settings.POSTGRES_PASSWORD,
-            settings.POSTGRES_SERVER,
-            settings.POSTGRES_PORT,
-            database,
-        ),
-        **options,
-    )
-
-
 @pytest.fixture
 def scratch() -> Iterator[tuple[str, Engine]]:
-    name = f"{settings.POSTGRES_DB}_axis_{uuid.uuid4().hex[:8]}"
-    maintenance = _engine(settings.POSTGRES_DB, isolation_level="AUTOCOMMIT")
-    with maintenance.connect() as connection:
-        connection.execute(text(f'CREATE DATABASE "{name}"'))
-    engine = _engine(name)
-    try:
-        yield name, engine
-    finally:
-        engine.dispose()
-        with maintenance.connect() as connection:
-            connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-        maintenance.dispose()
-
-
-def _alembic(database: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "alembic", *args],
-        cwd=MIGRATIONS_PATH.parent,
-        env={**os.environ, "POSTGRES_DB": database},
-        capture_output=True,
-        text=True,
-    )
-
-
-def _migrate(database: str, *args: str) -> None:
-    result = _alembic(database, *args)
-    assert result.returncode == 0, result.stderr
+    with scratch_database("axis") as database:
+        yield database
 
 
 PROFILE = {
@@ -174,10 +129,10 @@ def _recordings(engine: Engine, dive_id: int) -> list[Any]:
 class TestTheUpgrade:
     def test_the_readouts_and_the_setting_move_onto_the_primary_recording(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        _migrate(name, "upgrade", _BELOW)
+        migrate(name, "upgrade", _BELOW)
         _seed(engine)
 
-        _migrate(name, "upgrade", _REVISION)
+        migrate(name, "upgrade", _REVISION)
 
         # A dive with readouts and no recording gets one of readouts alone, at the dive's start.
         [minted] = _recordings(engine, 1)
@@ -205,10 +160,10 @@ class TestTheUpgrade:
 
     def test_every_axis_entry_is_multiplied_and_stamped(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        _migrate(name, "upgrade", _BELOW)
+        migrate(name, "upgrade", _BELOW)
         _seed(engine)
 
-        _migrate(name, "upgrade", _REVISION)
+        migrate(name, "upgrade", _REVISION)
 
         with engine.connect() as connection:
             rows = {
@@ -231,12 +186,12 @@ class TestTheUpgrade:
 class TestTheDowngrade:
     def test_it_puts_the_data_back(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        _migrate(name, "upgrade", _BELOW)
+        migrate(name, "upgrade", _BELOW)
         _seed(engine)
         before = _snapshot(engine)
 
-        _migrate(name, "upgrade", _REVISION)
-        _migrate(name, "downgrade", _BELOW)
+        migrate(name, "upgrade", _REVISION)
+        migrate(name, "downgrade", _BELOW)
 
         after = _snapshot(engine)
         # The one loss the upgrade logged: `en13319` on a dive with nowhere to carry it.
@@ -253,15 +208,15 @@ class TestTheDowngrade:
         """Data written after the change can carry an offset below a second, which the old
         axis cannot hold - so the downgrade refuses rather than rounds, and rolls back whole."""
         name, engine = scratch
-        _migrate(name, "upgrade", _BELOW)
+        migrate(name, "upgrade", _BELOW)
         _seed(engine)
-        _migrate(name, "upgrade", _REVISION)
+        migrate(name, "upgrade", _REVISION)
         with engine.begin() as connection:
             connection.execute(
                 text("UPDATE dive_profile SET data = jsonb_set(data, '{depth,t,0}', '160') WHERE recording_id = 10")
             )
 
-        result = _alembic(name, "downgrade", _BELOW)
+        result = alembic(name, "downgrade", _BELOW)
 
         assert result.returncode != 0
         assert "not a whole second" in result.stderr

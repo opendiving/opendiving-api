@@ -38,7 +38,6 @@ the format having dropped its cap - a note is prose, and the planner stores what
 own cap admits (`NOTES_MAX_LENGTH`) and reports the rest.
 """
 
-import re
 import uuid as uuid_pkg
 from datetime import date, datetime
 from enum import StrEnum
@@ -46,6 +45,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from ..core.utils.datetime_offset import full_date_is_a_date
 from .certification import CertificationAgency
 from .course import CourseStatus
 from .dive import DecoAlgorithm, DiveMode, Salinity, WaterType
@@ -114,22 +114,8 @@ def _null_is_empty(value: Any) -> Any:
 
 _Collection = BeforeValidator(_null_is_empty)
 
-_FULL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
-
-
-def _full_date_is_a_date(value: Any) -> Any:
-    """A bare `YYYY-MM-DD` reads as a `date`, never as midnight.
-
-    Pydantic's `datetime` coerces one to 00:00, which is the fabrication a date-only start
-    exists to avoid (spec §5.2): the day was recorded and the time of day was not.
-    """
-    if isinstance(value, str) and _FULL_DATE.fullmatch(value):
-        return date.fromisoformat(value)
-    return value
-
-
 # A start as a document spells it: a date-time, or on a dive a bare date.
-ImportStart = Annotated[datetime | date | None, BeforeValidator(_full_date_is_a_date), Field(default=None)]
+ImportStart = Annotated[datetime | date | None, BeforeValidator(full_date_is_a_date), Field(default=None)]
 
 
 class _ReadModel(BaseModel):
@@ -335,7 +321,7 @@ class ImportDive(_ReadModel):
     # `dive.utc_offset_minutes` became nullable. `DiveUpdate` has since dropped its
     # validator too, but for the narrower reason that it may only *preserve* what this
     # endpoint created - see `core/utils/datetime_offset.py`. A bare date reads as a `date`,
-    # which the planner does not store yet.
+    # which the planner stores as the date-only state.
     started_at: ImportStart
     duration: int | None = None
     notes: str | None = None

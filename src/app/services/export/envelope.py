@@ -30,7 +30,7 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
-from ...core.utils.datetime_offset import combine_start_time
+from ...core.utils.datetime_offset import combine_dive_start_time, combine_start_time
 from ...models.course import Course
 from ...models.dive import Dive
 from ...models.trip import Trip
@@ -429,7 +429,9 @@ def _recording(
     **`started_at` is written only when it differs from the dive's**, §6.4a's absent-means-
     the-dive's rule. Compared on the stored column pair rather than on the combined string,
     because two recordings of one dive may legitimately carry different offsets and a
-    string comparison would call `12:17:38Z` and `15:17:38+03:00` different starts.
+    string comparison would call `12:17:38Z` and `15:17:38+03:00` different starts. On a
+    date-only dive every stated start is written, since the dive's is a day and its stored
+    midnight is no start a recording could share.
     """
     files = [stored for file in row.files if (stored := _stored_file(bundle, file, paths)) is not None]
     device = ExportDevice(**row.device) if row.device else None
@@ -455,7 +457,7 @@ def _recording(
 
     started_at = None
     if row.start_time is not None and (
-        row.start_time != dive.start_time or row.utc_offset_minutes != dive.utc_offset_minutes
+        dive.start_date_only or row.start_time != dive.start_time or row.utc_offset_minutes != dive.utc_offset_minutes
     ):
         started_at = combine_start_time(row.start_time, row.utc_offset_minutes)
     return ExportRecording(
@@ -493,9 +495,10 @@ def _dive(
         uuid=dive.uuid,
         number=dive.dive_number,
         # The API's one rule for this column everywhere: one combined offset-aware
-        # string, never the stored UTC instant next to a separate offset. That is also the
-        # format's rule (spec §5.2), which is where it came from.
-        started_at=combine_start_time(dive.start_time, dive.utc_offset_minutes),
+        # string, never the stored UTC instant next to a separate offset - or the bare date
+        # where only the day was recorded. That is also the format's rule (spec §5.2), which
+        # is where it came from.
+        started_at=combine_dive_start_time(dive.start_time, dive.utc_offset_minutes, dive.start_date_only),
         duration=dive.duration,
         notes=_text(dive.notes),
         max_depth=dive.max_depth,

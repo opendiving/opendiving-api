@@ -4,7 +4,11 @@ UDDF is the interchange format the export exists for: it is what Subsurface, div
 and MacDive read, and it is the half of "your data, in open formats" that another program
 has to be able to open. `tests/fixtures/uddf/uddf_3.2.2.xsd` is vendored alongside the
 tests, and every document this module produces is validated against it - the schema is
-the referee for everything below, not habit or memory.
+the referee for everything below, not habit or memory. One element departs from it on
+purpose: a dive whose source recorded no time of day writes its bare date into
+`<datetime>`, which UDDF's prose allows ("it is possible to omit lower order time/date
+elements") and its XSD types as `xs:dateTime`. Midnight would be a time nobody recorded;
+the tests widen that element for their XSD pass alone.
 
 **UDDF is SI throughout, and our storage is not.** Depths are meters (ours already are),
 times seconds where the profile axis holds milliseconds, temperatures **Kelvin** where we
@@ -91,7 +95,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
-from ...core.utils.datetime_offset import combine_start_time
+from ...core.utils.datetime_offset import combine_dive_start_time
 from ...models.dive import Dive
 from ...models.gear_item import GearItem
 from ...schemas.dive import DiveMode
@@ -873,7 +877,9 @@ def _dive_element(
         # `xs:positiveInteger`. Nothing in the schema stops a dive being numbered 0, and
         # a 0 would make the whole document invalid rather than one element wrong.
         _sub(before, "divenumber", str(dive.dive_number))
-    _sub(before, "datetime", combine_start_time(dive.start_time, dive.utc_offset_minutes).isoformat())
+    # The bare date on a date-only dive - the module docstring's one departure from the XSD.
+    start = combine_dive_start_time(dive.start_time, dive.utc_offset_minutes, dive.start_date_only)
+    _sub(before, "datetime", start.isoformat())
     # Between `<datetime>` and `<equipmentused>`, because `informationbeforediveType` is an
     # `xs:sequence` and that is where `altitude` sits in it. Water type has no counterpart
     # here at all - 3.2.2's `density` elements are site-level and deco-planner input, never

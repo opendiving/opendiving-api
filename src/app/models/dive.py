@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -43,6 +43,18 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # missing keyword argument. Every real write passes an explicit value; the two that
     # ever pass an explicit `None` are the importer and `patch_dive`'s preserve branch.
     utc_offset_minutes: Mapped[int | None] = mapped_column(Integer, default=0, server_default="0")
+    # **A fourth state, on the same terms as the third**: the day was recorded and the time
+    # of day was not (DiveJSON spec §5.2's bare `full-date`). `start_time` then holds midnight
+    # of that day labelled UTC and `utc_offset_minutes` is NULL, since a day has no instant;
+    # `combine_dive_start_time` reads the triple back as the bare date. Midnight rather than
+    # another hour so that every sort on `start_time` places the dive at the start of its day.
+    #
+    # A flag rather than a nullable time column, because every query that orders or windows
+    # on `start_time` keeps working untouched. `False` by default and by server default, for
+    # the reason the offset keeps its `0`: a `Dive(...)` built without it cannot claim the
+    # state. Only the importer begins it; `patch_dive` keeps it for a bare date sent back and
+    # ends it on any date-time. See `core/utils/datetime_offset.py`.
+    start_date_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     max_depth: Mapped[float | None] = mapped_column(Float, default=None)
     avg_depth: Mapped[float | None] = mapped_column(Float, default=None)
@@ -169,6 +181,12 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             CheckConstraint(
                 "(exit_latitude IS NULL) = (exit_longitude IS NULL)",
                 name="ck_dive_exit_position_pair",
+            ),
+            # A day has no instant, so a date-only start cannot carry an offset: one would make
+            # the stored midnight a claim about when the dive happened.
+            CheckConstraint(
+                "NOT start_date_only OR utc_offset_minutes IS NULL",
+                name="ck_dive_start_date_only_has_no_offset",
             ),
             # Serves `_cached_read_dives` (`GET /dives`, by far the hottest query on this
             # table): `WHERE user_id = ... AND is_deleted = false ORDER BY start_time DESC`.

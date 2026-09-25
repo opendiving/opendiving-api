@@ -528,6 +528,65 @@ class TestFillingAStart:
         assert (row.start_time, row.utc_offset_minutes) == (self.WALL_CLOCK, 180)
 
 
+class TestADateOnlyDive:
+    """A dive whose source recorded its day and no time of day, and whose recording stated no
+    start of its own - the row logbook import leaves (spec §6.4a). A file attached later of
+    the same computer is a second reading of that recording, not a second computer."""
+
+    DAY = datetime(2026, 9, 8, tzinfo=UTC)
+
+    async def _date_only(self, db: AsyncSession, dive: Dive, recording: DiveRecording, **device: str) -> None:
+        await db.execute(
+            update(Dive)
+            .where(Dive.id == dive.id)
+            .values(start_time=self.DAY, utc_offset_minutes=None, start_date_only=True)
+        )
+        await db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.id == recording.id)
+            .values(start_time=None, utc_offset_minutes=None, cns_end=12.0, **device)
+        )
+        await db.commit()
+
+    async def _dive_start(self, db: AsyncSession, dive: Dive) -> tuple[Any, ...]:
+        row = (
+            await db.execute(
+                select(Dive.start_time, Dive.utc_offset_minutes, Dive.start_date_only).where(Dive.id == dive.id)
+            )
+        ).one()
+        return tuple(row)
+
+    @pytest.mark.asyncio
+    async def test_the_file_fills_the_recording_with_no_start_and_gives_it_the_files(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        recording = create_dive_recording(db, diver, dive)
+        await self._date_only(async_db, dive, recording)
+
+        stored = await _attach(async_db, diver, dive, _export(samples=_samples((0, "0"), (10, "5"))))
+
+        assert stored.recording_id == recording.id
+        [row] = await _recordings(async_db, dive)
+        assert (row.start_time, row.utc_offset_minutes) == (datetime(2026, 9, 8, 12, 17, 38, 670000, tzinfo=UTC), 180)
+        assert (row.device_serial, row.cns_end) == ("253810000400", 12.0)
+        # The dive's own start is the diver's record and stays a day.
+        assert await self._dive_start(async_db, dive) == (self.DAY, None, True)
+
+    @pytest.mark.asyncio
+    async def test_another_computers_file_is_a_recording_of_its_own(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        recording = create_dive_recording(db, diver, dive)
+        await self._date_only(async_db, dive, recording, device_brand="Shearwater", device_serial="D9772626")
+
+        stored = await _attach(async_db, diver, dive, _export())
+
+        recordings = await _recordings(async_db, dive)
+        assert [(row.ordinal, row.start_time is None) for row in recordings] == [(0, True), (1, False)]
+        assert recordings[1].id == stored.recording_id
+        assert await self._dive_start(async_db, dive) == (self.DAY, None, True)
+
+
 class TestFillingTheModeAndTheDecoModel:
     """The same never-overwrite rule the device columns follow, one object across.
 

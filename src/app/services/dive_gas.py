@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.utils.datetime_offset import combine_start_time
+from ..core.utils.datetime_offset import combine_dive_start_time
 from ..crud.crud_dive_mixtures import get_mixtures_for_dives
 from ..models.dive import Dive
 from ..schemas.dive import DiveGasUse, DiveGasUsePoint, DiveTankGasUse
@@ -534,6 +534,7 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
             Dive.dive_number,
             Dive.start_time,
             Dive.utc_offset_minutes,
+            Dive.start_date_only,
             Dive.duration,
             Dive.avg_depth,
         )
@@ -584,7 +585,7 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
                 # Re-attached to the dive's own offset, exactly as `_to_public_dive` does
                 # it - a point on this graph has to be the same instant, labeled the same
                 # way, as the dive page it links to.
-                start_time=combine_start_time(dive.start_time, dive.utc_offset_minutes),
+                start_time=combine_dive_start_time(dive.start_time, dive.utc_offset_minutes, dive.start_date_only),
                 # Non-null because the guard at the top of the loop skipped every dive
                 # without one. Not, as it once was, because the arithmetic demanded it:
                 # `compute_multi_tank_gas_use` can return a figure for a dive whose

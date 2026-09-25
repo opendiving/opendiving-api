@@ -36,7 +36,9 @@ def bucket_by_day(dives: Sequence[tuple[datetime, int | None]]) -> list[DiveActi
     labelled UTC, so `combine_start_time` hands back that wall clock and its calendar day
     is the day the diver wrote down. Going through this module's one converter is what
     makes that true - reading `start_time` directly would have been correct for these rows
-    and wrong for every other one, which is the more dangerous half of the bug.
+    and wrong for every other one, which is the more dangerous half of the bug. A date-only
+    dive needs no flag here either: it stores midnight of its day on that same label, and a
+    day is all this reads.
 
     Doing it here rather than as a `date_trunc` over `start_time + utc_offset_minutes` in
     SQL is deliberate. `core/utils/datetime_offset.py` is documented as the single place

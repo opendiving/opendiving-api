@@ -24,7 +24,7 @@ outside this database.
 import json
 import uuid as uuid_pkg
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -903,6 +903,27 @@ class TestReferences:
         every tested UDDF consumer produces and the reason spec §5.2 says so explicitly."""
         document = await _render(full_bundle(), monkeypatch)
         assert document["dives"][0]["started_at"] == "2026-06-01T08:15:00+02:00"
+
+    @pytest.mark.asyncio
+    async def test_a_date_only_dive_writes_its_day_and_every_recording_start_it_knows(self, monkeypatch):
+        """A day is no recording's start, so one that states a start writes it even where its
+        columns equal the dive's stored midnight - which here is a recording that really began
+        at 00:00 on a device that recorded no offset. One that states none stays absent (§6.4a)."""
+        midnight = datetime(2002, 6, 18, tzinfo=UTC)
+        dive = make_dive(1, UUIDS["dive-bare"], start_time=midnight, utc_offset_minutes=None, start_date_only=True)
+        recordings = [
+            make_recording(1, UUIDS["recording"], readouts={"cns_end": 4.0}),
+            make_recording(2, UUIDS["recording-second"], ordinal=1, readouts={"cns_end": 6.0}, start_time=midnight),
+        ]
+
+        document = await _render(build_bundle(dives=[dive], recordings_by_dive={1: recordings}), monkeypatch)
+
+        written = document["dives"][0]
+        assert written["started_at"] == "2002-06-18"
+        assert ["started_at" in recording for recording in written["recordings"]] == [False, True]
+        assert written["recordings"][1]["started_at"] == "2002-06-18T00:00:00"
+        issues = divejson.validate_document(document)
+        assert not issues, [str(issue) for issue in issues]
 
 
 class TestAbsence:

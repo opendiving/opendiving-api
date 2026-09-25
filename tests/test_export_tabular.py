@@ -175,6 +175,17 @@ class TestDivesCsv:
         rows = _parse(_render(write_dives_csv(full_bundle())))
         assert rows[1][1:4] == ["2026-06-01", "08:15:00", "+02:00"]
 
+    def test_a_date_only_dive_leaves_the_time_empty_as_well_as_the_offset(self):
+        dive = make_dive(
+            1,
+            UUIDS["dive-bare"],
+            start_time=datetime(2002, 6, 18, tzinfo=UTC),
+            utc_offset_minutes=None,
+            start_date_only=True,
+        )
+        rows = _parse(_render(write_dives_csv(build_bundle(dives=[dive]))))
+        assert rows[1][1:4] == ["2002-06-18", "", ""]
+
     def test_an_empty_logbook_is_a_header_and_nothing_else(self):
         assert _parse(_render(write_dives_csv(build_bundle()))) == [list(DIVES_HEADER)]
 
