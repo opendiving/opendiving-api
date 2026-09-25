@@ -76,7 +76,7 @@ DECO_MODEL_COLUMNS: dict[str, str] = {
 }
 
 # The recording's readout columns, which are `RecordingReadouts`' members by name - read off
-# the schema so the read shape, the writes and the export cannot drift apart.
+# the schema so the read shape and every write of these columns name the same set.
 READOUT_COLUMNS: tuple[str, ...] = tuple(RecordingReadouts.model_fields)
 
 # |Δ start| admitting a second *file of the same recording*, in seconds. Two, because the

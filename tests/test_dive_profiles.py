@@ -1518,6 +1518,21 @@ class TestFinalizeProfile:
         # And exactly equal here, since the dive begins on a gas and never stops being on one.
         assert sum(entry.seconds for entry in profile.gas_attribution) == span
 
+    def test_attribution_between_whole_seconds_still_fits_the_rounded_span(self):
+        """Rounding each gas's total on its own gives 2356 + 2255 here, a second past the span."""
+        times = [float(second) for second in range(0, 4_610, 10)] + [4_610.2]
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=times, v=[1500] * len(times)),
+            events=[_switch(0.0, 1), _switch(2_355.6, 2)],
+        )
+
+        profile = finalize_profile(parsed)
+
+        assert [(entry.gas_number, entry.seconds) for entry in profile.gas_attribution] == [(1, 2356), (2, 2254)]
+        assert sum(entry.seconds for entry in profile.gas_attribution) == round(
+            profile.duration / MILLISECONDS_PER_SECOND
+        )
+
 
 def _row(source_sha256: str, extractor_version: int, parser_key: str = "suunto_xml") -> ExistingProfileRow:
     return ExistingProfileRow(source_sha256=source_sha256, extractor_version=extractor_version, parser_key=parser_key)

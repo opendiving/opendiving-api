@@ -206,9 +206,9 @@ class RecordingReadouts(BaseModel):
     for every recording's files, and logbook import - never through a form, since a typed
     value would be a guess presented as a reading. See DECISIONS.md.
 
-    `READOUT_FIELDS` in `services/dive_files.py` is read off `model_fields`, so a field added
-    here is written by both import paths and by `backfill_tech_fields` without either being
-    edited.
+    The attach path and `backfill_tech_fields` write `model_fields` by name. Logbook import
+    and the export name each readout themselves, so a field added here reaches neither
+    until they do.
     """
 
     cns_start: Annotated[
@@ -240,9 +240,8 @@ class DiveTechScalars(BaseModel):
     Its own mixin rather than fields on `DiveBase` precisely so it lands on the read
     shapes and *not* on `DiveCreate`/`DiveUpdate`: these are written only by the import
     path (`services/dive_files.py::store_recording_file`), and `DiveCreate`'s `extra="forbid"`
-    then makes an attempt to set one a 422 rather than a silently accepted fiction. The
-    device's readouts used to ride here too and are `RecordingReadouts` now; these stay on the
-    dive because the format keeps its positions there.
+    then makes an attempt to set one a 422 rather than a silently accepted fiction. On the
+    dive rather than the recording because the format keeps its positions there.
 
     A diver could in principle type a position, but nothing offers to, so these travel the
     import-owned path. That has one consequence worth stating, because it is what would

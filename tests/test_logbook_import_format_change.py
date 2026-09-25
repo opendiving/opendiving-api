@@ -278,6 +278,7 @@ class TestImportingAcrossTheChange:
         plan = await _apply(async_db, user.id, document)
 
         [recording] = await _recordings(async_db, user.id)
+        assert recording.start_time is not None
         assert (recording.utc_offset_minutes, recording.start_time.hour) == (120, 8)
         assert ImportNoteCode.VALUE_DROPPED in {note.code for note in plan.notes}
 

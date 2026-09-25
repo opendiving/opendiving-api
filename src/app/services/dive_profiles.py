@@ -573,11 +573,11 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
     Ordered by when each gas was first breathed - the order a diver lists cylinders in.
 
     **`seconds` is wall clock and `mean_depth_cm` is an unweighted mean of the samples
-    inside it**. The stretches are measured on the millisecond axis and each gas's total is
-    divided into whole seconds once, at the end, because that is the unit the stored column
-    and `seconds_on_gas` on the wire keep. The two are the same measure only while the depth
-    channel's cadence is
-    even. Every format in the corpus samples depth on a fixed interval (10 s or 20 s for
+    inside it**. Whole seconds because that is the unit the stored column and `seconds_on_gas`
+    on the wire keep, taken by rounding each stretch's ends rather than each gas's total: the
+    ends telescope, so the gases sum to no more than the span rounded the same way, which
+    `compute_multi_tank_gas_use` divides by. The two are the same measure only while the
+    depth channel's cadence is even. Every format in the corpus samples depth on a fixed interval (10 s or 20 s for
     the Suunto XML export, ~11 s for an Ocean, 1 Hz for FIT), and this runs before
     `downsample`, so nothing has thinned them unevenly either. Where it would bite is a
     sensor dropout - a gap in `t` inside one stretch - which would weight the mean toward
@@ -627,13 +627,13 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
     if not switch_times:
         return []
 
-    milliseconds: dict[int, int] = {}
+    seconds: dict[int, int] = {}
     for index, (moment, gas_number) in enumerate(zip(switch_times, switch_gases, strict=True)):
         # The last stretch runs to the last depth sample: a dive ends where its recording
         # does, and there is no switch marking the surface.
         until = switch_times[index + 1] if index + 1 < len(switch_times) else last_sample
-        milliseconds[gas_number] = milliseconds.get(gas_number, 0) + (until - moment)
-    seconds = {gas_number: round(span / MILLISECONDS_PER_SECOND) for gas_number, span in milliseconds.items()}
+        stretch = round(until / MILLISECONDS_PER_SECOND) - round(moment / MILLISECONDS_PER_SECOND)
+        seconds[gas_number] = seconds.get(gas_number, 0) + stretch
 
     depth_totals: dict[int, int] = {}
     depth_counts: dict[int, int] = {}
