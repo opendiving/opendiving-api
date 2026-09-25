@@ -29,10 +29,8 @@ class Contact(Base, PublicUUIDMixin, TimestampMixin):
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     # `ContactRole` values (`schemas/contact.py`) in that enum's declaration order with
-    # duplicates collapsed, possibly none. `JSON` rather than `ARRAY` on the
-    # `dive_form_preset.hidden_fields` precedent: nothing queries into it. No DB `CHECK` on
-    # the vocabulary, as with every other stored vocabulary here - see *"Contact roles are a
-    # JSON list"* in DECISIONS.md.
+    # duplicates collapsed, possibly none. See *"Contact roles are a JSON list, in vocabulary
+    # order"* in DECISIONS.md.
     roles: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
     phone: Mapped[str | None] = mapped_column(String(32), default=None)
     email: Mapped[str | None] = mapped_column(String(255), default=None)

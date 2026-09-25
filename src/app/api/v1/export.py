@@ -115,8 +115,8 @@ async def export_divejson(
     DiveJSON is the open dive-log interchange format this project maintains
     (<https://divejson.org>) and this app is its reference implementation, so this file is
     lossless where UDDF is not: it carries the dives with their full sample profiles,
-    cylinders, sites, trips, training courses, marine-life sightings, gear and its service
-    history, c-card records and the check-in details and portrait a dive shop asks for -
+    cylinders, sites, trips, training courses, contacts, marine-life sightings, gear and its
+    service history, c-card records and the check-in details and portrait a dive shop asks for -
     everything the account holds except the binaries themselves, which the file references
     by digest, the profile picture, which it does not name, and an emergency contact with no
     name or an insurance with no provider, which the format cannot carry until the contact
@@ -144,10 +144,11 @@ async def export_uddf(
 
     UDDF is the older interchange format Subsurface, divelogs.de and MacDive import, so
     this is the file to hand one of those. It carries the dives, their sites, trips,
-    gases, cylinders, gear and full sample profiles, and the diver's date of birth, phone
-    and dive insurance - but not the things the format has no slot for (gear sets, service
-    history, c-cards, training courses, per-cylinder role and usage, the deco ceiling, the
-    emergency contact, the insurance policy number, the portrait).
+    gases, cylinders, gear and full sample profiles, the contacts as dive bases, shops and
+    the accommodation of each trip part, and the diver's date of birth, phone and dive
+    insurance - but not the things the format has no slot for (gear sets, service history,
+    c-cards, training courses, a contact's roles, per-cylinder role and usage, the deco
+    ceiling, the emergency contact, the insurance policy number, the portrait).
     For a lossless structured copy, use `/export/divejson`; for one that carries the
     stored files as well, `/export/archive`.
     """
@@ -170,7 +171,7 @@ async def export_csv(
 
     One row per dive with the related records flattened into readable cells - the file to
     open in Excel, Numbers or a notebook. The normalized set (cylinders, trips, courses,
-    sites, gear, service history, certifications) ships inside `/export/archive`.
+    sites, gear, service history, certifications, contacts) ships inside `/export/archive`.
     Deliberately lossy: `/export/divejson` is the one that holds everything.
     """
     await _enforce_export_limit(current_user["id"])

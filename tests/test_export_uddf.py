@@ -40,6 +40,7 @@ import pytest
 import xmlschema
 from uuid6 import uuid7
 
+from src.app.models.contact import Contact
 from src.app.models.gear_item import GearItem
 from src.app.schemas.dive import DiveMode
 from src.app.schemas.gear_item import GearType
@@ -63,6 +64,7 @@ from tests.helpers.export import (
     PRIMARY_RECORDING_ID,
     TRIMIX_PROFILE,
     UUIDS,
+    _with_id,
     build_bundle,
     full_bundle,
     make_dive,
@@ -194,6 +196,117 @@ class TestSchemaValidity:
         document = await _render(bundle, monkeypatch=monkeypatch)
         schema.validate(document)
         assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}notes/{UDDF}para") == nasty
+
+
+def _contact(row_id: int, name: str, roles: list[str], **columns: Any) -> Contact:
+    return _with_id(Contact(user_id=1, name=name, roles=roles, uuid=uuid7(), created_at=CREATED_AT, **columns), row_id)
+
+
+class TestContacts:
+    """Where a contact goes, which is one table and the library's: a shop and nothing else
+    is a `<shop>`, every other contact a `<divebase>`, a dive links it after its sites, and a
+    part carries an `<accomodation>` copy."""
+
+    @pytest.mark.asyncio
+    async def test_the_slots_follow_the_roles(self, monkeypatch):
+        tree = _tree(await _render(full_bundle(), monkeypatch=monkeypatch))
+
+        bases = tree.findall(f"{UDDF}divesite/{UDDF}divebase")
+        shops = tree.findall(f"{UDDF}business/{UDDF}shop")
+        assert [base.findtext(f"{UDDF}name") for base in bases] == ["Blue Ocean", "Blue Ocean Resort"]
+        assert [shop.findtext(f"{UDDF}name") for shop in shops] == ["Gear Hub"]
+        # Bases ahead of the sites: `<divesite>` is a sequence of the two.
+        assert [child.tag for child in tree.find(f"{UDDF}divesite")][:3] == [
+            f"{UDDF}divebase",
+            f"{UDDF}divebase",
+            f"{UDDF}site",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_contact_carries_its_address_contact_block_and_notes(self, monkeypatch):
+        """Owner decision on the diver's own email aside: this is a listing the diver chose to
+        record, so the email goes out with the phone and the website."""
+        tree = _tree(await _render(full_bundle(), monkeypatch=monkeypatch))
+        resort = tree.find(f"{UDDF}divesite/{UDDF}divebase[@id='contact-{UUIDS['contact-resort']}']")
+        assert resort is not None
+
+        assert resort.findtext(f"{UDDF}address/{UDDF}country") == "Egypt"
+        assert resort.findtext(f"{UDDF}address/{UDDF}province") == "South Sinai"
+        assert resort.findtext(f"{UDDF}contact/{UDDF}phone") == "+20 69 364 0000"
+        assert resort.findtext(f"{UDDF}contact/{UDDF}email") == "info@blueocean.example"
+        assert resort.findtext(f"{UDDF}contact/{UDDF}homepage") == "https://blueocean.example"
+        assert resort.findtext(f"{UDDF}notes/{UDDF}para") == "Ask for Ahmed."
+
+    @pytest.mark.asyncio
+    async def test_a_part_carries_a_copy_of_where_the_diver_stayed(self, monkeypatch):
+        tree = _tree(await _render(full_bundle(), monkeypatch=monkeypatch))
+        first, second, _ = tree.findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
+
+        copy = first.find(f"{UDDF}accomodation")
+        assert copy is not None
+        assert copy.get("id") == "accommodation-0"
+        assert copy.findtext(f"{UDDF}name") == "Blue Ocean Resort"
+        assert copy.findtext(f"{UDDF}address/{UDDF}country") == "Egypt"
+        assert first.get("type") == "hotel"
+        assert second.find(f"{UDDF}accomodation") is None
+        assert second.get("type") is None
+
+    @pytest.mark.asyncio
+    async def test_a_liveaboard_is_a_boat(self, schema, monkeypatch):
+        boat = _contact(1, "MY Blue Force", ["liveaboard"])
+        bundle = full_bundle()
+        bundle = build_bundle(
+            trips=bundle.trips,
+            parts_by_trip={1: [TripPartRead(start_date=date(2026, 6, 1), accommodation_uuid=boat.uuid)]},
+            contacts=[boat],
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+
+        schema.validate(document)
+        (part,) = _tree(document).findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
+        assert part.get("type") == "boat"
+
+    @pytest.mark.asyncio
+    async def test_a_part_whose_contact_shares_a_name_gets_no_copy(self, schema, monkeypatch):
+        """A reader folds a copy back by name alone, so a copy of either of two contacts
+        named alike would come back as whichever it met first. Rare from this app, whose
+        names are unique case-insensitively, but surrounding whitespace still tells two apart."""
+        one = _contact(1, "Blue Ocean", ["accommodation"])
+        other = _contact(2, " blue ocean ", ["accommodation"], address_country="Egypt")
+        bundle = build_bundle(
+            trips=full_bundle().trips,
+            parts_by_trip={1: [TripPartRead(start_date=date(2026, 6, 1), accommodation_uuid=other.uuid)]},
+            contacts=[one, other],
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+
+        schema.validate(document)
+        (part,) = _tree(document).findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")
+        assert part.find(f"{UDDF}accomodation") is None
+        assert part.get("type") is None
+
+    @pytest.mark.asyncio
+    async def test_a_round_trip_keeps_one_contact_with_both_references(self, monkeypatch):
+        """The invariant the library holds its own writer to, held to this one: read back
+        through `divejson`'s UDDF reader, a contact a dive links and a part stays at is one
+        contact, named by both, with the same listing. Its roles come back as the two slots
+        say them - the file cannot carry the set."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+
+        converted = divejson.convert(document, format="uddf").document
+
+        named = {contact["name"]: contact for contact in converted["contacts"]}
+        resort = named["Blue Ocean Resort"]
+        assert resort["phone"] == "+20 69 364 0000"
+        assert resort["email"] == "info@blueocean.example"
+        assert resort["website"] == "https://blueocean.example"
+        assert resort["address"]["country"] == "Egypt"
+        assert resort["roles"] == ["dive_center", "accommodation"]
+        dive = next(dive for dive in converted["dives"] if dive.get("contact_uuid"))
+        (part, *_) = converted["trips"][0]["parts"]
+        assert dive["contact_uuid"] == part["accommodation_uuid"] == resort["uuid"]
+        assert [contact["name"] for contact in converted["contacts"]].count("Blue Ocean Resort") == 1
+        assert named["Gear Hub"]["roles"] == ["shop"]
 
 
 class TestCheckedInCorpus:

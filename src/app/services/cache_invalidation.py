@@ -10,8 +10,11 @@ The same holds for a course: a dive read and a certification read each carry the
 uuid of the course they point at, so deleting one changes what all three
 families say.
 
+A contact is the same shape again, five hosts wide: a dive, a course, a certification,
+a service record and a trip part carry its uuid.
+
 These helpers live here rather than in the route modules so `dives.py`,
-`gear_items.py`, `dive_sites.py` and `courses.py` can all reach them without
+`gear_items.py`, `dive_sites.py`, `courses.py` and `contacts.py` can all reach them without
 importing each other (which would be circular - `dives.py` already invalidates
 gear caches, and gear now has to invalidate dive caches).
 
