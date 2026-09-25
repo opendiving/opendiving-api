@@ -211,10 +211,11 @@ disambiguating from the path.
 
 ## Date-only vs datetime fields
 
-`Dive.start_time` is a `DateTime(timezone=True)` (ISO 8601 with time).
-`TripPart.start_date`/`end_date` and `Course.start_date`/`end_date` are plain `Date` (`YYYY-MM-DD`).
-Decide up front whether a new field is a point in time (`datetime`) or a calendar date (`date`); the
-web app handles each differently (see its `DECISIONS.md`).
+`Dive.start_time` is a `DateTime(timezone=True)` (ISO 8601 with time) — on the wire a bare date only
+where the source recorded no time of day; see *A dive may record only its date, and only import can
+make it so*. `TripPart.start_date`/`end_date` and `Course.start_date`/`end_date` are plain `Date`
+(`YYYY-MM-DD`). Decide up front whether a new field is a point in time (`datetime`) or a calendar
+date (`date`); the web app handles each differently (see its `DECISIONS.md`).
 
 ## `start_time`'s UTC offset is stored separately, but the API only ever sees one field
 
@@ -227,9 +228,9 @@ string such as `"2021-04-04T10:04:47.910+02:00"`. `DiveCreate` rejects a naive d
 offset-less value for an import that lost it — see *A dive's UTC offset may be unknown, and only
 import can make it so* and *An offset-unknown dive keeps its wall clock editable*. `write_dive`
 (`api/v1/dives.py`) calls `split_start_time()`; `patch_dive` calls `split_updated_start_time()`, the
-same split plus the one update-only rule; `_to_public_start_time()` calls `combine_start_time()` on
-read. Only `DiveCreateInternal`/`DiveUpdateInternal`/`DiveReadInternal` carry `utc_offset_minutes`
-as a field, never `DiveCreate`/`DiveUpdate`/`DiveRead`.
+same split plus the update-only rules; `_to_public_start_time()` calls `combine_dive_start_time()`
+on read. Only `DiveCreateInternal`/`DiveUpdateInternal`/`DiveReadInternal` carry
+`utc_offset_minutes` as a field, never `DiveCreate`/`DiveUpdate`/`DiveRead`.
 
 ## `recalculate_dive_stats`'s aggregate is backed by a covering index, not incremental counters
 
@@ -2411,6 +2412,10 @@ Allowed: `po2_limit` maps to `<mix><maximumpo2>`, so `_MixKey` includes it;
 Forced: `<greatestdepth>` is mandatory and `Dive.max_depth` is not — deepest profile sample, then
 `0`; `<tankpressurebegin>` is mandatory in `tankdataType`, so a cylinder without one is skipped, its
 gas still in `<gasdefinitions>`.
+
+Departed from: a date-only dive's `<datetime>` is the bare date, which UDDF's prose licenses and the
+XSD types `xs:dateTime`; the tests widen it for their XSD pass alone. Midnight would be a time
+nobody recorded.
 
 The owner's email stays out of `contactType`, though the phone goes in; a UDDF file gets handed to
 shops.
@@ -4922,8 +4927,9 @@ route.
 Quiet properties: it reaches through `Dive.is_deleted` as `recalculate_dive_stats` does, since
 `dive_species` has no liveness and its `dive_id` cascade is dormant; its `total_count` equals
 `species_seen`; search is an `EXISTS` over `species_name`, not an alias-multiplying join;
-`first_seen`/`last_seen` use `array_agg(utc_offset_minutes ORDER BY start_time)[1]` and
-`combine_start_time`, keeping offsets in `core/utils/datetime_offset.py`.
+`first_seen`/`last_seen` use `array_agg(utc_offset_minutes ORDER BY start_time)[1]`, the same for
+`start_date_only`, and `combine_dive_start_time`, keeping offsets in
+`core/utils/datetime_offset.py`.
 
 `@cache` keys on `key_prefix` placeholders alone, so `SPECIES_LIFE_LIST_CACHE_KEY_PREFIX` carries
 `page` and `search` (`TestTheCacheKeyCarriesTheWholeQuery`) and sits under `user_{id}_dives:` for
@@ -6001,6 +6007,19 @@ safely.
 The column keeps its `0` default and `server_default`, so a `Dive(...)` built without an offset
 cannot claim the unknown state; only the importer passes `None`.
 
+## A dive may record only its date, and only import can make it so
+
+`dive.start_date_only` marks DiveJSON's bare `full-date` `started_at` (spec §5.2): the day was
+recorded, the time of day was not. The row holds that day's midnight labelled UTC with a NULL offset
+(`ck_dive_start_date_only_has_no_offset`), so every sort places it at the start of its day, and
+`combine_dive_start_time` serves the bare date. A recording's start stays a date-time: one the
+document leaves unstated stays NULL, and `is_same_recording` matches it on device and span alone.
+
+The write rule is the offset's: `DiveCreate`, `from_start_time` and `GET /dives/next-number` refuse
+a date; `split_updated_start_time` keeps the state for a bare date sent back, refuses one on a timed
+dive, and any date-time ends it. Rejected: a date column beside a nullable time, which touches every
+query ordering or windowing on `start_time`; a sentinel time, the fabrication with a name.
+
 ## The surface-pressure floor is 0.4 bar, because the altitude ceiling says so
 
 `ck_dive_recording_surface_pressure_range` is `[0.4, 1.2]` because ambient pressure at
@@ -6384,12 +6403,12 @@ and `max_depth`; device columns stay NULL until `backfill_tech_fields` re-parses
 neither, within one account from one indexed read on `(user_id, start_time)`. `same_device` and
 `devices_differ` share one rule — an absent member never makes two devices differ — so a pair may be
 neither; the model branch applies only with at most one serial in play. Gates: same recording — same
-device, starts and sampled spans within 2 s; same dive strict — Subsurface's `likely_same` on a
-different device, where one-sided figures block; same dive loose — the start window alone. Δ is
-between instants when both sides carry an offset, else between wall clocks; rejected: borrowing the
-account's or dive's offset, which DiveJSON §5.2 forbids. The 26-hour candidate window is wider than
-any gate; attach applies same-recording within the target dive; import applies same-recording then
-strict, never loose.
+device, starts and sampled spans within 2 s, a stored NULL start skipping its clause; same dive
+strict — Subsurface's `likely_same` on a different device, where one-sided figures block; same dive
+loose — the start window alone. Δ is between instants when both sides carry an offset, else between
+wall clocks; rejected: borrowing the account's or dive's offset, which DiveJSON §5.2 forbids. The
+26-hour candidate window is wider than any gate; attach applies same-recording within the target
+dive; import applies same-recording then strict, never loose.
 
 ## A second file of one recording fills, and never overwrites
 

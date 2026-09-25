@@ -17,7 +17,7 @@ ownership check and the cache, which is a question about the call, not about the
 """
 
 import uuid as uuid_pkg
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from fnmatch import fnmatch
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -122,6 +122,24 @@ class TestFindDiveNeighbors:
         assert neighbors.previous.start_time.utcoffset() == timedelta(hours=7)
         # Same instant either way - only how it is expressed changes.
         assert neighbors.previous.start_time == log_day(0)
+
+    @pytest.mark.asyncio
+    async def test_a_date_only_neighbour_is_its_day_and_comes_first_on_it(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """Stored at that day's midnight, so it sorts at the start of its day - and read back
+        as the bare date, never as the midnight."""
+        (dated,) = create_dive_log(db, diver, (1, 1))
+        dated.start_time, dated.utc_offset_minutes, dated.start_date_only = log_day(1).replace(hour=0), None, True
+        db.commit()
+        (timed,) = create_dive_log(db, diver, (2, 1))
+
+        neighbors = await _neighbors_of(async_db, timed)
+
+        assert neighbors.previous is not None
+        assert neighbors.previous.uuid == dated.uuid
+        assert type(neighbors.previous.start_time) is date
+        assert neighbors.previous.start_time == log_day(1).date()
 
     @pytest.mark.asyncio
     async def test_chronology_is_start_time_not_dive_number(

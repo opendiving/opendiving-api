@@ -7,6 +7,7 @@ import copy
 import io
 import json
 import uuid as uuid_pkg
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -253,16 +254,41 @@ class TestImportingAcrossTheChange:
         assert ImportNoteCode.VALUE_DROPPED in {note.code for note in plan.notes}
 
     @pytest.mark.asyncio
-    async def test_a_date_only_dive_is_skipped_rather_than_placed_at_midnight(
+    async def test_a_date_only_dive_lands_as_its_day_rather_than_at_midnight(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Stored as the date-only state with nothing to report: the document said a day and
+        the logbook holds a day. Its recording stated no start, and keeps none - a day is no
+        recording's start (spec §6.4a)."""
+        user = create_user(db)
+
+        plan = await _apply(
+            async_db, user.id, _document({"started_at": "2002-06-18", "recordings": [{"cns_end": 4.0}]})
+        )
+
+        assert plan.notes == []
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == user.id))).scalar_one()
+        assert (dive.start_time, dive.utc_offset_minutes, dive.start_date_only) == (
+            datetime(2002, 6, 18, tzinfo=UTC),
+            None,
+            True,
+        )
+        [recording] = await _recordings(async_db, user.id)
+        assert (recording.start_time, recording.utc_offset_minutes, recording.cns_end) == (None, None, 4.0)
+
+    @pytest.mark.asyncio
+    async def test_a_date_only_dives_recording_keeps_the_start_it_states(
         self, db: Session, async_db: AsyncSession
     ) -> None:
         user = create_user(db)
+        document = _document(
+            {"started_at": "2002-06-18", "recordings": [{"started_at": "2002-06-18T09:12:00+02:00", "cns_end": 4.0}]}
+        )
 
-        plan = await _apply(async_db, user.id, _document({"started_at": "2002-06-18"}))
+        await _apply(async_db, user.id, document)
 
-        assert [note.code for note in plan.notes] == [ImportNoteCode.RECORD_SKIPPED]
-        assert "no time of day" in plan.notes[0].message
-        assert (await async_db.execute(select(Dive.id).where(Dive.user_id == user.id))).first() is None
+        [recording] = await _recordings(async_db, user.id)
+        assert (recording.start_time, recording.utc_offset_minutes) == (datetime(2002, 6, 18, 7, 12, tzinfo=UTC), 120)
 
     @pytest.mark.asyncio
     async def test_a_recordings_start_with_no_time_of_day_is_read_as_absent(

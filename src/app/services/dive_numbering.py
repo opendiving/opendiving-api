@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from sqlalchemy import ColumnElement, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.utils.datetime_offset import combine_start_time, split_start_time
+from ..core.utils.datetime_offset import combine_dive_start_time, split_start_time
 from ..models.dive import Dive
 from ..schemas.dive import (
     DiveNumberingSummary,
@@ -190,6 +190,7 @@ async def renumber_dives(
                 Dive.dive_number,
                 Dive.start_time,
                 Dive.utc_offset_minutes,
+                Dive.start_date_only,
                 new_number.label("new_dive_number"),
             )
             .where(*scope)
@@ -203,7 +204,7 @@ async def renumber_dives(
             # Re-attached to the dive's own offset, as everywhere else a dive's time
             # leaves this app - the preview lists dives by date, and they have to read
             # the same as they do on the dive list.
-            start_time=combine_start_time(row.start_time, row.utc_offset_minutes),
+            start_time=combine_dive_start_time(row.start_time, row.utc_offset_minutes, row.start_date_only),
             dive_number=row.dive_number,
             new_dive_number=row.new_dive_number,
         )

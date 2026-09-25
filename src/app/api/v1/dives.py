@@ -21,6 +21,7 @@ from ...core.exceptions.http_exceptions import (
 from ...core.security import create_dive_file_token
 from ...core.utils.cache import cache
 from ...core.utils.datetime_offset import (
+    combine_dive_start_time,
     combine_start_time,
     split_local_start_time,
     split_start_time,
@@ -106,7 +107,6 @@ from ...services.dive_recordings import (
     RecordingFacts,
     RecordingNotFoundError,
     delete_recording,
-    delta_seconds,
     device_of,
     get_recordings_for_dives,
     is_same_dive_loose,
@@ -115,6 +115,7 @@ from ...services.dive_recordings import (
     make_primary,
     primary_recording_ids,
     resolve_recording,
+    start_delta,
 )
 from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
@@ -306,19 +307,21 @@ async def _get_owned_dive(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: d
 
 def _to_public_start_time(data: dict[str, Any]) -> dict[str, Any]:
     """Re-attaches a stored `utc_offset_minutes` to `start_time` and drops the now-redundant
-    offset key, so the public `DiveRead`/`DiveReadWithMixtures` shape exposes a single
-    `start_time` (e.g. `2021-04-04T10:04:47.910+02:00`) rather than a column pair - see
-    `core/utils/datetime_offset.py`.
+    offset and date-only keys, so the public `DiveRead`/`DiveReadWithMixtures` shape exposes a
+    single `start_time` (e.g. `2021-04-04T10:04:47.910+02:00`) rather than a column triple -
+    see `core/utils/datetime_offset.py`.
 
-    **Offset-aware for every dive but one kind.** A dive whose source recorded no offset
-    stores a NULL there, and `combine_start_time` hands back the recorded wall clock with no
-    zone attached (`2021-04-04T10:04:47.910`). Only logbook import can create such a dive;
-    the read shapes carry `DiveLocalStartTime` so they can serve it, `DiveCreate` still
-    requires an offset, and `patch_dive` requires one of any dive that already has one.
+    **Offset-aware for every dive but two kinds.** A dive whose source recorded no offset
+    stores a NULL there, and the recorded wall clock comes back with no zone attached
+    (`2021-04-04T10:04:47.910`); one whose source recorded no time of day comes back as its
+    bare date (`2021-04-04`). Only logbook import can create either; the read shapes carry
+    `DiveLocalStartTime` so they can serve both, `DiveCreate` still requires an offset, and
+    `patch_dive` keeps each state only for a dive already in it.
     """
     data = dict(data)
     offset_minutes = data.pop("utc_offset_minutes")
-    data["start_time"] = combine_start_time(data["start_time"], offset_minutes)
+    date_only = data.pop("start_date_only", False)
+    data["start_time"] = combine_dive_start_time(data["start_time"], offset_minutes, date_only)
     return data
 
 
@@ -470,30 +473,33 @@ async def _parse_matches(db: AsyncSession, *, user_id: int, parsed: ParsedDiveSc
         max_depth=parsed.max_depth,
     )
     # Nearest start first, so a form's default offer is the closest candidate rather than the
-    # oldest. Sorted through `delta_seconds` rather than by a plain subtraction, because that
+    # oldest. Sorted through `start_delta` rather than by a plain subtraction, because that
     # is the one function that knows whether a given pair is comparable as instants or only
     # as wall clocks - and a sort that got it wrong would put an eleven-hour "difference"
     # first for exactly the pair the *Clocks* rule exists for.
-    candidates = [
-        candidate
-        for candidate in await load_candidates(db, user_id=user_id, around=start_time)
-        if is_same_dive_loose(incoming, candidate.facts)
-    ]
-    candidates.sort(
-        key=lambda candidate: delta_seconds(
-            start_time, offset_minutes, candidate.facts.start_time, candidate.facts.utc_offset_minutes
-        )
+    nearest = sorted(
+        (
+            (delta, candidate)
+            for candidate in await load_candidates(db, user_id=user_id, around=start_time)
+            if is_same_dive_loose(incoming, candidate.facts)
+            and (delta := start_delta(incoming, candidate.facts)) is not None
+        ),
+        key=lambda pair: pair[0],
     )
     return [
         ParsedDiveMatch(
             dive_uuid=candidate.dive_uuid,
             dive_number=candidate.dive_number,
-            started_at=combine_start_time(candidate.facts.start_time, candidate.facts.utc_offset_minutes),
+            started_at=(
+                None
+                if candidate.facts.start_time is None
+                else combine_start_time(candidate.facts.start_time, candidate.facts.utc_offset_minutes)
+            ),
             recording_uuid=candidate.uuid,
             device=_match_device(candidate.facts.device),
             same_recording=is_same_recording(incoming, candidate.facts),
         )
-        for candidate in candidates
+        for _, candidate in nearest
     ]
 
 
@@ -1064,6 +1070,10 @@ async def patch_dive(
     value like `2026-04-17T11:49:23` is accepted and leaves the offset unknown, so the wall
     clock stays editable without inventing one. Sending an offsetless value for a dive that
     *has* an offset is a 422: an update may preserve that state but never create it.
+
+    A bare date like `2026-04-17` follows the same rule one level down: accepted only for a
+    dive whose time of day is already unknown, keeping it so, and a 422 for any other. Any
+    date-time ends that state.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
     owner_id = db_dive.user_id
@@ -1079,16 +1089,20 @@ async def patch_dive(
     # is always a real datetime here - which is what stops a null slipping past this
     # branch into the update and leaving `utc_offset_minutes` describing the *old* time.
     #
-    # The offset rule is the stored dive's to answer, which is why it is here and not on
-    # `DiveUpdate`: an offsetless value preserves an already-unknown offset and is refused
-    # on a dive that has one. See `core/utils/datetime_offset.py`.
+    # The offset and time-of-day rules are the stored dive's to answer, which is why they
+    # are here and not on `DiveUpdate`: an offsetless value or a bare date preserves a state
+    # the dive is already in and is refused on one that is not. See
+    # `core/utils/datetime_offset.py`.
     if "start_time" in values.model_fields_set and values.start_time is not None:
         try:
-            utc_start_time, utc_offset_minutes = split_updated_start_time(values.start_time, db_dive.utc_offset_minutes)
+            utc_start_time, utc_offset_minutes, date_only = split_updated_start_time(
+                values.start_time, db_dive.utc_offset_minutes, db_dive.start_date_only
+            )
         except ValueError as e:
             raise UnprocessableEntityException(str(e)) from e
         update_data["start_time"] = utc_start_time
         update_data["utc_offset_minutes"] = utc_offset_minutes
+        update_data["start_date_only"] = date_only
 
     # Against the *merged* pair, since a PATCH may carry either depth alone - the case
     # neither `DiveUpdate`'s validator nor `DiveCreate`'s can see.

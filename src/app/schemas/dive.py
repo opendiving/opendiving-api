@@ -1,9 +1,9 @@
 import uuid as uuid_pkg
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, ClassVar, Literal, Self
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from ..core.schemas import (
     NOTES_MAX_LENGTH,
@@ -11,7 +11,7 @@ from ..core.schemas import (
     RejectsExplicitNulls,
     StoredVocabulary,
 )
-from ..core.utils.datetime_offset import require_utc_offset
+from ..core.utils.datetime_offset import full_date_is_a_date, require_utc_offset
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
 from .dive_profile import DiveProfileInfo
 from .gear_item import GearItemInfo
@@ -19,6 +19,7 @@ from .location import Latitude, LocationRead, Longitude
 
 _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
 _LOCAL_START_TIME_EXAMPLE = "2021-04-04T10:04:47.910"
+_DATE_ONLY_START_TIME_EXAMPLE = "2021-04-04"
 
 # `start_time` carries an explicit UTC offset wherever a dive is **created**: it's the
 # offset the caller (e.g. the web app, defaulting to the browser's own offset) knows the
@@ -31,15 +32,16 @@ DiveStartTime = Annotated[datetime, AfterValidator(require_utc_offset)]
 # demands. A dive whose `utc_offset_minutes` is NULL records a wall clock with an unknown
 # instant (DiveJSON spec §5.2), and `combine_start_time` reconstructs it naive - so a read
 # schema carrying `DiveStartTime` would 500 on the very row the logbook importer exists to
-# be able to accept. No validator at all rather than a looser one: there is nothing left to
-# check once both spellings are legal.
+# be able to accept. A dive whose time of day is unknown is a bare `date`, and
+# `full_date_is_a_date` keeps Pydantic from widening `"2021-04-04"` to a midnight on the way
+# back in - which a cached response re-validated against its `response_model` would do.
 #
 # It is on one **write** shape too, `DiveUpdate`, and that is not a read spelling leaking
-# across: an update may preserve an unknown offset but not remove one, and which case a
-# given body is depends on the dive being updated - something no schema can see.
-# `split_updated_start_time` holds that half of the rule, so the two names no longer say on
-# their own which side of the API a field is on.
-DiveLocalStartTime = datetime
+# across: an update may preserve an unknown offset or an unknown time of day but not remove
+# either, and which case a given body is depends on the dive being updated - something no
+# schema can see. `split_updated_start_time` holds that half of the rule, so the two names no
+# longer say on their own which side of the API a field is on.
+DiveLocalStartTime = Annotated[datetime | date, BeforeValidator(full_date_is_a_date)]
 
 DEPTH_PAIR_MESSAGE = "avg_depth cannot be greater than max_depth"
 
@@ -161,9 +163,10 @@ class DiveBase(BaseModel):
     start_time: Annotated[
         DiveLocalStartTime,
         Field(
-            examples=[_START_TIME_EXAMPLE, _LOCAL_START_TIME_EXAMPLE],
+            examples=[_START_TIME_EXAMPLE, _LOCAL_START_TIME_EXAMPLE, _DATE_ONLY_START_TIME_EXAMPLE],
             description="The dive's own start time, in the timezone it was logged in. Carries no offset on a dive "
-            "whose source never recorded one - the wall clock is the record and the instant is unknown.",
+            "whose source never recorded one - the wall clock is the record and the instant is unknown. A bare date "
+            "on a dive whose source recorded the day and no time of day: never place it at midnight.",
         ),
     ]
     duration: Annotated[int, Field(examples=[2048], description="Dive duration in seconds")]
@@ -377,11 +380,12 @@ class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
     the owning user's/trip's/course's `uuid` and attaches the dive's sites).
 
     `start_time` here is the raw stored UTC instant (not yet re-combined with
-    `utc_offset_minutes` - see `combine_start_time()`), since that recombination only
-    makes sense once converting to the public `DiveRead` shape.
+    `utc_offset_minutes` and `start_date_only` - see `combine_dive_start_time()`), since that
+    recombination only makes sense once converting to the public `DiveRead` shape.
     """
 
     water_type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    start_time: datetime  # the column, never the public spelling
 
     id: int
     user_id: int
@@ -392,6 +396,13 @@ class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
         Field(
             description="UTC offset (minutes) start_time was originally expressed in, e.g. 120 for +02:00. Null on a "
             "dive whose source recorded no offset, where `start_time` above is the wall clock labelled UTC"
+        ),
+    ]
+    start_date_only: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Only the day of `start_time` was recorded: it holds midnight labelled UTC, with a null offset",
         ),
     ]
     created_at: datetime
@@ -533,14 +544,16 @@ class RecordingRead(RecordingReadouts):
             "one.",
         ),
     ]
+    # A date-time and never a bare date, even on a dive whose own start is one (spec §6.4a).
     started_at: Annotated[
-        DiveLocalStartTime | None,
+        datetime | None,
         Field(
             default=None,
             examples=[_START_TIME_EXAMPLE],
             description="This device's own start - not the dive's, which a second computer entering the water later "
             "legitimately differs from. Offset-less where the source recorded no offset, exactly as a dive's is. The "
-            "profile's `times` are elapsed milliseconds from this instant.",
+            "profile's `times` are elapsed milliseconds from this instant. Null where nothing stated one - which on a "
+            "dive whose start is a bare date means its axis counts from an unknown time that day.",
         ),
     ]
     files: Annotated[list[DiveFileInfo], Field(default_factory=list, description="In attach order")]
@@ -704,7 +717,7 @@ class DiveGasUsePoint(BaseModel):
         Field(
             examples=[_START_TIME_EXAMPLE],
             description="The dive's own start time, exactly as `DiveRead` reports it - the x axis. Offset-aware, "
-            "unless the dive's source recorded no offset",
+            "unless the dive's source recorded no offset; a bare date where it recorded no time of day",
         ),
     ]
     avg_depth: Annotated[
@@ -999,6 +1012,7 @@ class DiveCreate(DiveBase):
 class DiveCreateInternal(DiveBase):
     model_config = ConfigDict(extra="forbid")
 
+    start_time: datetime  # the column, never the public spelling
     user_id: int
     trip_id: int | None = None
     course_id: int | None = None
@@ -1040,14 +1054,17 @@ class DiveUpdate(RejectsExplicitNulls):
 
     dive_number: Annotated[int | None, Field(examples=[5], default=None)]
     # The permissive spelling, unlike `DiveCreate`'s. An update may **preserve** an unknown
-    # offset - an imported dive's wall clock stays editable, and the offsetless `started_at`
-    # this app exports for such a dive is a value it will take back - but it may not
-    # **remove** one, which `patch_dive` refuses through `split_updated_start_time`. Only
-    # the stored dive says which of the two a given body is, so the refusal cannot live
-    # here.
+    # offset or an unknown time of day - an imported dive stays editable, and the offsetless
+    # or date-only `started_at` this app exports for such a dive is a value it will take back
+    # - but it may not **remove** either, which `patch_dive` refuses through
+    # `split_updated_start_time`. Only the stored dive says which a given body is, so the
+    # refusal cannot live here.
     start_time: Annotated[
         DiveLocalStartTime | None,
-        Field(examples=[_START_TIME_EXAMPLE, _LOCAL_START_TIME_EXAMPLE], default=None),
+        Field(
+            examples=[_START_TIME_EXAMPLE, _LOCAL_START_TIME_EXAMPLE, _DATE_ONLY_START_TIME_EXAMPLE],
+            default=None,
+        ),
     ]
     duration: Annotated[int | None, Field(examples=[2048], description="Dive duration in seconds", default=None)]
     max_depth: Annotated[float | None, Field(default=None)]

@@ -16,7 +16,7 @@ from datetime import datetime
 from sqlalchemy import Select, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.utils.datetime_offset import combine_start_time
+from ..core.utils.datetime_offset import combine_dive_start_time
 from ..models.dive import Dive
 from ..schemas.dive import DiveNeighbor, DiveNeighbors
 
@@ -46,7 +46,7 @@ def _neighbor_query(user_id: int, start_time: datetime, dive_id: int, *, later: 
     pivot = tuple_(literal(start_time, Dive.start_time.type), literal(dive_id, Dive.id.type))
     ordering = (Dive.start_time.asc(), Dive.id.asc()) if later else (Dive.start_time.desc(), Dive.id.desc())
     return (
-        select(Dive.uuid, Dive.dive_number, Dive.start_time, Dive.utc_offset_minutes)
+        select(Dive.uuid, Dive.dive_number, Dive.start_time, Dive.utc_offset_minutes, Dive.start_date_only)
         .where(
             Dive.user_id == user_id,
             Dive.is_deleted.is_(False),
@@ -64,14 +64,14 @@ async def _adjacent_dive(
     if row is None:
         return None
 
-    uuid, dive_number, neighbor_start_time, offset_minutes = row
+    uuid, dive_number, neighbor_start_time, offset_minutes, date_only = row
     return DiveNeighbor(
         uuid=uuid,
         dive_number=dive_number,
         # Re-attached to the neighbour's *own* offset, exactly as `DiveRead` does it, so a
         # prev/next label reads in the timezone that dive was logged in rather than in
         # this one's.
-        start_time=combine_start_time(neighbor_start_time, offset_minutes),
+        start_time=combine_dive_start_time(neighbor_start_time, offset_minutes, date_only),
     )
 
 

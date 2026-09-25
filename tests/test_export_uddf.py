@@ -27,13 +27,15 @@ downloaded rather than rendered here, and its job is to notice that file rotting
 say anything about the writer.
 """
 
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
+import divejson
 import pytest
 import xmlschema
 from uuid6 import uuid7
@@ -95,6 +97,17 @@ async def _render(bundle: Any, profiles: dict[int, dict[str, Any]] | None = None
     monkeypatch.setattr("src.app.services.export.uddf.load_profile", fake_load_profile)
     chunks = [chunk async for chunk in write_uddf(AsyncMock(), bundle, exported_at=EXPORTED_AT)]
     return b"".join(chunks)
+
+
+def _for_the_xsd(document: bytes) -> bytes:
+    """Widen a dive's bare `<datetime>` to midnight, for the XSD pass alone.
+
+    A date-only dive writes its bare date - UDDF's prose allows omitting lower-order parts and
+    its XSD types the element `xs:dateTime`. The pass exists to catch element order and a
+    mandatory child left out, which the widening leaves intact; what the document itself
+    carries is asserted separately.
+    """
+    return re.sub(rb"<datetime>(\d{4}-\d{2}-\d{2})</datetime>", rb"<datetime>\1T00:00:00</datetime>", document)
 
 
 def _tree(document: bytes) -> ET.Element:
@@ -353,6 +366,25 @@ class TestDiveContent:
             _text(_dive(_tree(document), 0), f"{UDDF}informationbeforedive/{UDDF}datetime")
             == "2026-06-01T08:15:00+02:00"
         )
+
+    @pytest.mark.asyncio
+    async def test_a_date_only_dive_writes_its_bare_date_and_reads_back_as_one(self, schema, monkeypatch):
+        """Never a midnight, which would be a time nobody recorded - and the divejson library's
+        UDDF reader, which this app's own import goes through, takes the date back exactly."""
+        dive = make_dive(
+            1,
+            UUIDS["dive-bare"],
+            start_time=datetime(2002, 6, 18, tzinfo=UTC),
+            utc_offset_minutes=None,
+            start_date_only=True,
+        )
+
+        document = await _render(build_bundle(dives=[dive]), monkeypatch=monkeypatch)
+
+        assert _text(_dive(_tree(document), 0), f"{UDDF}informationbeforedive/{UDDF}datetime") == "2002-06-18"
+        schema.validate(_for_the_xsd(document))
+        converted = divejson.convert(document, format="uddf").document
+        assert converted["dives"][0]["started_at"] == "2002-06-18"
 
     @pytest.mark.asyncio
     async def test_every_site_is_linked_in_visit_order(self, monkeypatch):

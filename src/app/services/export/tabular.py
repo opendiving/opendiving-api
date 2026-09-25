@@ -42,9 +42,10 @@ trade. Revisit if the export ever carries data a *second* party supplied.
 import csv
 import io
 from collections.abc import Iterable, Iterator
+from datetime import datetime
 from typing import Any
 
-from ...core.utils.datetime_offset import combine_start_time
+from ...core.utils.datetime_offset import combine_dive_start_time
 from ...core.utils.trip_span import trip_span
 from ...models.dive import Dive
 from ...schemas.dive_mixture import DiveMixtureRead
@@ -155,7 +156,10 @@ def _utc_offset(minutes: int | None) -> str:
 
 
 def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
-    local = combine_start_time(dive.start_time, dive.utc_offset_minutes)
+    local = combine_dive_start_time(dive.start_time, dive.utc_offset_minutes, dive.start_date_only)
+    # The time column is empty where no time of day was recorded, as the offset beside it is
+    # where no offset was. `datetime` is a `date`, so the narrower test is the one that tells.
+    day, clock = (local.date(), local.strftime("%H:%M:%S")) if isinstance(local, datetime) else (local, "")
     mixtures = bundle.mixtures_by_dive[dive.id]
     gas_use = resolve_gas_use(
         duration=dive.duration,
@@ -170,8 +174,8 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
     readouts = recordings[0].readouts if recordings else {}
     return (
         dive.dive_number,
-        local.date().isoformat(),
-        local.strftime("%H:%M:%S"),
+        day.isoformat(),
+        clock,
         _utc_offset(dive.utc_offset_minutes),
         dive.duration,
         dive.max_depth,

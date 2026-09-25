@@ -215,6 +215,35 @@ class TestSameRecording:
         assert not is_same_recording(replace(_suunto_fit(), sampled_span=3_475_001), _suunto_json())
 
 
+class TestAStoredRecordingWithNoStart:
+    """What a date-only dive's import leaves where its document stated no start for a
+    recording: the device and the span still decide, and the start clause is skipped rather
+    than failed - otherwise that dive and the file that later records it would be two
+    recordings of one computer."""
+
+    def test_it_matches_its_own_device_on_device_and_span(self) -> None:
+        assert is_same_recording(_suunto_fit(), replace(_suunto_json(), start_time=None, utc_offset_minutes=None))
+
+    def test_it_matches_a_file_when_it_names_no_device_and_holds_no_samples(self) -> None:
+        """A hand-logged date-only dive whose recording is a readout alone."""
+        assert is_same_recording(_suunto_fit(), RecordingFacts(device=DeviceIdentity(), start_time=None))
+
+    def test_another_computer_still_does_not_match_it(self) -> None:
+        assert not is_same_recording(_perdix(1), replace(_suunto_json(), start_time=None, utc_offset_minutes=None))
+
+    def test_the_span_still_refuses_it(self) -> None:
+        stored = replace(_suunto_json(), start_time=None, utc_offset_minutes=None, sampled_span=1_000_000)
+
+        assert not is_same_recording(_suunto_fit(), stored)
+
+    def test_no_dive_gate_admits_a_start_nobody_stated(self) -> None:
+        """The strict and loose gates are windows on the clock, and have nothing to hold."""
+        stored = replace(_suunto_json(), device=PERDIX_DEVICE, start_time=None, utc_offset_minutes=None)
+
+        assert not is_same_dive_strict(_suunto_fit(), stored)
+        assert not is_same_dive_loose(_suunto_fit(), stored)
+
+
 class TestSameDiveStrict:
     """A different computer's record of one dive - the gate logbook import attaches on."""
 
@@ -224,7 +253,7 @@ class TestSameDiveStrict:
         its samples' and the Suunto's are its device's logged ones."""
         perdix, suunto = _perdix(2), _suunto_json()
 
-        assert delta_seconds(perdix.start_time, None, suunto.start_time, 180) == pytest.approx(255, abs=1)
+        assert delta_seconds(PERDIX_TWO_WALL, None, SUUNTO_INSTANT, 180) == pytest.approx(255, abs=1)
         assert max(60.0, max(perdix.duration or 0, suunto.duration or 0) / 2) == 1525.5
         assert is_same_dive_strict(perdix, suunto)
 

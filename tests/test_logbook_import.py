@@ -1347,8 +1347,8 @@ class TestTheOffsetUnknownState:
 
         with pytest.raises(ValidationError):
             DiveCreate(dive_number=1, start_time=datetime(2026, 4, 17, 11, 49), duration=60)
-        # And the read shape serves what is stored.
-        assert DiveRead.model_fields["start_time"].annotation is datetime
+        # And the read shape serves what is stored - a bare date included.
+        assert DiveRead.model_fields["start_time"].annotation == datetime | date
 
     @pytest.mark.asyncio
     async def test_the_write_api_takes_back_the_offsetless_value_it_exported(
@@ -1393,6 +1393,103 @@ class TestTheOffsetUnknownState:
 
         await async_db.refresh(stored)
         assert stored.utc_offset_minutes is not None
+
+
+class TestTheDateOnlyState:
+    """The fourth state, and import's alone to begin: a dive whose source recorded its day and
+    no time of day. Stored as that day with no clock and no offset, read back as the bare
+    date, and carried through an edit that sends it back - the offset-unknown state's rules,
+    one level down."""
+
+    @staticmethod
+    async def _date_only(seeded: Any, db: Session, async_db: AsyncSession) -> tuple[Any, Dive]:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["started_at"] = "2002-06-18"
+        destination = create_user(db)
+        await _apply(async_db, destination.id, json.dumps(parsed).encode())
+        stored = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        return destination, stored
+
+    @pytest.mark.asyncio
+    async def test_a_bare_date_round_trips_unchanged(self, seeded: Any, db: Session, async_db: AsyncSession) -> None:
+        destination, stored = await self._date_only(seeded, db, async_db)
+
+        assert (stored.start_time, stored.utc_offset_minutes, stored.start_date_only) == (
+            datetime(2002, 6, 18, tzinfo=UTC),
+            None,
+            True,
+        )
+        re_exported = parse_document(await _export(async_db, destination.id))
+        assert re_exported["dives"][0]["started_at"] == "2002-06-18"
+        issues = divejson.validate_document(re_exported)
+        assert not issues, [str(issue) for issue in issues]
+
+    @pytest.mark.asyncio
+    async def test_the_column_readers_report_its_day_and_no_clock(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        from src.app.services.dive_activity import dive_activity
+        from src.app.services.species_life_list import species_life_list
+
+        destination, _ = await self._date_only(seeded, db, async_db)
+
+        activity = await dive_activity(async_db, destination.id)
+        assert [(point.year, point.month, point.day) for point in activity] == [(2002, 6, 18)]
+        life_list = await species_life_list(async_db, user_id=destination.id, offset=0, limit=10)
+        entry = life_list["data"][0]
+        assert (type(entry["first_seen"]), entry["first_seen"], entry["last_seen"]) == (
+            date,
+            date(2002, 6, 18),
+            date(2002, 6, 18),
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_write_api_takes_back_the_bare_date_it_exported(
+        self, seeded: Any, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        destination, stored = await self._date_only(seeded, db, async_db)
+
+        await _patch_start_time(async_db, monkeypatch, destination, stored.uuid, "2002-06-19")
+
+        await async_db.refresh(stored)
+        assert (stored.start_time, stored.utc_offset_minutes, stored.start_date_only) == (
+            datetime(2002, 6, 19, tzinfo=UTC),
+            None,
+            True,
+        )
+        re_exported = parse_document(await _export(async_db, destination.id))
+        assert re_exported["dives"][0]["started_at"] == "2002-06-19"
+
+    @pytest.mark.asyncio
+    async def test_a_time_typed_ends_the_state(
+        self, seeded: Any, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        destination, stored = await self._date_only(seeded, db, async_db)
+
+        await _patch_start_time(async_db, monkeypatch, destination, stored.uuid, "2002-06-18T09:30:00+02:00")
+
+        await async_db.refresh(stored)
+        assert (stored.start_time, stored.utc_offset_minutes, stored.start_date_only) == (
+            datetime(2002, 6, 18, 7, 30, tzinfo=UTC),
+            120,
+            False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_update_may_not_take_the_time_off_a_dive_that_has_one(
+        self, seeded: Any, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, document = seeded
+        destination = create_user(db)
+        await _apply(async_db, destination.id, document)
+        stored = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+
+        with pytest.raises(UnprocessableEntityException, match="time of day is already unknown"):
+            await _patch_start_time(async_db, monkeypatch, destination, stored.uuid, "2002-06-18")
+
+        await async_db.refresh(stored)
+        assert stored.start_date_only is False
 
 
 class TestTheReaderRefusesOnlyWhatItMust:
@@ -3008,6 +3105,8 @@ class TestTheBoundsCensus:
             "ck_dive_mixture_pressure_order",
             # `_plan_deco_model` drops both halves of an inverted gradient-factor pair.
             "ck_dive_recording_deco_gf_low_within_high",
+            # `split_dive_start_time` never pairs the date-only flag with an offset.
+            "ck_dive_start_date_only_has_no_offset",
         }
     )
     # There used to be a third exclusion here, for the three `dive_mixture` bounds whose

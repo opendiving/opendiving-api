@@ -45,7 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from uuid6 import uuid7
 
 from ...core.schemas import NOTES_MAX_LENGTH
-from ...core.utils.datetime_offset import split_local_start_time
+from ...core.utils.datetime_offset import split_dive_start_time, split_local_start_time
 from ...core.utils.uploads import safe_filename
 from ...models.certification import Certification
 from ...models.course import Course
@@ -1845,15 +1845,6 @@ class _Planner:
         collection = "dives"
         if dive.started_at is None:
             return self._skip(collection, dive.uuid, "A dive needs a start time, and this one has none.")
-        if not isinstance(dive.started_at, datetime):
-            # A date-only start (spec §5.2): the day was recorded and the time of day was not.
-            # This app cannot store one yet, and midnight would be a time nobody recorded.
-            return self._skip(
-                collection,
-                dive.uuid,
-                "This dive records its date and no time of day, which this app cannot store yet. It was not "
-                "imported rather than placed at midnight.",
-            )
 
         record = self._resolve(collection, dive.uuid, existing)
         if record.action not in (Action.CREATE, Action.RESTORE):
@@ -1912,7 +1903,9 @@ class _Planner:
 
         entry = self._position(collection, dive.uuid, dive.entry_position, "entry")
         exit_ = self._position(collection, dive.uuid, dive.exit_position, "exit")
-        start_time, offset_minutes = split_local_start_time(dive.started_at)
+        # A bare date is the date-only state (spec §5.2): stored as its day with no clock,
+        # never as a midnight somebody would read as the time the dive began.
+        start_time, offset_minutes, date_only = split_dive_start_time(dive.started_at)
         record.values = {
             "user_id": self._user_id,
             # A dive number is the diver's own numbering and `NOT NULL` here. Absent - or
@@ -1925,6 +1918,7 @@ class _Planner:
             "dive_number": bounded.get("number", 0),
             "start_time": start_time,
             "utc_offset_minutes": offset_minutes,
+            "start_date_only": date_only,
             "duration": int(duration),
             "notes": self._notes_text("dives", dive.uuid, dive.notes),
             "max_depth": max_depth,
@@ -2216,7 +2210,10 @@ class _Planner:
 
         `started_at` absent means the dive's (§6.4a), so it is substituted here rather than
         left NULL - a reader that treated the absence as "unknown" would put every
-        single-computer recording outside every gate's reach.
+        single-computer recording outside every gate's reach. The exception is a dive whose
+        start is a bare date: a day is no recording's start, so the recording keeps a NULL one
+        and its axis counts from an unknown time that day, until a file attached to it states
+        one (`is_same_recording`, `fill_start`).
         """
         planned: list[PlannedRecording] = []
         for source in dive.recordings:
@@ -2280,7 +2277,8 @@ class _Planner:
         return planned
 
     def _recording_start(self, dive: ImportDive, source: ImportRecording) -> datetime | None:
-        """A recording's own start, or the dive's where it states none (§6.4a).
+        """A recording's own start, or the dive's where it states none (§6.4a) - and `None`
+        where that is a bare date, which no recording's start can be.
 
         A recording's start is a date-time and never a bare date; one that arrives as a date
         is read as absent, with a note, rather than as midnight.

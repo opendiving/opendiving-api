@@ -18,6 +18,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.schemas import PublicUUIDSchema
+from .dive import DiveLocalStartTime
 
 # The source that supplied a search result. `catalog` means the row already exists locally
 # and so carries a `uuid` a dive can reference immediately; the other two mean the diver has
@@ -183,7 +184,8 @@ class SpeciesLifeListEntry(PublicUUIDSchema):
     request per row.
 
     `first_seen`/`last_seen` are dive **start times**, so they carry the offset the diver
-    logged the dive in - the same values every other dive-derived surface reports.
+    logged the dive in - the same values every other dive-derived surface reports, a bare date
+    among them where that dive recorded no time of day.
     """
 
     scientific_name: Annotated[str, Field(max_length=255, examples=["Amphiprion ocellaris"])]
@@ -191,8 +193,8 @@ class SpeciesLifeListEntry(PublicUUIDSchema):
     rank: Annotated[str, Field(max_length=64, examples=["Species"])]
     photo_sha256: Annotated[str | None, Field(default=None, max_length=64)]
     dive_count: Annotated[int, Field(ge=1, examples=[7], description="How many live dives recorded this species")]
-    first_seen: datetime
-    last_seen: datetime
+    first_seen: DiveLocalStartTime
+    last_seen: DiveLocalStartTime
 
 
 class SpeciesResolveRequest(BaseModel):
