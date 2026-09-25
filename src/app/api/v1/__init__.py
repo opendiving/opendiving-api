@@ -4,7 +4,6 @@ from .admin import router as admin_router
 from .auth import router as auth_router
 from .certifications import router as certifications_router
 from .config import router as config_router
-from .contact import router as contact_router
 from .courses import router as courses_router
 from .dive_form_presets import router as dive_form_presets_router
 from .dive_sites import router as dive_sites_router
@@ -20,6 +19,7 @@ from .logbook_import import router as logbook_import_router
 from .passkeys import router as passkeys_router
 from .sessions import router as sessions_router
 from .species import router as species_router
+from .support import router as support_router
 from .trips import router as trips_router
 from .users import router as users_router
 
@@ -43,6 +43,6 @@ router.include_router(certifications_router)
 router.include_router(species_router)
 router.include_router(dives_router)
 router.include_router(dive_form_presets_router)
-router.include_router(contact_router)
+router.include_router(support_router)
 router.include_router(export_router)
 router.include_router(logbook_import_router)

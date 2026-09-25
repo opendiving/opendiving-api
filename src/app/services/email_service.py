@@ -5,7 +5,7 @@ email-change confirmation/notification pair (see `api.v1.users`), the passkey
 added/removed security notices (see `api.v1.passkeys`), the account-deletion
 confirmation that carries the purge date (see `api.v1.users.erase_user`), the gear-service
 digest (see `core.worker.functions.send_gear_service_digests`), the invitation into a
-closed instance (see `api.v1.invitations`), and the contact form (see `api.v1.contact`),
+closed instance (see `api.v1.invitations`), and the support form (see `api.v1.support`),
 all funneling through `_send` so the "run a blocking client off the event loop" plumbing
 only lives in one place.
 
@@ -101,8 +101,8 @@ def _header_safe(value: str) -> str:
 
     `EmailMessage` refuses a header containing a newline - it raises rather than emitting
     it, so there is no injection to prevent here. The problem is whose error it is: the
-    contact form's `subject` is typed by an unauthenticated stranger and no schema
-    restricts its characters (`schemas.contact`), so a `\\r\\n` in that JSON string would
+    support form's `subject` is typed by an unauthenticated stranger and no schema
+    restricts its characters (`schemas.support`), so a `\\r\\n` in that JSON string would
     otherwise 500 in our own code before any transport was involved.
 
     Applied in `_build_message` rather than at that one call site, so a later sender that
@@ -421,7 +421,7 @@ async def send_gear_service_digest_email(email: str, lines: list[tuple[str, str,
     are built from `GearItem.brand`/`name` and `GearServiceSchedule.label`, which the
     diver typed and which no schema restricts to safe characters (see
     `core.worker.functions.send_gear_service_digests`). Same reasoning as
-    `send_contact_form_email` below - content a person typed gets escaped, content this
+    `send_support_request_email` below - content a person typed gets escaped, content this
     server composed doesn't.
     """
     if not settings.SMTP_HOST:
@@ -449,8 +449,8 @@ async def send_gear_service_digest_email(email: str, lines: list[tuple[str, str,
     await anyio.to_thread.run_sync(_send, message)
 
 
-async def send_contact_form_email(name: str, email: str, category_label: str, subject: str, message: str) -> None:
-    """Forwards a contact-form submission to `CONTACT_FORM_EMAIL`.
+async def send_support_request_email(name: str, email: str, category_label: str, subject: str, message: str) -> None:
+    """Forwards a support-form submission to `CONTACT_FORM_EMAIL`.
 
     Every other sender in this module mails content this server composed itself; this
     one mails content a *stranger* typed, so it's the one place that has to escape its
@@ -467,7 +467,7 @@ async def send_contact_form_email(name: str, email: str, category_label: str, su
     rest of this module - the whole submission is written to the log in that case, so a
     local instance without a relay can still see what would have been sent.
 
-    An unset `CONTACT_FORM_EMAIL` raises rather than no-ops, and `api.v1.contact` answers
+    An unset `CONTACT_FORM_EMAIL` raises rather than no-ops, and `api.v1.support` answers
     503 before it ever gets here: there is no inbox to fall back to, and the value of the
     log line above is that a developer can read what *would* have been sent - there is no
     equivalent consolation for mail with no recipient.
@@ -478,7 +478,7 @@ async def send_contact_form_email(name: str, email: str, category_label: str, su
 
     if not settings.SMTP_HOST:
         logger.warning(
-            "SMTP_HOST not configured; contact message from %s <%s> [%s] %s: %s",
+            "SMTP_HOST not configured; support request from %s <%s> [%s] %s: %s",
             name,
             email,
             category_label,

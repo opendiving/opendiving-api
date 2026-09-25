@@ -9,7 +9,7 @@ transaction.
 
 The mode is patched in every test that depends on it. It has a default (`invite`) and
 `settings` is read at import, so a test that left it alone would pass or fail on whatever
-the developer's own `src/.env` happens to say - the same trap `test_contact.py`'s
+the developer's own `src/.env` happens to say - the same trap `test_support.py`'s
 `_configured_inbox` fixture exists for.
 """
 
@@ -143,7 +143,7 @@ class TestOpenModeMakesTheFeatureAbsent:
 
     @pytest.mark.asyncio
     async def test_nothing_is_written_or_rate_limited_on_the_way_out(self, mock_db) -> None:
-        """The mode check is above the rate limiters, the way `send_contact_message` puts
+        """The mode check is above the rate limiters, the way `send_support_request` puts
         its 503 above its own: an instance where the feature is off must not have its
         buckets spent by traffic that was never going to be stored."""
         with (

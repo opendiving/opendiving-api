@@ -1,6 +1,6 @@
-"""Unit tests for the contact-form endpoint (see `api.v1.contact`).
+"""Unit tests for the support-form endpoint (see `api.v1.support`).
 
-Built against a minimal app exposing only the contact router - like
+Built against a minimal app exposing only the support router - like
 `test_health.py`, this keeps the test off the full application lifespan (DB/Redis
 setup), which this endpoint doesn't touch anyway.
 """
@@ -11,10 +11,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.app.api.v1.contact import router as contact_router
+from src.app.api.v1.support import router as support_router
 from src.app.core.config import SMTPTLSMode, settings
 from src.app.core.exceptions.http_exceptions import RateLimitException
-from src.app.services.email_service import EmailDeliveryError, send_contact_form_email
+from src.app.services.email_service import EmailDeliveryError, send_support_request_email
 
 VALID_BODY = {
     "name": "Jacques Cousteau",
@@ -25,32 +25,32 @@ VALID_BODY = {
 }
 
 
-def _make_contact_client() -> TestClient:
+def _make_support_client() -> TestClient:
     app = FastAPI()
-    app.include_router(contact_router)
+    app.include_router(support_router)
     return TestClient(app)
 
 
 @pytest.fixture(autouse=True)
 def _configured_inbox():
-    """Give every route test an instance that has a contact address.
+    """Give every route test an instance that has a support address.
 
     `CONTACT_FORM_EMAIL` has no default, and the route 503s without one - so unpatched,
     these tests would read the developer's own `src/.env` and pass or fail depending on
     whose machine they run on. The 503 itself is asserted below with this fixture
     overridden.
     """
-    with patch.object(settings, "CONTACT_FORM_EMAIL", "contact@opendiving.example"):
+    with patch.object(settings, "CONTACT_FORM_EMAIL", "support@opendiving.example"):
         yield
 
 
-class TestSendContactMessage:
+class TestSendSupportRequest:
     def test_accepts_a_valid_submission_and_forwards_it(self):
         with (
-            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
-            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.support.send_support_request_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.support.enforce_rate_limit", new_callable=AsyncMock),
         ):
-            response = _make_contact_client().post("/contact", json=VALID_BODY)
+            response = _make_support_client().post("/support", json=VALID_BODY)
 
             assert response.status_code == 200
             assert "on its way" in response.json()["message"]
@@ -59,43 +59,43 @@ class TestSendContactMessage:
     def test_forwards_the_human_readable_category_label(self):
         """The inbox sees "Dive-computer import", not the `import` slug."""
         with (
-            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
-            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.support.send_support_request_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.support.enforce_rate_limit", new_callable=AsyncMock),
         ):
-            _make_contact_client().post("/contact", json=VALID_BODY)
+            _make_support_client().post("/support", json=VALID_BODY)
 
             assert mock_send.await_args.kwargs["category_label"] == "Dive-computer import"
 
     def test_lowercases_the_submitted_email(self):
         """So the per-email rate limit can't be sidestepped by varying the casing."""
         with (
-            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
-            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
+            patch("src.app.api.v1.support.send_support_request_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.support.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
         ):
-            _make_contact_client().post("/contact", json=VALID_BODY)
+            _make_support_client().post("/support", json=VALID_BODY)
 
             assert mock_send.await_args.kwargs["email"] == "jacques@example.com"
-            assert mock_limit.await_args_list[0].args[0] == "contact:email:jacques@example.com"
+            assert mock_limit.await_args_list[0].args[0] == "support:email:jacques@example.com"
 
     def test_rate_limits_by_email_and_by_ip(self):
         with (
-            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock),
-            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
+            patch("src.app.api.v1.support.send_support_request_email", new_callable=AsyncMock),
+            patch("src.app.api.v1.support.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
         ):
-            _make_contact_client().post("/contact", json=VALID_BODY)
+            _make_support_client().post("/support", json=VALID_BODY)
 
             keys = [call.args[0] for call in mock_limit.await_args_list]
-            assert keys[0].startswith("contact:email:")
-            assert keys[1].startswith("contact:ip:")
+            assert keys[0].startswith("support:email:")
+            assert keys[1].startswith("support:ip:")
 
     def test_does_not_send_when_rate_limited(self):
         with (
-            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
-            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
+            patch("src.app.api.v1.support.send_support_request_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.support.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
         ):
             mock_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
 
-            response = _make_contact_client().post("/contact", json=VALID_BODY)
+            response = _make_support_client().post("/support", json=VALID_BODY)
 
             assert response.status_code == 429
             mock_send.assert_not_awaited()
@@ -112,10 +112,10 @@ class TestSendContactMessage:
     )
     def test_rejects_invalid_submissions(self, field: str, value: str):
         with (
-            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
-            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.support.send_support_request_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.support.enforce_rate_limit", new_callable=AsyncMock),
         ):
-            response = _make_contact_client().post("/contact", json={**VALID_BODY, field: value})
+            response = _make_support_client().post("/support", json={**VALID_BODY, field: value})
 
             assert response.status_code == 422
             mock_send.assert_not_awaited()
@@ -125,15 +125,15 @@ class TestSendContactMessage:
         side or the other, not something to silently drop on the floor.
         """
         with (
-            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock),
-            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.support.send_support_request_email", new_callable=AsyncMock),
+            patch("src.app.api.v1.support.enforce_rate_limit", new_callable=AsyncMock),
         ):
-            response = _make_contact_client().post("/contact", json={**VALID_BODY, "cc": "someone@example.com"})
+            response = _make_support_client().post("/support", json={**VALID_BODY, "cc": "someone@example.com"})
 
             assert response.status_code == 422
 
 
-class TestAnInstanceWithNoContactAddress:
+class TestAnInstanceWithNoSupportAddress:
     """`CONTACT_FORM_EMAIL` has no default, so this is the shipped state of a fresh
     install: the form is off rather than delivering somebody else's support mail to an
     inbox they never chose.
@@ -142,10 +142,10 @@ class TestAnInstanceWithNoContactAddress:
     def test_answers_503_without_sending(self):
         with (
             patch.object(settings, "CONTACT_FORM_EMAIL", None),
-            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock) as mock_send,
-            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.support.send_support_request_email", new_callable=AsyncMock) as mock_send,
+            patch("src.app.api.v1.support.enforce_rate_limit", new_callable=AsyncMock),
         ):
-            response = _make_contact_client().post("/contact", json=VALID_BODY)
+            response = _make_support_client().post("/support", json=VALID_BODY)
 
             assert response.status_code == 503
             mock_send.assert_not_awaited()
@@ -156,15 +156,15 @@ class TestAnInstanceWithNoContactAddress:
         """
         with (
             patch.object(settings, "CONTACT_FORM_EMAIL", None),
-            patch("src.app.api.v1.contact.send_contact_form_email", new_callable=AsyncMock),
-            patch("src.app.api.v1.contact.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
+            patch("src.app.api.v1.support.send_support_request_email", new_callable=AsyncMock),
+            patch("src.app.api.v1.support.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
         ):
-            _make_contact_client().post("/contact", json=VALID_BODY)
+            _make_support_client().post("/support", json=VALID_BODY)
 
             mock_limit.assert_not_awaited()
 
 
-class TestSendContactFormEmail:
+class TestSendSupportRequestEmail:
     ARGS = {
         "name": "Jacques Cousteau",
         "email": "jacques@example.com",
@@ -181,7 +181,7 @@ class TestSendContactFormEmail:
         mock_settings.SMTP_PASSWORD = None
         mock_settings.SMTP_TLS_MODE = SMTPTLSMode.STARTTLS
         mock_settings.EMAIL_FROM_ADDRESS = "noreply@mail.opendiving.app"
-        mock_settings.CONTACT_FORM_EMAIL = "contact@opendiving.app"
+        mock_settings.CONTACT_FORM_EMAIL = "support@opendiving.app"
 
     @pytest.mark.asyncio
     async def test_noop_when_no_transport_is_configured(self):
@@ -191,7 +191,7 @@ class TestSendContactFormEmail:
         ):
             mock_settings.SMTP_HOST = None
 
-            await send_contact_form_email(**self.ARGS)
+            await send_support_request_email(**self.ARGS)
 
             mock_smtplib.SMTP.assert_not_called()
             mock_smtplib.SMTP_SSL.assert_not_called()
@@ -204,10 +204,10 @@ class TestSendContactFormEmail:
         ):
             self._configure(mock_settings)
 
-            await send_contact_form_email(**self.ARGS)
+            await send_support_request_email(**self.ARGS)
 
             _send_fn, message = mock_run_sync.call_args.args
-            assert message["To"] == "contact@opendiving.app"
+            assert message["To"] == "support@opendiving.app"
             # Never sent *as* the submitter - only our own address is SPF/DKIM-covered.
             assert message["From"] == "noreply@mail.opendiving.app"
             assert message["Reply-To"] == "jacques@example.com"
@@ -222,7 +222,7 @@ class TestSendContactFormEmail:
         ):
             self._configure(mock_settings)
 
-            await send_contact_form_email(
+            await send_support_request_email(
                 **{**self.ARGS, "message": '<a href="https://evil.example">click</a>', "name": "<b>bold</b>"}
             )
 
@@ -240,7 +240,7 @@ class TestSendContactFormEmail:
         ):
             self._configure(mock_settings)
 
-            await send_contact_form_email(**{**self.ARGS, "message": "line one\nline two"})
+            await send_support_request_email(**{**self.ARGS, "message": "line one\nline two"})
 
             _send_fn, message = mock_run_sync.call_args.args
             assert "line one<br>line two" in message.get_content()
@@ -260,6 +260,6 @@ class TestSendContactFormEmail:
             mock_settings.CONTACT_FORM_EMAIL = None
 
             with pytest.raises(EmailDeliveryError, match="CONTACT_FORM_EMAIL"):
-                await send_contact_form_email(**self.ARGS)
+                await send_support_request_email(**self.ARGS)
 
             mock_run_sync.assert_not_called()

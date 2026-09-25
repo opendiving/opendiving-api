@@ -1402,19 +1402,19 @@ reads both optional payload keys with `.get`, so a version-1 row reads back with
 `DiveProfileInfo` carries `event_count` and `max_ceiling`; `event_count` stays out of `channels`,
 events not being a curve.
 
-## The contact form is an API endpoint, not a `mailto:`
+## The support form is an API endpoint, not a `mailto:`
 
-`POST /api/v1/contact` (`api/v1/contact.py`) mails a human, not a user, from anonymous input; the
+`POST /api/v1/support` (`api/v1/support.py`) mails a human, not a user, from anonymous input; the
 SMTP credentials live here, not in the frontend.
 
 - Unauthenticated, so rate-limited by submitted email and by client IP (`CONTACT_FORM_RATE_LIMIT_*`,
   one-hour window); the address is unverified, so `From:` is a claim.
 - Nothing is stored; there is no inbox here.
 - `reply_to`, never a spoofed `from`: `EMAIL_FROM_ADDRESS` is the only address SPF/DKIM covers.
-- `send_contact_form_email` runs `html.escape` over name, subject and body, being the only sender in
-  `services/email_service.py` carrying a stranger's prose; any new one must too.
+- `send_support_request_email` runs `html.escape` over name, subject and body, being the only sender
+  in `services/email_service.py` carrying a stranger's prose; any new one must too.
 
-`CONTACT_FORM_EMAIL` is the recipient, with no default (*"The contact form has no default recipient,
+`CONTACT_FORM_EMAIL` is the recipient, with no default (*"The support form has no default recipient,
 and no recipient means 503"*), and is not `AppSettings.CONTACT_EMAIL`, the OpenAPI metadata for
 `/docs`, so a maintainer address there cannot reroute support mail.
 
@@ -3543,7 +3543,7 @@ relays only; `SMTP_USERNAME`/`SMTP_PASSWORD` are independently optional.
 `EMAIL_FROM_ADDRESS` has no default: `Settings._require_from_address_with_smtp` refuses to boot when
 `SMTP_HOST` is set without it, and `.env.example` ships it commented out, since an active template
 value would pass the check. `_build_message` flattens CR/LF in the subject (`EmailMessage` raises;
-the contact `subject` is unrestricted input) but not in addresses.
+the support form's `subject` is unrestricted input) but not in addresses.
 
 Mailpit is the opt-in `mail` compose profile (`docker compose --profile mail up`, inbox
 `127.0.0.1:8025`) so the logged magic link stays the default sign-in. `docker compose restart` does
@@ -3605,21 +3605,21 @@ stop the stack, not protect it. Survivable because `docker-compose.yml` binds Po
 and `PackageNotFoundError` falls back to `None`. Consumers: `/api/v1/health`, the export's
 `generator.version`, the UDDF `<version>`.
 
-## The contact form has no default recipient, and no recipient means 503
+## The support form has no default recipient, and no recipient means 503
 
 `CONTACT_FORM_EMAIL` has no default. No address is right for somebody else's install, and an
-upstream inbox gets reports the operator never sees. Unset, `POST /api/v1/contact` answers 503 — a
+upstream inbox gets reports the operator never sees. Unset, `POST /api/v1/support` answers 503 — a
 raw `HTTPException`, since `core/exceptions/http_exceptions.py` has no class for it, as
 `species.resolve` does. The check runs before the two rate limiters, so a switched-off form cannot
 spend the buckets.
 
-`send_contact_form_email` raises on a missing recipient, unlike its missing-`SMTP_HOST` branch,
+`send_support_request_email` raises on a missing recipient, unlike its missing-`SMTP_HOST` branch,
 which logs the whole submission and returns: that log line lets a developer read what would have
 been sent, and there is no equivalent consolation for mail with nowhere to go.
 
 The route tests build a minimal app and mock the sender, never settings, so the guard would
 otherwise read whatever `CONTACT_FORM_EMAIL` the developer's own `src/.env` holds.
-`tests/test_contact.py` has an autouse fixture pinning it, and the 503 cases override that fixture.
+`tests/test_support.py` has an autouse fixture pinning it, and the 503 cases override that fixture.
 
 ## Comma-separated strings are how this app takes a list
 
@@ -5048,7 +5048,7 @@ A token endpoint answering 4xx — an expired code, a replayed one, a `redirect_
 bad credential and stays `UnauthorizedException("Invalid Google credential.")`. A network failure or
 5xx from Google is this server failing, and reporting it as a bad credential sends the visitor to
 retry something that was never their problem, so `exchange_google_code` raises a 503 for those — a
-bare `HTTPException`, following `api/v1/contact.py` and `services/species_service.py`, because
+bare `HTTPException`, following `api/v1/support.py` and `services/species_service.py`, because
 `core/exceptions/http_exceptions.py` has no class for that status.
 
 429 is sorted with the 5xx. The question is not which side of 500 but whether this is the visitor's

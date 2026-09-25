@@ -1,4 +1,4 @@
-"""The frontend's contact form (see `app/contact/page.tsx` in opendiving-web).
+"""The frontend's support form (see `app/support/page.tsx` in opendiving-web).
 
 The only endpoint in this API that mails a human rather than a user: submissions are
 forwarded to `CONTACT_FORM_EMAIL` with the submitter's address as `reply_to`. Nothing
@@ -12,17 +12,17 @@ from fastapi import APIRouter, HTTPException, Request
 from ...core.config import settings
 from ...core.utils.client_ip import client_ip
 from ...core.utils.rate_limit import enforce_rate_limit
-from ...schemas.contact import CONTACT_CATEGORY_LABELS, ContactMessageRequest, ContactMessageResponse
-from ...services.email_service import send_contact_form_email
+from ...schemas.support import SUPPORT_CATEGORY_LABELS, SupportRequest, SupportResponse
+from ...services.email_service import send_support_request_email
 
-router = APIRouter(tags=["contact"])
+router = APIRouter(tags=["support"])
 
-_CONTACT_RESPONSE = ContactMessageResponse()
+_SUPPORT_RESPONSE = SupportResponse()
 
 
-@router.post("/contact", response_model=ContactMessageResponse)
-async def send_contact_message(request: Request, body: ContactMessageRequest) -> ContactMessageResponse:
-    """Forwards a contact-form submission to the instance operator.
+@router.post("/support", response_model=SupportResponse)
+async def send_support_request(request: Request, body: SupportRequest) -> SupportResponse:
+    """Forwards a support-form submission to the instance operator.
 
     Unauthenticated by design - someone locked out of their account is exactly the
     person who needs this - which also makes it the one endpoint that will send mail
@@ -41,27 +41,27 @@ async def send_contact_message(request: Request, body: ContactMessageRequest) ->
     if not settings.CONTACT_FORM_EMAIL:
         # A raw `HTTPException`: `core/exceptions/http_exceptions.py` has no class for 503,
         # the same reason `species.resolve` raises its own.
-        raise HTTPException(status_code=503, detail="This instance has no contact address configured.")
+        raise HTTPException(status_code=503, detail="This instance has no support address configured.")
 
     email = body.email.lower()
 
     await enforce_rate_limit(
-        f"contact:email:{email}",
+        f"support:email:{email}",
         settings.CONTACT_FORM_RATE_LIMIT_PER_EMAIL,
         settings.CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS,
     )
     await enforce_rate_limit(
-        f"contact:ip:{client_ip(request)}",
+        f"support:ip:{client_ip(request)}",
         settings.CONTACT_FORM_RATE_LIMIT_PER_IP,
         settings.CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS,
     )
 
-    await send_contact_form_email(
+    await send_support_request_email(
         name=body.name,
         email=email,
-        category_label=CONTACT_CATEGORY_LABELS[body.category],
+        category_label=SUPPORT_CATEGORY_LABELS[body.category],
         subject=body.subject,
         message=body.message,
     )
 
-    return _CONTACT_RESPONSE
+    return _SUPPORT_RESPONSE

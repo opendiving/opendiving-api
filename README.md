@@ -154,7 +154,7 @@ EMAIL_FROM_ADDRESS="noreply@yourdomain.example"
 # Used to build magic-link URLs ({FRONTEND_URL}/auth/verify?token=...)
 FRONTEND_URL="http://localhost:3000"
 
-# Where the frontend's contact form (POST /api/v1/contact) delivers to. No default:
+# Where the frontend's support form (POST /api/v1/support) delivers to. No default:
 # unset, that endpoint answers 503 and the form is simply off, which beats mailing
 # your users' support requests to somebody else's inbox.
 CONTACT_FORM_EMAIL="you@example.com"
@@ -211,7 +211,7 @@ operator has closed registration (`REGISTRATION_MODE`, documented with the rest 
 `src/.env.example`) — a member sends and revokes their own, and the routes answer 404 on an open
 instance; and **admin**, the operator's own — the queue of people who have asked to be let in, and
 inviting or removing them in a batch — which is the one family gated on `is_superuser` rather than
-merely on having a token. All of those want a bearer token. The ones that don't are **contact**, the
+merely on having a token. All of those want a bearer token. The ones that don't are **support**, the
 auth routes themselves, the two health checks — `/health` says the process is up, `/health/ready`
 says Postgres and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how
 somebody with no account asks a closed instance for an invitation, `GET /config`, which tells the

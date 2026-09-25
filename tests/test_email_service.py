@@ -14,11 +14,11 @@ from src.app.services.email_service import (
     EmailDeliveryError,
     _build_message,
     _send,
-    send_contact_form_email,
     send_email_change_confirmation_email,
     send_gear_service_digest_email,
     send_invitation_email,
     send_magic_link_email,
+    send_support_request_email,
 )
 
 
@@ -72,7 +72,7 @@ class TestBuildMessage:
             assert message["Reply-To"] is None
 
     def test_a_subject_carrying_crlf_does_not_raise(self):
-        """`EmailMessage` refuses a header containing a newline. The contact form's
+        """`EmailMessage` refuses a header containing a newline. The support form's
         subject is stranger-typed and unrestricted, so without the flattening in
         `_header_safe` a `\\r\\n` in that JSON string would 500 in our own code.
         """
@@ -446,7 +446,7 @@ class TestSendGearServiceDigestEmail:
     @pytest.mark.asyncio
     async def test_gear_names_are_escaped(self):
         """Gear names and brands are diver-typed and unconstrained by any schema, so they
-        reach this HTML as untrusted input - same footing as the contact form's fields.
+        reach this HTML as untrusted input - same footing as the support form's fields.
         """
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
@@ -483,9 +483,9 @@ class TestSendGearServiceDigestEmail:
             assert message["Subject"] == "Your dive gear needs servicing"
 
 
-class TestContactFormHeaders:
-    """The contact form is the only sender whose text reaches a *header* - see
-    `test_contact.py` for the rest of its behaviour.
+class TestSupportFormHeaders:
+    """The support form is the only sender whose text reaches a *header* - see
+    `test_support.py` for the rest of its behaviour.
     """
 
     @pytest.mark.asyncio
@@ -495,9 +495,9 @@ class TestContactFormHeaders:
             patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
         ):
             _configured(mock_settings)
-            mock_settings.CONTACT_FORM_EMAIL = "contact@opendiving.example"
+            mock_settings.CONTACT_FORM_EMAIL = "support@opendiving.example"
 
-            await send_contact_form_email(
+            await send_support_request_email(
                 name="Jacques Cousteau",
                 email="jacques@example.com",
                 category_label="Bug report",

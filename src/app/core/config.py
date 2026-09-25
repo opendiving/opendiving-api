@@ -69,7 +69,7 @@ class AppSettings(BaseSettings):
     APP_COMMIT: str | None = config("APP_COMMIT", default=None)
     LICENSE_NAME: str | None = config("LICENSE", default=None)
     # OpenAPI document metadata only ("who maintains this API", shown in `/docs`) -
-    # *not* where the frontend's contact form delivers to. That's
+    # *not* where the frontend's support form delivers to. That's
     # `ContactSettings.CONTACT_FORM_EMAIL` below.
     CONTACT_NAME: str | None = config("CONTACT_NAME", default=None)
     CONTACT_EMAIL: str | None = config("CONTACT_EMAIL", default=None)
@@ -291,7 +291,7 @@ class RegistrationSettings(BaseSettings):
     INVITATION_ATTEMPT_RATE_LIMIT_PER_USER: int = config("INVITATION_ATTEMPT_RATE_LIMIT_PER_USER", default=20)
 
     # Fixed-window rate limits on `POST /invite-requests`, keyed separately by the
-    # submitted email and by client IP - the `ContactSettings` shape, with the contact
+    # submitted email and by client IP - the `ContactSettings` shape, with the support
     # form's values, because it is the same kind of endpoint: anonymous, writing a row
     # nobody authenticated, on behalf of somebody who may never come back.
     INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS: int = config("INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS", default=3600)
@@ -382,14 +382,16 @@ class EmailSettings(BaseSettings):
 
 
 class ContactSettings(BaseSettings):
-    # Inbox the frontend's contact form (`POST /api/v1/contact`) delivers to.
+    # Inbox the frontend's support form (`POST /api/v1/support`) delivers to. The
+    # `CONTACT_FORM_` names stay: running instances already set `CONTACT_FORM_EMAIL`, and a
+    # rename would be a manual step for every operator.
     #
     # No default, for the same reason `EMAIL_FROM_ADDRESS` has none. It used to default to
     # the address for *this project's* own deployment, so a self-hosted instance quietly
     # routed its users' support mail - password trouble, lost dives, whatever they typed -
     # to an inbox belonging to strangers who can neither see that server nor help them.
     # There is no address we can guess that is right for somebody else's install, so unset
-    # means the endpoint answers 503 (`api.v1.contact`) rather than delivering somewhere.
+    # means the endpoint answers 503 (`api.v1.support`) rather than delivering somewhere.
     CONTACT_FORM_EMAIL: str | None = config("CONTACT_FORM_EMAIL", default=None)
 
     # Fixed-window rate limits (see `core.utils.rate_limit`), keyed separately by the
@@ -523,7 +525,7 @@ class ExportSettings(BaseSettings):
     # work, so the cheap CSV download draws on the same allowance as the archive.
     #
     # Authenticated and owner-only, so this is not an abuse
-    # boundary the way the contact form's is - it is there because one archive request
+    # boundary the way the support form's is - it is there because one archive request
     # reads every blob the caller owns, and nothing else in the API does that. The bound
     # is deliberately generous: this is a button a diver presses once, and someone
     # scripting a nightly backup of their own account should not hit it.

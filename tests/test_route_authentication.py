@@ -65,7 +65,7 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "out - the restore token is the credential, and it names the account itself."
     ),
     # 2. The caller may be locked out, and that is the point.
-    ("POST", "/api/v1/contact"): "A diver who cannot sign in is precisely who needs to reach a human.",
+    ("POST", "/api/v1/support"): "A diver who cannot sign in is precisely who needs to reach a human.",
     ("POST", "/api/v1/invite-requests"): (
         "Asks a closed instance for an invitation; the whole population it serves is people with no "
         "account. It answers the same 202 for every address and never queries `user`, which is the "
