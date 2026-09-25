@@ -277,6 +277,22 @@ class TestImportingAcrossTheChange:
         assert (recording.start_time, recording.utc_offset_minutes, recording.cns_end) == (None, None, 4.0)
 
     @pytest.mark.asyncio
+    async def test_a_recordings_bare_date_on_a_date_only_dive_is_stored_as_no_start(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The dive's start is a day too, so there is nothing to fall back on - and the note
+        says so rather than claiming the dive's start was used."""
+        user = create_user(db)
+        document = _document({"started_at": "2002-06-18", "recordings": [{"started_at": "2002-06-18", "cns_end": 4.0}]})
+
+        plan = await _apply(async_db, user.id, document)
+
+        [recording] = await _recordings(async_db, user.id)
+        assert recording.start_time is None
+        [note] = plan.notes
+        assert (note.code, "none was stored" in note.message) == (ImportNoteCode.VALUE_DROPPED, True)
+
+    @pytest.mark.asyncio
     async def test_a_date_only_dives_recording_keeps_the_start_it_states(
         self, db: Session, async_db: AsyncSession
     ) -> None:

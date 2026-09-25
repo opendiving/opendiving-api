@@ -2283,13 +2283,13 @@ class _Planner:
         A recording's start is a date-time and never a bare date; one that arrives as a date
         is read as absent, with a note, rather than as midnight.
         """
+        fallback = dive.started_at if isinstance(dive.started_at, datetime) else None
         if source.started_at is not None and not isinstance(source.started_at, datetime):
-            self._dropped(
-                "dives", dive.uuid, "A recording's start carried no time of day, so the dive's start was used"
-            )
+            outcome = "so the dive's start was used" if fallback is not None else "and none was stored"
+            self._dropped("dives", dive.uuid, f"A recording's start carried no time of day, {outcome}")
         if isinstance(source.started_at, datetime):
             return source.started_at
-        return dive.started_at if isinstance(dive.started_at, datetime) else None
+        return fallback
 
     def _plan_deco_model(self, dive_uuid: uuid_pkg.UUID, source: ImportDecoModel | None) -> dict[str, Any]:
         """One recording's deco model, as the columns that carry it - keyed by column name.
