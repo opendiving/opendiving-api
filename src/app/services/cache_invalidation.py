@@ -10,8 +10,11 @@ The same holds for a course: a dive read and a certification read each carry the
 uuid of the course they point at, so deleting one changes what all three
 families say.
 
+A contact is the same shape again, five hosts wide: a dive, a course, a certification,
+a service record and a trip part carry its uuid.
+
 These helpers live here rather than in the route modules so `dives.py`,
-`gear_items.py`, `dive_sites.py` and `courses.py` can all reach them without
+`gear_items.py`, `dive_sites.py`, `courses.py` and `contacts.py` can all reach them without
 importing each other (which would be circular - `dives.py` already invalidates
 gear caches, and gear now has to invalidate dive caches).
 
@@ -19,6 +22,9 @@ Both work by pattern, which is only possible because every affected cache key is
 user-scoped. See `read_dive`/`_cached_read_dives` and `gear_items.py` for the key
 shapes themselves.
 """
+
+import uuid as uuid_pkg
+from collections.abc import Iterable
 
 from ..core.utils.cache import delete_keys_by_pattern
 from ..core.utils.owned_resource_cache import OwnedResourceCache
@@ -69,6 +75,32 @@ async def invalidate_course_caches(user_id: int) -> None:
     `ON DELETE SET NULL` just made every one of them read back `course_uuid: null`.
     """
     await delete_keys_by_pattern(f"user_{user_id}_course*")
+
+
+async def invalidate_contact_caches(user_id: int) -> None:
+    """Drop every cached contact read for a user.
+
+    Both key shapes share the `user_{id}_contact` prefix (`..._contacts:page_...` and
+    `..._contact:{uuid}`), so one pattern covers the lot, as for courses.
+
+    A contact's reads embed nothing, and the five hosts that reference one carry only its
+    uuid, so a rename reaches no other family - with one exception while the course and
+    certification reads still serve a training-center name for the previous web build:
+    `patch_contact` drops those two families as well. Deleting a contact drops all five
+    hosts' families, the `ON DELETE SET NULL` having rewritten their rows.
+    """
+    await delete_keys_by_pattern(f"user_{user_id}_contact*")
+
+
+async def invalidate_trip_items(trip_uuids: Iterable[uuid_pkg.UUID]) -> None:
+    """Drop the single-trip reads of these trips.
+
+    `trip_cache:{uuid}` carries no user in its key, so no per-user pattern reaches it; a
+    writer that changes what a trip read says from outside the trip routes - deleting a
+    contact a part names - has to collect the uuids and drop them one by one.
+    """
+    for trip_uuid in trip_uuids:
+        await delete_keys_by_pattern(f"trip_cache:{trip_uuid}")
 
 
 async def invalidate_gear_caches(user_id: int) -> None:

@@ -11,10 +11,11 @@ DECISIONS.md for why putting the check inside a cached function is a vulnerabili
 """
 
 import uuid as uuid_pkg
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NoReturn, cast
 
 from fastapi import APIRouter, Depends, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
@@ -26,6 +27,7 @@ from ...core.exceptions.http_exceptions import (
 )
 from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
+from ...crud.crud_contacts import get_contact_refs_by_ids
 from ...crud.crud_gear_items import crud_gear_items, get_gear_item_uuids_by_id
 from ...crud.crud_gear_service_records import (
     crud_gear_service_records,
@@ -45,7 +47,7 @@ from ...schemas.gear_service import (
     GearServiceRecordCreateInternal,
     GearServiceRecordRead,
     GearServiceRecordReadInternal,
-    GearServiceRecordUpdate,
+    GearServiceRecordUpdateRequest,
     GearServiceScheduleCreate,
     GearServiceScheduleCreateInternal,
     GearServiceScheduleRead,
@@ -53,6 +55,7 @@ from ...schemas.gear_service import (
     GearServiceScheduleUpdate,
 )
 from ...services.cache_invalidation import invalidate_gear_caches
+from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
 from ...services.gear_service import recalculate_service_schedule
 
 router = APIRouter(tags=["gear"])
@@ -91,16 +94,36 @@ def _to_public_record(
     user_uuid: uuid_pkg.UUID,
     gear_item_uuid: uuid_pkg.UUID,
     gear_service_schedule_uuid: uuid_pkg.UUID | None,
+    contact_uuid: uuid_pkg.UUID | None,
 ) -> GearServiceRecordRead:
     """Convert an internal record representation (integer FKs) into its public shape."""
     data = db_record if isinstance(db_record, dict) else db_record.model_dump()
-    hidden = {"id", "user_id", "gear_item_id", "gear_service_schedule_id"}
+    hidden = {"id", "user_id", "gear_item_id", "gear_service_schedule_id", "contact_id"}
     return GearServiceRecordRead(
         **{k: v for k, v in data.items() if k not in hidden},
         user_uuid=user_uuid,
         gear_item_uuid=gear_item_uuid,
         gear_service_schedule_uuid=gear_service_schedule_uuid,
+        contact_uuid=contact_uuid,
     )
+
+
+async def _contact_uuids_by_id(
+    db: AsyncSession, contact_ids: list[int | None], user_id: int
+) -> dict[int | None, uuid_pkg.UUID]:
+    """The public uuids of the contacts a page of records names, in one query."""
+    refs = await get_contact_refs_by_ids(db=db, contact_ids=contact_ids, user_id=user_id)
+    return {contact_id: ref.uuid for contact_id, ref in refs.items()}
+
+
+async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> NoReturn:
+    """Turn a contact deleted between the resolve and the write into the 422 a foreign or
+    missing uuid gets. Rolls back first, as `certifications.py` does; re-raises anything
+    else untouched."""
+    await db.rollback()
+    if "gear_service_record_contact_id_fkey" in str(exc.orig):
+        raise UnprocessableEntityException(CONTACT_NOT_FOUND) from exc
+    raise exc
 
 
 async def _owned_gear_item(db: AsyncSession, gear_item_uuid: uuid_pkg.UUID, user_id: int) -> GearItemReadInternal:
@@ -393,6 +416,9 @@ async def write_gear_service_record(
     (item, kind, label) - see `find_schedule_for_record` - so logging "annual service
     done" from the gear page satisfies the reminder without picking anything. A record
     with no matching rule is fine and simply stands on its own.
+
+    `contact_uuid` names the shop that did the work, beside `performed_by`'s person; one
+    that isn't the caller's own - or doesn't exist - is a 422.
     """
     db_gear_item = await _owned_gear_item(db, record.gear_item_uuid, current_user["id"])
 
@@ -408,18 +434,26 @@ async def write_gear_service_record(
             db=db, gear_item_id=db_gear_item.id, kind=record.kind.value, label=record.label
         )
 
+    contact_id: int | None = None
+    if record.contact_uuid is not None:
+        contact_id = await resolve_contact_reference(db, contact_uuid=record.contact_uuid, user_id=current_user["id"])
+
     record_internal = GearServiceRecordCreateInternal(
-        **record.model_dump(exclude={"gear_item_uuid", "gear_service_schedule_uuid"}),
+        **record.model_dump(exclude={"gear_item_uuid", "gear_service_schedule_uuid", "contact_uuid"}),
         user_id=current_user["id"],
         gear_item_id=db_gear_item.id,
         gear_service_schedule_id=schedule.id if schedule is not None else None,
+        contact_id=contact_id,
         # Snapshot of the item's lifetime dive count at the moment of service - the
         # baseline the next dive-based threshold is measured from. Never client-supplied.
         dive_count_at_service=db_gear_item.dive_count,
     )
-    created = await crud_gear_service_records.create(
-        db=db, object=record_internal, schema_to_select=GearServiceRecordReadInternal, return_as_model=True
-    )
+    try:
+        created = await crud_gear_service_records.create(
+            db=db, object=record_internal, schema_to_select=GearServiceRecordReadInternal, return_as_model=True
+        )
+    except IntegrityError as e:
+        await _refuse_a_vanished_contact(db, e)
     if schedule is not None:
         # Moves the due date onto this service and clears the notify state, so the
         # reminder re-arms for the next cycle.
@@ -437,6 +471,7 @@ async def write_gear_service_record(
         user_uuid=current_user["uuid"],
         gear_item_uuid=db_gear_item.uuid,
         gear_service_schedule_uuid=schedule.uuid if schedule is not None else None,
+        contact_uuid=record.contact_uuid,
     )
 
 
@@ -478,6 +513,9 @@ async def _cached_read_records(
     schedule_uuid_by_id = await _schedule_uuids_by_id(
         db=db, schedule_ids=[row["gear_service_schedule_id"] for row in data["data"]]
     )
+    contact_uuid_by_id = await _contact_uuids_by_id(
+        db=db, contact_ids=[row["contact_id"] for row in data["data"]], user_id=user_id
+    )
     # `.get()`-and-skip on the item, for the reason `_cached_read_schedules` gives; the
     # schedule half was always a `.get()` because that reference is legitimately nullable.
     data["data"] = [
@@ -486,6 +524,7 @@ async def _cached_read_records(
             user_uuid=user_uuid,
             gear_item_uuid=item_uuid,
             gear_service_schedule_uuid=schedule_uuid_by_id.get(row["gear_service_schedule_id"]),
+            contact_uuid=contact_uuid_by_id.get(row["contact_id"]),
         ).model_dump()
         for row in data["data"]
         if (item_uuid := uuid_by_id.get(row["gear_item_id"])) is not None
@@ -581,12 +620,17 @@ async def _cached_read_record(
     )
     if db_record is None:
         raise NotFoundException("Service record not found")
+    db_record = cast(GearServiceRecordReadInternal, db_record)
+    # Resolved in here, unlike the item and schedule uuids the route hands in: the key names
+    # only the record, and a contact's delete drops the gear family this key sits in.
+    contact_uuid_by_id = await _contact_uuids_by_id(db=db, contact_ids=[db_record.contact_id], user_id=user_id)
 
     return _to_public_record(
-        cast(GearServiceRecordReadInternal, db_record),
+        db_record,
         user_uuid=owner_uuid,
         gear_item_uuid=gear_item_uuid,
         gear_service_schedule_uuid=gear_service_schedule_uuid,
+        contact_uuid=contact_uuid_by_id.get(db_record.contact_id),
     )
 
 
@@ -628,7 +672,7 @@ async def read_gear_service_record(
 async def patch_gear_service_record(
     request: Request,
     uuid: uuid_pkg.UUID,
-    values: GearServiceRecordUpdate,
+    values: GearServiceRecordUpdateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
@@ -636,17 +680,28 @@ async def patch_gear_service_record(
     date, so the linked rule is recalculated afterwards.
 
     `dive_count_at_service` isn't editable - it records a moment that has already
-    passed, and rewriting it would silently shift a dive-based threshold.
+    passed, and rewriting it would silently shift a dive-based threshold. Passing `null`
+    for `contact_uuid` unlinks the shop, which is distinct from omitting the key; a contact
+    that isn't the caller's own is a 422.
     """
     record = await resolve_record_for_user(db=db, record_uuid=uuid, user_id=current_user["id"])
     if record is None:
         raise NotFoundException("Service record not found")
 
-    update_data = values.model_dump(exclude_unset=True)
+    update_data = values.model_dump(exclude_unset=True, exclude={"contact_uuid"})
+    if "contact_uuid" in values.model_fields_set:
+        update_data["contact_id"] = (
+            None
+            if values.contact_uuid is None
+            else await resolve_contact_reference(db, contact_uuid=values.contact_uuid, user_id=record.user_id)
+        )
     if not update_data:
         return {"message": "Service record updated"}
 
-    await crud_gear_service_records.update(db=db, object=update_data, uuid=uuid)
+    try:
+        await crud_gear_service_records.update(db=db, object=update_data, uuid=uuid)
+    except IntegrityError as e:
+        await _refuse_a_vanished_contact(db, e)
     if record.gear_service_schedule_id is not None:
         await recalculate_service_schedule(db=db, schedule_id=record.gear_service_schedule_id)
     await invalidate_gear_caches(record.user_id)

@@ -11,6 +11,7 @@ from ..core.schemas import (
     RejectsExplicitNulls,
     StoredVocabulary,
 )
+from .contact import CONTACT_UUID_DESCRIPTION, TRAINING_CENTER_READ_DESCRIPTION, TrainingCenterShim
 
 
 class CertificationAgency(StrEnum):
@@ -173,10 +174,6 @@ class CertificationBase(BaseModel):
     ]
     instructor_name: Annotated[str | None, Field(default=None, max_length=255)]
     instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
-    training_center: Annotated[
-        str | None,
-        Field(default=None, max_length=255, description="Dive shop, resort or club that ran the course"),
-    ]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
     @model_validator(mode="after")
@@ -202,6 +199,10 @@ class CertificationRead(CertificationBase, PublicUUIDSchema):
         uuid_pkg.UUID | None,
         Field(default=None, description="Public id of the training course this certification came from"),
     ]
+    contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    # Read-only: the linked contact's name, for the web build that still prints a training
+    # center and echoes it back on save. Comes out with the write half - see `TrainingCenterShim`.
+    training_center: Annotated[str | None, Field(default=None, description=TRAINING_CENTER_READ_DESCRIPTION)]
     # The card images this certification has, as metadata only - see
     # `CertificationFileInfo`. Empty for a certification entered but not yet photographed.
     files: Annotated[
@@ -223,6 +224,7 @@ class CertificationReadInternal(CertificationBase, PublicUUIDSchema):
     id: int
     user_id: int
     course_id: int | None = None
+    contact_id: int | None = None
     created_at: datetime
 
 
@@ -242,15 +244,18 @@ class CertificationCreate(CertificationBase):
         uuid_pkg.UUID | None,
         Field(default=None, description="Public id of the training course this certification came from"),
     ]
+    contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    training_center: TrainingCenterShim
 
 
 class CertificationCreateInternal(CertificationBase):
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
-    # The column, not the uuid - so the admin create form gets a field it can actually
+    # The columns, not the uuids - so the admin create form gets fields it can actually
     # fill, matching how `DiveCreateInternal` exposes `trip_id`.
     course_id: int | None = None
+    contact_id: int | None = None
 
 
 class CertificationUpdate(RejectsExplicitNulls):
@@ -277,7 +282,6 @@ class CertificationUpdate(RejectsExplicitNulls):
     expires_on: Annotated[date | None, Field(default=None)]
     instructor_name: Annotated[str | None, Field(default=None, max_length=255)]
     instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
-    training_center: Annotated[str | None, Field(default=None, max_length=255)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
 
@@ -291,12 +295,15 @@ class CertificationUpdateRequest(CertificationUpdate):
     same split, and the same reason, as `TripUpdateRequest`.
 
     Omit `course_uuid` and the existing link is left alone; send `null` and it is cleared.
+    `contact_uuid` works the same way.
     """
 
     course_uuid: Annotated[
         uuid_pkg.UUID | None,
         Field(default=None, description="Public id of the training course this certification came from"),
     ]
+    contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    training_center: TrainingCenterShim
 
 
 class CertificationUpdateInternal(CertificationUpdate):

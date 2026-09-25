@@ -51,6 +51,7 @@ from ...core.utils.rate_limit import enforce_rate_limit
 from ...schemas.logbook_import import ImportCheckInSubmission, ImportPortraitChoice, ImportPreview, ImportResult
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
+    invalidate_contact_caches,
     invalidate_course_caches,
     invalidate_dive_caches,
     invalidate_dive_site_caches,
@@ -253,13 +254,14 @@ async def apply_logbook_import(
 
     # After the commit, never before: a cache dropped early can be refilled from the
     # pre-import state by any read that lands in between. An import fills the dive-site and
-    # trip collections as well as everything the four helpers below already cover, and those
+    # trip collections as well as everything the helpers below already cover, and those
     # two list caches live inside their own routers - see `services/cache_invalidation.py`.
     # Skipping them serves a restored diver empty pages for up to the 60-second list expiry,
     # at exactly the moment they go looking at what they just restored.
     user_id = current_user["id"]
     await invalidate_dive_caches(user_id)
     await invalidate_certification_caches(user_id)
+    await invalidate_contact_caches(user_id)
     await invalidate_course_caches(user_id)
     await invalidate_gear_caches(user_id)
     await invalidate_dive_site_caches(user_id)

@@ -52,8 +52,11 @@ class Certification(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     expires_on: Mapped[date | None] = mapped_column(Date, default=None)
     instructor_name: Mapped[str | None] = mapped_column(String(255), default=None)
     instructor_number: Mapped[str | None] = mapped_column(String(64), default=None)
-    # The dive shop, resort or club that ran the course.
-    training_center: Mapped[str | None] = mapped_column(String(255), default=None)
+    # Who ran the course this card came out of. `SET NULL` fires for a hidden card too, as
+    # it does for `course_id` below.
+    contact_id: Mapped[int | None] = mapped_column(
+        ForeignKey("contact.id", ondelete="SET NULL"), default=None, index=True
+    )
     # The training course this card came out of, if the diver recorded one - the first
     # reference a certification has ever carried, and the same shape as `dive.trip_id`.
     # One course can issue several certifications (TDI's combined Advanced Nitrox + Deco

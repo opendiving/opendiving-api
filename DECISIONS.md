@@ -117,17 +117,17 @@ informational (a React key); never send it back. `DiveMixtureCreate` has `extra=
 `id` field, so echoing it is a `422 extra_forbidden`. The web app's `normalizeMixtures()` strips it
 before every submit.
 
-## Case-insensitive per-user uniqueness (trips, dive sites)
+## Case-insensitive per-user uniqueness (trips, dive sites, contacts)
 
-`Trip.name` and `DiveSite.name` are unique per user, case-insensitively, enforced two ways: a
-functional unique index on `(user_id, lower(name))` — `Index(..., func.lower(name))` in
+`Trip.name`, `DiveSite.name` and `Contact.name` are unique per user, case-insensitively, enforced
+two ways: a functional unique index on `(user_id, lower(name))` — `Index(..., func.lower(name))` in
 `__table_args__` reproduces that DDL exactly — and an application-level check (`trip_name_exists` /
-`dive_site_name_exists`) before insert or update, so a duplicate returns
+`dive_site_name_exists` / `contact_name_exists`) before insert or update, so a duplicate returns
 `422 DuplicateValueException` instead of a raw integrity error. Neither half carries a
-`WHERE is_deleted = false` predicate: trips and dive sites are hard-deleted, so a deleted name frees
-its slot because the row is gone. The index and the check must agree — a predicate on one and not
-the other refuses names the other accepts. A new named, user-owned entity mirrors this pattern; add
-the predicate to both halves only if it is genuinely soft-deletable.
+`WHERE is_deleted = false` predicate: all three are hard-deleted, so a deleted name frees its slot
+because the row is gone. The index and the check must agree — a predicate on one and not the other
+refuses names the other accepts. A new named, user-owned entity mirrors this pattern; add the
+predicate to both halves only if it is genuinely soft-deletable.
 
 ## `trips.py`/`dive_sites.py` caching mirrors `dives.py`
 
@@ -2466,9 +2466,9 @@ CSV as the local ANSI codepage, turning every accented site name and non-Latin n
 it is the file's most likely destination, and the BOM is the only in-band way to tell it otherwise.
 Programmatic readers strip it (`encoding="utf-8-sig"`) or tolerate it.
 
-All nine CSVs carry it, including the normalized set inside the archive: `dive-sites.csv`,
-`trips.csv` and `certifications.csv` hold the same free text as `dives.csv`, a diver double-clicking
-one is ordinary, and a mangled site name is worse than a `utf-8-sig` a script author passes once.
+Every CSV carries it, including the normalized set inside the archive: `dive-sites.csv`, `trips.csv`
+and `certifications.csv` hold the same free text as `dives.csv`, a diver double-clicking one is
+ordinary, and a mangled site name is worse than a `utf-8-sig` a script author passes once.
 
 `tests/fixtures/export/dives.csv` pins the exact bytes, and `.gitattributes` marks it `-text` so
 `core.autocrlf` cannot normalize the line endings under the test. `-text` rather than `binary`,
@@ -5226,7 +5226,7 @@ combined Advanced Nitrox + Decompression Procedures is.
 `ux_trip_user_id_name_lower` has no counterpart on `course`, and no `course_name_exists` helper
 stands in front of one: a course failed and retaken later is legitimately the same name twice, the
 reasoning that leaves `certification` without a unique index. *"Case-insensitive per-user uniqueness
-(trips, dive sites)"* is the pattern this declines, not one it forgot.
+(trips, dive sites, contacts)"* is the pattern this declines, not one it forgot.
 
 `tests/test_hard_delete.py` runs three behavioural classes over one registry. `Course` takes the
 first two; `TestADeletedNameFreesItsSlot` has nothing to assert for a name that was never exclusive,
@@ -5949,7 +5949,7 @@ Every user-scoped unique index is a "you already have one of these" rule, so a c
 the caller's existing row and remaps every reference, within one document too:
 `ux_dive_site_user_id_name_location_lower`, `ux_trip_user_id_name_lower`,
 `ux_gear_item_user_id_brand_name_lower`, `ux_gear_set_user_id_name_lower`,
-`ux_gear_service_schedule_item_kind_label`. Derive the set with
+`ux_gear_service_schedule_item_kind_label`, `ux_contact_user_id_name_lower`. Derive the set with
 `git grep -n "unique=True\|UniqueConstraint\|ux_" -- src/app/models/ src/app/core/db/models.py`;
 join tables declare `UniqueConstraint(...)`, not `Index(..., unique=True)`.
 
@@ -7083,3 +7083,31 @@ figure no real note reaches, since a lower one leaves a longer imported note une
 form. The import models read any length and the planner stores a longer note cut at the cap with a
 report line: the read shapes validate the length, so a longer stored note would 500 its record.
 *Rejected:* dropping the application cap, which leaves every form unbounded.
+
+## Contact roles are a JSON list, in vocabulary order
+
+`contact.roles` is a `JSON` list of `ContactRole` values with no DB `CHECK`, the
+`dive_form_preset.hidden_fields` precedent: nothing queries into it. Every write rewrites it into
+declaration order with duplicates folded (`canonical_roles`) rather than refusing a repeat, so two
+equal sets are two equal lists; reads widen it to `list[str]`. A set rather than a `type` column,
+because a resort is a dive center with rooms and a scalar could never become a set later.
+*Rejected:* a single `type` with a `resort` member, which files one party two ways.
+
+## The course and certification writes honour a training-center string for one web build
+
+Until the web build that sends `contact_uuid` is live, `CourseCreate`, `CourseUpdateRequest`,
+`CertificationCreate` and `CertificationUpdateRequest` accept `training_center` and resolve a
+non-blank one to the caller's contact of that name, or a new `school`; blank and `null` change
+nothing. `CourseRead` and `CertificationRead` serve the linked contact's name under it, which the
+old dialog echoes back as a no-op - so a contact rename also drops the course and certification
+caches. The api and web deploy apart, and the old build would otherwise lose what a diver types.
+*Rejected:* accept-and-ignore. Both halves and this entry go together.
+
+## Deleting a contact invalidates five cache families and the trips it was stayed at
+
+A dive, a course, a certification, a service record and a trip part carry a contact's uuid, and
+`ON DELETE SET NULL` rewrites all of them, so `erase_contact` drops each family after its own. A
+single trip is cached under `trip_cache:{uuid}` with no user in the key, which no per-user pattern
+reaches, so the uuids of the trips whose parts name the contact are collected before the row goes
+and dropped one by one (`invalidate_trip_items`). A rename reaches no host's cache beyond the shim's
+two: reads carry the uuid, never a summary.

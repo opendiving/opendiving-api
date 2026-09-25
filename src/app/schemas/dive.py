@@ -347,7 +347,8 @@ class SpeciesInfo(PublicUUIDSchema):
 class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
     """Public representation of a dive, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API). Cross-resource
-    references (owning user, trip, training course) are likewise exposed via their `uuid`.
+    references (owning user, trip, training course, contact) are likewise exposed via their
+    `uuid`.
     """
 
     # Overrides `DiveBase.water_type`, which stays `WaterType` for the writes that base
@@ -360,6 +361,9 @@ class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
     ]
     course_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the training course this dive was on")
+    ]
+    contact_uuid: Annotated[
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact the diver dived with")
     ]
     created_at: datetime
     dive_sites: Annotated[
@@ -376,8 +380,9 @@ class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
 class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
     """Mirrors the actual `dive` table columns (integer PK/FK), for server-side lookups
     only - never returned directly over the API (use `DiveRead`/`DiveReadWithMixtures`
-    for the public shape, which additionally resolves `user_id`/`trip_id`/`course_id` to
-    the owning user's/trip's/course's `uuid` and attaches the dive's sites).
+    for the public shape, which additionally resolves `user_id`/`trip_id`/`course_id`/
+    `contact_id` to the owning user's/trip's/course's/contact's `uuid` and attaches the
+    dive's sites).
 
     `start_time` here is the raw stored UTC instant (not yet re-combined with
     `utc_offset_minutes` and `start_date_only` - see `combine_dive_start_time()`), since that
@@ -391,6 +396,7 @@ class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
     user_id: int
     trip_id: int | None = None
     course_id: int | None = None
+    contact_id: int | None = None
     utc_offset_minutes: Annotated[
         int | None,
         Field(
@@ -1007,6 +1013,9 @@ class DiveCreate(DiveBase):
     course_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the training course this dive was on")
     ]
+    contact_uuid: Annotated[
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact the diver dived with")
+    ]
 
 
 class DiveCreateInternal(DiveBase):
@@ -1016,6 +1025,7 @@ class DiveCreateInternal(DiveBase):
     user_id: int
     trip_id: int | None = None
     course_id: int | None = None
+    contact_id: int | None = None
     # `start_time` on this schema is the UTC instant to store (already split from the
     # public `start_time` via `split_start_time()`), paired with the offset it was split
     # from. `None` is the importer's offset-unknown state, where the instant is really the
@@ -1084,6 +1094,9 @@ class DiveUpdate(RejectsExplicitNulls):
     course_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the training course this dive was on")
     ]
+    contact_uuid: Annotated[
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact the diver dived with")
+    ]
     notes: Annotated[
         str | None,
         Field(
@@ -1145,6 +1158,9 @@ class DiveUpdateInternal(BaseModel):
     trip_id: Annotated[int | None, Field(default=None, description="Internal id of the trip this dive belongs to")]
     course_id: Annotated[
         int | None, Field(default=None, description="Internal id of the training course this dive was on")
+    ]
+    contact_id: Annotated[
+        int | None, Field(default=None, description="Internal id of the contact the diver dived with")
     ]
     utc_offset_minutes: Annotated[int | None, Field(default=None)]
     notes: Annotated[

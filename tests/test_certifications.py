@@ -82,7 +82,6 @@ def _internal_certification(**overrides) -> CertificationReadInternal:
         "expires_on": None,
         "instructor_name": "A. Instructor",
         "instructor_number": "654321",
-        "training_center": "Blue Ocean, Koh Tao",
         "notes": "",
         "created_at": datetime(2025, 1, 1, tzinfo=UTC),
     }

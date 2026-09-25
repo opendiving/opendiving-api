@@ -43,6 +43,7 @@ from uuid6 import uuid7
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.models.certification import Certification
+from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
@@ -92,6 +93,7 @@ from src.app.services.user_pictures import PORTRAIT_FRAME, recrop_picture, store
 from tests.conftest import db_available
 from tests.helpers.generators import (
     create_certification,
+    create_contact,
     create_course,
     create_dive,
     create_dive_recording,
@@ -1962,6 +1964,188 @@ class TestATripArrivesAsItsParts:
         }
 
 
+def _seed_contact_logbook(db: Session) -> Any:
+    """A contact named from all five places one can be: a dive, a course, a card, a service
+    record and a trip part."""
+    user = create_user(db)
+    contact = create_contact(db, user, roles=["dive_center", "accommodation"])
+    contact.phone = "+20 69 364 0000"
+    contact.address_city, contact.address_country = "Dahab", "Egypt"
+    trip = create_trip(db, user)
+    course = create_course(db, user)
+    dive = create_dive(db, user, trip=trip, course=course)
+    certification = create_certification(db, user, course=course)
+    record = create_gear_service_record(db, user, create_gear_item(db, user))
+    for row in (dive, course, certification, record):
+        row.contact_id = contact.id
+    db.commit()
+    db.execute(update(TripPart).where(TripPart.trip_id == trip.id).values(accommodation_contact_id=contact.id))
+    db.commit()
+    return user, contact
+
+
+def _legacy(document: bytes, training_center: str) -> bytes:
+    """The seeded logbook as an export made before contacts were records: no `contacts`,
+    no references to one, and the course and the card naming their school as a string."""
+    parsed = json.loads(document)
+    parsed.pop("contacts", None)
+    for collection in ("dives", "courses", "certifications", "gear_service_records"):
+        for record in parsed[collection]:
+            record.pop("contact_uuid", None)
+    for trip in parsed["trips"]:
+        for part in trip["parts"]:
+            part.pop("accommodation_uuid", None)
+    parsed["courses"][0]["training_center"] = training_center
+    parsed["certifications"][0]["training_center"] = training_center
+    return json.dumps(parsed).encode()
+
+
+class TestContacts:
+    @pytest.mark.asyncio
+    async def test_a_contact_arrives_once_with_all_five_references(self, db: Session, async_db: AsyncSession) -> None:
+        source, contact = _seed_contact_logbook(db)
+        contact_name = contact.name
+        document = await _export(async_db, source.id)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert _counts(plan)["contacts"] == (1, 0, 0, 0)
+        (imported,) = (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalars().all()
+        assert (imported.name, imported.roles, imported.address_country) == (
+            contact_name,
+            ["dive_center", "accommodation"],
+            "Egypt",
+        )
+        hosts: tuple[type[Dive | Course | Certification | GearServiceRecord], ...] = (
+            Dive,
+            Course,
+            Certification,
+            GearServiceRecord,
+        )
+        for model in hosts:
+            row: Any = (await async_db.execute(select(model).where(model.user_id == destination.id))).scalar_one()
+            assert row.contact_id == imported.id, model.__name__
+        trip = (await async_db.execute(select(Trip).where(Trip.user_id == destination.id))).scalar_one()
+        part = (await async_db.execute(select(TripPart).where(TripPart.trip_id == trip.id))).scalar_one()
+        assert part.accommodation_contact_id == imported.id
+
+    @pytest.mark.asyncio
+    async def test_an_export_made_before_contacts_imports_its_training_center(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Every backup made before contacts carries its training centers as strings, and the
+        format counts them among a diver's identity documents - so one contact per distinct
+        string, a school, which the course and the card both name. The preview predicts it."""
+        _, document = seeded
+        legacy = _legacy(document, "Blue Ocean")
+        destination = create_user(db)
+
+        preview = await _preview(async_db, destination.id, legacy)
+        # A preview predicts; it creates nothing.
+        assert (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalars().all() == []
+        plan = await _apply(async_db, destination.id, legacy)
+
+        assert _counts(preview)["contacts"] == _counts(plan)["contacts"] == (1, 0, 0, 0)
+        (contact,) = (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalars().all()
+        assert (contact.name, contact.roles) == ("Blue Ocean", ["school"])
+        course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalar_one()
+        card = (
+            await async_db.execute(select(Certification).where(Certification.user_id == destination.id))
+        ).scalar_one()
+        assert course.contact_id == card.contact_id == contact.id
+
+    @pytest.mark.asyncio
+    async def test_a_training_center_the_diver_already_has_is_linked_not_duplicated(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        destination = create_user(db)
+        existing = create_contact(db, destination)
+        existing_id, existing_name = existing.id, existing.name
+
+        plan = await _apply(async_db, destination.id, _legacy(document, f" {existing_name.upper()} "))
+
+        assert _counts(plan)["contacts"] == (0, 0, 0, 0)
+        course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalar_one()
+        assert course.contact_id == existing_id
+
+    @pytest.mark.asyncio
+    async def test_what_the_app_would_refuse_is_dropped_and_the_contact_kept(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The format's email check is an `@` and its website check is none; the app's are
+        stricter, and one bad listing must not fail a logbook. An unknown role is dropped from
+        the set and the rest kept (§5.6's list rule), and an address with no country goes."""
+        _, document = seeded
+        parsed = json.loads(document)
+        contact_uuid = str(uuid7())
+        parsed["contacts"] = [
+            {
+                "uuid": contact_uuid,
+                "name": "Blue Ocean",
+                "roles": ["resort", "shop", "shop"],
+                "email": "info@",
+                "website": "blueocean.example",
+                "phone": "+20 69 364 0000",
+                "address": {"city": "Dahab"},
+            }
+        ]
+        parsed["dives"][0]["contact_uuid"] = contact_uuid
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        messages = [note.message for note in plan.notes if note.collection == "contacts"]
+        assert any("email" in message for message in messages)
+        assert any("website" in message for message in messages)
+        assert any("no country" in message for message in messages)
+        contact = (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalar_one()
+        assert (contact.roles, contact.email, contact.website, contact.phone) == (
+            ["shop"],
+            None,
+            None,
+            "+20 69 364 0000",
+        )
+        assert contact.address_city is None
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalar_one()
+        assert dive.contact_id == contact.id
+
+    @pytest.mark.asyncio
+    async def test_a_part_staying_somewhere_the_document_does_not_define_imports_without_it(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["trips"][0]["parts"][0]["accommodation_uuid"] = str(uuid7())
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["trips"] == (1, 0, 0, 0)
+        assert ImportNoteCode.REFERENCE_UNRESOLVED in _codes(plan)
+        trip = (await async_db.execute(select(Trip).where(Trip.user_id == destination.id))).scalar_one()
+        part = (await async_db.execute(select(TripPart).where(TripPart.trip_id == trip.id))).scalar_one()
+        assert part.accommodation_contact_id is None
+
+    @pytest.mark.asyncio
+    async def test_two_contacts_named_alike_are_one(self, seeded: Any, db: Session, async_db: AsyncSession) -> None:
+        """No uniqueness rule anywhere fails an import: the second points at the first's row."""
+        _, document = seeded
+        parsed = json.loads(document)
+        first, second = str(uuid7()), str(uuid7())
+        parsed["contacts"] = [{"uuid": first, "name": "Blue Ocean"}, {"uuid": second, "name": "BLUE OCEAN"}]
+        parsed["dives"][0]["contact_uuid"] = second
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["contacts"] == (1, 1, 0, 0)
+        contact = (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalar_one()
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalar_one()
+        assert dive.contact_id == contact.id
+
+
 class TestNothingInventedNothingFatal:
     @pytest.mark.asyncio
     async def test_a_value_the_database_refuses_is_dropped_and_the_dive_imports(
@@ -3430,6 +3614,7 @@ class TestTheIntegerColumnCensus:
         ("dive", "user_id"): "the caller's",
         ("dive", "trip_id"): "resolved from a row this import wrote",
         ("dive", "course_id"): "resolved from a row this import wrote",
+        ("dive", "contact_id"): "resolved from a row this import wrote",
         ("dive", "utc_offset_minutes"): "derived from a parsed UTC offset, which Python bounds at a day",
         ("dive_mixture", "id"): "the sequence's",
         ("dive_mixture", "dive_id"): "resolved from a row this import wrote",
@@ -3468,6 +3653,7 @@ class TestTheIntegerColumnCensus:
         ("gear_service_record", "user_id"): "the caller's",
         ("gear_service_record", "gear_item_id"): "resolved from a row this import wrote",
         ("gear_service_record", "gear_service_schedule_id"): "resolved from a row this import wrote",
+        ("gear_service_record", "contact_id"): "resolved from a row this import wrote",
         ("gear_service_record", "dive_count_at_service"): "bounded by `_Planner._count`",
         ("gear_item", "id"): "the sequence's",
         ("gear_item", "user_id"): "the caller's",
@@ -3476,6 +3662,9 @@ class TestTheIntegerColumnCensus:
         ("trip", "user_id"): "the caller's",
         ("course", "id"): "the sequence's",
         ("course", "user_id"): "the caller's",
+        ("course", "contact_id"): "resolved from a row this import wrote, or one the caller already had",
+        ("contact", "id"): "the sequence's",
+        ("contact", "user_id"): "the caller's",
         ("dive_site", "id"): "the sequence's",
         ("dive_site", "user_id"): "the caller's",
         ("gear_set", "id"): "the sequence's",
@@ -3483,6 +3672,7 @@ class TestTheIntegerColumnCensus:
         ("certification", "id"): "the sequence's",
         ("certification", "user_id"): "the caller's",
         ("certification", "course_id"): "resolved from a row this import wrote",
+        ("certification", "contact_id"): "resolved from a row this import wrote, or one the caller already had",
         ("user_dive_stats", "id"): "the sequence's",
         ("user_dive_stats", "user_id"): "the caller's",
         ("user_dive_stats", "total_dives"): "a count of rows, derived by `recalculate_dive_stats`",
@@ -3490,6 +3680,7 @@ class TestTheIntegerColumnCensus:
         ("trip_part", "id"): "the sequence's",
         ("trip_part", "trip_id"): "resolved from a row this import wrote",
         ("trip_part", "position"): "the list index, not the document's",
+        ("trip_part", "accommodation_contact_id"): "resolved from a row this import wrote",
         ("dive_file", "id"): "the sequence's",
         ("dive_file", "user_id"): "the caller's",
         ("dive_file", "recording_id"): "resolved from a row this import wrote",
@@ -3529,6 +3720,7 @@ class TestTheIntegerColumnCensus:
             DiveMixture,
             DiveRecording,
             DiveProfile,
+            Contact,
             Trip,
             TripPart,
             Course,

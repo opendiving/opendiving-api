@@ -31,11 +31,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
 from ...core.utils.datetime_offset import combine_dive_start_time, combine_start_time
+from ...models.contact import Contact
 from ...models.course import Course
 from ...models.dive import Dive
 from ...models.trip import Trip
 from ...models.user import User
 from ...schemas.certification import CertificationAgency, CertificationSide
+from ...schemas.contact import ContactRole, address_from_row
 from ...schemas.course import CourseStatus
 from ...schemas.dive import DecoAlgorithm, DiveMode, Salinity, WaterType
 from ...schemas.dive_mixture import DiveMixtureRead, GasRole, TankUsage
@@ -44,8 +46,10 @@ from ...schemas.export import (
     DIVEJSON_PRODUCER_KEY,
     DIVEJSON_VERSION,
     EXPORT_EXTENSIONS,
+    ExportAddress,
     ExportBoundingBox,
     ExportCertification,
+    ExportContact,
     ExportCourse,
     ExportCylinder,
     ExportDecoModel,
@@ -100,7 +104,7 @@ def _encode_collection(records: list[Any]) -> bytes:
 
     The layout `dives` gets from being streamed a dive at a time, given to the collections
     that are small enough to encode in one go - so every top-level array reads the same way
-    in a diff or a pager, rather than `dives` alone being legible and the other nine each
+    in a diff or a pager, rather than `dives` alone being legible and every other collection
     arriving as one unbounded line. The whitespace is between values only, where JSON gives
     it no meaning, so nothing about the document changes for a reader that parses it.
     """
@@ -156,10 +160,11 @@ def _sayable[T: StrEnum](value: str | None, vocabulary: type[T]) -> T | None:
     return vocabulary(value) if value is not None and _speakable(value, vocabulary) else None
 
 
-def _export_course(course: Course) -> ExportCourse:
+def _export_course(bundle: ExportBundle, course: Course) -> ExportCourse:
     """One course, as the document spells it. Never omitted: nothing a course stores is a
     REQUIRED member the format could find unreadable."""
     agency, agency_other = _course_agency(course)
+    contact = bundle.contact_for(course)
     return ExportCourse(
         uuid=course.uuid,
         name=course.name,
@@ -170,9 +175,32 @@ def _export_course(course: Course) -> ExportCourse:
         ends_on=course.end_date,
         instructor_name=course.instructor_name,
         instructor_number=course.instructor_number,
-        training_center=course.training_center,
+        contact_uuid=None if contact is None else contact.uuid,
         notes=_text(course.notes),
         created_at=course.created_at,
+    )
+
+
+def _export_contact(contact: Contact) -> ExportContact:
+    """One contact, as §6.18 spells it.
+
+    `roles` goes through `_sayable` item by item - an OPTIONAL member's values the format
+    has no word for are dropped and the rest kept, the list rule §5.6 states - and an empty
+    set is written as absence. The address is written only with its country, which the
+    column constraint guarantees whenever any of it is stored.
+    """
+    roles = [role for value in contact.roles if (role := _sayable(value, ContactRole)) is not None]
+    address = address_from_row(contact)
+    return ExportContact(
+        uuid=contact.uuid,
+        name=contact.name,
+        roles=roles or None,
+        phone=_filled(contact.phone),
+        email=_filled(contact.email),
+        website=_filled(contact.website),
+        address=None if address is None else ExportAddress(**address.model_dump()),
+        notes=_text(contact.notes),
+        created_at=contact.created_at,
     )
 
 
@@ -364,6 +392,7 @@ def _trip_part(part: TripPartRead) -> ExportTripPart:
         starts_on=part.start_date,
         ends_on=part.end_date,
         location=_location(part.location),
+        accommodation_uuid=part.accommodation_uuid,
     )
 
 
@@ -491,6 +520,7 @@ def _dive(
 
     trip = bundle.trip_for(dive)
     course = bundle.course_for(dive)
+    contact = bundle.contact_for(dive)
     return ExportDive(
         uuid=dive.uuid,
         number=dive.dive_number,
@@ -512,6 +542,7 @@ def _dive(
         exit_position=_position(dive.exit_latitude, dive.exit_longitude),
         trip_uuid=None if trip is None else trip.uuid,
         course_uuid=None if course is None else course.uuid,
+        contact_uuid=None if contact is None else contact.uuid,
         site_uuids=[site.uuid for site in bundle.sites_for(dive)],
         gear_uuids=[item.uuid for item in bundle.gear_for(dive)],
         species_uuids=[species.uuid for species in bundle.species_for(dive)],
@@ -546,6 +577,7 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
         if not _speakable(certification.agency, CertificationAgency):
             continue
         course = bundle.course_for(certification)
+        contact = bundle.contact_for(certification)
         exported.append(
             ExportCertification(
                 uuid=certification.uuid,
@@ -557,7 +589,7 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
                 expires_on=certification.expires_on,
                 instructor_name=certification.instructor_name,
                 instructor_number=certification.instructor_number,
-                training_center=certification.training_center,
+                contact_uuid=None if contact is None else contact.uuid,
                 course_uuid=None if course is None else course.uuid,
                 notes=_text(certification.notes),
                 front_file=by_side.get(CertificationSide.FRONT.value),
@@ -585,7 +617,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
             "courses",
             # Every course the diver has, with no filter: `agency` and `status` are both
             # OPTIONAL (spec §6.17), so neither can cost the record - see `_speakable`.
-            [_export_course(course) for course in bundle.courses],
+            [_export_course(bundle, course) for course in bundle.courses],
         ),
         (
             "sites",
@@ -695,6 +727,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     dive_count_at_service=record.dive_count_at_service,
                     label=record.label,
                     performed_by=record.performed_by,
+                    contact_uuid=None if (contact := bundle.contact_for(record)) is None else contact.uuid,
                     notes=_text(record.notes),
                     created_at=record.created_at,
                 )
@@ -703,6 +736,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
             ],
         ),
         ("certifications", _certifications(bundle, paths)),
+        ("contacts", [_export_contact(contact) for contact in bundle.contacts]),
     ]
 
 

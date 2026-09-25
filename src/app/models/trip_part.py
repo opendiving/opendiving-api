@@ -62,5 +62,11 @@ class TripPart(Base):
     bbox_north: Mapped[float | None] = mapped_column(Float, default=None)
     bbox_west: Mapped[float | None] = mapped_column(Float, default=None)
     bbox_east: Mapped[float | None] = mapped_column(Float, default=None)
+    # Where the diver slept during the part - a contact, referenced from this value object
+    # the way its place is embedded in it. `SET NULL`: deleting the contact unlinks the
+    # part, and the part itself stays.
+    accommodation_contact_id: Mapped[int | None] = mapped_column(
+        ForeignKey("contact.id", ondelete="SET NULL"), default=None, index=True
+    )
 
     __table_args__ = (Index("ix_trip_part_trip_id_position", "trip_id", "position"),)

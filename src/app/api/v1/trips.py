@@ -16,6 +16,7 @@ from ...core.exceptions.http_exceptions import (
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
+from ...crud.crud_contacts import resolve_contact_ids_for_user
 from ...crud.crud_dives import reassign_dives_to_trip
 from ...crud.crud_trip_parts import (
     get_parts_for_trip,
@@ -26,6 +27,7 @@ from ...crud.crud_trips import crud_trips, get_trips_page, resolve_trip_id_for_u
 from ...schemas.trip import (
     TripCreate,
     TripCreateInternal,
+    TripPartInput,
     TripPartRead,
     TripRead,
     TripReadInternal,
@@ -35,17 +37,32 @@ from ...services.cache_invalidation import invalidate_dive_caches
 
 router = APIRouter(tags=["trips"])
 
-# The only integrity failure the part writes below can hit is the trip row vanishing
-# between the write and the insert (a concurrent hard delete): lengths and ranges are
-# already bounded by `TripPartInput`, and there is no unique constraint to violate.
-# 422 rather than a raw 500, matching how `patch_dive` treats its child-row writes.
+# The only integrity failures the part writes below can hit are the trip row, or a contact
+# a part stays at, vanishing between the resolve and the insert (a concurrent hard delete):
+# lengths and ranges are already bounded by `TripPartInput`, and there is no unique
+# constraint to violate. 422 rather than a raw 500, matching how `patch_dive` treats its
+# child-row writes.
 #
 # Both routes raise before invalidating anything, so this path knowingly leaves the trip's
 # caches as they were - including any column update `patch_trip` already committed. Same
-# as `patch_dive`, and the trade is deliberate: the trigger needs a hard delete, which no
-# route offers, and invalidating on the way out of a failed write would mean doing it in
-# two places for a case that cannot currently happen.
+# as `patch_dive`, and the trade is deliberate: the trigger needs a concurrent delete, and
+# invalidating on the way out of a failed write would mean doing it in two places for a
+# race that narrow.
 _PART_ERROR_DETAIL = "Trip parts could not be saved."
+
+
+async def _resolve_accommodations(
+    db: AsyncSession, parts: list[TripPartInput], user_id: int
+) -> dict[uuid_pkg.UUID, int]:
+    """The contacts the parts stay at, resolved against the trip's owner before anything is
+    written. One that is not the caller's own - or does not exist - is a 422, the answer a
+    foreign course gets on a certification, and it comes before the trip row so a refused
+    part cannot leave a trip behind without its parts."""
+    wanted = [part.accommodation_uuid for part in parts if part.accommodation_uuid is not None]
+    contact_ids = await resolve_contact_ids_for_user(db=db, contact_uuids=wanted, user_id=user_id)
+    if contact_ids is None:
+        raise UnprocessableEntityException("Contact not found.")
+    return contact_ids
 
 
 async def _get_owned_trip(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> TripReadInternal:
@@ -115,13 +132,16 @@ async def write_trip(
     Trip names are unique per user, so reusing one that already exists is a 422. A trip
     carries no dates of its own: each part has its own optional range and its own optional
     place, and the trip's span is the earliest start and latest end across them. `parts`
-    keep the order given; index 0 is the one shown wherever only a single part fits.
+    keep the order given; index 0 is the one shown wherever only a single part fits. A part's
+    `accommodation_uuid` names the contact the diver stayed at; one that isn't the caller's
+    own - or doesn't exist - is a 422.
 
     The trip row commits before its parts do, so a failure inserting them leaves the trip
     behind without them - the same accepted semantics as `POST /dive` and its mixtures.
     """
     if await trip_name_exists(db=db, user_id=current_user["id"], name=trip.name):
         raise DuplicateValueException("A trip with this name already exists")
+    accommodation_ids = await _resolve_accommodations(db, trip.parts, current_user["id"])
 
     # Only the trip's own columns reach `TripCreateInternal`, which is `extra="forbid"`:
     # parts are rows in another table.
@@ -131,7 +151,9 @@ async def write_trip(
     )
 
     try:
-        await replace_parts_for_trip(db=db, trip_id=created_trip.id, parts=trip.parts)
+        await replace_parts_for_trip(
+            db=db, trip_id=created_trip.id, parts=trip.parts, accommodation_ids=accommodation_ids
+        )
     except IntegrityError as e:
         await db.rollback()
         raise UnprocessableEntityException(_PART_ERROR_DETAIL) from e
@@ -281,7 +303,8 @@ async def patch_trip(
     a name the caller already has on another trip is a 422. `parts` is replaced wholesale
     when present rather than merged, so sending a shorter list removes the difference and
     an empty list clears them; omitting the key leaves them alone. Each part's own
-    `end_date` must be on or after its `start_date`, which is a 422 naming the part.
+    `end_date` must be on or after its `start_date`, which is a 422 naming the part, and a
+    part's `accommodation_uuid` must name one of the caller's contacts.
     """
     db_trip = await _get_owned_trip(db, uuid, current_user)
 
@@ -297,13 +320,14 @@ async def patch_trip(
 
     # `None` leaves the existing parts alone; `[]` is a diver clearing them.
     parts = values.parts
+    accommodation_ids = {} if parts is None else await _resolve_accommodations(db, parts, db_trip.user_id)
 
     if update_data:
         await crud_trips.update(db=db, object=update_data, uuid=uuid)
 
     if parts is not None:
         try:
-            await replace_parts_for_trip(db=db, trip_id=db_trip.id, parts=parts)
+            await replace_parts_for_trip(db=db, trip_id=db_trip.id, parts=parts, accommodation_ids=accommodation_ids)
         except IntegrityError as e:
             await db.rollback()
             raise UnprocessableEntityException(_PART_ERROR_DETAIL) from e

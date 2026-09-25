@@ -47,6 +47,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from ..core.utils.datetime_offset import full_date_is_a_date
 from .certification import CertificationAgency
+from .contact import ADDRESS_POSTCODE_MAX, CONTACT_EMAIL_MAX, CONTACT_WEBSITE_MAX, ContactRole
 from .course import CourseStatus
 from .dive import DecoAlgorithm, DiveMode, Salinity, WaterType
 from .dive_mixture import GasRole, TankUsage
@@ -102,6 +103,24 @@ def _unknown_is_absent(enum: type[StrEnum]) -> BeforeValidator:
     return BeforeValidator(coerce)
 
 
+def _unknown_items_dropped(enum: type[StrEnum]) -> BeforeValidator:
+    """`_unknown_is_absent` for an array of closed values: an item outside the vocabulary is
+    dropped and the rest kept, and a list with none left reads as absent (spec §5.6).
+
+    Dropping the whole member instead would punish every reader on the first value a 1.x
+    minor adds - one new role would erase every role beside it.
+    """
+    values = {member.value for member in enum}
+
+    def coerce(value: Any) -> Any:
+        if not isinstance(value, list):
+            return None
+        known = [item for item in value if item in values]
+        return known or None
+
+    return BeforeValidator(coerce)
+
+
 def _null_is_empty(value: Any) -> Any:
     """A collection written as `null` reads as absent, i.e. as the empty one (spec §5.4).
 
@@ -113,6 +132,13 @@ def _null_is_empty(value: Any) -> Any:
 
 
 _Collection = BeforeValidator(_null_is_empty)
+
+# A course's or certification's `training_center`, which the format had before contacts
+# were records and every export made before then carries. §9 counts training centers among
+# the members that work as identity documents, so the planner turns each distinct one into
+# a contact rather than letting `extra="ignore"` lose it. Read here and nowhere else - the
+# writer never emits it.
+_LegacyTrainingCenter = Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
 
 # A start as a document spells it: a date-time, or on a dive a bare date.
 ImportStart = Annotated[datetime | date | None, BeforeValidator(full_date_is_a_date), Field(default=None)]
@@ -338,6 +364,7 @@ class ImportDive(_ReadModel):
     exit_position: ImportPosition | None = None
     trip_uuid: uuid_pkg.UUID | None = None
     course_uuid: uuid_pkg.UUID | None = None
+    contact_uuid: uuid_pkg.UUID | None = None
     site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
     gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
     species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
@@ -369,6 +396,7 @@ class ImportTripPart(_ReadModel):
     starts_on: date | None = None
     ends_on: date | None = None
     location: ImportLocation | None = None
+    accommodation_uuid: uuid_pkg.UUID | None = None
 
 
 class ImportTrip(_ReadModel):
@@ -393,7 +421,8 @@ class ImportCourse(_ReadModel):
     ends_on: date | None = None
     instructor_name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     instructor_number: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
-    training_center: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    contact_uuid: uuid_pkg.UUID | None = None
+    training_center: _LegacyTrainingCenter = None
     notes: str | None = None
     created_at: datetime | None = None
 
@@ -486,6 +515,7 @@ class ImportGearServiceRecord(_ReadModel):
     dive_count_at_service: int | None = None
     label: Annotated[str | None, Field(default=None, max_length=_LABEL_MAX)]
     performed_by: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    contact_uuid: uuid_pkg.UUID | None = None
     notes: str | None = None
     created_at: datetime | None = None
 
@@ -500,11 +530,44 @@ class ImportCertification(_ReadModel):
     expires_on: date | None = None
     instructor_name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     instructor_number: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
-    training_center: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    contact_uuid: uuid_pkg.UUID | None = None
+    training_center: _LegacyTrainingCenter = None
     course_uuid: uuid_pkg.UUID | None = None
     notes: str | None = None
     front_file: ImportStoredFile | None = None
     back_file: ImportStoredFile | None = None
+    created_at: datetime | None = None
+
+
+class ImportAddress(_ReadModel):
+    """A contact's postal address (spec §6.19). `country` is REQUIRED in the format and
+    optional here, as a location's `name` is: the planner drops an address without one and
+    keeps the contact."""
+
+    street: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    city: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    postcode: Annotated[str | None, Field(default=None, max_length=ADDRESS_POSTCODE_MAX)]
+    region: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    country: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+
+
+class ImportContact(_ReadModel):
+    """A party the diver dealt with (spec §6.18).
+
+    `email` and `website` are read as the strings they are. The format's own check on an
+    email is an `@` and it checks a website not at all, while this app's write schema refuses
+    what `EmailStr` or an absolute `http(s)` URL would not accept - so the planner drops such
+    a value with a note rather than one bad address failing a logbook.
+    """
+
+    uuid: uuid_pkg.UUID
+    name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    roles: Annotated[list[ContactRole] | None, _unknown_items_dropped(ContactRole), Field(default=None)]
+    phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
+    email: Annotated[str | None, Field(default=None, max_length=CONTACT_EMAIL_MAX)]
+    website: Annotated[str | None, Field(default=None, max_length=CONTACT_WEBSITE_MAX)]
+    address: ImportAddress | None = None
+    notes: str | None = None
     created_at: datetime | None = None
 
 
@@ -535,6 +598,7 @@ class ImportDocument(_ReadModel):
     gear_service_schedules: Annotated[list[ImportGearServiceSchedule], Field(default_factory=list), _Collection]
     gear_service_records: Annotated[list[ImportGearServiceRecord], Field(default_factory=list), _Collection]
     certifications: Annotated[list[ImportCertification], Field(default_factory=list), _Collection]
+    contacts: Annotated[list[ImportContact], Field(default_factory=list), _Collection]
     extensions: dict[str, Any] | None = None
 
 
@@ -627,7 +691,9 @@ class ImportCollectionReport(BaseModel):
     """What would happen (preview) or did happen (apply) to one envelope collection.
 
     The four counts are disjoint and sum to the number of records the document carries in
-    this collection. `restored` is its own figure and never hides inside `created` or
+    this collection - and for `contacts`, the contacts made of the training centers an
+    export written before contacts existed names on its courses and certifications, which it
+    carries as strings rather than records. `restored` is its own figure and never hides inside `created` or
     `skipped`: un-deleting is the one thing this feature does that no other surface in the
     app can, and a diver restoring a backup is entitled to see it counted.
     """

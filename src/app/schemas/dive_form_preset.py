@@ -55,6 +55,9 @@ class DiveFormField(StrEnum):
 
     TRIP_UUID = "trip_uuid"
     COURSE_UUID = "course_uuid"
+    # Immediately after the course, and it has to stay there: revision `a9b7dc451f00`
+    # inserted it into every stored set beside `course_uuid` as the canonical position.
+    CONTACT_UUID = "contact_uuid"
     DIVE_SITE_UUIDS = "dive_site_uuids"
     MAX_DEPTH = "max_depth"
     AVG_DEPTH = "avg_depth"

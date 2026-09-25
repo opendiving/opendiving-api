@@ -72,11 +72,15 @@ class OwnedResourceCache[InternalT, PublicT]:
     In each of the first four the enrichment is a second query whose results have to be
     zipped back into the page before conversion, which is precisely the step this factory has
     no room for.
-    Adding a generic hook for it would complicate the factory for its two remaining
-    straightforward users (dive sites, gear sets) to serve four callers that each need
+    Adding a generic hook for it would complicate the factory for its straightforward users
+    (dive sites, gear sets, and the contact list) to serve four callers that each need
     something different; the duplication is the cheaper side of that trade. Revisit if the
     enrichment shape ever converges. `courses.py` would still be outside it either way -
     a hook for a second query does not buy an `ORDER BY` clause.
+
+    `contacts.py` takes `read_list` and hand-writes the single read, as `courses.py` does,
+    because `read_item`'s key cannot carry the user and every contact key sits under
+    `user_{id}_contact` so that one pattern drops both.
     """
 
     def __init__(

@@ -49,9 +49,12 @@ class GearServiceRecord(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
         ForeignKey("gear_service_schedule.id", ondelete="SET NULL"), default=None
     )
     label: Mapped[str | None] = mapped_column(String(120), default=None)
-    # Who did the work - a shop, a technician, or "self" for a home battery swap. Free
-    # text rather than a lookup: dive shops aren't an entity this app models.
+    # Who did the work - a technician's name, or "self" for a home battery swap. The shop
+    # is `contact_id` below; this stays free text because a person is not a contact.
     performed_by: Mapped[str | None] = mapped_column(String(255), default=None)
+    # The shop that did the work. `SET NULL` fires for a soft-deleted record too, whose row
+    # is still there to be updated.
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contact.id", ondelete="SET NULL"), default=None)
     notes: Mapped[str] = mapped_column(Text, default="")
 
     @declared_attr.directive
@@ -86,4 +89,6 @@ class GearServiceRecord(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # schedule delete. Invisible at a few hundred rows; an incident at ten million.
             Index("ix_gear_service_record_gear_item_id", "gear_item_id"),
             Index("ix_gear_service_record_schedule_id", "gear_service_schedule_id"),
+            # Plain for the same reason: deleting a contact is a `SET NULL` lookup here.
+            Index("ix_gear_service_record_contact_id", "contact_id"),
         )

@@ -70,8 +70,11 @@ else; what is here is the source, and the notes for working on it.
   service history, a due-soon endpoint, and a scheduled email reminder digest.
 - **Certifications** — c-card records with front/back card images.
 - **Training courses** — the course a card came out of and the dives logged on it, with the agency,
-  status, instructor and training centre. No mainstream logbook models this: the agency apps tie
-  dives to a course *or* cards to a course, and none of them let the record outlive the agency.
+  status, instructor and the contact that ran it. No mainstream logbook models this: the agency apps
+  tie dives to a course *or* cards to a course, and none of them let the record outlive the agency.
+- **Contacts** — the dive centers, schools, shops, clubs and places you stayed, each kept once with
+  its phone, email, website and address and picked for a dive, a course, a card, a gear service or a
+  trip part. Imported from UDDF's dive bases, shops and accommodation.
 - **Full export** — everything out in open formats (DiveJSON, UDDF, CSV, and an archive of all three
   plus your original files) in one request. Owner-only, never cached; the DiveJSON validates against
   the published 1.0 schema and the UDDF against the 3.2.2 one.

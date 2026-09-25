@@ -4,6 +4,7 @@ from .admin import router as admin_router
 from .auth import router as auth_router
 from .certifications import router as certifications_router
 from .config import router as config_router
+from .contacts import router as contacts_router
 from .courses import router as courses_router
 from .dive_form_presets import router as dive_form_presets_router
 from .dive_sites import router as dive_sites_router
@@ -34,6 +35,7 @@ router.include_router(invitations_router)
 router.include_router(admin_router)
 router.include_router(trips_router)
 router.include_router(courses_router)
+router.include_router(contacts_router)
 router.include_router(dive_sites_router)
 router.include_router(geocoding_router)
 router.include_router(gear_items_router)

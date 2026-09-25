@@ -365,7 +365,7 @@ class TestWhatUddfCannotHold:
         assert (course["agency"], course["status"]) == ("tdi", "completed")
         assert (course["starts_on"], course["ends_on"]) == ("2026-03-02", "2026-03-06")
         assert (course["instructor_name"], course["instructor_number"]) == ("Jae Kim", "TDI-88121")
-        assert course["training_center"] == "Blue Ocean"
+        assert course["contact_uuid"] == str(UUIDS["contact-school"])
 
     @pytest.mark.asyncio
     async def test_the_account_preferences_travel_under_this_producer_s_key(self, monkeypatch):
@@ -740,6 +740,60 @@ class TestTheRecordingsModeAndDecoModel:
 
         profile = document["dives"][1]["recordings"][0]["profile"]
         assert "provenance" not in profile
+        _assert_conforms(document)
+
+
+class TestContacts:
+    @pytest.mark.asyncio
+    async def test_a_contact_is_written_with_its_roles_listing_and_address(self, monkeypatch):
+        document = await _render(full_bundle(), monkeypatch)
+        contacts = {contact["name"]: contact for contact in document["contacts"]}
+
+        resort = contacts["Blue Ocean Resort"]
+        assert resort["uuid"] == str(UUIDS["contact-resort"])
+        assert resort["roles"] == ["dive_center", "accommodation"]
+        assert resort["phone"] == "+20 69 364 0000"
+        assert resort["address"] == {
+            "street": "Mashraba",
+            "city": "Dahab",
+            "region": "South Sinai",
+            "country": "Egypt",
+        }
+        # A name and a role and nothing else is written as exactly that, no empty members.
+        assert contacts["Blue Ocean"] == {
+            "uuid": str(UUIDS["contact-school"]),
+            "name": "Blue Ocean",
+            "roles": ["school"],
+            "created_at": contacts["Blue Ocean"]["created_at"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_all_five_hosts_reference_their_contact_by_uuid(self, monkeypatch):
+        """A dive, a course, a certification, a service record and a trip part - and a
+        conforming document, so every one resolves in `contacts`."""
+        document = await _render(full_bundle(), monkeypatch)
+
+        assert document["dives"][0]["contact_uuid"] == str(UUIDS["contact-resort"])
+        assert document["courses"][0]["contact_uuid"] == str(UUIDS["contact-school"])
+        assert document["certifications"][0]["contact_uuid"] == str(UUIDS["contact-school"])
+        assert document["gear_service_records"][0]["contact_uuid"] == str(UUIDS["contact-shop"])
+        assert document["gear_service_records"][0]["performed_by"] == "Ahmed"
+        assert document["trips"][0]["parts"][0]["accommodation_uuid"] == str(UUIDS["contact-resort"])
+        assert "accommodation_uuid" not in document["trips"][0]["parts"][1]
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_role_the_format_has_no_word_for_is_dropped_and_the_rest_kept(self, monkeypatch):
+        """The column holds plain strings with no `CHECK`, so a value outside the vocabulary
+        is data the writer has to answer for - by the list rule the format states."""
+        bundle = full_bundle()
+        bundle.contacts[1].roles = ["dive_center", "resort"]
+
+        document = await _render(bundle, monkeypatch)
+
+        assert {contact["name"]: contact.get("roles") for contact in document["contacts"]}["Blue Ocean Resort"] == [
+            "dive_center"
+        ]
         _assert_conforms(document)
 
 

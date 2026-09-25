@@ -179,6 +179,7 @@ def signed_in(import_app: Any, monkeypatch: Any) -> Any:
     for name in (
         "invalidate_dive_caches",
         "invalidate_certification_caches",
+        "invalidate_contact_caches",
         "invalidate_course_caches",
         "invalidate_gear_caches",
         "invalidate_dive_site_caches",
@@ -838,10 +839,9 @@ class TestApply:
     def test_the_caches_are_dropped_after_the_commit(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
-        """Six of them, and the last two are the point: an import fills the dive-site and
-        trip collections, whose list caches live inside their own routers rather than behind
-        a helper - so a restored diver would otherwise get empty pages for up to the
-        60-second list expiry."""
+        """Every family an import fills, and the dive-site and trip ones are the point: their
+        list caches live inside their own routers rather than behind a helper - so a
+        restored diver would otherwise get empty pages for up to the 60-second list expiry."""
         called: list[str] = []
 
         def record(name: str) -> Any:
@@ -853,6 +853,7 @@ class TestApply:
         for name in (
             "invalidate_dive_caches",
             "invalidate_certification_caches",
+            "invalidate_contact_caches",
             "invalidate_course_caches",
             "invalidate_gear_caches",
             "invalidate_dive_site_caches",
@@ -864,4 +865,5 @@ class TestApply:
 
         assert "invalidate_dive_site_caches" in called
         assert "invalidate_trip_caches" in called
-        assert len(called) == 6
+        assert "invalidate_contact_caches" in called
+        assert len(called) == 7

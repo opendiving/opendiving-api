@@ -54,6 +54,7 @@ from pydantic import BaseModel, Field
 
 from ..core.schemas import PublicUUIDSchema
 from .certification import CertificationAgency
+from .contact import ContactRole
 from .course import CourseStatus
 from .dive import DecoAlgorithm, DiveLocalStartTime, DiveMode, Salinity, WaterType
 from .dive_mixture import GasRole, TankUsage
@@ -388,6 +389,7 @@ class ExportDive(PublicUUIDSchema):
     exit_position: ExportPosition | None = None
     trip_uuid: uuid_pkg.UUID | None = None
     course_uuid: uuid_pkg.UUID | None = None
+    contact_uuid: uuid_pkg.UUID | None = None
     site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In visit order")]
     gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
     species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
@@ -422,16 +424,19 @@ class ExportLocation(BaseModel):
 
 
 class ExportTripPart(BaseModel):
-    """One stretch of a trip: an optional date range and an optional place (spec §6.9a).
+    """One stretch of a trip: an optional date range, an optional place and an optional
+    accommodation (spec §6.9a).
 
     Every member is optional and an empty object conforms - a part the diver added and
-    filled in neither half of is a stretch the source recorded nothing about, which the
-    format spells as absence rather than as an invented date.
+    filled in nothing of is a stretch the source recorded nothing about, which the format
+    spells as absence rather than as an invented date. `accommodation_uuid` resolves in
+    `contacts`, the one reference in the document an embedded object carries.
     """
 
     starts_on: date | None = None
     ends_on: date | None = None
     location: ExportLocation | None = None
+    accommodation_uuid: uuid_pkg.UUID | None = None
 
 
 class ExportTrip(PublicUUIDSchema):
@@ -476,7 +481,7 @@ class ExportCourse(PublicUUIDSchema):
     ends_on: date | None = None
     instructor_name: str | None = None
     instructor_number: str | None = None
-    training_center: str | None = None
+    contact_uuid: uuid_pkg.UUID | None = None
     notes: str | None = None
     created_at: datetime
 
@@ -564,6 +569,7 @@ class ExportGearServiceRecord(PublicUUIDSchema):
     dive_count_at_service: int
     label: str | None = None
     performed_by: str | None = None
+    contact_uuid: uuid_pkg.UUID | None = None
     notes: str | None = None
     created_at: datetime
 
@@ -584,11 +590,40 @@ class ExportCertification(PublicUUIDSchema):
     expires_on: date | None = None
     instructor_name: str | None = None
     instructor_number: str | None = None
-    training_center: str | None = None
+    contact_uuid: uuid_pkg.UUID | None = None
     course_uuid: uuid_pkg.UUID | None = None
     notes: str | None = None
     front_file: ExportStoredFile | None = None
     back_file: ExportStoredFile | None = None
+    created_at: datetime
+
+
+class ExportAddress(BaseModel):
+    """A contact's postal address (spec §6.19), anchored on `country` as UDDF's is."""
+
+    street: str | None = None
+    city: str | None = None
+    postcode: str | None = None
+    region: str | None = None
+    country: str
+
+
+class ExportContact(PublicUUIDSchema):
+    """A party the diver dealt with - a dive center, a school, a shop, a place they stayed
+    (spec §6.18). The dives, courses, certifications, service records and trip parts that
+    name one carry its uuid; nothing here points back.
+
+    `roles` is written even when empty only as absence: an empty set says nothing a
+    missing member does not.
+    """
+
+    name: str
+    roles: list[ContactRole] | None = None
+    phone: str | None = None
+    email: str | None = None
+    website: str | None = None
+    address: ExportAddress | None = None
+    notes: str | None = None
     created_at: datetime
 
 
@@ -619,4 +654,5 @@ class ExportEnvelope(BaseModel):
     gear_service_schedules: Annotated[list[ExportGearServiceSchedule], Field(default_factory=list)]
     gear_service_records: Annotated[list[ExportGearServiceRecord], Field(default_factory=list)]
     certifications: Annotated[list[ExportCertification], Field(default_factory=list)]
+    contacts: Annotated[list[ExportContact], Field(default_factory=list)]
     extensions: ExportExtensions = None

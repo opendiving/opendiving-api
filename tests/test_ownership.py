@@ -362,6 +362,12 @@ FETCH_OWNED_ROUTES = [
     ),
     *(
         OwnedRoute(
+            method, "/api/v1/contact/{uuid}", "src.app.api.v1.contacts:crud_contacts", "Contact not found", extra
+        )
+        for method, extra in _CRUD_METHODS
+    ),
+    *(
+        OwnedRoute(
             method,
             "/api/v1/gear-item/{uuid}",
             "src.app.api.v1.gear_items:crud_gear_items",
