@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.app.schemas.dive_profile import (
+    MILLISECONDS_PER_SECOND,
     GasAttribution,
     ParsedPressureSeries,
     ParsedProfileEvent,
@@ -970,24 +971,54 @@ class TestNormalize:
 
         profile = normalize(parsed)
 
-        assert profile.depth.t == [0, 10]
-        assert profile.temperature.t == [0, 20]
+        assert profile.depth.t == [0, 10_000]
+        assert profile.temperature.t == [0, 20_000]
 
-    def test_rounds_onto_integer_seconds_keeping_the_last_reading_per_second(self):
+    def test_rounds_onto_integer_milliseconds_keeping_the_last_reading_per_millisecond(self):
         parsed = SuuntoJsonParser.parse_profile(
             _json_with_samples(
                 [
-                    {"Temperature": 299.15, "TimeISO8601": "2025-05-31T12:59:06.310+02:00"},
-                    {"Temperature": 299.05, "TimeISO8601": "2025-05-31T12:59:06.410+02:00"},
-                    {"Temperature": 298.95, "TimeISO8601": "2025-05-31T12:59:07.310+02:00"},
+                    {"Temperature": 299.15, "TimeISO8601": "2025-05-31T12:59:06.310100+02:00"},
+                    {"Temperature": 299.05, "TimeISO8601": "2025-05-31T12:59:06.310400+02:00"},
+                    {"Temperature": 298.95, "TimeISO8601": "2025-05-31T12:59:06.410000+02:00"},
                 ]
             )
         )
 
         profile = normalize(parsed)
 
-        assert profile.temperature.t == [0, 1]
+        assert profile.temperature.t == [0, 100]
         assert profile.temperature.v == [259, 258]
+
+    def test_from_the_file_start_a_first_reading_keeps_the_offset_its_file_states(self):
+        """The axis counts from the start the header states, which is the recording's
+        `started_at` - so a Suunto app export's first depth 160 ms after `Header.DateTime` is
+        at 160, not at zero."""
+        parsed = SuuntoJsonParser.parse_profile(
+            _json_with_samples(
+                [
+                    {"Depth": 1.2, "TimeISO8601": "2025-05-31T12:59:06.160+02:00"},
+                    {"Depth": 3.4, "TimeISO8601": "2025-05-31T13:19:06.160+02:00"},
+                ],
+                date_time="2025-05-31T12:59:06.000+02:00",
+            )
+        )
+
+        profile = normalize(parsed, from_file_start=True)
+
+        assert profile.depth.t == [160, 1_200_160]
+        assert profile.duration == 1_200_160
+
+    def test_a_reading_before_the_file_start_is_clamped_to_it_keeping_the_later_one(self):
+        """A FIT record can be stamped before its session's start. There is nowhere else on
+        the axis for it, and where the clamp puts two readings on zero the later one wins,
+        `_rebase`'s rule for any collision."""
+        parsed = ParsedProfileSchema(depth=ParsedSeries(t=[-2.0, -0.5, 0.0, 10.0], v=[100, 110, 120, 130]))
+
+        profile = normalize(parsed, from_file_start=True)
+
+        assert profile.depth.t == [0, 10_000]
+        assert profile.depth.v == [120, 130]
 
     def test_returns_none_for_a_profile_with_no_readings(self):
         assert normalize(ParsedProfileSchema()) is None
@@ -1011,8 +1042,8 @@ class TestNormalize:
 
         profile = normalize(parsed)
 
-        assert profile.depth.t == [0, 10]
-        assert [event.t for event in profile.events] == [30]
+        assert profile.depth.t == [0, 10_000]
+        assert [event.t for event in profile.events] == [30_000]
 
     def test_an_event_before_the_first_sample_lands_at_the_start(self):
         """The ordinary case, not a corrupt one: a Suunto XML export numbers samples from
@@ -1036,7 +1067,7 @@ class TestNormalize:
 
         profile = normalize(parsed)
 
-        assert profile.depth.t == [0, 10]
+        assert profile.depth.t == [0, 10_000]
         assert [event.t for event in profile.events] == [0]
 
     def test_sorts_events_that_the_file_listed_out_of_order(self):
@@ -1052,26 +1083,26 @@ class TestNormalize:
 
         profile = normalize(parsed)
 
-        assert [(event.t, event.gas_number) for event in profile.events] == [(0, 1), (2356, 2)]
+        assert [(event.t, event.gas_number) for event in profile.events] == [(0, 1), (2_356_000, 2)]
 
-    def test_collapses_two_identical_events_that_round_onto_one_second(self):
-        """Rounding onto integer seconds is what makes this necessary - a device that logs
-        the same occurrence twice within a second would stack two ticks on one pixel."""
+    def test_collapses_two_identical_events_that_round_onto_one_millisecond(self):
+        """Rounding onto integer milliseconds is what makes this necessary - the same
+        `GasSwitch` under both `Events` and `DiveEvents` would stack two ticks on one pixel."""
         parsed = ParsedProfileSchema(
             depth=ParsedSeries(t=[0.0, 100.0], v=[124, 256]),
             events=[
-                ParsedProfileEvent(t=50.1, type=ProfileEventType.SAFETY_STOP),
-                ParsedProfileEvent(t=50.4, type=ProfileEventType.SAFETY_STOP),
-                # A different type at the same second is a different event and survives.
-                ParsedProfileEvent(t=50.2, type=ProfileEventType.OTHER, label="Ceiling Broken"),
+                ParsedProfileEvent(t=50.1001, type=ProfileEventType.SAFETY_STOP),
+                ParsedProfileEvent(t=50.1004, type=ProfileEventType.SAFETY_STOP),
+                # A different type at the same instant is a different event and survives.
+                ParsedProfileEvent(t=50.1002, type=ProfileEventType.OTHER, label="Ceiling Broken"),
             ],
         )
 
         profile = normalize(parsed)
 
         assert [(event.t, event.type) for event in profile.events] == [
-            (50, ProfileEventType.SAFETY_STOP),
-            (50, ProfileEventType.OTHER),
+            (50_100, ProfileEventType.SAFETY_STOP),
+            (50_100, ProfileEventType.OTHER),
         ]
 
     def test_truncates_a_label_rather_than_rejecting_it(self):
@@ -1106,8 +1137,8 @@ class TestNormalize:
 
         profile = normalize(parsed)
 
-        assert [event.t for event in profile.events] == [90]
-        assert profile.duration == 10
+        assert [event.t for event in profile.events] == [90_000]
+        assert profile.duration == 10_000
 
     def test_the_ceiling_shares_the_depth_channels_origin(self):
         parsed = SuuntoXmlParser.parse_profile(
@@ -1116,8 +1147,8 @@ class TestNormalize:
 
         profile = normalize(parsed)
 
-        assert profile.depth.t == [0, 10]
-        assert profile.ceiling.t == [10]
+        assert profile.depth.t == [0, 10_000]
+        assert profile.ceiling.t == [10_000]
         assert profile.channels == ["depth", "ceiling"]
 
     def test_summary_properties_describe_the_recorded_span(self):
@@ -1130,7 +1161,7 @@ class TestNormalize:
 
         profile = normalize(parsed)
 
-        assert profile.duration == 100
+        assert profile.duration == 100_000
         assert profile.depth_sample_count == 2
         assert profile.channels == ["depth", "temperature", "pressure"]
 
@@ -1481,9 +1512,26 @@ class TestFinalizeProfile:
 
         profile = finalize_profile(parsed)
 
-        assert sum(entry.seconds for entry in profile.gas_attribution) <= profile.duration
+        # `seconds` is whole seconds and the span milliseconds, so the fraction divides the span.
+        span = profile.duration / MILLISECONDS_PER_SECOND
+        assert sum(entry.seconds for entry in profile.gas_attribution) <= span
         # And exactly equal here, since the dive begins on a gas and never stops being on one.
-        assert sum(entry.seconds for entry in profile.gas_attribution) == profile.duration
+        assert sum(entry.seconds for entry in profile.gas_attribution) == span
+
+    def test_attribution_between_whole_seconds_still_fits_the_rounded_span(self):
+        """Rounding each gas's total on its own gives 2356 + 2255 here, a second past the span."""
+        times = [float(second) for second in range(0, 4_610, 10)] + [4_610.2]
+        parsed = ParsedProfileSchema(
+            depth=ParsedSeries(t=times, v=[1500] * len(times)),
+            events=[_switch(0.0, 1), _switch(2_355.6, 2)],
+        )
+
+        profile = finalize_profile(parsed)
+
+        assert [(entry.gas_number, entry.seconds) for entry in profile.gas_attribution] == [(1, 2356), (2, 2254)]
+        assert sum(entry.seconds for entry in profile.gas_attribution) == round(
+            profile.duration / MILLISECONDS_PER_SECOND
+        )
 
 
 def _row(source_sha256: str, extractor_version: int, parser_key: str = "suunto_xml") -> ExistingProfileRow:
@@ -1529,7 +1577,7 @@ class TestExtractProfile:
 
         profile = extract_profile(SuuntoXmlParser, content)
 
-        assert profile.depth.t == [0, 10, 20, 30, 40]
+        assert profile.depth.t == [0, 10_000, 20_000, 30_000, 40_000]
         assert profile.pressure[0].v == [2052] * 5
 
     def test_the_same_dive_exported_as_xml_and_json_agrees_with_itself(self):
@@ -1577,7 +1625,7 @@ class TestExtractProfile:
             ),
         )
 
-        assert xml.ceiling.t == js.ceiling.t == [10]
+        assert xml.ceiling.t == js.ceiling.t == [10_000]
         assert xml.ceiling.v == js.ceiling.v == [300]
 
 
@@ -1645,9 +1693,9 @@ class TestTheDecompressionChannels:
 
         profile = normalize(parsed)
 
-        assert profile.depth.t == [0, 10]
-        assert profile.ndl.t == [10]
-        assert profile.gradient_factor.t == [20]
+        assert profile.depth.t == [0, 10_000]
+        assert profile.ndl.t == [10_000]
+        assert profile.gradient_factor.t == [20_000]
 
     def test_a_file_of_only_a_computed_channel_still_has_a_profile(self):
         """The origin is the earliest reading across *all* channels, not across the four a
@@ -1655,7 +1703,7 @@ class TestTheDecompressionChannels:
         profile = normalize(ParsedProfileSchema(ndl=ParsedSeries(t=[5.0, 15.0], v=[5940, 1260])))
 
         assert profile is not None
-        assert profile.ndl.t == [0, 10]
+        assert profile.ndl.t == [0, 10_000]
         assert profile.channels == ["ndl"]
 
     def test_to_data_and_back_is_the_same_profile(self):
@@ -1712,10 +1760,21 @@ class TestTheDecompressionChannels:
     def test_shifting_moves_every_channel_onto_one_clock(self):
         profile = normalize(self._parsed())
 
-        moved = shift_profile(profile, 223)
+        moved = shift_profile(profile, 223_000)
 
-        assert moved.ndl.t == [223, 233]
-        assert moved.cns.t == [233]
+        assert moved.ndl.t == [223_000, 233_000]
+        assert moved.cns.t == [233_000]
+
+    def test_shifting_back_past_zero_clamps_there_keeping_the_later_reading(self):
+        """A file whose clock started before the recording's: what lands before zero is
+        kept at zero, and where two land there the later reading stands."""
+        profile = normalize(self._parsed())
+
+        moved = shift_profile(profile, -10_000)
+
+        assert moved.ndl.t == [0]
+        assert moved.ndl.v == [0]
+        assert moved.depth.v == [2400]
 
     def test_joining_two_records_of_one_dive_joins_every_channel(self):
         earlier = normalize(ParsedProfileSchema(tts=ParsedSeries(t=[0.0], v=[120])))

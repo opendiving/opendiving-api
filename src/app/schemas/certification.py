@@ -30,13 +30,13 @@ class CertificationAgency(StrEnum):
     **Value for value, and in order, the DiveJSON vocabulary** (spec §6.16, shared with
     §6.17's courses). That is a stronger statement than it is for `GearType`, because a
     *certification's* `agency` is a REQUIRED member of a closed set and the format freezes
-    those at 1.0 - so this list cannot grow again without a major version, and the five
-    that arrived with the importer (`andi`, `snsi`, `acuc`, `pss`, `ida`) are the last
-    additions there will be. One list serves both resources, so the freeze governs the
-    whole enum although a course's `agency` is OPTIONAL and may be absent entirely - see
-    *"A course may have no agency, and a certification may not"* in DECISIONS.md. The
-    alternative was laundering five real agencies through `other`/`agency_other` on the way
-    in, which would have made a round trip lossy on a member the format guarantees.
+    those at 1.0 - so the twenty that arrived with the format's last widening before the
+    tag (`ndl` to `diwa`) are the last additions there will be without a major version. One
+    list serves both resources, so the freeze governs the whole enum although a course's
+    `agency` is OPTIONAL and may be absent entirely - see *"A course may have no agency, and
+    a certification may not"* in DECISIONS.md. The alternative was laundering real agencies
+    through `other`/`agency_other` on the way in, which would have made a round trip lossy on
+    a member the format guarantees.
     """
 
     PADI = "padi"
@@ -57,6 +57,26 @@ class CertificationAgency(StrEnum):
     ACUC = "acuc"
     PSS = "pss"
     IDA = "ida"
+    NDL = "ndl"
+    UTD = "utd"
+    SAA = "saa"
+    SCOTSAC = "scotsac"
+    IAC = "iac"
+    PROTEC = "protec"
+    PDIC = "pdic"
+    NASE = "nase"
+    SEI = "sei"
+    YMCA = "ymca"
+    ERDI = "erdi"
+    AIDA = "aida"
+    MOLCHANOVS = "molchanovs"
+    PFI = "pfi"
+    APNEA_ACADEMY = "apnea_academy"
+    FII = "fii"
+    NSS_CDS = "nss_cds"
+    NACD = "nacd"
+    IDEA = "idea"
+    DIWA = "diwa"
     OTHER = "other"
 
 

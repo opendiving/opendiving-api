@@ -44,9 +44,10 @@ import codecs
 import hashlib
 import json
 import logging
+import re
 import tempfile
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import IO, Any, BinaryIO, cast
 
@@ -56,12 +57,20 @@ from fastapi import UploadFile
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from ...schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION
+from ...schemas.dive_profile import MILLISECONDS_PER_SECOND
+from ...schemas.export import (
+    DIVEJSON_FORMAT,
+    DIVEJSON_PRODUCER_KEY,
+    DIVEJSON_VERSION,
+    PROFILE_AXIS_MARKER,
+    PROFILE_AXIS_MILLISECONDS,
+)
 from ...schemas.logbook_import import (
     ConversionConverter,
     ConversionNoteGroup,
     ConversionReport,
     ImportDocument,
+    ImportNoteCode,
 )
 from ..export.archive import DIVEJSON_NAME, SPOOL_THRESHOLD
 
@@ -177,9 +186,6 @@ def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def parse_document(text: str | bytes) -> Any:
     """Parse document text as JSON, rejecting duplicate member names (spec §9).
 
-    Member order survives into the parsed dict, which is what lets a caller check the
-    `format`/`version` rule without re-reading the text.
-
     The app's own rather than `divejson.parse_document`, which is the same rule and takes
     `str` where an upload arrives as bytes. The duplicate-member refusal is the one §9 rule
     the importer has to enforce itself: `json` keeps the last value silently, so a document
@@ -214,6 +220,8 @@ class LoadedImport:
     source_format: str | None
     _spool: IO[bytes]
     _archive: zipfile.ZipFile | None
+    # What `read_as_written` read the way a pre-change writer meant it, for the report.
+    read_as_written: list[ReaderNote] = field(default_factory=list)
 
     def __enter__(self) -> LoadedImport:
         return self
@@ -411,18 +419,161 @@ def _validate_envelope(raw: Any) -> ImportDocument:
             "Minor versions are additive and are read; a different major version is not."
         )
 
-    # **Member order is deliberately not checked here**, and it is the one §3 rule with an
-    # obvious place to check it: `format` and `version` MUST be a document's first two
-    # members (spec §4), the parse preserves that order, and refusing anything else would
-    # be four lines. It is a *writer's* obligation, `divejson validate` is where it is
-    # enforced, and refusing an otherwise perfectly readable logbook over the order two
-    # members were written in is the failure this feature exists to end. Same reasoning as
-    # the dangling reference the planner reports rather than rejects.
-
     try:
         return ImportDocument.model_validate(raw)
     except ValidationError as exc:
         raise MalformedImportError(_first_error(exc)) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class ReaderNote:
+    """One line for the import report, decided before the planner runs."""
+
+    code: ImportNoteCode
+    message: str
+    collection: str | None = None
+    uuid: str | None = None
+
+
+# `divejson convert` names itself with this constant; its releases before this one wrote the
+# profile axis in seconds and the readouts on the dive, under the same member names.
+_CONVERTER_GENERATOR = "divejson convert"
+_CONVERTER_MILLISECONDS_SINCE = (0, 13, 0)
+_RELEASE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+_READOUTS = ("surface_pressure", "cns_start", "cns_end", "otu_start", "otu_end")
+
+
+def _members(value: Any, name: str) -> dict[str, Any]:
+    member = value.get(name) if isinstance(value, dict) else None
+    return member if isinstance(member, dict) else {}
+
+
+def _list(value: Any, name: str) -> list[Any]:
+    member = value.get(name) if isinstance(value, dict) else None
+    return member if isinstance(member, list) else []
+
+
+def _written_before_the_axis_moved(raw: dict[str, Any]) -> bool:
+    """Whether a writer this app knows produced `raw` before the profile axis moved.
+
+    Two such writers. **This app**, whose every export writes its producer key on the diver
+    and, from the change on, the axis marker at the root: a document with the first and not
+    the second is one of its own from before. Its `generator.name` is `settings.APP_NAME`,
+    which an operator configures, and its `generator.version` is shared by an edge build and
+    the release before it, so neither can be the key. **The published converter**, whose
+    generator name is a constant and whose releases below `_CONVERTER_MILLISECONDS_SINCE`
+    wrote seconds; the version compares as a tuple, `0.9.0` being below `0.13.0`.
+    """
+    producer = _members(raw, "extensions").get(DIVEJSON_PRODUCER_KEY)
+    marked = isinstance(producer, dict) and producer.get(PROFILE_AXIS_MARKER) == PROFILE_AXIS_MILLISECONDS
+    if DIVEJSON_PRODUCER_KEY in _members(_members(raw, "diver"), "extensions") and not marked:
+        return True
+
+    generator = _members(raw, "generator")
+    version = generator.get("version")
+    release = _RELEASE.match(version) if isinstance(version, str) else None
+    if generator.get("name") != _CONVERTER_GENERATOR or release is None:
+        return False
+    return tuple(int(part or 0) for part in release.groups()) < _CONVERTER_MILLISECONDS_SINCE
+
+
+def _in_milliseconds(profile: dict[str, Any]) -> None:
+    """A pre-change profile's axis, multiplied into milliseconds in place."""
+    series = [value for value in profile.values() if isinstance(value, dict)] + _list(profile, "pressures")
+    for entry in series:
+        times = entry.get("times") if isinstance(entry, dict) else None
+        if isinstance(times, list):
+            entry["times"] = [t * MILLISECONDS_PER_SECOND if isinstance(t, int) else t for t in times]
+    for event in _list(profile, "events"):
+        if isinstance(event, dict) and isinstance(event.get("time"), int):
+            event["time"] *= MILLISECONDS_PER_SECOND
+    if isinstance(profile.get("duration"), int):
+        profile["duration"] *= MILLISECONDS_PER_SECOND
+
+
+def read_as_written(raw: dict[str, Any]) -> list[ReaderNote]:
+    """Read a document a known writer produced before the format moved, as that writer meant it.
+
+    Rewrites `raw` in place into the current shape and says what it read, one report line
+    per kind: the profile axis in seconds, multiplied; the readouts on the dive, onto its
+    first recording - minting one where the dive has none, a recording of readouts alone;
+    `water_type: "en13319"` onto that recording's `salinity`, dropped where the dive has
+    neither a recording nor a readout to carry it; and a cylinder's `po2_limit` as
+    `ppo2_limit`. Anything else passes untouched, and a document no known writer produced is
+    not looked at: without this every old spelling would vanish silently, the importer
+    ignoring what it does not know (§5.6).
+    """
+    if not _written_before_the_axis_moved(raw):
+        return []
+
+    axes = readouts = salinities = limits = 0
+    notes: list[ReaderNote] = []
+    for dive in _list(raw, "dives"):
+        if not isinstance(dive, dict):
+            continue
+        recordings = [recording for recording in _list(dive, "recordings") if isinstance(recording, dict)]
+        profiles = [profile for recording in recordings if (profile := _members(recording, "profile"))]
+        for profile in profiles:
+            _in_milliseconds(profile)
+        axes += bool(profiles)
+
+        carried = {member: dive.pop(member) for member in _READOUTS if member in dive}
+        if carried:
+            if not recordings:
+                recordings = [{}]
+                dive["recordings"] = recordings
+            for member, value in carried.items():
+                recordings[0].setdefault(member, value)
+            readouts += 1
+
+        if dive.get("water_type") == "en13319":
+            del dive["water_type"]
+            if recordings:
+                recordings[0].setdefault("salinity", "en13319")
+                salinities += 1
+            else:
+                notes.append(
+                    ReaderNote(
+                        ImportNoteCode.VALUE_DROPPED,
+                        "This dive's water type was EN 13319, a dive computer's setting rather than a kind of water, "
+                        "and there is no recording of it to carry the setting, so it was dropped",
+                        collection="dives",
+                        uuid=str(dive.get("uuid")),
+                    )
+                )
+
+        for cylinder in _list(dive, "cylinders"):
+            if isinstance(cylinder, dict) and "po2_limit" in cylinder:
+                cylinder.setdefault("ppo2_limit", cylinder.pop("po2_limit"))
+                limits += 1
+
+    summary = [
+        ReaderNote(ImportNoteCode.READ_AS_WRITTEN, message, collection="dives")
+        for count, message in (
+            (
+                axes,
+                "This logbook was written before DiveJSON's profile times became milliseconds, so the profiles of "
+                f"{axes} dive(s) were read in seconds, as written.",
+            ),
+            (
+                readouts,
+                "This logbook was written before DiveJSON moved a dive computer's CNS, OTU and surface pressure onto "
+                f"its recording, so those of {readouts} dive(s) were read onto the dive's first recording.",
+            ),
+            (
+                salinities,
+                "This logbook was written before DiveJSON moved the EN 13319 setting onto the recording, so "
+                f"{salinities} dive(s) carry it as their first recording's salinity rather than as a water type.",
+            ),
+            (
+                limits,
+                "This logbook was written before DiveJSON renamed a cylinder's `po2_limit` to `ppo2_limit`, so "
+                f"{limits} cylinder(s) kept their ppO2 limit.",
+            ),
+        )
+        if count
+    ]
+    return summary + notes
 
 
 # What a document written before a dive site's `location` became an object looks like from
@@ -764,6 +915,7 @@ async def load_import(upload: UploadFile) -> LoadedImport:
                 raise MalformedImportError("This logbook document is not valid JSON: it is not UTF-8 text.") from exc
             raise MalformedImportError(f"This logbook document is not valid JSON: {exc.msg} at line {exc.lineno}.")
 
+        read = read_as_written(raw) if isinstance(raw, dict) else []
         return LoadedImport(
             document=_validate_envelope(raw),
             digest=digest,
@@ -772,6 +924,7 @@ async def load_import(upload: UploadFile) -> LoadedImport:
             source_format=None,
             _spool=buffer,
             _archive=archive,
+            read_as_written=read,
         )
     except BaseException:
         if archive is not None:

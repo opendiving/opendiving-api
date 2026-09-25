@@ -25,9 +25,10 @@ Where it differs from the API's own read shapes, and why:
   with `""` standing for "the diver wrote nothing", so this app cannot tell a blank note
   from no note, and emitting `""` would claim the stronger of the two.
 - **Nothing is re-scaled or re-unitised.** Depths meters, pressures bar, temperatures
-  Celsius, durations seconds - which is the format's own canonical system (spec §5.1), so
-  the app's wire values travel unchanged. The embedded profile keeps the integer scales
-  `GET /dive/{uuid}/recording/{rid}/profile` uses, which the spec fixes too. The diver's `units`
+  Celsius, a dive's duration seconds and the profile axis milliseconds - which is the
+  format's own canonical system (spec §5.1), so the app's wire values travel unchanged. The
+  embedded profile keeps the integer scales `GET /dive/{uuid}/recording/{rid}/profile` uses,
+  which the spec fixes too. The diver's `units`
   preference is account data, says which system they read in, and changes none of it
   (DECISIONS.md, *"Measurements are metric in the database and on the wire; `units` is
   who's looking"*).
@@ -37,8 +38,9 @@ Where it differs from the API's own read shapes, and why:
   closure: every uuid a record names is defined in the same document.
 - **Whatever the format has no core member for rides `extensions.opendiving`** (spec
   §5.5): the diver's account preferences, which parser read a stored dive-computer file,
-  and the crop this app frames the portrait with. A writer may not invent core members, so
-  this is the sanctioned slot.
+  the crop this app frames the portrait with, and at the document's root the axis marker
+  (`EXPORT_EXTENSIONS`). A writer may not invent core members, so this is the sanctioned
+  slot.
 
 The one derived value in here is `archive_path`, which is a fact about the zip rather than
 about the logbook.
@@ -53,15 +55,15 @@ from pydantic import BaseModel, Field
 from ..core.schemas import PublicUUIDSchema
 from .certification import CertificationAgency
 from .course import CourseStatus
-from .dive import DecoAlgorithm, DiveLocalStartTime, DiveMode, WaterType
-from .dive_mixture import DiveMixtureBase
+from .dive import DecoAlgorithm, DiveLocalStartTime, DiveMode, Salinity, WaterType
+from .dive_mixture import GasRole, TankUsage
 from .dive_profile import DiveProfileRead
 from .gear_item import GearType
 from .gear_service import ServiceKind
 
-# The format marker and the version the writer declares, both spec-defined literals and
-# both required to be the document's first two members so a reader can dispatch before
-# parsing further (spec §4). `version` is `"major.minor"` as a *string*: minor versions
+# The format marker and the version the writer declares, both spec-defined literals, and
+# written as the document's first two members so a reader can dispatch before parsing
+# further (spec §4, a SHOULD). `version` is `"major.minor"` as a *string*: minor versions
 # are additive, which the old bare integer could not signal without either lying or
 # breaking every reader.
 DIVEJSON_FORMAT = "divejson"
@@ -76,6 +78,14 @@ DIVEJSON_EXTENSION = "divejson"
 # This producer's key inside every `extensions` object (spec §5.5). Stable by contract -
 # a reader that learned to understand our entries keeps understanding them.
 DIVEJSON_PRODUCER_KEY = "opendiving"
+
+# The document root's `extensions`: which unit this writer's profile axis is in. Every export
+# before the axis moved to milliseconds wrote seconds under the same member names and no
+# marker, so this app's importer reads a markerless document of its own in seconds -
+# `services/logbook_import/reader.py`, `read_as_written`.
+PROFILE_AXIS_MARKER = "profile_axis"
+PROFILE_AXIS_MILLISECONDS = "milliseconds"
+EXPORT_EXTENSIONS: dict[str, Any] = {DIVEJSON_PRODUCER_KEY: {PROFILE_AXIS_MARKER: PROFILE_AXIS_MILLISECONDS}}
 
 # Every `extensions` member: producer key to that producer's payload. Typed loosely on
 # purpose - the spec allows any JSON value under a key, and a reader must not fail on
@@ -258,6 +268,25 @@ class ExportDecoModel(BaseModel):
     ]
 
 
+class ExportCylinder(BaseModel):
+    """One cylinder as the format spells it (spec §6.3).
+
+    The app's own `DiveMixtureBase` member for member, but for `ppo2_limit`, which the
+    column, the REST field and the CSV keep as `po2_limit`: the format renamed it to match
+    `ppo2`, and a spelling is not worth a data repair on every stored row or preset.
+    """
+
+    volume: float | None = None
+    start_pressure: float | None = None
+    end_pressure: float | None = None
+    oxygen: float | None = None
+    helium: float | None = None
+    ppo2_limit: float | None = None
+    gas_number: int | None = None
+    role: GasRole | None = None
+    usage: TankUsage | None = None
+
+
 class ExportRecording(BaseModel):
     """One device's record of one dive (spec §6.4a).
 
@@ -270,12 +299,13 @@ class ExportRecording(BaseModel):
     the ordinary single-computer dive does not, and writing a copy of the dive's start on
     every recording would be noise a reader has to compare rather than read.
 
-    A recording carries at least one of `device`, `profile` and `source_files` - §3's
-    beyond-schema rule 4 - which this writer satisfies by construction: it only emits a
-    recording for a row that has one. **`mode` and `deco_model` are not on that list**, and
-    the format says so in as many words: a mode with no device, no samples and no file behind
-    it is a setting nothing recorded a dive with, so a row carrying only those two is still
-    dropped.
+    A recording carries at least one of `device`, `profile`, `source_files` and a readout -
+    §3's beyond-schema rule 4 - which this writer satisfies by construction: it only emits a
+    recording for a row that has one. **`mode`, `deco_model` and `salinity` are not on that
+    list**, and the format says so in as many words: a setting with no device, no samples, no
+    file and no readout behind it is a setting nothing recorded a dive with, so a row
+    carrying only those is still dropped. A readout alone is a record - a computer's own
+    arithmetic nothing else can produce.
     """
 
     device: ExportDevice | None = None
@@ -286,6 +316,7 @@ class ExportRecording(BaseModel):
     # dive it was, which is a different member and one nothing in this version writes.
     mode: DiveMode | None = None
     deco_model: ExportDecoModel | None = None
+    salinity: Salinity | None = None
     started_at: Annotated[
         DiveLocalStartTime | None,
         Field(
@@ -293,6 +324,11 @@ class ExportRecording(BaseModel):
             description="This device's own start, when it differs from the dive's. Absent means the dive's (§6.4a).",
         ),
     ]
+    surface_pressure: Annotated[float | None, Field(default=None, description="Ambient surface pressure, in bar")]
+    cns_start: float | None = None
+    cns_end: float | None = None
+    otu_start: float | None = None
+    otu_end: float | None = None
     source_files: Annotated[list[ExportStoredFile], Field(default_factory=list, description="In attach order")]
     profile: DiveProfileRead | None = None
 
@@ -343,11 +379,6 @@ class ExportDive(PublicUUIDSchema):
     altitude: Annotated[
         int | None, Field(default=None, description="Elevation of the water surface, in meters above sea level")
     ]
-    cns_start: float | None = None
-    cns_end: float | None = None
-    otu_start: float | None = None
-    otu_end: float | None = None
-    surface_pressure: Annotated[float | None, Field(default=None, description="Ambient surface pressure, in bar")]
     # UDDF 3.2.2 has nowhere to put a per-dive position - its only `<geography>` hangs off
     # a `<site>`, and neither `informationbeforedive` nor `waypoint` has a coordinate
     # element - so this document and `dives.csv` are the only two exports that carry them.
@@ -359,11 +390,9 @@ class ExportDive(PublicUUIDSchema):
     site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In visit order")]
     gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
     species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
-    # `DiveMixtureBase` rather than the API's `DiveMixtureRead`, which carries the
-    # internal row `id`. Nothing here references a cylinder, so that id would be the one
-    # integer key in the document. Its member names are the spec's Cylinder members
-    # already, `gas_number` included.
-    cylinders: Annotated[list[DiveMixtureBase], Field(default_factory=list)]
+    # Not the API's `DiveMixtureRead`, which carries the internal row `id`: nothing here
+    # references a cylinder, so that id would be the one integer key in the document.
+    cylinders: Annotated[list[ExportCylinder], Field(default_factory=list)]
     recordings: Annotated[
         list[ExportRecording],
         Field(default_factory=list, description="What recorded this dive, in order; the first is primary"),
@@ -563,7 +592,7 @@ class ExportCertification(PublicUUIDSchema):
 
 
 class ExportEnvelope(BaseModel):
-    """The whole document, in the member order spec §4 declares.
+    """The whole document, in the member order spec §4 recommends.
 
     **Never used to serialize.** `services/export/envelope.py` streams the file a record
     at a time so a thousand-dive log with its profiles never sits in memory whole, which
@@ -589,3 +618,4 @@ class ExportEnvelope(BaseModel):
     gear_service_schedules: Annotated[list[ExportGearServiceSchedule], Field(default_factory=list)]
     gear_service_records: Annotated[list[ExportGearServiceRecord], Field(default_factory=list)]
     certifications: Annotated[list[ExportCertification], Field(default_factory=list)]
+    extensions: ExportExtensions = None

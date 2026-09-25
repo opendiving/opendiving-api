@@ -6,32 +6,32 @@ Run once after deploying the columns, from the API container:
     docker compose exec api python -m src.scripts.backfill_dive_tech_fields --parser-key suunto_xml
     docker compose exec api python -m src.scripts.backfill_dive_tech_fields --dry-run
 
-Fills `dive.cns_start/cns_end/otu_start/otu_end/surface_pressure_bar`, the entry/exit
-coordinates beside them, `dive_recording`'s six device columns plus the mode the computer
-ran in and the five `deco_*` columns of the model it ran, and - where the stored cylinders
-still demonstrably match the file's - `dive_mixture.po2_limit/gas_number/role`.
-The dive columns are whatever `DiveTechScalars` publishes rather than a list kept here,
-which is what let the coordinates arrive without editing this script.
+Fills each recording's readouts (`cns_start/cns_end/otu_start/otu_end/surface_pressure_bar`),
+its six device columns, the mode and salinity the computer ran with and the five `deco_*`
+columns of its model; and, from the primary recording, the dive's entry/exit coordinates and -
+where the stored cylinders still demonstrably match the file's -
+`dive_mixture.po2_limit/gas_number/role`. The readouts and the dive columns are whatever
+`RecordingReadouts` and `DiveTechScalars` publish rather than a list kept here.
 
-**The recording's mode and deco model are the exception to that**: they come off
-`ParsedDiveSchema` rather than a pivot, so `fill_recording_settings` is named in
-`backfill_tech_fields` beside `fill_device_fields` and this sentence has to be edited when a
-member is added. Both follow the same never-overwrite rule as the device columns, so a run
-fills what no earlier file recorded and takes nothing away.
+**The recording's settings are the exception to that**: they come off `ParsedDiveSchema`
+rather than a pivot, so `fill_recording_settings` is named in `backfill_tech_fields` beside
+`fill_device_fields` and this sentence has to be edited when a member is added. Everything
+follows the same never-overwrite rule as the device columns, so a run fills what no earlier
+file recorded and takes nothing away.
 
 **It does not touch the profile's samples**, which are a different backfill's
 (`backfill_dive_profiles`) and a different question - see *"The decompression channels
 arrive for new dives only"* in `DECISIONS.md` for why nothing runs that one.
 
-**Every primary recording holding a stored file is a candidate on every run**, and only the
-primary: a second computer's exposure readings are its own device's arithmetic and are never
-written onto the dive. See `services/dive_files.py::backfill_tech_fields` for why there is no
-version column to select on, why the run no longer *clears* a reading no file yields, and why
-the mixture half is deliberately the timid one.
+**Every recording holding a stored file is a candidate on every run**; the dive's own columns
+are written from the primary alone. See `services/dive_files.py::backfill_tech_fields` for why
+there is no version column to select on, why the run no longer *clears* a reading no file
+yields, and why the mixture half is deliberately the timid one.
 
 **One run is the upgrade step for an existing instance.** The migration that introduced
-recordings leaves every migrated one device-less - nothing in the old schema recorded what
-wrote a file - and this is what fills them, because it re-parses every stored export anyway.
+recordings left every migrated one device-less, and the one that moved the readouts onto the
+recording copied them onto the primary alone - neither reads a file - so this is what fills
+the rest, because it re-parses every stored export anyway.
 
 A script rather than an arq job, and a second script rather than a flag on
 `backfill_dive_profiles`, for the reasons recorded in that file and in DECISIONS.md.
@@ -84,10 +84,10 @@ async def main() -> None:
         await close_redis_cache_pool()
 
     logger.info(
-        "Tech-field backfill %s: examined=%d dives_updated=%d mixtures_updated=%d mixtures_skipped=%d failed=%d",
+        "Tech-field backfill %s: examined=%d recordings_updated=%d mixtures_updated=%d mixtures_skipped=%d failed=%d",
         "(dry run)" if args.dry_run else "complete",
         report.examined,
-        report.dives_updated,
+        report.recordings_updated,
         report.mixtures_updated,
         report.mixtures_skipped,
         report.failed,

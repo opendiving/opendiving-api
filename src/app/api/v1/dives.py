@@ -135,11 +135,6 @@ _DIVE_CONSTRAINT_MESSAGES = {
     # through to the generic "Invalid reference" below and 422s with a sentence about
     # something else entirely. A violation would mean a parser unit bug, so the messages
     # say so.
-    "ck_dive_cns_start_non_negative": "Imported CNS values must be zero or positive.",
-    "ck_dive_cns_end_non_negative": "Imported CNS values must be zero or positive.",
-    "ck_dive_otu_start_non_negative": "Imported OTU values must be zero or positive.",
-    "ck_dive_otu_end_non_negative": "Imported OTU values must be zero or positive.",
-    "ck_dive_surface_pressure_range": "Imported surface pressure must be between 0.4 and 1.2 bar.",
     "ck_dive_entry_latitude_range": "Imported latitudes must be between -90 and 90.",
     "ck_dive_exit_latitude_range": "Imported latitudes must be between -90 and 90.",
     "ck_dive_entry_longitude_range": "Imported longitudes must be between -180 and 180.",
@@ -220,6 +215,13 @@ _RECORDING_CONSTRAINT_MESSAGES = {
     "ck_dive_recording_deco_gf_low_within_high": (
         "This file's decompression settings are inconsistent: its low gradient factor is above its high one."
     ),
+    # The readouts, on the same terms: the parse-side validators on `ParsedDiveSchema` null
+    # every value these would refuse, so a violation is a parser unit bug.
+    "ck_dive_recording_cns_start_non_negative": "Imported CNS values must be zero or positive.",
+    "ck_dive_recording_cns_end_non_negative": "Imported CNS values must be zero or positive.",
+    "ck_dive_recording_otu_start_non_negative": "Imported OTU values must be zero or positive.",
+    "ck_dive_recording_otu_end_non_negative": "Imported OTU values must be zero or positive.",
+    "ck_dive_recording_surface_pressure_range": "Imported surface pressure must be between 0.4 and 1.2 bar.",
 }
 
 
@@ -1459,8 +1461,8 @@ async def read_dive_profile(
     Per **recording**, not per dive: a diver on two computers has two profiles of one dive
     and neither is a version of the other. `rid` is the recording's uuid, from the dive's
     `recordings[]`; the first of those is the primary one, which is what a client showing a
-    single chart should draw. The `times` are elapsed seconds from that recording's own
-    start, which is why a recording carries a start of its own.
+    single chart should draw. The `times` are elapsed milliseconds from that recording's own
+    `started_at`, which is why a recording carries a start of its own.
 
     `provenance` says where the samples came from - read off this recording's files,
     supplied by an imported document, or folded from two recordings by a merge. The same
@@ -1524,8 +1526,8 @@ async def erase_dive_file(
     the absence rather than succeeding quietly.
 
     **What goes with the file is what was only ever read off it**, and how much that is
-    depends on what is left. The recording's profile is re-derived from its remaining files,
-    and so are the dive's CNS, OTU and surface-pressure readings if this was the primary
+    depends on what is left. The recording's profile and readouts are re-derived from its
+    remaining files, and so are the dive's entry and exit fixes if this was the primary
     recording. A recording whose last file goes normally goes with it. The exception is a
     recording whose profile no file could re-yield - one a merge produced, or one a document
     supplied - which survives its last file's deletion along with its samples.
@@ -1558,10 +1560,10 @@ async def erase_dive_recording(
     import creates and what a merge can leave behind: there is no file whose deletion would
     take it.
 
-    Removing the primary recording promotes the next one, and the dive's oxygen-exposure
-    readings are re-derived from whatever becomes primary. Removing a **secondary** one
-    leaves them exactly as they are: they were never read off that recording, and rewriting
-    them from a primary this deletion did not touch is a loss rather than a repair - see
+    Removing the primary recording promotes the next one, and the dive's entry and exit fixes
+    are re-derived from whatever becomes primary. Removing a **secondary** one leaves them
+    exactly as they are: they were never read off that recording, and rewriting them from a
+    primary this deletion did not touch is a loss rather than a repair - see
     `refresh_tech_scalars`. 404 unless the caller owns the dive, and 404 again when it has no
     such recording.
     """
@@ -1595,9 +1597,9 @@ async def patch_dive_recording(
     """Make one of a dive's recordings the primary one.
 
     `{"primary": true}` moves it to ordinal 0 and shifts the rest down, keeping their order.
-    That decides three things at once: which profile a single-chart client draws, which
-    recording's files write the dive's oxygen-exposure readings - re-derived here from the
-    new primary - and which one a one-profile-per-dive export writes.
+    That decides three things at once: which profile and readouts a single-chart client
+    shows, which recording's files write the dive's entry and exit fixes - re-derived here
+    from the new primary - and which one a one-profile-per-dive export writes.
 
     `{"primary": false}` is refused with a 422 rather than silently ignored: there is no
     "make this one *not* primary" operation, because something has to be, and the diver means

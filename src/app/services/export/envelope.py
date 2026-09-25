@@ -10,7 +10,7 @@ model instance for a thousand-dive log, plus the encoded JSON of the same, is hu
 megabytes resident - for a file the caller is going to write straight to a socket or a
 temp file. So the envelope's scalars are emitted once, and each dive is loaded, encoded
 and dropped one at a time. Streaming is also what puts `format` and `version` first, which
-the format requires of a writer (spec §4) and which nothing about a dict would guarantee.
+the format asks of a writer (spec §4) and which nothing about a dict would guarantee.
 
 That trade has a cost: the declared shape (`ExportEnvelope`) is not on the write path and
 could drift from what is actually written. `tests/test_export_json.py` closes it by
@@ -37,15 +37,17 @@ from ...models.trip import Trip
 from ...models.user import User
 from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.course import CourseStatus
-from ...schemas.dive import DecoAlgorithm, DiveMode, WaterType
-from ...schemas.dive_mixture import DiveMixtureBase, DiveMixtureRead, GasRole, TankUsage
+from ...schemas.dive import DecoAlgorithm, DiveMode, Salinity, WaterType
+from ...schemas.dive_mixture import DiveMixtureRead, GasRole, TankUsage
 from ...schemas.export import (
     DIVEJSON_FORMAT,
     DIVEJSON_PRODUCER_KEY,
     DIVEJSON_VERSION,
+    EXPORT_EXTENSIONS,
     ExportBoundingBox,
     ExportCertification,
     ExportCourse,
+    ExportCylinder,
     ExportDecoModel,
     ExportDevice,
     ExportDive,
@@ -128,8 +130,9 @@ def _speakable(value: str | None, vocabulary: type[StrEnum]) -> bool:
       `certification.agency`) - the record is uninterpretable and is omitted, which is the
       writer's side of the rule the reader already follows (spec §5.6, and
       `logbook_import/planner.py::_agency`, which skips for that reason).
-    - OPTIONAL (`gear_item.type`, `dive.water_type`, `dive_mixture.role`/`usage`,
-      `course.agency`/`status`) - `_sayable` below drops the *field* and keeps the record.
+    - OPTIONAL (`gear_item.type`, `dive.water_type`, `dive_recording.mode`/`salinity`,
+      `dive_mixture.role`/`usage`, `course.agency`/`status`) - `_sayable` below drops the
+      *field* and keeps the record.
       A diver's cylinder must not vanish from their export over how its category is spelt,
       and neither must their course.
 
@@ -217,17 +220,21 @@ def _position(latitude: float | None, longitude: float | None) -> ExportPosition
     return ExportPosition(latitude=latitude, longitude=longitude)
 
 
-def _mixture(mixture: DiveMixtureRead) -> DiveMixtureBase:
-    """Re-validate a read cylinder as the format's shape.
+def _mixture(mixture: DiveMixtureRead) -> ExportCylinder:
+    """A read cylinder as the format's shape, `po2_limit` spelled `ppo2_limit`.
 
-    `role`/`usage` go through `_sayable` because `DiveMixtureBase` still types them as
-    enums - it is a *write* base, and widening it would drop the check on the way in. So a
-    value the read shape carried through has to be dropped here rather than handed over,
+    `role`/`usage` go through `_sayable` because the format's shape types them as enums, so
+    a value the read shape carried through has to be dropped here rather than handed over,
     or this rebuild raises mid-stream on exactly the row the read schemas were widened for.
     """
-    fields = mixture.model_dump(exclude={"id", "role", "usage"})
-    return DiveMixtureBase(
-        **fields,
+    return ExportCylinder(
+        volume=mixture.volume,
+        start_pressure=mixture.start_pressure,
+        end_pressure=mixture.end_pressure,
+        oxygen=mixture.oxygen,
+        helium=mixture.helium,
+        ppo2_limit=mixture.po2_limit,
+        gas_number=mixture.gas_number,
         role=_sayable(mixture.role, GasRole),
         usage=_sayable(mixture.usage, TankUsage),
     )
@@ -414,10 +421,10 @@ def _recording(
 ) -> ExportRecording | None:
     """One recording, or `None` when nothing about it survived to be written.
 
-    §3's rule 4 - a recording carries at least one of its device, its profile and its files -
-    is satisfied here rather than asserted: a row with no device columns, no samples and no
-    file left after the digest race above describes nothing, and a document is better without
-    it than with an empty object a reader has to skip.
+    §3's rule 4 - a recording carries at least one of its device, its profile, its files and
+    a readout - is satisfied here rather than asserted: a row with none of them left after the
+    digest race above describes nothing, and a document is better without it than with an
+    empty object a reader has to skip.
 
     **`started_at` is written only when it differs from the dive's**, §6.4a's absent-means-
     the-dive's rule. Compared on the stored column pair rather than on the combined string,
@@ -426,11 +433,11 @@ def _recording(
     """
     files = [stored for file in row.files if (stored := _stored_file(bundle, file, paths)) is not None]
     device = ExportDevice(**row.device) if row.device else None
-    # **§3's rule 4 counts three members and these two are not among them**, which the spec
-    # states outright: a mode with no device, no samples and no file behind it is a setting
-    # nothing recorded a dive with. So the test below stays exactly as it was, and a row
-    # carrying only a mode is still dropped.
-    if device is None and profile is None and not files:
+    # **§3's rule 4 counts the readouts and not the settings**, which the spec states
+    # outright: a mode or a salinity with no device, no samples, no file and no readout
+    # behind it is a setting nothing recorded a dive with, so a row carrying only those is
+    # still dropped. A readout alone is a record - a computer's own arithmetic.
+    if device is None and profile is None and not files and not row.readouts:
         return None
 
     # Through `_sayable`, the same as `water_type` and a mixture's `role`: the column has no
@@ -455,7 +462,13 @@ def _recording(
         device=device,
         mode=_sayable(row.mode, DiveMode),
         deco_model=deco_model,
+        salinity=_sayable(row.salinity, Salinity),
         started_at=started_at,
+        surface_pressure=row.readouts.get("surface_pressure_bar"),
+        cns_start=row.readouts.get("cns_start"),
+        cns_end=row.readouts.get("cns_end"),
+        otu_start=row.readouts.get("otu_start"),
+        otu_end=row.readouts.get("otu_end"),
         source_files=files,
         profile=None if profile is None else to_read_schema(profile),
     )
@@ -492,11 +505,6 @@ def _dive(
         weight=dive.weight,
         water_type=_sayable(dive.water_type, WaterType),
         altitude=dive.altitude,
-        cns_start=dive.cns_start,
-        cns_end=dive.cns_end,
-        otu_start=dive.otu_start,
-        otu_end=dive.otu_end,
-        surface_pressure=dive.surface_pressure_bar,
         entry_position=_position(dive.entry_latitude, dive.entry_longitude),
         exit_position=_position(dive.exit_latitude, dive.exit_longitude),
         trip_uuid=None if trip is None else trip.uuid,
@@ -504,8 +512,6 @@ def _dive(
         site_uuids=[site.uuid for site in bundle.sites_for(dive)],
         gear_uuids=[item.uuid for item in bundle.gear_for(dive)],
         species_uuids=[species.uuid for species in bundle.species_for(dive)],
-        # `DiveMixtureBase`, not `DiveMixtureRead`: the latter carries the internal row
-        # `id`, and nothing in this document references a cylinder by anything.
         cylinders=[_mixture(mixture) for mixture in bundle.mixtures_by_dive[dive.id]],
         recordings=recordings,
         created_at=dive.created_at,
@@ -757,8 +763,7 @@ async def write_divejson(
         yield separator + _encode(_dive(bundle, dive, profiles=profiles, paths=paths))
     yield b"\n],\n" if bundle.dives else b"],\n"
 
-    collections = _collections(bundle, paths)
-    for index, (key, records) in enumerate(collections):
-        trailer = b",\n" if index < len(collections) - 1 else b"\n"
-        yield _encode(key) + b": " + _encode_collection(records) + trailer
-    yield b"}\n"
+    for key, records in _collections(bundle, paths):
+        yield _encode(key) + b": " + _encode_collection(records) + b",\n"
+    # Last, where the format's own member order puts it: the marker `read_as_written` keys on.
+    yield b'"extensions": ' + _encode(EXPORT_EXTENSIONS) + b"\n}\n"

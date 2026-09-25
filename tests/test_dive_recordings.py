@@ -54,7 +54,7 @@ def _suunto_json() -> RecordingFacts:
         utc_offset_minutes=180,
         duration=3051,
         max_depth=19.04,
-        sampled_span=3473,
+        sampled_span=3_473_000,
     )
 
 
@@ -66,7 +66,7 @@ def _suunto_fit() -> RecordingFacts:
         utc_offset_minutes=180,
         duration=3051,
         max_depth=19.04,
-        sampled_span=3473,
+        sampled_span=3_473_000,
     )
 
 
@@ -78,10 +78,10 @@ def _perdix(part: int) -> RecordingFacts:
     """
     if part == 1:
         return RecordingFacts(
-            device=PERDIX_DEVICE, start_time=PERDIX_ONE_WALL, duration=180, max_depth=19.0, sampled_span=180
+            device=PERDIX_DEVICE, start_time=PERDIX_ONE_WALL, duration=180, max_depth=19.0, sampled_span=180_000
         )
     return RecordingFacts(
-        device=PERDIX_DEVICE, start_time=PERDIX_TWO_WALL, duration=2940, max_depth=19.0, sampled_span=2940
+        device=PERDIX_DEVICE, start_time=PERDIX_TWO_WALL, duration=2940, max_depth=19.0, sampled_span=2_940_000
     )
 
 
@@ -183,7 +183,7 @@ class TestSameRecording:
             utc_offset_minutes=180,
             duration=600,
             max_depth=19.0,
-            sampled_span=600,
+            sampled_span=600_000,
         )
         second = RecordingFacts(
             device=DeviceIdentity(brand="Suunto", serial="253810000400", dive_number=2),
@@ -191,7 +191,7 @@ class TestSameRecording:
             utc_offset_minutes=180,
             duration=600,
             max_depth=19.0,
-            sampled_span=600,
+            sampled_span=600_000,
         )
 
         assert not is_same_recording(second, first)
@@ -205,14 +205,14 @@ class TestSameRecording:
         source said nothing about the computer. Refusing it would leave a diver unable to
         attach the very file that would say what recorded it."""
         deviceless = RecordingFacts(
-            device=DeviceIdentity(), start_time=SUUNTO_INSTANT, utc_offset_minutes=180, sampled_span=3473
+            device=DeviceIdentity(), start_time=SUUNTO_INSTANT, utc_offset_minutes=180, sampled_span=3_473_000
         )
 
         assert is_same_recording(_suunto_fit(), deviceless)
 
     def test_spans_two_seconds_apart_are_the_edge(self) -> None:
-        assert is_same_recording(replace(_suunto_fit(), sampled_span=3475), _suunto_json())
-        assert not is_same_recording(replace(_suunto_fit(), sampled_span=3476), _suunto_json())
+        assert is_same_recording(replace(_suunto_fit(), sampled_span=3_475_000), _suunto_json())
+        assert not is_same_recording(replace(_suunto_fit(), sampled_span=3_475_001), _suunto_json())
 
 
 class TestSameDiveStrict:
@@ -237,7 +237,7 @@ class TestSameDiveStrict:
             utc_offset_minutes=180,
             duration=3040,
             max_depth=19.1,
-            sampled_span=3040,
+            sampled_span=3_040_000,
         )
 
         assert is_same_dive_strict(other, _suunto_json())

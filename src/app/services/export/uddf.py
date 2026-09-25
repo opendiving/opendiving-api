@@ -7,8 +7,8 @@ tests, and every document this module produces is validated against it - the sch
 the referee for everything below, not habit or memory.
 
 **UDDF is SI throughout, and our storage is not.** Depths are meters (ours already are),
-times seconds (ditto), but temperatures are **Kelvin** where we hold tenths of a degree
-Celsius, pressures **Pascal** where we hold tenths of a bar and plain bar, and tank
+times seconds where the profile axis holds milliseconds, temperatures **Kelvin** where we
+hold tenths of a degree Celsius, pressures **Pascal** where we hold tenths of a bar and plain bar, and tank
 volumes **cubic meters** where a diver says "twelve litres". Every one of those
 conversions is a one-liner with a unit test carrying a hand-computed expectation, because
 a silently wrong factor of 100 000 produces a file that validates perfectly and is
@@ -32,7 +32,7 @@ reading the XSD, and each is exported in `logbook.divejson`/CSV instead:
   attribute is `use="required"` - and a ceiling sample says how deep the obligation was,
   never how long the stop should last. Emitting one would mean inventing the number that
   matters most.
-- **OTU, and the dive's own CNS and OTU totals.** `informationafterdiveType` has no
+- **OTU, and a recording's own CNS and OTU totals.** `informationafterdiveType` has no
   oxygen-exposure element at all, so `cns_start`/`cns_end`/`otu_start`/`otu_end` - the
   device's figures for the whole dive - have nowhere to go. `<otu>` is a `<waypoint>` child
   like `<cns>` and stays empty for the other half of the same sentence: we store no `otu`
@@ -100,6 +100,7 @@ from ...schemas.dive_profile import (
     CNS_SCALE,
     DEPTH_SCALE,
     GRADIENT_FACTOR_SCALE,
+    MILLISECONDS_PER_SECOND,
     NDL_SCALE,
     PPO2_SCALE,
     PRESSURE_SCALE,
@@ -127,8 +128,9 @@ LITRES_PER_CUBIC_METRE = 1000.0
 # - where `gradient_factor` is stored in whole percent. See the module docstring for why
 # the fraction is the only spelling this writer can use.
 PERCENT_PER_FRACTION = 100.0
-# The furthest a reading is ever moved to reach a waypoint - see `_snap_tolerance`.
-MAX_SNAP_SECONDS = 30
+# The furthest a reading is ever moved to reach a waypoint, in the profile axis's
+# milliseconds - see `_snap_tolerance`.
+MAX_SNAP_MILLISECONDS = 30_000
 
 _INDENT = "  "
 
@@ -606,25 +608,25 @@ def _generator_element(exported_at: datetime) -> ET.Element:
     return generator
 
 
-def _series_by_second(series: dict | None) -> dict[int, int]:
-    """One stored channel as a `{second: reading}` lookup. Absent channel -> empty."""
+def _series_by_moment(series: dict | None) -> dict[int, int]:
+    """One stored channel as a `{millisecond: reading}` lookup. Absent channel -> empty."""
     if not series:
         return {}
     return dict(zip(series["t"], series["v"], strict=True))
 
 
-def _nearest(seconds: list[int], second: int) -> int:
-    """The depth sample closest in time to `second`; the earlier one wins a tie."""
-    index = bisect.bisect_left(seconds, second)
+def _nearest(moments: list[int], moment: int) -> int:
+    """The depth sample closest in time to `moment`; the earlier one wins a tie."""
+    index = bisect.bisect_left(moments, moment)
     if index == 0:
-        return seconds[0]
-    if index == len(seconds):
-        return seconds[-1]
-    before, after = seconds[index - 1], seconds[index]
-    return before if second - before <= after - second else after
+        return moments[0]
+    if index == len(moments):
+        return moments[-1]
+    before, after = moments[index - 1], moments[index]
+    return before if moment - before <= after - moment else after
 
 
-def _snap_tolerance(seconds: list[int]) -> int:
+def _snap_tolerance(moments: list[int]) -> int:
     """How far a reading may be moved to reach a waypoint: half the depth channel's
     **typical** interval, taken as the median of its gaps.
 
@@ -642,36 +644,35 @@ def _snap_tolerance(seconds: list[int]) -> int:
     end of the dive - are dropped. They are in `logbook.divejson`, on their own unsnapped axis,
     like everything else this format cannot carry honestly.
 
-    A 1 Hz depth channel yields a tolerance of zero, which is exact rather than strict:
-    `dive_profiles` stores whole-second timestamps, so a reading either coincides with a
-    depth sample or sits in a genuine dropout. Sub-second storage would turn that into
-    silent data loss, and would be the thing to revisit here.
+    In milliseconds, like the axis: a 1 Hz depth channel yields half a second, so a
+    temperature read a fraction of a second off a depth sample - which a Suunto app export's
+    separate sensor streams routinely are - still reaches its waypoint.
     """
-    if len(seconds) < 2:
+    if len(moments) < 2:
         return 0
-    gaps = sorted(later - earlier for earlier, later in zip(seconds, seconds[1:], strict=False))
+    gaps = sorted(later - earlier for earlier, later in zip(moments, moments[1:], strict=False))
     # Capped, because the median is only robust while dropouts are the minority. A depth
     # channel of two usable samples half an hour apart - which `suunto_xml` will produce
     # from a file whose `<Depth>` is nil for most of the dive while temperature keeps
     # sampling - has a median gap of 1800 s and would otherwise permit a 900 s move, the
     # exact failure this bound exists to prevent. No dive computer in the corpus samples
     # depth slower than every 20 s, so half a minute is generous as an outer limit.
-    return min(gaps[len(gaps) // 2] // 2, MAX_SNAP_SECONDS)
+    return min(gaps[len(gaps) // 2] // 2, MAX_SNAP_MILLISECONDS)
 
 
-def _at_or_after(seconds: list[int], second: int) -> int | None:
-    """The first depth sample not earlier than `second`; `None` past the end."""
-    index = bisect.bisect_left(seconds, second)
-    return None if index == len(seconds) else seconds[index]
+def _at_or_after(moments: list[int], moment: int) -> int | None:
+    """The first depth sample not earlier than `moment`; `None` past the end."""
+    index = bisect.bisect_left(moments, moment)
+    return None if index == len(moments) else moments[index]
 
 
-def _snapped(readings: dict[int, int], seconds: list[int], tolerance: int) -> dict[int, int]:
+def _snapped(readings: dict[int, int], moments: list[int], tolerance: int) -> dict[int, int]:
     """Move each reading onto the nearest depth sample, the closest reading winning."""
     snapped: dict[int, int] = {}
     distance: dict[int, int] = {}
-    for second, reading in sorted(readings.items()):
-        target = _nearest(seconds, second)
-        gap = abs(second - target)
+    for moment, reading in sorted(readings.items()):
+        target = _nearest(moments, moment)
+        gap = abs(moment - target)
         if gap > tolerance:
             continue
         if target not in snapped or gap < distance[target]:
@@ -724,20 +725,20 @@ def _waypoints(
     therefore loses its mode along with its samples - there is no waypoint to carry it, and
     `informationbeforedive` has no slot of its own.
     """
-    depth = _series_by_second(data.get("depth"))
+    depth = _series_by_moment(data.get("depth"))
     if not depth:
         return
-    seconds = sorted(depth)
+    moments = sorted(depth)
 
-    tolerance = _snap_tolerance(seconds)
-    temperature = _snapped(_series_by_second(data.get("temperature")), seconds, tolerance)
+    tolerance = _snap_tolerance(moments)
+    temperature = _snapped(_series_by_moment(data.get("temperature")), moments, tolerance)
     # The four deco readouts UDDF has a `<waypoint>` child for, snapped onto the depth axis
     # exactly like temperature: they are readings the device computed at an instant, and the
     # rule for reaching a waypoint honestly is the channel's, not the quantity's.
-    ndl = _snapped(_series_by_second(data.get("ndl")), seconds, tolerance)
-    ppo2 = _snapped(_series_by_second(data.get("ppo2")), seconds, tolerance)
-    cns = _snapped(_series_by_second(data.get("cns")), seconds, tolerance)
-    gradient_factor = _snapped(_series_by_second(data.get("gradient_factor")), seconds, tolerance)
+    ndl = _snapped(_series_by_moment(data.get("ndl")), moments, tolerance)
+    ppo2 = _snapped(_series_by_moment(data.get("ppo2")), moments, tolerance)
+    cns = _snapped(_series_by_moment(data.get("cns")), moments, tolerance)
+    gradient_factor = _snapped(_series_by_moment(data.get("gradient_factor")), moments, tolerance)
     divemode = _divemode_type(mode)
     pressure: list[tuple[str, dict[int, int]]] = []
     for cylinder in data.get("pressure") or []:
@@ -748,7 +749,7 @@ def _waypoints(
             # the gas number itself.
             continue
         readings = dict(zip(cylinder["t"], cylinder["v"], strict=True))
-        pressure.append((mix_id, _snapped(readings, seconds, tolerance)))
+        pressure.append((mix_id, _snapped(readings, moments, tolerance)))
 
     # A gas switch is a state change, not a reading, and that changes both rules it obeys.
     #
@@ -771,70 +772,72 @@ def _waypoints(
     markers_at: dict[int, list[str]] = {}
     for event in sorted(data.get("events") or [], key=lambda event: event["t"]):
         if event["type"] == ProfileEventType.GAS_SWITCH:
-            after = _at_or_after(seconds, event["t"])
+            after = _at_or_after(moments, event["t"])
             if after is not None:
                 switch_event_at[after] = event
             continue
         # Markers are annotations: one that cannot reach a waypoint honestly is dropped
         # like any other reading, since nothing downstream computes on its absence.
-        second = _nearest(seconds, event["t"])
-        if abs(event["t"] - second) > tolerance:
+        moment = _nearest(moments, event["t"])
+        if abs(event["t"] - moment) > tolerance:
             continue
-        markers_at.setdefault(second, []).append(event.get("label") or event["type"])
+        markers_at.setdefault(moment, []).append(event.get("label") or event["type"])
 
     switch_at: dict[int, str] = {}
-    for second, event in switch_event_at.items():
+    for moment, event in switch_event_at.items():
         gas_number = event.get("gas_number")
         # A switch the file recorded without saying what to, or to a cylinder this dive
         # has no mixture for, has no `xs:IDREF` to point at, so the waypoint gets no
         # `<switchmix>` at all. It stays in `logbook.divejson`, which carries the raw events.
         if gas_number is not None and gas_number in mix_id_by_gas_number:
-            switch_at[second] = mix_id_by_gas_number[gas_number]
+            switch_at[moment] = mix_id_by_gas_number[gas_number]
 
     samples = _sub(parent, "samples")
-    for second in seconds:
+    for moment in moments:
         # `waypointType` is an `xs:sequence`, so these have to go in exactly this order -
         # which is the type's own order and not a preference. `<cns>` comes third in it and
         # therefore first in a waypoint carrying no alarm or battery reading, and
         # `<nodecotime>` is last of all, several elements after the `<depth>` it was
         # computed at. The XSD validation test is what holds this.
         waypoint = _sub(samples, "waypoint")
-        if second in cns:
+        if moment in cns:
             # Percent, from our tenths of a percent.
-            _sub(waypoint, "cns", _num(cns[second] / CNS_SCALE))
-        if second in ppo2:
+            _sub(waypoint, "cns", _num(cns[moment] / CNS_SCALE))
+        if moment in ppo2:
             # Bar, from our hundredths of a bar - the second pressure in this file that is
             # not Pascal, and for the same reason `<mix><maximumpo2>` is not.
-            _sub(waypoint, "calculatedpo2", _num(ppo2[second] / PPO2_SCALE))
-        _sub(waypoint, "depth", _num(depth[second] / DEPTH_SCALE))
-        _sub(waypoint, "divetime", _num(second))
-        if second in markers_at:
+            _sub(waypoint, "calculatedpo2", _num(ppo2[moment] / PPO2_SCALE))
+        _sub(waypoint, "depth", _num(depth[moment] / DEPTH_SCALE))
+        # Seconds, with a fraction where the millisecond is not a whole one: `<divetime>` is
+        # `xs:float`, so the axis goes out exact and a whole second writes as it always did.
+        _sub(waypoint, "divetime", _num(moment / MILLISECONDS_PER_SECOND))
+        if moment in markers_at:
             # One `<setmarker>` per waypoint is all the schema allows, so simultaneous
             # markers are joined rather than dropped.
-            _sub(waypoint, "setmarker", "; ".join(markers_at[second]))
-        if second in switch_at:
-            _sub(waypoint, "switchmix", ref=switch_at[second])
+            _sub(waypoint, "setmarker", "; ".join(markers_at[moment]))
+        if moment in switch_at:
+            _sub(waypoint, "switchmix", ref=switch_at[moment])
         for mix_id, series in pressure:
-            if second in series:
-                _sub(waypoint, "tankpressure", _num(series[second] / PRESSURE_SCALE * PASCAL_PER_BAR), ref=mix_id)
-        if second in temperature:
-            _sub(waypoint, "temperature", _num(temperature[second] / TEMPERATURE_SCALE + KELVIN_OFFSET))
-        if divemode is not None and second == seconds[0]:
+            if moment in series:
+                _sub(waypoint, "tankpressure", _num(series[moment] / PRESSURE_SCALE * PASCAL_PER_BAR), ref=mix_id)
+        if moment in temperature:
+            _sub(waypoint, "temperature", _num(temperature[moment] / TEMPERATURE_SCALE + KELVIN_OFFSET))
+        if divemode is not None and moment == moments[0]:
             # Once per profile, on the first waypoint: the mode is one setting for the whole
             # recording, and UDDF's reader convention is that the first waypoint stating one
             # gives the dive its mode. Repeating it on every waypoint would be the same fact
             # written several thousand times.
             _sub(waypoint, "divemode", type=divemode)
-        if second in gradient_factor:
+        if moment in gradient_factor:
             # The documented fraction, from our whole percent - see the module docstring.
             # `@tissue` is left off: the channel is the *leading* tissue's, and the schema
             # makes the attribute optional precisely because a file need not say which.
             _sub(
-                waypoint, "gradientfactor", _num(gradient_factor[second] / GRADIENT_FACTOR_SCALE / PERCENT_PER_FRACTION)
+                waypoint, "gradientfactor", _num(gradient_factor[moment] / GRADIENT_FACTOR_SCALE / PERCENT_PER_FRACTION)
             )
-        if second in ndl:
+        if moment in ndl:
             # Seconds in both, which is why this one has no factor and still names its scale.
-            _sub(waypoint, "nodecotime", _num(ndl[second] / NDL_SCALE))
+            _sub(waypoint, "nodecotime", _num(ndl[moment] / NDL_SCALE))
 
 
 def _deepest(profile_data: dict[str, Any] | None) -> float | None:
@@ -856,6 +859,7 @@ def _dive_element(
     mix_ids: dict[_MixKey, str],
     profile_data: dict | None,
     mode: str | None,
+    surface_pressure_bar: float | None,
 ) -> ET.Element:
     element = ET.Element("dive", {"id": _uddf_id("dive", dive.uuid)})
 
@@ -886,8 +890,8 @@ def _dive_element(
     trip = bundle.trip_for(dive)
     if trip is not None:
         _sub(before, "tripmembership", ref=_uddf_id("trip", trip.uuid))
-    if dive.surface_pressure_bar is not None:
-        _sub(before, "surfacepressure", _num(dive.surface_pressure_bar * PASCAL_PER_BAR))
+    if surface_pressure_bar is not None:
+        _sub(before, "surfacepressure", _num(surface_pressure_bar * PASCAL_PER_BAR))
 
     mixtures = bundle.mixtures_by_dive[dive.id]
     mix_id_by_gas_number: dict[int, str] = {}
@@ -985,6 +989,9 @@ async def write_uddf(db: AsyncSession, bundle: ExportBundle, *, exported_at: dat
                 mix_ids=mix_ids,
                 profile_data=profile.data if profile else None,
                 mode=primary.mode if primary is not None else None,
+                # The primary's too: `<surfacepressure>` is one per dive, and the others' stay
+                # in `logbook.divejson`.
+                surface_pressure_bar=primary.readouts.get("surface_pressure_bar") if primary is not None else None,
             )
             yield _serialize(element, level=3)
         yield f"{_INDENT * 2}</repetitiongroup>\n{_INDENT}</profiledata>\n".encode()

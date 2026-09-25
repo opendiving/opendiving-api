@@ -33,9 +33,12 @@ writer's obligation, and the importer still grades nothing it is handed. `DECISI
 
 String bounds *are* enforced here, and they are the specification's own (§6): a value
 longer than the format allows is a malformed document rather than something to truncate,
-and every one of these limits is also the width of the column it lands in.
+and every one of these limits is also the width of the column it lands in. `notes` has none,
+the format having dropped its cap - a note is prose, and the planner stores what this app's
+own cap admits (`NOTES_MAX_LENGTH`) and reports the rest.
 """
 
+import re
 import uuid as uuid_pkg
 from datetime import date, datetime
 from enum import StrEnum
@@ -43,10 +46,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
-from ..core.schemas import NOTES_MAX_LENGTH
 from .certification import CertificationAgency
 from .course import CourseStatus
-from .dive import DecoAlgorithm, DiveMode, WaterType
+from .dive import DecoAlgorithm, DiveMode, Salinity, WaterType
 from .dive_mixture import GasRole, TankUsage
 from .dive_profile import ProfileEventType
 from .gear_service import ServiceKind
@@ -111,6 +113,23 @@ def _null_is_empty(value: Any) -> Any:
 
 
 _Collection = BeforeValidator(_null_is_empty)
+
+_FULL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _full_date_is_a_date(value: Any) -> Any:
+    """A bare `YYYY-MM-DD` reads as a `date`, never as midnight.
+
+    Pydantic's `datetime` coerces one to 00:00, which is the fabrication a date-only start
+    exists to avoid (spec §5.2): the day was recorded and the time of day was not.
+    """
+    if isinstance(value, str) and _FULL_DATE.fullmatch(value):
+        return date.fromisoformat(value)
+    return value
+
+
+# A start as a document spells it: a date-time, or on a dive a bare date.
+ImportStart = Annotated[datetime | date | None, BeforeValidator(_full_date_is_a_date), Field(default=None)]
 
 
 class _ReadModel(BaseModel):
@@ -275,16 +294,23 @@ class ImportRecording(_ReadModel):
     app invented - so the planner substitutes the dive's start rather than leaving the column
     NULL, and a recording whose device entered the water later carries its own.
 
-    A recording with none of `device`, `profile` and `source_files` describes nothing (§3's
-    rule 4) and the planner drops it with a note rather than creating an empty row. **`mode`
-    and `deco_model` are not on that list**, which the spec states outright: a mode with no
-    device, no samples and no file behind it is a setting nothing recorded a dive with.
+    A recording with none of `device`, `profile`, `source_files` and a readout describes
+    nothing (§3's rule 4) and the planner drops it with a note rather than creating an empty
+    row. **`mode`, `deco_model` and `salinity` are not on that list**, which the spec states
+    outright: a setting with nothing recorded behind it is a setting nothing recorded a dive
+    with.
     """
 
     device: ImportDevice | None = None
     mode: Annotated[DiveMode | None, _unknown_is_absent(DiveMode), Field(default=None)]
     deco_model: ImportDecoModel | None = None
-    started_at: datetime | None = None
+    salinity: Annotated[Salinity | None, _unknown_is_absent(Salinity), Field(default=None)]
+    started_at: ImportStart
+    surface_pressure: float | None = None
+    cns_start: float | None = None
+    cns_end: float | None = None
+    otu_start: float | None = None
+    otu_end: float | None = None
     source_files: Annotated[list[ImportStoredFile], Field(default_factory=list), _Collection]
     profile: ImportProfile | None = None
 
@@ -295,7 +321,7 @@ class ImportCylinder(_ReadModel):
     end_pressure: float | None = None
     oxygen: float | None = None
     helium: float | None = None
-    po2_limit: float | None = None
+    ppo2_limit: float | None = None
     gas_number: int | None = None
     role: Annotated[GasRole | None, _unknown_is_absent(GasRole), Field(default=None)]
     usage: Annotated[TankUsage | None, _unknown_is_absent(TankUsage), Field(default=None)]
@@ -308,10 +334,11 @@ class ImportDive(_ReadModel):
     # `started_at` is spec §5.2's local date-time, and admitting it is the reason
     # `dive.utc_offset_minutes` became nullable. `DiveUpdate` has since dropped its
     # validator too, but for the narrower reason that it may only *preserve* what this
-    # endpoint created - see `core/utils/datetime_offset.py`.
-    started_at: datetime | None = None
+    # endpoint created - see `core/utils/datetime_offset.py`. A bare date reads as a `date`,
+    # which the planner does not store yet.
+    started_at: ImportStart
     duration: int | None = None
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    notes: str | None = None
     max_depth: float | None = None
     avg_depth: float | None = None
     bottom_temperature: float | None = None
@@ -321,11 +348,6 @@ class ImportDive(_ReadModel):
     weight: float | None = None
     water_type: Annotated[WaterType | None, _unknown_is_absent(WaterType), Field(default=None)]
     altitude: int | None = None
-    cns_start: float | None = None
-    cns_end: float | None = None
-    otu_start: float | None = None
-    otu_end: float | None = None
-    surface_pressure: float | None = None
     entry_position: ImportPosition | None = None
     exit_position: ImportPosition | None = None
     trip_uuid: uuid_pkg.UUID | None = None
@@ -371,7 +393,7 @@ class ImportTrip(_ReadModel):
     # document written before the change is read as a trip with no parts rather than
     # failing, the same tolerance §5.6 asks for that a dive's `recordings` gets above.
     parts: Annotated[list[ImportTripPart], Field(default_factory=list), _Collection]
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    notes: str | None = None
     created_at: datetime | None = None
 
 
@@ -386,7 +408,7 @@ class ImportCourse(_ReadModel):
     instructor_name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     instructor_number: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
     training_center: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    notes: str | None = None
     created_at: datetime | None = None
 
 
@@ -406,7 +428,7 @@ class ImportDiveSite(_ReadModel):
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     location: ImportLocation | None = None
     position: ImportPosition | None = None
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    notes: str | None = None
     created_at: datetime | None = None
 
 
@@ -433,7 +455,7 @@ class ImportGearItem(_ReadModel):
     # the vocabulary, and this is the one place a value outside it must read as absent
     # rather than as a 422.
     type: str | None = None
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    notes: str | None = None
     rented: bool | None = None
     archived: bool | None = None
     archived_at: datetime | None = None
@@ -478,7 +500,7 @@ class ImportGearServiceRecord(_ReadModel):
     dive_count_at_service: int | None = None
     label: Annotated[str | None, Field(default=None, max_length=_LABEL_MAX)]
     performed_by: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    notes: str | None = None
     created_at: datetime | None = None
 
 
@@ -494,7 +516,7 @@ class ImportCertification(_ReadModel):
     instructor_number: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
     training_center: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     course_uuid: uuid_pkg.UUID | None = None
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    notes: str | None = None
     front_file: ImportStoredFile | None = None
     back_file: ImportStoredFile | None = None
     created_at: datetime | None = None
@@ -508,9 +530,8 @@ class ImportDocument(_ReadModel):
     document at all - which is a 415 rather than a 422, exactly as an unrecognized
     dive-computer export is at `POST /dive/parse`.
 
-    `extensions` is here and absent from `ExportEnvelope`, and the asymmetry is correct in
-    both directions: this app's writer emits none, and a reader that refused a foreign
-    producer's would be violating §5.6.
+    `extensions` is here as on `ExportEnvelope`: this app's writer marks its profile axis
+    there, and a reader that refused a foreign producer's would be violating §5.6.
     """
 
     format: str
@@ -562,6 +583,10 @@ class ImportNoteCode(StrEnum):
     RECORD_REMAPPED_REFERENCES_STAY = "record_remapped_references_stay"
     # A soft-deleted row of the caller's came back, under its original uuid.
     RECORD_RESTORED = "record_restored"
+    # The document was written before a change to the format, by a writer this app knows, and
+    # a value was read as that writer meant it - a profile axis in seconds, a readout on the
+    # dive, `en13319` as a dive's water, `po2_limit`. Nothing was lost.
+    READ_AS_WRITTEN = "read_as_written"
     # The record imported, but one of its values could not be stored as written.
     VALUE_DROPPED = "value_dropped"
     # A reference names a record the document does not define, or one that was skipped.

@@ -10,12 +10,12 @@ actually are - a filesystem volume or an S3-compatible bucket, on `FILE_STORAGE_
 **A file belongs to a recording, and a recording may hold several.** Which recording an
 incoming file lands in is `services/dive_recordings.py`'s decision; what this module owns is
 what happens once it has been made - the bytes, the row, the fill rule across a recording's
-files, and the two things derived from them (the profile, and the dive's oxygen-exposure
-readings).
+files, and what is derived from them (the profile, the recording's readouts, and the dive's
+entry and exit fixes).
 
 *A second file of one recording fills and never overwrites*, and that rule is written once per
-thing it applies to - the device columns, the two match figures, the recording's start, the
-dive's tech scalars, the profile's channels and the dive's cylinders. Derive them from
+thing it applies to - the device columns, the two match figures, the recording's start, its
+readouts, the dive's tech scalars, the profile's channels and the dive's cylinders. Derive them from
 `git grep -n "def fill_" -- src/app/services` rather than from a count here, which is what
 stops the list going stale; read it as a superset, since the cylinder one is implemented by
 two pure helpers that match the same grep and are not themselves things the rule applies to.
@@ -48,6 +48,7 @@ from ..models.dive_mixture import DiveMixture
 from ..models.dive_recording import DiveRecording
 from ..schemas.dive import DiveFileInfo, DiveTechScalars
 from ..schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, as_create
+from ..schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from . import blob_store, dive_recordings
 from .dive_parsers import PARSER_BY_KEY, DiveParseError, DiveParser, UnsupportedDiveFileError
@@ -60,6 +61,7 @@ from .dive_profiles import (
     get_existing_profile,
     normalize,
     recording_source_digest,
+    shift_profile,
     should_extract,
     store_profile,
 )
@@ -74,10 +76,15 @@ KEY_KIND = "dive-files"
 # storage. Exports are small (a few hundred KB); this is headroom, not a target.
 MAX_DIVE_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
-# The `dive` columns an import owns outright. Taken from `DiveTechScalars` rather than
-# listed here, so the schema that publishes them and the write that fills them cannot
-# drift: adding a field to one is adding it to both.
+# The `dive` columns an import owns outright - the primary recording's entry and exit fixes.
+# Taken from `DiveTechScalars` rather than listed here, so the schema that publishes them and
+# the write that fills them cannot drift: adding a field to one is adding it to both.
 TECH_SCALAR_FIELDS = tuple(DiveTechScalars.model_fields)
+# And the recording's, which every recording's own files write.
+READOUT_FIELDS = dive_recordings.READOUT_COLUMNS
+# Everything a file's header yields as a plain number, both halves - what `FileExtraction`
+# carries before the write splits it between the recording and the dive.
+SCALAR_FIELDS = (*READOUT_FIELDS, *TECH_SCALAR_FIELDS)
 
 
 class InvalidDiveFileTokenError(Exception):
@@ -194,7 +201,7 @@ async def _find_by_digest(db: AsyncSession, *, user_id: int, digest: str) -> _Ex
 
 
 def extract_tech_scalars(parser: type[DiveParser], content: bytes) -> dict[str, float | None] | None:
-    """The dive's oxygen-exposure and surface-pressure readings, or `None` if unreadable.
+    """A file's readouts and entry/exit fixes, or `None` if unreadable.
 
     **Never raises**, on the same terms and for the same reason as `extract_profile`: the
     file is the durable artifact, so a header this build can't read must not fail the
@@ -232,7 +239,7 @@ def extract_tech_scalars(parser: type[DiveParser], content: bytes) -> dict[str, 
     except Exception:
         logger.exception("Unexpected error extracting tech scalars from a %s file", parser.key)
         return None
-    return {name: getattr(parsed, name) for name in TECH_SCALAR_FIELDS}
+    return {name: getattr(parsed, name) for name in SCALAR_FIELDS}
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,13 +250,14 @@ class FileExtraction:
     from a header that read and said nothing - the first leaves the recording's device
     columns untouched, the second is a device the file did not name.
 
-    **`profile` is normalized and nothing more** - not attributed, not capped. Those two
-    steps belong to the recording rather than to the file: `extract_recording` fills the
-    channels across a recording's files and then runs them *once*, which is the only order
-    under which the gas attribution is computed against the channels it will be stored beside
-    and at the resolution `derive_gas_attribution` requires. `NormalizedProfile.duration` is
-    the same either way (`downsample` keeps each channel's first and last sample), so the
-    caller reading a sampled span off this gets the same number it always did.
+    **`profile` is normalized and nothing more** - on the file's own axis, counted from the
+    start its header states, and not attributed, capped or placed on the recording's clock.
+    Those steps belong to the recording rather than to the file: `extract_recording` shifts
+    each file onto the recording's stored start, fills the channels across them and then
+    attributes and caps *once*, which is the only order under which the gas attribution is
+    computed against the channels it will be stored beside and at the resolution
+    `derive_gas_attribution` requires. `NormalizedProfile.duration` is the same either way
+    (`downsample` keeps each channel's first and last sample).
     """
 
     parsed: ParsedDiveSchema | None
@@ -280,32 +288,42 @@ def _extract_all(parser: type[DiveParser], content: bytes) -> FileExtraction:
         # fallback is correct for anything at all and swallowing more here costs nothing
         # - `extract_profile` and `extract_tech_scalars` do their own logging, with the
         # per-half message that says which of the two actually went wrong.
+        header = _parse_header(parser, content)
         return FileExtraction(
-            parsed=_parse_header(parser, content),
-            profile=_normalized_profile(parser, content),
+            parsed=header,
+            profile=_normalized_profile(parser, content, from_file_start=_states_start(header)),
             scalars=extract_tech_scalars(parser, content),
         )
 
     try:
-        scalars: dict[str, float | None] | None = {name: getattr(parsed, name) for name in TECH_SCALAR_FIELDS}
+        scalars: dict[str, float | None] | None = {name: getattr(parsed, name) for name in SCALAR_FIELDS}
     except AttributeError:
         logger.exception("Unexpected error extracting tech scalars from a %s file", parser.key)
         scalars = None
 
     try:
         return FileExtraction(
-            parsed=parsed, profile=normalize(profile) if profile is not None else None, scalars=scalars
+            parsed=parsed,
+            profile=normalize(profile, from_file_start=_states_start(parsed)) if profile is not None else None,
+            scalars=scalars,
         )
     except Exception:
         logger.exception("Unexpected error extracting a profile from a %s file", parser.key)
         return FileExtraction(parsed=parsed, profile=None, scalars=scalars)
 
 
-def _normalized_profile(parser: type[DiveParser], content: bytes) -> NormalizedProfile | None:
+def _states_start(header: ParsedDiveSchema | None) -> bool:
+    """Whether a parsed header names the start its parser's sample axis counts from."""
+    return header is not None and header.start_time is not None
+
+
+def _normalized_profile(parser: type[DiveParser], content: bytes, *, from_file_start: bool) -> NormalizedProfile | None:
     """One file's samples, normalized and no further, never raising.
 
     `extract_profile`'s contract with `extract_profile`'s two steps removed - see
     `FileExtraction.profile` for why the attribution and the cap belong to the recording.
+    `from_file_start` is the separately parsed header's answer, since this path has none of
+    its own.
     """
     try:
         parsed = parser.parse_profile(content)
@@ -315,7 +333,7 @@ def _normalized_profile(parser: type[DiveParser], content: bytes) -> NormalizedP
     except Exception:
         logger.exception("Unexpected error extracting a profile from a %s file", parser.key)
         return None
-    return normalize(parsed) if parsed is not None else None
+    return normalize(parsed, from_file_start=from_file_start) if parsed is not None else None
 
 
 def _parse_header(parser: type[DiveParser], content: bytes) -> ParsedDiveSchema | None:
@@ -334,7 +352,7 @@ def _parse_header(parser: type[DiveParser], content: bytes) -> ParsedDiveSchema 
 class RecordingExtraction:
     """What a recording's files say, read in attach order under the fill rule.
 
-    One object rather than four returns because they are read together everywhere and every
+    One object rather than several returns because they are read together everywhere and every
     one of them is *the first file that recorded it* - only the unit differs. The profile
     takes each channel whole from the earliest file carrying it; the scalars take each
     reading likewise; the device likewise; and the cylinders take each *member* of each
@@ -351,8 +369,40 @@ class RecordingExtraction:
     unreadable: bool = False
 
 
+def _file_start(parsed: ParsedDiveSchema | None) -> tuple[datetime, int | None] | None:
+    """A file's stated start as the stored column pair, or `None` where it states none."""
+    if parsed is None or parsed.start_time is None:
+        return None
+    try:
+        return split_local_start_time(datetime.fromisoformat(parsed.start_time))
+    except ValueError:
+        return None
+
+
+def _placed(
+    profile: NormalizedProfile | None,
+    file_start: tuple[datetime, int | None] | None,
+    origin: tuple[datetime, int | None] | None,
+) -> NormalizedProfile | None:
+    """One file's profile moved onto the recording's axis: by its start's signed offset from the origin.
+
+    Measured on `delta_seconds`' clock - between instants when both carry an offset, between
+    wall clocks when either does not - since a file's start and a recording's imported one may
+    be spelled one each way. A file that states no start, or a recording with no origin to
+    measure against, is left where it is.
+    """
+    if profile is None or file_start is None or origin is None:
+        return profile
+    offset = dive_recordings.signed_delta_seconds(*file_start, *origin)
+    return shift_profile(profile, round(offset * MILLISECONDS_PER_SECOND))
+
+
 def extract_recording(
-    files: Sequence[LoadedDiveFile], known: Mapping[str, FileExtraction] | None = None
+    files: Sequence[LoadedDiveFile],
+    known: Mapping[str, FileExtraction] | None = None,
+    *,
+    start_time: datetime | None,
+    utc_offset_minutes: int | None,
 ) -> RecordingExtraction:
     """Read a recording's files in order and fill each answer from the first that carries it.
 
@@ -361,6 +411,12 @@ def extract_recording(
     the whole of it** - every caller on a request path hands it to `run_in_threadpool`, for
     the reason *"Uploaded files are parsed in a thread, not on the event loop"* in
     `DECISIONS.md` gives: a FIT is up to ~1.7 s of Python at `_MAX_FRAMES`.
+
+    **`start_time` and `utc_offset_minutes` are the recording's stored start**, the
+    `started_at` the export writes and the instant its profile's axis counts from. Each file's
+    profile is shifted by its own start's offset from it - the first file's included - before
+    a channel is taken from it, so a file whose clock differs from the recording's lands where
+    its samples happened. A recording with no stored start takes the first stated one.
 
     **Order is attach order** and the caller guarantees it (`ORDER BY dive_file.id`), because
     "the first file that recorded it" is meaningless without one. A file whose parser this
@@ -374,6 +430,7 @@ def extract_recording(
     `parse_all` was introduced to remove, reintroduced one level up.
     """
     result = RecordingExtraction()
+    origin = None if start_time is None else (start_time, utc_offset_minutes)
     for file in files:
         extraction = (known or {}).get(file.sha256)
         if extraction is None:
@@ -387,8 +444,10 @@ def extract_recording(
             result = replace(result, unreadable=True)
             continue
 
+        file_start = _file_start(extraction.parsed)
+        origin = origin or file_start
         result = RecordingExtraction(
-            profile=fill_channels(result.profile, extraction.profile),
+            profile=fill_channels(result.profile, _placed(extraction.profile, file_start, origin)),
             # `|` with the stored side second is the fill: a key already carrying a value
             # keeps it, and one carrying `None` is overwritten by a later file's reading.
             scalars={
@@ -415,16 +474,18 @@ def extract_recording(
     return replace(result, profile=attribute_and_cap(result.profile))
 
 
-def extract_recording_profile(files: Sequence[LoadedDiveFile]) -> tuple[NormalizedProfile | None, bool]:
+def extract_recording_profile(
+    files: Sequence[LoadedDiveFile], *, start_time: datetime | None, utc_offset_minutes: int | None
+) -> tuple[NormalizedProfile | None, bool]:
     """`extract_recording`'s profile half, for `backfill_profiles`, plus its `unreadable` flag."""
-    extraction = extract_recording(files)
+    extraction = extract_recording(files, start_time=start_time, utc_offset_minutes=utc_offset_minutes)
     return extraction.profile, extraction.unreadable
 
 
 async def store_tech_scalars(
     db: AsyncSession, *, dive_id: int, scalars: dict[str, float | None], commit: bool = False
 ) -> None:
-    """Write a dive's parsed tech scalars **outright**, in the caller's transaction.
+    """Write a dive's parsed entry and exit fixes **outright**, in the caller's transaction.
 
     Outright means every field of `DiveTechScalars`, `None` included - so a re-derivation
     that no longer yields a reading clears the one that is there rather than stranding a
@@ -437,23 +498,29 @@ async def store_tech_scalars(
     the file, the profile and these in one transaction, so a dive can never end up
     describing a recording it does not have.
     """
-    await db.execute(update(Dive).where(Dive.id == dive_id).values(**scalars))
+    await db.execute(
+        update(Dive).where(Dive.id == dive_id).values(**{name: scalars.get(name) for name in TECH_SCALAR_FIELDS})
+    )
     if commit:
         await db.commit()
 
 
 async def fill_tech_scalars(db: AsyncSession, *, dive_id: int, scalars: dict[str, float | None]) -> None:
-    """Write only the readings the dive does not already have. **Never overwrites.**
+    """Write only the fixes the dive does not already have. **Never overwrites.**
 
     The tech-scalar half of *a second file of one recording fills and never overwrites*: a
-    FIT arriving beside a JSON of one dive contributes the `cns_end` and `otu_end` the JSON
-    had none of, and leaves the positions the JSON supplied exactly as they are.
+    FIT arriving beside a JSON of one dive leaves the positions the JSON supplied exactly as
+    they are.
 
     A `COALESCE` per column rather than read-then-write, for `fill_device_fields`' reason:
     one statement, no read to race, and the rule stated once in SQL instead of once in SQL
     and once in Python.
     """
-    values = {name: func.coalesce(getattr(Dive, name), value) for name, value in scalars.items() if value is not None}
+    values = {
+        name: func.coalesce(getattr(Dive, name), value)
+        for name, value in scalars.items()
+        if name in TECH_SCALAR_FIELDS and value is not None
+    }
     if values:
         await db.execute(update(Dive).where(Dive.id == dive_id).values(**values))
 
@@ -823,7 +890,16 @@ async def store_recording_file(
     # arrived at from the other side. Safe for the reason that function documents: everything
     # this still needs (`matched`, `files`) is a frozen dataclass, detached from the session.
     await release_read_transaction(db)
-    recording_extraction = await run_in_threadpool(extract_recording, files, {digest: extraction})
+    # The recording's stored start is the axis origin: the matched one's, or - for the
+    # recording this upload creates - the incoming file's own, which is what it will store.
+    origin = matched.facts if matched is not None else incoming
+    recording_extraction = await run_in_threadpool(
+        extract_recording,
+        files,
+        {digest: extraction},
+        start_time=None if origin is None else origin.start_time,
+        utc_offset_minutes=None if origin is None else origin.utc_offset_minutes,
+    )
     # The file lands on the volume *before* the transaction that references it. Every
     # database-visible state therefore names bytes that exist; the only thing a crash
     # between the two can produce is an unreferenced file, which is harmless until the
@@ -843,6 +919,7 @@ async def store_recording_file(
                 recording_id=recording_id,
                 mode=None if extraction.parsed is None else extraction.parsed.mode,
                 deco_model=None if extraction.parsed is None else extraction.parsed.deco_model,
+                salinity=None if extraction.parsed is None else extraction.parsed.salinity,
             )
             if incoming is not None:
                 await dive_recordings.fill_gate_figures(
@@ -864,6 +941,7 @@ async def store_recording_file(
                 device=None if extraction.parsed is None else extraction.parsed.device,
                 mode=None if extraction.parsed is None else extraction.parsed.mode,
                 deco_model=None if extraction.parsed is None else extraction.parsed.deco_model,
+                salinity=None if extraction.parsed is None else extraction.parsed.salinity,
                 start_time=None if incoming is None else incoming.start_time,
                 utc_offset_minutes=None if incoming is None else incoming.utc_offset_minutes,
                 duration=None if incoming is None else incoming.duration,
@@ -986,9 +1064,12 @@ async def read_recording(
     files = await load_recording_files(db, recording_id=recording_id)
     if not files:
         return [], RecordingExtraction()
+    start_time, utc_offset_minutes = await dive_recordings.recording_start(db, recording_id=recording_id)
     if release:
         await release_read_transaction(db)
-    return files, await run_in_threadpool(extract_recording, files, known)
+    return files, await run_in_threadpool(
+        extract_recording, files, known, start_time=start_time, utc_offset_minutes=utc_offset_minutes
+    )
 
 
 async def _rederive_recording(
@@ -1011,12 +1092,12 @@ async def _rederive_recording(
     function of the files in attach order and of nothing else, so an attach, a deletion and a
     backfill run cannot disagree about it.
 
-    **The dive's tech scalars are the primary recording's, and only the primary's.** A
-    secondary recording is a second computer's account of the same dive; its CNS clock is its
-    own device's and writing it onto the dive would attribute one computer's arithmetic to
-    another's. **`fresh` says the dive had nothing on this recording to lose** - the caller's
+    **Every recording's readouts are its own files'**, written before anything the primary
+    alone may write. **The dive's fixes are the primary recording's, and only the primary's**:
+    a secondary recording is a second computer's account of the same dive, and its positions
+    are not the dive's. **`fresh` says the recording had nothing to lose** - the caller's
     answer, not a property of the row - which is what decides between the outright write
-    (clearing what nothing yields) and the fill. The attach path sets it from
+    (clearing what nothing yields) and the fill, for the readouts and the fixes alike. The attach path sets it from
     `matched is None`, so it is true of a recording this very upload created and **false of a
     file-less one a logbook import created earlier**: that recording's first file is a second
     reading of a record the logbook already holds, and fills. It is deliberately *not* "had no
@@ -1082,15 +1163,15 @@ async def _rederive_recording(
             commit=False,
         )
 
+    if fresh:
+        await dive_recordings.store_readouts(db, recording_id=recording_id, readouts=extraction.scalars)
+    else:
+        await dive_recordings.fill_readouts(db, recording_id=recording_id, readouts=extraction.scalars)
+
     if ordinal != 0:
         return
     if fresh:
-        await store_tech_scalars(
-            db,
-            dive_id=dive_id,
-            scalars={name: extraction.scalars.get(name) for name in TECH_SCALAR_FIELDS},
-            commit=False,
-        )
+        await store_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars, commit=False)
     else:
         await fill_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars)
 
@@ -1102,7 +1183,7 @@ async def _rederive_recording(
 
 
 async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int, touched_primary: bool) -> None:
-    """Rewrite a dive's tech scalars from its primary recording's files, outright.
+    """Rewrite a dive's entry and exit fixes from its primary recording's files, outright.
 
     The repair after anything that changes *which* recording is primary or which files it
     holds: a file deleted, a recording deleted, a recording promoted. Outright rather than
@@ -1134,9 +1215,7 @@ async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int, touched_primar
     # issued, and rolling the transaction back to free the connection would discard them.
     primary = (await dive_recordings.primary_recording_ids(db, dive_ids=[dive_id])).get(dive_id)
     scalars = {} if primary is None else (await read_recording(db, recording_id=primary))[1].scalars
-    await store_tech_scalars(
-        db, dive_id=dive_id, scalars={name: scalars.get(name) for name in TECH_SCALAR_FIELDS}, commit=False
-    )
+    await store_tech_scalars(db, dive_id=dive_id, scalars=scalars, commit=False)
 
 
 async def _repeat_upload(
@@ -1348,6 +1427,7 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
     ordinal = (
         await db.execute(select(DiveRecording.ordinal).where(DiveRecording.id == row.recording_id))
     ).scalar_one_or_none()
+    start_time, utc_offset_minutes = await dive_recordings.recording_start(db, recording_id=row.recording_id)
     # Read before the branch below can delete the recording, which is the only moment the
     # question is still answerable. `None` cannot happen - the file row named a live
     # recording a statement ago - and is read as the primary so that a row that somehow
@@ -1364,7 +1444,9 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
             # A deletion removes bytes; nothing arrived that could fill a cylinder.
             joined=False,
             files=remaining,
-            extraction=await run_in_threadpool(extract_recording, remaining),
+            extraction=await run_in_threadpool(
+                extract_recording, remaining, start_time=start_time, utc_offset_minutes=utc_offset_minutes
+            ),
         )
     else:
         existing = await get_existing_profile(db, recording_id=row.recording_id)
@@ -1407,7 +1489,7 @@ async def delete_files_for_dive(db: AsyncSession, *, dive_id: int, commit: bool 
     await delete_profiles_for_dive(db, dive_id=dive_id, commit=False)
     await db.execute(delete(DiveFile).where(DiveFile.dive_id == dive_id))
     blob_store.delete_after_commit(db, keys)
-    await store_tech_scalars(db, dive_id=dive_id, scalars=dict.fromkeys(TECH_SCALAR_FIELDS), commit=False)
+    await store_tech_scalars(db, dive_id=dive_id, scalars={}, commit=False)
     if commit:
         await db.commit()
 
@@ -1416,16 +1498,17 @@ async def delete_files_for_dive(db: AsyncSession, *, dive_id: int, commit: bool 
 class TechBackfillReport:
     """What one run of `backfill_tech_fields` did.
 
-    Dives and mixtures are counted separately because they are backfilled on different
-    terms - the dive's scalars are filled where the files yield a reading the dive lacks, the
-    mixture fields are applied only where the stored rows still demonstrably describe the
-    parsed ones - so one number could not say whether a run went well. `mixtures_skipped` in
-    particular is the interesting count: it is the diver having edited their cylinders since
-    the import, which is a reason not to touch them rather than a failure.
+    Recordings and mixtures are counted separately because they are backfilled on different
+    terms - a recording's readouts, device and settings are filled where its files yield a
+    value it lacks, the mixture fields are applied only where the stored rows still
+    demonstrably describe the parsed ones - so one number could not say whether a run went
+    well. `mixtures_skipped` in particular is the interesting count: it is the diver having
+    edited their cylinders since the import, which is a reason not to touch them rather than
+    a failure.
     """
 
     examined: int = 0
-    dives_updated: int = 0
+    recordings_updated: int = 0
     mixtures_updated: int = 0
     mixtures_skipped: int = 0
     failed: int = 0
@@ -1542,7 +1625,7 @@ async def backfill_tech_fields(
     limit: int | None = None,
     dry_run: bool = False,
 ) -> TechBackfillReport:
-    """Re-read every primary recording's stored files for the columns nothing else fills.
+    """Re-read every recording's stored files for the columns nothing else fills.
 
     A second script rather than an extension of `backfill_profiles`, because the two select
     on different things and stop on different terms. That one is keyed to
@@ -1553,25 +1636,19 @@ async def backfill_tech_fields(
 
     Idempotent, and safe to run repeatedly.
 
-    **It no longer clears.** It used to overwrite the dive's scalars outright, on the ground
-    that "no other path writes them"; recordings add one. A logbook import that matches an
-    existing recording and stores no bytes fills a blank `cns_end` from the document, and an
-    outright rewrite here would delete that reading on the next run with nothing on the
-    volume to recover it from. So a run now overwrites a scalar only with a value a stored
-    file actually yields, and leaves untouched a value no stored file re-yields. A parser fix
-    still reaches every dive whose file carries the reading, which is what this script is
-    for; what it can no longer do is *null* a reading it has decided is bogus, and that is the
-    accepted cost.
+    **It no longer clears.** A logbook import that matches an existing recording and stores no
+    bytes fills a blank `cns_end` from the document, and an outright rewrite here would delete
+    that reading on the next run with nothing on the volume to recover it from. So a run fills
+    only where a stored file yields a value and the column has none; what it can no longer do
+    is *null* a reading it has decided is bogus, and that is the accepted cost.
 
-    **It walks primary recordings**, because the dive's scalars are the primary's - a second
-    computer's CNS clock is its own device's arithmetic, and writing it onto the dive would
-    attribute one machine's numbers to another. The device columns go the same way and are
-    the reason this run matters on an upgraded instance: the migration leaves every migrated
-    recording device-less, and one pass here fills them for every file-backed one.
-
-    The mixture fields are best-effort - see `merge_mixture_fields` for why a dive whose
-    cylinders have been edited is skipped rather than reconciled - and they are the primary
-    recording's too.
+    **It walks every recording** for what is the recording's own - its readouts, its device
+    and its settings - and is the recovery for recordings stored before the readouts moved
+    there: the migration copied the dive's onto the primary alone, reading no file, so every
+    other recording's stay NULL until this runs. **The dive's fixes and the mixture fields
+    stay the primary's**, since a second computer's positions and cylinder labels are its own;
+    see `merge_mixture_fields` for why a dive whose cylinders have been edited is skipped
+    rather than reconciled.
     """
     # Imported here rather than at module scope, matching `backfill_profiles`: the crud
     # module is not otherwise part of this module's dependency surface, and keeping the
@@ -1579,11 +1656,14 @@ async def backfill_tech_fields(
     from ..crud.crud_dive_mixtures import get_mixtures_for_dive
     from .cache_invalidation import invalidate_dive_caches
 
-    stmt = (
-        select(DiveRecording.id.label("recording_id"), DiveRecording.dive_id, DiveRecording.user_id)
-        .where(DiveRecording.ordinal == 0)
-        .order_by(DiveRecording.dive_id)
-    )
+    stmt = select(
+        DiveRecording.id.label("recording_id"),
+        DiveRecording.dive_id,
+        DiveRecording.user_id,
+        DiveRecording.ordinal,
+        DiveRecording.start_time,
+        DiveRecording.utc_offset_minutes,
+    ).order_by(DiveRecording.dive_id, DiveRecording.ordinal)
     if parser_key is not None:
         # A recording is a candidate when any of its files was read by that parser, which is
         # what "I fixed the FIT parser, re-read the FITs" means for a recording holding two.
@@ -1596,9 +1676,9 @@ async def backfill_tech_fields(
         stmt = stmt.limit(limit)
 
     candidates = list(await db.execute(stmt))
-    examined = dives_updated = mixtures_updated = mixtures_skipped = failed = 0
-    # Dives written since the last commit, rather than a position in `candidates`. An
-    # index-modulo test sits below several `continue`s, so a dive that failed on exactly
+    examined = recordings_updated = mixtures_updated = mixtures_skipped = failed = 0
+    # Recordings written since the last commit, rather than a position in `candidates`. An
+    # index-modulo test sits below several `continue`s, so a recording that failed on exactly
     # the boundary skipped that commit and left up to two batches riding on the next one.
     pending = 0
     touched_user_ids: set[int] = set()
@@ -1612,74 +1692,79 @@ async def backfill_tech_fields(
             # The row is there and its file is not, which is data loss or an unmounted
             # volume rather than a race. Counted as a failure and the run continues, on the
             # same terms as the parse failure below: a run that stopped here would report
-            # less than one that finished and said how many dives are in this state.
-            logger.error("Skipping dive %s: a stored file is missing from the volume", row.dive_id)
+            # less than one that finished and said how many recordings are in this state.
+            logger.error("Skipping recording %s: a stored file is missing from the volume", row.recording_id)
             failed += 1
             continue
         if not files:
             # A recording with nothing to re-read - a converted logbook import's. Not a
             # failure and not an update: there is no file, so there is nothing this script
-            # can say about the dive that is not already stored.
+            # can say about it that is not already stored.
             continue
 
         # Synchronously, unlike every request path: this runs from a one-shot script whose
         # event loop has nothing else on it, so the threadpool hop would buy nothing and cost
         # a handoff per recording in the corpus.
-        extraction = extract_recording(files)
+        extraction = extract_recording(files, start_time=row.start_time, utc_offset_minutes=row.utc_offset_minutes)
         if extraction.unreadable:
             # A file that parsed at import time and does not now is a parser regression, and
             # a run that reported only successes would hide it - the same reasoning as
             # `BackfillReport`'s five counts.
-            logger.warning("Skipping dive %s: one of its stored exports could not be read", row.dive_id)
+            logger.warning("Skipping recording %s: one of its stored exports could not be read", row.recording_id)
             failed += 1
             continue
 
-        stored = await get_mixtures_for_dive(db, row.dive_id)
-        updates = merge_mixture_fields(extraction.mixtures, stored)
-        if updates is None:
-            # `max`, not `len(stored)`: the count mismatch that refuses the merge includes
-            # the diver having deleted every cylinder, and `len(stored)` is 0 there - so
-            # the run reported "nothing skipped" for precisely the dive whose cylinders
-            # were edited most. Whichever side has rows is what went unwritten.
-            mixtures_skipped += max(len(stored), len(extraction.mixtures))
+        primary = row.ordinal == 0
+        updates: list[tuple[int, dict[str, object]]] | None = []
+        if primary:
+            stored = await get_mixtures_for_dive(db, row.dive_id)
+            updates = merge_mixture_fields(extraction.mixtures, stored)
+            if updates is None:
+                # `max`, not `len(stored)`: the count mismatch that refuses the merge includes
+                # the diver having deleted every cylinder, and `len(stored)` is 0 there - so
+                # the run reported "nothing skipped" for precisely the dive whose cylinders
+                # were edited most. Whichever side has rows is what went unwritten.
+                mixtures_skipped += max(len(stored), len(extraction.mixtures))
 
         if dry_run:
-            dives_updated += 1
+            recordings_updated += 1
             mixtures_updated += len(updates or [])
             continue
 
+        source = extraction.device_source
         try:
-            # A savepoint, so a dive the database rejects costs only that dive. Without it
-            # the failure propagates out of this function and the enclosing `async with
-            # local_session()` rolls back every uncommitted dive since the last batch
-            # commit - and because nothing here advances a version column, the next run
-            # reaches the same dive and dies the same way. The backfill could then never
-            # get past it without hand-narrowing `--parser-key`.
+            # A savepoint, so a recording the database rejects costs only that recording.
+            # Without it the failure propagates out of this function and the enclosing
+            # `async with local_session()` rolls back everything since the last batch commit
+            # - and because nothing here advances a version column, the next run reaches the
+            # same row and dies the same way.
             async with db.begin_nested():
-                await fill_tech_scalars(db, dive_id=row.dive_id, scalars=extraction.scalars)
+                await dive_recordings.fill_readouts(db, recording_id=row.recording_id, readouts=extraction.scalars)
                 await dive_recordings.fill_device_fields(
-                    db,
-                    recording_id=row.recording_id,
-                    device=None if extraction.device_source is None else extraction.device_source.device,
+                    db, recording_id=row.recording_id, device=None if source is None else source.device
                 )
                 await dive_recordings.fill_recording_settings(
                     db,
                     recording_id=row.recording_id,
-                    mode=None if extraction.device_source is None else extraction.device_source.mode,
-                    deco_model=None if extraction.device_source is None else extraction.device_source.deco_model,
+                    mode=None if source is None else source.mode,
+                    deco_model=None if source is None else source.deco_model,
+                    salinity=None if source is None else source.salinity,
                 )
-                for mixture_id, values in updates or []:
-                    await db.execute(update(DiveMixture).where(DiveMixture.id == mixture_id).values(**values))
+                if primary:
+                    await fill_tech_scalars(db, dive_id=row.dive_id, scalars=extraction.scalars)
+                    for mixture_id, values in updates or []:
+                        await db.execute(update(DiveMixture).where(DiveMixture.id == mixture_id).values(**values))
         except IntegrityError:
             # A parsed value the schema let through and the database won't take: a parser
             # unit bug, and the file that proves it is still attached to the dive. Counted
-            # rather than raised, for the same reason as the parse failure above - a run
-            # that stopped on it would report less than one that finished and said so.
-            logger.warning("Skipping dive %s: its parsed values violate a constraint", row.dive_id, exc_info=True)
+            # rather than raised, for the same reason as the parse failure above.
+            logger.warning(
+                "Skipping recording %s: its parsed values violate a constraint", row.recording_id, exc_info=True
+            )
             failed += 1
             continue
 
-        dives_updated += 1
+        recordings_updated += 1
         mixtures_updated += len(updates or [])
         touched_user_ids.add(row.user_id)
 
@@ -1690,15 +1775,15 @@ async def backfill_tech_fields(
 
     if not dry_run:
         await db.commit()
-        # Cached dive reads embed both the scalars and the mixtures, so every dive this
-        # run touched is now serving stale values. See the script for why this needs a
-        # live Redis pool.
+        # Cached dive reads embed the readouts, the fixes and the mixtures, so every dive this
+        # run touched is now serving stale values. See the script for why this needs a live
+        # Redis pool.
         for user_id in touched_user_ids:
             await invalidate_dive_caches(user_id)
 
     return TechBackfillReport(
         examined=examined,
-        dives_updated=dives_updated,
+        recordings_updated=recordings_updated,
         mixtures_updated=mixtures_updated,
         mixtures_skipped=mixtures_skipped,
         failed=failed,

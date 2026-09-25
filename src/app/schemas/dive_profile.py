@@ -25,6 +25,11 @@ from typing import Annotated, Self
 
 from pydantic import BaseModel, Field, model_validator
 
+# The profile axis's unit: a series' `times`, a profile's `duration` and an event's `time` are
+# milliseconds (DiveJSON §5.1), and every consumer that wants seconds divides by this. The
+# `ndl` and `tts` *values* stay seconds - they are readings, not positions on the axis.
+MILLISECONDS_PER_SECOND = 1000
+
 # The integer scales every readings array is expressed in - `v` on the parser and stored
 # shapes, `values` on the wire. They live here (and, mirrored, in
 # the frontend's `PROFILE_CHANNELS`) rather than travelling per-response: they are part
@@ -53,9 +58,9 @@ TTS_SCALE = 1  # seconds
 PPO2_SCALE = 100
 # Tenths of a percent, because the two Suunto exports of one dive disagree about the
 # resolution: the JSON records `0.069` where the XML rounds to `7`, and the finer reading
-# is the one worth keeping. Not the same quantity as `dive.cns_start`/`cns_end`, which are
-# the device's own dive-level figures in whole percent and are neither derived from this
-# channel nor a source for it.
+# is the one worth keeping. Not the same quantity as a recording's `cns_start`/`cns_end`,
+# which are the device's own dive-level figures in whole percent and are neither derived from
+# this channel nor a source for it.
 CNS_SCALE = 10
 # Whole percent, and **the unit rather than a range**: a gradient factor is uncapped above.
 # A Suunto Ocean's `gf99` reaches 12 575 on a decompression ascent while the surface
@@ -201,11 +206,12 @@ def _validate_events(events: list[ParsedProfileEvent]) -> None:
 class ParsedSeries(BaseModel):
     """One channel as a parser produces it: raw seconds, already in this channel's scale.
 
-    `t` is seconds from the file's own origin (`Header.DateTime` for the JSON export, the
-    `<Time>` axis for the XML one) and may be fractional and non-zero-based - rebasing,
-    rounding and deduping are format-independent and happen once in
-    `services/dive_profiles.py`. Sorting, however, is the parser's job: only it knows
-    which timestamps belong to which sensor stream, and the union of a Suunto Ocean
+    `t` is seconds from the file's own origin - the start its header states
+    (`Header.DateTime` for the JSON export, `<StartTime>` for the XML one's `<Time>` axis) -
+    and may be fractional and need not begin at zero: the millisecond grain, rounding and
+    deduping are format-independent and happen once in `services/dive_profiles.py`.
+    Sorting, however, is the parser's job: only it knows which timestamps belong to which
+    sensor stream, and the union of a Suunto Ocean
     export's sample timestamps is *not* monotonic (adjacent entries go backwards by up to
     0.7 s, because separate streams are appended out of order). Each channel's own
     timestamps are monotonic, so a parser that groups by channel before emitting satisfies
@@ -235,8 +241,8 @@ class ParsedPressureSeries(ParsedSeries):
 class ParsedProfileEvent(BaseModel):
     """One thing the device recorded happening, at a moment rather than over a channel.
 
-    `t` is in the same raw seconds-from-the-file's-origin as `ParsedSeries.t`, and is
-    rebased by `normalize` against the *sample* channels' origin - never against the
+    `t` is in the same raw seconds-from-the-file's-origin as `ParsedSeries.t`, and is put on
+    the axis by `normalize` against the *sample* channels' origin - never against the
     events' own earliest, which would let one mistimed marker slide every event on the
     chart away from the curve it annotates.
 
@@ -318,7 +324,7 @@ class GasAttribution(BaseModel):
 
 
 class DiveProfileSeries(BaseModel):
-    """One channel as `GET /dive/{uuid}/recording/{rid}/profile` returns it: integer seconds, integer values.
+    """One channel as `GET /dive/{uuid}/recording/{rid}/profile` returns it: integer milliseconds and values.
 
     `times`/`values` rather than the `t`/`v` this served until DiveJSON 1.0: these are the
     format's member names (spec §6.5), and the export embeds this very schema, so the two
@@ -328,7 +334,10 @@ class DiveProfileSeries(BaseModel):
     `services/dive_profiles.py` are the translation).
     """
 
-    times: Annotated[list[int], Field(description="Elapsed seconds from the start of the dive, strictly increasing")]
+    times: Annotated[
+        list[int],
+        Field(description="Elapsed milliseconds from the recording's `started_at`, strictly increasing"),
+    ]
     values: Annotated[
         list[int], Field(description="Readings in this channel's integer scale - see the channel's field")
     ]
@@ -339,7 +348,7 @@ class DiveProfilePressureSeries(DiveProfileSeries):
 
 
 class DiveProfileEvent(BaseModel):
-    """One marker on the profile chart, at an integer second like every series' `times`.
+    """One marker on the profile chart, at an integer millisecond like every series' `times`.
 
     **`type` is nullable here and `OTHER` never reaches the wire**, which is the one place
     the stored vocabulary and the published one differ. DiveJSON §6.6 spells "the device
@@ -355,7 +364,7 @@ class DiveProfileEvent(BaseModel):
     (`exclude_none`), which is what §5.4 requires of a writer.
     """
 
-    time: Annotated[int, Field(description="Elapsed seconds from the start of the dive")]
+    time: Annotated[int, Field(description="Elapsed milliseconds from the recording's `started_at`")]
     type: Annotated[
         ProfileEventType | None,
         Field(
@@ -404,9 +413,9 @@ class DiveProfileRead(BaseModel):
     duration: Annotated[
         int,
         Field(
-            description="Elapsed seconds covered by the longest sample channel. An event may sit past it - a marker "
-            "pressed at the surface after the recorder's last sample is real, and neither it nor this number is "
-            "moved to make them agree (DiveJSON spec §6.4)."
+            description="Elapsed milliseconds covered by the longest sample channel. An event may sit past it - a "
+            "marker pressed at the surface after the recorder's last sample is real, and neither it nor this number "
+            "is moved to make them agree (DiveJSON spec §6.4)."
         ),
     ]
     depth: Annotated[
@@ -526,7 +535,7 @@ class DiveProfileInfo(BaseModel):
     """
 
     uuid: uuid_pkg.UUID
-    duration: int
+    duration: Annotated[int, Field(description="Elapsed milliseconds the profile covers - its own `duration`")]
     depth_sample_count: int
     # Always present: `dive_profile.parser_key` is NOT NULL, so every stored profile is one
     # of the three. It is here because a file-less recording is first-class rather than

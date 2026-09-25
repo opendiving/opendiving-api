@@ -11,6 +11,7 @@ is exercised end to end by hand (see DECISIONS.md), not here.
 
 import hashlib
 import io
+import json
 import uuid as uuid_pkg
 from dataclasses import astuple
 from datetime import UTC, datetime, timedelta
@@ -29,7 +30,8 @@ from src.app.core.security import ALGORITHM, SECRET_KEY, TokenType, create_dive_
 from src.app.core.utils.uploads import read_upload_within_limit
 from src.app.crud.crud_dive_mixtures import get_mixtures_for_dive, get_mixtures_for_dives
 from src.app.models.dive import Dive
-from src.app.schemas.dive import DiveFileInfo, DiveTechScalars
+from src.app.models.dive_recording import DiveRecording
+from src.app.schemas.dive import DiveFileInfo, DiveTechScalars, RecordingReadouts
 from src.app.schemas.dive_mixture import DiveMixtureRead, GasRole
 from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from src.app.services import dive_files as dive_files_module
@@ -41,6 +43,8 @@ from src.app.services.dive_files import (
 )
 from src.app.services.dive_files import (
     MAX_DIVE_FILE_SIZE,
+    READOUT_FIELDS,
+    SCALAR_FIELDS,
     TECH_SCALAR_FIELDS,
     LoadedDiveFile,
     RecordingExtraction,
@@ -424,9 +428,9 @@ class TestProfileExtractionReleasesTheTransaction:
             calls.append("extract")
             return real_extract_all(parser, data)
 
-        def second_hop(files, known=None):
+        def second_hop(files, known=None, **start):
             calls.append("extract")
-            return real_extract_recording(files, known)
+            return real_extract_recording(files, known, **start)
 
         monkeypatch.setattr("src.app.services.dive_files._extract_all", first_hop)
         monkeypatch.setattr("src.app.services.dive_files.extract_recording", second_hop)
@@ -598,7 +602,7 @@ class TestTechScalarExtraction:
         `None` is "couldn't read" and leaves them alone."""
         content = f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}"/>'.encode()
 
-        assert extract_tech_scalars(SuuntoXmlParser, content) == dict.fromkeys(TECH_SCALAR_FIELDS)
+        assert extract_tech_scalars(SuuntoXmlParser, content) == dict.fromkeys(SCALAR_FIELDS)
 
 
 class TestMixtureFieldMerge:
@@ -983,10 +987,11 @@ class TestReExtractionFailureDoesNotFailTheRequest:
     async def test_a_rejected_write_is_swallowed_and_rolled_back(self, monkeypatch) -> None:
         db = self._session_for_reupload()
 
-        async def rejecting_fill(db, *, dive_id, scalars):
-            raise IntegrityError("UPDATE dive ...", {}, Exception("ck_dive_cns_start_non_negative"))
+        async def rejecting_fill(db, *, recording_id, readouts):
+            raise IntegrityError("UPDATE dive_recording ...", {}, Exception("ck_dive_recording_cns_start_non_negative"))
 
-        monkeypatch.setattr("src.app.services.dive_files.fill_tech_scalars", rejecting_fill)
+        monkeypatch.setattr("src.app.services.dive_recordings.fill_readouts", rejecting_fill)
+        monkeypatch.setattr("src.app.services.dive_recordings.recording_start", AsyncMock(return_value=(None, None)))
         monkeypatch.setattr("src.app.services.dive_files.should_extract", lambda *a, **k: "extract")
         monkeypatch.setattr("src.app.services.dive_files.get_existing_profile", AsyncMock(return_value=None))
         monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
@@ -1032,6 +1037,9 @@ class TestReExtractionFailureDoesNotFailTheRequest:
         async def capture(db, *, dive_id, scalars):
             writes.append(scalars)
 
+        async def capture_readouts(db, *, recording_id, readouts):
+            writes.append(readouts)
+
         async def clearing(db, *, dive_id, scalars, commit=False):
             cleared.append(scalars)
 
@@ -1042,9 +1050,11 @@ class TestReExtractionFailureDoesNotFailTheRequest:
         monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
         monkeypatch.setattr("src.app.services.blob_store.get", AsyncMock(return_value=self.XML))
         monkeypatch.setattr("src.app.services.blob_store.has", AsyncMock(return_value=True))
+        monkeypatch.setattr("src.app.services.dive_recordings.recording_start", AsyncMock(return_value=(None, None)))
+        monkeypatch.setattr("src.app.services.dive_recordings.fill_readouts", capture_readouts)
         monkeypatch.setattr(
             "src.app.services.dive_files.extract_recording",
-            lambda files, known=None: RecordingExtraction(unreadable=True),
+            lambda files, known=None, **start: RecordingExtraction(unreadable=True),
         )
 
         user_uuid = uuid7()
@@ -1098,15 +1108,20 @@ class TestBackfillDoesNotStopOnOneBadDive:
 
     @pytest.mark.asyncio
     async def test_a_constraint_violation_is_counted_and_the_run_continues(self, monkeypatch) -> None:
-        candidates = [SimpleNamespace(recording_id=n, dive_id=n, user_id=1) for n in (1, 2, 3)]
+        candidates = [
+            SimpleNamespace(recording_id=n, dive_id=n, user_id=1, ordinal=0, start_time=None, utc_offset_minutes=None)
+            for n in (1, 2, 3)
+        ]
         written: list[int] = []
 
-        async def flaky_fill(db, *, dive_id, scalars):
-            if dive_id == 2:
-                raise IntegrityError("UPDATE dive ...", {}, Exception("ck_dive_surface_pressure_range"))
-            written.append(dive_id)
+        async def flaky_fill(db, *, recording_id, readouts):
+            if recording_id == 2:
+                raise IntegrityError(
+                    "UPDATE dive_recording ...", {}, Exception("ck_dive_recording_surface_pressure_range")
+                )
+            written.append(recording_id)
 
-        monkeypatch.setattr("src.app.services.dive_files.fill_tech_scalars", flaky_fill)
+        monkeypatch.setattr("src.app.services.dive_recordings.fill_readouts", flaky_fill)
         monkeypatch.setattr(
             "src.app.services.dive_files.load_recording_files",
             AsyncMock(
@@ -1129,19 +1144,20 @@ class TestBackfillDoesNotStopOnOneBadDive:
 
         # The dive after the bad one is the assertion that matters: the run got past it.
         assert written == [1, 3]
-        assert (report.examined, report.dives_updated, report.failed) == (3, 2, 1)
+        assert (report.examined, report.recordings_updated, report.failed) == (3, 2, 1)
 
 
 class TestScalarsAreWrittenAtAttach:
-    """The import path owns these columns outright - the form cannot set them at all
-    (`DiveTechScalars` is on the read shapes only), so this is the only write.
+    """The import path owns these columns outright - the form cannot set them at all, so this
+    is the only write: a recording's readouts onto that recording, and the primary's entry
+    and exit fixes onto the dive.
 
     **Outright for the upload that created the recording, filled for every other file**, and
-    that split is what the tests below are about. A dive with nothing yet on this recording
-    has nothing to lose by a write that clears what the files no longer yield; a recording
-    gaining a file it did not begin with has earlier readings on the dive and must not
-    overwrite them. The condition is `_rederive_recording`'s `fresh`, which is *not* "the
-    recording had no files" - see its docstring for the case where the two differ.
+    that split is what the tests below are about. A recording with nothing yet has nothing to
+    lose by a write that clears what the files no longer yield; a recording gaining a file it
+    did not begin with has earlier readings and must not overwrite them. The condition is
+    `_rederive_recording`'s `fresh`, which is *not* "the recording had no files" - see its
+    docstring for the case where the two differ.
     """
 
     XML_WITH_EXPOSURE = f"""<?xml version="1.0" encoding="utf-8"?>
@@ -1165,25 +1181,32 @@ class TestScalarsAreWrittenAtAttach:
     async def _rederive(
         files: list[LoadedDiveFile], monkeypatch, *, fresh: bool, ordinal: int = 0, joined: bool = False
     ) -> dict:
-        """Run the re-derivation over `files` and report which write it chose and with what.
+        """Run the re-derivation over `files` and report which writes it chose and with what.
 
-        Captured at the two `store_tech_scalars`/`fill_tech_scalars` seams rather than by
-        inspecting the emitted `UPDATE`: the decision under test is *what the attach decided
-        to write*, and reading it back off SQLAlchemy's statement internals would pin the
-        assertion to how the write is spelled rather than to what it says. The cylinder fill
-        is captured the same way, under `"cylinders"`.
+        Captured at the seams rather than by inspecting the emitted `UPDATE`: the decision
+        under test is *what the attach decided to write*. `readouts` is the recording's write
+        and `dive` the dive's, each under `outright` or `fill`; the cylinder fill is captured
+        under `cylinders`.
         """
         chosen: dict = {}
 
+        async def readouts_outright(db, *, recording_id, readouts):
+            chosen["readouts outright"] = {name: readouts.get(name) for name in READOUT_FIELDS}
+
+        async def readouts_fill(db, *, recording_id, readouts):
+            chosen["readouts fill"] = {name: readouts.get(name) for name in READOUT_FIELDS}
+
         async def outright(db, *, dive_id, scalars, commit=False):
-            chosen["outright"] = scalars
+            chosen["dive outright"] = {name: scalars.get(name) for name in TECH_SCALAR_FIELDS}
 
         async def fill(db, *, dive_id, scalars):
-            chosen["fill"] = scalars
+            chosen["dive fill"] = {name: scalars.get(name) for name in TECH_SCALAR_FIELDS}
 
         async def cylinders(db, *, dive_id, parsed):
             chosen["cylinders"] = list(parsed)
 
+        monkeypatch.setattr("src.app.services.dive_recordings.store_readouts", readouts_outright)
+        monkeypatch.setattr("src.app.services.dive_recordings.fill_readouts", readouts_fill)
         monkeypatch.setattr("src.app.services.dive_files.store_tech_scalars", outright)
         monkeypatch.setattr("src.app.services.dive_files.fill_tech_scalars", fill)
         monkeypatch.setattr("src.app.services.dive_files.fill_dive_mixtures", cylinders)
@@ -1198,25 +1221,22 @@ class TestScalarsAreWrittenAtAttach:
             fresh=fresh,
             joined=joined,
             files=files,
-            extraction=extract_recording(files),
+            extraction=extract_recording(files, start_time=None, utc_offset_minutes=None),
         )
         return chosen
 
     @pytest.mark.asyncio
-    async def test_an_export_that_records_exposure_writes_it(self, monkeypatch) -> None:
+    async def test_an_export_that_records_exposure_writes_it_onto_the_recording(self, monkeypatch) -> None:
         chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, fresh=True)
 
-        assert chosen["outright"] == {
+        assert chosen["readouts outright"] == {
             "cns_start": None,
             "cns_end": 20.0,
             "otu_start": None,
             "otu_end": None,
             "surface_pressure_bar": 1.057,
-            "entry_latitude": None,
-            "entry_longitude": None,
-            "exit_latitude": None,
-            "exit_longitude": None,
         }
+        assert chosen["dive outright"] == dict.fromkeys(TECH_SCALAR_FIELDS)
 
     @pytest.mark.asyncio
     async def test_an_export_that_records_none_clears_what_was_there(self, monkeypatch) -> None:
@@ -1227,47 +1247,46 @@ class TestScalarsAreWrittenAtAttach:
 
         chosen = await self._rederive(self._files(empty), monkeypatch, fresh=True)
 
-        assert chosen["outright"] == dict.fromkeys(TECH_SCALAR_FIELDS)
+        assert chosen["readouts outright"] == dict.fromkeys(READOUT_FIELDS)
+        assert chosen["dive outright"] == dict.fromkeys(TECH_SCALAR_FIELDS)
 
     @pytest.mark.asyncio
     async def test_a_second_file_of_one_recording_fills_and_never_clears(self, monkeypatch) -> None:
         """The rule a recording exists to make expressible. The FIT beside the JSON of one
         Ocean dive contributes what the JSON had none of and takes nothing away - so the
-        write is the filling one, and a value the second file does not carry is simply
-        absent from it rather than present as `None`."""
+        write is the filling one."""
         empty = f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}"/>'.encode()
 
         chosen = await self._rederive(self._files(empty, self.XML_WITH_EXPOSURE), monkeypatch, fresh=False, joined=True)
 
-        assert "outright" not in chosen
-        assert chosen["fill"] == dict.fromkeys(TECH_SCALAR_FIELDS) | {"cns_end": 20.0, "surface_pressure_bar": 1.057}
+        assert "readouts outright" not in chosen
+        assert "dive outright" not in chosen
+        assert chosen["readouts fill"] == dict.fromkeys(READOUT_FIELDS) | {
+            "cns_end": 20.0,
+            "surface_pressure_bar": 1.057,
+        }
 
     @pytest.mark.asyncio
     async def test_re_reading_the_same_files_fills_the_scalars_and_not_the_cylinders(self, monkeypatch) -> None:
         """**The two questions `fresh` and `joined` answer are different**, and this is where
         they part company: `_repeat_upload` re-reads bytes the recording already had, so a
-        re-parse yielding less must not clear the dive's readings (`fresh=False`) - but
-        nothing arrived that could put a value into a cylinder (`joined=False`).
-
-        Gating the cylinders on `fresh` instead made re-uploading a file undo an edit: the
-        diver attaches an export, clears the `oxygen` the form pre-filled from it, uploads
-        the same file again, and the fill reads it straight back off those very bytes. A
-        sample-less export reaches this on *every* repeat upload, `should_extract` answering
-        "extract" unconditionally where there is no stored profile.
-        """
+        re-parse yielding less must not clear the readings (`fresh=False`) - but nothing
+        arrived that could put a value into a cylinder (`joined=False`)."""
         chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, fresh=False, joined=False)
 
-        assert "fill" in chosen
+        assert "readouts fill" in chosen
+        assert "dive fill" in chosen
         assert "cylinders" not in chosen
 
     @pytest.mark.asyncio
-    async def test_a_secondary_recording_never_touches_them(self, monkeypatch) -> None:
-        """A second computer's CNS clock is its own device's arithmetic. Writing it onto the
-        dive would attribute one machine's numbers to another's record, which is why the
-        dive's readings are the *primary* recording's and nothing else's."""
+    async def test_a_secondary_recording_writes_its_own_readouts_and_nothing_of_the_dives(self, monkeypatch) -> None:
+        """A second computer's CNS clock is its own device's arithmetic, so it lands on its
+        own recording - and its positions never reach the dive, whose fixes are the
+        *primary* recording's and nothing else's."""
         chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, fresh=True, ordinal=1)
 
-        assert chosen == {}
+        assert chosen.keys() == {"readouts outright"}
+        assert chosen["readouts outright"]["cns_end"] == 20.0
 
     @pytest.mark.asyncio
     async def test_the_first_file_that_records_a_reading_wins(self, monkeypatch) -> None:
@@ -1278,7 +1297,9 @@ class TestScalarsAreWrittenAtAttach:
 <Dive xmlns="{SUUNTO_NS}"><CnsEnd>99</CnsEnd><OtuEnd>44</OtuEnd></Dive>
 """.encode()
 
-        extraction = extract_recording(self._files(self.XML_WITH_EXPOSURE, second))
+        extraction = extract_recording(
+            self._files(self.XML_WITH_EXPOSURE, second), start_time=None, utc_offset_minutes=None
+        )
 
         assert extraction.scalars["cns_end"] == 20.0
         assert extraction.scalars["otu_end"] == 44.0
@@ -1330,7 +1351,9 @@ class TestARecordingsProfileIsAttributedBeforeItIsCapped:
                     sha256=_digest(content),
                     parser_key=SuuntoXmlParser.key,
                 )
-            ]
+            ],
+            start_time=None,
+            utc_offset_minutes=None,
         )
 
         assert extraction.profile is not None
@@ -1342,3 +1365,90 @@ class TestARecordingsProfileIsAttributedBeforeItIsCapped:
         # And the channel really was thinned, so the mean could not have come off it.
         assert len(stored_depth.t) < len(depths)
         assert extraction.profile.gas_attribution[0].mean_depth_cm != round(sum(stored_depth.v) / len(stored_depth.v))
+
+
+def _suunto_app_export(header: str, *first_depth_at: str) -> bytes:
+    """A Suunto app export whose `Header.DateTime` is `header` and whose depth samples fall
+    at the given instants - the only format whose samples carry an offset below a second."""
+    samples = [{"Depth": 1.2 + index, "TimeISO8601": moment} for index, moment in enumerate(first_depth_at)]
+    body = {"DeviceLog": {"Header": {"DateTime": header, "Duration": 1800}, "Samples": samples}}
+    return json.dumps(body).encode()
+
+
+def _loaded(content: bytes) -> LoadedDiveFile:
+    return LoadedDiveFile(
+        data=content,
+        content_type="application/json",
+        original_filename="export.json",
+        sha256=_digest(content),
+        parser_key=SuuntoJsonParser.key,
+    )
+
+
+class TestEachFileIsPlacedOnTheRecordingsStart:
+    """A recording's axis counts from its stored start - the `started_at` the export writes -
+    and each file is moved onto it by its own start's offset, measured on the clock
+    `delta_seconds` uses."""
+
+    HEADER = "2025-05-31T12:59:06.000+02:00"
+    START = datetime(2025, 5, 31, 10, 59, 6, tzinfo=UTC)
+
+    def _depth_times(self, content: bytes, start_time: datetime | None, offset: int | None) -> list[int]:
+        extraction = extract_recording([_loaded(content)], start_time=start_time, utc_offset_minutes=offset)
+        assert extraction.profile is not None and extraction.profile.depth is not None
+        return extraction.profile.depth.t
+
+    def test_a_first_reading_keeps_the_offset_its_file_states(self) -> None:
+        content = _suunto_app_export(self.HEADER, "2025-05-31T12:59:06.160+02:00", "2025-05-31T13:19:06.160+02:00")
+
+        assert self._depth_times(content, self.START, 120) == [160, 1_200_160]
+
+    def test_an_offset_less_imported_recording_keeps_the_profile_intact(self) -> None:
+        """The recording came in from a document with a wall clock and no offset; the file
+        carries one. Compared as instants the two are two hours apart and the profile would
+        be pushed off its own dive - the wall clocks agree, which is what is compared."""
+        content = _suunto_app_export(self.HEADER, "2025-05-31T12:59:06.160+02:00")
+        wall_clock = datetime(2025, 5, 31, 12, 59, 6, tzinfo=UTC)
+
+        assert self._depth_times(content, wall_clock, None) == [160]
+
+    def test_a_file_whose_clock_started_later_is_moved_later(self) -> None:
+        """The corpus's Ocean: its JSON starts at `.67` of the second its FIT starts on."""
+        content = _suunto_app_export("2025-05-31T12:59:06.670+02:00", "2025-05-31T12:59:06.830+02:00")
+
+        assert self._depth_times(content, self.START, 120) == [830]
+
+    def test_a_reading_before_the_recordings_start_is_clamped_to_it(self) -> None:
+        content = _suunto_app_export(
+            "2025-05-31T12:59:05.000+02:00", "2025-05-31T12:59:05.500+02:00", "2025-05-31T12:59:16.000+02:00"
+        )
+
+        assert self._depth_times(content, self.START, 120) == [0, 10_000]
+
+    def test_a_recording_with_no_stored_start_takes_the_first_files(self) -> None:
+        first = _suunto_app_export(self.HEADER, "2025-05-31T12:59:06.160+02:00")
+        second = json.dumps(
+            {
+                "DeviceLog": {
+                    "Header": {"DateTime": "2025-05-31T12:59:08.000+02:00"},
+                    "Samples": [{"Temperature": 299.15, "TimeISO8601": "2025-05-31T12:59:08.000+02:00"}],
+                }
+            }
+        ).encode()
+
+        extraction = extract_recording([_loaded(first), _loaded(second)], start_time=None, utc_offset_minutes=None)
+
+        assert extraction.profile is not None
+        assert extraction.profile.depth is not None and extraction.profile.temperature is not None
+        assert extraction.profile.depth.t == [160]
+        assert extraction.profile.temperature.t == [2000]
+
+
+class TestTheReadoutFieldsAreTheRecordings:
+    def test_they_are_the_read_schemas_and_the_recordings_columns(self) -> None:
+        """Written onto `dive_recording` by name, so a readout that is not one of its columns
+        would raise at attach time, on a real upload."""
+        assert set(READOUT_FIELDS) == set(RecordingReadouts.model_fields)
+        assert set(READOUT_FIELDS) <= set(ParsedDiveSchema.model_fields)
+        assert set(READOUT_FIELDS) <= set(DiveRecording.__table__.columns.keys())
+        assert not set(READOUT_FIELDS) & set(Dive.__table__.columns.keys())

@@ -53,6 +53,7 @@ from ..models.dive_recording import DiveRecording
 from ..schemas.dive_profile import (
     CEILING_SCALE,
     DEPTH_SCALE,
+    MILLISECONDS_PER_SECOND,
     PRESSURE_SCALE,
     PROFILE_CHANNEL_ORDER,
     SINGLE_SERIES_CHANNELS,
@@ -86,12 +87,15 @@ logger = logging.getLogger(__name__)
 #    only the new column.
 # 4: the six decompression channels, and the Suunto JSON parser classifying an alarm
 #    instead of storing every one as `other`. Both change what the same bytes yield.
+# 5: the axis in milliseconds, counted from the file's own start rather than from its first
+#    reading. Revision `ce09bc7d4c64` stamps it on every row it multiplies, which keeps the
+#    ordinary backfill off them; `--force` is what re-derives their sub-second offsets.
 #
 # **A profile already stored stays on the channels it has**, which is a decision rather than
 # an oversight: `backfill_profiles` would re-extract everything behind this number and
 # nothing runs it. See *"The decompression channels arrive for new dives only"* in
 # `DECISIONS.md`.
-PROFILE_EXTRACTOR_VERSION = 4
+PROFILE_EXTRACTOR_VERSION = 5
 
 # The two `parser_key` values that are **not** a parser's, and the set both backfills refuse
 # to overwrite. `dive_profile.parser_key` answers "which of three things is this profile":
@@ -178,7 +182,7 @@ _SUMMARY_COLUMNS: Mapping[str, tuple[tuple[str, Callable[[list[int]], int]], ...
 
 @dataclass(frozen=True, slots=True)
 class ProfileSeries:
-    """One normalized channel: strictly increasing integer seconds, integer-scaled values."""
+    """One normalized channel: strictly increasing integer milliseconds, integer-scaled values."""
 
     t: list[int]
     v: list[int]
@@ -193,7 +197,7 @@ class ProfilePressureSeries(ProfileSeries):
 
 @dataclass(frozen=True, slots=True)
 class ProfileEvent:
-    """One stored marker: an integer second, a type from the closed vocabulary, and
+    """One stored marker: an integer millisecond, a type from the closed vocabulary, and
     whatever the device said about it."""
 
     t: int
@@ -204,7 +208,7 @@ class ProfileEvent:
 
 @dataclass(frozen=True, slots=True)
 class NormalizedProfile:
-    """A dive's channels, ready to store: rebased to zero, deduped, sorted, capped.
+    """A dive's channels, ready to store: on a millisecond axis, deduped, sorted, capped.
 
     The nine single-series channels are declared in `SINGLE_SERIES_CHANNELS`' order, which is
     the format's; `pressure` is a list rather than a series and sits where §6.4 puts it.
@@ -253,7 +257,7 @@ class NormalizedProfile:
 
     @property
     def duration(self) -> int:
-        """Elapsed seconds covered by the longest channel.
+        """Elapsed milliseconds covered by the longest channel.
 
         Not the dive's `duration`: this is the span of what the file actually recorded,
         which is what the chart's x axis has to cover. `dive.duration` is the diver's
@@ -364,9 +368,9 @@ class ProfileGasAttribution:
     off the same profile row. The dive's own `duration` is the diver's record and may have
     been edited, which would make the fraction say whatever the edit said.
 
-    `duration` is the profile's full span rather than the depth channel's, which
-    is what the attribution actually walked. The two differ by seconds where they differ
-    at all - a device goes on logging temperature a moment past the last depth reading -
+    `duration` is the profile's full span, in the axis's milliseconds, rather than the depth
+    channel's, which is what the attribution actually walked. The two differ by seconds where
+    they differ at all - a device goes on logging temperature a moment past the last depth reading -
     and the profile's span is the one already stored, already meant by "the recorded
     dive", and the one a client can line up against `DiveProfileInfo`.
     """
@@ -425,65 +429,58 @@ class BackfillReport:
 # ---------------------------------------------------------------- pure, DB-free
 
 
-def _rebase(points: list[tuple[float, int]], origin: float) -> ProfileSeries:
-    """Round a channel onto integer seconds from `origin`, keeping the last reading per second.
+def _milliseconds(seconds: float) -> int:
+    """A parser's fractional seconds as whole milliseconds, never below zero.
 
-    Integer seconds because at 720 px across an hour, one second is a fifth of a pixel -
-    already finer than the chart can draw. Where two readings round onto the same second
-    (1 Hz temperature with sub-second jitter does this constantly), the later one wins:
-    an arbitrary but consistent choice, and the alternative - averaging - would invent a
-    reading the sensor never took.
+    Clamped rather than dropped: a reading before the axis origin is real - a FIT record
+    stamped before its session's start, a second file whose clock started early - and the
+    start of the axis is the one place a chart can put it.
     """
-    by_second: dict[int, int] = {}
+    return max(0, round(seconds * MILLISECONDS_PER_SECOND))
+
+
+def _rebase(points: list[tuple[float, int]], origin: float) -> ProfileSeries:
+    """Round a channel onto integer milliseconds from `origin`, keeping the last reading per millisecond.
+
+    Where two readings land on one millisecond - which a clamp at zero produces as well as
+    rounding - the later one wins: an arbitrary but consistent choice, and the alternative,
+    averaging, would invent a reading the sensor never took.
+    """
+    by_millisecond: dict[int, int] = {}
     for seconds, value in points:
-        by_second[round(seconds - origin)] = value
-    ordered = sorted(by_second)
-    return ProfileSeries(t=ordered, v=[by_second[second] for second in ordered])
+        by_millisecond[_milliseconds(seconds - origin)] = value
+    ordered = sorted(by_millisecond)
+    return ProfileSeries(t=ordered, v=[by_millisecond[moment] for moment in ordered])
 
 
 def _rebase_events(parsed: ParsedProfileSchema, origin: float) -> list[ProfileEvent]:
-    """Put the file's markers on the same integer-second axis as the channels.
+    """Put the file's markers on the same millisecond axis as the channels.
 
-    **Clamped at zero rather than dropped below it.** An event that precedes the first
-    sample is the ordinary case, not a corrupt one: a Suunto XML export numbers its samples
-    from `<Time>1</Time>` while recording the dive's opening gas selection at
-    `<GasChangeTime>0</GasChangeTime>`, so rebasing puts it at -1. Discarding it would lose
-    which gas a dive *started* on - the one marker a two-gas dive most needs, and the one
-    Phase 4's per-tank attribution has to begin from. There is nowhere else on a chart for
-    "before the first reading" to go, so it goes at the start.
+    **Clamped at zero rather than dropped below it**, for `_milliseconds`' reason: a marker
+    before the origin is the ordinary case where the origin is a file's first reading - a DM5
+    export records its opening gas at `<GasChangeTime>0</GasChangeTime>` and its first sample
+    at `<Time>1</Time>` - and discarding it would lose which gas the dive started on.
 
-    **The high end is deliberately not clamped**, and the asymmetry is the point rather than
-    an oversight. Zero is where the dive begins for every format, so pinning to it moves a
-    marker by a second or two onto a boundary that is real. There is no equivalent at the
-    other end: `duration` is the span of the *samples*, and a device goes on
-    recording after the last one - a Suunto Ocean writes 8 292 samples of which 395 carry
-    depth, and a FIT `user_marker` can be pressed after the final `record`. A marker there
-    happened when the file says it happened, and dragging it back onto the last sample would
-    invent a time to keep it on screen. A chart that draws past its x domain is the chart's
-    to clip.
+    **The high end is deliberately not clamped.** `duration` is the span of the *samples*,
+    and a device goes on recording after the last one - a FIT `user_marker` can be pressed
+    after the final `record`. A marker there happened when the file says it happened, and a
+    chart that draws past its x domain is the chart's to clip.
 
-    The origin is the *sample* channels' - see `normalize`. Events are sorted here rather
-    than being required to arrive sorted, because unlike the sample channels there is only
-    one stream of them and nothing a parser knows that this doesn't: the XML export lists
-    gas changes nested inside each `<DiveMixture>`, so file order is cylinder order, not
-    time order. A stable sort, so two markers on the same second keep the order the file
-    listed them in.
-
-    Deduped on the whole event, keeping the first. Rounding onto integer seconds is what
-    makes this necessary: the same `GasSwitch` can arrive under both `Events` and
-    `DiveEvents` on one Suunto JSON sample, and two samples a fraction of a second apart can
-    repeat one `Notify` - either would otherwise stack two identical ticks on one pixel.
+    Sorted here because the Suunto XML export lists gas changes nested inside each
+    `<DiveMixture>`, so file order is cylinder order; a stable sort keeps two markers on one
+    millisecond in the order the file listed them. Deduped on the whole event, keeping the
+    first, because the same `GasSwitch` can arrive under both `Events` and `DiveEvents` on one
+    Suunto JSON sample.
 
     `label` is truncated here rather than bounded on the schema, which would raise: a file
-    whose one long alert took its depth curve down with it is exactly what the never-fail
-    contract on `extract_profile` exists to prevent. One place, so all three formats inherit
-    it, the same way `ceiling_cm` holds the zero rule.
+    whose one long alert took its depth curve down with it is what the never-fail contract on
+    `extract_profile` exists to prevent.
     """
     seen: set[tuple[int, ProfileEventType, int | None, str | None]] = set()
     ordered: list[ProfileEvent] = []
     for event in sorted(parsed.events, key=lambda event: event.t):
         label = event.label[:MAX_LABEL_CHARS] if event.label is not None else None
-        key = (max(0, round(event.t - origin)), event.type, event.gas_number, label)
+        key = (_milliseconds(event.t - origin), event.type, event.gas_number, label)
         if key in seen:
             continue
         seen.add(key)
@@ -491,23 +488,24 @@ def _rebase_events(parsed: ParsedProfileSchema, origin: float) -> list[ProfileEv
     return ordered
 
 
-def normalize(parsed: ParsedProfileSchema) -> NormalizedProfile | None:
+def normalize(parsed: ParsedProfileSchema, *, from_file_start: bool = False) -> NormalizedProfile | None:
     """Turn a parser's raw per-channel arrays into the stored shape, or `None` if empty.
 
-    Format-independent work, done exactly once here rather than in each parser: rebasing
-    the axis to zero, rounding to integer seconds, deduping collisions, and dropping
-    channels that turned out to carry nothing.
+    Format-independent work, done exactly once here rather than in each parser: rounding to
+    integer milliseconds, deduping collisions, and dropping channels that turned out to carry
+    nothing.
 
-    The origin is the earliest reading across *all* channels, not each channel's own
-    first sample: the channels share one x axis on the chart, so shifting them
-    independently would slide the temperature curve off the depth curve it is meant to
-    line up with.
+    **`from_file_start` says the parser's axis counts from a start the file's header
+    states**, which every parser's does: `Header.DateTime` for the Suunto JSON export, the
+    session's `start_time` for FIT, `<StartTime>` for DM5's `<Time>`. The axis is then kept
+    as it is, so a first reading keeps the offset its file states and the stored axis counts
+    from the instant the recording's `started_at` names. Without a stated start - a header
+    that names none, or a caller holding no header - the earliest reading across every
+    channel is zero, which is the only origin the file offers.
 
-    **Events do not get a vote on the origin**, though they are rebased against it. They
-    are markers a device wrote alongside the samples rather than a stream with its own
-    cadence, and letting one of them be the earliest thing in the file would slide every
-    curve away from the axis the samples define. A file consisting only of events has no
-    profile to draw and returns `None` for the same reason a file of no readings does.
+    **Events never set the origin**, though they are rebased against it: a marker a device
+    wrote alongside the samples is not a stream with its own cadence. A file consisting only
+    of events has no profile to draw and returns `None`.
     """
     points_by_channel: dict[str, list[tuple[float, int]]] = {}
     for channel in SINGLE_SERIES_CHANNELS:
@@ -523,7 +521,7 @@ def normalize(parsed: ParsedProfileSchema) -> NormalizedProfile | None:
 
     # Each channel is sorted (the schema validates it), so its first timestamp is its
     # minimum. The union across channels is not sorted, hence the `min`.
-    origin = min(points[0][0] for points in sampled)
+    origin = 0.0 if from_file_start else min(points[0][0] for points in sampled)
 
     return with_channels(
         {channel: _rebase(points, origin) if points else None for channel, points in points_by_channel.items()},
@@ -575,8 +573,11 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
     Ordered by when each gas was first breathed - the order a diver lists cylinders in.
 
     **`seconds` is wall clock and `mean_depth_cm` is an unweighted mean of the samples
-    inside it**, which are the same measure only while the depth channel's cadence is
-    even. Every format in the corpus samples depth on a fixed interval (10 s or 20 s for
+    inside it**. Whole seconds because that is the unit the stored column and `seconds_on_gas`
+    on the wire keep, taken by rounding each stretch's ends rather than each gas's total: the
+    ends telescope, so the gases sum to no more than the span rounded the same way, which
+    `compute_multi_tank_gas_use` divides by. The two are the same measure only while the
+    depth channel's cadence is even. Every format in the corpus samples depth on a fixed interval (10 s or 20 s for
     the Suunto XML export, ~11 s for an Ocean, 1 Hz for FIT), and this runs before
     `downsample`, so nothing has thinned them unevenly either. Where it would bite is a
     sensor dropout - a gap in `t` inside one stretch - which would weight the mean toward
@@ -586,9 +587,9 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
     checked against.
 
     At a boundary the two halves also count the sample *on* it differently: a stretch's
-    seconds run up to the next switch's second, while the sample taken at that second is
+    time runs up to the next switch's instant, while the sample taken at that instant is
     assigned to the gas being switched to. So one reading sits on the far side of the
-    boundary from the second it was counted in - one sample out of tens or hundreds, and
+    boundary from the stretch it was counted in - one sample out of tens or hundreds, and
     the alternative (counting it into the stretch that was ending) is no more correct, since
     the switch happened at some unrecorded instant within that sampling interval either way.
 
@@ -616,8 +617,8 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
             # writes this whenever a diver browses the gas list without changing anything.
             continue
         if switch_times and switch_times[-1] == moment:
-            # Two switches on one second: the later one is what the diver ended up on, the
-            # same last-reading-wins rule `_rebase` applies to a channel.
+            # Two switches on one millisecond: the later one is what the diver ended up on,
+            # the same last-reading-wins rule `_rebase` applies to a channel.
             switch_gases[-1] = event.gas_number
             continue
         switch_times.append(moment)
@@ -631,7 +632,8 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
         # The last stretch runs to the last depth sample: a dive ends where its recording
         # does, and there is no switch marking the surface.
         until = switch_times[index + 1] if index + 1 < len(switch_times) else last_sample
-        seconds[gas_number] = seconds.get(gas_number, 0) + (until - moment)
+        stretch = round(until / MILLISECONDS_PER_SECOND) - round(moment / MILLISECONDS_PER_SECOND)
+        seconds[gas_number] = seconds.get(gas_number, 0) + stretch
 
     depth_totals: dict[int, int] = {}
     depth_counts: dict[int, int] = {}
@@ -648,16 +650,16 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
         # A gas whose every stretch fell between two depth samples has a time but no depth
         # to normalize it against, and is dropped rather than given a borrowed one.
         #
-        # So is one that was attributed no time at all, which happens when a switch rebases
-        # exactly onto the last depth sample: there is no dive left after it, so the stretch
-        # is zero seconds long. Dropped **here** rather than left for the consumer to
+        # So is one that was attributed no whole second at all, which happens when a switch
+        # lands on or just before the last depth sample: there is no dive left after it, so
+        # the stretch rounds to zero seconds. Dropped **here** rather than left for the consumer to
         # discard, because the two are not equivalent - an entry that claims a cylinder and
         # accounts for none of the dive lets `compute_multi_tank_gas_use` take it for a
         # cylinder that simply produced no figure, and report the remaining tanks as
         # covering the whole dive. Absent from the attribution, the same cylinder reaches
         # the branch that refuses a dive whose breathed cylinder was never attributed. A
-        # switch one second later already takes that path, via the `break` above; a
-        # difference of one second must not decide between a refusal and a wrong figure.
+        # switch a moment later already takes that path, via the `break` above; so small a
+        # difference must not decide between a refusal and a wrong figure.
         count = depth_counts.get(gas_number, 0)
         if count == 0 or seconds[gas_number] <= 0:
             continue
@@ -920,32 +922,52 @@ def profile_from_data(data: Mapping[str, Any]) -> NormalizedProfile:
     )
 
 
-def shift_profile(profile: NormalizedProfile, seconds: int) -> NormalizedProfile:
-    """Move every sample and marker `seconds` later on the axis.
+def shift_profile(profile: NormalizedProfile, milliseconds: int) -> NormalizedProfile:
+    """Move every sample and marker `milliseconds` along the axis, clamping at zero.
 
-    What puts a second record of one dive onto the first one's clock: its `times` are
-    elapsed from *its own* recording's start, so re-expressing them as elapsed from the
-    earlier recording's start is an addition and nothing else. No sample is invented,
-    dropped or resampled - the gap between the two records stays a gap, which is what
-    DiveJSON §5.4 requires and what the chart's break-at-gaps rule already draws.
+    What puts a record onto another start's clock: its `times` are elapsed from the start it
+    was read against, so re-expressing them from another start is an addition and nothing
+    else. A merge moves the later of two records of one dive onto the earlier's axis; the
+    attach path moves each file of a recording onto the recording's stored start, and there
+    the offset may be negative. No sample is invented or resampled - the gap between two
+    records stays a gap, which is what DiveJSON §5.4 requires.
+
+    **A reading moved before zero is clamped to it**, the last reading per millisecond kept
+    where the clamp makes two collide - `_rebase`'s rule, for `_milliseconds`' reason: a
+    second device whose clock started early has readings before the recording's start, and a
+    filled channel loses its first samples if they are dropped. Events clamp the same way and
+    keep the first of two identical markers, as `_rebase_events` does.
 
     `gas_attribution` is left behind for `profile_from_data`'s reason: its entries are
     durations rather than instants, but they are about to be recomputed over the joined
     profile anyway, and carrying half of an answer forward is how the two come to disagree.
     """
-    if seconds == 0:
+    if milliseconds == 0:
         return replace(profile, gas_attribution=[])
 
-    def moved(series: ProfileSeries | None) -> ProfileSeries | None:
-        return None if series is None else ProfileSeries(t=[t + seconds for t in series.t], v=series.v)
+    def moved(source: ProfileSeries) -> dict[str, list[int]]:
+        by_moment = {max(0, moment + milliseconds): value for moment, value in zip(source.t, source.v, strict=True)}
+        ordered = sorted(by_moment)
+        return {"t": ordered, "v": [by_moment[moment] for moment in ordered]}
+
+    seen: set[tuple[int, ProfileEventType, int | None, str | None]] = set()
+    events: list[ProfileEvent] = []
+    for event in profile.events:
+        placed = replace(event, t=max(0, event.t + milliseconds))
+        key = (placed.t, placed.type, placed.gas_number, placed.label)
+        if key not in seen:
+            seen.add(key)
+            events.append(placed)
 
     return with_channels(
-        {channel: moved(series) for channel, series in channels_of(profile).items()},
+        {
+            channel: None if source is None else ProfileSeries(**moved(source))
+            for channel, source in channels_of(profile).items()
+        },
         pressure=[
-            ProfilePressureSeries(gas_number=cylinder.gas_number, t=[t + seconds for t in cylinder.t], v=cylinder.v)
-            for cylinder in profile.pressure
+            ProfilePressureSeries(gas_number=cylinder.gas_number, **moved(cylinder)) for cylinder in profile.pressure
         ],
-        events=[replace(event, t=event.t + seconds) for event in profile.events],
+        events=events,
     )
 
 
@@ -954,19 +976,19 @@ def join_profiles(earlier: NormalizedProfile | None, later: NormalizedProfile | 
 
     **Not `fill_channels`, and the difference is the unit.** That one takes each *channel*
     whole from the first file that carried it, because two files of one recording are two
-    readings of the same sensor over the same seconds and interleaving them would invent a
+    readings of the same sensor over the same stretch and interleaving them would invent a
     curve neither device recorded. These two are the same device's readings of *different*
-    seconds - it surfaced, shut down and started again - so the samples belong end to end on
-    one axis and taking one channel whole would throw away half the dive.
+    stretches - it surfaced, shut down and started again - so the samples belong end to end
+    on one axis and taking one channel whole would throw away half the dive.
 
     **Nothing is synthesised between them.** The gap where the computer was off stays a gap:
     no surface samples, no interpolation, no marker saying the dive paused. A channel one
     side carries alone is carried whole, which is the same answer as joining it to nothing.
 
-    Where the two do overlap on a second - which a real pair cannot produce, the second
+    Where the two do overlap on a millisecond - which a real pair cannot produce, the second
     record starting after the first ended, but nothing in the data enforces - the earlier
     reading stands. Arbitrary but deterministic, and it keeps the invariant every consumer
-    relies on: one value per second, strictly increasing.
+    relies on: one value per instant, strictly increasing.
     """
     if earlier is None:
         return None if later is None else replace(later, gas_attribution=[])
@@ -986,7 +1008,7 @@ def _join_series(earlier: ProfileSeries | None, later: ProfileSeries | None) -> 
         return later
     if later is None:
         return earlier
-    # `later` first so that `earlier` overwrites it on a shared second - see `join_profiles`.
+    # `later` first so that `earlier` overwrites it on a shared instant - see `join_profiles`.
     by_second = dict(zip(later.t, later.v, strict=True)) | dict(zip(earlier.t, earlier.v, strict=True))
     ordered = sorted(by_second)
     return ProfileSeries(t=ordered, v=[by_second[second] for second in ordered])
@@ -1023,7 +1045,7 @@ def _join_events(earlier: Sequence[ProfileEvent], later: Sequence[ProfileEvent])
     are the same device's markers from two stretches of one dive, not two devices' accounts
     of the same stretch, so dropping either half would lose every gas switch it recorded.
 
-    A stable sort with the earlier half first, so two markers on one second keep the order
+    A stable sort with the earlier half first, so two markers on one instant keep the order
     the records were written in, and the dedupe keeps the first - the same shape
     `_rebase_events` uses within one file.
     """
@@ -1554,6 +1576,8 @@ async def backfill_profiles(
             DiveRecording.id.label("recording_id"),
             DiveRecording.dive_id,
             DiveRecording.user_id,
+            DiveRecording.start_time,
+            DiveRecording.utc_offset_minutes,
         )
         # Explicit columns, never `select(DiveRecording)`: the same discipline the file
         # query kept for the payload's sake, retained because it says what is read.
@@ -1636,7 +1660,9 @@ async def backfill_profiles(
 
         # Synchronously: a one-shot script's loop has nothing else on it, so the threadpool
         # hop the request paths need (`dive_files.read_recording`) would buy nothing here.
-        profile, unreadable = extract_recording_profile(files)
+        profile, unreadable = extract_recording_profile(
+            files, start_time=row.start_time, utc_offset_minutes=row.utc_offset_minutes
+        )
         if unreadable:
             # At least one of this recording's files is recorded under a parser key this
             # build no longer has, or stopped parsing. Counted rather than swallowed: a file

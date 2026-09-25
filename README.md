@@ -24,9 +24,9 @@ else; what is here is the source, and the notes for working on it.
 
 - **Dive log API** — dives with gas mixtures (O₂/He, pressures), multiple ordered dive sites per
   dive, trips, weights, water type, altitude, and notes. Soft deletes throughout.
-- **Technical diving** — per-cylinder ppO₂ limits and gas roles, CNS/OTU and surface pressure
-  persisted from imports, and per-tank gas consumption derived from recorded gas switches on
-  multi-tank dives.
+- **Technical diving** — per-cylinder ppO₂ limits and gas roles, each computer's CNS/OTU and surface
+  pressure persisted from imports, and per-tank gas consumption derived from recorded gas switches
+  on multi-tank dives.
 - **Dive-computer file parsing** — upload a FIT file (Garmin Descent, Suunto Ocean/D5) or a Suunto
   XML/JSON export to `POST /dive/parse` and get structured dive data back to pre-fill a form. Attach
   the file to the dive afterwards and the **per-sample profile** (depth, temperature, tank pressure,
@@ -36,10 +36,11 @@ else; what is here is the source, and the notes for working on it.
   and its own profile. So a diver on two computers keeps both accounts of the dive, the same
   computer exported twice fills one record rather than making two, and every device the file named —
   brand, model, serial, firmware, its own name and its own dive counter — is kept beside the
-  samples, along with **the mode that computer ran in and the decompression model it ran**, both of
-  which two computers on one dive legitimately disagree about. A computer that shut down mid-water
-  logs the dive twice, so two dives can be **merged** into one: the two records land on a single
-  axis with the stretch the computer was off left empty, and nothing is invented to bridge it.
+  samples, along with **the mode, salinity and decompression model that computer ran with, and its
+  CNS, OTU and surface-pressure readouts**, all of which two computers on one dive legitimately
+  disagree about. A computer that shut down mid-water logs the dive twice, so two dives can be
+  **merged** into one: the two records land on a single axis with the stretch the computer was off
+  left empty, and nothing is invented to bridge it.
 - **Air consumption** — SAC and RMV derived automatically, per tank on multi-tank dives, plus a
   gas-use history endpoint powering the dashboard trend chart.
 - **Species log** — record what you saw on a dive, from a catalog searched live against

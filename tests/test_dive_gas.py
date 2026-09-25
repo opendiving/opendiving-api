@@ -9,7 +9,7 @@ is exercised by hand (see DECISIONS.md), not here.
 from typing import Any
 
 from src.app.schemas.dive_mixture import DiveMixtureRead, TankUsage
-from src.app.schemas.dive_profile import GasAttribution
+from src.app.schemas.dive_profile import MILLISECONDS_PER_SECOND, GasAttribution
 from src.app.services.dive_gas import (
     MAX_PLAUSIBLE_RMV,
     METERS_PER_BAR,
@@ -229,8 +229,9 @@ def _attributed(gas_number: int, *, seconds: int, mean_depth_cm: int) -> GasAttr
 
 def _attribution(*entries: GasAttribution, duration: int = 6000) -> ProfileGasAttribution:
     """The attribution as it comes off a profile row, span included - the denominator
-    `attributed_seconds` is a fraction of."""
-    return ProfileGasAttribution(duration=duration, entries=list(entries))
+    `attributed_seconds` is a fraction of. `duration` is seconds here, and the row holds the
+    profile axis's milliseconds."""
+    return ProfileGasAttribution(duration=duration * MILLISECONDS_PER_SECOND, entries=list(entries))
 
 
 class TestComputeMultiTankGasUse:

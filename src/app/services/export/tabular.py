@@ -78,6 +78,7 @@ DIVES_HEADER = (
     "gas_used_l",
     "rmv_l_per_min",
     "sac_bar_per_min",
+    # The primary recording's readouts - the ones the dive page shows.
     "cns_end",
     "otu_end",
     "surface_pressure_bar",
@@ -164,11 +165,9 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
     )
     trip = bundle.trip_for(dive)
     course = bundle.course_for(dive)
-    source_files = "; ".join(
-        file.info.original_filename
-        for recording in bundle.recordings_by_dive.get(dive.id, [])
-        for file in recording.files
-    )
+    recordings = bundle.recordings_by_dive.get(dive.id, [])
+    source_files = "; ".join(file.info.original_filename for recording in recordings for file in recording.files)
+    readouts = recordings[0].readouts if recordings else {}
     return (
         dive.dive_number,
         local.date().isoformat(),
@@ -194,9 +193,9 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         None if gas_use is None else gas_use.gas_used,
         None if gas_use is None else gas_use.rmv,
         None if gas_use is None else gas_use.sac_bar_per_min,
-        dive.cns_end,
-        dive.otu_end,
-        dive.surface_pressure_bar,
+        readouts.get("cns_end"),
+        readouts.get("otu_end"),
+        readouts.get("surface_pressure_bar"),
         dive.entry_latitude,
         dive.entry_longitude,
         dive.exit_latitude,

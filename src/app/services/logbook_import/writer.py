@@ -53,7 +53,7 @@ from ...models.trip import Trip
 from ...models.trip_part import TripPart
 from ...models.user import User
 from ...schemas.certification import CertificationSide
-from ...schemas.dive import DiveMode
+from ...schemas.dive import DiveMode, Salinity
 from ...schemas.dive_mixture import DiveMixtureCreate, as_create
 from ...schemas.logbook_import import ImportNote, ImportNoteCode
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice
@@ -83,6 +83,7 @@ from ..dive_recordings import (
     create_recording,
     fill_device_fields,
     fill_gate_figures,
+    fill_readouts,
     fill_recording_settings,
     fill_start,
     next_ordinal,
@@ -376,7 +377,7 @@ class _Writer:
             if record.action is Action.RESTORE and record.row_id is not None:
                 # Before the row itself, not after: `delete_files_for_dive` clears the
                 # dive's tech scalars along with the recordings they were read off, so
-                # running it afterwards would wipe the CNS and OTU this import just wrote. It
+                # running it afterwards would wipe the positions this import just wrote. It
                 # also takes the old recordings and their profiles, which is what stops a
                 # restored dive from keeping curves the document does not describe.
                 await delete_files_for_dive(self._db, dive_id=record.row_id, commit=False)
@@ -439,6 +440,8 @@ class _Writer:
             user_id=self._user_id,
             ordinal=planned.ordinal if ordinal is None else ordinal,
             mode=None if planned.mode is None else DiveMode(planned.mode),
+            salinity=None if planned.salinity is None else Salinity(planned.salinity),
+            readouts=planned.readouts,
             start_time=planned.start_time,
             utc_offset_minutes=planned.utc_offset_minutes,
             duration=planned.duration,
@@ -527,10 +530,11 @@ class _Writer:
         last keeps the write in the same order the plan reasoned in.
 
         A **fill** writes no recording row. It fills the stored recording's blanks - its
-        device columns, its start, the two figures the gates compare - and, where that
-        recording had no samples at all, its profile. The stored dive's own blanks fill too:
-        its oxygen-exposure readings, and the members its cylinders have none of, where those
-        cylinders still demonstrably describe the document's. Nothing is ever overwritten,
+        device columns, its settings, its readouts, its start, the two figures the gates
+        compare - and, where that recording had no samples at all, its profile. The stored
+        dive's own blanks fill too, from the primary recording alone: its positions, and the
+        members its cylinders have none of, where those cylinders still demonstrably describe
+        the document's. Nothing is ever overwritten,
         which is the whole rule: the diver may have corrected any of it, and a fill that won
         an argument with an edit would be the silent loss this repository already refuses on
         the backfill path.
@@ -597,7 +601,11 @@ class _Writer:
             deco_model=ParsedDecoModel(
                 **{member: planned.deco_model.get(column) for member, column in DECO_MODEL_COLUMNS.items()}
             ),
+            salinity=None if planned.salinity is None else Salinity(planned.salinity),
         )
+        # The recording's own readouts, on every recording and above the primary-only line
+        # below: they are this device's figures, whichever position it holds on the dive.
+        await fill_readouts(self._db, recording_id=match.recording_id, readouts=planned.readouts)
         await fill_gate_figures(
             self._db, recording_id=match.recording_id, duration=planned.duration, max_depth=planned.max_depth
         )
@@ -646,21 +654,16 @@ class _Writer:
             )
 
         # **Everything below this line is the dive's rather than the recording's, and only
-        # the primary recording may write it.** A secondary recording is a second computer's
-        # account of the same dive: its CNS clock is its own device's arithmetic, and its
-        # cylinder labelling is its own numbering rather than the dive's. `_rederive_recording`
-        # has returned here for `ordinal != 0` since recordings arrived; this side could not,
-        # carrying no ordinal, and so filled the dive off whichever recording matched. The
-        # join's own guard kept that from doing damage to the cylinders - a second computer's
-        # list has to agree on every recorded fraction and on the count before anything is
-        # written - but a guard is not the rule, and the scalars had no guard at all.
+        # the primary recording may write it** - `_rederive_recording`'s rule on the attach
+        # path. A secondary recording is a second computer's account of the same dive: its
+        # positions are its own, and its cylinder labelling is its own numbering.
         if match.ordinal != 0:
             return
 
         # `dive_values` is `PlannedRecord.values`, which is already keyed by column name -
         # the same dict the dive insert would have taken - so `TECH_SCALAR_FIELDS` indexes it
-        # directly. A member the document did not carry is `None` and `fill_tech_scalars`
-        # skips it; a member it did carry lands only where the stored dive has none.
+        # directly: the entry and exit fixes. A member the document did not carry is `None`
+        # and `fill_tech_scalars` skips it; one it did carry lands only where the dive has none.
         await fill_tech_scalars(
             self._db,
             dive_id=match.dive_id,

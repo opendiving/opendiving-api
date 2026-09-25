@@ -35,7 +35,7 @@ from ..crud.crud_dive_mixtures import get_mixtures_for_dives
 from ..models.dive import Dive
 from ..schemas.dive import DiveGasUse, DiveGasUsePoint, DiveTankGasUse
 from ..schemas.dive_mixture import DiveMixtureRead, TankUsage
-from ..schemas.dive_profile import DEPTH_SCALE, GasAttribution
+from ..schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND, GasAttribution
 from .dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
 
 # Metres of water per bar of ambient pressure. Salt water is nearer 10.06 m/bar and
@@ -51,8 +51,9 @@ from .dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
 # water-type-aware, the null rows are the whole problem to solve first. See DECISIONS.md.
 #
 # Two further simplifications are baked in for the same reason: surface pressure is
-# assumed to be 1 bar (wrong at an altitude lake, and `dive.altitude` does not change that
-# either) and air is treated as an ideal gas (optimistic by roughly 5% at a 230 bar fill).
+# assumed to be 1 bar (wrong at an altitude lake, and neither `dive.altitude` nor a
+# recording's `surface_pressure_bar` changes that) and air is treated as an ideal gas
+# (optimistic by roughly 5% at a 230 bar fill).
 METERS_PER_BAR = 10.0
 
 
@@ -351,7 +352,9 @@ def compute_multi_tank_gas_use(
             for tank in tanks
         ],
         attributed_seconds=sum(tank.seconds for tank in tanks),
-        duration=attribution.duration,
+        # The profile's span is on the axis's milliseconds; `attributed_seconds` beside it is
+        # seconds, and the two halves of the fraction have to share a unit.
+        duration=round(attribution.duration / MILLISECONDS_PER_SECOND),
     )
 
 

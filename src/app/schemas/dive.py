@@ -70,7 +70,7 @@ def validate_depth_pair(avg_depth: float | None, max_depth: float | None) -> Non
 
 
 class WaterType(StrEnum):
-    """What the diver (or their computer) was calibrated for.
+    """What the water was - a fact about the dive, which a diver knows and types.
 
     A closed vocabulary rather than free text, on the same terms as `GearType`
     (`schemas/gear_item.py`): the value exists to be compared across dives, and the
@@ -79,12 +79,8 @@ class WaterType(StrEnum):
     second sorted list. Deliberately **not** mirrored by a DB `CHECK` - see DECISIONS.md.
 
     Salt and fresh are the two real answers; brackish is a genuine third (the Baltic,
-    estuaries, cenote haloclines) and is in Subsurface's vocabulary too. `EN13319` is the
-    European standard depth-instrument calibration (~1020 kg/m3), not a kind of water -
-    it is here because it is what a Shearwater ships set to and what a FIT file records,
-    and folding it into `SALT` on import would be the parser substituting a plausible
-    value for what the file said (see `schemas/parsed_dive.py`). The diver can correct it
-    on the prefilled form.
+    estuaries, cenote haloclines) and is in Subsurface's vocabulary too. The density a
+    computer was set to is not here: that is `Salinity`, on the recording.
 
     No `OTHER`: `None` already means "not recorded".
     """
@@ -92,7 +88,21 @@ class WaterType(StrEnum):
     SALT = "salt"
     FRESH = "fresh"
     BRACKISH = "brackish"
+
+
+class Salinity(StrEnum):
+    """The water density one **device** divided pressure by to show a depth (spec §6.4a).
+
+    A setting of the computer, like `DiveMode`, and so the recording's rather than the dive's:
+    two computers on one dive can be set differently, and `EN13319` - the European depth-gauge
+    calibration a Shearwater ships set to and a FIT file records - is not a kind of water. The
+    dive's `water_type` is never derived from it, nor the reverse. Values as a computer offers
+    them, in the format's order; no DB `CHECK`, on `WaterType`'s terms.
+    """
+
+    FRESH = "fresh"
     EN13319 = "en13319"
+    SALT = "salt"
 
 
 class DiveMode(StrEnum):
@@ -187,37 +197,18 @@ class DiveBase(BaseModel):
         return self
 
 
-class DiveTechScalars(BaseModel):
-    """What the dive computer recorded and the diver never typed.
+class RecordingReadouts(BaseModel):
+    """What one computer reported about the dive as a whole, off its own arithmetic.
 
-    Its own mixin rather than fields on `DiveBase` precisely so it lands on the read
-    shapes and *not* on `DiveCreate`/`DiveUpdate`: these are written only by the import
-    path (`services/dive_files.py::store_recording_file`), and `DiveCreate`'s `extra="forbid"`
-    then makes an attempt to set one a 422 rather than a silently accepted fiction.
+    The recording's rather than the dive's (spec §6.4a): CNS and OTU depend on the algorithm
+    the device ran and on the exposure it carried over, and two computers on one dive give
+    two answers to every one of these. Written only by the import paths - the attach path
+    for every recording's files, and logbook import - never through a form, since a typed
+    value would be a guess presented as a reading. See DECISIONS.md.
 
-    CNS and OTU depend on the decompression algorithm the device ran and on the diver's
-    exposure carried over from earlier dives, so nothing on a logged dive reconstructs
-    them - a typed-in value would be a guess presented as a reading. See DECISIONS.md.
-
-    The entry/exit coordinates join them for the *mechanism* rather than that argument: a
-    diver could in principle type a position, but nothing offers to, so these travel the
-    same import-owned path. That has one consequence worth stating, because it is what
-    would break first if a form ever did offer them: an upload that **creates** a primary
-    recording writes every field of this mixin outright, `None` included
-    (`store_tech_scalars`), so it overwrites whatever these hold. Every other file of that
-    recording fills instead and cannot overwrite (`fill_tech_scalars`) - but that is a
-    property of which write runs, not a protection these fields have, and the condition is
-    "this upload created the recording" rather than "the recording had no files"
-    (`_rederive_recording` on `fresh`). Adding a hand-set position means taking it off this
-    mixin, not relying on the fill or adding a special case to the outright write.
-
-    The membership is load-bearing in the other direction too - `TECH_SCALAR_FIELDS` is
-    read off `model_fields`, so a field added here is written by the import and picked up
-    by `backfill_tech_fields` on its next run without either being edited.
-
-    On `DiveRead` rather than `DiveReadWithMixtures`, unlike `recordings`/`gas_use`: those
-    are kept off the list response because each costs `_cached_read_dives` an extra query,
-    and these are plain columns on the row that is being selected anyway.
+    The attach path and `backfill_tech_fields` write `model_fields` by name. Logbook import
+    and the export name each readout themselves, so a field added here reaches neither
+    until they do.
     """
 
     cns_start: Annotated[
@@ -237,10 +228,41 @@ class DiveTechScalars(BaseModel):
         Field(
             default=None,
             examples=[1.057],
-            description="Ambient pressure at the surface, in bar. Display only - gas-use maths deliberately "
-            "assumes 1 bar (see `services/dive_gas.py`).",
+            description="Ambient pressure at the surface this device measured, in bar. Display only - gas-use maths "
+            "deliberately assumes 1 bar (see `services/dive_gas.py`).",
         ),
     ]
+
+
+class DiveTechScalars(BaseModel):
+    """The entry and exit fixes a dive computer recorded and the diver never typed.
+
+    Its own mixin rather than fields on `DiveBase` precisely so it lands on the read
+    shapes and *not* on `DiveCreate`/`DiveUpdate`: these are written only by the import
+    path (`services/dive_files.py::store_recording_file`), and `DiveCreate`'s `extra="forbid"`
+    then makes an attempt to set one a 422 rather than a silently accepted fiction. On the
+    dive rather than the recording because the format keeps its positions there.
+
+    A diver could in principle type a position, but nothing offers to, so these travel the
+    import-owned path. That has one consequence worth stating, because it is what would
+    break first if a form ever did offer them: an upload that **creates** a primary
+    recording writes every field of this mixin outright, `None` included
+    (`store_tech_scalars`), so it overwrites whatever these hold. Every other file of that
+    recording fills instead and cannot overwrite (`fill_tech_scalars`) - but that is a
+    property of which write runs, not a protection these fields have, and the condition is
+    "this upload created the recording" rather than "the recording had no files"
+    (`_rederive_recording` on `fresh`). Adding a hand-set position means taking it off this
+    mixin, not relying on the fill or adding a special case to the outright write.
+
+    The membership is load-bearing in the other direction too - `TECH_SCALAR_FIELDS` is
+    read off `model_fields`, so a field added here is written by the import and picked up
+    by `backfill_tech_fields` on its next run without either being edited.
+
+    On `DiveRead` rather than `DiveReadWithMixtures`, unlike `recordings`/`gas_use`: those
+    are kept off the list response because each costs `_cached_read_dives` an extra query,
+    and these are plain columns on the row that is being selected anyway.
+    """
+
     entry_latitude: Annotated[
         float | None,
         Field(
@@ -465,13 +487,13 @@ class RecordingDecoModel(BaseModel):
     ]
 
 
-class RecordingRead(BaseModel):
-    """One device's record of a dive: what recorded it, when it started, its files and a
-    summary of its samples.
+class RecordingRead(RecordingReadouts):
+    """One device's record of a dive: what recorded it, how it was set, when it started, what
+    it reported, its files and a summary of its samples.
 
     Ordered by `ordinal` within a dive, and **0 is primary** - the recording a single-profile
-    consumer takes, the one whose files write the dive's oxygen-exposure readings, and the
-    one the app's own UDDF export writes. Order rather than a flag, matching the published
+    consumer takes, the one whose readouts the dive page and the CSV show, and the one the
+    app's own UDDF export writes. Order rather than a flag, matching the published
     format: a flag every writer has to set is a value every reader has to default.
 
     `files` is in attach order, and there may legitimately be more than one: the same
@@ -501,6 +523,16 @@ class RecordingRead(BaseModel):
         RecordingDecoModel | None,
         Field(default=None, description="The decompression model this device ran, or null where nothing recorded one"),
     ]
+    salinity: Annotated[
+        StoredVocabulary | None,
+        Field(
+            default=None,
+            examples=["en13319"],
+            description="The water density this device was set to: one of `fresh`, `en13319`, `salt`. A setting of "
+            "the computer, not a kind of water - the dive's `water_type` is that. Null means the file did not record "
+            "one.",
+        ),
+    ]
     started_at: Annotated[
         DiveLocalStartTime | None,
         Field(
@@ -508,7 +540,7 @@ class RecordingRead(BaseModel):
             examples=[_START_TIME_EXAMPLE],
             description="This device's own start - not the dive's, which a second computer entering the water later "
             "legitimately differs from. Offset-less where the source recorded no offset, exactly as a dive's is. The "
-            "profile's `times` are elapsed seconds from this instant.",
+            "profile's `times` are elapsed milliseconds from this instant.",
         ),
     ]
     files: Annotated[list[DiveFileInfo], Field(default_factory=list, description="In attach order")]
@@ -648,7 +680,8 @@ class DiveGasUse(BaseModel):
         Field(
             default=None,
             examples=[4619],
-            description="What `attributed_seconds` is a fraction of: the span the dive's profile recorded, which is "
+            description="What `attributed_seconds` is a fraction of, in seconds: the span the dive's profile recorded, "
+            "which is "
             "what the attribution ran over. Deliberately not the dive's own `duration`, which is the diver's record "
             "and may have been edited - the two halves of the fraction have to come from the same place to be worth "
             "anything. Null alongside `attributed_seconds`.",

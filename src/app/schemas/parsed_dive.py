@@ -5,7 +5,7 @@ from typing import Annotated, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .dive import DecoAlgorithm, DiveMode, WaterType
+from .dive import DecoAlgorithm, DiveMode, Salinity
 from .dive_mixture import GasRole
 
 # The bounds `ck_dive_entry_latitude_range` and its three siblings enforce, and the only
@@ -205,7 +205,7 @@ class ParsedDevice(_ParserOutput):
     the diver named their computer after it.
 
     Every field is defaulted, unlike `DiveMixtureSchema`'s undefaulted block, and for the
-    reason `water_type` is: no format carries all six, so each parser passes the subset
+    reason `salinity` is: no format carries all six, so each parser passes the subset
     its format records and matching the stricter style would make every parse a
     `ValidationError`. What each parser reads is documented on its own `_device`.
 
@@ -388,19 +388,6 @@ class ParsedDiveSchema(_ParserOutput):
     start_time: str | None
     mixtures: list[DiveMixtureSchema]
 
-    # A form-prefill field like everything above it, not one of the server-side ones
-    # below: a FIT file's `dive_settings.water_type` is a *starting point* the diver can
-    # correct, and it reaches the dive through the ordinary `DiveCreateRequest` the
-    # prefilled form submits, never through a server-side write.
-    #
-    # **The `= None` default is deliberate, unlike its undefaulted neighbours above.**
-    # Both Suunto parsers construct this schema with explicit keyword arguments and
-    # neither format carries salinity, so matching the neighbouring style here would make
-    # every Suunto parse a `ValidationError`. The default is what makes "nothing to do
-    # for Suunto" true. No validator: the enum type is the guard, and the column has no
-    # `CHECK` to mirror.
-    water_type: WaterType | None = None
-
     # What recorded the file, on the same all-nullable terms as everything else here. Not
     # a form field and not a server-side write either, which makes it the first member on
     # this schema that is neither: nothing stores a device yet, and this reports what the
@@ -421,13 +408,15 @@ class ParsedDiveSchema(_ParserOutput):
     # where a setting would read as evidence of identity and is not.
     mode: DiveMode | None = None
     deco_model: ParsedDecoModel | None = None
+    # The density the computer was set to - FIT's `dive_settings.water_type`. A setting, like
+    # `mode`, and never a prefill of the dive's `water_type`: a calibration is not a kind of
+    # water. No validator: the enum type is the guard, and the column has no `CHECK`.
+    salinity: Salinity | None = None
 
     # Oxygen exposure and surface pressure, on the same all-nullable terms as everything
-    # above. These have no place on the dive *form* - they are the device's own
-    # accounting and a diver has no way to know them - so unlike the fields above they
-    # are written server-side at file attach rather than pre-filling anything. They ride
-    # on this schema anyway because `/dive/parse` returns it, which makes them visible in
-    # the import preview for free.
+    # above: the device's own accounting, written server-side onto the recording at file
+    # attach rather than pre-filling anything. They ride on this schema anyway because
+    # `/dive/parse` returns it, which makes them visible in the import preview for free.
     cns_start: float | None = None
     cns_end: float | None = None
     otu_start: float | None = None
@@ -472,7 +461,7 @@ class ParsedDiveSchema(_ParserOutput):
     @field_validator("cns_start", "cns_end", "otu_start", "otu_end")
     @classmethod
     def _drop_negative_exposure(cls, value: float | None) -> float | None:
-        """Oxygen loading does not run backwards, and `ck_dive_*_non_negative` says so.
+        """Oxygen loading does not run backwards, and `ck_dive_recording_*_non_negative` says so.
 
         `< 0`, not `<= 0`: a dive that began with **no** oxygen loading records a real 0,
         and telling that apart from "didn't record it" is exactly why those four
@@ -492,7 +481,7 @@ class ParsedDiveSchema(_ParserOutput):
     def _drop_implausible_surface_pressure(cls, value: float | None) -> float | None:
         """Outside 0.4-1.2 bar this is a unit error or an absent-marker, not a reading.
 
-        The same band `ck_dive_surface_pressure_range` enforces, and deliberately the same
+        The same band `ck_dive_recording_surface_pressure_range` enforces, and deliberately the same
         numbers rather than a looser sanity check: the point is that no value can reach
         that column without having passed the bound the column applies. Nulled rather than
         rejected, on the `_drop_unpressurized` principle above - a file whose barometer
@@ -506,7 +495,7 @@ class ParsedDiveSchema(_ParserOutput):
         Unattested in the corpus, unlike `_drop_unpressurized`: the 384 XML exports span
         1.031-1.067 bar and the 531 JSON readings 0.997-1.067, so not one of the 915 comes
         near either bound. It is here because of where the value lands, rather than because
-        a file was caught writing a bad one - `store_tech_scalars` runs
+        a file was caught writing a bad one - the readout write runs
         inside `store_recording_file`'s transaction, so a `CHECK` violation from a parsed number
         surfaces to the diver as `IntegrityError` -> "the file changed while this upload was
         in flight", advice that would be both wrong and unactionable: the retry it asks for

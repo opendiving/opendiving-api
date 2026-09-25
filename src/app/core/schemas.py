@@ -7,7 +7,7 @@ from pydantic import BaseModel, model_validator
 # Free-text "notes" fields (Dive, DiveSite, Trip) are stored as unbounded `Text`
 # columns in Postgres (VARCHAR(n) and TEXT perform identically there), so this
 # limit exists purely to keep payloads sane - not because of any storage constraint.
-NOTES_MAX_LENGTH = 10_000
+NOTES_MAX_LENGTH = 100_000
 
 DATE_RANGE_MESSAGE = "end_date must be on or after start_date"
 

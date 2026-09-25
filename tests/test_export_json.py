@@ -5,7 +5,7 @@ Three jobs, and they are not interchangeable.
 **Conformance.** The app claims to be DiveJSON's reference implementation, so the streamed
 bytes are checked against the published JSON Schema *and* against the rules spec §3 says
 the schema cannot express - identifier closure, cross-member arithmetic, profile-series
-integrity, the `exported_at` offset, the member order. `divejson.validate_document` is that
+integrity, the `exported_at` offset. `divejson.validate_document` is that
 whole rule set, from the reference implementation itself rather than a port of it; a
 schema-only check would pass documents `divejson validate` rejects, which is not a
 hypothetical (see `test_the_checker_is_not_vacuous`).
@@ -65,7 +65,9 @@ from tests.helpers.export import (
 )
 
 
-async def _stream(bundle: Any, monkeypatch: Any, profiles: dict[int, dict] | None = None, duration: int = 90) -> bytes:
+async def _stream(
+    bundle: Any, monkeypatch: Any, profiles: dict[int, dict] | None = None, duration: int = 90_000
+) -> bytes:
     payloads = profiles or {}
 
     async def fake_load_profile(db: Any, *, recording_id: int) -> LoadedProfile | None:
@@ -81,7 +83,7 @@ async def _render(
     monkeypatch: Any,
     profiles: dict[int, dict] | None = None,
     paths: Any = None,
-    duration: int = 90,
+    duration: int = 90_000,
     parser_key: str = "suunto_xml",
 ) -> dict:
     payloads = profiles or {}
@@ -189,9 +191,9 @@ class TestConformance:
         broken["exported_at"] = broken["exported_at"].replace("+00:00", "")
         assert any("must carry a UTC offset" in issue for issue in _issues(broken))
 
-        broken = {"version": document["version"], **document}
-        del broken["format"]
-        assert any('"format" MUST come first' in issue for issue in _issues(broken))
+        broken = json.loads(json.dumps(document))
+        broken["dives"][0]["recordings"][0] = {"mode": "gauge"}
+        assert any("a recording carries at least one of" in issue for issue in _issues(broken))
 
         broken = json.loads(json.dumps(document))
         broken["dives"][0]["mixtures"] = []
@@ -218,14 +220,41 @@ class TestConformance:
         unmoved: neither clamped, nor dropped, nor swallowed by a widened `duration`.
         """
         profile = {
-            "depth": {"t": [0, 30, 60], "v": [0, 1800, 300]},
-            "events": [{"t": 95, "type": "bookmark"}],
+            "depth": {"t": [0, 30_000, 60_000], "v": [0, 1800, 300]},
+            "events": [{"t": 95_000, "type": "bookmark"}],
         }
-        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: profile}, duration=60)
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: profile}, duration=60_000)
 
-        assert document["dives"][1]["recordings"][0]["profile"]["duration"] == 60
-        assert document["dives"][1]["recordings"][0]["profile"]["events"] == [{"time": 95, "type": "bookmark"}]
+        assert document["dives"][1]["recordings"][0]["profile"]["duration"] == 60_000
+        assert document["dives"][1]["recordings"][0]["profile"]["events"] == [{"time": 95_000, "type": "bookmark"}]
         assert _issues(document) == []
+
+
+class TestTheFormatChange:
+    @pytest.mark.asyncio
+    async def test_the_document_marks_its_axis_as_milliseconds(self, monkeypatch):
+        """Under this producer's key at the root, last - what this app's own reader keys on to
+        tell its exports from the ones written in seconds before the axis moved."""
+        document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+
+        assert list(document)[-1] == "extensions"
+        assert document["extensions"] == {"opendiving": {"profile_axis": "milliseconds"}}
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_recordings_salinity_is_written_and_a_stored_one_outside_it_is_not(self, monkeypatch):
+        bundle = full_bundle()
+        recording = bundle.recordings_by_dive[2][0]
+        bundle.recordings_by_dive[2][0] = replace(recording, salinity="en13319", readouts={"cns_end": 9.0})
+        bundle.recordings_by_dive[1][0] = replace(bundle.recordings_by_dive[1][0], salinity="brine")
+
+        document = await _render(bundle, monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
+
+        written = document["dives"][1]["recordings"][0]
+        assert (written["salinity"], written["cns_end"]) == ("en13319", 9.0)
+        assert list(written)[:4] == ["device", "mode", "deco_model", "salinity"]
+        assert "salinity" not in document["dives"][0]["recordings"][0]
+        _assert_conforms(document)
 
 
 class TestTheDeclaredShape:
@@ -245,8 +274,8 @@ class TestTheDeclaredShape:
 
     @pytest.mark.asyncio
     async def test_format_and_version_come_first(self, monkeypatch):
-        """A reader has to be able to dispatch on them before parsing anything else, which
-        is why the spec makes it a rule about the document's text rather than a courtesy."""
+        """A reader can dispatch on them before parsing anything else. The format asks this
+        of a writer (a SHOULD, spec §4) rather than grading a document on it."""
         document = await _render(full_bundle(), monkeypatch)
         assert list(document)[:2] == ["format", "version"]
         assert (document["format"], document["version"]) == (DIVEJSON_FORMAT, DIVEJSON_VERSION)
@@ -375,17 +404,18 @@ class TestWhatUddfCannotHold:
     @pytest.mark.asyncio
     async def test_the_per_cylinder_role_ppo2_limit_and_usage_survive(self, monkeypatch):
         """`role` and `usage` are the two UDDF has no slot for, which is why this document
-        exists. `po2_limit` is asserted beside them because it completes the cylinder's gas
-        planning, not because it is lost - it maps to `<mix><maximumpo2>`, which is why
+        exists. The ppO2 limit is asserted beside them because it completes the cylinder's
+        gas planning, not because it is lost - it maps to `<mix><maximumpo2>`, which is why
         `_MixKey` dedupes on it and why `test_the_planned_ppo2_lands_in_maximumpo2` pins it.
+        The format spells it `ppo2_limit`, and the stored `po2_limit` is renamed on the way.
 
-        `usage` rides in for free on `DiveMixtureBase` - the envelope re-wraps every read
-        as that schema - so this is what would catch it silently not doing so. The absent
-        `usage` is *absent* rather than null, which is the format's only spelling of it.
+        The absent `usage` is *absent* rather than null, which is the format's only spelling
+        of it.
         """
         document = await _render(full_bundle(), monkeypatch)
         cylinders = document["dives"][1]["cylinders"]
-        assert [(c["role"], c["po2_limit"], c.get("usage")) for c in cylinders] == [
+        assert all("po2_limit" not in c for c in cylinders)
+        assert [(c["role"], c["ppo2_limit"], c.get("usage")) for c in cylinders] == [
             ("bottom", 1.4, None),
             ("deco", 1.6, "staged"),
         ]
@@ -411,8 +441,13 @@ class TestWhatUddfCannotHold:
 
     @pytest.mark.asyncio
     async def test_cns_and_otu_are_here_since_uddf_has_no_slot_for_them(self, monkeypatch):
+        """On the recording that reported them, which here is one of readouts alone - a
+        record the format admits (§3 rule 4) - and never on the dive."""
         document = await _render(full_bundle(), monkeypatch)
-        assert (document["dives"][0]["cns_end"], document["dives"][0]["otu_end"]) == (8.0, 21.0)
+        dive = document["dives"][0]
+        assert dive["recordings"] == [{"surface_pressure": 1.013, "cns_end": 8.0, "otu_end": 21.0, "source_files": []}]
+        assert "cns_end" not in dive
+        _assert_conforms(document)
 
     @pytest.mark.asyncio
     async def test_the_entry_and_exit_positions_are_here_for_the_same_reason(self, monkeypatch):
@@ -451,7 +486,8 @@ class TestWhatUddfCannotHold:
     async def test_the_ceiling_channel_survives_in_the_embedded_profile(self, monkeypatch):
         """UDDF drops it (`<decostop>` needs a duration we do not have); this must not."""
         document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
-        assert document["dives"][1]["recordings"][0]["profile"]["ceiling"] == {"times": [60, 90], "values": [600, 300]}
+        ceiling = document["dives"][1]["recordings"][0]["profile"]["ceiling"]
+        assert ceiling == {"times": [60_000, 90_000], "values": [600, 300]}
 
 
 class TestTheCheckInDetails:
@@ -544,8 +580,8 @@ class TestTheProfileVocabulary:
             "surface_gradient_factor",
             "events",
         }
-        assert profile["depth"] == {"times": [0, 30, 60, 90], "values": [0, 1800, 5200, 300]}
-        assert profile["pressures"][0] == {"times": [0, 60], "values": [2320, 1400], "gas_number": 1}
+        assert profile["depth"] == {"times": [0, 30_000, 60_000, 90_000], "values": [0, 1800, 5200, 300]}
+        assert profile["pressures"][0] == {"times": [0, 60_000], "values": [2320, 1400], "gas_number": 1}
         assert profile["events"][0] == {"time": 0, "type": "gas_switch", "gas_number": 1}
 
     @pytest.mark.asyncio
@@ -578,7 +614,7 @@ class TestTheProfileVocabulary:
             "recordings"
         ][0]["profile"]
 
-        assert profile["ndl"] == {"times": [0, 30, 60], "values": [5940, 1260, 0]}
+        assert profile["ndl"] == {"times": [0, 30_000, 60_000], "values": [5940, 1260, 0]}
         assert profile["tts"]["values"] == [268, 120]
         assert profile["ppo2"]["values"] == [34, 96]
         assert profile["cns"]["values"] == [100, 800]
@@ -597,7 +633,7 @@ class TestTheProfileVocabulary:
         events = document["dives"][1]["recordings"][0]["profile"]["events"]
 
         unclassified = [event for event in events if "type" not in event]
-        assert unclassified == [{"time": 60, "label": "Ceiling Broken"}]
+        assert unclassified == [{"time": 60_000, "label": "Ceiling Broken"}]
         assert all(event.get("type") != "other" for event in events)
         _assert_conforms(document)
 
@@ -665,13 +701,16 @@ class TestTheRecordingsModeAndDecoModel:
         _assert_conforms(document)
 
     @pytest.mark.asyncio
-    async def test_neither_member_satisfies_the_rule_that_a_recording_describes_something(self, monkeypatch):
-        """§3's rule 4 counts three members and these two are not among them: a mode with no
-        device, no samples and no file behind it is a setting nothing recorded a dive with.
+    async def test_no_setting_satisfies_the_rule_that_a_recording_describes_something(self, monkeypatch):
+        """§3's rule 4 counts the device, the samples, the files and a readout, and no
+        setting: a mode, a model or a salinity with nothing recorded behind it is a setting
+        nothing recorded a dive with.
         """
         bundle = full_bundle()
         bundle.recordings_by_dive[2] = [
-            make_recording(9, UUIDS["recording-second"], mode="gauge", deco_model={"algorithm": "buhlmann"})
+            make_recording(
+                9, UUIDS["recording-second"], mode="gauge", deco_model={"algorithm": "buhlmann"}, salinity="en13319"
+            )
         ]
 
         document = await _render(bundle, monkeypatch)
@@ -686,7 +725,7 @@ class TestTheRecordingsModeAndDecoModel:
         document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
         profile = document["dives"][1]["recordings"][0]["profile"]
         assert profile["depth"]["values"] == [0, 1800, 5200, 300]
-        assert profile["temperature"] == {"times": [0, 60], "values": [249, 181]}
+        assert profile["temperature"] == {"times": [0, 60_000], "values": [249, 181]}
 
     @pytest.mark.asyncio
     async def test_a_merged_profile_exports_without_its_provenance(self, monkeypatch):

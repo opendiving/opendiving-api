@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -241,9 +241,29 @@ class TestOneComputersTwoRecordsFoldIntoOne:
         profile = await _profile(async_db, recording.id)
         times = profile.data["depth"]["t"]
         assert len(times) == FIRST_PART_SAMPLES + SECOND_PART_SAMPLES == 314
-        assert times[FIRST_PART_SAMPLES] == RESTART_DELTA
-        assert times[FIRST_PART_SAMPLES] - times[FIRST_PART_SAMPLES - 1] == 43
-        assert profile.duration == 3163
+        assert times[FIRST_PART_SAMPLES] == RESTART_DELTA * 1000
+        assert times[FIRST_PART_SAMPLES] - times[FIRST_PART_SAMPLES - 1] == 43_000
+        assert profile.duration == 3_163_000
+
+    @pytest.mark.asyncio
+    async def test_the_absorbed_records_readouts_fill_the_survivors_blanks(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """The fold keeps one recording, and the other half's figures fill what it lacks -
+        fill, never overwrite, the rule every second record of one recording follows."""
+        first, second = await _two_halves(async_db, db, diver)
+        await async_db.execute(
+            update(DiveRecording).where(DiveRecording.dive_id == first.id).values(cns_start=3.0, cns_end=5.0)
+        )
+        await async_db.execute(
+            update(DiveRecording).where(DiveRecording.dive_id == second.id).values(cns_end=11.0, otu_end=22.0)
+        )
+        await async_db.commit()
+
+        await _merge(async_db, diver, first, second)
+
+        [recording] = await _recordings(async_db, first)
+        assert (recording.cns_start, recording.cns_end, recording.otu_end) == (3.0, 5.0, 22.0)
 
     @pytest.mark.asyncio
     async def test_the_folded_samples_are_marked_as_a_merge(
@@ -380,7 +400,7 @@ class TestTwoDifferentComputers:
         appended = (await _recordings(async_db, first))[1]
         assert appended.start_time == datetime(2026, 9, 8, 12, 18, 10, tzinfo=UTC)
         profile = await _profile(async_db, appended.id)
-        assert profile.data["depth"]["t"] == [0, 10, 20, 30, 40]
+        assert profile.data["depth"]["t"] == [0, 10_000, 20_000, 30_000, 40_000]
         assert profile.dive_id == first.id
 
 
@@ -609,7 +629,7 @@ class TestTheSurvivingDiveReadsBackWhole:
         assert result.dive.duration == 3163
         assert len(result.dive.recordings) == 1
         assert result.dive.recordings[0].profile is not None
-        assert result.dive.recordings[0].profile.duration == 3163
+        assert result.dive.recordings[0].profile.duration == 3_163_000
         assert result.dive.recordings[0].profile.depth_sample_count == 314
         assert [file.original_filename for file in result.dive.recordings[0].files] == [
             "part-one.xml",
@@ -643,7 +663,7 @@ class TestWhenTheSurvivingDivesOwnRecordStartedLater:
         assert recording.start_time == datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC)
         times = (await _profile(async_db, recording.id)).data["depth"]["t"]
         assert min(times) == 0
-        assert max(times) == RESTART_DELTA + 20
+        assert max(times) == (RESTART_DELTA + 20) * 1000
 
 
 class TestASameDeviceParedWithNoStartToPlaceIt:
@@ -750,5 +770,5 @@ class TestTheTimeSpanWhenTheGapIsLonger:
 
         recording = (await _recordings(async_db, first))[0]
         times = (await _profile(async_db, recording.id)).data["depth"]["t"]
-        assert times[3] == 30 * 60
+        assert times[3] == 30 * 60 * 1000
         assert (await _row(async_db, first)).duration == 30 * 60 + 20

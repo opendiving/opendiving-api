@@ -1041,8 +1041,8 @@ Not row-per-sample: profiles are only ever fetched whole. JSONB, not packed `byt
 
 Values are integers (centimetres, tenths of a degree, tenths of a bar) via `Decimal(str(value))`
 with `ROUND_HALF_UP`; the scale lives in `schemas/dive_profile.py` and the web app's
-`PROFILE_CHANNELS`. `t` is integer seconds from the first sample of any channel; the later reading
-wins a shared second. A dropout is a gap in `t`, never a null. Pressure is a list keyed by
+`PROFILE_CHANNELS`. `t` is integer milliseconds from the recording's start; the later reading wins a
+shared millisecond. A dropout is a gap in `t`, never a null. Pressure is a list keyed by
 `gas_number`, a label not an index.
 
 Summary columns (`duration`, `depth_sample_count`, five extremes) sit outside `data`; `channels`
@@ -1246,19 +1246,17 @@ column exists for; zero still catches a negative.
 
 ## CNS, OTU and surface pressure are written by the import, never by the form
 
-`dive.cns_start`/`cns_end`/`otu_start`/`otu_end`/`surface_pressure_bar` are filled server-side in
-`services/dive_files.py::store_recording_file`, in the same `run_in_threadpool` hop and transaction
-as profile extraction. They are not on `DiveCreate`/`DiveUpdate`: `DiveTechScalars`
-(`schemas/dive.py`) is mixed into the read shapes only, so `DiveCreate`'s `extra="forbid"` turns an
-attempt into a 422.
+A recording's `cns_start`/`cns_end`/`otu_start`/`otu_end`/`surface_pressure_bar` are filled
+server-side in `services/dive_files.py::store_recording_file`, in the same `run_in_threadpool` hop
+and transaction as profile extraction, and by logbook import. No write schema carries them.
 
 Mixture fields round-trip through the form; these don't, since CNS and OTU depend on the device's
 algorithm and prior exposure, which nothing in a logged dive reconstructs.
 
-- The write is unconditional: replacing an export that recorded exposure with one that doesn't
-  clears the old readings. Only a failed extraction (logged, returns `None`) leaves them alone.
-- `delete_dive_file` clears them too, alongside the profile. Mixtures are not cleared; the diver may
-  have edited them.
+- The file that creates a recording writes them outright, clearing what it does not yield; a later
+  file fills. Only a failed extraction (logged, returns `None`) leaves them alone.
+- A deleted file's recording is re-derived from what remains. Mixtures are not cleared; the diver
+  may have edited them.
 - `extract_tech_scalars` never raises: it catches `DiveParseError`/`UnsupportedDiveFileError` then
   bare `Exception` — not `EXTRACTION_ERRORS`, which parsers catch internally and contains neither.
 - `surface_pressure_bar` is display-only; `services/dive_gas.py` assumes 1 bar at the surface.
@@ -1279,7 +1277,7 @@ JSON CNS is a fraction: the parser multiplies by 100, or a 69 % clock reads 0.06
 XML `SurfacePressure` is Pascal, not the millibar `_MILLIBAR_PER_BAR` covers. Cylinder pressures are
 millibar (`StartPressure: 207141` is 207.141 bar), but read as millibar 105700 is 105.7 bar; every
 XML export lands in 103100-106700, plausible only as Pascal, and the JSON twin writes the identical
-integer. `ck_dive_surface_pressure_range` is the backstop.
+integer. `ck_dive_recording_surface_pressure_range` is the backstop.
 
 FIT: `session`/`dive_summary` carry `start_cns`/`end_cns` (whole percent) and `o2_toxicity`, the
 ending OTU total rather than a delta — a dive held as both FIT and XML shows
@@ -1296,18 +1294,18 @@ docker compose exec api python -m src.scripts.backfill_dive_tech_fields
 ```
 
 Separate from `backfill_dive_profiles` because the selection differs: `PROFILE_EXTRACTOR_VERSION`
-lets that one skip a current profile; these columns have no version, so every primary recording with
-a file is a candidate each run (a cheap header parse).
+lets that one skip a current profile; these columns have no version, so every recording with a file
+is a candidate each run (a cheap header parse).
 
-It walks primary recordings (a second computer's CNS clock is its own), fills the device columns
-too, and never clears a reading the file lacks: a logbook-import match can fill one without bytes
-(*"A profile has one of three provenances, and a recording need not have a file"*).
+It fills each recording's readouts, device and settings columns; the dive's entry and exit fixes and
+its mixtures come from the primary alone. It fills blanks and never clears a reading the file lacks:
+a logbook-import match can fill one without bytes (*"A profile has one of three provenances, and a
+recording need not have a file"*).
 
-Dive scalars are overwritten outright. Mixture fields are best-effort via `merge_mixture_fields`
-(pure). Saves replace mixtures wholesale, so a stored `id` cannot name its parsed cylinder and
-position alone is too weak; counts must match and every pair must agree on `(oxygen, helium)`,
-all-or-nothing per dive, else `mixtures_skipped`. A parsed `None` fraction is not compared: the form
-filled `DEFAULT_MIXTURE`.
+Mixture fields are best-effort via `merge_mixture_fields` (pure). Saves replace mixtures wholesale,
+so a stored `id` cannot name its parsed cylinder and position alone is too weak; counts must match
+and every pair must agree on `(oxygen, helium)`, all-or-nothing per dive, else `mixtures_skipped`. A
+parsed `None` fraction is not compared: the form filled `DEFAULT_MIXTURE`.
 
 ## Manual DDL for the Phase 2 tech fields
 
@@ -1317,7 +1315,8 @@ no migration tool"*: `cns_start`, `cns_end`, `otu_start`, `otu_end`, `surface_pr
 `role VARCHAR(20)` on `dive_mixture`. Constraints `ck_dive_cns_start_non_negative`,
 `ck_dive_cns_end_non_negative`, `ck_dive_otu_start_non_negative`, `ck_dive_otu_end_non_negative`,
 `ck_dive_surface_pressure_range` (0.5-1.2), `ck_dive_mixture_po2_limit_range` (0.4-2.0),
-`ck_dive_mixture_gas_number_non_negative`.
+`ck_dive_mixture_gas_number_non_negative`. The five readings and their `CHECK`s live on
+`dive_recording`, as `ck_dive_recording_*` (*"A recording carries its readouts and its salinity"*).
 
 CNS is `DOUBLE PRECISION`, not integer: XML rounds to whole percent, JSON records 0.069. All
 nullable: each is absent from some format.
@@ -1354,8 +1353,7 @@ FIT's ceiling is `record.next_stop_depth`; neighbours `next_stop_time`, `time_to
 `dive_profile.data` carries `"events": [{t, type, gas_number?, label?}]`,
 `type ∈ {gas_switch, deep_stop, safety_stop, bookmark, other}` (`ProfileEventType`).
 `_validate_events` rejects an `other` without `label`. `normalize` sorts them; validation is
-separate from `_validate_series`. Rebasing clamps at zero, so the opening
-`<GasChangeTime>0</GasChangeTime>` survives.
+separate from `_validate_series`. A marker before the axis's zero is clamped to it, never dropped.
 
 - Suunto XML: gas switches only, from `<DiveGasChanges>` inside each `<DiveMixture>`, so
   `gas_number` is `_parse_mixture`'s position.
@@ -2168,8 +2166,8 @@ becomes
   `oxygen` and `helium` stay unguarded.
 - The `noop` branch's writes and commit share one `try`/`rollback`, since a `CHECK` raises from
   `execute()` (`TestReExtractionFailureDoesNotFailTheRequest`).
-- `begin_nested()` per dive in `backfill_tech_fields` wraps the statements; a rejected dive counts
-  into `failed`.
+- `begin_nested()` per recording in `backfill_tech_fields` wraps the statements; a rejected
+  recording counts into `failed`.
 
 A one-sided comparison is not a bound (`nan < 0` and `'NaN'::float8 >= 0` both pass), and
 `JSONResponse` (`allow_nan=False`) 500s `GET /dives`. `_ParserOutput`, base of `DiveMixtureSchema`,
@@ -3152,18 +3150,16 @@ resolves with its schedules and records.
 ## Water type and altitude are dive columns, and the gas math deliberately ignores them
 
 `dive.water_type` and `dive.altitude` are nullable, form-writable and feed no arithmetic.
-`WaterType` (`schemas/dive.py`) is a `StrEnum` of `salt`, `fresh`, `brackish`, `en13319`, ordered
-for the picker; `en13319` is a calibration kept for import fidelity (Shearwater, Garmin FIT) under
-*"Parsers report what a file recorded"*. No `OTHER` (`NULL` means not recorded) and no `CHECK`, per
-`GearItem.type`. `altitude` is `Integer` metres under `ck_dive_altitude_range` (`-450..6500`), which
-needs a `_DIVE_CONSTRAINT_MESSAGES` entry (`api/v1/dives.py`) or the 422 misdescribes itself.
-Neither is a `DiveTechScalars` field, since `store_tech_scalars` overwrites every field on
-re-attach. FIT seeds it from `_FitScan`'s `dive_settings` via `_water_type` (`custom` nulled) and
-`ParsedDiveSchema`, whose `water_type = None` default the Suunto parsers rely on. `METERS_PER_BAR`
-stays 10.0: a column `NULL` on most rows would step one diver's trend by 3%. UDDF carries `altitude`
-(`informationbeforediveType`) but no `water_type`, 3.2.2 having no per-dive salinity; `dives.csv`
-gains `water_type` and `altitude_m`. Any future `GET /dives` filter must join `_cached_read_dives`'
-`key_prefix`.
+`WaterType` (`schemas/dive.py`) is a `StrEnum` of `salt`, `fresh`, `brackish`, ordered for the
+picker; the density a computer was set to, `en13319` among them, is the recording's `salinity`. No
+`OTHER` (`NULL` means not recorded) and no `CHECK`, per `GearItem.type`. `altitude` is `Integer`
+metres under `ck_dive_altitude_range` (`-450..6500`), which needs a `_DIVE_CONSTRAINT_MESSAGES`
+entry (`api/v1/dives.py`) or the 422 misdescribes itself. Neither is a `DiveTechScalars` field,
+since `store_tech_scalars` overwrites every field on re-attach, and no parser seeds either.
+`METERS_PER_BAR` stays 10.0: a column `NULL` on most rows would step one diver's trend by 3%. UDDF
+carries `altitude` (`informationbeforediveType`) but no `water_type`, 3.2.2 having no per-dive
+salinity; `dives.csv` gains `water_type` and `altitude_m`. Any future `GET /dives` filter must join
+`_cached_read_dives`' `key_prefix`.
 
 ## Measurements are metric in the database and on the wire; `units` is who's looking
 
@@ -6007,9 +6003,9 @@ cannot claim the unknown state; only the importer passes `None`.
 
 ## The surface-pressure floor is 0.4 bar, because the altitude ceiling says so
 
-`ck_dive_surface_pressure_range` is `[0.4, 1.2]` because ambient pressure at
+`ck_dive_recording_surface_pressure_range` is `[0.4, 1.2]` because ambient pressure at
 `ck_dive_altitude_range`'s 6500 m ceiling is about 0.44 bar; a higher floor refuses a surface
-pressure the altitude bound blesses. DiveJSON §6.2 bands the member at 0.4–1.2 for the same reason,
+pressure the altitude bound blesses. DiveJSON §6.4a bands the member at 0.4–1.2 for the same reason,
 and an importer must not drop a value the format blesses. The band is stated in the constraint, in
 `_drop_implausible_surface_pressure` (whose docstring pins itself to the CHECK's numbers), in the
 constraint message `api/v1/dives.py` serves, in `suunto_xml.py`'s backstop comment, and in the two
@@ -6031,8 +6027,7 @@ on the bare path.
 The profile's `duration` is the document's (§6.4 allows it past the last sample; it is the
 gas-coverage denominator) via a `store_profile` override, clamped up if below its samples.
 
-Samples skip `normalize()`, which rebases onto the earliest reading; `times` are already elapsed
-(§6.5).
+Samples skip `normalize()`; `times` are already milliseconds from the recording's start (§6.5).
 
 ## A bare document creates no file rows, and only the archive restores bytes
 
@@ -6113,18 +6108,19 @@ Rejected: restore-means-restore for preferences; filling only empty details.
 
 ## The certification agency vocabulary is the format's, value for value, and cannot grow again
 
-`CertificationAgency` equals DiveJSON's §6.16 enum value for value and in order, `andi`, `snsi`,
-`acuc`, `pss` and `ida` included. The column is a plain `VARCHAR(32)` with no DB `CHECK`, for the
-reason `gear_item.type` has none, so the vocabulary needs no migration.
+`CertificationAgency` equals DiveJSON's §6.16 enum value for value and in order, the twenty of the
+format's last widening before 1.0 (`ndl` to `diwa`) included. The column is a plain `VARCHAR(32)`
+with no DB `CHECK`, for the reason `gear_item.type` has none, so the vocabulary needs no migration.
 
 Rejected: laundering real agencies through `other`/`agency_other` on the way in, which makes a round
 trip lossy on a member the format guarantees.
 
 The list cannot grow: a certification's `agency` is a REQUIRED member of a closed set, and §7
 freezes those at 1.0 because a reader treats an unrecognized value as absent, which for a REQUIRED
-member leaves the record uninterpretable. That is why the spec seeded the list wide, and why a
-national CMAS federation is `cmas`. The freeze holds for the whole enum although a course's `agency`
-is OPTIONAL: one list is shared by both, so the certification's requiredness is what governs it.
+member leaves the record uninterpretable. That is why the spec seeded the list wide and widened it
+once more before the tag, and why a national CMAS federation is `cmas`. The freeze holds for the
+whole enum although a course's `agency` is OPTIONAL: one list is shared by both, so the
+certification's requiredness is what governs it.
 
 ## Logbook import spools its upload and still parses the document whole
 
@@ -6175,10 +6171,9 @@ the uploaded bytes and apply converts again, deterministic except `exported_at`,
 logbook import wants a whole logbook in a format other applications write. The same file read both
 ways differs; none of it is a defect. Known differences: `gas_number` (a position there, the file's
 number here); `bottom_temperature` (unmapped there, a minimum over samples here); precision
-(`parse_float=Decimal` there, `_round2_or_none` through `float` here); the profile time axis
-(`dive_profiles.normalize` rebases onto the earliest reading, ~+1 s); `duration` on a half-second
+(`parse_float=Decimal` there, `_round2_or_none` through `float` here); `duration` on a half-second
 (`round()` here, `ROUND_HALF_UP` there); `DiveRouteOrigin` rounded to six places by
-`positions.geo_fix`; per-second merging keeping first there, `_rebase` last here; bounds, zero
+`positions.geo_fix`; per-millisecond merging keeping first there, `_rebase` last here; bounds, zero
 floors, `null`, `ActivityType` and `Header.DateTime` rules the library applies and this parser does
 not; `can_parse` requiring `.json`. Only the library records `source_generator`. The list is a
 floor; add to it rather than reconciling.
@@ -6451,25 +6446,25 @@ recording; different devices or a NULL start append. The offset is the recording
 dives'. The gap stays empty: `join_profiles` is not `fill_channels`; pressure joins by `gas_number`;
 markers all stay. Provenance is `merge`, so `should_extract` never re-extracts; files stay.
 `duration`, `max_depth` and `dive_figures` recompute, `None` meaning leave alone; `start_time` and
-oxygen readings stay, `refresh_tech_scalars` uncalled. An `avg_depth` failing
-`ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers` precedes the join,
-keeping `usage`; moved profiles use `replace_profile_samples`, never `store_profile`. Join rows
-re-point, collisions stay, notes append within `NOTES_MAX_LENGTH`. `_rederive_recording` and
-`delete_recording` are not reused.
+the fixes stay, `refresh_tech_scalars` uncalled; the absorbed record's readouts fill the survivor's
+blanks. An `avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write.
+`relabel_gas_numbers` precedes the join, keeping `usage`; moved profiles use
+`replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
+within `NOTES_MAX_LENGTH`. `_rederive_recording` and `delete_recording` are not reused.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
 `_fill_recording` in the import writer writes two things that belong to the dive, not the matched
-recording: oxygen-exposure readings (`fill_tech_scalars`) and cylinders (`fill_dive_mixtures`). Both
-are the primary recording's — a second computer's CNS clock is its own arithmetic, its cylinder
-labelling its own numbering — and `_rederive_recording` already returns before both for
-`ordinal != 0`.
+recording: the entry and exit fixes (`fill_tech_scalars`) and cylinders (`fill_dive_mixtures`). Both
+are the primary recording's — the dive's columns come from its primary, and a second computer's
+cylinder labelling is its own numbering — and `_rederive_recording` already returns before both for
+`ordinal != 0`. The readouts are the matched recording's own and are filled above that line.
 
 So `PlannedRecordingMatch` carries `ordinal`: `None` on an `attach`, where no stored recording is
 named and the writer computes the slot with `next_ordinal`, and the writer returns before both
 writes for anything but ordinal 0. Otherwise a Suunto export imported as a second reading of a
 secondary recording credits the primary with the Suunto's numbers; `fill_mixture_fields`'
-`(oxygen, helium)` join guards cylinders only by accident, the scalars not at all. Required, not
+`(oxygen, helium)` join guards cylinders only by accident, the fixes not at all. Required, not
 defaulted, as `PlannedRecordingMatch.mixtures` is: an empty default can leave a whole path
 unreachable unnoticed.
 
@@ -6496,10 +6491,11 @@ serves `RecordingProfileRead`, a subclass adding `provenance`, and `to_recording
 
 ## A deletion re-derives the dive's readings only where it touched the primary recording
 
-`refresh_tech_scalars` rewrites every `DiveTechScalars` field outright from ordinal 0. After a
-secondary's file is deleted on a multi-recording dive it is a loss: a file-less logbook-import
-primary (`services/logbook_import/writer.py`) gives `read_recording` nothing, so every field goes
-`None`; a primary with files loses the document's `cns_end` and unparsed `otu_end`.
+`refresh_tech_scalars` rewrites every `DiveTechScalars` field - the entry and exit fixes - outright
+from ordinal 0. After a secondary's file is deleted on a multi-recording dive it is a loss: a
+file-less logbook-import primary (`services/logbook_import/writer.py`) gives `read_recording`
+nothing, so every field goes `None`; a primary with files loses a position only the document
+supplied.
 
 So it takes a required `touched_primary`; `False` is a no-op. The answer cannot be read inside,
 `renumber_ordinals` having closed the gap: `delete_dive_file` uses the ordinal it reads before the
@@ -6724,14 +6720,14 @@ the ones that are 1, so no channel looks like the unscaled odd one out.
 
 | channel                                      | unit                | why                                                                |
 | -------------------------------------------- | ------------------- | ------------------------------------------------------------------ |
-| `ndl`, `tts`                                 | seconds             | the format's duration unit; devices report minutes or seconds      |
+| `ndl`, `tts`                                 | seconds             | the values are durations; devices report minutes or seconds        |
 | `ppo2`                                       | hundredths of a bar | tenths cannot tell 1.30 from 1.32; Shearwater exports two decimals |
 | `cns`                                        | tenths of a percent | Suunto JSON records `0.069` where the XML rounds to `7`            |
 | `gradient_factor`, `surface_gradient_factor` | whole percent       | every source reports whole percent                                 |
 
 Rejected: millibar for ppO₂ (no source resolves below a hundredth) and reusing tenths-of-a-bar
-because it is "a pressure". `cns` the channel and `dive.cns_start`/`cns_end` are different
-quantities, neither derived from the other; the dive columns are the device's own whole-percent
+because it is "a pressure". `cns` the channel and a recording's `cns_start`/`cns_end` are different
+quantities, neither derived from the other; the recording columns are the device's own whole-percent
 figures and follow *"A second file of one recording fills, and never overwrites"*.
 
 ## Zero is a reading, a negative is an absent-marker, and neither rule is the ceiling's
@@ -6790,21 +6786,21 @@ helium summing past 100. The pair travels whole: one gradient factor alone names
 
 ## The decompression channels arrive for new dives only
 
-`PROFILE_EXTRACTOR_VERSION` is 4 and `should_extract` re-extracts any profile behind it, so the
-existing script picks the corpus up unchanged:
+Version 4 of `PROFILE_EXTRACTOR_VERSION` brought them, and revision `ce09bc7d4c64` stamps every
+stored row with version 5 as it moves the axis, so only a forced run re-derives an older one:
 
 ```bash
-docker compose exec api python -m src.scripts.backfill_dive_profiles
+docker compose exec api python -m src.scripts.backfill_dive_profiles --force
 ```
 
-Nothing runs it. Profiles already stored keep the four channels they have until their recording is
-re-uploaded; the new data is worth having for new dives without a pass over old ones. Running the
-backfill changes every profile ETag (`{source_sha256}:{extractor_version}`) and flushes the dive
-caches of every user it touches, which is the cost of running it on a whim. A migration is the wrong
-place regardless: re-extraction reads dive-computer files out of the blob store, and an Alembic
-revision has neither the blob store nor the parsers. Stale rows read harmlessly: `profile_from_data`
-and `to_read_schema` read every channel with `.get`, so a payload with no key for a newer channel
-raises no `KeyError`, and its NULL summary columns are what `channels` means by no such curve.
+Nothing runs it. Profiles already stored keep the channels they have; the new data is worth having
+for new dives without a pass over old ones. Running the backfill changes every profile ETag
+(`{source_sha256}:{extractor_version}`) and flushes the dive caches of every user it touches, which
+is the cost of running it on a whim. A migration is the wrong place regardless: re-extraction reads
+dive-computer files out of the blob store, and an Alembic revision has neither the blob store nor
+the parsers. Stale rows read harmlessly: `profile_from_data` and `to_read_schema` read every channel
+with `.get`, so a payload with no key for a newer channel raises no `KeyError`, and its NULL summary
+columns are what `channels` means by no such curve.
 
 ## The dive *detail* cache key carries no version, and any suffix goes after the colon
 
@@ -7022,3 +7018,49 @@ for the few minutes of skew and then costs a second pass over the same schemas, 
 take out — and which, held longer than that, is a second spelling of a member the format defines
 once. The migration is a separate question and keeps its guards: it is about data already stored,
 not about a window.
+
+## A recording carries its readouts and its salinity
+
+`cns_start`, `cns_end`, `otu_start`, `otu_end`, `surface_pressure_bar` and `salinity` are
+`dive_recording` columns, as DiveJSON §6.4a has them: each is one device's own arithmetic or
+setting, and two computers on one dive give two answers. Every recording's files write its own; the
+dive page and `dives.csv` show the primary's. A recording of readouts alone is a record (§3 rule 4)
+\- a hand-logged `.ssrf` dive's `@cns`, or a dive whose readouts had no recording - and a setting
+alone is not, so export and import both drop a recording carrying only `mode`, `deco_model` or
+`salinity`. `en13319` is a salinity, never a `water_type`. Recordings stored before the move carry
+readouts on the primary only, since a migration reads no file;
+`src/scripts/backfill_dive_tech_fields.py` fills the rest. *Rejected:* dive-level copies of the
+primary's, two spellings of one fact.
+
+## The profile axis is milliseconds, counted from the recording's start
+
+`dive_profile` stores `t` and `duration` in integer milliseconds, DiveJSON's axis unit; a parser's
+fractional seconds round to the millisecond, the later reading winning a collision. `normalize`
+keeps a file's own start - the header instant its parser's axis counts from - as zero, so a first
+reading keeps the offset it states, and `extract_recording` shifts each file by its start's signed
+offset from the recording's stored start, on `delta_seconds`' clock, clamping a reading before zero
+to it. `ndl`/`tts` values, a dive's `duration`, `dive_recording.duration` and
+`GasAttribution.seconds` stay seconds. Rows stored before the change keep whole-second resolution
+and their first-reading origin, multiplied, until `src/scripts/backfill_dive_profiles.py --force`
+re-derives the file-backed ones; a `merge` profile keeps its origin for good. *Rejected:* the first
+reading as zero, which puts an export's axis off its own `started_at`.
+
+## A document from before the axis moved is read as its writer wrote it
+
+A document written before DiveJSON moved the axis to milliseconds and the readouts onto the
+recording uses the same member names, and the importer ignores what it does not know (§5.6), so it
+would read a thousand times short and lose its readouts silently. Two writers are known. This app
+marks every export with `extensions.opendiving.profile_axis: "milliseconds"` at the root, so a
+document with the producer key on its diver and no marker is one of its own from before.
+`divejson convert` names itself with a constant, and its releases below 0.13.0, compared as a parsed
+tuple, are the other. `reader.read_as_written` rewrites both into the current shape and reports each
+kind it read. *Rejected:* keying on this app's `generator.name`, which is the configurable
+`APP_NAME`, or on its `generator.version`, which an edge build shares with the release before it.
+
+## Notes are capped at 100 000, and an import reads any length
+
+DiveJSON caps no note. `NOTES_MAX_LENGTH` stays this app's limit on what its forms accept, at a
+figure no real note reaches, since a lower one leaves a longer imported note uneditable through the
+form. The import models read any length and the planner stores a longer note cut at the cap with a
+report line: the read shapes validate the length, so a longer stored note would 500 its record.
+*Rejected:* dropping the application cap, which leaves every form unbounded.
