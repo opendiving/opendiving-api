@@ -35,8 +35,8 @@ _MILLIBAR_PER_BAR = Decimal("1000")
 # over. Every one of the 384 XML exports lands in 103100-106700, which is a plausible
 # barometric range only on the Pascal reading; and the same dives exported as JSON write
 # the identical integer into `Header.Diving.SurfacePressure`, which that parser already
-# treats as Pascal. `ck_dive_surface_pressure_range` (0.4-1.2 bar) is the backstop that
-# would catch this being got wrong again.
+# treats as Pascal. `ck_dive_recording_surface_pressure_range` (0.4-1.2 bar) is the
+# backstop that would catch this being got wrong again.
 _PASCALS_PER_BAR = Decimal("100000")
 # Millibar -> tenths of a bar. The depth/temperature conversions this shares with the
 # other parsers live in `channels.py`; see `schemas/dive_profile.py` for why the profile

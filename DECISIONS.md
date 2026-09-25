@@ -1294,18 +1294,18 @@ docker compose exec api python -m src.scripts.backfill_dive_tech_fields
 ```
 
 Separate from `backfill_dive_profiles` because the selection differs: `PROFILE_EXTRACTOR_VERSION`
-lets that one skip a current profile; these columns have no version, so every primary recording with
-a file is a candidate each run (a cheap header parse).
+lets that one skip a current profile; these columns have no version, so every recording with a file
+is a candidate each run (a cheap header parse).
 
-It walks primary recordings (a second computer's CNS clock is its own), fills the device columns
-too, and never clears a reading the file lacks: a logbook-import match can fill one without bytes
-(*"A profile has one of three provenances, and a recording need not have a file"*).
+It fills each recording's readouts, device and settings columns; the dive's entry and exit fixes and
+its mixtures come from the primary alone. It fills blanks and never clears a reading the file lacks:
+a logbook-import match can fill one without bytes (*"A profile has one of three provenances, and a
+recording need not have a file"*).
 
-Dive scalars are overwritten outright. Mixture fields are best-effort via `merge_mixture_fields`
-(pure). Saves replace mixtures wholesale, so a stored `id` cannot name its parsed cylinder and
-position alone is too weak; counts must match and every pair must agree on `(oxygen, helium)`,
-all-or-nothing per dive, else `mixtures_skipped`. A parsed `None` fraction is not compared: the form
-filled `DEFAULT_MIXTURE`.
+Mixture fields are best-effort via `merge_mixture_fields` (pure). Saves replace mixtures wholesale,
+so a stored `id` cannot name its parsed cylinder and position alone is too weak; counts must match
+and every pair must agree on `(oxygen, helium)`, all-or-nothing per dive, else `mixtures_skipped`. A
+parsed `None` fraction is not compared: the form filled `DEFAULT_MIXTURE`.
 
 ## Manual DDL for the Phase 2 tech fields
 
@@ -6005,7 +6005,7 @@ cannot claim the unknown state; only the importer passes `None`.
 
 `ck_dive_recording_surface_pressure_range` is `[0.4, 1.2]` because ambient pressure at
 `ck_dive_altitude_range`'s 6500 m ceiling is about 0.44 bar; a higher floor refuses a surface
-pressure the altitude bound blesses. DiveJSON §6.2 bands the member at 0.4–1.2 for the same reason,
+pressure the altitude bound blesses. DiveJSON §6.4a bands the member at 0.4–1.2 for the same reason,
 and an importer must not drop a value the format blesses. The band is stated in the constraint, in
 `_drop_implausible_surface_pressure` (whose docstring pins itself to the CHECK's numbers), in the
 constraint message `api/v1/dives.py` serves, in `suunto_xml.py`'s backstop comment, and in the two
@@ -6455,16 +6455,16 @@ within `NOTES_MAX_LENGTH`. `_rederive_recording` and `delete_recording` are not 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
 `_fill_recording` in the import writer writes two things that belong to the dive, not the matched
-recording: oxygen-exposure readings (`fill_tech_scalars`) and cylinders (`fill_dive_mixtures`). Both
-are the primary recording's — a second computer's CNS clock is its own arithmetic, its cylinder
-labelling its own numbering — and `_rederive_recording` already returns before both for
-`ordinal != 0`.
+recording: the entry and exit fixes (`fill_tech_scalars`) and cylinders (`fill_dive_mixtures`). Both
+are the primary recording's — the dive's columns come from its primary, and a second computer's
+cylinder labelling is its own numbering — and `_rederive_recording` already returns before both for
+`ordinal != 0`. The readouts are the matched recording's own and are filled above that line.
 
 So `PlannedRecordingMatch` carries `ordinal`: `None` on an `attach`, where no stored recording is
 named and the writer computes the slot with `next_ordinal`, and the writer returns before both
 writes for anything but ordinal 0. Otherwise a Suunto export imported as a second reading of a
 secondary recording credits the primary with the Suunto's numbers; `fill_mixture_fields`'
-`(oxygen, helium)` join guards cylinders only by accident, the scalars not at all. Required, not
+`(oxygen, helium)` join guards cylinders only by accident, the fixes not at all. Required, not
 defaulted, as `PlannedRecordingMatch.mixtures` is: an empty default can leave a whole path
 unreachable unnoticed.
 

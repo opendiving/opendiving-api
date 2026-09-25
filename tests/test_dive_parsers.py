@@ -2322,7 +2322,7 @@ class TestTechScalars:
 
     def test_an_out_of_band_surface_pressure_reads_as_no_reading(self):
         """Unattested in the corpus - all 384 XML exports land in 1.031-1.067 bar - but
-        the band is the one `ck_dive_surface_pressure_range` enforces, and the column is
+        the band is the one `ck_dive_recording_surface_pressure_range` enforces, and the column is
         written inside `store_recording_file`'s transaction. A value the CHECK rejects would
         therefore fail the *attach* of an otherwise importable file, reported to the diver
         as a concurrent-upload conflict that no retry can clear. Nulled here instead."""
@@ -2473,7 +2473,7 @@ class TestTechScalars:
     def test_a_zero_or_negative_depth_reads_as_no_depth(self):
         """`<= 0`, against `_drop_negative_exposure`'s `< 0` one method over - the two
         constraints genuinely differ (`ck_dive_max_depth_positive` is `> 0`,
-        `ck_dive_cns_start_non_negative` is `>= 0`), because a dive that began with no
+        `ck_dive_recording_cns_start_non_negative` is `>= 0`), because a dive that began with no
         oxygen loading recorded a real 0 and a dive to 0 m did not happen."""
         content = f"""<?xml version="1.0" encoding="utf-8"?>
 <Dive xmlns="{SUUNTO_NS}">

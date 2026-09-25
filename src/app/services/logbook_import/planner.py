@@ -318,10 +318,10 @@ class PlannedRecordingMatch:
     recording_id: int | None
     recording: PlannedRecording
     # **The matched recording's position on its dive, and it decides what the writer may
-    # touch beyond the recording itself.** A fill writes the dive's oxygen-exposure readings
-    # and fills its cylinders, and both of those are the *primary* recording's to write - a
-    # second computer's CNS clock is its own device's arithmetic, and its cylinder labelling
-    # is its own. The attach path has enforced that since recordings arrived
+    # touch beyond the recording itself.** A fill writes the dive's entry and exit fixes and
+    # fills its cylinders, and both of those are the *primary* recording's to write - the
+    # dive's columns come from its primary, and a second computer's cylinder labelling is its
+    # own. The attach path has enforced that since recordings arrived
     # (`_rederive_recording` returns before both for `ordinal != 0`); this side could not,
     # having no ordinal to hand, so it wrote them for whichever recording matched. `None`
     # on an `attach`, where no stored recording is named and the writer computes the slot.
