@@ -12,7 +12,8 @@ from sqlalchemy import CheckConstraint
 
 from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
-from src.app.schemas.dive import DecoAlgorithm, DiveCreate, DiveMode, WaterType
+from src.app.models.dive_recording import DiveRecording
+from src.app.schemas.dive import DecoAlgorithm, DiveCreate, DiveMode, Salinity
 from src.app.schemas.dive_mixture import GasRole
 from src.app.schemas.parsed_dive import (
     LATITUDE_LIMIT,
@@ -1598,10 +1599,10 @@ class TestFitParserDiveSummary:
         assert FitParser.parse(content).max_depth == 27.5
 
 
-class TestFitWaterType:
+class TestFitSalinity:
     """`dive_settings.water_type` is the only salinity evidence any supported export
-    carries, and the one field the FIT parser contributes to the dive *form* rather than
-    to the server-side tech scalars.
+    carries, and it is the recording's `salinity` - a setting of the computer, never a
+    prefill of the dive's water type.
 
     The vocabulary is kept verbatim - a computer left on its EN13319 factory calibration
     imports as `en13319`, not as the nearest real water. Folding it into `salt` would be
@@ -1612,26 +1613,32 @@ class TestFitWaterType:
     @pytest.mark.parametrize(
         ("native", "expected"),
         [
-            ("salt", WaterType.SALT),
-            ("fresh", WaterType.FRESH),
-            ("en13319", WaterType.EN13319),
+            ("salt", Salinity.SALT),
+            ("fresh", Salinity.FRESH),
+            ("en13319", Salinity.EN13319),
         ],
     )
-    def test_each_named_salinity_survives_the_import(self, native: str, expected: WaterType) -> None:
+    def test_each_named_salinity_survives_the_import(self, native: str, expected: Salinity) -> None:
         content = dive_fit_file(message("dive_settings", water_type=native))
 
-        assert FitParser.parse(content).water_type is expected
+        assert FitParser.parse(content).salinity is expected
 
-    def test_a_custom_density_is_not_a_water_type(self) -> None:
+    def test_a_custom_density_is_not_a_named_setting(self) -> None:
         """`custom` means the diver dialled in a `water_density` number, which has no
-        column here - so the file records no water *type*, and that is what `None` says.
+        column here - so the file records no named setting, and that is what `None` says.
         Picking `salt` off a density near 1030 would be inventing the reading."""
         content = dive_fit_file(message("dive_settings", water_type="custom", water_density=1030.0))
 
-        assert FitParser.parse(content).water_type is None
+        assert FitParser.parse(content).salinity is None
 
     def test_a_file_with_no_dive_settings_records_nothing(self) -> None:
-        assert FitParser.parse(dive_fit_file()).water_type is None
+        assert FitParser.parse(dive_fit_file()).salinity is None
+
+    def test_the_dive_form_is_not_offered_a_water_type(self) -> None:
+        """A calibration is not a kind of water, so nothing seeds the form's `water_type`."""
+        content = dive_fit_file(message("dive_settings", water_type="en13319"))
+
+        assert "water_type" not in FitParser.parse(content).model_dump()
 
     def test_dive_settings_written_after_the_session_still_count(self) -> None:
         """The branch sits *above* `_collect`'s first-session cut, which is what makes
@@ -1644,7 +1651,7 @@ class TestFitWaterType:
             message("dive_settings", water_type="fresh"),
         )
 
-        assert FitParser.parse(content).water_type is WaterType.FRESH
+        assert FitParser.parse(content).salinity is Salinity.FRESH
 
     def test_the_first_setting_wins_on_a_two_dive_file(self) -> None:
         """Same rule as `session`: the first dive is the one the file is about."""
@@ -1661,19 +1668,19 @@ class TestFitWaterType:
             ),
         )
 
-        assert FitParser.parse(content).water_type is WaterType.SALT
+        assert FitParser.parse(content).salinity is Salinity.SALT
 
-    def test_neither_suunto_export_claims_a_water_type(self) -> None:
+    def test_neither_suunto_export_claims_a_salinity(self) -> None:
         """Neither format carries salinity anywhere, so `None` is the honest answer - and
-        `ParsedDiveSchema.water_type`'s default is what supplies it, since both Suunto
+        `ParsedDiveSchema.salinity`'s default is what supplies it, since both Suunto
         parsers build the schema from explicit keyword arguments."""
         xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <Dive xmlns="{SUUNTO_NS}"><Duration>1800</Duration></Dive>
 """.encode()
         json_content = json.dumps({"DeviceLog": {"Header": {"Duration": 1800}}}).encode()
 
-        assert SuuntoXmlParser.parse(xml).water_type is None
-        assert SuuntoJsonParser.parse(json_content).water_type is None
+        assert SuuntoXmlParser.parse(xml).salinity is None
+        assert SuuntoJsonParser.parse(json_content).salinity is None
 
 
 class TestParsersReportTheDevice:
@@ -2332,7 +2339,9 @@ class TestTechScalars:
         """Not a looser sanity check that happens to sit inside the CHECK: the point is
         that nothing can reach the column having passed a weaker test than the column's."""
         constraint = next(
-            c for c in Dive.__table__.constraints if getattr(c, "name", None) == "ck_dive_surface_pressure_range"
+            c
+            for c in DiveRecording.__table__.constraints
+            if getattr(c, "name", None) == "ck_dive_recording_surface_pressure_range"
         )
         sqltext = str(constraint.sqltext)
 
@@ -2356,8 +2365,8 @@ class TestTechScalars:
         assert parsed_with(1.21) is None
 
     def test_a_negative_exposure_reading_reads_as_no_reading(self):
-        """Oxygen loading does not run backwards. Unguarded, a negative here violated
-        `ck_dive_cns_start_non_negative` *inside* `store_recording_file`'s transaction, so the
+        """Oxygen loading does not run backwards. Unguarded, a negative here violates
+        `ck_dive_recording_cns_start_non_negative` *inside* `store_recording_file`'s transaction, so the
         attach rolled back and the diver got a 409 telling them to retry an upload that
         could never succeed."""
         content = f"""<?xml version="1.0" encoding="utf-8"?>
@@ -2575,11 +2584,11 @@ class TestTechScalars:
         bounded = {
             (Dive, "avg_depth"),
             (Dive, "max_depth"),
-            (Dive, "cns_start"),
-            (Dive, "cns_end"),
-            (Dive, "otu_start"),
-            (Dive, "otu_end"),
-            (Dive, "surface_pressure_bar"),
+            (DiveRecording, "cns_start"),
+            (DiveRecording, "cns_end"),
+            (DiveRecording, "otu_start"),
+            (DiveRecording, "otu_end"),
+            (DiveRecording, "surface_pressure_bar"),
             (Dive, "entry_latitude"),
             (Dive, "entry_longitude"),
             (Dive, "exit_latitude"),
@@ -2595,6 +2604,7 @@ class TestTechScalars:
         # ...and every one is validated on the way in, on whichever schema carries it.
         guarded = {
             *((Dive, name) for name in _validated_fields(ParsedDiveSchema)),
+            *((DiveRecording, name) for name in _validated_fields(ParsedDiveSchema)),
             *((DiveMixture, name) for name in _validated_fields(DiveMixtureSchema)),
         }
         assert bounded <= guarded, f"unguarded: {bounded - guarded}"

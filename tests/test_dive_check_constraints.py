@@ -190,46 +190,6 @@ class TestDiveCheckConstraints:
         db.add(_make_dive(dive_owner.id, water_type="soda"))
         db.commit()
 
-    def test_negative_cns_is_rejected(self, db: Session, dive_owner: User) -> None:
-        _assert_violates(db, _make_dive(dive_owner.id, cns_start=-1), "ck_dive_cns_start_non_negative")
-        _assert_violates(db, _make_dive(dive_owner.id, cns_end=-1), "ck_dive_cns_end_non_negative")
-
-    def test_negative_otu_is_rejected(self, db: Session, dive_owner: User) -> None:
-        _assert_violates(db, _make_dive(dive_owner.id, otu_start=-1), "ck_dive_otu_start_non_negative")
-        _assert_violates(db, _make_dive(dive_owner.id, otu_end=-1), "ck_dive_otu_end_non_negative")
-
-    def test_zero_cns_and_otu_are_allowed(self, db: Session, dive_owner: User) -> None:
-        """`>= 0`, not `> 0`: a dive that began with no oxygen loading records a real 0,
-        and that is worth telling apart from having recorded nothing."""
-        db.add(_make_dive(dive_owner.id, cns_start=0, cns_end=0, otu_start=0, otu_end=0))
-        db.commit()
-
-    def test_cns_over_one_hundred_percent_is_allowed(self, db: Session, dive_owner: User) -> None:
-        """Deliberately unbounded above - a CNS clock past 100 % is precisely the reading
-        a diver most needs to see, and clamping it would hide it."""
-        db.add(_make_dive(dive_owner.id, cns_end=140.0))
-        db.commit()
-
-    def test_surface_pressure_outside_the_barometric_band_is_rejected(self, db: Session, dive_owner: User) -> None:
-        """The band exists to catch a unit error, not an unusual dive site: both Suunto
-        exports write this field in Pascal, so an unconverted 105700 is off by five
-        orders of magnitude."""
-        _assert_violates(db, _make_dive(dive_owner.id, surface_pressure_bar=105700.0), "ck_dive_surface_pressure_range")
-        _assert_violates(db, _make_dive(dive_owner.id, surface_pressure_bar=0.1), "ck_dive_surface_pressure_range")
-
-    def test_real_surface_pressures_are_allowed(self, db: Session, dive_owner: User) -> None:
-        """1.057 bar is a real reading off a 2025 export; 0.55 is roughly a 5 000 m lake.
-
-        0.44 is the floor's own reason to be 0.4 rather than 0.5: it is ambient pressure at
-        `ck_dive_altitude_range`'s 6500 m ceiling, so the old floor refused a reading the
-        altitude bound blesses - and it is DiveJSON's floor too (spec §6.2), which is where
-        the contradiction was noticed.
-        """
-        db.add(_make_dive(dive_owner.id, surface_pressure_bar=1.057))
-        db.add(_make_dive(dive_owner.id, surface_pressure_bar=0.55))
-        db.add(_make_dive(dive_owner.id, surface_pressure_bar=0.44))
-        db.commit()
-
     def test_coordinates_past_the_poles_or_the_antimeridian_are_rejected(self, db: Session, dive_owner: User) -> None:
         """The limits of the coordinate system, so a value outside them is a unit error -
         a Suunto radian or a FIT semicircle count that reached the column unconverted."""
@@ -453,13 +413,12 @@ class TestDiveMixtureCheckConstraints:
 
 
 class TestDiveRecordingCheckConstraints:
-    """The one constraint on a recording's own columns, against the real database.
+    """The constraints on a recording's own columns, against the real database.
 
-    Nothing that exists today can reach it: both writers - the parsers through
-    `ParsedDecoModel` and the importer through its planner - drop an inverted gradient-factor
-    pair before it gets here, which is what stops one bad reading costing a whole upload or a
-    whole archive. This is the backstop under them, and a test that inserts the row directly
-    is the only way to see it fire.
+    Nothing that exists today can reach them: the parsers' validators and the importer's
+    planner drop a value these would refuse before it gets here, which is what stops one bad
+    reading costing a whole upload or a whole archive. These are the backstop under them,
+    and a test that inserts the row directly is the only way to see one fire.
     """
 
     @pytest.fixture
@@ -502,6 +461,50 @@ class TestDiveRecordingCheckConstraints:
         """Suunto's P-1, and the one reading in this app with no floor: the number means
         nothing without `deco_name` and the device columns beside it."""
         db.add(self._recording(dive, deco_conservatism=-1, deco_name="Suunto Fused2 RGBM"))
+        db.commit()
+
+    def test_negative_cns_is_rejected(self, db: Session, dive: Dive) -> None:
+        _assert_violates(db, self._recording(dive, cns_start=-1), "ck_dive_recording_cns_start_non_negative")
+        _assert_violates(db, self._recording(dive, cns_end=-1), "ck_dive_recording_cns_end_non_negative")
+
+    def test_negative_otu_is_rejected(self, db: Session, dive: Dive) -> None:
+        _assert_violates(db, self._recording(dive, otu_start=-1), "ck_dive_recording_otu_start_non_negative")
+        _assert_violates(db, self._recording(dive, otu_end=-1), "ck_dive_recording_otu_end_non_negative")
+
+    def test_zero_cns_and_otu_are_allowed(self, db: Session, dive: Dive) -> None:
+        """`>= 0`, not `> 0`: a dive that began with no oxygen loading records a real 0,
+        and that is worth telling apart from having recorded nothing."""
+        db.add(self._recording(dive, cns_start=0, cns_end=0, otu_start=0, otu_end=0))
+        db.commit()
+
+    def test_cns_over_one_hundred_percent_is_allowed(self, db: Session, dive: Dive) -> None:
+        """Deliberately unbounded above - a CNS clock past 100 % is precisely the reading
+        a diver most needs to see, and clamping it would hide it."""
+        db.add(self._recording(dive, cns_end=140.0))
+        db.commit()
+
+    def test_surface_pressure_outside_the_barometric_band_is_rejected(self, db: Session, dive: Dive) -> None:
+        """The band exists to catch a unit error, not an unusual dive site: both Suunto
+        exports write this field in Pascal, so an unconverted 105700 is off by five
+        orders of magnitude."""
+        constraint = "ck_dive_recording_surface_pressure_range"
+        _assert_violates(db, self._recording(dive, surface_pressure_bar=105700.0), constraint)
+        _assert_violates(db, self._recording(dive, surface_pressure_bar=0.1), constraint)
+
+    def test_real_surface_pressures_are_allowed(self, db: Session, dive: Dive) -> None:
+        """1.057 bar is a real reading off a 2025 export; 0.55 is roughly a 5 000 m lake.
+
+        0.44 is the floor's own reason to be 0.4 rather than 0.5: it is ambient pressure at
+        `ck_dive_altitude_range`'s 6500 m ceiling - and it is DiveJSON's floor too.
+        """
+        db.add(self._recording(dive, ordinal=0, surface_pressure_bar=1.057))
+        db.add(self._recording(dive, ordinal=1, surface_pressure_bar=0.55))
+        db.add(self._recording(dive, ordinal=2, surface_pressure_bar=0.44))
+        db.commit()
+
+    def test_an_unrecognized_salinity_is_stored(self, db: Session, dive: Dive) -> None:
+        """No `CHECK`, `mode`'s pattern: the write shapes hold the vocabulary."""
+        db.add(self._recording(dive, salinity="brine"))
         db.commit()
 
     def test_an_unrecognized_mode_is_stored(self, db: Session, dive: Dive) -> None:

@@ -285,6 +285,7 @@ class TestWhichDiveSurvives:
 
 class TestTheSurvivingDivesFigures:
     def _span(self, *, minutes: int = 0, duration: int | None, max_depth_cm: int | None = None) -> _Span:
+        """`duration` is the profile's span, in the axis's milliseconds."""
         return _Span(
             start_time=datetime(2026, 9, 8, 12, 0, tzinfo=UTC) + timedelta(minutes=minutes),
             utc_offset_minutes=180,
@@ -293,8 +294,9 @@ class TestTheSurvivingDivesFigures:
         )
 
     def test_the_span_runs_from_the_earliest_recording_to_the_last_sample(self) -> None:
-        """The folded case: one recording covering 3 163 seconds from its own start."""
-        duration, _ = dive_figures([self._span(duration=3163)])
+        """The folded case: one recording covering 3 163 seconds from its own start - and the
+        dive's duration is whole seconds, the span's milliseconds divided."""
+        duration, _ = dive_figures([self._span(duration=3_163_000)])
 
         assert duration == 3163
 
@@ -303,7 +305,7 @@ class TestTheSurvivingDivesFigures:
         after the first, so the dive runs to *its* last sample rather than to the primary
         recording's.
         """
-        duration, _ = dive_figures([self._span(duration=1800), self._span(minutes=2, duration=1800)])
+        duration, _ = dive_figures([self._span(duration=1_800_000), self._span(minutes=2, duration=1_800_000)])
 
         assert duration == 120 + 1800
 
@@ -339,13 +341,13 @@ class TestTheSurvivingDivesFigures:
                 _Span(
                     start_time=datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC),
                     utc_offset_minutes=180,
-                    duration=1800,
+                    duration=1_800_000,
                     max_depth_cm=None,
                 ),
                 _Span(
                     start_time=datetime(2026, 9, 8, 15, 18, 10, tzinfo=UTC),
                     utc_offset_minutes=None,
-                    duration=1800,
+                    duration=1_800_000,
                     max_depth_cm=None,
                 ),
             ]

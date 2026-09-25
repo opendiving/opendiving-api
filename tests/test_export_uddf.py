@@ -168,7 +168,7 @@ class TestSchemaValidity:
     async def test_a_control_character_in_an_attribute_is_scrubbed_too(self, schema, monkeypatch):
         """Attributes go through the same scrub - a `<setmarker>` is element text, but a
         device label could as easily land in one."""
-        profile = {**TRIMIX_PROFILE, "events": [{"t": 60, "type": "other", "label": "Ceiling\x00Broken"}]}
+        profile = {**TRIMIX_PROFILE, "events": [{"t": 60_000, "type": "other", "label": "Ceiling\x00Broken"}]}
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         assert b"\x00" not in document
@@ -778,8 +778,8 @@ class TestWaypoints:
         profile = {
             **OFF_GRID_PROFILE,
             "events": [
-                {"t": 21, "type": "gas_switch", "gas_number": 1},
-                {"t": 23, "type": "gas_switch", "gas_number": 2},
+                {"t": 21_000, "type": "gas_switch", "gas_number": 1},
+                {"t": 23_000, "type": "gas_switch", "gas_number": 2},
             ],
         }
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
@@ -806,8 +806,8 @@ class TestWaypoints:
         profile = {
             **OFF_GRID_PROFILE,
             "events": [
-                {"t": 21, "type": "gas_switch", "gas_number": 1},
-                {"t": 23, "type": "gas_switch", "gas_number": 9},
+                {"t": 21_000, "type": "gas_switch", "gas_number": 1},
+                {"t": 23_000, "type": "gas_switch", "gas_number": 9},
             ],
         }
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
@@ -826,8 +826,8 @@ class TestWaypoints:
         interval in between is attributed to the old gas rather than to the new one.
         """
         profile = {
-            "depth": {"t": [0, 10, 20, 1820, 1830], "v": [0, 1000, 2000, 800, 0]},
-            "events": [{"t": 900, "type": "gas_switch", "gas_number": 2}],
+            "depth": {"t": [0, 10_000, 20_000, 1_820_000, 1_830_000], "v": [0, 1000, 2000, 800, 0]},
+            "events": [{"t": 900_000, "type": "gas_switch", "gas_number": 2}],
         }
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
@@ -841,7 +841,7 @@ class TestWaypoints:
     async def test_a_switch_after_the_last_sample_has_nowhere_to_go(self, schema, monkeypatch):
         """The one case where dropping a switch is right: nothing follows it in the
         profile, so no importer can compute anything on the wrong gas."""
-        profile = {**OFF_GRID_PROFILE, "events": [{"t": 40, "type": "gas_switch", "gas_number": 2}]}
+        profile = {**OFF_GRID_PROFILE, "events": [{"t": 40_000, "type": "gas_switch", "gas_number": 2}]}
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
@@ -854,8 +854,8 @@ class TestWaypoints:
         unpinned. Here 9 s is one second from the waypoint and 6 s is four, so only
         closest-wins produces 22.0 C."""
         profile = {
-            "depth": {"t": [0, 10, 20], "v": [0, 1000, 2000]},
-            "temperature": {"t": [6, 9], "v": [999, 220]},
+            "depth": {"t": [0, 10_000, 20_000], "v": [0, 1000, 2000]},
+            "temperature": {"t": [6_000, 9_000], "v": [999, 220]},
         }
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
@@ -871,14 +871,14 @@ class TestWaypoints:
         move, which is the failure the tolerance exists to prevent rather than an
         application of it.
         """
-        profile = {"depth": {"t": [0, 1800], "v": [0, 3000]}, "temperature": {"t": [890], "v": [220]}}
+        profile = {"depth": {"t": [0, 1_800_000], "v": [0, 3000]}, "temperature": {"t": [890_000], "v": [220]}}
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
         assert [_text(w, f"{UDDF}temperature") for w in waypoints] == [None, None]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("second", [-60, 230])
+    @pytest.mark.parametrize("second", [-60_000, 230_000])
     async def test_a_reading_too_far_from_any_sample_is_dropped_not_clamped(self, second, schema, monkeypatch):
         """`_nearest` alone would put a surface-interval reading on the last in-water
         waypoint, as if it had been taken there - the one way snapping could invent data
@@ -901,8 +901,8 @@ class TestWaypoints:
         waypoint a quarter of an hour away.
         """
         profile = {
-            "depth": {"t": [0, 10, 20, 1820, 1830], "v": [0, 1000, 2000, 800, 0]},
-            "temperature": {"t": [12, 900, 1825], "v": [240, 999, 220]},
+            "depth": {"t": [0, 10_000, 20_000, 1_820_000, 1_830_000], "v": [0, 1000, 2000, 800, 0]},
+            "temperature": {"t": [12_000, 900_000, 1_825_000], "v": [240, 999, 220]},
         }
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
@@ -920,7 +920,7 @@ class TestWaypoints:
         a dive that plunges to the surface and back on every sample; the readings are in
         `logbook.divejson` either way.
         """
-        profile = {"temperature": {"t": [0, 60], "v": [249, 181]}, "events": [{"t": 30, "type": "safety_stop"}]}
+        profile = {"temperature": {"t": [0, 60_000], "v": [249, 181]}, "events": [{"t": 30_000, "type": "safety_stop"}]}
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         assert _dive(_tree(document), 1).find(f"{UDDF}samples") is None
@@ -1217,8 +1217,8 @@ class TestDecoReadouts:
         surfaced rather than one inside a dropout, and the depth axis here is uniform.
         """
         profile = {
-            "depth": {"t": [0, 10, 20, 30], "v": [0, 1000, 2000, 1500]},
-            "ndl": {"t": [4, 27, 55], "v": [900, 0, 600]},
+            "depth": {"t": [0, 10_000, 20_000, 30_000], "v": [0, 1000, 2000, 1500]},
+            "ndl": {"t": [4_000, 27_000, 55_000], "v": [900, 0, 600]},
         }
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)

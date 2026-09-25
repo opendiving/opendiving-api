@@ -23,9 +23,9 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
 
     **One row per recording, not per dive.** A diver on two computers has two profiles of
     one dive, drawn from two devices' samples, and neither is a version of the other. The
-    `t` axis is elapsed seconds from the *recording's* start, which is why the recording
-    carries a `start_time` of its own: a second computer that entered the water 223 seconds
-    later has a profile whose zero is 223 seconds after the dive's.
+    `t` axis is elapsed milliseconds from the *recording's* start, which is why the
+    recording carries a `start_time` of its own: a second computer that entered the water
+    223 seconds later has a profile whose zero is 223 seconds after the dive's.
 
     **The exception is logbook import**, which does write samples the client supplied. It
     is the one sanctioned path, on the terms `DECISIONS.md` records under *"Importing a
@@ -46,15 +46,16 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     `data` holds independently-sampled per-channel series, not one shared time axis, plus
     the moments the device marked rather than sampled:
 
-        {"depth":       {"t": [0, 10, 20], "v": [139, 372, 632]},
-         "ceiling":     {"t": [20],        "v": [300]},
-         "temperature": {"t": [0, 1, 2],   "v": [219, 219, 218]},
-         "ndl":         {"t": [0, 10],     "v": [5940, 1260]},
-         "gradient_factor": {"t": [20],    "v": [64]},
-         "pressure":    [{"gas_number": 1, "t": [0, 10], "v": [2052, 2041]}],
+        {"depth":       {"t": [160, 10160, 20160], "v": [139, 372, 632]},
+         "ceiling":     {"t": [20160],             "v": [300]},
+         "temperature": {"t": [0, 1000, 2000],     "v": [219, 219, 218]},
+         "ndl":         {"t": [160, 10160],        "v": [5940, 1260]},
+         "gradient_factor": {"t": [20160],         "v": [64]},
+         "pressure":    [{"gas_number": 1, "t": [160, 10160], "v": [2052, 2041]}],
          "events":      [{"t": 0, "type": "gas_switch", "gas_number": 1}]}
 
-    `t` is integer elapsed seconds from the first sample; `v` is integer-scaled (depth and
+    `t` is integer elapsed milliseconds from the recording's start (`dive_recording.start_time`),
+    so a first reading keeps the offset its file states; `v` is integer-scaled (depth and
     ceiling in cm, temperature in 0.1 C, pressure in 0.1 bar, ndl and tts in seconds, ppO2
     in 0.01 bar, CNS in 0.1 %, both gradient factors in whole percent) so a float round-trip
     can't reintroduce `20.600000000000023`-class noise several thousand times per dive.
@@ -121,9 +122,9 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # without decoding tens of KB of JSONB. Stored in the same integer scales as the
     # series (`_c10` is 0.1 C, `_bar10` is 0.1 bar) and converted to display units on the
     # way out.
-    # Seconds, and named for the wire member it feeds - `profile.duration` (DiveJSON spec
-    # §6.4) - rather than carrying a unit suffix of its own, so storage and the published
-    # format speak one word. Not the dive's own `duration`, which is a column on another
+    # Milliseconds, and named for the wire member it feeds - `profile.duration` (DiveJSON
+    # spec §6.4) - rather than carrying a unit suffix of its own, so storage and the
+    # published format speak one word. Not the dive's own `duration`, which is a column on another
     # table and a different quantity: the diver's logged length, which may have been
     # hand-edited.
     duration: Mapped[int] = mapped_column(Integer)

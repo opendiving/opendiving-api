@@ -17,7 +17,7 @@ row between the dive and its files that makes all three representable.
 
 import logging
 import uuid as uuid_pkg
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -31,7 +31,15 @@ from ..models.dive import Dive
 from ..models.dive_file import DiveFile
 from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
-from ..schemas.dive import DiveFileInfo, DiveMode, RecordingDecoModel, RecordingDevice, RecordingRead
+from ..schemas.dive import (
+    DiveFileInfo,
+    DiveMode,
+    RecordingDecoModel,
+    RecordingDevice,
+    RecordingRead,
+    RecordingReadouts,
+    Salinity,
+)
 from ..schemas.parsed_dive import ParsedDecoModel, ParsedDevice
 from . import blob_store
 from .dive_profiles import get_profile_infos_for_recordings
@@ -67,13 +75,17 @@ DECO_MODEL_COLUMNS: dict[str, str] = {
     "conservatism": "deco_conservatism",
 }
 
-# |Δ start| admitting a second *file of the same recording*. Two seconds, because the same
-# computer's two exports of one dive disagree by rounding and nothing else: the corpus's
+# The recording's readout columns, which are `RecordingReadouts`' members by name - read off
+# the schema so the read shape, the writes and the export cannot drift apart.
+READOUT_COLUMNS: tuple[str, ...] = tuple(RecordingReadouts.model_fields)
+
+# |Δ start| admitting a second *file of the same recording*, in seconds. Two, because the
+# same computer's two exports of one dive disagree by rounding and nothing else: the corpus's
 # Ocean writes `15:17:38.67` in its JSON and `15:17:38` in its FIT.
 SAME_RECORDING_START_TOLERANCE = 2.0
 # And the same tolerance on the sampled span, for the same reason - two readings of one
-# sample stream, not two dives.
-SAME_RECORDING_SPAN_TOLERANCE = 2.0
+# sample stream, not two dives. In the profile axis's milliseconds, which the span is.
+SAME_RECORDING_SPAN_TOLERANCE = 2000
 
 # The strict gate's numbers are Subsurface's `likely_same` (`core/dive.cpp`), adopted as
 # they are rather than re-derived: a floor of a minute on the start delta, widening to half
@@ -225,7 +237,17 @@ def delta_seconds(
     right_start: datetime,
     right_offset: int | None,
 ) -> float:
-    """|Δ| between two recordings' starts, measured on whichever clock both can speak.
+    """|Δ| between two recordings' starts - `signed_delta_seconds`, unsigned."""
+    return abs(signed_delta_seconds(left_start, left_offset, right_start, right_offset))
+
+
+def signed_delta_seconds(
+    left_start: datetime,
+    left_offset: int | None,
+    right_start: datetime,
+    right_offset: int | None,
+) -> float:
+    """The left start minus the right, measured on whichever clock both can speak.
 
     **Between instants when both sides carry an offset, and between wall clocks when either
     does not.** This is the single most consequential line in the module and it is not a
@@ -242,8 +264,8 @@ def delta_seconds(
     writes it into a comparison where it would be invisible.
     """
     if left_offset is not None and right_offset is not None:
-        return abs((left_start - right_start).total_seconds())
-    return abs((wall_clock(left_start, left_offset) - wall_clock(right_start, right_offset)).total_seconds())
+        return (left_start - right_start).total_seconds()
+    return (wall_clock(left_start, left_offset) - wall_clock(right_start, right_offset)).total_seconds()
 
 
 def starts_before(
@@ -276,10 +298,10 @@ class RecordingFacts:
 
     `duration` and `max_depth` are **the recording's own**, never the dive's, and their
     provenance is the path that produced them - the device's logged figures on the attach
-    path, the samples' own span and deepest reading on the import path. `sampled_span` is
-    separately the profile's span, which the same-recording gate compares and the strict
-    gate does not: the same file is 3 051 logged seconds and 3 473 sampled ones, so the two
-    questions need two numbers.
+    path, the samples' own span and deepest reading on the import path. `duration` is
+    seconds. `sampled_span` is separately the profile's span, in the axis's milliseconds,
+    which the same-recording gate compares and the strict gate does not: the same file is
+    3 051 logged seconds and 3 473 sampled ones, so the two questions need two numbers.
     """
 
     device: DeviceIdentity
@@ -561,6 +583,8 @@ async def create_recording(
     device: ParsedDevice | None = None,
     mode: DiveMode | None = None,
     deco_model: ParsedDecoModel | None = None,
+    salinity: Salinity | None = None,
+    readouts: Mapping[str, float | None] | None = None,
     start_time: datetime | None = None,
     utc_offset_minutes: int | None = None,
     duration: int | None = None,
@@ -568,15 +592,17 @@ async def create_recording(
 ) -> int:
     """Insert one recording and return its row id. Does not commit.
 
-    The device's six members and the model's five are spread from their column tables rather
-    than named, so a member added to either shape is stored without this function being
-    edited.
+    The device's six members, the model's five and the readouts are spread from their column
+    tables rather than named, so a member added to any of them is stored without this
+    function being edited.
     """
     values: dict[str, object] = {
         "dive_id": dive_id,
         "user_id": user_id,
         "ordinal": ordinal,
         "mode": None if mode is None else mode.value,
+        "salinity": None if salinity is None else salinity.value,
+        **{name: (readouts or {}).get(name) for name in READOUT_COLUMNS},
         "start_time": start_time,
         "utc_offset_minutes": utc_offset_minutes,
         "duration": duration,
@@ -625,10 +651,15 @@ async def fill_device_fields(db: AsyncSession, *, recording_id: int, device: Par
 
 
 async def fill_recording_settings(
-    db: AsyncSession, *, recording_id: int, mode: DiveMode | None, deco_model: ParsedDecoModel | None
+    db: AsyncSession,
+    *,
+    recording_id: int,
+    mode: DiveMode | None,
+    deco_model: ParsedDecoModel | None,
+    salinity: Salinity | None = None,
 ) -> None:
-    """Fill this recording's blank mode and deco-model columns from a later file. **Never
-    overwrites**, exactly as `fill_device_fields` does not.
+    """Fill this recording's blank mode, salinity and deco-model columns from a later file.
+    **Never overwrites**, exactly as `fill_device_fields` does not.
 
     The same rule and the same reason: a second file of one recording contributes what the
     first did not carry - a Suunto's JSON names the model its FIT has no room for - and takes
@@ -646,6 +677,8 @@ async def fill_recording_settings(
     values: dict[str, object] = {}
     if mode is not None:
         values["mode"] = func.coalesce(DiveRecording.mode, mode.value)
+    if salinity is not None:
+        values["salinity"] = func.coalesce(DiveRecording.salinity, salinity.value)
     for member, column in DECO_MODEL_COLUMNS.items():
         value = None if deco_model is None else getattr(deco_model, member)
         if value is not None:
@@ -655,6 +688,35 @@ async def fill_recording_settings(
     if not values:
         return
     await db.execute(update(DiveRecording).where(DiveRecording.id == recording_id).values(**values))
+
+
+async def store_readouts(db: AsyncSession, *, recording_id: int, readouts: Mapping[str, float | None]) -> None:
+    """Write a recording's readouts **outright**, `None` included, in the caller's transaction.
+
+    The re-derivation's write, for a recording whose whole set of files has just been read:
+    a reading the files no longer yield is cleared rather than left claiming evidence the
+    recording does not hold.
+    """
+    await db.execute(
+        update(DiveRecording)
+        .where(DiveRecording.id == recording_id)
+        .values(**{name: readouts.get(name) for name in READOUT_COLUMNS})
+    )
+
+
+async def fill_readouts(db: AsyncSession, *, recording_id: int, readouts: Mapping[str, float | None]) -> None:
+    """Write only the readouts this recording does not already have. **Never overwrites.**
+
+    The readout half of *a second file of one recording fills and never overwrites*: a FIT
+    arriving beside a JSON of one dive contributes the `cns_end` the JSON had none of.
+    """
+    values = {
+        name: func.coalesce(getattr(DiveRecording, name), value)
+        for name, value in readouts.items()
+        if name in READOUT_COLUMNS and value is not None
+    }
+    if values:
+        await db.execute(update(DiveRecording).where(DiveRecording.id == recording_id).values(**values))
 
 
 async def fill_gate_figures(
@@ -724,6 +786,16 @@ async def fill_start(
         return
 
     await db.execute(update(DiveRecording).where(DiveRecording.id == recording_id).values(**values))
+
+
+async def recording_start(db: AsyncSession, *, recording_id: int) -> tuple[datetime | None, int | None]:
+    """A recording's stored start as its column pair - the origin its profile's axis counts from."""
+    row = (
+        await db.execute(
+            select(DiveRecording.start_time, DiveRecording.utc_offset_minutes).where(DiveRecording.id == recording_id)
+        )
+    ).one_or_none()
+    return (None, None) if row is None else (row.start_time, row.utc_offset_minutes)
 
 
 async def storage_keys_for_recordings(db: AsyncSession, *, recording_ids: Sequence[int]) -> list[str]:
@@ -876,6 +948,8 @@ async def get_recordings_for_dives(db: AsyncSession, *, dive_ids: Sequence[int])
                 device=_read_device(row),
                 mode=row.mode,
                 deco_model=_read_deco_model(row),
+                salinity=row.salinity,
+                **{name: getattr(row, name) for name in READOUT_COLUMNS},
                 started_at=(
                     None if row.start_time is None else combine_start_time(row.start_time, row.utc_offset_minutes)
                 ),

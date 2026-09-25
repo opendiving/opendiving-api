@@ -70,6 +70,7 @@ UUIDS = {
             "dive-form-preset-2",
             "recording",
             "recording-second",
+            "recording-readouts",
         )
     )
 }
@@ -182,6 +183,8 @@ def make_recording(row_id: int, uuid: uuid_pkg.UUID, **overrides: Any) -> Export
         "device": {},
         "mode": None,
         "deco_model": {},
+        "salinity": None,
+        "readouts": {},
         "start_time": None,
         "utc_offset_minutes": None,
         "files": [],
@@ -464,9 +467,6 @@ def full_bundle() -> ExportBundle:
         trip_id=1,
         course_id=1,
         notes='Strong current, "the wall" was worth it.\nSaw a thresher.',
-        cns_end=8.0,
-        otu_end=21.0,
-        surface_pressure_bar=1.013,
         entry_latitude=27.727800,
         entry_longitude=34.256400,
         exit_latitude=27.729100,
@@ -546,6 +546,15 @@ def full_bundle() -> ExportBundle:
         gear_ids_by_dive={1: [1, 2, 3], 2: [1]},
         species_ids_by_dive={1: [1, 2], 2: [1]},
         recordings_by_dive={
+            # A recording of readouts alone - a computer's own figures with no device, samples
+            # or file behind them, which the format admits and the migration creates.
+            1: [
+                make_recording(
+                    2,
+                    UUIDS["recording-readouts"],
+                    readouts={"cns_end": 8.0, "otu_end": 21.0, "surface_pressure_bar": 1.013},
+                )
+            ],
             2: [
                 make_recording(
                     1,
@@ -575,7 +584,7 @@ def full_bundle() -> ExportBundle:
                     ],
                     has_profile=True,
                 )
-            ]
+            ],
         },
         trips=[trip],
         parts_by_trip={1: trip_parts},
@@ -620,9 +629,9 @@ def full_bundle() -> ExportBundle:
     )
 
 
-# The profile the `trimix` dive carries, in the stored integer scales: depth in cm,
-# temperature in 0.1 C, pressure in 0.1 bar, ndl and tts in seconds, ppO2 in 0.01 bar, CNS
-# in 0.1 % and both gradient factors in whole percent. Every reading lands on a depth sample
+# The profile the `trimix` dive carries, in the stored integer scales on a millisecond axis:
+# depth in cm, temperature in 0.1 C, pressure in 0.1 bar, ndl and tts in seconds, ppO2 in
+# 0.01 bar, CNS in 0.1 % and both gradient factors in whole percent. Every reading lands on a depth sample
 # - the ordinary case, where `uddf.py::_waypoints` has nothing to snap. `OFF_GRID_PROFILE`
 # below is the one that disagrees.
 #
@@ -631,49 +640,49 @@ def full_bundle() -> ExportBundle:
 # scale, or out of §6.4's order fails against `divejson.validate_document` rather than
 # against an assertion someone remembered to write.
 TRIMIX_PROFILE: dict[str, Any] = {
-    "depth": {"t": [0, 30, 60, 90], "v": [0, 1800, 5200, 300]},
-    "ceiling": {"t": [60, 90], "v": [600, 300]},
-    "temperature": {"t": [0, 60], "v": [249, 181]},
+    "depth": {"t": [0, 30000, 60000, 90000], "v": [0, 1800, 5200, 300]},
+    "ceiling": {"t": [60000, 90000], "v": [600, 300]},
+    "temperature": {"t": [0, 60000], "v": [249, 181]},
     # A no-decompression clock that runs out: 5940 is a Shearwater's display maximum, and
     # the 0 at 60 s is the moment the dive became a decompression dive - the reading the
     # ceiling beside it is the consequence of.
-    "ndl": {"t": [0, 30, 60], "v": [5940, 1260, 0]},
-    "tts": {"t": [60, 90], "v": [268, 120]},
-    "ppo2": {"t": [0, 60], "v": [34, 96]},
-    "cns": {"t": [0, 90], "v": [100, 800]},
+    "ndl": {"t": [0, 30000, 60000], "v": [5940, 1260, 0]},
+    "tts": {"t": [60000, 90000], "v": [268, 120]},
+    "ppo2": {"t": [0, 60000], "v": [34, 96]},
+    "cns": {"t": [0, 90000], "v": [100, 800]},
     # Past 100 on one sample, which is a compartment past its M-value and a real reading:
     # the format puts no ceiling on the channel, so a writer that clamped would fail here.
-    "gradient_factor": {"t": [60, 90], "v": [17, 398]},
-    "surface_gradient_factor": {"t": [60, 90], "v": [90, 116]},
+    "gradient_factor": {"t": [60000, 90000], "v": [17, 398]},
+    "surface_gradient_factor": {"t": [60000, 90000], "v": [90, 116]},
     "pressure": [
-        {"gas_number": 1, "t": [0, 60], "v": [2320, 1400]},
-        {"gas_number": 2, "t": [90], "v": [2000]},
+        {"gas_number": 1, "t": [0, 60000], "v": [2320, 1400]},
+        {"gas_number": 2, "t": [90000], "v": [2000]},
         # A cylinder the dive has no mixture for: its readings have no `<mix>` to point
         # at and must be dropped from the UDDF rather than emitted with a dangling ref.
-        {"gas_number": 9, "t": [30], "v": [1111]},
+        {"gas_number": 9, "t": [30000], "v": [1111]},
     ],
     "events": [
         {"t": 0, "type": "gas_switch", "gas_number": 1},
-        {"t": 90, "type": "gas_switch", "gas_number": 2},
-        {"t": 60, "type": "safety_stop"},
-        {"t": 60, "type": "other", "label": "Ceiling Broken"},
+        {"t": 90000, "type": "gas_switch", "gas_number": 2},
+        {"t": 60000, "type": "safety_stop"},
+        {"t": 60000, "type": "other", "label": "Ceiling Broken"},
     ],
 }
 
 # The same shape, with every non-depth reading deliberately *between* depth samples - what
 # a real device produces, and the only fixture that exercises the snapping in
-# `uddf.py::_waypoints`. The depth axis is 0/10/20/30 and the readings are placed to pin
+# `uddf.py::_waypoints`. The depth axis is 0/10/20/30 s and the readings are placed to pin
 # each rule: 4 -> 0 and 27 -> 30 (plain nearest), 12 and 13 both -> 10 with the closer one
 # winning (13's 99.9 C is absurd on purpose - it is what a last-wins bug would emit), 15 ->
 # 10 on a tie the earlier sample takes, 7 and 8 -> 10 as two markers on one waypoint, and
 # and the switch at 24 -> 30, because a switch is never moved backwards.
 OFF_GRID_PROFILE: dict[str, Any] = {
-    "depth": {"t": [0, 10, 20, 30], "v": [0, 1000, 2000, 1500]},
-    "temperature": {"t": [4, 12, 13, 27], "v": [250, 240, 999, 220]},
-    "pressure": [{"gas_number": 1, "t": [15], "v": [2000]}],
+    "depth": {"t": [0, 10000, 20000, 30000], "v": [0, 1000, 2000, 1500]},
+    "temperature": {"t": [4000, 12000, 13000, 27000], "v": [250, 240, 999, 220]},
+    "pressure": [{"gas_number": 1, "t": [15000], "v": [2000]}],
     "events": [
-        {"t": 7, "type": "safety_stop"},
-        {"t": 8, "type": "other", "label": "Deco"},
-        {"t": 24, "type": "gas_switch", "gas_number": 1},
+        {"t": 7000, "type": "safety_stop"},
+        {"t": 8000, "type": "other", "label": "Deco"},
+        {"t": 24000, "type": "gas_switch", "gas_number": 1},
     ],
 }

@@ -23,7 +23,7 @@ from typing import Any
 import fitdecode
 from fitdecode.types import DevField, FieldData
 
-from ...schemas.dive import DecoAlgorithm, WaterType
+from ...schemas.dive import DecoAlgorithm, Salinity
 from ...schemas.dive_mixture import GasRole
 from ...schemas.dive_profile import (
     ParsedPressureSeries,
@@ -114,14 +114,14 @@ _EVENT_TYPE_BY_NAME = {
 }
 
 # `dive_settings.water_type`'s own vocabulary, which the FIT profile spells
-# `{0: fresh, 1: salt, 2: en13319, 3: custom}`. Three of the four are `WaterType` members
+# `{0: fresh, 1: salt, 2: en13319, 3: custom}`. Three of the four are `Salinity` members
 # under the same name; `custom` is deliberately absent, so `.get()` nulls it - it says the
-# diver dialled in a `water_density` number, which is not a water type and has no column.
+# diver dialled in a `water_density` number, which is not a named setting and has no column.
 # Anything a future profile revision adds nulls the same way rather than guessing.
-_WATER_TYPE_BY_NAME = {
-    "fresh": WaterType.FRESH,
-    "salt": WaterType.SALT,
-    "en13319": WaterType.EN13319,
+_SALINITY_BY_NAME = {
+    "fresh": Salinity.FRESH,
+    "salt": Salinity.SALT,
+    "en13319": Salinity.EN13319,
 }
 
 # The one member `tissue_model_type` has in the FIT profile, and the only value
@@ -761,7 +761,7 @@ class FitParser(DiveParser):
             duration=round(duration) if duration is not None else None,
             max_depth=cls._depth(session, summary, "max_depth"),
             start_time=start_time.isoformat() if isinstance(start_time, datetime) else None,
-            water_type=cls._water_type(scan),
+            salinity=cls._salinity(scan),
             mixtures=cls._mixtures(scan),
         )
 
@@ -887,22 +887,22 @@ class FitParser(DiveParser):
         )
 
     @staticmethod
-    def _water_type(scan: _FitScan) -> WaterType | None:
+    def _salinity(scan: _FitScan) -> Salinity | None:
         """The device's salinity setting, kept verbatim where we have a name for it.
 
         `en13319` stays `en13319` rather than being folded into `salt`: it is the
         calibration a computer ships set to, and rewriting it as the nearest real water
-        would be inventing a reading (see `schemas/parsed_dive.py`). The diver can correct
-        it on the prefilled form.
+        would be inventing a reading. It is the recording's, and never the dive's
+        `water_type`.
 
         `custom` maps to `None`, not to a fourth member. It says the diver dialled in a
         density number, which lives in `dive_settings.water_density` and has no column
-        here - so the file records no water *type*, and `None` is what that means.
+        here - so the file records no named setting, and `None` is what that means.
         """
         if scan.dive_settings is None:
             return None
         value = _native_value(scan.dive_settings, "water_type")
-        return _WATER_TYPE_BY_NAME.get(value) if isinstance(value, str) else None
+        return _SALINITY_BY_NAME.get(value) if isinstance(value, str) else None
 
     @staticmethod
     def _dive_session(scan: _FitScan) -> fitdecode.FitDataMessage:
@@ -1300,9 +1300,9 @@ class FitParser(DiveParser):
         """Turn the scanned sample streams into one series per channel.
 
         Timestamps are rebased onto the dive's start as fractional seconds. The origin is
-        the `session` start where there is one, so every channel shares an axis; absolute
-        zero doesn't matter (`services/dive_profiles.py` rebases onto the earliest
-        reading across all channels anyway), only that the channels agree on it.
+        the `session` start where there is one - the `start_time` `parse` reports, which is
+        what `services/dive_profiles.py` keeps as the axis's zero - and the earliest sample
+        otherwise, where `parse` reports no start and the earliest reading is zero anyway.
         """
         if not scan.depth and not scan.temperature and not scan.pressure and not scan.ceiling:
             return None

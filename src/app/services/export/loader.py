@@ -70,7 +70,7 @@ from ...schemas.trip import TripPartRead
 from ...schemas.user_picture import PictureKind
 from ..certification_files import get_file_infos_for_certifications
 from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
-from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, get_file_infos_for_recordings
+from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS, get_file_infos_for_recordings
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +103,10 @@ class ExportRecordingRow:
     # device.
     mode: str | None
     deco_model: dict[str, Any]
+    salinity: str | None
+    # The readouts by column name, the NULL ones left out - so an empty dict is "this row
+    # reported nothing", which is what `_recording`'s rule-4 test asks.
+    readouts: dict[str, float]
     start_time: datetime | None
     utc_offset_minutes: int | None
     files: list[ExportFileRow]
@@ -480,6 +484,10 @@ async def _recordings_by_dive(db: AsyncSession, dive_ids: list[int]) -> dict[int
                     member: getattr(row, column)
                     for member, column in DECO_MODEL_COLUMNS.items()
                     if getattr(row, column) is not None
+                },
+                salinity=row.salinity,
+                readouts={
+                    column: getattr(row, column) for column in READOUT_COLUMNS if getattr(row, column) is not None
                 },
                 start_time=row.start_time,
                 utc_offset_minutes=row.utc_offset_minutes,

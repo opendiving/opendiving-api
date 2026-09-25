@@ -241,9 +241,9 @@ class TestOneComputersTwoRecordsFoldIntoOne:
         profile = await _profile(async_db, recording.id)
         times = profile.data["depth"]["t"]
         assert len(times) == FIRST_PART_SAMPLES + SECOND_PART_SAMPLES == 314
-        assert times[FIRST_PART_SAMPLES] == RESTART_DELTA
-        assert times[FIRST_PART_SAMPLES] - times[FIRST_PART_SAMPLES - 1] == 43
-        assert profile.duration == 3163
+        assert times[FIRST_PART_SAMPLES] == RESTART_DELTA * 1000
+        assert times[FIRST_PART_SAMPLES] - times[FIRST_PART_SAMPLES - 1] == 43_000
+        assert profile.duration == 3_163_000
 
     @pytest.mark.asyncio
     async def test_the_folded_samples_are_marked_as_a_merge(
@@ -380,7 +380,7 @@ class TestTwoDifferentComputers:
         appended = (await _recordings(async_db, first))[1]
         assert appended.start_time == datetime(2026, 9, 8, 12, 18, 10, tzinfo=UTC)
         profile = await _profile(async_db, appended.id)
-        assert profile.data["depth"]["t"] == [0, 10, 20, 30, 40]
+        assert profile.data["depth"]["t"] == [0, 10_000, 20_000, 30_000, 40_000]
         assert profile.dive_id == first.id
 
 
@@ -609,7 +609,7 @@ class TestTheSurvivingDiveReadsBackWhole:
         assert result.dive.duration == 3163
         assert len(result.dive.recordings) == 1
         assert result.dive.recordings[0].profile is not None
-        assert result.dive.recordings[0].profile.duration == 3163
+        assert result.dive.recordings[0].profile.duration == 3_163_000
         assert result.dive.recordings[0].profile.depth_sample_count == 314
         assert [file.original_filename for file in result.dive.recordings[0].files] == [
             "part-one.xml",
@@ -643,7 +643,7 @@ class TestWhenTheSurvivingDivesOwnRecordStartedLater:
         assert recording.start_time == datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC)
         times = (await _profile(async_db, recording.id)).data["depth"]["t"]
         assert min(times) == 0
-        assert max(times) == RESTART_DELTA + 20
+        assert max(times) == (RESTART_DELTA + 20) * 1000
 
 
 class TestASameDeviceParedWithNoStartToPlaceIt:
@@ -750,5 +750,5 @@ class TestTheTimeSpanWhenTheGapIsLonger:
 
         recording = (await _recordings(async_db, first))[0]
         times = (await _profile(async_db, recording.id)).data["depth"]["t"]
-        assert times[3] == 30 * 60
+        assert times[3] == 30 * 60 * 1000
         assert (await _row(async_db, first)).duration == 30 * 60 + 20

@@ -80,19 +80,27 @@ def _samples(*depths: tuple[int, str]) -> str:
     return f"<DiveSamples>{inner}</DiveSamples>"
 
 
-async def _cns_end(db: AsyncSession, dive: Dive) -> float | None:
-    """Read back through a query rather than `refresh`: the `dive` fixture belongs to the
-    *sync* session that seeded it, and is not persistent in the async one under test."""
-    return (await db.execute(select(Dive.cns_end).where(Dive.id == dive.id))).scalar_one()
-
-
 async def _readings(db: AsyncSession, dive: Dive) -> tuple[float | None, float | None]:
-    """`(cns_end, otu_end)`. The pair rather than the one reading, because the two answer
-    different halves of the same question: `cns_end` is a figure a file can also yield and
-    `otu_end` one nothing here parses, so a rewrite that replaced the first and cleared the
-    second is visible as two different wrong numbers rather than as one."""
-    row = (await db.execute(select(Dive.cns_end, Dive.otu_end).where(Dive.id == dive.id))).one()
-    return row.cns_end, row.otu_end
+    """The primary recording's `(cns_end, otu_end)` - the readings the dive page shows.
+
+    The pair rather than the one reading, because the two answer different halves of the
+    same question: `cns_end` is a figure a file can also yield and `otu_end` one nothing here
+    parses, so a rewrite that replaced the first and cleared the second is visible as two
+    different wrong numbers rather than as one. Read back through a query rather than
+    `refresh`: the `dive` fixture belongs to the *sync* session that seeded it.
+    """
+    row = (
+        await db.execute(
+            select(DiveRecording.cns_end, DiveRecording.otu_end).where(
+                DiveRecording.dive_id == dive.id, DiveRecording.ordinal == 0
+            )
+        )
+    ).one_or_none()
+    return (None, None) if row is None else (row.cns_end, row.otu_end)
+
+
+async def _cns_end(db: AsyncSession, dive: Dive) -> float | None:
+    return (await _readings(db, dive))[0]
 
 
 @pytest.fixture
@@ -178,17 +186,14 @@ async def _import_recording(
     start: datetime | None = None,
 ) -> Any:
     """A converted logbook import, as `services/logbook_import/writer.py` leaves it: the
-    document's figures on the dive row, beside a primary recording that holds samples and no
-    bytes. Nothing on this instance can re-derive either number."""
+    document's figures on a primary recording that holds samples and no bytes. Nothing on
+    this instance can re-derive either number."""
     recording = create_dive_recording(sync_db, diver, dive, ordinal=0)
+    values: dict[str, Any] = {"cns_end": cns_end, "otu_end": otu_end}
     if start is not None:
-        await db.execute(
-            update(DiveRecording)
-            .where(DiveRecording.id == recording.id)
-            .values(start_time=start, utc_offset_minutes=180)
-        )
+        values |= {"start_time": start, "utc_offset_minutes": 180}
+    await db.execute(update(DiveRecording).where(DiveRecording.id == recording.id).values(**values))
     await _insert_profile(db, dive, recording, parser_key=IMPORT_PARSER_KEY)
-    await db.execute(update(Dive).where(Dive.id == dive.id).values(cns_end=cns_end, otu_end=otu_end))
     await db.commit()
     return recording
 
@@ -247,8 +252,8 @@ class TestWhereAFileLands:
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
     ) -> None:
         """Two minutes apart and a different serial: a second computer, appended after the
-        first. The dive's exposure readings stay the primary recording's - a second machine's
-        CNS clock is its own device's arithmetic."""
+        first, and carrying its own readouts - a second machine's CNS clock is its own
+        device's arithmetic, and the primary's stays what it was."""
         await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
         other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
 
@@ -258,6 +263,7 @@ class TestWhereAFileLands:
         assert [row.ordinal for row in recordings] == [0, 1]
         assert recordings[1].id == stored.recording_id
         assert await _cns_end(async_db, dive) == 9.0
+        assert recordings[1].cns_end == 44.0
 
     @pytest.mark.asyncio
     async def test_re_uploading_repairs_a_file_that_vanished_from_the_volume(
@@ -668,14 +674,12 @@ class TestDeletingAFile:
 
 
 class TestDeletingASecondComputersFile:
-    """Emptying a recording the dive's readings never came off must not touch them.
+    """Emptying a second computer's recording must not touch the primary's readings.
 
     The single-recording cases above are the ones the deletion path was written for, and on
     those the outright rewrite is the point. These are the multi-recording ones, where the
-    same rewrite has nothing to re-derive *from* and everything to lose: the recording being
-    emptied is a second computer's, the figures on the dive belong to the primary, and
-    `refresh_tech_scalars` would have rewritten them from a recording this deletion did not
-    touch.
+    recording being emptied is a second computer's and the figures the dive shows belong to
+    the primary.
     """
 
     @pytest.mark.asyncio
@@ -683,10 +687,8 @@ class TestDeletingASecondComputersFile:
         self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
     ) -> None:
         """The shape a converted logbook import creates: a primary holding samples and no
-        bytes, with the document's figures on the dive. An outright rewrite here reads an
-        empty extraction off that primary and writes every field `None`, so deleting the
-        second computer's export would clear two numbers the document supplied and nothing on
-        this instance can produce again.
+        bytes, with the document's figures on it. Nothing on this instance can produce either
+        number again, so deleting the second computer's export must leave them.
         """
         imported = await _import_recording(async_db, db, diver, dive, cns_end=12.5, otu_end=31.0)
         # Months from the imported recording's start, so it lands beside it rather than in it.
@@ -708,7 +710,7 @@ class TestDeletingASecondComputersFile:
         """A primary with files is no protection either, and this is the sharper case.
 
         The diver imported a document, then attached the export it was converted from - the
-        primary's *first* file, which fills and cannot overwrite, so the dive keeps the
+        primary's *first* file, which fills and cannot overwrite, so the primary keeps the
         document's `cns_end` and the `otu_end` no parser here reads at all. Rewriting outright
         off that file would replace the first with the file's own 9.0 and clear the second,
         on the strength of deleting an unrelated recording's export.
@@ -740,8 +742,8 @@ class TestDeletingASecondComputersFile:
     ) -> None:
         """The other half of the guard: where the deletion *does* reach the primary, the
         rewrite is owed and still runs. The primary goes with its last file, the second
-        computer's recording is promoted into ordinal 0, and the dive's reading becomes that
-        machine's rather than being left at a number no recording of this dive claims.
+        computer's recording is promoted into ordinal 0, and the reading the dive shows becomes
+        that machine's own.
         """
         first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
         other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")

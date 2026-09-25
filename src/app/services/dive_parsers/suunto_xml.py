@@ -144,8 +144,8 @@ def _gas_switches(root: ET.Element) -> list[ParsedProfileEvent]:
     **A `<GasChangeTime>0</GasChangeTime>` is kept, and it is the common case** - 342 of the
     corpus's 353 mixtures. On a single-gas dive it is the one marker saying the dive was
     breathed on that gas throughout; on the two-gas dive it separates the 21/0 the diver
-    went down on from the 49/0 they came up on at 2 356 s. `normalize` is where it lands at
-    t=0 rather than at -1, since this format numbers samples from `<Time>1</Time>`.
+    went down on from the 49/0 they came up on at 2 356 s. It lands at the axis's zero, the
+    dive's `<StartTime>`, a second before this format's first `<Time>1</Time>` sample.
 
     **`<Marks>` is deliberately not read**, though it is the only other event-shaped block
     in the format and the obvious candidate for bookmarks and stops. Its `<Type>` is an

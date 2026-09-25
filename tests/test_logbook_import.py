@@ -86,7 +86,7 @@ from src.app.services.logbook_import import (
     write_import,
 )
 from src.app.services.logbook_import import reader as import_reader
-from src.app.services.logbook_import.planner import _DIVE_BOUNDS, _MIXTURE_BOUNDS
+from src.app.services.logbook_import.planner import _DIVE_BOUNDS, _MIXTURE_BOUNDS, _READOUT_BOUNDS
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
 from src.app.services.user_pictures import PORTRAIT_FRAME, recrop_picture, store_picture
 from tests.conftest import db_available
@@ -1869,7 +1869,7 @@ class TestNothingInventedNothingFatal:
     ) -> None:
         _, document = seeded
         parsed = json.loads(document)
-        parsed["dives"][0]["surface_pressure"] = 42.0
+        parsed["dives"][0]["recordings"] = [{"surface_pressure": 42.0, "cns_end": 3.0}]
         parsed["dives"][0]["altitude"] = 99999
         destination = create_user(db)
 
@@ -1878,8 +1878,11 @@ class TestNothingInventedNothingFatal:
         assert _counts(plan)["dives"] == (1, 0, 0, 0)
         assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
         stored = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
-        assert stored.surface_pressure_bar is None
         assert stored.altitude is None
+        recording = (
+            await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == stored.id))
+        ).scalar_one()
+        assert (recording.surface_pressure_bar, recording.cns_end) == (None, 3.0)
 
     @pytest.mark.asyncio
     async def test_the_widened_surface_pressure_floor_is_storable(
@@ -1889,13 +1892,16 @@ class TestNothingInventedNothingFatal:
         and the old 0.5 floor refused it."""
         _, document = seeded
         parsed = json.loads(document)
-        parsed["dives"][0]["surface_pressure"] = 0.44
+        parsed["dives"][0]["recordings"] = [{"surface_pressure": 0.44}]
         destination = create_user(db)
 
         await _apply(async_db, destination.id, json.dumps(parsed).encode())
 
         stored = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
-        assert stored.surface_pressure_bar == 0.44
+        recording = (
+            await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == stored.id))
+        ).scalar_one()
+        assert recording.surface_pressure_bar == 0.44
 
     @pytest.mark.asyncio
     async def test_a_dive_with_no_duration_and_no_profile_is_skipped_not_invented(
@@ -2997,6 +3003,8 @@ class TestTheBoundsCensus:
             "ck_dive_exit_position_pair",
             "ck_dive_mixture_oxygen_helium_sum",
             "ck_dive_mixture_pressure_order",
+            # `_plan_deco_model` drops both halves of an inverted gradient-factor pair.
+            "ck_dive_recording_deco_gf_low_within_high",
         }
     )
     # There used to be a third exclusion here, for the three `dive_mixture` bounds whose
@@ -3020,13 +3028,13 @@ class TestTheBoundsCensus:
     )
 
     def test_every_bound_the_document_can_reach_has_a_guard(self) -> None:
-        guarded = {bound.field for bound in _DIVE_BOUNDS} | {bound.field for bound in _MIXTURE_BOUNDS}
+        guarded = {bound.field for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, _READOUT_BOUNDS) for bound in bounds}
         # Column names, mapped onto the wire names the planner reads them under.
-        wire = {"surface_pressure_bar": "surface_pressure"}
+        wire = {"surface_pressure_bar": "surface_pressure", "po2_limit": "ppo2_limit"}
         unguarded = []
         # `tuple[Any, ...]` because `Model.__table__` is typed `FromClause` on a precisely
         # typed class, and only `Table` carries `.constraints`.
-        models: tuple[Any, ...] = (Dive, DiveMixture)
+        models: tuple[Any, ...] = (Dive, DiveMixture, DiveRecording)
         for model in models:
             table = model.__table__
             for constraint in table.constraints:
@@ -3551,9 +3559,9 @@ class TestTheImportGates:
             {
                 "device": {"brand": "suunto", "model": "Suunto Ocean"},
                 "started_at": "2026-09-08T15:17:38+03:00",
-                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+                "profile": {"duration": 3_473_000, "depth": {"times": [0, 3_473_000], "values": [0, 1904]}},
+                "cns_end": 9.0,
             },
-            cns_end=9.0,
         )
 
         plan = await _apply(async_db, user.id, document)
@@ -3564,8 +3572,8 @@ class TestTheImportGates:
         # The stored recording keeps its serial and gains the model the incoming one had.
         recording = (await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == dive.id))).scalar_one()
         assert (recording.device_serial, recording.device_model) == ("253810000400", "Suunto Ocean")
-        # And the dive's blank exposure reading fills from the document.
-        assert (await async_db.execute(select(Dive.cns_end).where(Dive.id == dive.id))).scalar_one() == 9.0
+        # And its blank exposure reading fills from the document.
+        assert recording.cns_end == 9.0
 
     @pytest.mark.asyncio
     async def test_a_fill_puts_the_documents_mix_into_a_blank_cylinder(
@@ -3586,7 +3594,7 @@ class TestTheImportGates:
             {
                 "device": {"brand": "suunto", "model": "Suunto Ocean"},
                 "started_at": "2026-09-08T15:17:38+03:00",
-                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+                "profile": {"duration": 3_473_000, "depth": {"times": [0, 3_473_000], "values": [0, 1904]}},
             },
             cylinders=[{"gas_number": 1, "oxygen": 33.0, "helium": 0.0}],
         )
@@ -3630,9 +3638,9 @@ class TestTheImportGates:
             {
                 "device": {"brand": "suunto", "model": "Suunto Ocean"},
                 "started_at": "2026-09-08T15:17:38+03:00",
-                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+                "profile": {"duration": 3_473_000, "depth": {"times": [0, 3_473_000], "values": [0, 1904]}},
+                "cns_end": 9.0,
             },
-            cns_end=9.0,
             cylinders=[{"gas_number": 1, "oxygen": 33.0, "helium": 0.0}],
         )
 
@@ -3642,8 +3650,14 @@ class TestTheImportGates:
         # The recording itself filled, which is the half that is still the fill's to write.
         filled = (await async_db.execute(select(DiveRecording).where(DiveRecording.id == secondary.id))).scalar_one()
         assert filled.device_model == "Suunto Ocean"
-        # The dive's did not.
-        assert (await async_db.execute(select(Dive.cns_end).where(Dive.id == dive.id))).scalar_one() is None
+        # Its readouts are its own and filled too; the primary's are not touched.
+        assert filled.cns_end == 9.0
+        primary = (
+            await async_db.execute(
+                select(DiveRecording.cns_end).where(DiveRecording.dive_id == dive.id, DiveRecording.ordinal == 0)
+            )
+        ).scalar_one()
+        assert primary is None
         cylinder = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalar_one()
         assert cylinder.oxygen is None
 
@@ -3662,7 +3676,7 @@ class TestTheImportGates:
                 # declared `duration`**: a document may legitimately declare a span longer
                 # than its own samples (a computer that stops sampling at the surface), and
                 # what an imported recording's figures mean is "the samples' own".
-                "profile": {"duration": 2940, "depth": {"times": [0, 2940], "values": [0, 1900]}},
+                "profile": {"duration": 2_940_000, "depth": {"times": [0, 2_940_000], "values": [0, 1900]}},
             }
         )
 
@@ -3711,8 +3725,8 @@ class TestTheImportGates:
                 "device": {"brand": "Shearwater Research, Inc", "model": "Perdix 3", "serial": "D9772626"},
                 "started_at": "2026-09-08T15:19:38+03:00",
                 "profile": {
-                    "duration": 2940,
-                    "depth": {"times": [0, 2940], "values": [0, 1900]},
+                    "duration": 2_940_000,
+                    "depth": {"times": [0, 2_940_000], "values": [0, 1900]},
                     "pressures": [{"gas_number": 1, "times": [0], "values": [2000]}],
                     "events": [{"time": 0, "type": "gas_switch", "gas_number": 1}],
                 },
@@ -3770,7 +3784,7 @@ class TestTheImportGates:
             {
                 "device": {"brand": "suunto", "model": "Suunto Ocean"},
                 "started_at": "2026-09-08T15:17:38+03:00",
-                "profile": {"duration": 3473, "depth": {"times": [0, 3473], "values": [0, 1904]}},
+                "profile": {"duration": 3_473_000, "depth": {"times": [0, 3_473_000], "values": [0, 1904]}},
                 "source_files": [
                     {
                         "uuid": str(uuid7()),
@@ -3810,7 +3824,7 @@ class TestTheImportGates:
                 # is the clause doing the refusing here rather than a depth or a duration.
                 "device": {"brand": "Garmin", "serial": "3542000001"},
                 "started_at": "2026-09-09T09:00:00+03:00",
-                "profile": {"duration": 2940, "depth": {"times": [0, 2940], "values": [0, 1904]}},
+                "profile": {"duration": 2_940_000, "depth": {"times": [0, 2_940_000], "values": [0, 1904]}},
             },
             started_at="2026-09-09T09:00:00+03:00",
         )
@@ -3828,7 +3842,7 @@ class TestTheImportGates:
         created and no note is raised."""
         user = create_user(db)
         document = self._document(
-            {"device": {"brand": "Suunto"}, "profile": {"duration": 60, "depth": {"times": [0], "values": [0]}}}
+            {"device": {"brand": "Suunto"}, "profile": {"duration": 60_000, "depth": {"times": [0], "values": [0]}}}
         )
 
         plan = await _apply(async_db, user.id, document)

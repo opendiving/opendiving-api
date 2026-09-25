@@ -21,13 +21,15 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     a bare document (see *"A bare document creates no file rows"* in `DECISIONS.md`), so a
     recording it creates carries a device, a start and a profile and nothing else. That is
     first-class rather than degenerate: it is how every UDDF and `.ssrf` dive in the app
-    arrives, and both backfills are written to leave it alone.
+    arrives, and both backfills are written to leave it alone. Nor need it have a device or
+    samples: a recording of readouts alone - a dive-level `cns_end` a logbook carried, with
+    no computer named - is one (spec §3 rule 4).
 
     **Ordinal 0 is primary**, which is order rather than a flag - the same choice the
     format makes, and for the format's reason: a flag every writer has to set is a value
     every reader has to default. The primary recording is the one a single-profile
     consumer takes (the app's own UDDF export does exactly this), and it is the only one
-    whose file writes the dive's tech scalars.
+    whose file writes the dive's entry and exit fixes.
 
     **`user_id` is denormalized off `dive` and the match query is why.** Every gate in
     `services/dive_recordings.py` runs per account over `(user_id, start_time)`, comparing
@@ -127,6 +129,24 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     # nothing without `deco_name` and the device columns above, which is why it is stored
     # beside them rather than normalized into something comparable across vendors.
     deco_conservatism: Mapped[int | None] = mapped_column(Integer, default=None)
+    # The water density this device divided pressure by - a `Salinity` value, on `mode`'s
+    # terms: a setting of the computer, not a kind of water (that is `dive.water_type`).
+    salinity: Mapped[str | None] = mapped_column(String(32), default=None)
+
+    # What this device reported about the dive as a whole, off its own arithmetic and its own
+    # barometer - the recording's rather than the dive's, because two computers give two
+    # answers (spec §6.4a). Written only by the import paths, never by a form: CNS and OTU
+    # depend on the algorithm the device ran and the exposure it carried over, so a typed
+    # value would be a guess wearing a reading's clothes. See DECISIONS.md.
+    #
+    # `Float` for CNS: the Suunto DM5 XML export rounds it to whole percent where the JSON
+    # export of the same dive records 0.069 (a 0-1 fraction, 6.9 %).
+    cns_start: Mapped[float | None] = mapped_column(Float, default=None)
+    cns_end: Mapped[float | None] = mapped_column(Float, default=None)
+    otu_start: Mapped[float | None] = mapped_column(Float, default=None)
+    otu_end: Mapped[float | None] = mapped_column(Float, default=None)
+    # In bar, display-only: `services/dive_gas.py` deliberately assumes 1 bar at the surface.
+    surface_pressure_bar: Mapped[float | None] = mapped_column(Float, default=None)
 
     # The device's own start, split exactly as the dive's is: the instant in `start_time`
     # and the offset it was expressed in beside it, with NULL meaning "the source recorded a
@@ -162,6 +182,20 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
             CheckConstraint(
                 "deco_gf_low IS NULL OR deco_gf_high IS NULL OR deco_gf_low <= deco_gf_high",
                 name="ck_dive_recording_deco_gf_low_within_high",
+            ),
+            # `>= 0` rather than `> 0`: a dive begun with no oxygen loading records a real 0.
+            # No upper bound - CNS above 100 % is exactly the reading a diver most needs.
+            CheckConstraint("cns_start IS NULL OR cns_start >= 0", name="ck_dive_recording_cns_start_non_negative"),
+            CheckConstraint("cns_end IS NULL OR cns_end >= 0", name="ck_dive_recording_cns_end_non_negative"),
+            CheckConstraint("otu_start IS NULL OR otu_start >= 0", name="ck_dive_recording_otu_start_non_negative"),
+            CheckConstraint("otu_end IS NULL OR otu_end >= 0", name="ck_dive_recording_otu_end_non_negative"),
+            # Both sides: anything outside is a unit error (both Suunto exports write Pascal),
+            # and the floor is 0.4 because `ck_dive_altitude_range`'s 6500 m ceiling is about
+            # 0.44 bar - the DiveJSON floor too. Mirrored by `_drop_implausible_surface_pressure`
+            # in `schemas/parsed_dive.py`.
+            CheckConstraint(
+                "surface_pressure_bar IS NULL OR (surface_pressure_bar >= 0.4 AND surface_pressure_bar <= 1.2)",
+                name="ck_dive_recording_surface_pressure_range",
             ),
             # One recording per slot per dive. What used to be `ux_dive_file_dive_id`'s job
             # - stopping a dive from accumulating records nobody asked for - moved here and

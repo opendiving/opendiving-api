@@ -52,7 +52,7 @@ dependencies = [
     # `agency`, and the readers spell a dive's number `number`, so a UDDF or `.ssrf` dive
     # `services/logbook_import/reader.py` converts on the request path keeps its own number
     # rather than the placeholder `0`.
-    "divejson>=0.12.0",
+    "divejson>=0.13.0",
     "webauthn>=3.0.0",
     # Decodes and renders the uploaded pictures (`services/user_pictures.py`) and the species
     # photos (`services/species_photos.py`) - the only image processing in the app. 12.0.0 is the first release with official Python 3.14

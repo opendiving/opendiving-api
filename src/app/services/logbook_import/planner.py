@@ -44,6 +44,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid6 import uuid7
 
+from ...core.schemas import NOTES_MAX_LENGTH
 from ...core.utils.datetime_offset import split_local_start_time
 from ...core.utils.uploads import safe_filename
 from ...models.certification import Certification
@@ -60,7 +61,7 @@ from ...models.species import Species
 from ...models.trip import Trip
 from ...models.user import User
 from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, CertificationAgency, CertificationSide
-from ...schemas.dive_profile import DEPTH_SCALE, SINGLE_SERIES_CHANNELS, ProfileEventType
+from ...schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND, SINGLE_SERIES_CHANNELS, ProfileEventType
 from ...schemas.export import DIVEJSON_PRODUCER_KEY
 from ...schemas.gear_item import GearType
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
@@ -84,6 +85,7 @@ from ...schemas.logbook_import import (
     ImportPortraitChoice,
     ImportPortraitOffer,
     ImportProfile,
+    ImportRecording,
     ImportSpecies,
     ImportStoredFile,
     ImportTrip,
@@ -268,10 +270,11 @@ class PlannedRecording:
     `device_brand`.
 
     **`duration` and `max_depth` are derived from the profile's own samples**, which is what
-    an imported recording has to do: a DiveJSON Recording carries no scalars of its own, so
-    the document offers nowhere else to read the two figures the strict gate compares from.
-    Left `None` where the recording has no profile - and a recording with no figures simply
-    cannot be strict-matched, which is honest rather than lossy.
+    an imported recording has to do: a DiveJSON Recording carries no such scalars of its own,
+    so the document offers nowhere else to read the two figures the strict gate compares
+    from. `duration` is whole seconds, the profile's millisecond span divided. Left `None`
+    where the recording has no profile - and a recording with no figures simply cannot be
+    strict-matched, which is honest rather than lossy.
     """
 
     ordinal: int
@@ -282,6 +285,9 @@ class PlannedRecording:
     # key in the dict because it is not part of the model.
     mode: str | None = None
     deco_model: dict[str, Any] = field(default_factory=dict)
+    salinity: str | None = None
+    # The device's readouts, keyed by column name like `device`, the absent ones left out.
+    readouts: dict[str, float] = field(default_factory=dict)
     start_time: datetime | None = None
     utc_offset_minutes: int | None = None
     duration: int | None = None
@@ -483,12 +489,18 @@ _DIVE_BOUNDS: tuple[_Bound, ...] = (
     _Bound("visibility", lambda value: 0 <= value <= _INT32_MAX, "visibility must be a non-negative number of metres"),
     _Bound("weight", lambda value: value >= 0, "ballast cannot be negative"),
     _Bound("altitude", lambda value: -450 <= value <= 6500, "altitude must be between -450 and 6500 metres"),
+)
+
+# A recording's readouts, same rules, from `models/dive_recording.py` - keyed by the format's
+# member name, which is the column's for all but the surface pressure (`_READOUT_COLUMN`).
+_READOUT_BOUNDS: tuple[_Bound, ...] = (
+    _Bound("surface_pressure", lambda value: 0.4 <= value <= 1.2, "surface pressure must be between 0.4 and 1.2 bar"),
     _Bound("cns_start", lambda value: value >= 0, "a CNS reading cannot be negative"),
     _Bound("cns_end", lambda value: value >= 0, "a CNS reading cannot be negative"),
     _Bound("otu_start", lambda value: value >= 0, "an OTU reading cannot be negative"),
     _Bound("otu_end", lambda value: value >= 0, "an OTU reading cannot be negative"),
-    _Bound("surface_pressure", lambda value: 0.4 <= value <= 1.2, "surface pressure must be between 0.4 and 1.2 bar"),
 )
+_READOUT_COLUMN = {"surface_pressure": "surface_pressure_bar"}
 
 # The mixture bounds, same rules, from `models/dive_mixture.py`. `volume`, `oxygen` and
 # `helium` are here rather than handled apart because they became nullable columns: they
@@ -500,7 +512,7 @@ _MIXTURE_BOUNDS: tuple[_Bound, ...] = (
     _Bound("helium", lambda value: 0 <= value <= 100, "a helium fraction must be between 0 and 100 percent"),
     _Bound("start_pressure", lambda value: 0 < value <= 350, "a start pressure must be between 0 and 350 bar"),
     _Bound("end_pressure", lambda value: 0 <= value <= 350, "an end pressure must be between 0 and 350 bar"),
-    _Bound("po2_limit", lambda value: 0.4 <= value <= 2.0, "a ppO2 limit must be between 0.4 and 2.0 bar"),
+    _Bound("ppo2_limit", lambda value: 0.4 <= value <= 2.0, "a ppO2 limit must be between 0.4 and 2.0 bar"),
     _Bound(
         "gas_number",
         lambda value: 0 <= value <= _INT32_MAX,
@@ -1039,9 +1051,27 @@ class _Planner:
         """
         return value or ""
 
+    def _notes_text(self, collection: str, record_uuid: uuid_pkg.UUID, value: str | None) -> str:
+        """A notes column: `_text`, cut at this app's own cap with a note.
+
+        The format caps no note and this reader reads any length; the app's read shapes carry
+        `NOTES_MAX_LENGTH`, so a longer one stored whole would make its record unreadable.
+        """
+        text = self._text(value)
+        if len(text) <= NOTES_MAX_LENGTH:
+            return text
+        self._dropped(
+            collection,
+            record_uuid,
+            f"The notes ran past {NOTES_MAX_LENGTH:,} characters, this app's limit, and the rest was dropped",
+        )
+        return text[:NOTES_MAX_LENGTH]
+
     # ------------------------------------------------------------------ collections
 
     async def plan(self) -> ImportPlan:
+        for note in self._loaded.read_as_written:
+            self._note(note.code, note.message, collection=note.collection, uuid=note.uuid)
         await self._plan_diver()
         await self._plan_portrait()
         await self._plan_trips()
@@ -1189,7 +1219,7 @@ class _Planner:
         record.values = {
             "user_id": self._user_id,
             "name": trip.name,
-            "notes": self._text(trip.notes),
+            "notes": self._notes_text("trips", trip.uuid, trip.notes),
             "created_at": self._created_at(trip.created_at),
         }
         record.children = {"parts": self._plan_trip_parts(trip)}
@@ -1262,7 +1292,7 @@ class _Planner:
             "instructor_name": course.instructor_name,
             "instructor_number": course.instructor_number,
             "training_center": course.training_center,
-            "notes": self._text(course.notes),
+            "notes": self._notes_text("courses", course.uuid, course.notes),
             "created_at": self._created_at(course.created_at),
         }
         return record
@@ -1309,7 +1339,7 @@ class _Planner:
             "name": site.name,
             "latitude": latitude,
             "longitude": longitude,
-            "notes": self._text(site.notes),
+            "notes": self._notes_text("sites", site.uuid, site.notes),
             "created_at": self._created_at(site.created_at),
             **place,
         }
@@ -1404,7 +1434,7 @@ class _Planner:
             "name": item.name,
             "brand": item.brand,
             "type": gear_type,
-            "notes": self._text(item.notes),
+            "notes": self._notes_text("gear", item.uuid, item.notes),
             "rented": bool(item.rented),
             "is_archived": bool(item.archived),
             "archived_at": item.archived_at if item.archived else None,
@@ -1597,7 +1627,7 @@ class _Planner:
             "dive_count_at_service": self._count(collection, service.uuid, service.dive_count_at_service),
             "label": service.label,
             "performed_by": service.performed_by,
-            "notes": self._text(service.notes),
+            "notes": self._notes_text("gear_service_records", service.uuid, service.notes),
             "created_at": self._created_at(service.created_at),
         }
         record.children = {
@@ -1647,7 +1677,7 @@ class _Planner:
             "instructor_name": certification.instructor_name,
             "instructor_number": certification.instructor_number,
             "training_center": certification.training_center,
-            "notes": self._text(certification.notes),
+            "notes": self._notes_text("certifications", certification.uuid, certification.notes),
             "created_at": self._created_at(certification.created_at),
         }
         record.children = {
@@ -1815,6 +1845,15 @@ class _Planner:
         collection = "dives"
         if dive.started_at is None:
             return self._skip(collection, dive.uuid, "A dive needs a start time, and this one has none.")
+        if not isinstance(dive.started_at, datetime):
+            # A date-only start (spec §5.2): the day was recorded and the time of day was not.
+            # This app cannot store one yet, and midnight would be a time nobody recorded.
+            return self._skip(
+                collection,
+                dive.uuid,
+                "This dive records its date and no time of day, which this app cannot store yet. It was not "
+                "imported rather than placed at midnight.",
+            )
 
         record = self._resolve(collection, dive.uuid, existing)
         if record.action not in (Action.CREATE, Action.RESTORE):
@@ -1831,8 +1870,9 @@ class _Planner:
         if duration is None and profile is not None:
             # Derived, and reported as derived - which §5.4 permits and inventing does not.
             # The profile is the recording of this very dive, so its span is the one number
-            # in the document that can honestly stand for a duration the source never wrote.
-            duration = profile.duration
+            # in the document that can honestly stand for a duration the source never wrote -
+            # in milliseconds, and a dive's duration is whole seconds.
+            duration = round(profile.duration / MILLISECONDS_PER_SECOND)
             self._note(
                 ImportNoteCode.VALUE_DROPPED,
                 "This dive records no duration, so its length was taken from the span of its own profile.",
@@ -1886,7 +1926,7 @@ class _Planner:
             "start_time": start_time,
             "utc_offset_minutes": offset_minutes,
             "duration": int(duration),
-            "notes": self._text(dive.notes),
+            "notes": self._notes_text("dives", dive.uuid, dive.notes),
             "max_depth": max_depth,
             "avg_depth": avg_depth,
             "bottom_temperature": dive.bottom_temperature if _finite(dive.bottom_temperature) else None,
@@ -1894,11 +1934,6 @@ class _Planner:
             "weight": bounded.get("weight"),
             "water_type": None if dive.water_type is None else dive.water_type.value,
             "altitude": bounded.get("altitude"),
-            "cns_start": bounded.get("cns_start"),
-            "cns_end": bounded.get("cns_end"),
-            "otu_start": bounded.get("otu_start"),
-            "otu_end": bounded.get("otu_end"),
-            "surface_pressure_bar": bounded.get("surface_pressure"),
             "entry_latitude": entry[0],
             "entry_longitude": entry[1],
             "exit_latitude": exit_[0],
@@ -2017,7 +2052,8 @@ class _Planner:
                     "helium": helium,
                     "start_pressure": start_pressure,
                     "end_pressure": end_pressure,
-                    "po2_limit": bounded.get("po2_limit"),
+                    # The column keeps the app's own spelling; only the format's changed.
+                    "po2_limit": bounded.get("ppo2_limit"),
                     "gas_number": bounded.get("gas_number"),
                     "role": None if cylinder.role is None else cylinder.role.value,
                     "usage": None if cylinder.usage is None else cylinder.usage.value,
@@ -2028,14 +2064,13 @@ class _Planner:
     def _plan_profile(self, dive_uuid: uuid_pkg.UUID, source: Any) -> PlannedProfile | None:
         """A dive's samples, as the stored shape - or nothing, with a note.
 
-        Built directly rather than through `normalize()`, and that is deliberate:
-        `normalize` rebases a parser's raw axis onto the earliest reading, which is exactly
-        right for a dive-computer file and exactly wrong here. A document's `times` are
-        already elapsed seconds from the start of the dive (spec §6.5), so shifting a
-        profile whose first sample is at five seconds would move every marker on it. What
-        the import does reuse is everything downstream of that: `derive_gas_attribution`
-        and `downsample`, in that order, because attribution reads a mean depth off the
-        full-resolution channel.
+        Built directly rather than through `normalize()`: a document's `times` are already
+        integer milliseconds from the recording's start (spec §6.5), which is the stored
+        axis, so there is nothing to round or place. What the import does reuse is everything
+        downstream of that: `derive_gas_attribution` and `downsample`, in that order, because
+        attribution reads a mean depth off the full-resolution channel. Every axis entry and
+        the span keep an int32 bound, which in milliseconds is twenty-four days - still far
+        past any dive.
         """
         if source is None:
             return None
@@ -2172,10 +2207,12 @@ class _Planner:
     def _plan_recordings(self, dive: ImportDive) -> list[PlannedRecording]:
         """A dive's recordings, in the document's order - the first primary.
 
-        **A recording carrying none of its device, its profile and its files is dropped**,
-        which is §3's beyond-schema rule 4 applied on the way in rather than asserted about
-        the way out: an object that describes nothing would become a row nothing can render,
-        with a `start_time` and no reason to exist.
+        **A recording carrying none of its device, its profile, its files and a readout is
+        dropped**, which is §3's beyond-schema rule 4 applied on the way in rather than
+        asserted about the way out: an object that describes nothing would become a row
+        nothing can render, with a `start_time` and no reason to exist. A readout alone is a
+        record - a computer's own arithmetic, which a hand-logged dive in Subsurface keeps
+        with no samples at all - and a setting alone is not.
 
         `started_at` absent means the dive's (§6.4a), so it is substituted here rather than
         left NULL - a reader that treated the absence as "unknown" would put every
@@ -2201,13 +2238,19 @@ class _Planner:
                 for stored in source.source_files
                 if (planned_file := self._plan_dive_file(dive, stored)) is not None
             ]
-            if not device and profile is None and not source.source_files:
+            readouts = {
+                _READOUT_COLUMN.get(member, member): value
+                for member, value in self._bounded("dives", dive.uuid, source, _READOUT_BOUNDS).items()
+            }
+            if not device and profile is None and not source.source_files and not readouts:
                 self._dropped(
-                    "dives", dive.uuid, "A recording described no device, no samples and no file, and was dropped"
+                    "dives",
+                    dive.uuid,
+                    "A recording described no device, no samples, no file and no reading, and was dropped",
                 )
                 continue
 
-            started_at = source.started_at if source.started_at is not None else dive.started_at
+            started_at = self._recording_start(dive, source)
             start_time, offset_minutes = (None, None)
             if started_at is not None:
                 start_time, offset_minutes = split_local_start_time(started_at)
@@ -2218,21 +2261,37 @@ class _Planner:
                     device=device,
                     mode=None if source.mode is None else source.mode.value,
                     deco_model=self._plan_deco_model(dive.uuid, source.deco_model),
+                    salinity=None if source.salinity is None else source.salinity.value,
+                    readouts=readouts,
                     start_time=start_time,
                     utc_offset_minutes=offset_minutes,
                     # **Derived from the samples**, which is the only place a document offers
-                    # them: a Recording carries no scalars of its own, so a recording with no
-                    # profile has no figures and cannot be strict-matched. Left NULL rather
+                    # them: a Recording carries no such scalars of its own, so a recording with
+                    # no profile has no figures and cannot be strict-matched. Left NULL rather
                     # than borrowed from the dive - the dive's are the diver's logbook entry
                     # and may have been hand-edited, and a gate comparing an edited number
                     # against another device's samples is comparing two different things.
-                    duration=None if profile is None else profile.profile.duration,
+                    duration=None if profile is None else round(profile.profile.duration / MILLISECONDS_PER_SECOND),
                     max_depth=_deepest_metres(profile),
                     profile=profile,
                     files=files,
                 )
             )
         return planned
+
+    def _recording_start(self, dive: ImportDive, source: ImportRecording) -> datetime | None:
+        """A recording's own start, or the dive's where it states none (§6.4a).
+
+        A recording's start is a date-time and never a bare date; one that arrives as a date
+        is read as absent, with a note, rather than as midnight.
+        """
+        if source.started_at is not None and not isinstance(source.started_at, datetime):
+            self._dropped(
+                "dives", dive.uuid, "A recording's start carried no time of day, so the dive's start was used"
+            )
+        if isinstance(source.started_at, datetime):
+            return source.started_at
+        return dive.started_at if isinstance(dive.started_at, datetime) else None
 
     def _plan_deco_model(self, dive_uuid: uuid_pkg.UUID, source: ImportDecoModel | None) -> dict[str, Any]:
         """One recording's deco model, as the columns that carry it - keyed by column name.

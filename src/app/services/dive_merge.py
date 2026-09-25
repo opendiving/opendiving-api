@@ -26,6 +26,7 @@ from datetime import datetime
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from ..core.schemas import NOTES_MAX_LENGTH
 from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
@@ -39,7 +40,7 @@ from ..models.dive_recording import DiveRecording
 from ..models.dive_species import DiveSpecies
 from ..schemas.dive import DiveReadInternal
 from ..schemas.dive_mixture import as_create
-from ..schemas.dive_profile import DEPTH_SCALE
+from ..schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND
 from .dive_files import apply_gas_mapping, relabel_gas_numbers
 from .dive_profiles import (
     MERGE_PARSER_KEY,
@@ -53,7 +54,15 @@ from .dive_profiles import (
     shift_profile,
     store_profile,
 )
-from .dive_recordings import DeviceIdentity, delta_seconds, next_ordinal, same_device, starts_before, wall_clock
+from .dive_recordings import (
+    READOUT_COLUMNS,
+    DeviceIdentity,
+    delta_seconds,
+    next_ordinal,
+    same_device,
+    starts_before,
+    wall_clock,
+)
 
 
 class DiveNotMergeableError(Exception):
@@ -96,6 +105,7 @@ class _Span:
 
     start_time: datetime | None
     utc_offset_minutes: int | None
+    # The profile's span, in the axis's milliseconds.
     duration: int | None
     max_depth_cm: int | None
 
@@ -104,7 +114,7 @@ class _Span:
 
 
 def dive_figures(spans: Sequence[_Span]) -> tuple[int | None, float | None]:
-    """A dive's `duration` and `max_depth`, from what its recordings carry.
+    """A dive's `duration` in seconds and its `max_depth`, from what its recordings carry.
 
     **`duration` runs from the earliest recording's start to the last sample any of them
     recorded**, which is not the same as the later dive's own logged end and is deliberately
@@ -132,7 +142,7 @@ def dive_figures(spans: Sequence[_Span]) -> tuple[int | None, float | None]:
     if placed:
         origin_start, origin_offset, _ = min(placed, key=_clock_key(placed))
         duration = max(
-            round(delta_seconds(origin_start, origin_offset, start, offset)) + covered
+            round(delta_seconds(origin_start, origin_offset, start, offset) + covered / MILLISECONDS_PER_SECOND)
             for start, offset, covered in placed
         )
 
@@ -336,6 +346,7 @@ async def _plan_fold(db: AsyncSession, *, survivor: _Recording, absorbed: _Recor
 
     offset = round(
         delta_seconds(survivor_start, survivor.utc_offset_minutes, absorbed_start, absorbed.utc_offset_minutes)
+        * MILLISECONDS_PER_SECOND
     )
     survivor_first = not starts_before(
         absorbed_start, absorbed.utc_offset_minutes, survivor_start, survivor.utc_offset_minutes
@@ -376,12 +387,28 @@ async def _write_fold(db: AsyncSession, fold: _Fold, *, dive_id: int) -> None:
     **The surviving recording's own `duration` and `max_depth` are recomputed from the merged
     profile.** They are the columns the match gates compare, and after a fold the recording
     describes both records; leaving them at the surviving half's figures would have every
-    later gate comparing an incoming file against half a dive.
+    later gate comparing an incoming file against half a dive. The column is seconds, so the
+    span is divided into it.
+
+    **The absorbed recording's readouts and salinity fill the surviving one's blanks** before
+    its row goes, on the rule every second record of one recording follows: fill, never
+    overwrite.
     """
     await db.execute(
         update(DiveFile)
         .where(DiveFile.recording_id == fold.absorbed_recording_id)
         .values(recording_id=fold.recording_id, dive_id=dive_id)
+    )
+    absorbed = aliased(DiveRecording)
+    await db.execute(
+        update(DiveRecording)
+        .where(DiveRecording.id == fold.recording_id, absorbed.id == fold.absorbed_recording_id)
+        .values(
+            {
+                getattr(DiveRecording, column): func.coalesce(getattr(DiveRecording, column), getattr(absorbed, column))
+                for column in (*READOUT_COLUMNS, "salinity")
+            }
+        )
     )
     await db.execute(delete(DiveRecording).where(DiveRecording.id == fold.absorbed_recording_id))
 
@@ -409,7 +436,7 @@ async def _write_fold(db: AsyncSession, fold: _Fold, *, dive_id: int) -> None:
         .values(
             start_time=fold.start_time,
             utc_offset_minutes=fold.utc_offset_minutes,
-            duration=None if fold.profile is None else fold.profile.duration,
+            duration=None if fold.profile is None else round(fold.profile.duration / MILLISECONDS_PER_SECOND),
             max_depth=max(depths) / DEPTH_SCALE if depths else None,
         )
     )
