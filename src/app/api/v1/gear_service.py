@@ -416,6 +416,9 @@ async def write_gear_service_record(
     (item, kind, label) - see `find_schedule_for_record` - so logging "annual service
     done" from the gear page satisfies the reminder without picking anything. A record
     with no matching rule is fine and simply stands on its own.
+
+    `contact_uuid` names the shop that did the work, beside `performed_by`'s person; one
+    that isn't the caller's own - or doesn't exist - is a 422.
     """
     db_gear_item = await _owned_gear_item(db, record.gear_item_uuid, current_user["id"])
 

@@ -132,7 +132,9 @@ async def write_trip(
     Trip names are unique per user, so reusing one that already exists is a 422. A trip
     carries no dates of its own: each part has its own optional range and its own optional
     place, and the trip's span is the earliest start and latest end across them. `parts`
-    keep the order given; index 0 is the one shown wherever only a single part fits.
+    keep the order given; index 0 is the one shown wherever only a single part fits. A part's
+    `accommodation_uuid` names the contact the diver stayed at; one that isn't the caller's
+    own - or doesn't exist - is a 422.
 
     The trip row commits before its parts do, so a failure inserting them leaves the trip
     behind without them - the same accepted semantics as `POST /dive` and its mixtures.
@@ -301,7 +303,8 @@ async def patch_trip(
     a name the caller already has on another trip is a 422. `parts` is replaced wholesale
     when present rather than merged, so sending a shorter list removes the difference and
     an empty list clears them; omitting the key leaves them alone. Each part's own
-    `end_date` must be on or after its `start_date`, which is a 422 naming the part.
+    `end_date` must be on or after its `start_date`, which is a 422 naming the part, and a
+    part's `accommodation_uuid` must name one of the caller's contacts.
     """
     db_trip = await _get_owned_trip(db, uuid, current_user)
 

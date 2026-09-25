@@ -544,8 +544,8 @@ async def write_dive(
 ) -> DiveReadWithMixtures:
     """Log a dive, together with its gas mixtures, dive sites, gear and species in one request.
 
-    Every referenced trip, training course, dive site and gear item must belong to the
-    caller: one that doesn't - or doesn't exist - is a 422 naming which, not a 403, since
+    Every referenced trip, training course, contact, dive site and gear item must belong to
+    the caller: one that doesn't - or doesn't exist - is a 422 naming which, not a 403, since
     from the caller's side the two are the same thing. Species are the exception, and only
     because the catalog is global: a species uuid needs to exist, but it belongs to nobody,
     so there is no ownership to fail. Dive sites keep the order given; index 0 is the
