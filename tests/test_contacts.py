@@ -1,5 +1,5 @@
-"""Contacts: the record (`models/contact.py`), its routes (`api/v1/contacts.py`), the five
-references to it, and the training-center shim on the course and certification writes.
+"""Contacts: the record (`models/contact.py`), its routes (`api/v1/contacts.py`) and the five
+references to it.
 
 House style per `test_courses.py`: the routes with their collaborators stubbed and the
 assertions on what they hand them, plus a Postgres-guarded tail for what only the database
@@ -26,13 +26,11 @@ from src.app.api.v1 import gear_service as gear_service_module
 from src.app.api.v1 import trips as trips_module
 from src.app.core.exceptions.http_exceptions import DuplicateValueException, UnprocessableEntityException
 from src.app.crud.crud_contacts import (
-    ContactRef,
     contact_name_exists,
     crud_contacts,
-    get_contact_refs_by_ids,
+    get_contact_uuids_by_ids,
     resolve_contact_id_for_user,
     resolve_contact_ids_for_user,
-    resolve_or_create_contact,
 )
 from src.app.crud.crud_trip_parts import get_parts_for_trip, get_trip_uuids_staying_at, replace_parts_for_trip
 from src.app.models.certification import Certification
@@ -251,9 +249,8 @@ class TestTheRoutes:
         }
 
     @pytest.mark.asyncio
-    async def test_a_rename_reaches_the_reads_that_print_the_name(self, route_collaborators: dict[str, Any]) -> None:
-        """The course and certification reads carry the contact's name for the web build
-        that prints a training center, so a rename drops those two families as well."""
+    async def test_a_rename_drops_only_the_contact_family(self, route_collaborators: dict[str, Any]) -> None:
+        """Every host reads its contact by uuid, so no other family carries the name."""
         await contacts_module.patch_contact(
             request=MagicMock(),
             uuid=uuid7(),
@@ -262,9 +259,15 @@ class TestTheRoutes:
             db=MagicMock(),
         )
 
-        for name in ("invalidate_contact_caches", "invalidate_course_caches", "invalidate_certification_caches"):
-            route_collaborators[name].assert_awaited_once_with(USER_ID)
-        route_collaborators["invalidate_dive_caches"].assert_not_awaited()
+        route_collaborators["invalidate_contact_caches"].assert_awaited_once_with(USER_ID)
+        for name in (
+            "invalidate_dive_caches",
+            "invalidate_course_caches",
+            "invalidate_certification_caches",
+            "invalidate_gear_caches",
+            "invalidate_trip_caches",
+        ):
+            route_collaborators[name].assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_renaming_onto_another_contact_is_a_422(self, route_collaborators: dict[str, Any]) -> None:
@@ -325,8 +328,6 @@ class TestTheRoutes:
 
 
 class TestTheCourseWrite:
-    """`contact_uuid`, and the shim that honours a training-center string beside it."""
-
     @pytest.fixture
     def stubs(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         course = CourseReadInternal(
@@ -343,18 +344,13 @@ class TestTheCourseWrite:
             "create": AsyncMock(return_value=course),
             "update": AsyncMock(),
             "resolve": AsyncMock(return_value=42),
-            "resolve_or_create": AsyncMock(return_value=(43, True)),
             "invalidate_courses": AsyncMock(),
-            "invalidate_contacts": AsyncMock(),
         }
         monkeypatch.setattr(courses_module, "_get_owned_course", values["owned"])
         monkeypatch.setattr(courses_module.crud_courses, "create", values["create"])
         monkeypatch.setattr(courses_module.crud_courses, "update", values["update"])
         monkeypatch.setattr(contact_links, "resolve_contact_id_for_user", values["resolve"])
-        monkeypatch.setattr(contact_links, "resolve_or_create_contact", values["resolve_or_create"])
         monkeypatch.setattr(courses_module, "invalidate_course_caches", values["invalidate_courses"])
-        monkeypatch.setattr(courses_module, "invalidate_contact_caches", values["invalidate_contacts"])
-        monkeypatch.setattr(courses_module, "_contact_of", AsyncMock(return_value=None))
         return values
 
     async def _create(self, body: dict[str, Any]) -> None:
@@ -380,7 +376,6 @@ class TestTheCourseWrite:
 
         assert stubs["resolve"].await_args.kwargs["user_id"] == USER_ID
         assert stubs["create"].await_args.kwargs["object"].contact_id == 42
-        stubs["resolve_or_create"].assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_someone_elses_contact_is_a_422(self, stubs: dict[str, Any]) -> None:
@@ -392,32 +387,11 @@ class TestTheCourseWrite:
         stubs["create"].assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_the_previous_build_s_training_center_becomes_a_contact(self, stubs: dict[str, Any]) -> None:
-        """The deploy-skew shim: what a diver types into the old build's field during the
-        window is kept, as the contact of that name."""
-        await self._create({"training_center": "  Blue Ocean  "})
-
-        assert stubs["resolve_or_create"].await_args.kwargs == {"user_id": USER_ID, "name": "Blue Ocean"}
-        assert stubs["create"].await_args.kwargs["object"].contact_id == 43
-        stubs["invalidate_contacts"].assert_awaited_once_with(USER_ID)
-
-    @pytest.mark.asyncio
-    async def test_the_uuid_wins_over_a_training_center_beside_it(self, stubs: dict[str, Any]) -> None:
-        await self._create({"contact_uuid": str(uuid7()), "training_center": "Blue Ocean"})
-
-        stubs["resolve_or_create"].assert_not_awaited()
-        assert stubs["create"].await_args.kwargs["object"].contact_id == 42
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("training_center", [None, "", "   "])
-    async def test_a_blank_training_center_changes_nothing(
-        self, stubs: dict[str, Any], training_center: str | None
-    ) -> None:
-        """So an edit from the previous build can set a contact and never clear one."""
-        await self._patch({"name": "Advanced Nitrox", "training_center": training_center})
+    async def test_an_omitted_contact_uuid_leaves_the_link_alone(self, stubs: dict[str, Any]) -> None:
+        await self._patch({"name": "Advanced Nitrox"})
 
         assert "contact_id" not in stubs["update"].await_args.kwargs["object"]
-        stubs["resolve_or_create"].assert_not_awaited()
+        stubs["resolve"].assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_null_contact_uuid_unlinks(self, stubs: dict[str, Any]) -> None:
@@ -425,9 +399,8 @@ class TestTheCourseWrite:
 
         assert stubs["update"].await_args.kwargs["object"] == {"contact_id": None}
 
-    def test_the_read_serves_the_linked_contact_s_name_as_the_training_center(self) -> None:
-        """The shim's read half, for the build that prints the field and echoes it back."""
-        contact = ContactRef(uuid=uuid7(), name="Blue Ocean")
+    def test_the_read_carries_the_uuid_alone(self) -> None:
+        contact_uuid = uuid7()
         course = CourseReadInternal(
             id=11,
             user_id=USER_ID,
@@ -439,27 +412,26 @@ class TestTheCourseWrite:
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
-        read = courses_module._to_public_course(course, user_uuid=USER_UUID, contact=contact)
+        read = courses_module._to_public_course(course, user_uuid=USER_UUID, contact_uuid=contact_uuid)
         unlinked = courses_module._to_public_course(course, user_uuid=USER_UUID)
 
-        assert (read.contact_uuid, read.training_center) == (contact.uuid, "Blue Ocean")
-        assert (unlinked.contact_uuid, unlinked.training_center) == (None, None)
-        assert "contact_id" not in read.model_dump()
+        assert (read.contact_uuid, unlinked.contact_uuid) == (contact_uuid, None)
+        assert {"contact_id", "training_center"}.isdisjoint(read.model_dump())
 
 
 class TestTheCertificationWrite:
-    def test_both_write_shapes_take_the_reference_and_the_shim(self) -> None:
+    def test_both_write_shapes_take_the_reference(self) -> None:
         contact_uuid = uuid7()
         created = CertificationCreate.model_validate(
-            {"agency": "padi", "name": "Open Water", "contact_uuid": str(contact_uuid), "training_center": "Blue"}
+            {"agency": "padi", "name": "Open Water", "contact_uuid": str(contact_uuid)}
         )
         patched = CertificationUpdateRequest.model_validate({"contact_uuid": None})
 
-        assert (created.contact_uuid, created.training_center) == (contact_uuid, "Blue")
+        assert created.contact_uuid == contact_uuid
         assert "contact_uuid" in patched.model_fields_set
 
-    def test_the_read_serves_the_linked_contact_s_name_too(self) -> None:
-        contact = ContactRef(uuid=uuid7(), name="Blue Ocean")
+    def test_the_read_carries_the_uuid_alone(self) -> None:
+        contact_uuid = uuid7()
         internal = certifications_module.CertificationReadInternal(
             id=1,
             user_id=USER_ID,
@@ -471,9 +443,10 @@ class TestTheCertificationWrite:
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
-        read = certifications_module._to_public_certification(internal, user_uuid=USER_UUID, contact=contact)
+        read = certifications_module._to_public_certification(internal, user_uuid=USER_UUID, contact_uuid=contact_uuid)
 
-        assert (read.contact_uuid, read.training_center) == (contact.uuid, "Blue Ocean")
+        assert read.contact_uuid == contact_uuid
+        assert "training_center" not in read.model_dump()
 
     def test_a_vanished_contact_is_named_in_the_integrity_message(self) -> None:
         assert (
@@ -558,22 +531,6 @@ class TestTheDatabase:
         db.rollback()
 
     @pytest.mark.asyncio
-    async def test_the_shim_reuses_a_contact_by_name_and_otherwise_makes_a_school(
-        self, db: Session, async_db: AsyncSession, diver: User
-    ) -> None:
-        mine = create_contact(db, diver)
-        fresh_name = f"Koh Tao Divers {uuid7().hex[-8:]}"
-
-        reused = await resolve_or_create_contact(async_db, user_id=diver.id, name=mine.name.lower())
-        created_id, created = await resolve_or_create_contact(async_db, user_id=diver.id, name=f" {fresh_name} ")
-        await async_db.commit()
-
-        assert reused == (mine.id, False)
-        assert created
-        row = await async_db.get(Contact, created_id)
-        assert row is not None and (row.name, row.roles) == (fresh_name, ["school"])
-
-    @pytest.mark.asyncio
     async def test_someone_elses_contact_never_resolves(
         self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
@@ -588,7 +545,7 @@ class TestTheDatabase:
         assert await resolve_contact_ids_for_user(async_db, contact_uuids=[mine.uuid], user_id=diver.id) == {
             mine.uuid: mine.id
         }
-        assert await get_contact_refs_by_ids(async_db, contact_ids=[theirs.id, None], user_id=diver.id) == {}
+        assert await get_contact_uuids_by_ids(async_db, contact_ids=[theirs.id, None], user_id=diver.id) == {}
 
     @pytest.mark.asyncio
     async def test_a_part_reads_its_accommodation_back_by_uuid(
@@ -684,15 +641,13 @@ class TestTheReadsCarryTheReference:
         assert single.contact_uuid == contact_uuid
 
     @pytest.mark.asyncio
-    async def test_a_course_and_a_card_carry_the_uuid_and_the_shim_s_name(
-        self, db: Session, async_db: AsyncSession, diver: User
-    ) -> None:
+    async def test_a_course_and_a_card_on_both_paths(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         contact = create_contact(db, diver)
         course = create_course(db, diver)
         card = create_certification(db, diver)
         course.contact_id = card.contact_id = contact.id
         db.commit()
-        expected = (contact.uuid, contact.name)
+        contact_uuid = contact.uuid
         course_uuid, card_uuid, user_id, user_uuid = course.uuid, card.uuid, diver.id, diver.uuid
 
         courses = await courses_module._cached_read_courses.__wrapped__(  # type: ignore[attr-defined]
@@ -718,10 +673,10 @@ class TestTheReadsCarryTheReference:
             request=None, user_id=user_id, uuid=card_uuid, owner_uuid=user_uuid, db=async_db
         )
 
-        assert [(row["contact_uuid"], row["training_center"]) for row in courses["data"]] == [expected]
-        assert (one_course.contact_uuid, one_course.training_center) == expected
-        assert [(row["contact_uuid"], row["training_center"]) for row in cards["data"]] == [expected]
-        assert (one_card.contact_uuid, one_card.training_center) == expected
+        assert [row["contact_uuid"] for row in courses["data"]] == [contact_uuid]
+        assert one_course.contact_uuid == contact_uuid
+        assert [row["contact_uuid"] for row in cards["data"]] == [contact_uuid]
+        assert one_card.contact_uuid == contact_uuid
 
     @pytest.mark.asyncio
     async def test_a_service_record_names_its_shop_on_both_paths(

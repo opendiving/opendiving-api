@@ -7093,21 +7093,11 @@ equal sets are two equal lists; reads widen it to `list[str]`. A set rather than
 because a resort is a dive center with rooms and a scalar could never become a set later.
 *Rejected:* a single `type` with a `resort` member, which files one party two ways.
 
-## The course and certification writes honour a training-center string for one web build
-
-Until the web build that sends `contact_uuid` is live, `CourseCreate`, `CourseUpdateRequest`,
-`CertificationCreate` and `CertificationUpdateRequest` accept `training_center` and resolve a
-non-blank one to the caller's contact of that name, or a new `school`; blank and `null` change
-nothing. `CourseRead` and `CertificationRead` serve the linked contact's name under it, which the
-old dialog echoes back as a no-op - so a contact rename also drops the course and certification
-caches. The api and web deploy apart, and the old build would otherwise lose what a diver types.
-*Rejected:* accept-and-ignore. Both halves and this entry go together.
-
 ## Deleting a contact invalidates five cache families and the trips it was stayed at
 
 A dive, a course, a certification, a service record and a trip part carry a contact's uuid, and
 `ON DELETE SET NULL` rewrites all of them, so `erase_contact` drops each family after its own. A
 single trip is cached under `trip_cache:{uuid}` with no user in the key, which no per-user pattern
 reaches, so the uuids of the trips whose parts name the contact are collected before the row goes
-and dropped one by one (`invalidate_trip_items`). A rename reaches no host's cache beyond the shim's
-two: reads carry the uuid, never a summary.
+and dropped one by one (`invalidate_trip_items`). A rename reaches no host's cache: reads carry the
+uuid, never a summary.

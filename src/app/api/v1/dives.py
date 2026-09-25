@@ -29,7 +29,7 @@ from ...core.utils.datetime_offset import (
 )
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.uploads import content_disposition_attachment, read_upload_within_limit
-from ...crud.crud_contacts import get_contact_refs_by_ids
+from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
@@ -734,7 +734,7 @@ async def _cached_read_dives(
     trip_uuid_by_id = await get_trip_uuids_by_ids(db=db, trip_ids=referenced_trip_ids, user_id=user_id)
     referenced_course_ids = [d["course_id"] for d in dives_data["data"] if d["course_id"] is not None]
     course_uuid_by_id = await get_course_uuids_by_ids(db=db, course_ids=referenced_course_ids, user_id=user_id)
-    contact_by_id = await get_contact_refs_by_ids(
+    contact_uuid_by_id = await get_contact_uuids_by_ids(
         db=db, contact_ids=[d["contact_id"] for d in dives_data["data"]], user_id=user_id
     )
 
@@ -744,7 +744,7 @@ async def _cached_read_dives(
             user_uuid=user_uuid,
             trip_uuid=trip_uuid_by_id.get(dive["trip_id"]) if dive["trip_id"] is not None else None,
             course_uuid=course_uuid_by_id.get(dive["course_id"]) if dive["course_id"] is not None else None,
-            contact_uuid=contact.uuid if (contact := contact_by_id.get(dive["contact_id"])) is not None else None,
+            contact_uuid=contact_uuid_by_id.get(dive["contact_id"]),
             dive_sites=sites_by_dive.get(dive["id"], []),
             gear_items=gear_by_dive.get(dive["id"], []),
         ).model_dump()
@@ -963,7 +963,7 @@ async def _cached_read_dive(
         course_uuid_by_id = await get_course_uuids_by_ids(db=db, course_ids=[db_dive["course_id"]], user_id=user_id)
         course_uuid = course_uuid_by_id.get(db_dive["course_id"])
 
-    contact = (await get_contact_refs_by_ids(db=db, contact_ids=[db_dive["contact_id"]], user_id=user_id)).get(
+    contact_uuid = (await get_contact_uuids_by_ids(db=db, contact_ids=[db_dive["contact_id"]], user_id=user_id)).get(
         db_dive["contact_id"]
     )
 
@@ -993,7 +993,7 @@ async def _cached_read_dive(
         user_uuid=owner_uuid,
         trip_uuid=trip_uuid,
         course_uuid=course_uuid,
-        contact_uuid=None if contact is None else contact.uuid,
+        contact_uuid=contact_uuid,
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,

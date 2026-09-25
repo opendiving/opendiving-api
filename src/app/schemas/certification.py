@@ -11,7 +11,7 @@ from ..core.schemas import (
     RejectsExplicitNulls,
     StoredVocabulary,
 )
-from .contact import CONTACT_UUID_DESCRIPTION, TRAINING_CENTER_READ_DESCRIPTION, TrainingCenterShim
+from .contact import CONTACT_UUID_DESCRIPTION
 
 
 class CertificationAgency(StrEnum):
@@ -200,9 +200,6 @@ class CertificationRead(CertificationBase, PublicUUIDSchema):
         Field(default=None, description="Public id of the training course this certification came from"),
     ]
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
-    # Read-only: the linked contact's name, for the web build that still prints a training
-    # center and echoes it back on save. Comes out with the write half - see `TrainingCenterShim`.
-    training_center: Annotated[str | None, Field(default=None, description=TRAINING_CENTER_READ_DESCRIPTION)]
     # The card images this certification has, as metadata only - see
     # `CertificationFileInfo`. Empty for a certification entered but not yet photographed.
     files: Annotated[
@@ -245,7 +242,6 @@ class CertificationCreate(CertificationBase):
         Field(default=None, description="Public id of the training course this certification came from"),
     ]
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
-    training_center: TrainingCenterShim
 
 
 class CertificationCreateInternal(CertificationBase):
@@ -303,7 +299,6 @@ class CertificationUpdateRequest(CertificationUpdate):
         Field(default=None, description="Public id of the training course this certification came from"),
     ]
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
-    training_center: TrainingCenterShim
 
 
 class CertificationUpdateInternal(CertificationUpdate):

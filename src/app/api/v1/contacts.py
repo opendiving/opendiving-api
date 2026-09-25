@@ -205,11 +205,6 @@ async def patch_contact(
     if update_data:
         await crud_contacts.update(db=db, object=update_data, uuid=uuid)
         await invalidate_contact_caches(db_contact.user_id)
-        # The course and certification reads carry this contact's name as `training_center`
-        # while the web build that prints one is still deployed, so a rename reaches them
-        # too. Goes with that read-only member.
-        await invalidate_course_caches(db_contact.user_id)
-        await invalidate_certification_caches(db_contact.user_id)
 
     return {"message": "Contact updated"}
 

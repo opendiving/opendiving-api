@@ -27,7 +27,7 @@ from ...core.exceptions.http_exceptions import (
 )
 from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
-from ...crud.crud_contacts import get_contact_refs_by_ids
+from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_gear_items import crud_gear_items, get_gear_item_uuids_by_id
 from ...crud.crud_gear_service_records import (
     crud_gear_service_records,
@@ -106,14 +106,6 @@ def _to_public_record(
         gear_service_schedule_uuid=gear_service_schedule_uuid,
         contact_uuid=contact_uuid,
     )
-
-
-async def _contact_uuids_by_id(
-    db: AsyncSession, contact_ids: list[int | None], user_id: int
-) -> dict[int | None, uuid_pkg.UUID]:
-    """The public uuids of the contacts a page of records names, in one query."""
-    refs = await get_contact_refs_by_ids(db=db, contact_ids=contact_ids, user_id=user_id)
-    return {contact_id: ref.uuid for contact_id, ref in refs.items()}
 
 
 async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> NoReturn:
@@ -513,7 +505,7 @@ async def _cached_read_records(
     schedule_uuid_by_id = await _schedule_uuids_by_id(
         db=db, schedule_ids=[row["gear_service_schedule_id"] for row in data["data"]]
     )
-    contact_uuid_by_id = await _contact_uuids_by_id(
+    contact_uuid_by_id = await get_contact_uuids_by_ids(
         db=db, contact_ids=[row["contact_id"] for row in data["data"]], user_id=user_id
     )
     # `.get()`-and-skip on the item, for the reason `_cached_read_schedules` gives; the
@@ -623,7 +615,7 @@ async def _cached_read_record(
     db_record = cast(GearServiceRecordReadInternal, db_record)
     # Resolved in here, unlike the item and schedule uuids the route hands in: the key names
     # only the record, and a contact's delete drops the gear family this key sits in.
-    contact_uuid_by_id = await _contact_uuids_by_id(db=db, contact_ids=[db_record.contact_id], user_id=user_id)
+    contact_uuid_by_id = await get_contact_uuids_by_ids(db=db, contact_ids=[db_record.contact_id], user_id=user_id)
 
     return _to_public_record(
         db_record,
