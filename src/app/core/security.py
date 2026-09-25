@@ -211,7 +211,7 @@ async def exchange_google_code(*, code: str, code_verifier: str, redirect_uri: s
     except (httpx.HTTPError, TimeoutError) as exc:
         logger.warning("Could not reach Google's token endpoint (%s).", type(exc).__name__)
         # A raw `HTTPException`: `core/exceptions/http_exceptions.py` has no class for 503,
-        # same as `api/v1/contact.py` and `services/species_service.py`.
+        # same as `api/v1/support.py` and `services/species_service.py`.
         raise HTTPException(status_code=503, detail=_GOOGLE_UNAVAILABLE) from None
 
     if response.status_code >= 500 or response.status_code == 429:

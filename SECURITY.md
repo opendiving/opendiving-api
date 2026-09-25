@@ -48,8 +48,8 @@ whole stack in a couple of minutes.
   those was closed by hand on the day of the move, and none has been opened since. This rule is
   about a defect in *our* code that nobody has disclosed yet — that still goes to the private
   channel above.)
-- **Don't use the in-app contact form.** It has a *Security* category, and it is still the wrong
-  route: `POST /api/v1/contact` delivers to whoever runs *that* instance, not to this project, and
+- **Don't use the in-app support form.** It has a *Security* category, and it is still the wrong
+  route: `POST /api/v1/support` delivers to whoever runs *that* instance, not to this project, and
   on most instances it delivers nowhere at all — `CONTACT_FORM_EMAIL` has no default, and unset the
   endpoint answers 503. Your report would reach a stranger's inbox or none.
 

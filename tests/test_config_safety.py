@@ -360,10 +360,10 @@ class TestRegistrationSettings:
 
         assert loaded.INVITATION_ATTEMPT_RATE_LIMIT_PER_USER > loaded.INVITATIONS_PER_USER
 
-    def test_the_request_limits_mirror_the_contact_form(self, tmp_path, monkeypatch):
+    def test_the_request_limits_mirror_the_support_form(self, tmp_path, monkeypatch):
         """Same shape and same values: both endpoints are anonymous and both act on a
         stranger's say-so, so a divergence here would be a number with no argument behind
-        it. Asserted against the contact form's own defaults rather than against literals,
+        it. Asserted against the support form's own defaults rather than against literals,
         so the two move together or the test says so."""
         for name in (
             "INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS",

@@ -154,7 +154,7 @@ EMAIL_FROM_ADDRESS="noreply@yourdomain.example"
 # Used to build magic-link URLs ({FRONTEND_URL}/auth/verify?token=...)
 FRONTEND_URL="http://localhost:3000"
 
-# Where the frontend's contact form (POST /api/v1/contact) delivers to. No default:
+# Where the frontend's support form (POST /api/v1/support) delivers to. No default:
 # unset, that endpoint answers 503 and the form is simply off, which beats mailing
 # your users' support requests to somebody else's inbox.
 CONTACT_FORM_EMAIL="you@example.com"

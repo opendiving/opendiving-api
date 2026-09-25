@@ -88,7 +88,7 @@ async def readiness_check(response: Response, db: Annotated[AsyncSession, Depend
     # argument order, so the detail always names the database before Redis.
     problems = [problem for problem in await asyncio.gather(_database_problem(db), _redis_problem()) if problem]
     if problems:
-        # Raw `HTTPException`, as in `api/v1/contact.py`: there is no 503 class in
+        # Raw `HTTPException`, as in `api/v1/support.py`: there is no 503 class in
         # `core/exceptions/http_exceptions.py`. The header goes on the exception because
         # raising discards the injected `response` above - the error path is the one that
         # most needs to not be cached, so it cannot rely on it.

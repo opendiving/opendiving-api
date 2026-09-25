@@ -37,7 +37,7 @@ class ChallengeStoreUnavailable(HTTPException):
     """Redis is not reachable, so no ceremony can be started or completed.
 
     An `HTTPException` rather than one of `core.exceptions.http_exceptions`' classes for
-    the same reason `POST /contact` and `species.resolve` raise their own: there is no
+    the same reason `POST /support` and `species.resolve` raise their own: there is no
     503 class in there. The message names the email fallback, because that is the whole
     point of the method still working.
     """

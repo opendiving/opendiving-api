@@ -94,7 +94,7 @@ async def request_an_invite(
 
     email = body.email.lower()
 
-    # The mode check is above these deliberately, the way `send_contact_message` puts its
+    # The mode check is above these deliberately, the way `send_support_request` puts its
     # 503 above its own: an instance where this feature is off must not have its buckets
     # spent by traffic that was never going to be stored.
     await enforce_rate_limit(
