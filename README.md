@@ -211,7 +211,7 @@ operator has closed registration (`REGISTRATION_MODE`, documented with the rest 
 `src/.env.example`) — a member sends and revokes their own, and the routes answer 404 on an open
 instance; and **admin**, the operator's own — the queue of people who have asked to be let in, and
 inviting or removing them in a batch — which is the one family gated on `is_superuser` rather than
-merely on having a token. All of those want a bearer token. The ones that don't are **contact**, the
+merely on having a token. All of those want a bearer token. The ones that don't are **support**, the
 auth routes themselves, the two health checks — `/health` says the process is up, `/health/ready`
 says Postgres and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how
 somebody with no account asks a closed instance for an invitation, `GET /config`, which tells the

@@ -3543,7 +3543,7 @@ relays only; `SMTP_USERNAME`/`SMTP_PASSWORD` are independently optional.
 `EMAIL_FROM_ADDRESS` has no default: `Settings._require_from_address_with_smtp` refuses to boot when
 `SMTP_HOST` is set without it, and `.env.example` ships it commented out, since an active template
 value would pass the check. `_build_message` flattens CR/LF in the subject (`EmailMessage` raises;
-the contact `subject` is unrestricted input) but not in addresses.
+the support form's `subject` is unrestricted input) but not in addresses.
 
 Mailpit is the opt-in `mail` compose profile (`docker compose --profile mail up`, inbox
 `127.0.0.1:8025`) so the logged magic link stays the default sign-in. `docker compose restart` does

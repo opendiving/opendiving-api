@@ -382,9 +382,9 @@ class EmailSettings(BaseSettings):
 
 
 class ContactSettings(BaseSettings):
-    # Inbox the frontend's support form (`POST /api/v1/support`) delivers to. Named for the
-    # form rather than its route: running instances already set these, and a rename would
-    # be a manual step for every operator.
+    # Inbox the frontend's support form (`POST /api/v1/support`) delivers to. The
+    # `CONTACT_FORM_` names stay: running instances already set `CONTACT_FORM_EMAIL`, and a
+    # rename would be a manual step for every operator.
     #
     # No default, for the same reason `EMAIL_FROM_ADDRESS` has none. It used to default to
     # the address for *this project's* own deployment, so a self-hosted instance quietly
