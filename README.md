@@ -68,7 +68,9 @@ else; what is here is the source, and the notes for working on it.
   dive site of your own that you can rename, move and annotate.
 - **Gear** — items, gear sets with default weights, service **schedules** (by months and/or dives),
   service history, a due-soon endpoint, and a scheduled email reminder digest.
-- **Certifications** — c-card records with front/back card images.
+- **Certifications** — c-card records with front/back card images, and an email when a card or the
+  account's dive insurance is about to expire and again when it has.
+- **Year in review** — each January, an email with the diver's previous year in figures.
 - **Training courses** — the course a card came out of and the dives logged on it, with the agency,
   status, instructor and the contact that ran it. No mainstream logbook models this: the agency apps
   tie dives to a course *or* cards to a course, and none of them let the record outlive the agency.

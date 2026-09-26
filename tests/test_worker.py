@@ -30,6 +30,7 @@ from src.app.core.worker.functions import (
     send_year_in_review,
     startup,
 )
+from src.app.core.worker.settings import WorkerSettings
 from src.app.models import Certification, Dive, DiveDiveSite, DiveSpecies
 from src.app.models.authentication_request import AuthenticationRequest
 from src.app.models.invitation import Invitation
@@ -1157,3 +1158,15 @@ class TestWorkerStartup:
 
         with pytest.raises(RuntimeError, match="S3_BUCKET"):
             await startup(cast(Any, SimpleNamespace()))
+
+
+class TestTheMailCrons:
+    """The three scheduled emails share the digest's hour, and none runs at startup: a worker
+    restart must never send a round of email, and `YEAR_IN_REVIEW_BATCH_SIZE` leaves room in the
+    relay's daily cap for the other two sending beside it."""
+
+    @pytest.mark.parametrize("job", ["send_gear_service_digests", "send_renewal_reminders", "send_year_in_review"])
+    def test_it_runs_daily_at_the_digest_hour_and_never_at_startup(self, job: str) -> None:
+        [entry] = [cron_job for cron_job in WorkerSettings.cron_jobs if cron_job.name == f"cron:{job}"]
+
+        assert (entry.hour, entry.minute, entry.run_at_startup) == (settings.GEAR_SERVICE_DIGEST_HOUR, 0, False)
