@@ -27,11 +27,13 @@ from typing import Any
 import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
+from uuid6 import uuid7
 
 from src.app.core.db.database import Base
 from src.app.models.auth_audit_event import AuthAuditEvent
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
+from src.app.models.checkin_link import CheckinLink
 from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.dive import Dive
@@ -93,12 +95,12 @@ class TestDeletingAUserTakesEverythingWithIt:
     that hang off those - then a single `DELETE`.
 
     Most of them are the ten `48781087b2b3` had to redeclare. The rest are tables added
-    since - `course`, then `user_session`, `auth_audit_event` and `contact` - each of which declared
-    `ON DELETE CASCADE` from the outset, which is exactly the case the metadata sweep above
-    cannot distinguish from a table that got it right by accident, so they are seeded here
-    too. (No count in this sentence on purpose: the previous one said "eleven" and was one
-    model away from being wrong, which `DECISIONS.md` §"The counts in the prose go stale
-    too" is about.)
+    since - `course`, then `user_session`, `auth_audit_event`, `contact` and `checkin_link` -
+    each of which declared `ON DELETE CASCADE` from the outset, which is exactly the case the
+    metadata sweep above cannot distinguish from a table that got it right by accident, so they
+    are seeded here too. (No count in this sentence on purpose: the previous one said "eleven"
+    and was one model away from being wrong, which `DECISIONS.md` §"The counts in the prose go
+    stale too" is about.)
 
     Second-order coverage is not decoration. `certification_file`, `dive_file`,
     `dive_dive_site`, `gear_set_item` and `trip_part` are the tables that would be left
@@ -140,6 +142,14 @@ class TestDeletingAUserTakesEverythingWithIt:
                     expires_at=datetime.now(UTC) + timedelta(days=7),
                     ip="203.0.113.7",
                     user_agent="Mozilla/5.0",
+                ),
+                CheckinLink(
+                    user_id=diver.id,
+                    token_hash=uuid7().hex * 2,
+                    expires_at=datetime.now(UTC) + timedelta(hours=24),
+                    total_dives=1,
+                    max_depth=18.0,
+                    last_dive_on=None,
                 ),
                 # The *account-tied* audit row, which is the one the cascade is responsible
                 # for. Its user-less sibling carries no FK to follow and is erased by the
@@ -196,6 +206,7 @@ class TestDeletingAUserTakesEverythingWithIt:
         for model in (
             AuthAuditEvent,
             Certification,
+            CheckinLink,
             Contact,
             Course,
             Dive,

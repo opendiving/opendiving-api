@@ -88,6 +88,19 @@ async def get_certifications_page(
     return {"data": [dict(row) for row in rows], "total_count": total_count or 0}
 
 
+async def get_every_certification(db: AsyncSession, *, user_id: int) -> list[dict[str, Any]]:
+    """All of a diver's certifications in the list's own order, unpaginated, as rows of every
+    column - what a check-in link's summary prints."""
+    rows = (
+        await db.execute(
+            select(*Certification.__table__.columns)
+            .where(Certification.user_id == user_id, Certification.is_deleted.is_(False))
+            .order_by(*_LIST_ORDER)
+        )
+    ).mappings()
+    return [dict(row) for row in rows]
+
+
 async def get_expiring_overview_for_user(
     db: AsyncSession, user_id: int, limit: int
 ) -> tuple[list[CertificationExpiringItem], bool]:

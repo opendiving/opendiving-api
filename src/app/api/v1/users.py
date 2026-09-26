@@ -199,8 +199,8 @@ async def patch_user(
 # a key would leave the file behind.
 #
 # Self-scoped like the rest of `/user` - no uuid anywhere, so there is no ownership check to
-# get backwards. Serving *another* diver's picture is a separate, viewer-facing route for
-# whenever one is needed; nothing renders one today.
+# get backwards. The one route serving a picture to anyone else is the check-in link's
+# `GET /checkin/{token}/portrait`: the portrait's rendition, to whoever holds a live link.
 
 _PICTURE_CACHE_CONTROL = "private, max-age=300"
 _MAX_UPLOAD_MB = MAX_PICTURE_UPLOAD_SIZE // (1024 * 1024)

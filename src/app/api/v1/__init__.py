@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from .admin import router as admin_router
 from .auth import router as auth_router
 from .certifications import router as certifications_router
+from .checkin_links import router as checkin_links_router
 from .config import router as config_router
 from .contacts import router as contacts_router
 from .courses import router as courses_router
@@ -42,6 +43,7 @@ router.include_router(gear_items_router)
 router.include_router(gear_sets_router)
 router.include_router(gear_service_router)
 router.include_router(certifications_router)
+router.include_router(checkin_links_router)
 router.include_router(species_router)
 router.include_router(dives_router)
 router.include_router(dive_form_presets_router)

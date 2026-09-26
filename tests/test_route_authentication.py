@@ -97,6 +97,18 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "session exists. Discloses two bits the page discloses anyway: by which form it then shows, "
         "and by which copy that form carries."
     ),
+    # 6. The caller holds a check-in link a diver shared, and the token in the path is the
+    # credential: a desk opens the page with no account, and its `<img>` tags carry nothing.
+    ("GET", "/api/v1/checkin/{token}"): (
+        "The check-in page a diver shared with a desk. The token is 256 bits, stored only as its "
+        "hash, lives a day and dies with a revoke or a deletion request; every dead token is one 404."
+    ),
+    ("GET", "/api/v1/checkin/{token}/portrait"): (
+        "The shared page's portrait, for an `<img>`: the token's authorization, and the rendition only."
+    ),
+    ("GET", "/api/v1/checkin/{token}/certification/{uuid}/front"): (
+        "The shared page's card fronts, for an `<img>`: the token's authorization, image fronts only."
+    ),
 }
 
 

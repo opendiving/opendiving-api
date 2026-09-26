@@ -6,6 +6,7 @@ from .functions import (
     purge_deleted_accounts,
     purge_expired_auth_audit_events,
     purge_expired_authentication_requests,
+    purge_expired_checkin_links,
     purge_expired_invitations,
     purge_expired_invite_requests,
     purge_expired_tokens,
@@ -36,6 +37,8 @@ class WorkerSettings:
         # is what keeps them on this side of the line `purge_deleted_accounts` sits on.
         cron(purge_expired_user_sessions, minute=0, run_at_startup=True),
         cron(purge_expired_auth_audit_events, minute=0, run_at_startup=True),
+        # A dead check-in link opens nothing either, and joins them on the same criterion.
+        cron(purge_expired_checkin_links, minute=0, run_at_startup=True),
         # The two invitation sweeps join the hour mark on the same criterion, with one
         # difference worth naming: these delete rows that are *not* past an expiry of their
         # own, because neither table has one - a live invitation admits its address until
