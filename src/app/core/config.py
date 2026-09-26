@@ -766,10 +766,11 @@ class PasskeySettings(BaseSettings):
 
 
 class GearServiceSettings(BaseSettings):
-    # Hour of the day (UTC) the gear-service digest cron runs - see
-    # `core.worker.functions.send_gear_service_digests`. Configurable mainly so local
-    # development can park it somewhere harmless; 07:00 UTC lands mid-morning across
-    # Europe, which is close enough given everything here is date-granular.
+    # Hour of the day (UTC) the three scheduled emails run - the gear-service digest, the
+    # renewal reminders and the year in review (`core/worker/settings.py`). Configurable
+    # mainly so local development can park it somewhere harmless; 07:00 UTC lands
+    # mid-morning across Europe, which is close enough given everything here is
+    # date-granular.
     GEAR_SERVICE_DIGEST_HOUR: int = config("GEAR_SERVICE_DIGEST_HOUR", default=7)
 
 

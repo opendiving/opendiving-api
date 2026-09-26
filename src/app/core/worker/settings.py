@@ -11,6 +11,8 @@ from .functions import (
     purge_expired_tokens,
     purge_expired_user_sessions,
     send_gear_service_digests,
+    send_renewal_reminders,
+    send_year_in_review,
     shutdown,
     startup,
 )
@@ -56,6 +58,11 @@ class WorkerSettings:
         # blast a round of reminders out. Once a day is plenty - `should_notify` means
         # most runs send nothing at all.
         cron(send_gear_service_digests, hour=settings.GEAR_SERVICE_DIGEST_HOUR, minute=0),
+        # The other two emails, on the digest's terms and at its hour, so the day's mail goes
+        # out in one batch: the relay's daily cap is shared, and `YEAR_IN_REVIEW_BATCH_SIZE`
+        # is sized against the other two sending beside it.
+        cron(send_renewal_reminders, hour=settings.GEAR_SERVICE_DIGEST_HOUR, minute=0),
+        cron(send_year_in_review, hour=settings.GEAR_SERVICE_DIGEST_HOUR, minute=0),
     ]
     redis_settings = RedisSettings(host=REDIS_QUEUE_HOST, port=REDIS_QUEUE_PORT, password=settings.REDIS_PASSWORD)
     # `arq --check` reads a sentinel key that the worker rewrites every
