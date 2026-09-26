@@ -222,6 +222,8 @@ class CertificationReadInternal(CertificationBase, PublicUUIDSchema):
     user_id: int
     course_id: int | None = None
     contact_id: int | None = None
+    expiry_notified_stage: str | None = None
+    expiry_notified_for: date | None = None
     created_at: datetime
 
 

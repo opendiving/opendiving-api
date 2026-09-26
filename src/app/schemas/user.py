@@ -137,6 +137,10 @@ class UserRead(PublicUUIDSchema):
     # column, so such a database raises `UndefinedColumn` and the request 500s before
     # Pydantic sees a row at all (see DECISIONS.md).
     gear_service_emails: bool = True
+    # The settings page's renewal-reminder and year-in-review toggles. Same note as the gear
+    # toggle above on what the default is and isn't for.
+    renewal_reminder_emails: bool = True
+    year_in_review_emails: bool = True
     # Feeds the settings page's units toggle, and every measurement the web app renders.
     # Same note as its neighbour above on what the default is and isn't for.
     # `StoredVocabulary`, not `UnitSystem` - `user.units` is a plain `VARCHAR(16)` with
@@ -230,6 +234,8 @@ class UserUpdate(RejectsExplicitNulls):
         "name",
         "username",
         "gear_service_emails",
+        "renewal_reminder_emails",
+        "year_in_review_emails",
         "units",
         "dive_form_hidden_fields",
     )
@@ -242,6 +248,14 @@ class UserUpdate(RejectsExplicitNulls):
     # without it the settings page's toggle would 422 rather than save.
     gear_service_emails: Annotated[
         bool | None, Field(default=None, description="Email me when gear is due for service")
+    ]
+    # Same reasoning for the settings page's other two email toggles.
+    renewal_reminder_emails: Annotated[
+        bool | None,
+        Field(default=None, description="Email me when a certification or my dive insurance is about to expire"),
+    ]
+    year_in_review_emails: Annotated[
+        bool | None, Field(default=None, description="Email me a review of my diving year each January")
     ]
     # Same `extra="forbid"` reasoning as its neighbour: without this field the settings
     # page's units select would 422 rather than save.

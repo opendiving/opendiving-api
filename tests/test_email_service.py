@@ -3,8 +3,10 @@
 import logging
 import smtplib
 import ssl
+from datetime import date
 from email.message import EmailMessage
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 import pytest
 
@@ -18,8 +20,11 @@ from src.app.services.email_service import (
     send_gear_service_digest_email,
     send_invitation_email,
     send_magic_link_email,
+    send_renewal_reminder_email,
     send_support_request_email,
+    send_year_in_review_email,
 )
+from src.app.services.year_in_review import ReviewedDive, YearInReview
 
 
 def _configured(mock_settings, **overrides) -> None:
@@ -481,6 +486,185 @@ class TestSendGearServiceDigestEmail:
 
             _send_fn, message = mock_run_sync.call_args.args
             assert message["Subject"] == "Your dive gear needs servicing"
+
+
+class TestSendRenewalReminderEmail:
+    LINES = [
+        ("PADI Rescue Diver", "expired 3 Sep 2026", "/certifications"),
+        ("DAN Europe dive insurance", "expires 5 Dec 2026", "/settings"),
+    ]
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_transport_is_configured(self):
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.smtplib") as mock_smtplib,
+        ):
+            mock_settings.SMTP_HOST = None
+
+            await send_renewal_reminder_email("diver@example.com", self.LINES)
+
+            mock_smtplib.SMTP.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lists_every_subject_and_links_to_where_it_is_edited(self):
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            _configured(mock_settings)
+            mock_settings.FRONTEND_URL = "https://app.example.com"
+
+            await send_renewal_reminder_email("diver@example.com", self.LINES)
+
+            _send_fn, message = mock_run_sync.call_args.args
+            body = message.get_content()
+            assert message["To"] == "diver@example.com"
+            assert message["Subject"] == "2 renewals need your attention"
+            assert "PADI Rescue Diver" in body
+            assert "expired 3 Sep 2026" in body
+            # A card is edited on the certifications page, the policy in settings...
+            assert 'href="https://app.example.com/certifications"' in body
+            assert 'href="https://app.example.com/settings"><strong>DAN Europe' in body
+            # ...and the footer's way out is the digest's.
+            assert "turn these reminders off" in body
+
+    @pytest.mark.asyncio
+    async def test_the_subject_names_a_single_subject(self):
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            _configured(mock_settings)
+            mock_settings.FRONTEND_URL = "https://app.example.com"
+
+            await send_renewal_reminder_email("diver@example.com", self.LINES[1:])
+
+            _send_fn, message = mock_run_sync.call_args.args
+            assert message["Subject"] == "DAN Europe dive insurance expires 5 Dec 2026"
+
+    @pytest.mark.asyncio
+    async def test_diver_typed_names_are_escaped(self):
+        """A card's level, an agency named under "other" and an insurer are all typed by the
+        diver and unconstrained by any schema."""
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            _configured(mock_settings)
+            mock_settings.FRONTEND_URL = "https://app.example.com"
+
+            await send_renewal_reminder_email(
+                "diver@example.com",
+                [("<img src=x onerror=alert(1)> dive insurance", "expires 5 Dec 2026", "/settings")],
+            )
+
+            _send_fn, message = mock_run_sync.call_args.args
+            body = message.get_content()
+            assert "<img src=x" not in body
+            assert "&lt;img src=x onerror=alert(1)&gt;" in body
+            assert "<li><a href=" in body
+
+
+class TestSendYearInReviewEmail:
+    DEEPEST = ReviewedDive(
+        id=1,
+        uuid=UUID("0199aaaa-0000-7000-8000-000000000001"),
+        day=date(2026, 3, 14),
+        max_depth=30.52,
+        duration=2400,
+        site_name="Blue Hole",
+    )
+    LONGEST = ReviewedDive(
+        id=2,
+        uuid=UUID("0199aaaa-0000-7000-8000-000000000002"),
+        day=date(2026, 8, 2),
+        max_depth=12.0,
+        duration=4260,
+        site_name=None,
+    )
+
+    def _review(self, **overrides):
+        values = {
+            "year": 2026,
+            "dives": 42,
+            "seconds_underwater": 43_500,
+            "deepest": self.DEEPEST,
+            "longest": self.LONGEST,
+            "dive_sites": 11,
+            "species": 23,
+            "first_species": 7,
+        }
+        return YearInReview(**{**values, **overrides})
+
+    async def _sent(self, review, units="metric"):
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            _configured(mock_settings)
+            mock_settings.FRONTEND_URL = "https://app.example.com"
+
+            await send_year_in_review_email("diver@example.com", review, units)
+
+            _send_fn, message = mock_run_sync.call_args.args
+            return message
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_transport_is_configured(self):
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.smtplib") as mock_smtplib,
+        ):
+            mock_settings.SMTP_HOST = None
+
+            await send_year_in_review_email("diver@example.com", self._review(), "metric")
+
+            mock_smtplib.SMTP.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_says_the_year_in_figures(self):
+        message = await self._sent(self._review())
+        body = message.get_content()
+
+        assert message["Subject"] == "Your 2026 in diving"
+        assert "42 dives</strong>, 12h 5min underwater" in body
+        assert (
+            'Deepest: <a href="https://app.example.com/dives/0199aaaa-0000-7000-8000-000000000001">30.52 m</a>'
+            " on 14 Mar 2026 at Blue Hole"
+        ) in body
+        assert "Longest: " in body and ">1h 11min</a> on 2 Aug 2026</li>" in body
+        assert "11 dive sites" in body
+        assert "23 species logged, 7 of them for the first time" in body
+        assert 'href="https://app.example.com/settings">turn this email off' in body
+
+    @pytest.mark.asyncio
+    async def test_depths_are_in_the_divers_units(self):
+        body = (await self._sent(self._review(), units="imperial")).get_content()
+
+        # 30.52 m is 100.13 ft, which the web prints as whole feet.
+        assert ">100 ft</a>" in body
+        assert " m</a>" not in body
+
+    @pytest.mark.asyncio
+    async def test_a_figure_with_nothing_behind_it_is_left_out(self):
+        review = self._review(dives=1, seconds_underwater=2400, deepest=None, dive_sites=0, species=0, first_species=0)
+        body = (await self._sent(review)).get_content()
+
+        assert "1 dive</strong>, 40min underwater" in body
+        assert "Deepest" not in body
+        assert "dive site" not in body
+        assert "species" not in body
+
+    @pytest.mark.asyncio
+    async def test_the_site_name_is_escaped(self):
+        deepest = ReviewedDive(
+            id=1, uuid=self.DEEPEST.uuid, day=self.DEEPEST.day, max_depth=30.0, duration=60, site_name="<b>Reef</b>"
+        )
+        body = (await self._sent(self._review(deepest=deepest))).get_content()
+
+        assert "<b>Reef</b>" not in body
+        assert "&lt;b&gt;Reef&lt;/b&gt;" in body
 
 
 class TestSupportFormHeaders:

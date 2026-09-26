@@ -26,16 +26,26 @@ from src.app.core.worker.functions import (
     purge_expired_invite_requests,
     purge_expired_tokens,
     send_gear_service_digests,
+    send_renewal_reminders,
+    send_year_in_review,
     startup,
 )
+from src.app.models import Certification, Dive, DiveDiveSite, DiveSpecies
 from src.app.models.authentication_request import AuthenticationRequest
 from src.app.models.invitation import Invitation
 from src.app.models.invite_request import InviteRequest
 from src.app.models.user import User
 from src.app.schemas.gear_service import ServiceKind, ServiceStatus
+from src.app.services.year_in_review import YEAR_IN_REVIEW_BATCH_SIZE, ReviewedDive, YearInReview
 from tests.conftest import db_available, unique_email
 from tests.helpers.fake_s3 import select_s3_backend
-from tests.helpers.generators import create_gear_item, create_gear_service_schedule
+from tests.helpers.generators import (
+    create_certification,
+    create_dive_site,
+    create_gear_item,
+    create_gear_service_schedule,
+    create_species,
+)
 
 
 class _FakeSessionContext:
@@ -675,6 +685,449 @@ class TestSendGearServiceDigestsAgainstPostgres:
             await send_gear_service_digests({})
 
         assert diver.email not in {call.args[0] for call in send.await_args_list}
+
+
+TODAY = date(2026, 9, 26)
+
+
+def _certification_row(**overrides):
+    """A row as the renewal job's certification query yields it."""
+    defaults = {
+        "user_id": 1,
+        "email": "diver@example.com",
+        "certification_id": 20,
+        "agency": "padi",
+        "agency_other": None,
+        "name": "Rescue Diver",
+        "expires_on": TODAY + timedelta(days=30),
+        "expiry_notified_stage": None,
+        "expiry_notified_for": None,
+    }
+    return SimpleNamespace(**{**defaults, **overrides})
+
+
+def _insurance_row(**overrides):
+    """A row as the renewal job's insurance query yields it."""
+    defaults = {
+        "user_id": 1,
+        "email": "diver@example.com",
+        "insurance_provider": "DAN Europe",
+        "insurance_expires_on": TODAY + timedelta(days=10),
+        "insurance_notified_stage": None,
+        "insurance_notified_for": None,
+    }
+    return SimpleNamespace(**{**defaults, **overrides})
+
+
+class _RenewalSession(_RecordingSession):
+    """Answers the job's two reads by which table each one is from."""
+
+    def __init__(self, certifications, insurances):
+        super().__init__([])
+        self._certifications = certifications
+        self._insurances = insurances
+        self.update_statements = []
+
+    async def execute(self, statement, parameters=None):
+        compiled = str(statement)
+        if compiled.strip().upper().startswith("UPDATE"):
+            self.update_statements.append((statement, parameters))
+            return await super().execute(statement, parameters)
+        self.calls.append(compiled)
+        result = MagicMock()
+        result.all.return_value = self._certifications if "FROM certification" in compiled else self._insurances
+        return result
+
+
+def _renewal_patches(session):
+    return (
+        patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(session)),
+        patch("src.app.core.worker.functions.send_renewal_reminder_email", new_callable=AsyncMock),
+    )
+
+
+class TestSendRenewalReminders:
+    """One email per diver, cards and insurance together, sent before the pair is marked."""
+
+    @pytest.mark.asyncio
+    async def test_sends_nothing_when_nothing_is_running_out(self) -> None:
+        session = _RenewalSession([], [])
+        session_patch, email_patch = _renewal_patches(session)
+        with session_patch, email_patch as send:
+            result = await send_renewal_reminders({}, today=TODAY)
+
+        send.assert_not_awaited()
+        assert session.update_statements == []
+        assert "No renewal reminders" in result
+
+    @pytest.mark.asyncio
+    async def test_one_email_per_diver_soonest_first(self) -> None:
+        certifications = [
+            _certification_row(certification_id=20, name="Rescue Diver", expires_on=TODAY + timedelta(days=60)),
+            _certification_row(certification_id=21, name="EFR", agency="efr", expires_on=TODAY - timedelta(days=3)),
+            _certification_row(user_id=2, email="other@example.com", certification_id=22),
+        ]
+        session = _RenewalSession(certifications, [_insurance_row()])
+        session_patch, email_patch = _renewal_patches(session)
+        with session_patch, email_patch as send:
+            result = await send_renewal_reminders({}, today=TODAY)
+
+        assert send.await_count == 2
+        email, lines = send.await_args_list[0].args
+        assert email == "diver@example.com"
+        assert lines == [
+            ("EFR EFR", "expired 23 Sep 2026", "/certifications"),
+            ("DAN Europe dive insurance", "expires 6 Oct 2026", "/settings"),
+            ("PADI Rescue Diver", "expires 25 Nov 2026", "/certifications"),
+        ]
+        assert "Sent 2 renewal reminder(s) covering 4 subject(s)" in result
+
+    @pytest.mark.asyncio
+    async def test_marks_each_subject_after_sending(self) -> None:
+        certifications = [
+            _certification_row(certification_id=20),
+            _certification_row(certification_id=21, expires_on=TODAY - timedelta(days=1)),
+        ]
+        session = _RenewalSession(certifications, [_insurance_row()])
+        session_patch, email_patch = _renewal_patches(session)
+        with session_patch, email_patch:
+            await send_renewal_reminders({}, today=TODAY)
+
+        # The cards in one executemany by primary key, with no WHERE of its own...
+        card_marks = [params for statement, params in session.update_statements if params is not None]
+        assert card_marks == [
+            [
+                {
+                    "id": 20,
+                    "expiry_notified_stage": "expiring_soon",
+                    "expiry_notified_for": TODAY + timedelta(days=30),
+                },
+                {"id": 21, "expiry_notified_stage": "expired", "expiry_notified_for": TODAY - timedelta(days=1)},
+            ]
+        ]
+        # ...and the insurance on the account's own row.
+        [insurance_mark] = [statement for statement, params in session.update_statements if params is None]
+        values = insurance_mark.compile().params
+        assert values["insurance_notified_stage"] == "expiring_soon"
+        assert values["insurance_notified_for"] == TODAY + timedelta(days=10)
+        session.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_subject_already_reminded_at_this_stage_sends_nothing(self) -> None:
+        expires_on = TODAY + timedelta(days=30)
+        card = _certification_row(
+            expires_on=expires_on, expiry_notified_stage="expiring_soon", expiry_notified_for=expires_on
+        )
+        insured = _insurance_row(
+            insurance_expires_on=expires_on, insurance_notified_stage="expiring_soon", insurance_notified_for=expires_on
+        )
+        session = _RenewalSession([card], [insured])
+        session_patch, email_patch = _renewal_patches(session)
+        with session_patch, email_patch as send:
+            await send_renewal_reminders({}, today=TODAY)
+
+        send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_queries_exclude_deleted_cards_deleted_accounts_and_the_opted_out(self) -> None:
+        session = _RenewalSession([], [])
+        session_patch, email_patch = _renewal_patches(session)
+        with session_patch, email_patch:
+            await send_renewal_reminders({}, today=TODAY)
+
+        certifications, insurances = session.calls
+        assert "certification.is_deleted IS false" in certifications
+        for statement in (certifications, insurances):
+            assert '"user".is_deleted IS false' in statement
+            assert '"user".renewal_reminder_emails IS true' in statement
+        assert "certification.expires_on <=" in certifications
+        assert '"user".insurance_expires_on <=' in insurances
+
+
+def _review(year: int = 2025) -> YearInReview:
+    dive = ReviewedDive(id=1, uuid=uuid7(), day=date(year, 5, 1), max_depth=20.0, duration=2400)
+    return YearInReview(
+        year=year,
+        dives=1,
+        seconds_underwater=2400,
+        deepest=dive,
+        longest=dive,
+        dive_sites=0,
+        species=0,
+        first_species=0,
+    )
+
+
+def _candidate(user_id: int):
+    return SimpleNamespace(id=user_id, email=f"diver{user_id}@example.com", units="metric")
+
+
+def _year_in_review_patches(session, reviews):
+    return (
+        patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(session)),
+        patch("src.app.core.worker.functions.send_year_in_review_email", new_callable=AsyncMock),
+        patch("src.app.core.worker.functions.year_in_review", new=AsyncMock(side_effect=reviews)),
+    )
+
+
+class TestSendYearInReview:
+    """January only, a batch at a time, oldest accounts first, marked after each send."""
+
+    JANUARY = date(2026, 1, 10)
+
+    @pytest.mark.asyncio
+    async def test_does_nothing_outside_january(self) -> None:
+        session = _RecordingSession([_candidate(1)])
+        session_patch, email_patch, review_patch = _year_in_review_patches(session, [_review()])
+        with session_patch, email_patch as send, review_patch:
+            result = await send_year_in_review({}, today=date(2026, 2, 1))
+
+        send.assert_not_awaited()
+        assert session.calls == []
+        assert "outside January" in result
+
+    @pytest.mark.asyncio
+    async def test_reviews_the_previous_year_and_marks_it_after_the_send(self) -> None:
+        session = _RecordingSession([_candidate(1)])
+        session_patch, email_patch, review_patch = _year_in_review_patches(session, [_review(2025)])
+        with session_patch, email_patch as send, review_patch as review:
+            await send_year_in_review({}, today=self.JANUARY)
+
+        assert review.await_args.args[1:] == (1, 2025)
+        email, sent_review, units = send.await_args.args
+        assert (email, sent_review.year, units) == ("diver1@example.com", 2025, "metric")
+        [mark] = session.updates
+        assert mark["year_in_review_sent_for"] == 2025
+
+    @pytest.mark.asyncio
+    async def test_sends_at_most_one_batch_in_candidate_order(self) -> None:
+        candidates = [_candidate(user_id) for user_id in range(1, YEAR_IN_REVIEW_BATCH_SIZE + 6)]
+        session = _RecordingSession(candidates)
+        reviews = [_review() for _ in candidates]
+        session_patch, email_patch, review_patch = _year_in_review_patches(session, reviews)
+        with session_patch, email_patch as send, review_patch:
+            result = await send_year_in_review({}, today=self.JANUARY)
+
+        assert send.await_count == YEAR_IN_REVIEW_BATCH_SIZE
+        assert [call.args[0] for call in send.await_args_list] == [
+            f"diver{user_id}@example.com" for user_id in range(1, YEAR_IN_REVIEW_BATCH_SIZE + 1)
+        ]
+        assert len(session.updates) == YEAR_IN_REVIEW_BATCH_SIZE
+        assert f"Sent {YEAR_IN_REVIEW_BATCH_SIZE} year-in-review email(s) for 2025" in result
+
+    @pytest.mark.asyncio
+    async def test_a_diver_with_no_dive_in_the_year_is_skipped_without_using_a_slot(self) -> None:
+        candidates = [_candidate(user_id) for user_id in range(1, YEAR_IN_REVIEW_BATCH_SIZE + 2)]
+        session = _RecordingSession(candidates)
+        reviews = [None, *(_review() for _ in candidates[1:])]
+        session_patch, email_patch, review_patch = _year_in_review_patches(session, reviews)
+        with session_patch, email_patch as send, review_patch:
+            await send_year_in_review({}, today=self.JANUARY)
+
+        sent_to = [call.args[0] for call in send.await_args_list]
+        assert "diver1@example.com" not in sent_to
+        assert len(sent_to) == YEAR_IN_REVIEW_BATCH_SIZE
+        assert sent_to[-1] == f"diver{YEAR_IN_REVIEW_BATCH_SIZE + 1}@example.com"
+
+    @pytest.mark.asyncio
+    async def test_a_refused_send_leaves_that_diver_unmarked(self) -> None:
+        """The relay's daily ceiling raises; the diver is picked up by the next run."""
+        session = _RecordingSession([_candidate(1), _candidate(2)])
+        session_patch, email_patch, review_patch = _year_in_review_patches(session, [_review(), _review()])
+        with session_patch, email_patch as send, review_patch:
+            send.side_effect = [None, RuntimeError("daily quota exceeded")]
+            with pytest.raises(RuntimeError):
+                await send_year_in_review({}, today=self.JANUARY)
+
+        assert len(session.updates) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_query_asks_for_the_opted_in_living_and_unsent_oldest_first(self) -> None:
+        session = _RecordingSession([])
+        session_patch, email_patch, review_patch = _year_in_review_patches(session, [])
+        with session_patch, email_patch, review_patch:
+            await send_year_in_review({}, today=self.JANUARY)
+
+        [statement] = session.calls
+        assert '"user".is_deleted IS false' in statement
+        assert '"user".year_in_review_emails IS true' in statement
+        assert '"user".year_in_review_sent_for IS NULL OR "user".year_in_review_sent_for <' in statement
+        assert "dive.is_deleted IS false" in statement
+        assert 'ORDER BY "user".created_at, "user".id' in statement
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestSendRenewalRemindersAgainstPostgres:
+    """The job against a real database, for the reason `TestSendGearServiceDigestsAgainstPostgres`
+    exists: the cards' mark is an ORM bulk UPDATE by primary key, and a mocked session files
+    away a statement Postgres would refuse.
+
+    Unscoped, as the cron runs it. `today` is pinned decades back so the window reaches no
+    other test's rows, and assertions only ask after the rows seeded here.
+    """
+
+    TODAY = date(1990, 6, 1)
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _dispose_the_app_engine(self) -> AsyncGenerator[None]:
+        await async_engine.dispose()
+        yield
+        await async_engine.dispose()
+
+    def _due(self, db: Session, diver: User) -> Certification:
+        card = create_certification(db, diver)
+        card.expires_on = self.TODAY + timedelta(days=30)
+        diver.insurance_provider = "DAN Europe"
+        diver.insurance_expires_on = self.TODAY - timedelta(days=1)
+        db.commit()
+        return card
+
+    @pytest.mark.asyncio
+    async def test_the_marks_reach_postgres(self, db: Session, diver: User) -> None:
+        card = self._due(db, diver)
+
+        with patch("src.app.core.worker.functions.send_renewal_reminder_email", new_callable=AsyncMock) as send:
+            await send_renewal_reminders({}, today=self.TODAY)
+
+        [lines] = [call.args[1] for call in send.await_args_list if call.args[0] == diver.email]
+        assert len(lines) == 2
+        db.refresh(card)
+        db.refresh(diver)
+        assert (card.expiry_notified_stage, card.expiry_notified_for) == ("expiring_soon", card.expires_on)
+        assert (diver.insurance_notified_stage, diver.insurance_notified_for) == ("expired", diver.insurance_expires_on)
+
+    @pytest.mark.asyncio
+    async def test_a_second_run_sends_nothing_new(self, db: Session, diver: User) -> None:
+        self._due(db, diver)
+
+        with patch("src.app.core.worker.functions.send_renewal_reminder_email", new_callable=AsyncMock):
+            await send_renewal_reminders({}, today=self.TODAY)
+        with patch("src.app.core.worker.functions.send_renewal_reminder_email", new_callable=AsyncMock) as send:
+            await send_renewal_reminders({}, today=self.TODAY)
+
+        assert diver.email not in {call.args[0] for call in send.await_args_list}
+
+    @pytest.mark.asyncio
+    async def test_an_opted_out_diver_and_a_deleted_card_are_left_alone(
+        self, db: Session, diver: User, other_diver: User
+    ) -> None:
+        self._due(db, diver)
+        diver.renewal_reminder_emails = False
+        hidden = create_certification(db, other_diver)
+        hidden.expires_on = self.TODAY
+        hidden.is_deleted = True
+        db.commit()
+
+        with patch("src.app.core.worker.functions.send_renewal_reminder_email", new_callable=AsyncMock) as send:
+            await send_renewal_reminders({}, today=self.TODAY)
+
+        assert {diver.email, other_diver.email}.isdisjoint(call.args[0] for call in send.await_args_list)
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestSendYearInReviewAgainstPostgres:
+    """The job and its queries against a real database: the mark, and the figures read back
+    through the dives' own local days.
+
+    Unscoped, as the cron runs it, over a year decades back so no other test's dives are in
+    it; a diver this class seeded is marked by its own run and not eligible again.
+    """
+
+    YEAR = 1990
+    JANUARY = date(1991, 1, 10)
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _dispose_the_app_engine(self) -> AsyncGenerator[None]:
+        await async_engine.dispose()
+        yield
+        await async_engine.dispose()
+
+    @staticmethod
+    def _dive(db: Session, diver: User, start_time: datetime, **columns: Any) -> Dive:
+        values: dict[str, Any] = {"duration": 2400, "max_depth": 18.0, **columns}
+        dive = Dive(user_id=diver.id, dive_number=1, start_time=start_time, notes="", **values)
+        db.add(dive)
+        db.commit()
+        return dive
+
+    async def _run(self) -> AsyncMock:
+        with patch("src.app.core.worker.functions.send_year_in_review_email", new_callable=AsyncMock) as send:
+            await send_year_in_review({}, today=self.JANUARY)
+        return send
+
+    @pytest.mark.asyncio
+    async def test_the_review_and_its_mark(self, db: Session, diver: User) -> None:
+        # 00:30 on 1 January in Bangkok, stored in the year before: a dive of this year.
+        self._dive(db, diver, datetime(self.YEAR - 1, 12, 31, 17, 30, tzinfo=UTC), utc_offset_minutes=420)
+        deepest = self._dive(db, diver, datetime(self.YEAR, 6, 1, 9, 0, tzinfo=UTC), max_depth=31.0, duration=3000)
+        # 03:00 on 1 January of the next year in Bangkok, stored in this one: not this year's.
+        self._dive(db, diver, datetime(self.YEAR, 12, 31, 20, 0, tzinfo=UTC), utc_offset_minutes=420, max_depth=40.0)
+        self._dive(db, diver, datetime(self.YEAR, 7, 1, 9, 0, tzinfo=UTC), max_depth=50.0, is_deleted=True)
+
+        send = await self._run()
+
+        [review] = [call.args[1] for call in send.await_args_list if call.args[0] == diver.email]
+        assert review.year == self.YEAR
+        assert review.dives == 2
+        assert review.seconds_underwater == 5400
+        assert review.deepest.uuid == deepest.uuid
+        db.refresh(diver)
+        assert diver.year_in_review_sent_for == self.YEAR
+
+    @pytest.mark.asyncio
+    async def test_a_second_run_does_not_send_the_year_again(self, db: Session, diver: User) -> None:
+        self._dive(db, diver, datetime(self.YEAR, 6, 1, 9, 0, tzinfo=UTC))
+
+        await self._run()
+        send = await self._run()
+
+        assert diver.email not in {call.args[0] for call in send.await_args_list}
+
+    @pytest.mark.asyncio
+    async def test_sites_and_first_sightings(self, db: Session, diver: User) -> None:
+        earlier = self._dive(db, diver, datetime(self.YEAR - 2, 6, 1, 9, 0, tzinfo=UTC))
+        this_year = self._dive(db, diver, datetime(self.YEAR, 6, 1, 9, 0, tzinfo=UTC))
+        turtle, moray = create_species(db), create_species(db)
+        site = create_dive_site(db, diver)
+        db.add_all(
+            [
+                DiveSpecies(dive_id=earlier.id, species_id=moray.id),
+                DiveSpecies(dive_id=this_year.id, species_id=moray.id),
+                DiveSpecies(dive_id=this_year.id, species_id=turtle.id),
+                DiveDiveSite(dive_id=this_year.id, dive_site_id=site.id),
+            ]
+        )
+        db.commit()
+
+        send = await self._run()
+
+        [review] = [call.args[1] for call in send.await_args_list if call.args[0] == diver.email]
+        assert (review.dive_sites, review.species, review.first_species) == (1, 2, 1)
+        assert review.deepest.site_name == site.name
+
+    @pytest.mark.asyncio
+    async def test_a_dive_in_the_window_but_not_the_year_is_not_a_review(self, db: Session, diver: User) -> None:
+        """Stored on the year's last day, dived on the next year's first: the pre-filter lets
+        the diver through and the local day turns them away, unmarked."""
+        self._dive(db, diver, datetime(self.YEAR, 12, 31, 20, 0, tzinfo=UTC), utc_offset_minutes=420)
+
+        send = await self._run()
+
+        assert diver.email not in {call.args[0] for call in send.await_args_list}
+        db.refresh(diver)
+        assert diver.year_in_review_sent_for is None
+
+    @pytest.mark.asyncio
+    async def test_the_opted_out_get_nothing(self, db: Session, diver: User) -> None:
+        self._dive(db, diver, datetime(self.YEAR, 6, 1, 9, 0, tzinfo=UTC))
+        diver.year_in_review_emails = False
+        db.commit()
+
+        send = await self._run()
+
+        assert diver.email not in {call.args[0] for call in send.await_args_list}
+        db.refresh(diver)
+        assert diver.year_in_review_sent_for is None
 
 
 class TestWorkerStartup:

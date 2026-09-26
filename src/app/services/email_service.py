@@ -3,11 +3,11 @@
 Used for the magic-link sign-in email (see `api.v1.auth.request_email_link`), the
 email-change confirmation/notification pair (see `api.v1.users`), the passkey
 added/removed security notices (see `api.v1.passkeys`), the account-deletion
-confirmation that carries the purge date (see `api.v1.users.erase_user`), the gear-service
-digest (see `core.worker.functions.send_gear_service_digests`), the invitation into a
-closed instance (see `api.v1.invitations`), and the support form (see `api.v1.support`),
-all funneling through `_send` so the "run a blocking client off the event loop" plumbing
-only lives in one place.
+confirmation that carries the purge date (see `api.v1.users.erase_user`), the scheduled
+emails - the gear-service digest, the renewal reminder and the year in review (see
+`core.worker.functions`) - the invitation into a closed instance (see
+`api.v1.invitations`), and the support form (see `api.v1.support`), all funneling through
+`_send` so the "run a blocking client off the event loop" plumbing only lives in one place.
 
 SMTP rather than any vendor's HTTP API because it is the one interface every provider
 and every self-hosted relay already speaks - Resend included, which is reachable as
@@ -19,6 +19,7 @@ codebase already standardizes on running blocking clients in a worker thread (se
 
 import html
 import logging
+import math
 import smtplib
 import ssl
 from datetime import datetime
@@ -27,6 +28,7 @@ from email.message import EmailMessage
 import anyio
 
 from ..core.config import EnvironmentOption, SMTPTLSMode, settings
+from .year_in_review import ReviewedDive, YearInReview
 
 logger = logging.getLogger(__name__)
 
@@ -443,6 +445,122 @@ async def send_gear_service_digest_email(email: str, lines: list[tuple[str, str,
             f"<ul>{items}</ul>"
             f'<p><a href="{settings.FRONTEND_URL}/gear">Review your gear</a>, or '
             f'<a href="{settings.FRONTEND_URL}/settings">turn these reminders off</a>.</p>'
+        ),
+    )
+
+    await anyio.to_thread.run_sync(_send, message)
+
+
+async def send_renewal_reminder_email(email: str, lines: list[tuple[str, str, str]]) -> None:
+    """Sends the "renew these before your next trip" reminder.
+
+    The gear digest's shape and its reasons: one email per diver per run, never one per
+    card, and each entry in `lines` is `(label, expiry_text, path)` already ordered and
+    phrased by the caller, so `services.renewals` alone decides what "expiring soon" means.
+    The label is diver-typed (a card's level, an agency named under "other", an insurer),
+    so it is escaped; the path is one this server chose.
+    """
+    if not settings.SMTP_HOST:
+        logger.warning("SMTP_HOST not configured; renewal reminder for %s: %s", email, lines)
+        return
+
+    items = "".join(
+        f'<li><a href="{settings.FRONTEND_URL}{path}">'
+        f"<strong>{html.escape(label)}</strong></a> - {html.escape(detail)}</li>"
+        for label, detail, path in lines
+    )
+    if len(lines) == 1:
+        label, detail, _ = lines[0]
+        subject = f"{label} {detail}"
+    else:
+        subject = f"{len(lines)} renewals need your attention"
+
+    message = _build_message(
+        to=email,
+        subject=subject,
+        html_body=(
+            "<p>A heads-up before your next trip - a dive shop will ask to see these:</p>"
+            f"<ul>{items}</ul>"
+            "<p>Renewed already? Enter the new expiry date in OpenDiving. Or "
+            f'<a href="{settings.FRONTEND_URL}/settings">turn these reminders off</a>.</p>'
+        ),
+    )
+
+    await anyio.to_thread.run_sync(_send, message)
+
+
+_METERS_PER_FOOT = 0.3048
+
+
+def _round_half_up(value: float, places: int) -> float:
+    """JavaScript's `Math.round`, which the web's `roundTo` uses: ties go up, where Python's
+    `round` goes to even. The email and the dive page it links to print the same number."""
+    factor = 10.0**places
+    return math.floor(value * factor + 0.5) / factor
+
+
+def _depth_text(meters: float, units: str) -> str:
+    """The web's `formatDepth`: whole feet, or metres to two places with the zeros dropped."""
+    if units == "imperial":
+        return f"{_round_half_up(meters / _METERS_PER_FOOT, 0):.0f} ft"
+    return f"{_round_half_up(meters, 2):.2f}".rstrip("0").rstrip(".") + " m"
+
+
+def _duration_text(seconds: int) -> str:
+    """The web's `formatDurationHoursMinutes`: "45min", "2h", "12h 5min"."""
+    total_minutes = int(_round_half_up(seconds / 60, 0))
+    if total_minutes < 60:
+        return f"{total_minutes}min"
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours}h {minutes}min" if minutes else f"{hours}h"
+
+
+def _plural(count: int, noun: str, plural: str | None = None) -> str:
+    return f"{count} {noun if count == 1 else plural or noun + 's'}"
+
+
+def _highlight(title: str, figure: str, dive: ReviewedDive) -> str:
+    where = f" at {html.escape(dive.site_name)}" if dive.site_name else ""
+    return (
+        f'<li>{title}: <a href="{settings.FRONTEND_URL}/dives/{dive.uuid}">{figure}</a>'
+        f" on {dive.day:%-d %b %Y}{where}</li>"
+    )
+
+
+async def send_year_in_review_email(email: str, review: YearInReview, units: str) -> None:
+    """Sends a diver their previous calendar year in figures, each January.
+
+    Depths are in the diver's own `units`, as the dive pages the highlights link to print
+    them; everything else is a count or a time. A figure with nothing behind it - no depth
+    recorded all year, no site, no species - is left out rather than printed as a zero. The
+    one diver-typed string is a site name, which is escaped.
+    """
+    if not settings.SMTP_HOST:
+        logger.warning("SMTP_HOST not configured; year in review for %s: %s", email, review)
+        return
+
+    items = [
+        f"<li><strong>{_plural(review.dives, 'dive')}</strong>, "
+        f"{_duration_text(review.seconds_underwater)} underwater</li>"
+    ]
+    if review.deepest is not None and review.deepest.max_depth is not None:
+        items.append(_highlight("Deepest", _depth_text(review.deepest.max_depth, units), review.deepest))
+    if review.longest is not None:
+        items.append(_highlight("Longest", _duration_text(review.longest.duration), review.longest))
+    if review.dive_sites:
+        items.append(f"<li>{_plural(review.dive_sites, 'dive site')}</li>")
+    if review.species:
+        first = f", {review.first_species} of them for the first time" if review.first_species else ""
+        items.append(f"<li>{_plural(review.species, 'species', 'species')} logged{first}</li>")
+
+    message = _build_message(
+        to=email,
+        subject=f"Your {review.year} in diving",
+        html_body=(
+            f"<p>Your {review.year} in diving, from your OpenDiving log book:</p>"
+            f"<ul>{''.join(items)}</ul>"
+            f'<p><a href="{settings.FRONTEND_URL}/dives">Open your log book</a>, or '
+            f'<a href="{settings.FRONTEND_URL}/settings">turn this email off</a>.</p>'
         ),
     )
 

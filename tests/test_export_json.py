@@ -389,6 +389,8 @@ class TestWhatUddfCannotHold:
             "opendiving": {
                 "units": "metric",
                 "gear_service_emails": True,
+                "renewal_reminder_emails": True,
+                "year_in_review_emails": True,
                 "dive_form_hidden_fields": ["altitude", "mixture.po2_limit"],
                 "dive_form_presets": [
                     {"name": "Recreational", "hidden_fields": ["altitude", "mixture.po2_limit"]},

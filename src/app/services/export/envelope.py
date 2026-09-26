@@ -353,6 +353,8 @@ def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
             DIVEJSON_PRODUCER_KEY: {
                 "units": user.units,
                 "gear_service_emails": user.gear_service_emails,
+                "renewal_reminder_emails": user.renewal_reminder_emails,
+                "year_in_review_emails": user.year_in_review_emails,
                 "dive_form_hidden_fields": list(user.dive_form_hidden_fields),
                 "dive_form_presets": [
                     {"name": preset.name, "hidden_fields": list(preset.hidden_fields)}

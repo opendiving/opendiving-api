@@ -70,6 +70,13 @@ class Certification(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     )
     notes: Mapped[str] = mapped_column(Text, default="")
 
+    # The (stage, expiry date) `send_renewal_reminders` last emailed about for this card, null
+    # until it has. A renewal moves `expires_on`, so the stored pair stops matching and the
+    # reminder re-arms without anything clearing it. Bookkeeping the job alone reads: on
+    # `CertificationReadInternal` and never on `CertificationRead`.
+    expiry_notified_stage: Mapped[str | None] = mapped_column(String(16), default=None)
+    expiry_notified_for: Mapped[date | None] = mapped_column(Date, default=None)
+
     @declared_attr.directive
     @classmethod
     def __table_args__(cls) -> tuple:
