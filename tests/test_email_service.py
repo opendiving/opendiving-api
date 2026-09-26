@@ -20,6 +20,7 @@ from src.app.services.email_service import (
     send_gear_service_digest_email,
     send_invitation_email,
     send_magic_link_email,
+    send_passkey_added_email,
     send_renewal_reminder_email,
     send_support_request_email,
     send_year_in_review_email,
@@ -258,6 +259,23 @@ class TestSendMagicLinkEmail:
             assert mock_run_sync.call_args.args[0] is _send
 
 
+class TestSendPasskeyAddedEmail:
+    @pytest.mark.asyncio
+    async def test_the_way_out_is_the_page_that_removes_it(self):
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+        ):
+            _configured(mock_settings)
+            mock_settings.FRONTEND_URL = "https://app.example.com"
+
+            await send_passkey_added_email("diver@example.com", "<b>iPhone</b>")
+
+        body = mock_run_sync.call_args.args[1].get_content()
+        assert 'href="https://app.example.com/settings/authentication">remove it' in body
+        assert "&lt;b&gt;iPhone&lt;/b&gt;" in body
+
+
 class TestSendInvitationEmail:
     """The ninth sender, and the one that carries somebody else's name into a stranger's
     inbox."""
@@ -445,8 +463,8 @@ class TestSendGearServiceDigestEmail:
             assert "Hydrostatic test due 20 Aug 2026" in body
             # Every line links straight to the item it's about...
             assert "https://app.example.com/gear/0199-aaaa" in body
-            # ...and there's always a way out of the reminders.
-            assert "https://app.example.com/settings" in body
+            # ...and there's always a way out of the reminders, on the page holding the toggle.
+            assert 'href="https://app.example.com/settings/notifications">turn these reminders off' in body
 
     @pytest.mark.asyncio
     async def test_gear_names_are_escaped(self):
@@ -491,7 +509,7 @@ class TestSendGearServiceDigestEmail:
 class TestSendRenewalReminderEmail:
     LINES = [
         ("PADI Rescue Diver", "expired 3 Sep 2026", "/certifications"),
-        ("DAN Europe dive insurance", "expires 5 Dec 2026", "/settings"),
+        ("DAN Europe dive insurance", "expires 5 Dec 2026", "/settings/check-in"),
     ]
 
     @pytest.mark.asyncio
@@ -525,9 +543,9 @@ class TestSendRenewalReminderEmail:
             assert "expired 3 Sep 2026" in body
             # A card is edited on the certifications page, the policy in settings...
             assert 'href="https://app.example.com/certifications"' in body
-            assert 'href="https://app.example.com/settings"><strong>DAN Europe' in body
+            assert 'href="https://app.example.com/settings/check-in"><strong>DAN Europe' in body
             # ...and the footer's way out is the digest's.
-            assert "turn these reminders off" in body
+            assert 'href="https://app.example.com/settings/notifications">turn these reminders off' in body
 
     @pytest.mark.asyncio
     async def test_the_subject_names_a_single_subject(self):
@@ -556,7 +574,7 @@ class TestSendRenewalReminderEmail:
 
             await send_renewal_reminder_email(
                 "diver@example.com",
-                [("<img src=x onerror=alert(1)> dive insurance", "expires 5 Dec 2026", "/settings")],
+                [("<img src=x onerror=alert(1)> dive insurance", "expires 5 Dec 2026", "/settings/check-in")],
             )
 
             _send_fn, message = mock_run_sync.call_args.args
@@ -636,7 +654,7 @@ class TestSendYearInReviewEmail:
         assert "Longest: " in body and ">1h 11min</a> on 2 Aug 2026</li>" in body
         assert "11 dive sites" in body
         assert "23 species logged, 7 of them for the first time" in body
-        assert 'href="https://app.example.com/settings">turn this email off' in body
+        assert 'href="https://app.example.com/settings/notifications">turn this email off' in body
 
     @pytest.mark.asyncio
     async def test_depths_are_in_the_divers_units(self):

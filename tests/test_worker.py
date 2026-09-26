@@ -778,7 +778,7 @@ class TestSendRenewalReminders:
         assert email == "diver@example.com"
         assert lines == [
             ("EFR EFR", "expired 23 Sep 2026", "/certifications"),
-            ("DAN Europe dive insurance", "expires 6 Oct 2026", "/settings"),
+            ("DAN Europe dive insurance", "expires 6 Oct 2026", "/settings/check-in"),
             ("PADI Rescue Diver", "expires 25 Nov 2026", "/certifications"),
         ]
         assert "Sent 2 renewal reminder(s) covering 4 subject(s)" in result
