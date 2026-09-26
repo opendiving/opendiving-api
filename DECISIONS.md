@@ -6704,9 +6704,9 @@ pins models to revisions.
 
 Nothing here sets an autovacuum parameter: not the compose file, a migration or a model. The tables
 that churn hardest are the ones the hourly sweeps in `core/worker/settings.py` empty (tokens,
-authentication requests, sessions, audit rows, invitations), and `autovacuum_vacuum_threshold` (50)
-plus `autovacuum_vacuum_scale_factor` (0.2) fires on those every time; `dive` churns at human speed.
-A parameter set now is a guess about volume.
+authentication requests, sessions, audit rows, invitations, check-in links), and
+`autovacuum_vacuum_threshold` (50) plus `autovacuum_vacuum_scale_factor` (0.2) fires on those every
+time; `dive` churns at human speed. A parameter set now is a guess about volume.
 
 The reading that says otherwise is `n_dead_tup` on `dive` climbing and staying up in
 `pg_stat_user_tables`, and the remedy belongs to whoever operates that database:
