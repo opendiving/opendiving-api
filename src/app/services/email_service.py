@@ -304,7 +304,7 @@ async def send_passkey_added_email(email: str, passkey_name: str) -> None:
 
     A passkey is a standalone sign-in method, so registering one is exactly the kind of
     change whose victim should hear about it in a channel the attacker may not hold. It
-    carries no link and no token, which is why - unlike the magic-link and email-change
+    carries no sign-in link and no token, which is why - unlike the magic-link and email-change
     senders - a missing `SMTP_HOST` just logs everywhere rather than raising outside
     `local`: there is no credential here to leak into a log.
 
@@ -322,7 +322,7 @@ async def send_passkey_added_email(email: str, passkey_name: str) -> None:
         html_body=(
             f"<p>A passkey named <strong>{html.escape(passkey_name)}</strong> was just added to your "
             "OpenDiving account, and can now be used to sign in.</p>"
-            f'<p>If this wasn\'t you, <a href="{settings.FRONTEND_URL}/settings">remove it</a> and '
+            f'<p>If this wasn\'t you, <a href="{settings.FRONTEND_URL}/settings/authentication">remove it</a> and '
             "contact support.</p>"
         ),
     )
@@ -444,7 +444,7 @@ async def send_gear_service_digest_email(email: str, lines: list[tuple[str, str,
             "<p>A quick heads-up before your next trip - this gear is due for service:</p>"
             f"<ul>{items}</ul>"
             f'<p><a href="{settings.FRONTEND_URL}/gear">Review your gear</a>, or '
-            f'<a href="{settings.FRONTEND_URL}/settings">turn these reminders off</a>.</p>'
+            f'<a href="{settings.FRONTEND_URL}/settings/notifications">turn these reminders off</a>.</p>'
         ),
     )
 
@@ -482,7 +482,7 @@ async def send_renewal_reminder_email(email: str, lines: list[tuple[str, str, st
             "<p>A heads-up before your next trip - a dive shop will ask to see these:</p>"
             f"<ul>{items}</ul>"
             "<p>Renewed already? Enter the new expiry date in OpenDiving. Or "
-            f'<a href="{settings.FRONTEND_URL}/settings">turn these reminders off</a>.</p>'
+            f'<a href="{settings.FRONTEND_URL}/settings/notifications">turn these reminders off</a>.</p>'
         ),
     )
 
@@ -560,7 +560,7 @@ async def send_year_in_review_email(email: str, review: YearInReview, units: str
             f"<p>Your {review.year} in diving, from your OpenDiving log book:</p>"
             f"<ul>{''.join(items)}</ul>"
             f'<p><a href="{settings.FRONTEND_URL}/dives">Open your log book</a>, or '
-            f'<a href="{settings.FRONTEND_URL}/settings">turn this email off</a>.</p>'
+            f'<a href="{settings.FRONTEND_URL}/settings/notifications">turn this email off</a>.</p>'
         ),
     )
 
