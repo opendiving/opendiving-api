@@ -4638,8 +4638,10 @@ the loser inserts a duplicate `token_blacklist.token`, and that `IntegrityError`
 ## Avatars are the third kind on the files volume, and portraits sit beside them
 
 A diver's avatar and check-in portrait are stored under the `user-avatars/` and `user-portraits/`
-kinds, written by `PUT /user/avatar` and `PUT /user/portrait` and served to their owner by `GET`.
-There is no `profile_image_url`, and nothing at the `blob_store` layer changes for them.
+kinds, written by `PUT /user/avatar` and `PUT /user/portrait` and served to their owner by `GET`;
+the portrait's rendition is also served to whoever holds a live check-in link, by
+`GET /checkin/{token}/portrait`. There is no `profile_image_url`, and nothing at the `blob_store`
+layer changes for them.
 
 Gravatar is rejected: off by default, a default install had no pictures; on, it disclosed a SHA-256
 of every signed-in user's email plus their IP to Automattic on every page, and changing a picture
@@ -5689,6 +5691,17 @@ new; Plausible and Ghost bind the same way. Losing forwardability is the feature
 keyed on addresses keeps "who was invited" coupled to "who signed up". No per-invitation expiry; the
 90-day retention sweep bounds the address. Revocation stamps `revoked_at` rather than deleting, so
 the quota stays a bound on emails sent.
+
+## A check-in link is a bearer token, where an invitation is not
+
+`POST /user/checkin-link` mints a secret that shows the diver's check-in page to whoever holds it.
+The invitation rejected a forwardable secret because forwarding was what it had to prevent; here
+forwarding to a desk is the feature. What bounds it instead: only `hash_token` of it is stored, it
+is returned once, it lives `CHECKIN_LINK_TTL` (24 hours), minting revokes the diver's other links
+under a lock on their row, and a deletion request kills it at once. Unknown, expired, revoked and
+deleted-diver tokens get one 404, carrying `private, no-store` like every response there. No rate
+limit: the token has 256 bits. *Rejected:* a week's life, and redacting the policy number and the
+emergency contact's phone, the two things a desk asks for.
 
 ## The registration gate sits below `release_read_transaction`, and that is the whole design
 

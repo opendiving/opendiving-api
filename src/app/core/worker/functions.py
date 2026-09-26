@@ -15,6 +15,7 @@ from ...models.auth_audit_event import AuthAuditEvent
 from ...models.authentication_request import AuthenticationRequest
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
+from ...models.checkin_link import CheckinLink
 from ...models.dive import Dive
 from ...models.dive_file import DiveFile
 from ...models.gear_item import GearItem
@@ -26,6 +27,7 @@ from ...models.user_picture import UserPicture
 from ...models.user_session import UserSession
 from ...schemas.gear_service import ServiceStatus
 from ...services import blob_store
+from ...services.checkin_links import swept_checkin_link_predicate
 from ...services.email_service import (
     send_gear_service_digest_email,
     send_renewal_reminder_email,
@@ -298,6 +300,30 @@ async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
 
     logging.info("Purged %d dead session(s)", purged)
     return f"Purged {purged} dead session(s)"
+
+
+async def purge_expired_checkin_links(ctx: dict[Any, Any]) -> str:
+    """Delete `checkin_link` rows no one can open any more - past their own `expires_at`, or
+    revoked.
+
+    `swept_checkin_link_predicate` is the complement of the liveness predicate the check-in
+    routes read, as for sessions. No retention margin: nothing reads a dead link, and a desk
+    holding one sees the same 404 whether its row is still here or not.
+    """
+    async with local_session() as db:
+        result = cast(
+            CursorResult, await db.execute(delete(CheckinLink).where(swept_checkin_link_predicate(datetime.now(UTC))))
+        )
+        # Read before the commit: the count belongs to the statement, not the transaction.
+        purged = result.rowcount
+        await db.commit()
+
+    if purged == 0:
+        logging.info("No dead check-in links to purge")
+        return "No dead check-in links to purge"
+
+    logging.info("Purged %d dead check-in link(s)", purged)
+    return f"Purged {purged} dead check-in link(s)"
 
 
 async def purge_expired_auth_audit_events(ctx: dict[Any, Any]) -> str:

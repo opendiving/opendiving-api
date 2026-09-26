@@ -484,11 +484,13 @@ RESOLVER_OWNED_ROUTES = [
     ),
 ]
 
-# The one intentional exception, and the only kind of entry that belongs here. The species
-# catalog is global (`models/species.py`): every row is a fact about the ocean that every
-# account may reference, so there is no owner to compare a caller against and a species
-# uuid is an existence oracle for nothing private. `crud/crud_species.py` documents why the
-# `user_id` filter its siblings carry is an omission on purpose rather than an oversight.
+# The two kinds of entry that belong here. A resource with no owner at all: the species
+# catalog is global (`models/species.py`), every row a fact about the ocean that every account
+# may reference, so there is no owner to compare a caller against and a species uuid is an
+# existence oracle for nothing private - `crud/crud_species.py` documents why the `user_id`
+# filter its siblings carry is an omission on purpose. And a resource whose owner is not the
+# caller but someone a credential in the path names: a check-in link's diver, whose card the
+# route resolves against the link rather than against a signed-in caller.
 UNOWNED_ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/species/{uuid}"): "The species catalog is global - there is no owner to compare against.",
     ("GET", "/api/v1/species/{uuid}/photo"): (
@@ -496,6 +498,11 @@ UNOWNED_ROUTES: dict[tuple[str, str], str] = {
         "`test_route_authentication.ANONYMOUS_BY_DESIGN`. The bytes are a freely licensed "
         "Commons file shared by every account, so there is no owner to compare against and "
         "nothing an ownership check could protect."
+    ),
+    ("GET", "/api/v1/checkin/{token}/certification/{uuid}/front"): (
+        "Anonymous, so there is no caller to own it: the owner is the diver the check-in link names, "
+        "and `find_card_front` scopes the card to that diver's `user_id` - someone else's card is the "
+        "same 404 as a dead token. See its entry in `test_route_authentication.ANONYMOUS_BY_DESIGN`."
     ),
 }
 
@@ -632,7 +639,8 @@ class TestEveryUuidRouteIsAccountedFor:
             + "\n".join(f"  {method:6} {path}" for method, path in unaccounted)
             + "\n\nResolve ownership in the handler (`fetch_owned_or_raise`, or a `user_id`-scoped"
             + "\nresolver) and add the route to `FETCH_OWNED_ROUTES` or `RESOLVER_OWNED_ROUTES`."
-            + "\nOnly a resource with no owner at all belongs in `UNOWNED_ROUTES`, with the reason."
+            + "\nOnly a resource with no owner at all, or one whose owner a credential in the path names"
+            + "\nrather than the caller, belongs in `UNOWNED_ROUTES`, with the reason."
         )
 
     def test_no_entry_names_a_route_that_no_longer_exists(self) -> None:

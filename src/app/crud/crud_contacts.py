@@ -78,3 +78,16 @@ async def get_contact_uuids_by_ids(
         select(Contact.id, Contact.uuid).where(Contact.id.in_(wanted), Contact.user_id == user_id)
     )
     return {row.id: row.uuid for row in result}
+
+
+async def get_contact_names_by_ids(db: AsyncSession, contact_ids: list[int | None], user_id: int) -> dict[int, str]:
+    """`get_contact_uuids_by_ids`' twin for the name, which a check-in link's summary prints in
+    place of the uuid."""
+    wanted = {contact_id for contact_id in contact_ids if contact_id is not None}
+    if not wanted:
+        return {}
+
+    result = await db.execute(
+        select(Contact.id, Contact.name).where(Contact.id.in_(wanted), Contact.user_id == user_id)
+    )
+    return {row.id: row.name for row in result}
