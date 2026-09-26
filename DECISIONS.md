@@ -829,6 +829,30 @@ with rows must supply a value, and only a server-side default is part of the DDL
 applied by SQLAlchemy on INSERT, so autogenerate cannot see it and a revision generated from
 `default=` alone fails against any non-empty table.
 
+## Renewal reminders fire once per (stage, date), with no re-nag
+
+`send_renewal_reminders` emails when a certification or the account's insurance enters the 90-day
+window (`CERTIFICATION_EXPIRING_SOON_DAYS`, the web's name and value) and when it expires. The state
+is a nullable pair on the subject's own row — `certification.expiry_notified_stage`/`_for`,
+`user.insurance_notified_stage`/`_for` — and the job sends when the live pair differs from the
+stored one. A renewal moves the date, so the pair stops matching and the reminder re-arms with
+nothing clearing it. This is `should_notify` minus the dive arm and the quarterly re-nag: an expired
+card is renewed or let lapse, and the Renewals card shows it either way. The pair stays off
+`CertificationRead`, so no cached read changes shape. `user.renewal_reminder_emails` is the opt-out,
+on `gear_service_emails`' terms. *Rejected:* a reminder-state table, a second model for two columns.
+
+## The year in review acts only in January, fifty divers a run
+
+`send_year_in_review` reviews the previous calendar year and acts only while the UTC month is
+January, so an old logbook imported in July does not produce a "your year" email in July; a diver
+still unsent when January ends gets none for that year. A run sends at most
+`YEAR_IN_REVIEW_BATCH_SIZE` (50), oldest accounts first, marking `user.year_in_review_sent_for` per
+diver: the project's hosted instance relays through a plan capped at 100 emails a day, shared with
+the gear digest, the renewal reminders and every sign-in. A dive counts in the year of its own local
+day, as `bucket_by_day` counts it, and the figures are computed per run; `user_dive_stats` stays
+all-time. *Rejected:* a batch-size setting, an installer-facing knob for one instance's mail plan;
+one run on 1 January, which that cap forbids past fifty divers.
+
 ## Card files are a separate table, hard-deleted, with a deferred `data` column
 
 `certification` carries **no binary columns**, so a certification list never loads megabytes.

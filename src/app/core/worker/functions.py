@@ -15,6 +15,7 @@ from ...models.auth_audit_event import AuthAuditEvent
 from ...models.authentication_request import AuthenticationRequest
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
+from ...models.dive import Dive
 from ...models.dive_file import DiveFile
 from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
@@ -25,7 +26,11 @@ from ...models.user_picture import UserPicture
 from ...models.user_session import UserSession
 from ...schemas.gear_service import ServiceStatus
 from ...services import blob_store
-from ...services.email_service import send_gear_service_digest_email
+from ...services.email_service import (
+    send_gear_service_digest_email,
+    send_renewal_reminder_email,
+    send_year_in_review_email,
+)
 from ...services.gear_service import (
     SERVICE_DUE_SOON_DAYS,
     SERVICE_DUE_SOON_DIVES,
@@ -33,6 +38,15 @@ from ...services.gear_service import (
     service_status,
     should_notify,
 )
+from ...services.renewals import (
+    CERTIFICATION_EXPIRING_SOON_DAYS,
+    certification_label,
+    expiry_stage,
+    expiry_text,
+    insurance_label,
+    should_remind,
+)
+from ...services.year_in_review import YEAR_IN_REVIEW_BATCH_SIZE, reviewed_year, year_in_review, year_window
 from ..config import configure_logging, settings
 from ..db.crud_token_blacklist import crud_token_blacklist
 from ..db.database import local_session
@@ -712,6 +726,199 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
 
     logging.info("Sent %d gear service digest(s) covering %d schedule(s)", sent_users, sent_schedules)
     return f"Sent {sent_users} gear service digest(s) covering {sent_schedules} schedule(s)"
+
+
+async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None) -> str:
+    """Email each diver one list of the certifications and insurance they need to renew.
+
+    The gear digest's shape, cloned onto dates. The subjects are every live certification
+    with an `expires_on` and the account's dive insurance when it has an expiry; each is
+    sent once on entering the window and once on expiring (`services.renewals.should_remind`),
+    with no re-nag after that. A renewal moves the date, and the stored pair then no longer
+    matches, so the next window re-arms without anything clearing it.
+
+    `user.renewal_reminder_emails` is the opt-out, and a soft-deleted account has no
+    subjects. "Today" is UTC for the digest's reason, at a lead three times as long.
+
+    Unbatched: it sends at most one email per diver per run. The first run over an existing
+    instance is therefore a sweep of every card already expired or inside the window, once.
+    """
+    today = today or datetime.now(UTC).date()
+    horizon = today + timedelta(days=CERTIFICATION_EXPIRING_SOON_DAYS)
+
+    async with local_session() as db:
+        # `expires_on <= horizon` implies a date is set; `expiry_stage` below makes the call.
+        certifications = (
+            await db.execute(
+                select(
+                    User.id.label("user_id"),
+                    User.email,
+                    Certification.id.label("certification_id"),
+                    Certification.agency,
+                    Certification.agency_other,
+                    Certification.name,
+                    Certification.expires_on,
+                    Certification.expiry_notified_stage,
+                    Certification.expiry_notified_for,
+                )
+                .join(User, User.id == Certification.user_id)
+                .where(
+                    Certification.is_deleted.is_(False),
+                    User.is_deleted.is_(False),
+                    User.renewal_reminder_emails.is_(True),
+                    Certification.expires_on <= horizon,
+                )
+            )
+        ).all()
+        insurances = (
+            await db.execute(
+                select(
+                    User.id.label("user_id"),
+                    User.email,
+                    User.insurance_provider,
+                    User.insurance_expires_on,
+                    User.insurance_notified_stage,
+                    User.insurance_notified_for,
+                ).where(
+                    User.is_deleted.is_(False),
+                    User.renewal_reminder_emails.is_(True),
+                    User.insurance_expires_on <= horizon,
+                )
+            )
+        ).all()
+
+    by_user: dict[int, dict[str, Any]] = defaultdict(lambda: {"email": "", "lines": [], "marks": [], "insurance": None})
+    for row in certifications:
+        stage = expiry_stage(row.expires_on, today)
+        if stage is None or not should_remind(
+            stage=stage,
+            expires_on=row.expires_on,
+            notified_stage=row.expiry_notified_stage,
+            notified_for=row.expiry_notified_for,
+        ):
+            continue
+        bucket = by_user[row.user_id]
+        bucket["email"] = row.email
+        label = certification_label(agency=row.agency, agency_other=row.agency_other, name=row.name)
+        bucket["lines"].append((row.expires_on, label, expiry_text(stage, row.expires_on), "/certifications"))
+        bucket["marks"].append(
+            {"id": row.certification_id, "expiry_notified_stage": stage.value, "expiry_notified_for": row.expires_on}
+        )
+    for policy in insurances:
+        stage = expiry_stage(policy.insurance_expires_on, today)
+        if stage is None or not should_remind(
+            stage=stage,
+            expires_on=policy.insurance_expires_on,
+            notified_stage=policy.insurance_notified_stage,
+            notified_for=policy.insurance_notified_for,
+        ):
+            continue
+        bucket = by_user[policy.user_id]
+        bucket["email"] = policy.email
+        text = expiry_text(stage, policy.insurance_expires_on)
+        # `/settings`, where the policy is entered, as the Renewals card's insurance row links.
+        bucket["lines"].append(
+            (policy.insurance_expires_on, insurance_label(policy.insurance_provider), text, "/settings")
+        )
+        bucket["insurance"] = (stage.value, policy.insurance_expires_on)
+
+    if not by_user:
+        logging.info("No renewal reminders to send")
+        return "No renewal reminders to send"
+
+    sent_users = 0
+    sent_subjects = 0
+    async with local_session() as db:
+        for user_id, bucket in by_user.items():
+            # Soonest first, cards and insurance in one list, as the Renewals card orders them.
+            lines = [(label, text, path) for _, label, text, path in sorted(bucket["lines"])]
+            # Send, then mark, for the digest's reason: a failed send is a duplicate tomorrow
+            # rather than a reminder that never arrives.
+            await send_renewal_reminder_email(bucket["email"], lines)
+
+            # An ORM bulk UPDATE by primary key with no `.where()`, as the digest's mark is -
+            # DECISIONS.md, "The digest's mark is an ORM bulk UPDATE by primary key".
+            if bucket["marks"]:
+                await db.execute(update(Certification), bucket["marks"])
+            if bucket["insurance"] is not None:
+                stage_value, expires_on = bucket["insurance"]
+                await db.execute(
+                    update(User)
+                    .where(User.id == user_id)
+                    .values(insurance_notified_stage=stage_value, insurance_notified_for=expires_on)
+                )
+            await db.commit()
+            sent_users += 1
+            sent_subjects += len(lines)
+
+    logging.info("Sent %d renewal reminder(s) covering %d subject(s)", sent_users, sent_subjects)
+    return f"Sent {sent_users} renewal reminder(s) covering {sent_subjects} subject(s)"
+
+
+async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) -> str:
+    """Email divers their previous calendar year in figures, through January.
+
+    Acts only while the UTC month is January (`services.year_in_review.reviewed_year`), and
+    sends at most `YEAR_IN_REVIEW_BATCH_SIZE` reviews a run so the day's mail fits the relay's
+    ceiling; the rest are taken on the following days. The order is account creation, oldest
+    first, so a batch is a queue rather than a sample.
+
+    A diver is eligible with `user.year_in_review_emails` on, a live account, no review sent
+    for that year yet, and at least one live dive in it by the dive's own local day. The query
+    pre-filters on a window of stored instants a day wider than the year; `year_in_review`
+    decides, and a diver whose only dives in the window fall outside the year is skipped
+    without counting against the batch.
+
+    Marked after each send and committed per diver, as the digest is: a send the relay refuses
+    raises before its mark, ends the run, and leaves that diver for the next one.
+    """
+    today = today or datetime.now(UTC).date()
+    year = reviewed_year(today)
+    if year is None:
+        return "No year in review outside January"
+
+    window_start, window_end = year_window(year)
+    dived_in_window = (
+        select(Dive.id)
+        .where(
+            Dive.user_id == User.id,
+            Dive.is_deleted.is_(False),
+            Dive.start_time >= window_start,
+            Dive.start_time < window_end,
+        )
+        .exists()
+    )
+
+    sent = 0
+    async with local_session() as db:
+        candidates = (
+            await db.execute(
+                select(User.id, User.email, User.units)
+                .where(
+                    User.is_deleted.is_(False),
+                    User.year_in_review_emails.is_(True),
+                    or_(User.year_in_review_sent_for.is_(None), User.year_in_review_sent_for < year),
+                    dived_in_window,
+                )
+                .order_by(User.created_at, User.id)
+            )
+        ).all()
+
+        for candidate in candidates:
+            if sent == YEAR_IN_REVIEW_BATCH_SIZE:
+                break
+            review = await year_in_review(db, candidate.id, year)
+            if review is None:
+                continue
+            await send_year_in_review_email(candidate.email, review, candidate.units)
+            await db.execute(update(User).where(User.id == candidate.id).values(year_in_review_sent_for=year))
+            await db.commit()
+            sent += 1
+
+    if sent == YEAR_IN_REVIEW_BATCH_SIZE:
+        logging.info("Year-in-review batch was full; more divers may be due on the next run")
+    logging.info("Sent %d year-in-review email(s) for %d", sent, year)
+    return f"Sent {sent} year-in-review email(s) for {year}"
 
 
 # -------- base functions --------

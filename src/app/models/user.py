@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import JSON, Boolean, Date, Index, String, func
+from sqlalchemy import JSON, Boolean, Date, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -34,6 +34,11 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # only `server_default` gives the migration adding this column a value to backfill
     # the rows already in the table with, which a NOT NULL column has to have.
     gear_service_emails: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # The other two scheduled emails' opt-outs - `send_renewal_reminders` and
+    # `send_year_in_review` in `core.worker.functions` - on exactly `gear_service_emails`'
+    # terms: opt-out, and the same `default`/`server_default` pair for the same reason.
+    renewal_reminder_emails: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    year_in_review_emails: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
     # Which measurement system this diver reads and types in - `metric` or `imperial`
     # (`UnitSystem` in `schemas/user.py` is the vocabulary; the column is a plain
@@ -88,6 +93,14 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     insurance_provider: Mapped[str | None] = mapped_column(String(255), default=None)
     insurance_policy_number: Mapped[str | None] = mapped_column(String(64), default=None)
     insurance_expires_on: Mapped[date | None] = mapped_column(Date, default=None)
+
+    # Bookkeeping the worker alone reads, on no schema that crosses the wire. The first pair is
+    # the (stage, expiry date) `send_renewal_reminders` last emailed about for the insurance
+    # above - `certification` carries the same pair for each card; the last is the calendar
+    # year `send_year_in_review` last sent this diver a review of. Null is "never sent".
+    insurance_notified_stage: Mapped[str | None] = mapped_column(String(16), default=None)
+    insurance_notified_for: Mapped[date | None] = mapped_column(Date, default=None)
+    year_in_review_sent_for: Mapped[int | None] = mapped_column(Integer, default=None)
 
     # Overrides `SoftDeleteMixin.is_deleted` to add an index: unlike Dive, Certification and
     # GearServiceRecord (each of which has a compound partial index whose predicate already
