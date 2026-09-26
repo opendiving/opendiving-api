@@ -842,9 +842,9 @@ async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None)
         bucket = by_user[policy.user_id]
         bucket["email"] = policy.email
         text = expiry_text(stage, policy.insurance_expires_on)
-        # `/settings/check-in`, where the policy is entered, as the Renewals card's insurance row links.
+        # `/settings/checkin`, where the policy is entered, as the Renewals card's insurance row links.
         bucket["lines"].append(
-            (policy.insurance_expires_on, insurance_label(policy.insurance_provider), text, "/settings/check-in")
+            (policy.insurance_expires_on, insurance_label(policy.insurance_provider), text, "/settings/checkin")
         )
         bucket["insurance"] = (stage.value, policy.insurance_expires_on)
 

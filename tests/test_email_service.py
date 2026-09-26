@@ -509,7 +509,7 @@ class TestSendGearServiceDigestEmail:
 class TestSendRenewalReminderEmail:
     LINES = [
         ("PADI Rescue Diver", "expired 3 Sep 2026", "/certifications"),
-        ("DAN Europe dive insurance", "expires 5 Dec 2026", "/settings/check-in"),
+        ("DAN Europe dive insurance", "expires 5 Dec 2026", "/settings/checkin"),
     ]
 
     @pytest.mark.asyncio
@@ -543,7 +543,7 @@ class TestSendRenewalReminderEmail:
             assert "expired 3 Sep 2026" in body
             # A card is edited on the certifications page, the policy in settings...
             assert 'href="https://app.example.com/certifications"' in body
-            assert 'href="https://app.example.com/settings/check-in"><strong>DAN Europe' in body
+            assert 'href="https://app.example.com/settings/checkin"><strong>DAN Europe' in body
             # ...and the footer's way out is the digest's.
             assert 'href="https://app.example.com/settings/notifications">turn these reminders off' in body
 
@@ -574,7 +574,7 @@ class TestSendRenewalReminderEmail:
 
             await send_renewal_reminder_email(
                 "diver@example.com",
-                [("<img src=x onerror=alert(1)> dive insurance", "expires 5 Dec 2026", "/settings/check-in")],
+                [("<img src=x onerror=alert(1)> dive insurance", "expires 5 Dec 2026", "/settings/checkin")],
             )
 
             _send_fn, message = mock_run_sync.call_args.args
