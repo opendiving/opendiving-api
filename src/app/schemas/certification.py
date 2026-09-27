@@ -12,6 +12,9 @@ from ..core.schemas import (
     StoredVocabulary,
 )
 from .contact import CONTACT_UUID_DESCRIPTION
+from .person import INSTRUCTOR_NAME_READ_DESCRIPTION, InstructorNameShim
+
+INSTRUCTOR_UUID_DESCRIPTION = "Public id of the person who signed the card as its instructor"
 
 
 class CertificationAgency(StrEnum):
@@ -172,8 +175,9 @@ class CertificationBase(BaseModel):
         date | None,
         Field(default=None, description="Expiry date, for the certifications that have one (rescue, EFR, most tech)"),
     ]
-    instructor_name: Annotated[str | None, Field(default=None, max_length=255)]
-    instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
+    instructor_number: Annotated[
+        str | None, Field(default=None, max_length=64, description="The instructor's number, as printed on the card")
+    ]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
     @model_validator(mode="after")
@@ -200,6 +204,10 @@ class CertificationRead(CertificationBase, PublicUUIDSchema):
         Field(default=None, description="Public id of the training course this certification came from"),
     ]
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    instructor_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=INSTRUCTOR_UUID_DESCRIPTION)]
+    # Read-only: the instructor person's name, for the web build that still prints one and
+    # echoes it back on save. Comes out with the write half - see `InstructorNameShim`.
+    instructor_name: Annotated[str | None, Field(default=None, description=INSTRUCTOR_NAME_READ_DESCRIPTION)]
     # The card images this certification has, as metadata only - see
     # `CertificationFileInfo`. Empty for a certification entered but not yet photographed.
     files: Annotated[
@@ -222,6 +230,7 @@ class CertificationReadInternal(CertificationBase, PublicUUIDSchema):
     user_id: int
     course_id: int | None = None
     contact_id: int | None = None
+    instructor_id: int | None = None
     expiry_notified_stage: str | None = None
     expiry_notified_for: date | None = None
     created_at: datetime
@@ -244,6 +253,8 @@ class CertificationCreate(CertificationBase):
         Field(default=None, description="Public id of the training course this certification came from"),
     ]
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    instructor_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=INSTRUCTOR_UUID_DESCRIPTION)]
+    instructor_name: InstructorNameShim
 
 
 class CertificationCreateInternal(CertificationBase):
@@ -254,6 +265,7 @@ class CertificationCreateInternal(CertificationBase):
     # fill, matching how `DiveCreateInternal` exposes `trip_id`.
     course_id: int | None = None
     contact_id: int | None = None
+    instructor_id: int | None = None
 
 
 class CertificationUpdate(RejectsExplicitNulls):
@@ -278,7 +290,6 @@ class CertificationUpdate(RejectsExplicitNulls):
     certification_number: Annotated[str | None, Field(default=None, max_length=64)]
     certified_on: Annotated[date | None, Field(default=None)]
     expires_on: Annotated[date | None, Field(default=None)]
-    instructor_name: Annotated[str | None, Field(default=None, max_length=255)]
     instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
@@ -293,7 +304,7 @@ class CertificationUpdateRequest(CertificationUpdate):
     same split, and the same reason, as `TripUpdateRequest`.
 
     Omit `course_uuid` and the existing link is left alone; send `null` and it is cleared.
-    `contact_uuid` works the same way.
+    `contact_uuid` and `instructor_uuid` work the same way.
     """
 
     course_uuid: Annotated[
@@ -301,6 +312,8 @@ class CertificationUpdateRequest(CertificationUpdate):
         Field(default=None, description="Public id of the training course this certification came from"),
     ]
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    instructor_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=INSTRUCTOR_UUID_DESCRIPTION)]
+    instructor_name: InstructorNameShim
 
 
 class CertificationUpdateInternal(CertificationUpdate):

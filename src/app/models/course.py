@@ -56,12 +56,9 @@ class Course(Base, PublicUUIDMixin, TimestampMixin):
     # `__table_args__` below.
     start_date: Mapped[date | None] = mapped_column(Date, default=None)
     end_date: Mapped[date | None] = mapped_column(Date, default=None)
-    # The same fields a certification carries, with the same names and lengths
-    # (`models/certification.py`), so the two never drift apart in vocabulary. The
-    # duplication is deliberate rather than something to normalize away: imported history
-    # arrives certification-first, with no course to hang the fields on, so a certification
-    # has to stand alone.
-    instructor_name: Mapped[str | None] = mapped_column(String(255), default=None)
+    # The number printed on the card, as a certification carries it too: a card arrives
+    # certification-first as often as not, with no course to read it from. Who the instructor
+    # was is a person on the course's `course_person` rows, with the role `instructor`.
     instructor_number: Mapped[str | None] = mapped_column(String(64), default=None)
     # Who ran the course - a school, a dive center, a club. `ON DELETE SET NULL`, the shape
     # of `dive.course_id`: deleting the contact unlinks the course.

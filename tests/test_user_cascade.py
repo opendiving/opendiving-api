@@ -36,18 +36,22 @@ from src.app.models.certification_file import CertificationFile
 from src.app.models.checkin_link import CheckinLink
 from src.app.models.contact import Contact
 from src.app.models.course import Course
+from src.app.models.course_person import CoursePerson
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_file import DiveFile
 from src.app.models.dive_form_preset import DiveFormPreset
+from src.app.models.dive_person import DivePerson
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
+from src.app.models.person import Person
 from src.app.models.trip import Trip
 from src.app.models.trip_part import TripPart
+from src.app.models.trip_person import TripPerson
 from src.app.models.user import User
 from src.app.models.user_dive_stats import UserDiveStats
 from src.app.models.user_session import UserSession
@@ -64,6 +68,7 @@ from tests.helpers.generators import (
     create_gear_service_record,
     create_gear_service_schedule,
     create_gear_set,
+    create_person,
     create_trip,
     create_user,
 )
@@ -75,18 +80,21 @@ class TestEveryForeignKeyIntoUserCascades:
     A model added later with `ForeignKey("user.id")` and no `ondelete` reinstates exactly
     the bug this change fixes, and would fail nothing else - the purge would raise on the
     first account that owned one of its rows, in a cron job, in production.
+
+    One key is allowed another rule, by name: `person.linked_user_id` names *another*
+    account, whose purge unlinks this diver's person rather than deleting it.
     """
 
     def test_no_foreign_key_into_user_is_left_without_a_delete_rule(self):
-        without_cascade = sorted(
-            f"{column.table.name}.{column.name}"
+        without_cascade = {
+            f"{column.table.name}.{column.name}": fk.ondelete
             for table in Base.metadata.tables.values()
             for column in table.columns
             for fk in column.foreign_keys
             if fk.column.table.name == "user" and fk.ondelete != "CASCADE"
-        )
+        }
 
-        assert without_cascade == []
+        assert without_cascade == {"person.linked_user_id": "SET NULL"}
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
@@ -95,16 +103,16 @@ class TestDeletingAUserTakesEverythingWithIt:
     that hang off those - then a single `DELETE`.
 
     Most of them are the ten `48781087b2b3` had to redeclare. The rest are tables added
-    since - `course`, then `user_session`, `auth_audit_event`, `contact` and `checkin_link` -
-    each of which declared `ON DELETE CASCADE` from the outset, which is exactly the case the
+    since - `course`, then `user_session`, `auth_audit_event`, `contact`, `checkin_link` and
+    `person` - each of which declared `ON DELETE CASCADE` from the outset, which is exactly the case the
     metadata sweep above cannot distinguish from a table that got it right by accident, so they
     are seeded here too. (No count in this sentence on purpose: the previous one said "eleven"
     and was one model away from being wrong, which `DECISIONS.md` §"The counts in the prose go
     stale too" is about.)
 
     Second-order coverage is not decoration. `certification_file`, `dive_file`,
-    `dive_dive_site`, `gear_set_item` and `trip_part` are the tables that would be left
-    pointing at nothing if a cascade stopped one level short, and `dive_file` is on both
+    `dive_dive_site`, `gear_set_item`, `trip_part` and the three `*_person` tables are the
+    tables that would be left pointing at nothing if a cascade stopped one level short, and `dive_file` is on both
     lists: it holds `user_id` *and* `dive_id`, so it is reached twice and has to survive
     being deleted by whichever fires first.
     """
@@ -122,9 +130,11 @@ class TestDeletingAUserTakesEverythingWithIt:
         site = create_dive_site(db, diver)
         # One `trip_part` row comes with it, which is what the second-order sweep counts;
         # a second one here would make that sweep's "one row each" arithmetic wrong.
-        create_trip(db, diver)
-        create_course(db, diver)
+        trip = create_trip(db, diver)
+        course = create_course(db, diver)
         create_contact(db, diver)
+        # A person with a row in each join table, which only these cascades reach.
+        person = create_person(db, diver)
         item = create_gear_item(db, diver)
         schedule = create_gear_service_schedule(db, diver, item)
         create_gear_service_record(db, diver, item, schedule=schedule)
@@ -137,6 +147,9 @@ class TestDeletingAUserTakesEverythingWithIt:
                 UserDiveStats(user_id=diver.id, total_dives=1, max_depth=18.0, total_time=1800, species_seen=0),
                 DiveDiveSite(dive_id=dive.id, dive_site_id=site.id),
                 GearSetItem(gear_set_id=gear_set.id, gear_item_id=item.id),
+                DivePerson(dive_id=dive.id, person_id=person.id, role="buddy"),
+                TripPerson(trip_id=trip.id, person_id=person.id),
+                CoursePerson(course_id=course.id, person_id=person.id, role="instructor"),
                 UserSession(
                     user_id=diver.id,
                     expires_at=datetime.now(UTC) + timedelta(days=7),
@@ -217,6 +230,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             GearServiceRecord,
             GearServiceSchedule,
             GearSet,
+            Person,
             Trip,
             UserDiveStats,
             UserSession,
@@ -228,7 +242,7 @@ class TestDeletingAUserTakesEverythingWithIt:
         raising, so counting only the tables above would pass while they stayed."""
         second_order = {
             model: int(db.execute(select(func.count()).select_from(model)).scalar_one())
-            for model in (CertificationFile, DiveDiveSite, GearSetItem, TripPart)
+            for model in (CertificationFile, CoursePerson, DiveDiveSite, DivePerson, GearSetItem, TripPart, TripPerson)
         }
 
         db.execute(text('DELETE FROM "user" WHERE id = :id'), {"id": populated_diver.id})
@@ -237,3 +251,23 @@ class TestDeletingAUserTakesEverythingWithIt:
         for model, before in second_order.items():
             after = int(db.execute(select(func.count()).select_from(model)).scalar_one())
             assert after == before - 1, f"{model.__tablename__} did not follow its parent down"
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestAPersonLinkedToAPurgedAccountStays:
+    """The one foreign key into `user.id` that is not a cascade. A person names *another*
+    account; that account's purge unlinks the person and leaves the diver's record."""
+
+    def test_the_person_stays_unlinked(self, db: Session) -> None:
+        diver = create_user(db)
+        friend = create_user(db)
+        person = create_person(db, diver, linked_to=friend)
+        person_id, friend_id = person.id, friend.id
+
+        db.execute(text('DELETE FROM "user" WHERE id = :id'), {"id": friend_id})
+        db.commit()
+        db.expunge_all()
+
+        kept = db.get(Person, person_id)
+        assert kept is not None
+        assert kept.linked_user_id is None

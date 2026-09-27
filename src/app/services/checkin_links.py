@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.security import generate_secure_token, hash_token
 from ..crud.crud_certifications import get_every_certification
 from ..crud.crud_contacts import get_contact_names_by_ids
+from ..crud.crud_people import get_person_names_by_ids
 from ..crud.crud_users import read_account
 from ..models.certification import Certification
 from ..models.certification_file import CertificationFile
@@ -172,6 +173,9 @@ async def checkin_summary(db: AsyncSession, link: LiveCheckinLink) -> CheckinSum
     contact_names = await get_contact_names_by_ids(
         db, contact_ids=[card["contact_id"] for card in cards], user_id=link.user_id
     )
+    instructor_names = await get_person_names_by_ids(
+        db, [card["instructor_id"] for card in cards], user_id=link.user_id
+    )
 
     certifications = []
     for card in cards:
@@ -181,6 +185,7 @@ async def checkin_summary(db: AsyncSession, link: LiveCheckinLink) -> CheckinSum
                 card
                 | {
                     "contact_name": contact_names.get(card["contact_id"]) if card["contact_id"] is not None else None,
+                    "instructor_name": instructor_names.get(card["instructor_id"]),
                     "front_content_type": front.content_type if front is not None else None,
                 }
             )

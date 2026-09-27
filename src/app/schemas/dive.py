@@ -16,6 +16,7 @@ from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
 from .dive_profile import DiveProfileInfo
 from .gear_item import GearItemInfo
 from .location import Latitude, LocationRead, Longitude
+from .person import PeopleRead, PeopleUpdate, PeopleWrite
 
 _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
 _LOCAL_START_TIME_EXAMPLE = "2021-04-04T10:04:47.910"
@@ -363,7 +364,7 @@ class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the training course this dive was on")
     ]
     contact_uuid: Annotated[
-        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact the diver dived with")
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact that ran the dive")
     ]
     created_at: datetime
     dive_sites: Annotated[
@@ -774,6 +775,10 @@ class DiveReadWithMixtures(DiveRead):
     # live an hour and replay through this schema, so every entry written before this field
     # existed lacks the key and would fail validation on read.
     species: Annotated[list[SpeciesInfo], Field(default_factory=list)]
+    # Here for `species`' reason, and defaulted for it too. References only - each person's
+    # uuid and the role they had - never a summary of the person: a client resolves names
+    # from `GET /people`, so renaming a person reaches no cached dive.
+    people: PeopleRead
     # **`source_file` and `profile` are gone**, and `recordings` replaces both. A dive had
     # at most one of each while a dive had at most one record; it now has an ordered list of
     # recordings, each of which carries its own files and its own profile summary. A client
@@ -851,7 +856,7 @@ class DiveMergeResult(BaseModel):
         uuid_pkg.UUID,
         Field(
             description="The dive that was merged away. It is soft-deleted and **not recoverable through the API**: "
-            "its recordings, files, cylinders, sites, gear, species and notes are now the surviving dive's."
+            "its recordings, files, cylinders, sites, gear, species, people and notes are now the surviving dive's."
         ),
     ]
     folded: Annotated[
@@ -1014,7 +1019,7 @@ class DiveCreate(DiveBase):
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the training course this dive was on")
     ]
     contact_uuid: Annotated[
-        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact the diver dived with")
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact that ran the dive")
     ]
 
 
@@ -1049,6 +1054,7 @@ class DiveCreateRequest(DiveCreate):
         list[uuid_pkg.UUID],
         Field(default_factory=list, description="Public ids of the species spotted, in the order listed"),
     ]
+    people: PeopleWrite
 
 
 class DiveUpdate(RejectsExplicitNulls):
@@ -1095,7 +1101,7 @@ class DiveUpdate(RejectsExplicitNulls):
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the training course this dive was on")
     ]
     contact_uuid: Annotated[
-        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact the diver dived with")
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact that ran the dive")
     ]
     notes: Annotated[
         str | None,
@@ -1118,9 +1124,9 @@ class DiveUpdateRequest(DiveUpdate):
     """Request body for updating a dive, including replacing its gas mixtures, dive site(s)
     and gear.
 
-    If `mixtures`/`dive_site_uuids`/`gear_item_uuids`/`species_uuids` is omitted, the
-    existing mixtures/dive sites/gear/species are left untouched. If provided (even as an
-    empty list), the existing ones are replaced with the given list.
+    If `mixtures`/`dive_site_uuids`/`gear_item_uuids`/`species_uuids`/`people` is omitted,
+    the existing ones are left untouched. If provided (even as an empty list), the existing
+    ones are replaced with the given list.
     """
 
     mixtures: Annotated[list[DiveMixtureCreate] | None, Field(default=None)]
@@ -1136,6 +1142,7 @@ class DiveUpdateRequest(DiveUpdate):
         list[uuid_pkg.UUID] | None,
         Field(default=None, description="Public ids of the species spotted, in the order listed"),
     ]
+    people: PeopleUpdate
 
 
 class DiveUpdateInternal(BaseModel):
@@ -1159,9 +1166,7 @@ class DiveUpdateInternal(BaseModel):
     course_id: Annotated[
         int | None, Field(default=None, description="Internal id of the training course this dive was on")
     ]
-    contact_id: Annotated[
-        int | None, Field(default=None, description="Internal id of the contact the diver dived with")
-    ]
+    contact_id: Annotated[int | None, Field(default=None, description="Internal id of the contact that ran the dive")]
     utc_offset_minutes: Annotated[int | None, Field(default=None)]
     notes: Annotated[
         str | None,

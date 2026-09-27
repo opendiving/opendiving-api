@@ -632,6 +632,7 @@ class TestTheReadsCarryTheReference:
             dive_site_id=None,
             gear_item_id=None,
             species_id=None,
+            person_id=None,
         )
         single = await dives_module._cached_read_dive.__wrapped__(  # type: ignore[attr-defined]
             request=None, user_id=user_id, uuid=dive_uuid, owner_uuid=user_uuid, db=async_db

@@ -129,8 +129,9 @@ async def read_current_user(request: Request, current_user: Annotated[dict, Depe
 
 # Note: there is no `GET /user/{uuid}` here (yet) - looking up *other* users will be
 # added later as a separate, public-profile-shaped endpoint (limited fields, no
-# email) rather than reusing this module's current-user-only routes. Until then,
-# there's no way to fetch another user's data through this API at all.
+# email) rather than reusing this module's current-user-only routes. Until then, no route
+# fetches another user's data but the named exceptions - see *"Current-user routes live at
+# a bare `/user`"* in DECISIONS.md.
 
 
 @router.patch("/user")

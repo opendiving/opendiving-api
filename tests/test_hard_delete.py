@@ -55,6 +55,7 @@ from src.app.crud.crud_gear_service_schedules import (
     schedule_kind_exists,
 )
 from src.app.crud.crud_gear_sets import crud_gear_sets, gear_set_name_exists
+from src.app.crud.crud_people import crud_people, person_name_exists
 from src.app.crud.crud_trips import crud_trips, trip_name_exists
 from src.app.models.contact import Contact
 from src.app.models.course import Course
@@ -63,6 +64,7 @@ from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
+from src.app.models.person import Person
 from src.app.models.trip import Trip
 from src.app.models.user import User
 from src.app.schemas.contact import ContactReadInternal
@@ -71,6 +73,7 @@ from src.app.schemas.dive_form_preset import DiveFormPresetReadInternal
 from src.app.schemas.dive_site import DiveSiteReadInternal
 from src.app.schemas.gear_item import GearItemReadInternal
 from src.app.schemas.gear_set import GearSetReadInternal
+from src.app.schemas.person import PersonReadInternal
 from src.app.schemas.trip import TripReadInternal
 from tests.conftest import db_available
 from tests.helpers.generators import (
@@ -82,6 +85,7 @@ from tests.helpers.generators import (
     create_gear_service_record,
     create_gear_service_schedule,
     create_gear_set,
+    create_person,
     create_trip,
 )
 from tests.helpers.model_metadata import (
@@ -146,6 +150,12 @@ HARD_DELETED_RESOURCES: dict[type[Base], Resource] = {
         create=create_contact,
         resolve=_resolves_through_fetch_owned(crud_contacts, ContactReadInternal),
         name_exists=lambda session, diver, row: contact_name_exists(session, user_id=diver.id, name=row.name),
+    ),
+    Person: Resource(
+        crud=crud_people,
+        create=create_person,
+        resolve=_resolves_through_fetch_owned(crud_people, PersonReadInternal),
+        name_exists=lambda session, diver, row: person_name_exists(session, user_id=diver.id, name=row.name),
     ),
     Course: Resource(
         crud=crud_courses,

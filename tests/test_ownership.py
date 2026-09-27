@@ -367,6 +367,10 @@ FETCH_OWNED_ROUTES = [
         for method, extra in _CRUD_METHODS
     ),
     *(
+        OwnedRoute(method, "/api/v1/person/{uuid}", "src.app.api.v1.people:crud_people", "Person not found", extra)
+        for method, extra in _CRUD_METHODS
+    ),
+    *(
         OwnedRoute(
             method,
             "/api/v1/gear-item/{uuid}",

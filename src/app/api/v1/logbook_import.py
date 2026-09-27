@@ -156,6 +156,11 @@ async def preview_logbook_import(
     inline image framed as it would be stored. It is absent when the archive's is your own,
     framed the same, and a portrait that cannot be offered is explained in `notes`.
 
+    A person this app exported linked to an account here is proposed linked to it again,
+    within the limit on linking people - an `account_linked` note names the account's
+    current username - where the account still exists, is not yours and no other person of
+    yours links it. Nothing of a link that cannot be made is kept.
+
     The `token` in the response goes to `POST /import/logbook` with the same file. It says
     which bytes this report describes and nothing more: the import re-reads, re-converts and
     re-plans, because your logbook may have moved between the two calls.
@@ -220,6 +225,10 @@ async def apply_logbook_import(
     The archive's portrait replaces your account's only when `portrait` says `take`, and
     only while your portrait is still the one the preview showed; otherwise yours is kept,
     and a note says so when you had chosen the archive's.
+
+    Each link to an account the import makes counts against the limit on linking people,
+    and one past it is dropped with a note rather than failing the import. A link counts
+    whether or not the import completes.
     """
     if check_in_details is not None and (anchor_errors := check_in_details.anchor_errors()):
         raise RequestValidationError(
@@ -248,6 +257,7 @@ async def apply_logbook_import(
             newly_resolved_aphia_ids=newly_resolved,
             check_in=check_in_details,
             portrait=portrait,
+            claim_links=True,
         )
         await write_import(db, user_id=current_user["id"], loaded=loaded, plan=plan)
         await db.commit()

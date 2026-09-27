@@ -385,18 +385,16 @@ a used link; the web precheck never sends one.
 
 ## Current-user routes live at a bare `/user`, not `/user/me` or `/user/{uuid}`
 
-Current-user routes resolve the account from the access token at a bare `/user`: `GET /user`
-(`read_current_user`), `PATCH /user`, `DELETE /user`, `GET /user/dive-stats`. There is no `{uuid}`
-to mismatch, so no `403` ownership check, and `DELETE /user` does no
-`crud_users.get`/`NotFoundException` re-fetch — `get_current_user` already loaded a fresh,
-non-deleted row. "My account" and "someone else's public profile" are meant to be distinct,
-differently shaped endpoints — full data including `email` from the token versus a limited public
-subset keyed by `{uuid}` — rather than one `/user/{uuid}` route gated by a runtime
-`if current_user["uuid"] != uuid` check a new route can forget. There is no `GET /user/{uuid}`, no
-`GET /users` and no `read_users`: nothing fetches another user's data through this API.
-Public-profile-shaped replacements are separate work, and public dive stats would be a new route
-such as `GET /profile/{uuid}/dive-stats`. `opendiving-web` (`authAPI.getCurrentUser`/`updateProfile`
-in `lib/api/auth.ts`) and `opendiving-ios` (`AuthAPI.currentUser()`) match.
+Current-user routes resolve the account from the access token at a bare `/user`: `GET /user`,
+`PATCH /user`, `DELETE /user`, `GET /user/dive-stats`. There is no `{uuid}` to mismatch, so no
+ownership check, and `DELETE /user` re-fetches nothing: `get_current_user` already loaded a fresh,
+non-deleted row. "My account" and "someone else's public profile" are distinct, differently shaped
+endpoints — full data including `email` from the token versus a limited public subset keyed by
+`{uuid}` — rather than one `/user/{uuid}` route gated by a runtime `if current_user["uuid"] != uuid`
+check a new route can forget. There is no `GET /user/{uuid}`, no `GET /users` and no `read_users`.
+Another user's data reaches a caller only as a check-in link's card for its token holder, and as the
+account a diver linked a person to: its current username, and its public id in the diver's own
+export. Public dive stats would be `GET /profile/{uuid}/dive-stats`.
 
 ## `CORSMiddleware` is gated on `FrontendSettings`; without it every preflight is a 405
 
@@ -4437,24 +4435,19 @@ because tuning it tunes that leniency unknowingly. One Core `DELETE` with `rowco
 match. `expires_at` is indexed by a hand-written revision. Cost: a link past retention reports
 "invalid" rather than "expired"; `check_email_link` already collapses both to `valid=false`.
 
-## Every foreign key into `user.id` declares `ondelete="CASCADE"`
+## Every foreign key into `user.id` declares `ondelete="CASCADE"` but one
 
-Every foreign key into `user.id` declares `ondelete="CASCADE"`: `certification_user_id_fkey`,
-`dive_user_id_fkey`, `dive_file_user_id_fkey`, `dive_site_user_id_fkey`, `gear_item_user_id_fkey`,
-`gear_service_record_user_id_fkey`, `gear_service_schedule_user_id_fkey`, `gear_set_user_id_fkey`,
-`trip_user_id_fkey`, `user_dive_stats_user_id_fkey`, beside `authentication_provider`,
-`authentication_request` and `webauthn_credential`. `DELETE /user` soft-deletes (`SoftDeleteMixin`);
-the raw `DELETE FROM "user"` is the purge's. Two traps in the revision: autogenerate and
-`alembic check` do not detect an `ondelete` change, so it is hand-written; and Postgres cannot
-`ALTER` a delete rule, so each is `DROP CONSTRAINT` plus `ADD CONSTRAINT` under Postgres's default
-`<table>_<column>_fkey` name, with `downgrade` passing `ondelete=None` (NO ACTION). No index is
-added: all ten already carry a plain btree leading with `user_id`, and a cascade on an unindexed or
-partial-indexed FK seq-scans the child; `tests/test_foreign_key_indexes.py` checks every FK.
-`tests/test_user_cascade.py` is two halves: `TestEveryForeignKeyIntoUserCascades` walks
-`Base.metadata` to catch a bare `ForeignKey("user.id")`, and
-`TestDeletingAUserTakesEverythingWithIt` seeds one row per table plus second-order rows
-(`certification_file`, `dive_dive_site`, `gear_set_item`, `trip_part`) and issues the raw `DELETE`
-on Postgres (skipped without `POSTGRES_SERVER=localhost`).
+Every foreign key into `user.id` declares `ondelete="CASCADE"` but `person.linked_user_id`, which is
+`SET NULL`: it names *another* account, whose purge must unlink this diver's person rather than
+delete it. `DELETE /user` soft-deletes (`SoftDeleteMixin`); the raw `DELETE FROM "user"` is the
+purge's. Two traps in a revision that changes one: autogenerate and `alembic check` do not detect an
+`ondelete` change, so it is hand-written; and Postgres cannot `ALTER` a delete rule, so each is
+`DROP CONSTRAINT` plus `ADD CONSTRAINT` under Postgres's default `<table>_<column>_fkey` name, with
+`downgrade` passing `ondelete=None` (NO ACTION). A cascade on an unindexed or partial-indexed FK
+seq-scans the child; `tests/test_foreign_key_indexes.py` checks every FK.
+`tests/test_user_cascade.py` walks `Base.metadata` for a bare `ForeignKey("user.id")`, naming the
+one exception, and issues the raw `DELETE` on Postgres over one row per table plus second-order rows
+(skipped without `POSTGRES_SERVER=localhost`).
 
 ## Deleting an account is two changes with a fortnight between them
 
@@ -7016,7 +7009,7 @@ and every handler scopes by `current_user["id"]`. The eight create schemas are `
 a body naming an owner is a 422 like any other unknown key. *Rejected:* an owner field the handler
 compares to the session's and 403s on — it has authority over nothing. *Rejected:* keeping it
 optional as an on-behalf-of hook for a future admin path; nothing fetches another user's data
-through this API.
+through this API beyond the exceptions *Current-user routes live at a bare `/user`* names.
 
 `tests/test_request_identity.py` holds the wire-level pins, and a structural one over the served
 OpenAPI document: no request body schema publishes an owner property and no operation declares one
@@ -7138,3 +7131,25 @@ single trip is cached under `trip_cache:{uuid}` with no user in the key, which n
 reaches, so the uuids of the trips whose parts name the contact are collected before the row goes
 and dropped one by one (`invalidate_trip_items`). A rename reaches no host's cache: reads carry the
 uuid, never a summary.
+
+## Linking a person confirms an account exists, and nothing else
+
+`POST`/`PATCH /person` link a person to the account with exactly that username and store the
+account, so the link survives a rename and a purge clears it. It answers *found* for exactly what
+the availability check calls taken, a deleted account in its grace period included, so comparing the
+two reveals nothing new; it is throttled like choosing a username
+(`PERSON_LINK_RATE_LIMIT_PER_USER`), counting only a change. The linker then sees that account's
+current username, and their own export carries its public id, a uuid7 that dates its creation -
+which that account's export carries anyway. An import links a person by that id, under the same
+limit, and reports the current username, which the file did not carry. *Rejected:* linking by email,
+a second oracle over guessable addresses.
+
+## The course and certification writes honour an instructor's name for one web build
+
+Until the web build that sends `people` and `instructor_uuid` is live, `CourseCreate`,
+`CourseUpdateRequest`, `CertificationCreate` and `CertificationUpdateRequest` accept
+`instructor_name` and resolve a non-blank one to the caller's person of that name, or a new one,
+made the course's first instructor or the card's `instructor_id`; blank and `null` change nothing.
+`CourseRead` and `CertificationRead` serve the instructor's name under it, which the old dialog
+echoes back as a no-op - so a person rename also drops the course and certification caches. The api
+and web deploy apart. *Rejected:* accept-and-ignore. Both halves and this entry go together.

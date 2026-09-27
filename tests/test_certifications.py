@@ -80,7 +80,6 @@ def _internal_certification(**overrides) -> CertificationReadInternal:
         "certification_number": "1234567",
         "certified_on": date(2019, 6, 14),
         "expires_on": None,
-        "instructor_name": "A. Instructor",
         "instructor_number": "654321",
         "notes": "",
         "created_at": datetime(2025, 1, 1, tzinfo=UTC),

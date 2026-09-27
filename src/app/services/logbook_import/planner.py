@@ -58,6 +58,7 @@ from ...models.gear_item import GearItem
 from ...models.gear_service_record import GearServiceRecord
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.gear_set import GearSet
+from ...models.person import Person
 from ...models.species import Species
 from ...models.trip import Trip
 from ...models.user import User
@@ -85,6 +86,8 @@ from ...schemas.logbook_import import (
     ImportLocation,
     ImportNote,
     ImportNoteCode,
+    ImportPerson,
+    ImportPersonReference,
     ImportPortraitChoice,
     ImportPortraitOffer,
     ImportProfile,
@@ -93,6 +96,7 @@ from ...schemas.logbook_import import (
     ImportStoredFile,
     ImportTrip,
 )
+from ...schemas.person import PersonRole
 from ...schemas.user import CHECK_IN_FIELDS
 from ...schemas.user_picture import PictureCrop
 from ..certification_files import MAX_CARD_FILE_SIZE
@@ -119,6 +123,7 @@ from ..dive_recordings import (
     is_same_recording,
     load_candidates,
 )
+from ..person_links import Account, accounts_by_uuid, claim_link_slot, link_budget_remaining
 from ..user_pictures import (
     MAX_PICTURE_UPLOAD_SIZE,
     PORTRAIT_FRAME,
@@ -147,16 +152,19 @@ COLLECTIONS: tuple[str, ...] = (
     "gear_service_records",
     "certifications",
     "contacts",
+    "people",
 )
 
 # References only ever point *backwards* along this order, so one pass resolves everything:
 # a trip's parts, a course, a service record, a certification and a dive name a contact; a
-# dive names a trip, a course, sites, gear and species; a gear set, a schedule and a service
-# record name gear; a certification names a course. Nothing here is recursive, which is what
+# trip, a course, a certification and a dive name people; a dive names a trip, a course,
+# sites, gear and species; a gear set, a schedule and a service record name gear; a
+# certification names a course. Nothing here is recursive, which is what
 # makes a fixed order enough rather than a graph walk - and it is the order `writer.py`
 # writes in, so a reference always resolves to a row that already exists.
 _RESOLUTION_ORDER: tuple[str, ...] = (
     "contacts",
+    "people",
     "trips",
     "courses",
     "sites",
@@ -359,6 +367,20 @@ class PlannedPortrait:
     filename: str
     held: HeldPicture | None
     take: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedPersonReference:
+    """One person on a dive, trip or course, or a card's instructor, as planned.
+
+    Either a document record's `source_uuid` - resolved to a row by the writer, which writes
+    people first - or, for a legacy instructor name matching a person the caller already
+    has, that row's id.
+    """
+
+    role: str | None = None
+    source_uuid: uuid_pkg.UUID | None = None
+    row_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -612,6 +634,7 @@ class _Planner:
         newly_resolved_aphia_ids: frozenset[int] = frozenset(),
         check_in: ImportCheckInSubmission | None = None,
         portrait: ImportPortraitChoice | None = None,
+        claim_links: bool = False,
     ) -> None:
         self._db = db
         self._user_id = user_id
@@ -651,6 +674,20 @@ class _Planner:
         # Filled by `_plan_contacts`, which runs before anything that references a contact.
         self._contact_index: dict[tuple[str, ...], int] = {}
         self._contact_aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
+        # The same for people by name, plus the accounts the caller's people link and the
+        # ones this document's have linked so far - a link claims a person before a name
+        # does. Filled by `_plan_people`, which runs before anything that references one.
+        self._person_index: dict[tuple[str, ...], int] = {}
+        self._person_aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
+        self._linked_rows: dict[int, int] = {}
+        self._link_aliases: dict[int, uuid_pkg.UUID] = {}
+        self._accounts: dict[uuid_pkg.UUID, Account] = {}
+        # **Where a link's count is spent.** The apply claims one slot per link it makes, an
+        # exhausted window dropping that link rather than the import; the preview reads what
+        # the window has left and spends nothing, so the plan is made twice and counted once.
+        # Read on the first link the preview meets, so an import that links nobody never asks.
+        self._claim_links = claim_links
+        self._link_budget: int | None = None
 
     # ------------------------------------------------------------------ notes
 
@@ -1088,6 +1125,7 @@ class _Planner:
         await self._plan_diver()
         await self._plan_portrait()
         await self._plan_contacts()
+        await self._plan_people()
         await self._plan_trips()
         await self._plan_courses()
         await self._plan_sites()
@@ -1248,16 +1286,7 @@ class _Planner:
         return record
 
     def _contact_email(self, contact: ImportContact) -> str | None:
-        """The email as `EmailStr` accepts it, or `None` and a note. The format checks for an
-        `@` and nothing more; the app's write schema checks the address, and a value this app
-        could not have written itself is dropped rather than stored."""
-        if contact.email is None:
-            return None
-        try:
-            return str(_EMAIL.validate_python(contact.email))
-        except ValidationError:
-            self._dropped("contacts", contact.uuid, "The email address was not one this app can store, and was dropped")
-            return None
+        return self._email("contacts", contact.uuid, contact.email)
 
     def _contact_website(self, contact: ImportContact) -> str | None:
         """The website as an absolute `http(s)` URL, or `None` and a note - no scheme is
@@ -1333,6 +1362,214 @@ class _Planner:
         )
         return {"contact_uuid": source_uuid}
 
+    async def _plan_people(self) -> None:
+        people = self._document.people
+        existing = await self._rows_by_uuid(Person, [person.uuid for person in people])
+        self._person_index = await self._existing_by_key(Person, (Person.name,), lambda row: _key(row[0]))
+        linked = await self._db.execute(
+            select(Person.linked_user_id, Person.id).where(
+                Person.user_id == self._user_id, Person.linked_user_id.is_not(None)
+            )
+        )
+        self._linked_rows = {row.linked_user_id: row.id for row in linked}
+        self._accounts = await accounts_by_uuid(
+            self._db, [account for person in people if (account := _person_account(person)) is not None]
+        )
+        for person in people:
+            self._claim_document_uuid("people", person)
+            self._records["people"][person.uuid] = await self._plan_person(person, existing)
+
+    async def _plan_person(self, person: ImportPerson, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
+        """One person: the uuid rules, then - for a record this import would create - a claim
+        by link before a claim by name. A person whose entry names an account another of the
+        caller's people already links is that person, whatever its name says."""
+        collection = "people"
+        name = (person.name or "").strip()
+        if not name:
+            return self._skip(collection, person.uuid, "A person needs a name, and this one has none.")
+        record = self._resolve(collection, person.uuid, existing)
+        account = self._accounts.get(account_uuid) if (account_uuid := _person_account(person)) else None
+        if record.action is Action.CREATE and account is not None:
+            row_id = self._linked_rows.get(account.id)
+            if row_id is not None:
+                self._note(
+                    ImportNoteCode.RECORD_LINKED,
+                    "You already have a person linked to the account this one names, so this record was linked to "
+                    "them rather than duplicated.",
+                    collection=collection,
+                    uuid=person.uuid,
+                )
+                return PlannedRecord(action=Action.LINK, source_uuid=person.uuid, uuid=person.uuid, row_id=row_id)
+            owner = self._link_aliases.get(account.id)
+            if owner is not None:
+                self._note(
+                    ImportNoteCode.RECORD_LINKED,
+                    "This document carries two people linked to one account; they were imported as one.",
+                    collection=collection,
+                    uuid=person.uuid,
+                )
+                return PlannedRecord(
+                    action=Action.LINK, source_uuid=person.uuid, uuid=person.uuid, canonical_source_uuid=owner
+                )
+        if record.action is Action.CREATE:
+            person_key = _key(name)
+            record = self._claim_unique(
+                collection,
+                record,
+                self._person_index,
+                self._person_aliases,
+                person_key,
+                "person",
+                index_key=person_key,
+            )
+        if record.action is not Action.CREATE:
+            return record
+
+        record.values = {
+            "user_id": self._user_id,
+            "name": name,
+            "email": self._email(collection, person.uuid, person.email),
+            "phone": person.phone,
+            "notes": self._notes_text(collection, person.uuid, person.notes),
+            "linked_user_id": await self._account_link(person, account_uuid, account),
+            "created_at": self._created_at(person.created_at),
+        }
+        return record
+
+    async def _account_link(
+        self, person: ImportPerson, account_uuid: uuid_pkg.UUID | None, account: Account | None
+    ) -> int | None:
+        """The account a new person links to, from its entry under this producer's key - under
+        the caller's link limit, as a typed username is, and named in the report.
+
+        Only an account the username resolver would take: one on this instance (a deleted one
+        in its grace period included), not the caller's, not linked by another of their people.
+        Anything else is dropped with a note and nothing of it is kept.
+        """
+        if account_uuid is None:
+            return None
+        if account is None:
+            self._dropped(
+                "people",
+                person.uuid,
+                "The account this person was linked to is not on this instance, so the person arrives unlinked",
+            )
+            return None
+        if account.id == self._user_id:
+            self._dropped(
+                "people", person.uuid, "This person was linked to your own account, so the person arrives unlinked"
+            )
+            return None
+        if account.id in self._linked_rows or account.id in self._link_aliases:
+            self._dropped(
+                "people",
+                person.uuid,
+                "Another of your people is linked to the account this one names, so this one arrives unlinked",
+            )
+            return None
+        if self._claim_links:
+            if not await claim_link_slot(self._user_id):
+                self._dropped(
+                    "people",
+                    person.uuid,
+                    "This import is past the limit on linking people, so this one arrives unlinked",
+                )
+                return None
+        else:
+            if self._link_budget is None:
+                self._link_budget = await link_budget_remaining(self._user_id)
+            if self._link_budget <= 0:
+                self._dropped(
+                    "people",
+                    person.uuid,
+                    "This import is past the limit on linking people, so this one would arrive unlinked",
+                )
+                return None
+            self._link_budget -= 1
+        self._link_aliases[account.id] = person.uuid
+        self._note(
+            ImportNoteCode.ACCOUNT_LINKED,
+            f"This person {'was' if self._claim_links else 'will be'} linked to @{account.username}, the account on "
+            "this instance the document names.",
+            collection="people",
+            uuid=person.uuid,
+        )
+        return account.id
+
+    def _email(self, collection: str, record_uuid: uuid_pkg.UUID, value: str | None) -> str | None:
+        """The email as `EmailStr` accepts it, or `None` and a note. The format checks for an
+        `@` and nothing more; the app's write schemas check the address, and a value this app
+        could not have written itself is dropped rather than stored."""
+        if value is None:
+            return None
+        try:
+            return str(_EMAIL.validate_python(value))
+        except ValidationError:
+            self._dropped(collection, record_uuid, "The email address was not one this app can store, and was dropped")
+            return None
+
+    def _person_references(
+        self, collection: str, record_uuid: uuid_pkg.UUID, references: Sequence[ImportPersonReference]
+    ) -> list[PlannedPersonReference]:
+        """A host's people, order kept and a person named twice kept once, at its first
+        position - the join tables refuse a repeat, as `_reference_list` says."""
+        planned: list[PlannedPersonReference] = []
+        for reference in references:
+            target = self._reference(collection, record_uuid, "people", reference.person_uuid)
+            if target is None or any(existing.source_uuid == target for existing in planned):
+                continue
+            planned.append(
+                PlannedPersonReference(
+                    source_uuid=target, role=None if reference.role is None else reference.role.value
+                )
+            )
+        return planned
+
+    def _legacy_instructor(self, instructor_name: str | None) -> PlannedPersonReference | None:
+        """The person an export made before people were records names as an instructor.
+
+        Claimed by trimmed name against the caller's people and this document's own, as any
+        person is: one the caller already has is referenced by row id, and any other is
+        planned as a new person, which the next record naming the same string then shares.
+        Planned here, never created - a preview predicts - so the people collection's counts
+        include the people an old export's instructors make.
+        """
+        name = (instructor_name or "").strip()
+        if not name:
+            return None
+        role = PersonRole.INSTRUCTOR.value
+        legacy_key = _key(name)
+        row_id = self._person_index.get(legacy_key)
+        if row_id is not None:
+            return PlannedPersonReference(role=role, row_id=row_id)
+        owner = self._person_aliases.get(legacy_key)
+        if owner is not None:
+            return PlannedPersonReference(role=role, source_uuid=owner)
+        source_uuid = uuid7()
+        self._person_aliases[legacy_key] = source_uuid
+        self._records["people"][source_uuid] = PlannedRecord(
+            action=Action.CREATE,
+            source_uuid=source_uuid,
+            uuid=source_uuid,
+            values={
+                "user_id": self._user_id,
+                "name": name,
+                "email": None,
+                "phone": None,
+                "notes": "",
+                "linked_user_id": None,
+                "created_at": datetime.now(UTC),
+            },
+        )
+        return PlannedPersonReference(role=role, source_uuid=source_uuid)
+
+    def _certification_instructor(self, certification: ImportCertification) -> PlannedPersonReference | None:
+        """A card's instructor: its reference where it has one, else a legacy name's person."""
+        if certification.instructor_uuid is not None:
+            target = self._reference("certifications", certification.uuid, "people", certification.instructor_uuid)
+            return None if target is None else PlannedPersonReference(source_uuid=target)
+        return self._legacy_instructor(certification.instructor_name)
+
     async def _plan_trips(self) -> None:
         existing = await self._rows_by_uuid(Trip, [trip.uuid for trip in self._document.trips])
         index = await self._existing_by_key(Trip, (Trip.name,), lambda row: _key(row[0]))
@@ -1363,7 +1600,10 @@ class _Planner:
             "notes": self._notes_text("trips", trip.uuid, trip.notes),
             "created_at": self._created_at(trip.created_at),
         }
-        record.children = {"parts": self._plan_trip_parts(trip)}
+        record.children = {
+            "parts": self._plan_trip_parts(trip),
+            "people": self._person_references("trips", trip.uuid, trip.people),
+        }
         return record
 
     def _plan_trip_parts(self, trip: ImportTrip) -> list[dict[str, Any]]:
@@ -1439,12 +1679,18 @@ class _Planner:
             "status": course.status.value,
             "start_date": course.starts_on,
             "end_date": end_date,
-            "instructor_name": course.instructor_name,
             "instructor_number": course.instructor_number,
             "notes": self._notes_text("courses", course.uuid, course.notes),
             "created_at": self._created_at(course.created_at),
         }
-        record.children = self._contact_link("courses", course.uuid, course.contact_uuid, course.training_center)
+        people = self._person_references("courses", course.uuid, course.people)
+        legacy = self._legacy_instructor(course.instructor_name)
+        if legacy is not None and not any(reference.role == PersonRole.INSTRUCTOR for reference in people):
+            people = [legacy, *(reference for reference in people if not _same_person(reference, legacy))]
+        record.children = {
+            **self._contact_link("courses", course.uuid, course.contact_uuid, course.training_center),
+            "people": people,
+        }
         return record
 
     async def _plan_sites(self) -> None:
@@ -1825,7 +2071,6 @@ class _Planner:
             "certification_number": certification.number,
             "certified_on": certification.certified_on,
             "expires_on": certification.expires_on,
-            "instructor_name": certification.instructor_name,
             "instructor_number": certification.instructor_number,
             "notes": self._notes_text("certifications", certification.uuid, certification.notes),
             "created_at": self._created_at(certification.created_at),
@@ -1835,6 +2080,7 @@ class _Planner:
                 collection, certification.uuid, certification.contact_uuid, certification.training_center
             ),
             "course_uuid": self._reference(collection, certification.uuid, "courses", certification.course_uuid),
+            "instructor": self._certification_instructor(certification),
             CertificationSide.FRONT.value: self._plan_card_file(
                 collection, certification.uuid, certification.front_file
             ),
@@ -2118,6 +2364,7 @@ class _Planner:
             "site_uuids": self._reference_list(collection, dive.uuid, "sites", dive.site_uuids),
             "gear_uuids": self._reference_list(collection, dive.uuid, "gear", dive.gear_uuids),
             "species_ids": self._plan_species_links(dive),
+            "people": self._person_references(collection, dive.uuid, dive.people),
             "mixtures": mixtures,
             "recordings": recordings,
         }
@@ -2658,7 +2905,7 @@ def _carried_crop(stored: ImportStoredFile) -> PictureCrop | None:
         return None
 
 
-def _producer_entry(stored: ImportStoredFile, member: str) -> Any:
+def _producer_entry(record: ImportStoredFile | ImportPerson, member: str) -> Any:
     """One value out of this producer's extension entry (spec §5.5).
 
     Defensive about the shape all the way down: `extensions` is typed as "any JSON value
@@ -2666,9 +2913,25 @@ def _producer_entry(stored: ImportStoredFile, member: str) -> Any:
     and must not raise here - §5.5 says a reader MUST NOT fail on any well-formed
     `extensions` content.
     """
-    extensions = stored.extensions or {}
+    extensions = record.extensions or {}
     entry = extensions.get(DIVEJSON_PRODUCER_KEY)
     return entry.get(member) if isinstance(entry, dict) else None
+
+
+def _person_account(person: ImportPerson) -> uuid_pkg.UUID | None:
+    """The account this app's writer linked the person to, as its public id, or `None` for
+    anything else under the key."""
+    entry = _producer_entry(person, "user_uuid")
+    if not isinstance(entry, str):
+        return None
+    try:
+        return uuid_pkg.UUID(entry)
+    except ValueError:
+        return None
+
+
+def _same_person(one: PlannedPersonReference, other: PlannedPersonReference) -> bool:
+    return (one.source_uuid, one.row_id) == (other.source_uuid, other.row_id)
 
 
 async def plan_import(
@@ -2680,11 +2943,14 @@ async def plan_import(
     newly_resolved_aphia_ids: frozenset[int] = frozenset(),
     check_in: ImportCheckInSubmission | None = None,
     portrait: ImportPortraitChoice | None = None,
+    claim_links: bool = False,
 ) -> ImportPlan:
-    """Plan an import of `loaded` into `user_id`'s logbook. Writes nothing.
+    """Plan an import of `loaded` into `user_id`'s logbook. Writes nothing to the database.
 
     `check_in` and `portrait` are what the diver confirmed in the preview; the apply passes
-    them and the preview, which has nothing submitted yet, does not.
+    them and the preview, which has nothing submitted yet, does not. `claim_links` is the
+    apply's too: it spends the link limit for each person it links, where the preview only
+    reads what is left of it.
     """
     planner = _Planner(
         db,
@@ -2694,6 +2960,7 @@ async def plan_import(
         newly_resolved_aphia_ids=newly_resolved_aphia_ids,
         check_in=check_in,
         portrait=portrait,
+        claim_links=claim_links,
     )
     return await planner.plan()
 

@@ -9,10 +9,11 @@ class Contact(Base, PublicUUIDMixin, TimestampMixin):
     """A party a diver deals with - a dive center, a school, a shop, a place they stayed, a
     club, a friend's house - picked from a list rather than typed again.
 
-    Referenced by a dive (who it was dived with), a course and a certification (who ran the
-    course), a gear service record (who did the work) and a trip part (where the diver
-    slept). What the party *is* lives in `roles`, a set, so one row can be a resort's dive
-    center and its rooms at once.
+    Referenced by a dive (who ran it), a course and a certification (who ran the course), a
+    gear service record (who did the work) and a trip part (where the diver slept). The
+    individuals the diver was with are people (`models/person.py`), not contacts. What the
+    party *is* lives in `roles`, a set, so one row can be a resort's dive center and its
+    rooms at once.
 
     Owned by one diver, like a dive site and unlike a species: the name, the phone and the
     notes are what this diver recorded, and two divers' "Blue Ocean" need not be one place.

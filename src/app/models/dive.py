@@ -89,7 +89,8 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     course_id: Mapped[int | None] = mapped_column(
         ForeignKey("course.id", ondelete="SET NULL"), default=None, index=True
     )
-    # Who the diver dived with - the dive center, club or liveaboard - the same shape again.
+    # The contact that ran the dive - the dive center, club or liveaboard - the same shape
+    # again. Who the diver was with is `dive_person`'s.
     contact_id: Mapped[int | None] = mapped_column(
         ForeignKey("contact.id", ondelete="SET NULL"), default=None, index=True
     )

@@ -168,7 +168,8 @@ class UserRead(PublicUUIDSchema):
     insurance_expires_on: date | None = None
     # The caller's own record of whether they are this instance's operator, so a client can
     # decide whether to offer the operator's surface at all. Not a disclosure about anybody
-    # else: `GET /user` returns the caller's row and no route returns another account's.
+    # else: `GET /user` returns the caller's row, and of another account no route returns more
+    # than the exceptions *"Current-user routes live at a bare `/user`"* names - never this.
     # False for every account but the first one on an empty instance (see
     # `UserBootstrapCreateInternal`) and any promoted by hand.
     is_superuser: bool = False

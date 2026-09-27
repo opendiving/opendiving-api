@@ -26,6 +26,7 @@ from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
+from src.app.models.person import Person
 from src.app.models.species import Species
 from src.app.models.trip import Trip
 from src.app.models.user import User
@@ -75,6 +76,10 @@ UUIDS = {
             "contact-school",
             "contact-resort",
             "contact-shop",
+            "person-jae",
+            "person-sam",
+            "person-lina",
+            "linked-account",
         )
     )
 }
@@ -224,6 +229,11 @@ def build_bundle(
     cert_file_sha256: dict[tuple[int, str], str] | None = None,
     pictures: dict[PictureKind, UserPicture] | None = None,
     contacts: list[Contact] | None = None,
+    people: list[Person] | None = None,
+    linked_uuid_by_person: dict[int, uuid_pkg.UUID] | None = None,
+    person_ids_by_dive: dict[int, list[tuple[int, str | None]]] | None = None,
+    person_ids_by_trip: dict[int, list[tuple[int, str | None]]] | None = None,
+    person_ids_by_course: dict[int, list[tuple[int, str | None]]] | None = None,
 ) -> ExportBundle:
     """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive".
 
@@ -273,6 +283,11 @@ def build_bundle(
         cert_file_sha256=cert_file_sha256,
         pictures=pictures or {},
         contacts=contacts or [],
+        people=people or [],
+        linked_uuid_by_person=linked_uuid_by_person or {},
+        person_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(person_ids_by_dive or {})},
+        person_ids_by_trip={**{trip.id: [] for trip in (trips or [])}, **(person_ids_by_trip or {})},
+        person_ids_by_course={**{course.id: [] for course in (courses or [])}, **(person_ids_by_course or {})},
     )
 
 
@@ -404,7 +419,6 @@ def full_bundle() -> ExportBundle:
             status="completed",
             start_date=date(2026, 3, 2),
             end_date=date(2026, 3, 6),
-            instructor_name="Jae Kim",
             instructor_number="TDI-88121",
             contact_id=3,
             notes="Two deco dives to 45 m",
@@ -490,6 +504,7 @@ def full_bundle() -> ExportBundle:
             certified_on=date(2019, 6, 1),
             course_id=1,
             contact_id=3,
+            instructor_id=1,
             notes="",
             uuid=UUIDS["certification"],
             created_at=CREATED_AT,
@@ -556,6 +571,26 @@ def full_bundle() -> ExportBundle:
         scientific_name="Muraenidae",
         rank="Family",
     )
+
+    # Three people, ordered by name as `load_export_bundle` orders them. Jae is linked to an
+    # account here, instructs the course and signed the card, and guides the air dive under
+    # its resort - the one role besides `buddy` UDDF can say. Sam carries every member and is
+    # the air dive's buddy and the course's student. Lina has a one-word name, came on the
+    # trip without diving, and is on the trimix dive with no role at all.
+    jae = _with_id(Person(user_id=1, name="Jae Kim", uuid=UUIDS["person-jae"], created_at=CREATED_AT), 1)
+    sam = _with_id(
+        Person(
+            user_id=1,
+            name="Sam Ortiz",
+            email="sam@example.com",
+            phone="+34 600 000 000",
+            notes="Shoots video.",
+            uuid=UUIDS["person-sam"],
+            created_at=CREATED_AT,
+        ),
+        2,
+    )
+    lina = _with_id(Person(user_id=1, name="Lina", uuid=UUIDS["person-lina"], created_at=CREATED_AT), 3)
 
     return build_bundle(
         dives=[air, trimix, bare],
@@ -675,6 +710,11 @@ def full_bundle() -> ExportBundle:
             make_dive_form_preset(2, "Technical", []),
         ],
         contacts=[school, resort, shop],
+        people=[jae, lina, sam],
+        linked_uuid_by_person={1: UUIDS["linked-account"]},
+        person_ids_by_dive={1: [(2, "buddy"), (1, "guide")], 2: [(3, None)]},
+        person_ids_by_trip={1: [(3, "companion")]},
+        person_ids_by_course={1: [(1, "instructor"), (2, "student")]},
     )
 
 

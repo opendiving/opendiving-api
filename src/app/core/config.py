@@ -350,6 +350,10 @@ class MagicLinkSettings(BaseSettings):
     # the rest of the profile (name, avatar, email-preference toggle) reveals nothing and
     # shouldn't 429 a settings page.
     USERNAME_CHANGE_RATE_LIMIT_PER_USER: int = config("USERNAME_CHANGE_RATE_LIMIT_PER_USER", default=5)
+    # Linking a person to an account by username (`POST`/`PATCH /person`) answers whether
+    # that username exists, the oracle above; an import's links count here too. Per user,
+    # over the same window, and spent only by a link that names a different account.
+    PERSON_LINK_RATE_LIMIT_PER_USER: int = config("PERSON_LINK_RATE_LIMIT_PER_USER", default=10)
 
 
 class SMTPTLSMode(Enum):

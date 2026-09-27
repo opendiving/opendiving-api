@@ -35,6 +35,7 @@ from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_file import DiveFile
 from ..models.dive_gear_item import DiveGearItem
+from ..models.dive_person import DivePerson
 from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
 from ..models.dive_species import DiveSpecies
@@ -299,8 +300,8 @@ def _folds(survivor: _Recording, absorbed: _Recording) -> bool:
     A same-device pair this cannot place on the clock takes the other branch and the two
     recordings sit side by side on the surviving dive. That is the honest answer rather than a
     refusal: nothing is lost, both records keep their own samples, and the diver can delete
-    whichever they do not want - where refusing would block a merge whose sites, gear, species
-    and notes are perfectly mergeable over a clock reading nobody can supply.
+    whichever they do not want - where refusing would block a merge whose sites, gear, species,
+    people and notes are perfectly mergeable over a clock reading nobody can supply.
     """
     return same_device(survivor.device, absorbed.device) and (
         survivor.start_time is not None and absorbed.start_time is not None
@@ -473,7 +474,8 @@ async def _move_recordings(
 
 
 async def _move_links(db: AsyncSession, *, from_dive_id: int, to_dive_id: int) -> None:
-    """Carry the other dive's sites, gear and species across, skipping what is already there.
+    """Carry the other dive's sites, gear, species and people across, skipping what is
+    already there - a person on both dives keeps the surviving dive's role.
 
     One statement per table, because each carries a `(dive_id, x_id)` uniqueness constraint
     and the two dives may name the same site or the same wing: the rows that would collide are
@@ -509,13 +511,14 @@ async def _move_links(db: AsyncSession, *, from_dive_id: int, to_dive_id: int) -
             )
 
 
-# The three collections a dive links rather than owns, each with the column that says which
+# The collections a dive links rather than owns, each with the column that says which
 # row it points at - the half of its `(dive_id, x_id)` uniqueness constraint that decides
 # whether the surviving dive already has this one.
 _LINKED_COLLECTIONS = (
     (DiveDiveSite, DiveDiveSite.dive_site_id),
     (DiveGearItem, DiveGearItem.gear_item_id),
     (DiveSpecies, DiveSpecies.species_id),
+    (DivePerson, DivePerson.person_id),
 )
 
 

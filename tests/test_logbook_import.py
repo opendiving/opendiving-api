@@ -35,7 +35,7 @@ import pytest
 import pytest_asyncio
 from fastapi import UploadFile
 from PIL import Image
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, undefer
 from uuid6 import uuid7
@@ -45,11 +45,13 @@ from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.models.certification import Certification
 from src.app.models.contact import Contact
 from src.app.models.course import Course
+from src.app.models.course_person import CoursePerson
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_file import DiveFile
 from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.dive_mixture import DiveMixture
+from src.app.models.dive_person import DivePerson
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_site import DiveSite
@@ -59,9 +61,11 @@ from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
+from src.app.models.person import Person
 from src.app.models.species import Species
 from src.app.models.trip import Trip
 from src.app.models.trip_part import TripPart
+from src.app.models.trip_person import TripPerson
 from src.app.models.user_picture import UserPicture
 from src.app.schemas.certification import CertificationAgency
 from src.app.schemas.dive import DiveUpdateRequest
@@ -86,6 +90,7 @@ from src.app.services.logbook_import import (
     plan_import,
     write_import,
 )
+from src.app.services.logbook_import import planner as planner_module
 from src.app.services.logbook_import import reader as import_reader
 from src.app.services.logbook_import.planner import _DIVE_BOUNDS, _MIXTURE_BOUNDS, _READOUT_BOUNDS
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
@@ -102,6 +107,7 @@ from tests.helpers.generators import (
     create_gear_service_record,
     create_gear_service_schedule,
     create_gear_set,
+    create_person,
     create_species,
     create_trip,
     create_user,
@@ -167,7 +173,13 @@ async def _apply(
     """
     with await load_import(_upload(data, filename)) as loaded:
         plan = await plan_import(
-            db, user_id=user_id, loaded=loaded, resolution_ran=True, check_in=check_in, portrait=portrait
+            db,
+            user_id=user_id,
+            loaded=loaded,
+            resolution_ran=True,
+            check_in=check_in,
+            portrait=portrait,
+            claim_links=True,
         )
         await write_import(db, user_id=user_id, loaded=loaded, plan=plan)
         await db.commit()
@@ -2146,6 +2158,326 @@ class TestContacts:
         assert dive.contact_id == contact.id
 
 
+def _seed_people_logbook(db: Session) -> Any:
+    """Two people named from all four places one can be - a dive, a trip, a course and a card -
+    one of them linked to another account on this instance."""
+    user, friend = create_user(db), create_user(db)
+    alex = create_person(db, user, name="Alex Moreno", linked_to=friend)
+    sam = create_person(db, user, name="Sam")
+    sam.email, sam.phone, sam.notes = "sam@example.com", "+34 600 000 000", "Shoots video."
+    trip = create_trip(db, user)
+    course = create_course(db, user)
+    dive = create_dive(db, user, trip=trip, course=course)
+    certification = create_certification(db, user, course=course)
+    certification.instructor_id = alex.id
+    db.add_all(
+        [
+            DivePerson(dive_id=dive.id, person_id=sam.id, position=0, role="buddy"),
+            DivePerson(dive_id=dive.id, person_id=alex.id, position=1, role="guide"),
+            TripPerson(trip_id=trip.id, person_id=sam.id, position=0, role="companion"),
+            CoursePerson(course_id=course.id, person_id=alex.id, position=0, role="instructor"),
+        ]
+    )
+    db.commit()
+    return user, friend, alex
+
+
+async def _people_of(db: AsyncSession, user_id: int) -> dict[str, Person]:
+    rows = (await db.execute(select(Person).where(Person.user_id == user_id))).scalars().all()
+    return {person.name: person for person in rows}
+
+
+def _with_people(document: bytes, records: list[dict[str, Any]], on_dive: list[dict[str, Any]] | None = None) -> bytes:
+    """The document with these `people`, and the first dive naming `on_dive` of them."""
+    parsed = json.loads(document)
+    parsed["people"] = records
+    if on_dive is not None:
+        parsed["dives"][0]["people"] = on_dive
+    return json.dumps(parsed).encode()
+
+
+def _account_entry(user: Any) -> dict[str, Any]:
+    return {"opendiving": {"user_uuid": str(user.uuid)}}
+
+
+class TestPeople:
+    @pytest.fixture(autouse=True)
+    def _limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The link limit's Redis, stubbed as *"The local suite has no Redis"* in DECISIONS.md
+        says of any handler that reaches it: a real client is bound to the loop that opened it,
+        and each test runs on its own. A test about the limit patches these itself."""
+        monkeypatch.setattr(planner_module, "link_budget_remaining", AsyncMock(return_value=10))
+        monkeypatch.setattr(planner_module, "claim_link_slot", AsyncMock(return_value=True))
+
+    @pytest.mark.asyncio
+    async def test_people_arrive_once_with_every_reference_and_role(self, db: Session, async_db: AsyncSession) -> None:
+        source, friend, _ = _seed_people_logbook(db)
+        document = await _export(async_db, source.id)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert _counts(plan)["people"] == (2, 0, 0, 0)
+        people = await _people_of(async_db, destination.id)
+        alex, sam = people["Alex Moreno"], people["Sam"]
+        assert (sam.email, sam.phone, sam.notes) == ("sam@example.com", "+34 600 000 000", "Shoots video.")
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalar_one()
+        on_dive = (
+            await async_db.execute(
+                select(DivePerson.person_id, DivePerson.role)
+                .where(DivePerson.dive_id == dive.id)
+                .order_by(DivePerson.position)
+            )
+        ).all()
+        assert [(row.person_id, row.role) for row in on_dive] == [(sam.id, "buddy"), (alex.id, "guide")]
+        trip = (await async_db.execute(select(Trip).where(Trip.user_id == destination.id))).scalar_one()
+        on_trip = (
+            await async_db.execute(select(TripPerson.person_id, TripPerson.role).where(TripPerson.trip_id == trip.id))
+        ).one()
+        assert tuple(on_trip) == (sam.id, "companion")
+        course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalar_one()
+        on_course = (
+            await async_db.execute(
+                select(CoursePerson.person_id, CoursePerson.role).where(CoursePerson.course_id == course.id)
+            )
+        ).one()
+        assert tuple(on_course) == (alex.id, "instructor")
+        card = (
+            await async_db.execute(select(Certification).where(Certification.user_id == destination.id))
+        ).scalar_one()
+        assert card.instructor_id == alex.id
+        # The export's producer entry names the friend's account, which the importer may link.
+        assert alex.linked_user_id == friend.id
+        (linked,) = [note for note in plan.notes if note.code is ImportNoteCode.ACCOUNT_LINKED]
+        assert f"@{friend.username}" in linked.message
+
+    @pytest.mark.asyncio
+    async def test_a_restore_links_a_deleted_person_again(self, db: Session, async_db: AsyncSession) -> None:
+        """A hard-deleted row has nothing to restore, so the person is created again - and
+        linked, the link being the one thing of it the export kept under this app's key."""
+        source, friend, alex = _seed_people_logbook(db)
+        document = await _export(async_db, source.id)
+        await async_db.execute(delete(Person).where(Person.id == alex.id))
+        await async_db.commit()
+
+        plan = await _apply(async_db, source.id, document)
+
+        assert _counts(plan)["people"] == (1, 1, 0, 0)
+        assert (await _people_of(async_db, source.id))["Alex Moreno"].linked_user_id == friend.id
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", ["nobody", "the importer", "not our entry"])
+    async def test_an_entry_that_names_no_account_to_link_brings_the_person_unlinked(
+        self, case: str, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        destination = create_user(db)
+        entry: Any = {
+            "nobody": {"user_uuid": str(uuid7())},
+            "the importer": {"user_uuid": str(destination.uuid)},
+            "not our entry": {"user_uuid": 7},
+        }[case]
+        person = {"uuid": str(uuid7()), "name": "Alex", "extensions": {"opendiving": entry}}
+
+        plan = await _apply(async_db, destination.id, _with_people(document, [person]))
+
+        assert _counts(plan)["people"] == (1, 0, 0, 0)
+        assert (await _people_of(async_db, destination.id))["Alex"].linked_user_id is None
+        assert ImportNoteCode.ACCOUNT_LINKED not in _codes(plan)
+        dropped = [
+            note for note in plan.notes if note.collection == "people" and note.code is ImportNoteCode.VALUE_DROPPED
+        ]
+        assert len(dropped) == (0 if case == "not our entry" else 1)
+
+    @pytest.mark.asyncio
+    async def test_a_link_claims_the_person_before_a_name_does(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """A person whose entry names an account another of the caller's people links is that
+        person, whatever its name says - and two such entries in one document are one."""
+        _, document = seeded
+        destination, friend = create_user(db), create_user(db)
+        mine = create_person(db, destination, name="Alex M.", linked_to=friend)
+        mine_id = mine.id
+        first, second = str(uuid7()), str(uuid7())
+        people = [
+            {"uuid": first, "name": "Alexandra", "extensions": _account_entry(friend)},
+            {"uuid": second, "name": "A. Moreno", "extensions": _account_entry(friend)},
+        ]
+        document = _with_people(document, people, on_dive=[{"person_uuid": second, "role": "buddy"}])
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert _counts(plan)["people"] == (0, 2, 0, 0)
+        assert list(await _people_of(async_db, destination.id)) == ["Alex M."]
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalar_one()
+        on_dive = (
+            await async_db.execute(select(DivePerson.person_id).where(DivePerson.dive_id == dive.id))
+        ).scalar_one()
+        assert on_dive == mine_id
+
+    @pytest.mark.asyncio
+    async def test_two_entries_naming_one_account_are_one_person(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The second is claimed by the first's link, not by its name, and is not a second
+        link to count."""
+        _, document = seeded
+        destination, friend = create_user(db), create_user(db)
+        first, second = str(uuid7()), str(uuid7())
+        people = [
+            {"uuid": first, "name": "Alexandra", "extensions": _account_entry(friend)},
+            {"uuid": second, "name": "A. Moreno", "extensions": _account_entry(friend)},
+        ]
+
+        plan = await _apply(async_db, destination.id, _with_people(document, people, on_dive=[{"person_uuid": second}]))
+
+        assert _counts(plan)["people"] == (1, 1, 0, 0)
+        (person,) = (await _people_of(async_db, destination.id)).values()
+        assert (person.name, person.linked_user_id) == ("Alexandra", friend.id)
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalar_one()
+        on_dive = (
+            await async_db.execute(select(DivePerson.person_id).where(DivePerson.dive_id == dive.id))
+        ).scalar_one()
+        assert on_dive == person.id
+
+    @pytest.mark.asyncio
+    async def test_the_preview_spends_nothing_and_says_what_is_past_the_limit(
+        self, seeded: Any, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, document = seeded
+        destination, one, two = create_user(db), create_user(db), create_user(db)
+        people = [
+            {"uuid": str(uuid7()), "name": "One", "extensions": _account_entry(one)},
+            {"uuid": str(uuid7()), "name": "Two", "extensions": _account_entry(two)},
+        ]
+        claim = AsyncMock(return_value=True)
+        monkeypatch.setattr(planner_module, "link_budget_remaining", AsyncMock(return_value=1))
+        monkeypatch.setattr(planner_module, "claim_link_slot", claim)
+
+        preview = await _preview(async_db, destination.id, _with_people(document, people))
+
+        claim.assert_not_awaited()
+        notes = [note for note in preview.notes if note.collection == "people"]
+        assert [note.code for note in notes] == [ImportNoteCode.ACCOUNT_LINKED, ImportNoteCode.VALUE_DROPPED]
+        assert "will be linked" in notes[0].message
+        assert await _people_of(async_db, destination.id) == {}
+
+    @pytest.mark.asyncio
+    async def test_the_apply_claims_a_slot_per_link_and_drops_what_it_is_refused(
+        self, seeded: Any, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An exhausted window drops that link with its note rather than failing the import."""
+        _, document = seeded
+        destination, one, two = create_user(db), create_user(db), create_user(db)
+        people = [
+            {"uuid": str(uuid7()), "name": "One", "extensions": _account_entry(one)},
+            {"uuid": str(uuid7()), "name": "Two", "extensions": _account_entry(two)},
+        ]
+        claim = AsyncMock(side_effect=[True, False])
+        monkeypatch.setattr(planner_module, "claim_link_slot", claim)
+
+        plan = await _apply(async_db, destination.id, _with_people(document, people))
+
+        assert claim.await_count == 2
+        people_here = await _people_of(async_db, destination.id)
+        assert (people_here["One"].linked_user_id, people_here["Two"].linked_user_id) == (one.id, None)
+        assert _counts(plan)["people"] == (2, 0, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_an_export_made_before_people_names_the_instructor_the_diver_has(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Every backup made before people carries its instructors as strings, and a name the
+        diver already has is that person, listed on the course and named by the card. The
+        preview predicts the same."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed.pop("people", None)
+        parsed["courses"][0].pop("people", None)
+        parsed["certifications"][0].pop("instructor_uuid", None)
+        parsed["courses"][0]["instructor_name"] = " jae kim "
+        parsed["certifications"][0]["instructor_name"] = "Jae Kim"
+        legacy = json.dumps(parsed).encode()
+        destination = create_user(db)
+        existing = create_person(db, destination, name="JAE KIM")
+        existing_id = existing.id
+
+        preview = await _preview(async_db, destination.id, legacy)
+        plan = await _apply(async_db, destination.id, legacy)
+
+        assert _counts(preview)["people"] == _counts(plan)["people"] == (0, 0, 0, 0)
+        course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalar_one()
+        card = (
+            await async_db.execute(select(Certification).where(Certification.user_id == destination.id))
+        ).scalar_one()
+        listed = (
+            await async_db.execute(
+                select(CoursePerson.person_id, CoursePerson.role).where(CoursePerson.course_id == course.id)
+            )
+        ).one()
+        assert tuple(listed) == (existing_id, "instructor")
+        assert card.instructor_id == existing_id
+
+    @pytest.mark.asyncio
+    async def test_a_new_legacy_instructor_is_one_new_person(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed.pop("people", None)
+        parsed["courses"][0].pop("people", None)
+        parsed["certifications"][0].pop("instructor_uuid", None)
+        parsed["courses"][0]["instructor_name"] = "Jae Kim"
+        parsed["certifications"][0]["instructor_name"] = "JAE KIM"
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["people"] == (1, 0, 0, 0)
+        (person,) = (await _people_of(async_db, destination.id)).values()
+        card = (
+            await async_db.execute(select(Certification).where(Certification.user_id == destination.id))
+        ).scalar_one()
+        assert (person.name, card.instructor_id) == ("Jae Kim", person.id)
+
+    @pytest.mark.asyncio
+    async def test_a_person_the_document_does_not_define_leaves_the_dive_without_it(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        destination = create_user(db)
+
+        plan = await _apply(
+            async_db, destination.id, _with_people(document, [], on_dive=[{"person_uuid": str(uuid7())}])
+        )
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert ImportNoteCode.REFERENCE_UNRESOLVED in _codes(plan)
+
+    @pytest.mark.asyncio
+    async def test_two_people_named_alike_are_one_and_a_bad_email_is_dropped(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        first, second = str(uuid7()), str(uuid7())
+        people = [{"uuid": first, "name": " Sam ", "email": "sam@"}, {"uuid": second, "name": "SAM"}]
+        destination = create_user(db)
+        document = _with_people(document, people, on_dive=[{"person_uuid": second, "role": "divemaster"}])
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert _counts(plan)["people"] == (1, 1, 0, 0)
+        (sam,) = (await _people_of(async_db, destination.id)).values()
+        assert (sam.name, sam.email) == ("Sam", None)
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalar_one()
+        on_dive = (
+            await async_db.execute(select(DivePerson.person_id, DivePerson.role).where(DivePerson.dive_id == dive.id))
+        ).one()
+        # A role this version's vocabulary does not hold reads as none (§5.6).
+        assert tuple(on_dive) == (sam.id, None)
+
+
 class TestNothingInventedNothingFatal:
     @pytest.mark.asyncio
     async def test_a_value_the_database_refuses_is_dropped_and_the_dive_imports(
@@ -3665,6 +3997,19 @@ class TestTheIntegerColumnCensus:
         ("course", "contact_id"): "resolved from a row this import wrote, or one the caller already had",
         ("contact", "id"): "the sequence's",
         ("contact", "user_id"): "the caller's",
+        ("person", "id"): "the sequence's",
+        ("person", "user_id"): "the caller's",
+        ("person", "linked_user_id"): "an account this instance already has, found by the document's uuid",
+        **{
+            (table, column): reason
+            for table, host in (("dive_person", "dive"), ("trip_person", "trip"), ("course_person", "course"))
+            for column, reason in (
+                ("id", "the sequence's"),
+                (f"{host}_id", "resolved from a row this import wrote"),
+                ("person_id", "resolved from a row this import wrote, or one the caller already had"),
+                ("position", "the list index, not the document's"),
+            )
+        },
         ("dive_site", "id"): "the sequence's",
         ("dive_site", "user_id"): "the caller's",
         ("gear_set", "id"): "the sequence's",
@@ -3673,6 +4018,7 @@ class TestTheIntegerColumnCensus:
         ("certification", "user_id"): "the caller's",
         ("certification", "course_id"): "resolved from a row this import wrote",
         ("certification", "contact_id"): "resolved from a row this import wrote, or one the caller already had",
+        ("certification", "instructor_id"): "resolved from a row this import wrote, or one the caller already had",
         ("user_dive_stats", "id"): "the sequence's",
         ("user_dive_stats", "user_id"): "the caller's",
         ("user_dive_stats", "total_dives"): "a count of rows, derived by `recalculate_dive_stats`",
@@ -3712,7 +4058,11 @@ class TestTheIntegerColumnCensus:
         from sqlalchemy import BigInteger, Integer
 
         from src.app.models.certification_file import CertificationFile
+        from src.app.models.course_person import CoursePerson
+        from src.app.models.dive_person import DivePerson
+        from src.app.models.person import Person
         from src.app.models.trip_part import TripPart
+        from src.app.models.trip_person import TripPerson
         from src.app.models.user_dive_stats import UserDiveStats
 
         written: tuple[Any, ...] = (
@@ -3721,6 +4071,10 @@ class TestTheIntegerColumnCensus:
             DiveRecording,
             DiveProfile,
             Contact,
+            Person,
+            DivePerson,
+            TripPerson,
+            CoursePerson,
             Trip,
             TripPart,
             Course,

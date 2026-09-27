@@ -34,6 +34,7 @@ from ...core.utils.datetime_offset import combine_dive_start_time, combine_start
 from ...models.contact import Contact
 from ...models.course import Course
 from ...models.dive import Dive
+from ...models.person import Person
 from ...models.trip import Trip
 from ...models.user import User
 from ...schemas.certification import CertificationAgency, CertificationSide
@@ -65,6 +66,8 @@ from ...schemas.export import (
     ExportGenerator,
     ExportInsurance,
     ExportLocation,
+    ExportPerson,
+    ExportPersonReference,
     ExportPosition,
     ExportRecording,
     ExportSpecies,
@@ -75,11 +78,12 @@ from ...schemas.export import (
 from ...schemas.gear_item import GearType
 from ...schemas.gear_service import ServiceKind
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LocationRead, location_from_row
+from ...schemas.person import PersonRole
 from ...schemas.trip import TripPartRead
 from ...schemas.user import EMERGENCY_CONTACT_FIELDS, INSURANCE_FIELDS, is_blank
 from ...schemas.user_picture import PictureKind
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
-from .loader import ExportBundle, ExportFileRow, ExportRecordingRow
+from .loader import ExportBundle, ExportFileRow, ExportRecordingRow, ExportReference
 from .paths import ArchivePaths
 
 
@@ -173,11 +177,36 @@ def _export_course(bundle: ExportBundle, course: Course) -> ExportCourse:
         status=_sayable(course.status, CourseStatus),
         starts_on=course.start_date,
         ends_on=course.end_date,
-        instructor_name=course.instructor_name,
         instructor_number=course.instructor_number,
         contact_uuid=None if contact is None else contact.uuid,
+        people=_people(bundle.people_for(course)),
         notes=_text(course.notes),
         created_at=course.created_at,
+    )
+
+
+def _people(references: list[ExportReference]) -> list[ExportPersonReference]:
+    """A host's people as references. A stored role the format has no word for is written
+    as absence and the reference kept - `role` is OPTIONAL, so §5.6's reading of it."""
+    return [
+        ExportPersonReference(person_uuid=reference.person.uuid, role=_sayable(reference.role, PersonRole))
+        for reference in references
+    ]
+
+
+def _export_person(bundle: ExportBundle, person: Person) -> ExportPerson:
+    """One person, as §6.20 spells it. A linked one carries its account's public id under
+    this producer's key - the value that account's own export writes as its diver's `uuid`;
+    an unlinked one carries no entry at all."""
+    linked = bundle.linked_uuid_by_person.get(person.id)
+    return ExportPerson(
+        uuid=person.uuid,
+        name=person.name,
+        email=_filled(person.email),
+        phone=_filled(person.phone),
+        notes=_text(person.notes),
+        created_at=person.created_at,
+        extensions=None if linked is None else {DIVEJSON_PRODUCER_KEY: {"user_uuid": linked}},
     )
 
 
@@ -398,7 +427,7 @@ def _trip_part(part: TripPartRead) -> ExportTripPart:
     )
 
 
-def _trip(trip: Trip, parts: list[TripPartRead]) -> ExportTrip:
+def _trip(bundle: ExportBundle, trip: Trip, parts: list[TripPartRead]) -> ExportTrip:
     """A trip as `$defs/trip` describes it: a name and a sequence of parts.
 
     Every stored part is written, in the diver's own order, including one carrying neither
@@ -411,6 +440,7 @@ def _trip(trip: Trip, parts: list[TripPartRead]) -> ExportTrip:
         uuid=trip.uuid,
         name=trip.name,
         parts=[_trip_part(part) for part in parts],
+        people=_people(bundle.people_for(trip)),
         notes=_text(trip.notes),
         created_at=trip.created_at,
     )
@@ -548,6 +578,7 @@ def _dive(
         site_uuids=[site.uuid for site in bundle.sites_for(dive)],
         gear_uuids=[item.uuid for item in bundle.gear_for(dive)],
         species_uuids=[species.uuid for species in bundle.species_for(dive)],
+        people=_people(bundle.people_for(dive)),
         cylinders=[_mixture(mixture) for mixture in bundle.mixtures_by_dive[dive.id]],
         recordings=recordings,
         created_at=dive.created_at,
@@ -580,6 +611,7 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
             continue
         course = bundle.course_for(certification)
         contact = bundle.contact_for(certification)
+        instructor = bundle.instructor_for(certification)
         exported.append(
             ExportCertification(
                 uuid=certification.uuid,
@@ -589,7 +621,7 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
                 number=certification.certification_number,
                 certified_on=certification.certified_on,
                 expires_on=certification.expires_on,
-                instructor_name=certification.instructor_name,
+                instructor_uuid=None if instructor is None else instructor.uuid,
                 instructor_number=certification.instructor_number,
                 contact_uuid=None if contact is None else contact.uuid,
                 course_uuid=None if course is None else course.uuid,
@@ -613,7 +645,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
     return [
         (
             "trips",
-            [_trip(trip, bundle.parts_by_trip[trip.id]) for trip in bundle.trips],
+            [_trip(bundle, trip, bundle.parts_by_trip[trip.id]) for trip in bundle.trips],
         ),
         (
             "courses",
@@ -739,6 +771,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
         ),
         ("certifications", _certifications(bundle, paths)),
         ("contacts", [_export_contact(contact) for contact in bundle.contacts]),
+        ("people", [_export_person(bundle, person) for person in bundle.people]),
     ]
 
 

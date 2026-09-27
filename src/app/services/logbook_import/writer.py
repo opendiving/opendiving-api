@@ -38,6 +38,12 @@ from ...crud.crud_dive_gear_items import replace_gear_items_for_dive
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
 from ...crud.crud_dive_species import replace_species_for_dive
 from ...crud.crud_gear_set_items import replace_gear_items_for_set
+from ...crud.crud_people import (
+    StoredReference,
+    replace_people_for_course,
+    replace_people_for_dive,
+    replace_people_for_trip,
+)
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
 from ...models.contact import Contact
@@ -50,6 +56,7 @@ from ...models.gear_item import GearItem
 from ...models.gear_service_record import GearServiceRecord
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.gear_set import GearSet
+from ...models.person import Person
 from ...models.trip import Trip
 from ...models.trip_part import TripPart
 from ...models.user import User
@@ -98,6 +105,7 @@ from .planner import (
     Action,
     ImportPlan,
     PlannedFile,
+    PlannedPersonReference,
     PlannedProfile,
     PlannedRecord,
     PlannedRecording,
@@ -248,6 +256,7 @@ class _Writer:
         await self._write_check_in()
         await self._write_portrait()
         await self._write_contacts()
+        await self._write_people()
         await self._write_trips()
         await self._write_courses()
         await self._write_sites()
@@ -292,6 +301,24 @@ class _Writer:
         for record in self._plan.writable("contacts"):
             await self._write_row("contacts", Contact, record)
 
+    async def _write_people(self) -> None:
+        for record in self._plan.writable("people"):
+            await self._write_row("people", Person, record)
+
+    def _person_id(self, reference: PlannedPersonReference | None) -> int | None:
+        if reference is None:
+            return None
+        return reference.row_id or self._id("people", reference.source_uuid)
+
+    def _people(self, record: PlannedRecord) -> list[StoredReference]:
+        """A host's people as the join tables store them, the ones that resolved to no row
+        left out."""
+        return [
+            (person_id, reference.role)
+            for reference in record.children.get("people") or []
+            if (person_id := self._person_id(reference)) is not None
+        ]
+
     def _contact_id(self, record: PlannedRecord) -> int | None:
         """The contact a record names: a row the planner already matched by name, or one a
         reference resolves to."""
@@ -313,11 +340,13 @@ class _Writer:
                         for row in parts
                     ],
                 )
+            await replace_people_for_trip(self._db, trip_id, self._people(record), commit=False)
 
     async def _write_courses(self) -> None:
         for record in self._plan.writable("courses"):
             record.values["contact_id"] = self._contact_id(record)
-            await self._write_row("courses", Course, record)
+            course_id = await self._write_row("courses", Course, record)
+            await replace_people_for_course(self._db, course_id, self._people(record), commit=False)
 
     async def _write_sites(self) -> None:
         for record in self._plan.writable("sites"):
@@ -368,6 +397,7 @@ class _Writer:
         for record in self._plan.writable("certifications"):
             record.values["course_id"] = self._id("courses", record.children.get("course_uuid"))
             record.values["contact_id"] = self._contact_id(record)
+            record.values["instructor_id"] = self._person_id(record.children.get("instructor"))
             certification_id = await self._write_row("certifications", Certification, record)
             for side in (CertificationSide.FRONT, CertificationSide.BACK):
                 planned = record.children.get(side.value)
@@ -432,6 +462,7 @@ class _Writer:
             await replace_species_for_dive(
                 db=self._db, dive_id=dive_id, species_ids=record.children.get("species_ids") or [], commit=False
             )
+            await replace_people_for_dive(self._db, dive_id, self._people(record), commit=False)
             for recording in record.children.get("recordings") or []:
                 await self._write_recording(record, dive_id, recording)
 

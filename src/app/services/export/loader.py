@@ -4,8 +4,8 @@ Every writer in this package (UDDF, CSV, `logbook.divejson`) needs the same grap
 read once into an `ExportBundle` and handed to all three rather than each of them
 issuing its own queries. The read is deliberately flat: a fixed set of `SELECT`s over whole
 tables scoped to one `user_id`, with no per-dive query anywhere. A logbook is a few hundred
-dives and a handful of sites, trips, courses, contacts and gear items, so "load the lot"
-costs less than the round trips a lazier shape would need - and the archive walks all of it
+dives and a handful of sites, trips, courses, contacts, people and gear items, so "load the
+lot" costs less than the round trips a lazier shape would need - and the archive walks all of it
 anyway.
 
 **The two things this does not load are the binary payloads**: uploaded exports and card
@@ -46,11 +46,13 @@ from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
 from ...models.contact import Contact
 from ...models.course import Course
+from ...models.course_person import CoursePerson
 from ...models.dive import Dive
 from ...models.dive_dive_site import DiveDiveSite
 from ...models.dive_file import DiveFile
 from ...models.dive_form_preset import DiveFormPreset
 from ...models.dive_gear_item import DiveGearItem
+from ...models.dive_person import DivePerson
 from ...models.dive_profile import DiveProfile
 from ...models.dive_recording import DiveRecording
 from ...models.dive_site import DiveSite
@@ -60,13 +62,16 @@ from ...models.gear_service_record import GearServiceRecord
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.gear_set import GearSet
 from ...models.gear_set_item import GearSetItem
+from ...models.person import Person
 from ...models.species import Species
 from ...models.trip import Trip
+from ...models.trip_person import TripPerson
 from ...models.user import User
 from ...models.user_picture import UserPicture
 from ...schemas.certification import CertificationFileInfo
 from ...schemas.dive import DiveFileInfo
 from ...schemas.dive_mixture import DiveMixtureRead
+from ...schemas.person import PersonRole
 from ...schemas.trip import TripPartRead
 from ...schemas.user_picture import PictureKind
 from ..certification_files import get_file_infos_for_certifications
@@ -112,6 +117,14 @@ class ExportRecordingRow:
     utc_offset_minutes: int | None
     files: list[ExportFileRow]
     has_profile: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ExportReference:
+    """One person on one dive, trip or course: the row and the stored role, if any."""
+
+    person: Person
+    role: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +183,14 @@ class ExportBundle:
     pictures: dict[PictureKind, UserPicture]
     # By name, as `GET /contacts` lists them.
     contacts: list[Contact]
+    # By name, as `GET /people` lists them, and each linked person's account's public id.
+    people: list[Person]
+    linked_uuid_by_person: dict[int, uuid_pkg.UUID]
+    # The `(person_id, role)` rows of each host's join table in position order, keyed for
+    # every host in the bundle.
+    person_ids_by_dive: dict[int, list[tuple[int, str | None]]]
+    person_ids_by_trip: dict[int, list[tuple[int, str | None]]]
+    person_ids_by_course: dict[int, list[tuple[int, str | None]]]
 
     trip_by_id: dict[int, Trip] = field(init=False)
     course_by_id: dict[int, Course] = field(init=False)
@@ -179,6 +200,7 @@ class ExportBundle:
     schedule_by_id: dict[int, GearServiceSchedule] = field(init=False)
     contact_by_id: dict[int, Contact] = field(init=False)
     contact_by_uuid: dict[uuid_pkg.UUID, Contact] = field(init=False)
+    person_by_id: dict[int, Person] = field(init=False)
 
     def __post_init__(self) -> None:
         # `object.__setattr__` because the dataclass is frozen: these are lookup indexes
@@ -192,6 +214,7 @@ class ExportBundle:
         object.__setattr__(self, "schedule_by_id", {schedule.id: schedule for schedule in self.schedules})
         object.__setattr__(self, "contact_by_id", {contact.id: contact for contact in self.contacts})
         object.__setattr__(self, "contact_by_uuid", {contact.uuid: contact for contact in self.contacts})
+        object.__setattr__(self, "person_by_id", {person.id: person for person in self.people})
 
     def sites_for(self, dive: Dive) -> list[DiveSite]:
         """A dive's sites in visit order; index 0 is the primary site."""
@@ -241,6 +264,57 @@ class ExportBundle:
         id never reaches this. A trip part names its accommodation by uuid, already
         resolved when the parts were read: `contact_by_uuid` is its lookup."""
         return None if row.contact_id is None else self.contact_by_id.get(row.contact_id)
+
+    def _references(self, rows: list[tuple[int, str | None]]) -> list[ExportReference]:
+        return [
+            ExportReference(person=person, role=role)
+            for person_id, role in rows
+            if (person := self.person_by_id.get(person_id)) is not None
+        ]
+
+    def people_for(self, row: Dive | Trip | Course) -> list[ExportReference]:
+        """A dive's, trip's or course's people in the diver's order, each with its role."""
+        if isinstance(row, Dive):
+            return self._references(self.person_ids_by_dive[row.id])
+        if isinstance(row, Trip):
+            return self._references(self.person_ids_by_trip[row.id])
+        return self._references(self.person_ids_by_course[row.id])
+
+    def instructor_for(self, row: Course | Certification) -> Person | None:
+        """A card's instructor, or a course's first by position - the one name each of the
+        CSV's instructor columns holds."""
+        if isinstance(row, Certification):
+            return None if row.instructor_id is None else self.person_by_id.get(row.instructor_id)
+        return next(
+            (reference.person for reference in self.people_for(row) if reference.role == PersonRole.INSTRUCTOR),
+            None,
+        )
+
+
+async def _person_ids_by_host(
+    db: AsyncSession, host_column: Any, model: Any, host_ids: list[int]
+) -> dict[int, list[tuple[int, str | None]]]:
+    """One join table's `(person_id, role)` rows for these hosts, in position order."""
+    by_host: dict[int, list[tuple[int, str | None]]] = {host_id: [] for host_id in host_ids}
+    if not host_ids:
+        return by_host
+    rows = await db.execute(
+        select(host_column.label("host_id"), model.person_id, model.role)
+        .where(host_column.in_(host_ids))
+        .order_by(host_column, model.position)
+    )
+    for row in rows:
+        by_host[row.host_id].append((row.person_id, row.role))
+    return by_host
+
+
+async def _linked_uuids(db: AsyncSession, *, user_id: int) -> dict[int, uuid_pkg.UUID]:
+    """Each linked person's account's public id - the one thing of that account an export
+    carries."""
+    rows = await db.execute(
+        select(Person.id, User.uuid).join(User, User.id == Person.linked_user_id).where(Person.user_id == user_id)
+    )
+    return {row.id: row.uuid for row in rows}
 
 
 async def _ordered_ids_by_dive(
@@ -432,6 +506,13 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
             for picture in (await db.execute(select(UserPicture).where(UserPicture.user_id == user_id))).scalars()
         },
         contacts=await _owned(db, Contact, user_id=user_id, order_by=(Contact.name, Contact.id)),
+        people=await _owned(db, Person, user_id=user_id, order_by=(Person.name, Person.id)),
+        linked_uuid_by_person=await _linked_uuids(db, user_id=user_id),
+        person_ids_by_dive=await _person_ids_by_host(db, DivePerson.dive_id, DivePerson, dive_ids),
+        person_ids_by_trip=await _person_ids_by_host(db, TripPerson.trip_id, TripPerson, [trip.id for trip in trips]),
+        person_ids_by_course=await _person_ids_by_host(
+            db, CoursePerson.course_id, CoursePerson, [course.id for course in courses]
+        ),
     )
 
 

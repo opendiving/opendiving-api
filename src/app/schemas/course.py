@@ -14,6 +14,7 @@ from ..core.schemas import (
 )
 from .certification import CertificationAgency, validate_agency_pairing
 from .contact import CONTACT_UUID_DESCRIPTION
+from .person import INSTRUCTOR_NAME_READ_DESCRIPTION, InstructorNameShim, PeopleRead, PeopleUpdate, PeopleWrite
 
 
 class CourseStatus(StrEnum):
@@ -66,8 +67,9 @@ class CourseBase(BaseModel):
     status: Annotated[CourseStatus, Field(default=CourseStatus.COMPLETED)]
     start_date: Annotated[date | None, Field(default=None, examples=["2026-03-02"])]
     end_date: Annotated[date | None, Field(default=None, examples=["2026-03-06"])]
-    instructor_name: Annotated[str | None, Field(default=None, max_length=255)]
-    instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
+    instructor_number: Annotated[
+        str | None, Field(default=None, max_length=64, description="The instructor's number, as printed on the card")
+    ]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
     @model_validator(mode="after")
@@ -93,6 +95,11 @@ class CourseRead(CourseBase, PublicUUIDSchema):
 
     user_uuid: uuid_pkg.UUID
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    # Its instructors among them, by role.
+    people: PeopleRead
+    # Read-only: the first instructor's name, for the web build that still prints one and
+    # echoes it back on save. Comes out with the write half - see `InstructorNameShim`.
+    instructor_name: Annotated[str | None, Field(default=None, description=INSTRUCTOR_NAME_READ_DESCRIPTION)]
     created_at: datetime
 
 
@@ -114,14 +121,17 @@ class CourseReadInternal(CourseBase, PublicUUIDSchema):
 class CourseCreate(CourseBase):
     """Request body for creating a course.
 
-    `contact_uuid` sits here and on `CourseUpdateRequest`, never on `CourseBase`:
-    `CourseCreateInternal` inherits the base and is CRUDAdmin's form, and every read
-    inherits it too - the trap `CertificationCreate`'s docstring records.
+    `contact_uuid`, `people` and the shim's `instructor_name` sit here and on
+    `CourseUpdateRequest`, never on `CourseBase`: `CourseCreateInternal` inherits the base
+    and is CRUDAdmin's form, and every read inherits it too - the trap
+    `CertificationCreate`'s docstring records.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    people: PeopleWrite
+    instructor_name: InstructorNameShim
 
 
 class CourseCreateInternal(CourseBase):
@@ -145,7 +155,7 @@ class CourseUpdate(RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
 
     # Everything nullable stays off this list, so an explicit null clears it: an
-    # instructor misremembered, the dates of a course that turned out to be `planned`
+    # instructor's number misremembered, the dates of a course that turned out to be `planned`
     # after all, and the agency of one that turns out to have run under none are all real
     # edits. `agency_other` in particular is half of moving a course off `agency="other"`.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "status", "notes")
@@ -156,7 +166,6 @@ class CourseUpdate(RejectsExplicitNulls):
     status: Annotated[CourseStatus | None, Field(default=None)]
     start_date: Annotated[date | None, Field(default=None)]
     end_date: Annotated[date | None, Field(default=None)]
-    instructor_name: Annotated[str | None, Field(default=None, max_length=255)]
     instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
@@ -167,10 +176,13 @@ class CourseUpdateRequest(CourseUpdate):
     Separate from `CourseUpdate`, which is CRUDAdmin's Course form and the shape
     `test_update_explicit_nulls.py` sweeps against the table's columns - the split
     `CertificationUpdateRequest` makes for `course_uuid`. Omit `contact_uuid` and the link
-    is left alone; send `null` and it is cleared.
+    is left alone; send `null` and it is cleared. `people` replaces the course's people
+    wholesale, and omitting it leaves them.
     """
 
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    people: PeopleUpdate
+    instructor_name: InstructorNameShim
 
 
 class CourseUpdateInternal(CourseUpdate):

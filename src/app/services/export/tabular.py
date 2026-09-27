@@ -50,7 +50,7 @@ from ...core.utils.trip_span import trip_span
 from ...models.dive import Dive
 from ...schemas.dive_mixture import DiveMixtureRead
 from ..dive_gas import resolve_gas_use
-from .loader import ExportBundle
+from .loader import ExportBundle, ExportReference
 from .naming import gas_name, trip_place_names
 
 # Excel's cue that the file is UTF-8. See the module docstring.
@@ -73,8 +73,10 @@ DIVES_HEADER = (
     # The course a training dive was logged on, as its *name* - the same shape as `trip`
     # beside it. `courses.csv` carries the uuid that actually joins the two files.
     "course",
-    # Who the dive was dived with, by name on the same terms; `contacts.csv` has the uuid.
+    # The contact that ran the dive, by name on the same terms; `contacts.csv` has the uuid.
     "contact",
+    # Who the diver was with, by name and role - `people.csv` has the uuids.
+    "people",
     "dive_sites",
     "species",
     "cylinders",
@@ -99,6 +101,16 @@ DIVES_HEADER = (
     "notes",
     "dive_uuid",
 )
+
+
+def _people_cell(references: list[ExportReference]) -> str | None:
+    """A host's people as one cell: names in the diver's order, each with its role in
+    brackets where it has one, joined with the `;` these files mean *list* by."""
+    cell = "; ".join(
+        reference.person.name if reference.role is None else f"{reference.person.name} ({reference.role})"
+        for reference in references
+    )
+    return cell or None
 
 
 def _rows_to_csv(header: tuple[str, ...], rows: Iterable[tuple[Any, ...]]) -> Iterator[str]:
@@ -191,6 +203,7 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         None if trip is None else trip.name,
         None if course is None else course.name,
         None if contact is None else contact.name,
+        _people_cell(bundle.people_for(dive)),
         "; ".join(site.name for site in bundle.sites_for(dive)),
         # Scientific names, not the common ones a diver reads on the dive page: they are
         # unambiguous, every row has one (a common name is often null), and a spreadsheet
@@ -259,7 +272,17 @@ def write_mixtures_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(MIXTURES_HEADER, rows())
 
 
-TRIPS_HEADER = ("name", "location", "accommodations", "start_date", "end_date", "dives", "notes", "trip_uuid")
+TRIPS_HEADER = (
+    "name",
+    "location",
+    "accommodations",
+    "people",
+    "start_date",
+    "end_date",
+    "dives",
+    "notes",
+    "trip_uuid",
+)
 
 
 def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
@@ -290,6 +313,7 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
                     if part.accommodation_uuid is not None
                     and (contact := bundle.contact_by_uuid.get(part.accommodation_uuid)) is not None
                 ),
+                _people_cell(bundle.people_for(trip)),
                 None if start_date is None else start_date.isoformat(),
                 None if end_date is None else end_date.isoformat(),
                 counts.get(trip.id, 0),
@@ -306,10 +330,12 @@ COURSES_HEADER = (
     "status",
     "start_date",
     "end_date",
+    # The first instructor among the course's people, by name, beside the number.
     "instructor_name",
     "instructor_number",
     # Who ran it, by name: a CSV carries names, as `course` does in `dives.csv`.
     "contact",
+    "people",
     "dives",
     "certifications",
     "notes",
@@ -345,9 +371,10 @@ def write_courses_csv(bundle: ExportBundle) -> Iterator[str]:
                 course.status,
                 None if course.start_date is None else course.start_date.isoformat(),
                 None if course.end_date is None else course.end_date.isoformat(),
-                course.instructor_name,
+                None if (instructor := bundle.instructor_for(course)) is None else instructor.name,
                 course.instructor_number,
                 None if (contact := bundle.contact_for(course)) is None else contact.name,
+                _people_cell(bundle.people_for(course)),
                 dive_counts.get(course.id, 0),
                 certification_counts.get(course.id, 0),
                 course.notes,
@@ -539,6 +566,7 @@ CERTIFICATIONS_HEADER = (
     "certification_number",
     "certified_on",
     "expires_on",
+    # The person who signed the card, by name.
     "instructor_name",
     "instructor_number",
     "contact",
@@ -562,7 +590,7 @@ def write_certifications_csv(bundle: ExportBundle) -> Iterator[str]:
                 certification.certification_number,
                 None if certification.certified_on is None else certification.certified_on.isoformat(),
                 None if certification.expires_on is None else certification.expires_on.isoformat(),
-                certification.instructor_name,
+                None if (instructor := bundle.instructor_for(certification)) is None else instructor.name,
                 certification.instructor_number,
                 None if (contact := bundle.contact_for(certification)) is None else contact.name,
                 None if (course := bundle.course_for(certification)) is None else course.name,
@@ -615,6 +643,30 @@ def write_contacts_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(CONTACTS_HEADER, rows())
 
 
+PEOPLE_HEADER = ("name", "email", "phone", "dives", "notes", "person_uuid")
+
+
+def write_people_csv(bundle: ExportBundle) -> Iterator[str]:
+    """One row per person, with how many of the exported dives name them."""
+    dive_counts: dict[int, int] = {}
+    for dive in bundle.dives:
+        for reference in bundle.people_for(dive):
+            dive_counts[reference.person.id] = dive_counts.get(reference.person.id, 0) + 1
+
+    def rows() -> Iterator[tuple[Any, ...]]:
+        for person in bundle.people:
+            yield (
+                person.name,
+                person.email,
+                person.phone,
+                dive_counts.get(person.id, 0),
+                person.notes,
+                str(person.uuid),
+            )
+
+    return _rows_to_csv(PEOPLE_HEADER, rows())
+
+
 # The archive's `csv/` directory, in the order the files are added to it.
 CSV_WRITERS = (
     ("dives.csv", write_dives_csv),
@@ -627,4 +679,5 @@ CSV_WRITERS = (
     ("gear-service.csv", write_gear_service_csv),
     ("certifications.csv", write_certifications_csv),
     ("contacts.csv", write_contacts_csv),
+    ("people.csv", write_people_csv),
 )

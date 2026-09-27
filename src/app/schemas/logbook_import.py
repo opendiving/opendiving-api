@@ -53,6 +53,7 @@ from .dive import DecoAlgorithm, DiveMode, Salinity, WaterType
 from .dive_mixture import GasRole, TankUsage
 from .dive_profile import ProfileEventType
 from .gear_service import ServiceKind
+from .person import PERSON_EMAIL_MAX, PersonRole
 from .user import (
     ANCHOR_REQUIRED_MESSAGES,
     EMERGENCY_CONTACT_FIELDS,
@@ -139,6 +140,11 @@ _Collection = BeforeValidator(_null_is_empty)
 # a contact rather than letting `extra="ignore"` lose it. Read here and nowhere else - the
 # writer never emits it.
 _LegacyTrainingCenter = Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+
+# A course's or certification's `instructor_name`, on the same terms: the format had it before
+# people were records, and the planner makes each distinct one a person the host names as its
+# instructor. Read here and nowhere else - the writer never emits it.
+_LegacyInstructorName = Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
 
 # A start as a document spells it: a date-time, or on a dive a bare date.
 ImportStart = Annotated[datetime | date | None, BeforeValidator(full_date_is_a_date), Field(default=None)]
@@ -339,6 +345,17 @@ class ImportCylinder(_ReadModel):
     usage: Annotated[TankUsage | None, _unknown_is_absent(TankUsage), Field(default=None)]
 
 
+class ImportPersonReference(_ReadModel):
+    """One person on one dive, trip or course (spec §6.20). A role outside the vocabulary
+    reads as absent and keeps the reference (§5.6)."""
+
+    person_uuid: uuid_pkg.UUID
+    role: Annotated[PersonRole | None, _unknown_is_absent(PersonRole), Field(default=None)]
+
+
+_People = Annotated[list[ImportPersonReference], Field(default_factory=list), _Collection]
+
+
 class ImportDive(_ReadModel):
     uuid: uuid_pkg.UUID
     number: int | None = None
@@ -368,6 +385,7 @@ class ImportDive(_ReadModel):
     site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
     gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
     species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
+    people: _People
     cylinders: Annotated[list[ImportCylinder], Field(default_factory=list), _Collection]
     # **`source_file` and `profile` are not members of a dive any more**, and this reader
     # does not accept them under those names: `extra="ignore"` means a 1.0 document written
@@ -407,6 +425,7 @@ class ImportTrip(_ReadModel):
     # document written before the change is read as a trip with no parts rather than
     # failing, the same tolerance §5.6 asks for that a dive's `recordings` gets above.
     parts: Annotated[list[ImportTripPart], Field(default_factory=list), _Collection]
+    people: _People
     notes: str | None = None
     created_at: datetime | None = None
 
@@ -419,9 +438,10 @@ class ImportCourse(_ReadModel):
     status: Annotated[CourseStatus | None, _unknown_is_absent(CourseStatus), Field(default=None)]
     starts_on: date | None = None
     ends_on: date | None = None
-    instructor_name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    instructor_name: _LegacyInstructorName = None
     instructor_number: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
     contact_uuid: uuid_pkg.UUID | None = None
+    people: _People
     training_center: _LegacyTrainingCenter = None
     notes: str | None = None
     created_at: datetime | None = None
@@ -528,7 +548,8 @@ class ImportCertification(_ReadModel):
     number: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
     certified_on: date | None = None
     expires_on: date | None = None
-    instructor_name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    instructor_uuid: uuid_pkg.UUID | None = None
+    instructor_name: _LegacyInstructorName = None
     instructor_number: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
     contact_uuid: uuid_pkg.UUID | None = None
     training_center: _LegacyTrainingCenter = None
@@ -571,6 +592,23 @@ class ImportContact(_ReadModel):
     created_at: datetime | None = None
 
 
+class ImportPerson(_ReadModel):
+    """An individual the diver was with (spec §6.20).
+
+    `email` is read as the string it is, as a contact's is, and the planner drops one this
+    app could not have written. `extensions` is read because this app's own writer puts a
+    linked person's account there, which the planner may link again.
+    """
+
+    uuid: uuid_pkg.UUID
+    name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    email: Annotated[str | None, Field(default=None, max_length=PERSON_EMAIL_MAX)]
+    phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
+    notes: str | None = None
+    created_at: datetime | None = None
+    extensions: dict[str, Any] | None = None
+
+
 class ImportDocument(_ReadModel):
     """A whole DiveJSON document as this reader sees it.
 
@@ -599,6 +637,7 @@ class ImportDocument(_ReadModel):
     gear_service_records: Annotated[list[ImportGearServiceRecord], Field(default_factory=list), _Collection]
     certifications: Annotated[list[ImportCertification], Field(default_factory=list), _Collection]
     contacts: Annotated[list[ImportContact], Field(default_factory=list), _Collection]
+    people: Annotated[list[ImportPerson], Field(default_factory=list), _Collection]
     extensions: dict[str, Any] | None = None
 
 
@@ -666,6 +705,9 @@ class ImportNoteCode(StrEnum):
     # The diver took the archive's portrait, and the account's changed after the preview they
     # chose from, so the account's was kept.
     PORTRAIT_KEPT = "portrait_kept"
+    # A person was linked (apply), or would be (preview), to the account on this instance its
+    # entry names - the sentence names that account's current username.
+    ACCOUNT_LINKED = "account_linked"
 
 
 class ImportNote(BaseModel):
@@ -691,11 +733,12 @@ class ImportCollectionReport(BaseModel):
     """What would happen (preview) or did happen (apply) to one envelope collection.
 
     The four counts are disjoint and sum to the number of records the document carries in
-    this collection - and for `contacts`, the contacts made of the training centers an
-    export written before contacts existed names on its courses and certifications, which it
-    carries as strings rather than records. `restored` is its own figure and never hides inside `created` or
-    `skipped`: un-deleting is the one thing this feature does that no other surface in the
-    app can, and a diver restoring a backup is entitled to see it counted.
+    this collection - and for `contacts` and `people`, the records made of the training
+    centers and the instructors an export written before either existed names on its courses
+    and certifications, which it carries as strings rather than records. `restored` is its
+    own figure and never hides inside `created` or `skipped`: un-deleting is the one thing
+    this feature does that no other surface in the app can, and a diver restoring a backup
+    is entitled to see it counted.
     """
 
     collection: Annotated[str, Field(examples=["dives"])]

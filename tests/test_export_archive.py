@@ -149,6 +149,7 @@ class TestInventory:
             "csv/gear-service.csv",
             "csv/certifications.csv",
             "csv/contacts.csv",
+            "csv/people.csv",
             "files/0002-0-Suunto-Ocean-2026-06-01.json",
             "certifications/open-water-diver-front.jpg",
             "certifications/open-water-diver-back.png",

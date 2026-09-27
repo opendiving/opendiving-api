@@ -31,6 +31,7 @@ from src.app.services.export.tabular import (
     GEAR_ITEMS_HEADER,
     GEAR_SERVICE_HEADER,
     MIXTURES_HEADER,
+    PEOPLE_HEADER,
     SPECIES_HEADER,
     TRIPS_HEADER,
     _utc_offset,
@@ -42,6 +43,7 @@ from src.app.services.export.tabular import (
     write_gear_items_csv,
     write_gear_service_csv,
     write_mixtures_csv,
+    write_people_csv,
     write_species_csv,
     write_trips_csv,
 )
@@ -67,6 +69,7 @@ _NORMALIZED_FILES = (
     (write_gear_service_csv, GEAR_SERVICE_HEADER),
     (write_certifications_csv, CERTIFICATIONS_HEADER),
     (write_contacts_csv, CONTACTS_HEADER),
+    (write_people_csv, PEOPLE_HEADER),
 )
 
 
@@ -298,6 +301,28 @@ class TestTheNormalizedFiles:
         # A name and a role and nothing else - the school the migration made of a string.
         assert by_name["Blue Ocean"]["country"] == ""
 
+    def test_people_have_a_file_and_every_host_names_them_by_name_and_role(self):
+        """`people.csv` has the uuid; `dives.csv`, `trips.csv` and `courses.csv` name each
+        person with the role they had, and a course's and a card's instructor column is the
+        instructor person's name beside the number printed on the card."""
+        bundle = full_bundle()
+        people = _parse(_render(write_people_csv(bundle)))
+        by_name = {row[0]: dict(zip(PEOPLE_HEADER, row, strict=True)) for row in people[1:]}
+        trips = _parse(_render(write_trips_csv(bundle)))
+        courses = _parse(_render(write_courses_csv(bundle)))
+        certifications = _parse(_render(write_certifications_csv(bundle)))
+
+        assert list(by_name) == ["Jae Kim", "Lina", "Sam Ortiz"]
+        assert (by_name["Sam Ortiz"]["email"], by_name["Sam Ortiz"]["dives"]) == ("sam@example.com", "1")
+        assert by_name["Lina"]["person_uuid"] == str(UUIDS["person-lina"])
+        assert trips[1][TRIPS_HEADER.index("people")] == "Lina (companion)"
+        assert courses[1][COURSES_HEADER.index("people")] == "Jae Kim (instructor); Sam Ortiz (student)"
+        assert (
+            courses[1][COURSES_HEADER.index("instructor_name")],
+            courses[1][COURSES_HEADER.index("instructor_number")],
+        ) == ("Jae Kim", "TDI-88121")
+        assert certifications[1][CERTIFICATIONS_HEADER.index("instructor_name")] == "Jae Kim"
+
     def test_dive_sites_count_visits_not_dives(self):
         """Yolanda is the second site of one dive and the only site of another."""
         rows = _parse(_render(write_dive_sites_csv(full_bundle())))
@@ -421,6 +446,6 @@ class TestTheNormalizedFiles:
         one hits the same Excel mojibake. Pinned across every file, and the count with it, so
         a file added later cannot quietly be the exception."""
         bundle = full_bundle()
-        assert len(CSV_WRITERS) == 10
+        assert len(CSV_WRITERS) == 11
         for filename, writer in CSV_WRITERS:
             assert _render(writer(bundle)).startswith(BOM), filename
