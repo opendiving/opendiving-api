@@ -2409,9 +2409,8 @@ user. No hard ceiling, since refusing a legitimate export is worse; size `/tmp` 
 account hosted.
 
 The writers stay generators: the spool bounds what is resident, the generators what is constructed.
-`uddf.py` writes one `<dive>` at a time, `envelope.py` one record, and `loader.py` fetches
-`dive_profile.data`, `dive_file.data` and `certification_file.data` one row at a time — the
-package's one deliberate N+1.
+`uddf.py` writes one `<dive>` at a time, `envelope.py` one record; `loader.py` reads no payload:
+`archive.py` fetches each blob singly, the writers each profile — the package's one deliberate N+1.
 
 ## What UDDF 3.2.2 has no slot for, and what it forces
 
