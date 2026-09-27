@@ -42,12 +42,16 @@ dependencies = [
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
     #
-    # 0.13.0 is the floor because it is the first release that writes the profile axis in
-    # milliseconds and a device's readouts and salinity on the recording. Resolved lower, a
+    # 0.15.0 is the floor because it is the first release whose schema has `people`, the
+    # person references on a dive, a trip and a course and a certification's `instructor_uuid`,
+    # and whose UDDF and `.ssrf` readers bring buddies and guides in as people. Resolved lower,
+    # the export of any account with a person fails the conformance check the export tests
+    # run, and an upload's buddies are never read. The floor still carries what 0.14.0's did:
+    # the `contacts` collection and its references; what 0.13.0's did: the profile axis in
+    # milliseconds and a device's readouts and salinity on the recording, without which a
     # UDDF, `.ssrf` or FIT upload converts with its axis in seconds, which the importer reads
     # as milliseconds - the conversion is never passed through `read_as_written` - and with
-    # its readouts on the dive, where nothing reads them. The floor still carries what
-    # 0.12.0's did: the Diver's `portrait_file`, without which the export of any account
+    # its readouts on the dive, where nothing reads them; what 0.12.0's did: the Diver's `portrait_file`, without which the export of any account
     # with a portrait fails the conformance check the export tests run; what 0.11.0's did:
     # the Diver's `born_on`, `phone`, `emergency_contacts` and `insurances`, and a UDDF
     # `<owner>`'s birthdate, phone and insurance read in; and what 0.10.0's did: a dive site's `location` is a place object, a

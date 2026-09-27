@@ -485,8 +485,9 @@ def _diver_element(bundle: ExportBundle) -> ET.Element:
     # No `<contact><email>`, although the schema has the slot: a UDDF file is the thing a
     # diver hands to a dive shop or uploads to divelogs.de, and their address riding along
     # in it would be a surprise. It is in `logbook.divejson`, which is the diver's own copy.
-    # A contact's email *is* written (`_contact_contents`): that is the listing on a shop's
-    # sign, which the diver chose to record, not the diver's own address.
+    # What the diver logged about others *is* written: a contact's email (`_contact_contents`),
+    # the listing on a shop's sign, and a person's email and phone (`_buddy_element`), in the
+    # slot UDDF gives a buddy. The owner's address is the account's sign-in, not a record.
     if not is_blank(user.phone):
         _sub(_sub(owner, "contact"), "phone", user.phone)
     equipment = _equipment_element(bundle)

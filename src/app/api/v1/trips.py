@@ -43,7 +43,8 @@ router = APIRouter(tags=["trips"])
 # The only integrity failures the part and people writes below can hit are the trip row, a
 # contact a part stays at or a person on the trip vanishing between the resolve and the
 # insert (a concurrent hard delete): lengths and ranges are already bounded by
-# `TripPartInput`, and there is no unique constraint to violate. 422 rather than a raw 500,
+# `TripPartInput`, and the people write drops a repeated person before
+# `ux_trip_person_trip_id_person_id` could refuse it. 422 rather than a raw 500,
 # matching how `patch_dive` treats its child-row writes.
 #
 # Both routes raise before invalidating anything, so this path knowingly leaves the trip's
