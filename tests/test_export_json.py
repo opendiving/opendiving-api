@@ -803,6 +803,61 @@ class TestContacts:
         _assert_conforms(document)
 
 
+class TestPeople:
+    @pytest.mark.asyncio
+    async def test_a_person_is_written_with_every_member_it_has(self, monkeypatch):
+        document = await _render(full_bundle(), monkeypatch)
+        people = {person["name"]: person for person in document["people"]}
+
+        assert [person["name"] for person in document["people"]] == ["Jae Kim", "Lina", "Sam Ortiz"]
+        assert people["Sam Ortiz"] == {
+            "uuid": str(UUIDS["person-sam"]),
+            "name": "Sam Ortiz",
+            "email": "sam@example.com",
+            "phone": "+34 600 000 000",
+            "notes": "Shoots video.",
+            "created_at": people["Sam Ortiz"]["created_at"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_linked_person_carries_its_accounts_public_id_under_this_producers_key(self, monkeypatch):
+        """The value that account's own export writes as its diver's `uuid`, and nothing else
+        of that account. An unlinked person carries no entry at all."""
+        document = await _render(full_bundle(), monkeypatch)
+        people = {person["name"]: person for person in document["people"]}
+
+        assert people["Jae Kim"]["extensions"] == {"opendiving": {"user_uuid": str(UUIDS["linked-account"])}}
+        assert "extensions" not in people["Lina"]
+
+    @pytest.mark.asyncio
+    async def test_every_host_references_its_people_with_their_roles(self, monkeypatch):
+        """A dive, a trip, a course and a card - and a conforming document, so every one
+        resolves in `people` and no host names a person twice."""
+        document = await _render(full_bundle(), monkeypatch)
+
+        assert document["dives"][0]["people"] == [
+            {"person_uuid": str(UUIDS["person-sam"]), "role": "buddy"},
+            {"person_uuid": str(UUIDS["person-jae"]), "role": "guide"},
+        ]
+        # No role at all is written as absence.
+        assert document["dives"][1]["people"] == [{"person_uuid": str(UUIDS["person-lina"])}]
+        assert document["trips"][0]["people"] == [{"person_uuid": str(UUIDS["person-lina"]), "role": "companion"}]
+        assert document["certifications"][0]["instructor_uuid"] == str(UUIDS["person-jae"])
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_role_the_format_has_no_word_for_is_dropped_and_the_reference_kept(self, monkeypatch):
+        """`role` is OPTIONAL, so a stored value outside the vocabulary reads as absent (§5.6)
+        and the person is still on the dive."""
+        bundle = full_bundle()
+        bundle.person_ids_by_dive[1][0] = (2, "divemaster")
+
+        document = await _render(bundle, monkeypatch)
+
+        assert document["dives"][0]["people"][0] == {"person_uuid": str(UUIDS["person-sam"])}
+        _assert_conforms(document)
+
+
 class TestReferences:
     @pytest.mark.asyncio
     async def test_records_reference_each_other_by_public_uuid(self, monkeypatch):

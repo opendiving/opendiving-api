@@ -33,6 +33,7 @@ from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_file import DiveFile
 from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.dive_mixture import DiveMixture
+from src.app.models.dive_person import DivePerson
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_species import DiveSpecies
@@ -47,6 +48,7 @@ from tests.helpers.generators import (
     create_dive,
     create_dive_site,
     create_gear_item,
+    create_person,
     create_species,
     create_user,
 )
@@ -523,6 +525,35 @@ class TestWhatElseMoves:
             .all()
         )
         assert list(species) == [fish.id]
+
+    @pytest.mark.asyncio
+    async def test_the_other_dives_people_arrive_and_a_shared_one_keeps_this_dives_role(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """A dive's people are links like its sites, so the absorbed dive's move and are
+        appended after the surviving dive's own - and a person both halves name stays once,
+        in the role the surviving dive gave them."""
+        first, second = await _two_halves(async_db, db, diver)
+        buddy, guide = create_person(db, diver), create_person(db, diver)
+        db.add_all(
+            [
+                DivePerson(dive_id=first.id, person_id=buddy.id, position=0, role="buddy"),
+                DivePerson(dive_id=second.id, person_id=guide.id, position=0, role="guide"),
+                DivePerson(dive_id=second.id, person_id=buddy.id, position=1, role="companion"),
+            ]
+        )
+        db.commit()
+
+        await _merge(async_db, diver, first, second)
+
+        rows = (
+            await async_db.execute(
+                select(DivePerson.person_id, DivePerson.role)
+                .where(DivePerson.dive_id == first.id)
+                .order_by(DivePerson.position)
+            )
+        ).all()
+        assert [(row.person_id, row.role) for row in rows] == [(buddy.id, "buddy"), (guide.id, "guide")]
 
     @pytest.mark.asyncio
     async def test_the_other_dives_notes_arrive_under_a_heading(

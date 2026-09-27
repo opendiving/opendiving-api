@@ -93,14 +93,6 @@ async def accounts_by_uuid(db: AsyncSession, uuids: Sequence[uuid_pkg.UUID]) -> 
     return {row.uuid: Account(id=row.id, username=row.username) for row in rows}
 
 
-async def linked_account_ids(db: AsyncSession, *, owner_id: int) -> set[int]:
-    """The accounts the caller's people already link."""
-    rows = await db.execute(
-        select(Person.linked_user_id).where(Person.user_id == owner_id, Person.linked_user_id.is_not(None))
-    )
-    return {row[0] for row in rows}
-
-
 async def resolve_people_references(
     db: AsyncSession, references: Sequence[PersonReference], *, user_id: int
 ) -> list[StoredReference]:

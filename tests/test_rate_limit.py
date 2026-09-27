@@ -10,7 +10,7 @@ from redis.exceptions import ConnectionError, RedisError, TimeoutError
 
 from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.utils import rate_limit as rate_limit_module
-from src.app.core.utils.rate_limit import enforce_rate_limit
+from src.app.core.utils.rate_limit import claim_rate_limit_slot, enforce_rate_limit, remaining_in_window
 
 
 class TestEnforceRateLimit:
@@ -191,3 +191,46 @@ class TestRedisIsDown:
 
             with pytest.raises(RateLimitException):
                 await enforce_rate_limit("key", max_requests=3, window_seconds=60)
+
+
+class TestTheAnsweringForms:
+    """What a caller for whom an exhausted window is an ordinary branch uses: a logbook
+    import's links, spent at the apply and only read at the preview."""
+
+    @pytest.mark.asyncio
+    async def test_a_claim_answers_rather_than_raises(self):
+        with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
+            mock_cache.client.incr = AsyncMock(side_effect=[1, 2])
+            mock_cache.client.expire = AsyncMock(return_value=None)
+            mock_cache.client.ttl = AsyncMock(return_value=30)
+
+            assert await claim_rate_limit_slot("key", max_requests=1, window_seconds=60) is True
+            assert await claim_rate_limit_slot("key", max_requests=1, window_seconds=60) is False
+
+    @pytest.mark.asyncio
+    async def test_what_is_left_is_read_without_spending(self):
+        with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
+            mock_cache.client.get = AsyncMock(return_value=b"3")
+            mock_cache.client.incr = AsyncMock()
+
+            assert await remaining_in_window("key", max_requests=10) == 7
+            mock_cache.client.incr.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_untouched_or_overrun_window_reads_as_whole_or_empty(self):
+        with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
+            mock_cache.client.get = AsyncMock(side_effect=[None, b"14"])
+
+            assert await remaining_in_window("key", max_requests=10) == 10
+            assert await remaining_in_window("key", max_requests=10) == 0
+
+    @pytest.mark.asyncio
+    async def test_reading_fails_open_like_the_limiter(self):
+        with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
+            mock_cache.client.get = AsyncMock(side_effect=ConnectionError("down"))
+
+            assert await remaining_in_window("key", max_requests=10) == 10
+        with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
+            mock_cache.client = None
+
+            assert await remaining_in_window("key", max_requests=10) == 10

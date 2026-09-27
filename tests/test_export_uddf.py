@@ -309,6 +309,73 @@ class TestContacts:
         assert named["Gear Hub"]["roles"] == ["shop"]
 
 
+class TestPeople:
+    """Every person a `<buddy>` after the owner; a dive links its people after its contact,
+    a guide through a `<guide>` under the dive's base - the one role besides `buddy` UDDF can
+    say."""
+
+    @pytest.mark.asyncio
+    async def test_every_person_is_a_buddy_after_the_owner(self, schema, monkeypatch):
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        schema.validate(_for_the_xsd(document))
+        diver = _tree(document).find(f"{UDDF}diver")
+        assert diver is not None
+
+        assert [child.tag for child in diver] == [f"{UDDF}owner", f"{UDDF}buddy", f"{UDDF}buddy", f"{UDDF}buddy"]
+        buddies = {buddy.get("id"): buddy for buddy in diver.findall(f"{UDDF}buddy")}
+        sam = buddies[f"person-{UUIDS['person-sam']}"]
+        # Split at the first space, and a one-word name leaves the mandatory last name empty.
+        assert (_text(sam, f"{UDDF}personal/{UDDF}firstname"), _text(sam, f"{UDDF}personal/{UDDF}lastname")) == (
+            "Sam",
+            "Ortiz",
+        )
+        lina = buddies[f"person-{UUIDS['person-lina']}"]
+        assert (_text(lina, f"{UDDF}personal/{UDDF}firstname"), _text(lina, f"{UDDF}personal/{UDDF}lastname")) == (
+            "Lina",
+            None,
+        )
+        # `personType`'s order, and `contactType`'s phone before email.
+        assert [child.tag for child in sam] == [f"{UDDF}personal", f"{UDDF}contact", f"{UDDF}notes"]
+        contact = sam.find(f"{UDDF}contact")
+        assert contact is not None
+        assert [(child.tag, child.text) for child in contact] == [
+            (f"{UDDF}phone", "+34 600 000 000"),
+            (f"{UDDF}email", "sam@example.com"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_guide_hangs_under_the_dives_base_and_the_dive_links_it(self, monkeypatch):
+        tree = _tree(await _render(full_bundle(), monkeypatch=monkeypatch))
+        resort = tree.find(f"{UDDF}divesite/{UDDF}divebase[@id='contact-{UUIDS['contact-resort']}']")
+        assert resort is not None
+
+        (guide,) = resort.findall(f"{UDDF}guide")
+        assert guide.get("id") == "guide-0"
+        assert guide.find(f"{UDDF}link").get("ref") == f"person-{UUIDS['person-jae']}"  # type: ignore[union-attr]
+        # Between the listing and the notes, where `divebaseType` puts it.
+        assert [child.tag for child in resort][-2:] == [f"{UDDF}guide", f"{UDDF}notes"]
+        # A dive with no base to hang a guide on links its person plainly.
+        links = _dive(tree, 1).findall(f"{UDDF}informationbeforedive/{UDDF}link")
+        assert links[-1].get("ref") == f"person-{UUIDS['person-lina']}"
+
+    @pytest.mark.asyncio
+    async def test_a_round_trip_brings_the_people_and_the_two_roles_uddf_can_say_back(self, monkeypatch):
+        """Read back through `divejson`'s UDDF reader: a plain link is a buddy - which a
+        reference with no role becomes, the one loss - and the guide link is a guide."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+
+        converted = divejson.convert(document, format="uddf").document
+
+        people = {person["uuid"]: person["name"] for person in converted["people"]}
+        assert sorted(people.values()) == ["Jae Kim", "Lina", "Sam Ortiz"]
+        by_dive = [
+            [(people[reference["person_uuid"]], reference.get("role")) for reference in dive.get("people", [])]
+            for dive in converted["dives"]
+        ]
+        assert [("Sam Ortiz", "buddy"), ("Jae Kim", "guide")] in by_dive
+        assert [("Lina", "buddy")] in by_dive
+
+
 class TestCheckedInCorpus:
     """`tests/fixtures/uddf/demo-account.uddf` is a real download, not a rendering.
 

@@ -49,7 +49,7 @@ from src.app.services.certification_files import store_certification_file
 from src.app.services.checkin_links import CHECKIN_LINK_TTL, CardFront
 from src.app.services.user_pictures import AVATAR_FRAME, PORTRAIT_FRAME, store_picture
 from tests.conftest import db_available
-from tests.helpers.generators import create_contact, create_dive, create_user
+from tests.helpers.generators import create_contact, create_dive, create_person, create_user
 from tests.helpers.images import plain_png
 from tests.helpers.routes import iter_api_routes
 
@@ -324,15 +324,21 @@ class TestAgainstPostgres:
         self, db: Session, async_db: AsyncSession, http: httpx.AsyncClient, sign_in: SignIn
     ) -> None:
         """Every field the check-in page prints, off `GET /user` and `GET /certifications` for
-        the same diver - in the list's order, with each card's dive centre by name, and its
-        front's type and nothing of the back. A deleted card is not there."""
+        the same diver - in the list's order, with each card's dive centre and instructor by
+        name, and its front's type and nothing of the back. A deleted card is not there."""
         diver = create_user(db)
         diver.phone, diver.date_of_birth = "+20 100 000 0000", date(1990, 4, 2)
         diver.insurance_provider, diver.insurance_policy_number = "DAN Europe", "DE-1234"
         diver.emergency_contact_name, diver.emergency_contact_phone = "Sam", "+44 20 0000 0000"
         centre = create_contact(db, diver)
+        instructor = create_person(db, diver)
         newest = Certification(
-            user_id=diver.id, agency="padi", name="Rescue", certified_on=date(2025, 5, 1), contact_id=centre.id
+            user_id=diver.id,
+            agency="padi",
+            name="Rescue",
+            certified_on=date(2025, 5, 1),
+            contact_id=centre.id,
+            instructor_id=instructor.id,
         )
         older = Certification(
             user_id=diver.id, agency="other", agency_other="CMAS Egypt", name="2 Star", certified_on=date(2019, 1, 1)
@@ -380,11 +386,17 @@ class TestAgainstPostgres:
             items_per_page=100,
             course_id=None,
         )
-        shared_fields = set(CheckinCertification.model_fields) - {"contact_name", "front_content_type"}
+        shared_fields = set(CheckinCertification.model_fields) - {
+            "contact_name",
+            "instructor_name",
+            "front_content_type",
+        }
         expected = [
             {field: card[field] for field in shared_fields}
             | {
                 "contact_name": centre.name if card["contact_uuid"] == centre.uuid else None,
+                # The one name an anonymous page cannot resolve from a uuid.
+                "instructor_name": instructor.name if card["instructor_uuid"] == instructor.uuid else None,
                 "front_content_type": next(
                     (file["content_type"] for file in card["files"] if file["side"] == CertificationSide.FRONT), None
                 ),
@@ -395,6 +407,7 @@ class TestAgainstPostgres:
             CheckinCertification.model_validate(card).model_dump() for card in expected
         ]
         assert [card["name"] for card in summary["certifications"]] == ["Rescue", "2 Star", "Nitrox"]
+        assert [card["instructor_name"] for card in summary["certifications"]] == [instructor.name, None, None]
         assert [card["front_content_type"] for card in summary["certifications"]] == [
             "image/png",
             "application/pdf",

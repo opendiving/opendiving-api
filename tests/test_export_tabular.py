@@ -301,6 +301,28 @@ class TestTheNormalizedFiles:
         # A name and a role and nothing else - the school the migration made of a string.
         assert by_name["Blue Ocean"]["country"] == ""
 
+    def test_people_have_a_file_and_every_host_names_them_by_name_and_role(self):
+        """`people.csv` has the uuid; `dives.csv`, `trips.csv` and `courses.csv` name each
+        person with the role they had, and a course's and a card's instructor column is the
+        instructor person's name beside the number printed on the card."""
+        bundle = full_bundle()
+        people = _parse(_render(write_people_csv(bundle)))
+        by_name = {row[0]: dict(zip(PEOPLE_HEADER, row, strict=True)) for row in people[1:]}
+        trips = _parse(_render(write_trips_csv(bundle)))
+        courses = _parse(_render(write_courses_csv(bundle)))
+        certifications = _parse(_render(write_certifications_csv(bundle)))
+
+        assert list(by_name) == ["Jae Kim", "Lina", "Sam Ortiz"]
+        assert (by_name["Sam Ortiz"]["email"], by_name["Sam Ortiz"]["dives"]) == ("sam@example.com", "1")
+        assert by_name["Lina"]["person_uuid"] == str(UUIDS["person-lina"])
+        assert trips[1][TRIPS_HEADER.index("people")] == "Lina (companion)"
+        assert courses[1][COURSES_HEADER.index("people")] == "Jae Kim (instructor); Sam Ortiz (student)"
+        assert (
+            courses[1][COURSES_HEADER.index("instructor_name")],
+            courses[1][COURSES_HEADER.index("instructor_number")],
+        ) == ("Jae Kim", "TDI-88121")
+        assert certifications[1][CERTIFICATIONS_HEADER.index("instructor_name")] == "Jae Kim"
+
     def test_dive_sites_count_visits_not_dives(self):
         """Yolanda is the second site of one dive and the only site of another."""
         rows = _parse(_render(write_dive_sites_csv(full_bundle())))
