@@ -12,7 +12,6 @@ from ..core.schemas import (
     StoredVocabulary,
 )
 from .contact import CONTACT_UUID_DESCRIPTION
-from .person import INSTRUCTOR_NAME_READ_DESCRIPTION, InstructorNameShim
 
 INSTRUCTOR_UUID_DESCRIPTION = "Public id of the person who signed the card as its instructor"
 
@@ -205,9 +204,6 @@ class CertificationRead(CertificationBase, PublicUUIDSchema):
     ]
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
     instructor_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=INSTRUCTOR_UUID_DESCRIPTION)]
-    # Read-only: the instructor person's name, for the web build that still prints one and
-    # echoes it back on save. Comes out with the write half - see `InstructorNameShim`.
-    instructor_name: Annotated[str | None, Field(default=None, description=INSTRUCTOR_NAME_READ_DESCRIPTION)]
     # The card images this certification has, as metadata only - see
     # `CertificationFileInfo`. Empty for a certification entered but not yet photographed.
     files: Annotated[
@@ -254,7 +250,6 @@ class CertificationCreate(CertificationBase):
     ]
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
     instructor_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=INSTRUCTOR_UUID_DESCRIPTION)]
-    instructor_name: InstructorNameShim
 
 
 class CertificationCreateInternal(CertificationBase):
@@ -313,7 +308,6 @@ class CertificationUpdateRequest(CertificationUpdate):
     ]
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
     instructor_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=INSTRUCTOR_UUID_DESCRIPTION)]
-    instructor_name: InstructorNameShim
 
 
 class CertificationUpdateInternal(CertificationUpdate):

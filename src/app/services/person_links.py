@@ -12,16 +12,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from fastapi.exceptions import RequestValidationError
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
 from ..core.exceptions.http_exceptions import UnprocessableEntityException
 from ..core.utils.rate_limit import claim_rate_limit_slot, enforce_rate_limit, remaining_in_window
 from ..crud.crud_people import StoredReference, person_linking, resolve_person_ids_for_user
-from ..models.person import Person
 from ..models.user import User
-from ..schemas.person import PERSON_NOT_FOUND, PersonReference, PersonRole
+from ..schemas.person import PERSON_NOT_FOUND, PersonReference
 
 NO_SUCH_ACCOUNT = "No account has that username."
 OWN_ACCOUNT = "That is your own account."
@@ -113,35 +112,3 @@ async def resolve_person_reference(db: AsyncSession, *, person_uuid: uuid_pkg.UU
     if ids is None:
         raise UnprocessableEntityException(PERSON_NOT_FOUND)
     return ids[person_uuid]
-
-
-def with_instructor(references: Sequence[StoredReference], person_id: int) -> list[StoredReference]:
-    """A course's people with `person_id` as its instructor, for the shim: the first
-    instructor reference becomes this person, or the person leads the list where there is
-    none. A person already there in another role takes the instructor's place instead."""
-    if (person_id, PersonRole.INSTRUCTOR.value) in references:
-        return list(references)
-    others = [(other, role) for other, role in references if other != person_id]
-    for index, (_, role) in enumerate(others):
-        if role == PersonRole.INSTRUCTOR.value:
-            others[index] = (person_id, role)
-            return others
-    return [(person_id, PersonRole.INSTRUCTOR.value), *others]
-
-
-async def resolve_or_create_person(db: AsyncSession, *, user_id: int, name: str) -> int:
-    """The diver's person of this trimmed name, case-insensitively, or a new one.
-
-    For the instructor-name shim on the course and certification writes alone, and goes
-    with it. Flushes rather than commits, so the new row lands in the route's one commit.
-    """
-    trimmed = name.strip()
-    existing = await db.scalar(
-        select(Person.id).where(Person.user_id == user_id, func.lower(Person.name) == trimmed.lower()).limit(1)
-    )
-    if existing is not None:
-        return int(existing)
-    person = Person(user_id=user_id, name=trimmed)
-    db.add(person)
-    await db.flush()
-    return person.id

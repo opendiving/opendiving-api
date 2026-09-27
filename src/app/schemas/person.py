@@ -86,32 +86,6 @@ PeopleRead = Annotated[
 ]
 
 
-# -------------- the instructor-name shim --------------
-# The web build deployed before people existed posts an `instructor_name` string on a course
-# or certification and prints one back. Until the build that sends `people` and
-# `instructor_uuid` is live, those writes accept the string and resolve it to a person
-# (`resolve_or_create_person`), and the reads serve the instructor person's name under it.
-# Absent, `null` and blank are no change, so an edit from that build can set an instructor
-# and never clear one. Both halves come out together once that build is gone - see
-# *"The course and certification writes honour an instructor's name for one web build"* in
-# DECISIONS.md.
-InstructorNameShim = Annotated[
-    str | None,
-    Field(
-        default=None,
-        max_length=PERSON_NAME_MAX,
-        description="Deprecated: an instructor's name, resolved to a person by name. Send the person's uuid.",
-    ),
-]
-INSTRUCTOR_NAME_READ_DESCRIPTION = "Deprecated: the instructor person's name. Read the person's uuid."
-
-
-def instructor_shim_name(value: str | None) -> str | None:
-    """The shim's string as a name to resolve, or `None` for the no-change cases."""
-    name = (value or "").strip()
-    return name or None
-
-
 class PersonBase(BaseModel):
     name: PersonName
     email: PersonEmail

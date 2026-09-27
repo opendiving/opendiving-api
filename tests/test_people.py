@@ -59,7 +59,7 @@ from src.app.schemas.person import (
     PersonUpdateRequest,
 )
 from src.app.services import person_links
-from src.app.services.person_links import resolve_linked_account, resolve_people_references, with_instructor
+from src.app.services.person_links import resolve_linked_account, resolve_people_references
 from tests.conftest import db_available
 from tests.helpers.generators import create_course, create_dive, create_person, create_trip, create_user
 
@@ -155,35 +155,25 @@ class TestTheWriteSchema:
     def test_a_card_takes_its_instructor_by_uuid(self, schema: Any) -> None:
         assert "instructor_uuid" in schema.model_fields
 
+    @pytest.mark.parametrize(
+        ("schema", "body"),
+        [
+            (CourseCreate, {"name": "AN/DP"}),
+            (CourseUpdateRequest, {}),
+            (CertificationCreate, {"agency": "padi", "name": "Rescue Diver"}),
+            (CertificationUpdateRequest, {}),
+        ],
+        ids=["CourseCreate", "CourseUpdateRequest", "CertificationCreate", "CertificationUpdateRequest"],
+    )
+    def test_an_instructor_is_never_named_by_a_string(self, schema: Any, body: dict[str, Any]) -> None:
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            schema.model_validate({**body, "instructor_name": "Jae Kim"})
+
 
 def test_every_role_is_the_format_s() -> None:
     """Value for value and in order, DiveJSON §6.20's vocabulary - the web mirrors it by hand
     and the export writes it through."""
     assert [role.value for role in PersonRole] == list(divejson.converter.person_roles())
-
-
-class TestWithInstructor:
-    """The shim's edit to a course's people: the one person an old build names as its
-    instructor, placed where the single field used to be."""
-
-    def test_a_course_with_none_gains_one_at_the_front(self) -> None:
-        assert with_instructor([(2, "student")], 9) == [(9, "instructor"), (2, "student")]
-
-    def test_the_first_instructor_is_the_one_replaced(self) -> None:
-        assert with_instructor([(2, "student"), (3, "instructor"), (4, "instructor")], 9) == [
-            (2, "student"),
-            (9, "instructor"),
-            (4, "instructor"),
-        ]
-
-    def test_the_same_instructor_again_changes_nothing(self) -> None:
-        """What the old dialog does on every save: echo back the name a read gave it."""
-        references = [(3, "instructor"), (2, "student")]
-
-        assert with_instructor(references, 3) == references
-
-    def test_a_person_already_there_in_another_role_takes_the_place_instead(self) -> None:
-        assert with_instructor([(3, "instructor"), (9, "student")], 9) == [(9, "instructor")]
 
 
 @pytest.fixture
@@ -234,36 +224,26 @@ class TestTheRoutes:
         route_collaborators["update"].assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_rename_drops_the_two_families_that_still_print_a_name(
-        self, route_collaborators: dict[str, Any]
-    ) -> None:
-        """Every host reads its people by uuid; only the shim's `instructor_name` on the
-        course and certification reads carries a person's name."""
+    @pytest.mark.parametrize("body", [{"name": "Alex Moreno"}, {"phone": "+34 600 000 000"}])
+    async def test_an_edit_drops_nothing(self, route_collaborators: dict[str, Any], body: dict[str, str]) -> None:
+        """Every host reads its people by uuid and role, never a name, and the check-in link
+        that prints one is uncached - so not even a rename changes a cached body."""
         await people_module.patch_person(
             request=MagicMock(),
             uuid=uuid7(),
-            values=PersonUpdateRequest.model_validate({"name": "Alex Moreno"}),
-            current_user=_current_user(),
-            db=MagicMock(),
-        )
-
-        route_collaborators["invalidate_course_caches"].assert_awaited_once_with(USER_ID)
-        route_collaborators["invalidate_certification_caches"].assert_awaited_once_with(USER_ID)
-        route_collaborators["invalidate_dive_caches"].assert_not_awaited()
-        route_collaborators["invalidate_trip_caches"].assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_an_edit_that_is_not_a_rename_drops_nothing(self, route_collaborators: dict[str, Any]) -> None:
-        await people_module.patch_person(
-            request=MagicMock(),
-            uuid=uuid7(),
-            values=PersonUpdateRequest.model_validate({"phone": "+34 600 000 000"}),
+            values=PersonUpdateRequest.model_validate(body),
             current_user=_current_user(),
             db=MagicMock(),
         )
 
         route_collaborators["update"].assert_awaited_once()
-        for name in ("invalidate_course_caches", "invalidate_certification_caches", "invalidate_dive_caches"):
+        for name in (
+            "invalidate_dive_caches",
+            "invalidate_trip_caches",
+            "invalidate_trip_items",
+            "invalidate_course_caches",
+            "invalidate_certification_caches",
+        ):
             route_collaborators[name].assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -706,104 +686,74 @@ class TestTheHostsCarryReferences:
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
-class TestTheInstructorShim:
-    """The web build deployed before people existed keeps writing and reading a name."""
+class TestTheCourseAndCardWrites:
+    """A course's instructors are people by role and a card's is one by uuid, through the
+    real write and read bodies."""
 
     @staticmethod
     def _no_caches(monkeypatch: pytest.MonkeyPatch) -> None:
-        for module, names in (
-            (courses_module, ("invalidate_course_caches",)),
-            (certifications_module, ("invalidate_certification_caches",)),
-        ):
-            for name in names:
-                monkeypatch.setattr(module, name, AsyncMock())
+        monkeypatch.setattr(courses_module, "invalidate_course_caches", AsyncMock())
+        monkeypatch.setattr(certifications_module, "invalidate_certification_caches", AsyncMock())
 
     @pytest.mark.asyncio
-    async def test_a_course_names_its_instructor_by_name_and_reads_it_back(
-        self, async_db: AsyncSession, diver: User, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._no_caches(monkeypatch)
-        name = f"Jae {uuid7().hex[-6:]}"
-
-        first = await courses_module.write_course(
-            request=MagicMock(),
-            course=CourseCreate.model_validate({"name": "AN/DP", "instructor_name": f"  {name} "}),
-            current_user=_as(diver),
-            db=async_db,
-        )
-        second = await courses_module.write_course(
-            request=MagicMock(),
-            course=CourseCreate.model_validate({"name": "Trimix", "instructor_name": name.upper()}),
-            current_user=_as(diver),
-            db=async_db,
-        )
-
-        assert first.instructor_name == second.instructor_name == name
-        assert [reference.role for reference in first.people] == ["instructor"]
-        # One person, whom both courses name: the second spelling found the first's row.
-        assert first.people[0].person_uuid == second.people[0].person_uuid
-
-    @pytest.mark.asyncio
-    async def test_an_echo_changes_nothing_and_a_new_name_replaces_the_instructor(
+    async def test_a_course_keeps_its_people_until_a_patch_sends_them(
         self, db: Session, async_db: AsyncSession, diver: User, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._no_caches(monkeypatch)
-        course, jae, sam = create_course(db, diver), create_person(db, diver), create_person(db, diver)
-        await replace_people_for_course(async_db, course.id, [(jae.id, "instructor"), (sam.id, "student")])
-        course_uuid, course_id, jae_name, sam_id = course.uuid, course.id, jae.name, sam.id
-        new_name = f"Kim {uuid7().hex[-6:]}"
-
-        for instructor_name in (jae_name, "", new_name):
-            await courses_module.patch_course(
-                request=MagicMock(),
-                uuid=course_uuid,
-                values=CourseUpdateRequest.model_validate({"instructor_name": instructor_name}),
-                current_user=_as(diver),
-                db=async_db,
-            )
-
-        read = await courses_module._cached_read_course.__wrapped__(  # type: ignore[attr-defined]
-            request=None, user_id=diver.id, uuid=course_uuid, owner_uuid=diver.uuid, db=async_db
-        )
-        assert read.instructor_name == new_name
-        rows = db.execute(
-            select(CoursePerson.person_id, CoursePerson.role)
-            .where(CoursePerson.course_id == course_id)
-            .order_by(CoursePerson.position)
-        ).all()
-        assert [row.role for row in rows] == ["instructor", "student"]
-        assert rows[1].person_id == sam_id
-
-    @pytest.mark.asyncio
-    async def test_people_sent_win_over_the_name(
-        self, db: Session, async_db: AsyncSession, diver: User, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._no_caches(monkeypatch)
-        sam = create_person(db, diver)
+        jae, sam = create_person(db, diver), create_person(db, diver)
+        jae_uuid, sam_uuid = jae.uuid, sam.uuid
 
         created = await courses_module.write_course(
             request=MagicMock(),
             course=CourseCreate.model_validate(
-                {"name": "AN/DP", "instructor_name": "Ignored", "people": [{"person_uuid": str(sam.uuid)}]}
+                {
+                    "name": "AN/DP",
+                    "people": [
+                        {"person_uuid": str(jae_uuid), "role": "instructor"},
+                        {"person_uuid": str(sam_uuid), "role": "student"},
+                    ],
+                }
             ),
             current_user=_as(diver),
             db=async_db,
         )
+        await courses_module.patch_course(
+            request=MagicMock(),
+            uuid=created.uuid,
+            values=CourseUpdateRequest.model_validate({"notes": "passed"}),
+            current_user=_as(diver),
+            db=async_db,
+        )
+        kept = await courses_module._cached_read_course.__wrapped__(  # type: ignore[attr-defined]
+            request=None, user_id=diver.id, uuid=created.uuid, owner_uuid=diver.uuid, db=async_db
+        )
+        await courses_module.patch_course(
+            request=MagicMock(),
+            uuid=created.uuid,
+            values=CourseUpdateRequest.model_validate({"people": [{"person_uuid": str(sam_uuid)}]}),
+            current_user=_as(diver),
+            db=async_db,
+        )
+        replaced = await courses_module._cached_read_course.__wrapped__(  # type: ignore[attr-defined]
+            request=None, user_id=diver.id, uuid=created.uuid, owner_uuid=diver.uuid, db=async_db
+        )
 
-        assert [(reference.person_uuid, reference.role) for reference in created.people] == [(sam.uuid, None)]
-        assert created.instructor_name is None
+        expected = [(jae_uuid, "instructor"), (sam_uuid, "student")]
+        assert [(reference.person_uuid, reference.role) for reference in created.people] == expected
+        assert [(reference.person_uuid, reference.role) for reference in kept.people] == expected
+        assert [(reference.person_uuid, reference.role) for reference in replaced.people] == [(sam_uuid, None)]
 
     @pytest.mark.asyncio
-    async def test_a_card_names_its_instructor_by_name_and_a_null_uuid_clears_it(
-        self, async_db: AsyncSession, diver: User, monkeypatch: pytest.MonkeyPatch
+    async def test_a_card_keeps_its_instructor_until_a_null_clears_it(
+        self, db: Session, async_db: AsyncSession, diver: User, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._no_caches(monkeypatch)
-        name = f"Jae {uuid7().hex[-6:]}"
+        jae_uuid = create_person(db, diver).uuid
 
         created = await certifications_module.write_certification(
             request=MagicMock(),
             certification=CertificationCreate.model_validate(
-                {"agency": "padi", "name": "Rescue Diver", "instructor_name": name}
+                {"agency": "padi", "name": "Rescue Diver", "instructor_uuid": str(jae_uuid)}
             ),
             current_user=_as(diver),
             db=async_db,
@@ -811,7 +761,7 @@ class TestTheInstructorShim:
         await certifications_module.patch_certification(
             request=MagicMock(),
             uuid=created.uuid,
-            values=CertificationUpdateRequest.model_validate({"instructor_name": "", "notes": "renewed"}),
+            values=CertificationUpdateRequest.model_validate({"notes": "renewed"}),
             current_user=_as(diver),
             db=async_db,
         )
@@ -829,6 +779,5 @@ class TestTheInstructorShim:
             request=None, user_id=diver.id, uuid=created.uuid, owner_uuid=diver.uuid, db=async_db
         )
 
-        assert created.instructor_name == kept.instructor_name == name
-        assert created.instructor_uuid is not None and kept.instructor_uuid == created.instructor_uuid
-        assert (cleared.instructor_uuid, cleared.instructor_name) == (None, None)
+        assert created.instructor_uuid == kept.instructor_uuid == jae_uuid
+        assert cleared.instructor_uuid is None

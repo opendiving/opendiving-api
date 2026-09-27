@@ -21,8 +21,6 @@ from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import COURSE_SEARCH_COLUMNS, crud_courses, get_courses_page
 from ...crud.crud_people import (
     StoredReference,
-    get_course_instructor_names,
-    get_course_references,
     get_people_for_courses,
     replace_people_for_course,
 )
@@ -35,14 +33,14 @@ from ...schemas.course import (
     CourseStatus,
     CourseUpdateRequest,
 )
-from ...schemas.person import PERSON_NOT_FOUND, PersonReference, PersonReferenceRead, instructor_shim_name
+from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
     invalidate_course_caches,
     invalidate_dive_caches,
 )
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
-from ...services.person_links import resolve_or_create_person, resolve_people_references, with_instructor
+from ...services.person_links import resolve_people_references
 
 router = APIRouter(tags=["courses"])
 
@@ -57,13 +55,12 @@ def _to_public_course(
     user_uuid: uuid_pkg.UUID,
     contact_uuid: uuid_pkg.UUID | None = None,
     people: list[PersonReferenceRead] | None = None,
-    instructor_name: str | None = None,
 ) -> CourseRead:
     """Convert an internal course representation (integer PK/FK) into its public shape
     (owning user and contact referenced by `uuid`, people embedded as references).
 
-    `contact_uuid`, `people` and the shim's `instructor_name` are resolved by the caller,
-    batched across a page where there is one.
+    `contact_uuid` and `people` are resolved by the caller, batched across a page where
+    there is one.
     """
     data = db_course if isinstance(db_course, dict) else db_course.model_dump()
     return CourseRead(
@@ -71,33 +68,7 @@ def _to_public_course(
         user_uuid=user_uuid,
         contact_uuid=contact_uuid,
         people=people or [],
-        instructor_name=instructor_name,
     )
-
-
-async def _people_update(
-    db: AsyncSession,
-    *,
-    user_id: int,
-    people: list[PersonReference] | None,
-    instructor_name: str | None,
-    course_id: int | None,
-) -> list[StoredReference] | None:
-    """What a course write says about its people, or `None` for no change.
-
-    The list it sent wins. Only without one does the shim's `instructor_name` count: that
-    person - the diver's of that name, or a new one - becomes the course's instructor in
-    what it already has. Blank or absent says nothing.
-    """
-    if people is not None:
-        return await resolve_people_references(db, people, user_id=user_id)
-    name = instructor_shim_name(instructor_name)
-    if name is None:
-        return None
-    person_id = await resolve_or_create_person(db, user_id=user_id, name=name)
-    stored = [] if course_id is None else await get_course_references(db, course_id)
-    updated = with_instructor(stored, person_id)
-    return None if updated == stored else updated
 
 
 async def _write_people(db: AsyncSession, course_id: int, references: list[StoredReference]) -> None:
@@ -207,21 +178,14 @@ async def write_course(
 
     `contact_uuid` names who ran the course; one that isn't the caller's own - or doesn't
     exist - is a 422. `people` names who was on it, its instructors by role, and is refused
-    the same way. `instructor_name` is deprecated and read only when `people` is absent: a
-    name resolves to the caller's person of that name, or creates one, as the instructor.
+    the same way.
     """
     contact_id: int | None = None
     if course.contact_uuid is not None:
         contact_id = await resolve_contact_reference(db, contact_uuid=course.contact_uuid, user_id=current_user["id"])
-    people = await _people_update(
-        db,
-        user_id=current_user["id"],
-        people=course.people if "people" in course.model_fields_set else None,
-        instructor_name=course.instructor_name,
-        course_id=None,
-    )
+    people = await resolve_people_references(db, course.people, user_id=current_user["id"])
     course_internal = CourseCreateInternal(
-        **course.model_dump(exclude={"contact_uuid", "people", "instructor_name"}),
+        **course.model_dump(exclude={"contact_uuid", "people"}),
         user_id=current_user["id"],
         contact_id=contact_id,
     )
@@ -241,9 +205,6 @@ async def write_course(
         user_uuid=current_user["uuid"],
         contact_uuid=course.contact_uuid,
         people=(await get_people_for_courses(db, [created_course.id]))[created_course.id] if people else [],
-        instructor_name=(
-            (await get_course_instructor_names(db, [created_course.id])).get(created_course.id) if people else None
-        ),
     )
 
 
@@ -307,14 +268,12 @@ async def _cached_read_courses(
     )
     course_ids = [row["id"] for row in courses_data["data"]]
     people_by_course = await get_people_for_courses(db, course_ids)
-    instructor_by_course = await get_course_instructor_names(db, course_ids)
     courses_data["data"] = [
         _to_public_course(
             row,
             user_uuid=user_uuid,
             contact_uuid=contact_uuid_by_id.get(row["contact_id"]),
             people=people_by_course.get(row["id"]),
-            instructor_name=instructor_by_course.get(row["id"]),
         ).model_dump()
         for row in courses_data["data"]
     ]
@@ -417,7 +376,6 @@ async def _cached_read_course(
         user_uuid=owner_uuid,
         contact_uuid=contact_uuid_by_id.get(db_course.contact_id),
         people=(await get_people_for_courses(db, [db_course.id])).get(db_course.id),
-        instructor_name=(await get_course_instructor_names(db, [db_course.id])).get(db_course.id),
     )
 
 
@@ -459,12 +417,11 @@ async def patch_course(
     rather than a course that ends before it began. Passing `null` for `contact_uuid`
     unlinks the course's contact, which is distinct from omitting the key; a contact that
     isn't the caller's own is a 422. `people` replaces the course's people wholesale, every
-    one the caller's own. A deprecated `instructor_name` counts only without `people`,
-    making that person the course's instructor; a blank one changes nothing.
+    one the caller's own.
     """
     db_course = await _get_owned_course(db, uuid, current_user)
 
-    update_data = values.model_dump(exclude={"contact_uuid", "people", "instructor_name"}, exclude_unset=True)
+    update_data = values.model_dump(exclude={"contact_uuid", "people"}, exclude_unset=True)
     if "agency" in update_data or "agency_other" in update_data:
         _validate_merged_agency_pairing(
             update_data.get("agency", db_course.agency),
@@ -483,12 +440,8 @@ async def patch_course(
             else await resolve_contact_reference(db, contact_uuid=values.contact_uuid, user_id=db_course.user_id)
         )
 
-    people = await _people_update(
-        db,
-        user_id=db_course.user_id,
-        people=values.people,
-        instructor_name=values.instructor_name,
-        course_id=db_course.id,
+    people = (
+        None if values.people is None else await resolve_people_references(db, values.people, user_id=db_course.user_id)
     )
 
     if update_data:

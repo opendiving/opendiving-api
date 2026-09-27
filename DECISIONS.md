@@ -7142,13 +7142,3 @@ current username, and their own export carries its public id, a uuid7 that dates
 which that account's export carries anyway. An import links a person by that id, under the same
 limit, and reports the current username, which the file did not carry. *Rejected:* linking by email,
 a second oracle over guessable addresses.
-
-## The course and certification writes honour an instructor's name for one web build
-
-Until the web build that sends `people` and `instructor_uuid` is live, `CourseCreate`,
-`CourseUpdateRequest`, `CertificationCreate` and `CertificationUpdateRequest` accept
-`instructor_name` and resolve a non-blank one to the caller's person of that name, or a new one,
-made the course's first instructor or the card's `instructor_id`; blank and `null` change nothing.
-`CourseRead` and `CertificationRead` serve the instructor's name under it, which the old dialog
-echoes back as a no-op - so a person rename also drops the course and certification caches. The api
-and web deploy apart. *Rejected:* accept-and-ignore. Both halves and this entry go together.

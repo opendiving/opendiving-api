@@ -19,7 +19,7 @@ from ...crud.crud_certifications import (
 )
 from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
-from ...crud.crud_people import get_person_names_by_ids, get_person_uuids_by_ids
+from ...crud.crud_people import get_person_uuids_by_ids
 from ...schemas.certification import (
     CertificationCreate,
     CertificationCreateInternal,
@@ -31,7 +31,7 @@ from ...schemas.certification import (
     CertificationUpdateRequest,
     validate_agency_pairing,
 )
-from ...schemas.person import PERSON_NOT_FOUND, instructor_shim_name
+from ...schemas.person import PERSON_NOT_FOUND
 from ...services.cache_invalidation import invalidate_certification_caches
 from ...services.certification_files import (
     UnsupportedCardFileError,
@@ -43,7 +43,7 @@ from ...services.certification_files import (
     store_certification_file,
 )
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
-from ...services.person_links import resolve_or_create_person, resolve_person_reference
+from ...services.person_links import resolve_person_reference
 
 router = APIRouter(tags=["certifications"])
 
@@ -96,7 +96,6 @@ def _to_public_certification(
     course_uuid: uuid_pkg.UUID | None = None,
     contact_uuid: uuid_pkg.UUID | None = None,
     instructor_uuid: uuid_pkg.UUID | None = None,
-    instructor_name: str | None = None,
     files: list[CertificationFileInfo] | None = None,
 ) -> CertificationRead:
     """Convert an internal certification representation (integer FKs) into its public
@@ -109,7 +108,7 @@ def _to_public_certification(
     `course_uuid` is passed in for the same reason: this stays a synchronous pure
     function, and each caller resolves the value the cheapest way it can - batched across
     a page for the readers, straight off the request body for the create path, and
-    `contact_uuid`, `instructor_uuid` and the shim's `instructor_name` the same way.
+    `contact_uuid` and `instructor_uuid` the same way.
     """
     data = db_certification if isinstance(db_certification, dict) else db_certification.model_dump()
     return CertificationRead(
@@ -118,30 +117,8 @@ def _to_public_certification(
         course_uuid=course_uuid,
         contact_uuid=contact_uuid,
         instructor_uuid=instructor_uuid,
-        instructor_name=instructor_name,
         files=files or [],
     )
-
-
-async def _instructor_update(
-    db: AsyncSession,
-    *,
-    user_id: int,
-    fields_set: set[str],
-    instructor_uuid: uuid_pkg.UUID | None,
-    instructor_name: str | None,
-) -> dict[str, int | None]:
-    """What a write says about `instructor_id`: `instructor_uuid` whenever it was sent, an
-    explicit `null` clearing it. Only without it does the shim's `instructor_name` count - the
-    caller's person of that name, or a new one - and a blank one says nothing."""
-    if "instructor_uuid" in fields_set:
-        if instructor_uuid is None:
-            return {"instructor_id": None}
-        return {"instructor_id": await resolve_person_reference(db, person_uuid=instructor_uuid, user_id=user_id)}
-    name = instructor_shim_name(instructor_name)
-    if name is None:
-        return {}
-    return {"instructor_id": await resolve_or_create_person(db, user_id=user_id, name=name)}
 
 
 def _validate_agency_pairing(agency: str, agency_other: str | None) -> None:
@@ -193,9 +170,7 @@ async def write_certification(
     `course_uuid` optionally links the card to the training course that issued it,
     `contact_uuid` to who ran it and `instructor_uuid` to the person who signed it; one that
     isn't the caller's own - or doesn't exist - is a 422, the same answer `POST /dive` gives
-    for a trip it cannot resolve. `instructor_name` is deprecated and read only when
-    `instructor_uuid` is absent: a name resolves to the caller's person of that name, or
-    creates one.
+    for a trip it cannot resolve.
     """
     course_id: int | None = None
     if certification.course_uuid is not None:
@@ -210,20 +185,18 @@ async def write_certification(
             db, contact_uuid=certification.contact_uuid, user_id=current_user["id"]
         )
 
-    instructor = await _instructor_update(
-        db,
-        user_id=current_user["id"],
-        fields_set=certification.model_fields_set,
-        instructor_uuid=certification.instructor_uuid,
-        instructor_name=certification.instructor_name,
-    )
+    instructor_id: int | None = None
+    if certification.instructor_uuid is not None:
+        instructor_id = await resolve_person_reference(
+            db, person_uuid=certification.instructor_uuid, user_id=current_user["id"]
+        )
 
     certification_internal = CertificationCreateInternal(
-        **certification.model_dump(exclude={"course_uuid", "contact_uuid", "instructor_uuid", "instructor_name"}),
+        **certification.model_dump(exclude={"course_uuid", "contact_uuid", "instructor_uuid"}),
         user_id=current_user["id"],
         course_id=course_id,
         contact_id=contact_id,
-        instructor_id=instructor.get("instructor_id"),
+        instructor_id=instructor_id,
     )
     try:
         created = await crud_certifications.create(
@@ -233,15 +206,12 @@ async def write_certification(
         await _refuse_a_vanished_reference(db, e)
     await invalidate_certification_caches(current_user["id"])
 
-    created_certification = cast(CertificationReadInternal, created)
-    instructor_id = created_certification.instructor_id
     return _to_public_certification(
-        created_certification,
+        cast(CertificationReadInternal, created),
         user_uuid=current_user["uuid"],
         course_uuid=certification.course_uuid,
         contact_uuid=certification.contact_uuid,
-        instructor_uuid=(await get_person_uuids_by_ids(db, [instructor_id], current_user["id"])).get(instructor_id),
-        instructor_name=(await get_person_names_by_ids(db, [instructor_id], current_user["id"])).get(instructor_id),
+        instructor_uuid=certification.instructor_uuid,
     )
 
 
@@ -293,9 +263,7 @@ async def _cached_read_certifications(
     contact_uuid_by_id = await get_contact_uuids_by_ids(
         db=db, contact_ids=[item["contact_id"] for item in data["data"]], user_id=user_id
     )
-    instructor_ids = [item["instructor_id"] for item in data["data"]]
-    instructor_uuid_by_id = await get_person_uuids_by_ids(db, instructor_ids, user_id)
-    instructor_name_by_id = await get_person_names_by_ids(db, instructor_ids, user_id)
+    instructor_uuid_by_id = await get_person_uuids_by_ids(db, [item["instructor_id"] for item in data["data"]], user_id)
     data["data"] = [
         _to_public_certification(
             item,
@@ -303,7 +271,6 @@ async def _cached_read_certifications(
             course_uuid=course_uuid_by_id.get(item["course_id"]) if item["course_id"] is not None else None,
             contact_uuid=contact_uuid_by_id.get(item["contact_id"]),
             instructor_uuid=instructor_uuid_by_id.get(item["instructor_id"]),
-            instructor_name=instructor_name_by_id.get(item["instructor_id"]),
             files=files_by_certification[item["id"]],
         ).model_dump()
         for item in data["data"]
@@ -381,7 +348,6 @@ async def _cached_read_certification(
         course_uuid=course_uuid,
         contact_uuid=contact_uuid_by_id.get(db_certification.contact_id),
         instructor_uuid=(await get_person_uuids_by_ids(db, [instructor_id], user_id)).get(instructor_id),
-        instructor_name=(await get_person_names_by_ids(db, [instructor_id], user_id)).get(instructor_id),
         files=files[db_certification.id],
     )
 
@@ -420,14 +386,11 @@ async def patch_certification(
     clearing one while the other still requires it is a 422 rather than a half-updated
     row. Passing `null` for `course_uuid` detaches the card from its training course,
     which is distinct from omitting the key; a course that isn't the caller's own is a
-    422. `contact_uuid` and `instructor_uuid` work the same way. A deprecated
-    `instructor_name` counts only without `instructor_uuid`, and a blank one changes nothing.
+    422. `contact_uuid` and `instructor_uuid` work the same way.
     """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
-    update_data = values.model_dump(
-        exclude={"course_uuid", "contact_uuid", "instructor_uuid", "instructor_name"}, exclude_unset=True
-    )
+    update_data = values.model_dump(exclude={"course_uuid", "contact_uuid", "instructor_uuid"}, exclude_unset=True)
     if "agency" in update_data or "agency_other" in update_data:
         _validate_agency_pairing(
             update_data.get("agency", db_certification.agency),
@@ -455,14 +418,14 @@ async def patch_certification(
             else await resolve_contact_reference(db, contact_uuid=values.contact_uuid, user_id=db_certification.user_id)
         )
 
-    instructor = await _instructor_update(
-        db,
-        user_id=db_certification.user_id,
-        fields_set=values.model_fields_set,
-        instructor_uuid=values.instructor_uuid,
-        instructor_name=values.instructor_name,
-    )
-    update_data |= instructor
+    if "instructor_uuid" in values.model_fields_set:
+        update_data["instructor_id"] = (
+            None
+            if values.instructor_uuid is None
+            else await resolve_person_reference(
+                db, person_uuid=values.instructor_uuid, user_id=db_certification.user_id
+            )
+        )
 
     if update_data:
         try:
