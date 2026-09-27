@@ -19,7 +19,6 @@ from ..schemas.person import (
     PersonRead,
     PersonReadInternal,
     PersonReferenceRead,
-    PersonRole,
     PersonUpdate,
     PersonUpdateInternal,
 )
@@ -184,16 +183,6 @@ async def get_people_for_courses(db: AsyncSession, course_ids: Sequence[int]) ->
     return await _people_for(db, CoursePerson, CoursePerson.course_id, course_ids)
 
 
-async def get_course_references(db: AsyncSession, course_id: int) -> list[StoredReference]:
-    """A course's people as stored, in order - what the shim edits an instructor into."""
-    rows = await db.execute(
-        select(CoursePerson.person_id, CoursePerson.role)
-        .where(CoursePerson.course_id == course_id)
-        .order_by(CoursePerson.position)
-    )
-    return [(row.person_id, row.role) for row in rows]
-
-
 async def _replace_people(
     db: AsyncSession,
     model: PersonJoin,
@@ -232,23 +221,6 @@ async def replace_people_for_course(
     db: AsyncSession, course_id: int, references: Sequence[StoredReference], commit: bool = True
 ) -> None:
     await _replace_people(db, CoursePerson, CoursePerson.course_id, course_id, references, commit)
-
-
-async def get_course_instructor_names(db: AsyncSession, course_ids: Sequence[int]) -> dict[int, str]:
-    """Each course's first instructor's name, by position - what the shim's `instructor_name`
-    serves in the place the single field used to be."""
-    if not course_ids:
-        return {}
-    rows = await db.execute(
-        select(CoursePerson.course_id, Person.name)
-        .join(Person, Person.id == CoursePerson.person_id)
-        .where(CoursePerson.course_id.in_(set(course_ids)), CoursePerson.role == PersonRole.INSTRUCTOR.value)
-        .order_by(CoursePerson.course_id, CoursePerson.position)
-    )
-    first: dict[int, str] = {}
-    for row in rows:
-        first.setdefault(row.course_id, row.name)
-    return first
 
 
 async def get_trip_uuids_with_person(db: AsyncSession, person_id: int) -> list[uuid_pkg.UUID]:

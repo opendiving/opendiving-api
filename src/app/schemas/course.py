@@ -14,7 +14,7 @@ from ..core.schemas import (
 )
 from .certification import CertificationAgency, validate_agency_pairing
 from .contact import CONTACT_UUID_DESCRIPTION
-from .person import INSTRUCTOR_NAME_READ_DESCRIPTION, InstructorNameShim, PeopleRead, PeopleUpdate, PeopleWrite
+from .person import PeopleRead, PeopleUpdate, PeopleWrite
 
 
 class CourseStatus(StrEnum):
@@ -97,9 +97,6 @@ class CourseRead(CourseBase, PublicUUIDSchema):
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
     # Its instructors among them, by role.
     people: PeopleRead
-    # Read-only: the first instructor's name, for the web build that still prints one and
-    # echoes it back on save. Comes out with the write half - see `InstructorNameShim`.
-    instructor_name: Annotated[str | None, Field(default=None, description=INSTRUCTOR_NAME_READ_DESCRIPTION)]
     created_at: datetime
 
 
@@ -121,17 +118,15 @@ class CourseReadInternal(CourseBase, PublicUUIDSchema):
 class CourseCreate(CourseBase):
     """Request body for creating a course.
 
-    `contact_uuid`, `people` and the shim's `instructor_name` sit here and on
-    `CourseUpdateRequest`, never on `CourseBase`: `CourseCreateInternal` inherits the base
-    and is CRUDAdmin's form, and every read inherits it too - the trap
-    `CertificationCreate`'s docstring records.
+    `contact_uuid` and `people` sit here and on `CourseUpdateRequest`, never on
+    `CourseBase`: `CourseCreateInternal` inherits the base and is CRUDAdmin's form, and
+    every read inherits it too - the trap `CertificationCreate`'s docstring records.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
     people: PeopleWrite
-    instructor_name: InstructorNameShim
 
 
 class CourseCreateInternal(CourseBase):
@@ -182,7 +177,6 @@ class CourseUpdateRequest(CourseUpdate):
 
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
     people: PeopleUpdate
-    instructor_name: InstructorNameShim
 
 
 class CourseUpdateInternal(CourseUpdate):

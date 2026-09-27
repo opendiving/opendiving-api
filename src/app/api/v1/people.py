@@ -187,12 +187,6 @@ async def patch_person(
 
     if update_data:
         await crud_people.update(db=db, object=update_data, uuid=uuid)
-        if "name" in update_data:
-            # The course and certification reads still carry the instructor's name for the
-            # web build that prints one - see *"The course and certification writes honour
-            # an instructor's name for one web build"* in DECISIONS.md.
-            await invalidate_course_caches(db_person.user_id)
-            await invalidate_certification_caches(db_person.user_id)
 
     return {"message": "Person updated"}
 

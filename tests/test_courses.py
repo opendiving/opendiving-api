@@ -503,10 +503,9 @@ class TestListOrderingSql:
 
 
 def _no_people(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A course read resolves its people and the shim's instructor name in two batched
-    queries; these tests are about the rest of the row."""
+    """A course read resolves its people in a batched query; these tests are about the rest
+    of the row."""
     monkeypatch.setattr(courses_module, "get_people_for_courses", AsyncMock(return_value={}))
-    monkeypatch.setattr(courses_module, "get_course_instructor_names", AsyncMock(return_value={}))
 
 
 class TestReadPath:
