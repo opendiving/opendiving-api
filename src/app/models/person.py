@@ -25,7 +25,7 @@ class Person(Base, PublicUUIDMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255))
     # The one foreign key into `user.id` that is not a cascade: it names *another* account,
     # whose purge must unlink this diver's record rather than delete it. See *"Every foreign
-    # key into `user.id` cascades but one"* in DECISIONS.md.
+    # key into `user.id` declares `ondelete="CASCADE"` but one"* in DECISIONS.md.
     linked_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("user.id", ondelete="SET NULL"), default=None, index=True
     )

@@ -72,11 +72,17 @@ else; what is here is the source, and the notes for working on it.
   account's dive insurance is about to expire and again when it has.
 - **Year in review** — each January, an email with the diver's previous year in figures.
 - **Training courses** — the course a card came out of and the dives logged on it, with the agency,
-  status, instructor and the contact that ran it. No mainstream logbook models this: the agency apps
-  tie dives to a course *or* cards to a course, and none of them let the record outlive the agency.
+  status, the people on it and the contact that ran it. No mainstream logbook models this: the
+  agency apps tie dives to a course *or* cards to a course, and none of them let the record outlive
+  the agency.
 - **Contacts** — the dive centers, schools, shops, clubs and places you stayed, each kept once with
   its phone, email, website and address and picked for a dive, a course, a card, a gear service or a
   trip part. Imported from UDDF's dive bases, shops and accommodation.
+- **People** — the buddies, guides, instructors, fellow students and companions you were with, each
+  kept once and listed with a role on a dive, a trip or a course; a course's and a card's instructor
+  is one. A person can be linked to an account on the same instance by its exact username, which
+  shows you that account's current username and tells it nothing. Imported from UDDF buddies and
+  guides and Subsurface's buddy and divemaster fields.
 - **Full export** — everything out in open formats (DiveJSON, UDDF, CSV, and an archive of all three
   plus your original files) in one request. Owner-only, never cached; the DiveJSON validates against
   the published 1.0 schema and the UDDF against the 3.2.2 one.
