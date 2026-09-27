@@ -45,8 +45,8 @@ dependencies = [
     # 0.15.0 is the floor because it is the first release whose schema has `people`, the
     # person references on a dive, a trip and a course and a certification's `instructor_uuid`,
     # and whose UDDF and `.ssrf` readers bring buddies and guides in as people. Resolved lower,
-    # the export of any account with a person fails the conformance check the export tests
-    # run, and an upload's buddies are never read. The floor still carries what 0.14.0's did:
+    # the export of every account fails the conformance check the export tests run, and an
+    # upload's buddies are never read. The floor still carries what 0.14.0's did:
     # the `contacts` collection and its references; what 0.13.0's did: the profile axis in
     # milliseconds and a device's readouts and salinity on the recording, without which a
     # UDDF, `.ssrf` or FIT upload converts with its axis in seconds, which the importer reads

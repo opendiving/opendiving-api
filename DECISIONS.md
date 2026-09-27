@@ -2444,9 +2444,7 @@ XSD types `xs:dateTime`; the tests widen it for their XSD pass alone. Midnight w
 nobody recorded.
 
 The owner's email stays out of `contactType`, though the phone goes in; a UDDF file gets handed to
-shops, and that address is the account's sign-in rather than anything the diver logged. What the
-diver logged about others goes out: a contact's email, and a person's email and phone in
-`<buddy><contact>`, the slot UDDF gives them.
+shops.
 
 ## Gas mixes dedupe on a rounded key, because the corpus carries float noise
 
