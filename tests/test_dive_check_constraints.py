@@ -1,4 +1,5 @@
-"""Integration tests for the `CheckConstraint`s on `Dive`/`DiveMixture`.
+"""Integration tests for the `CheckConstraint`s on `Dive`, `DiveMixture`, `DiveRecording` and
+`DiveSpecies`.
 
 Unlike the rest of this suite, these tests insert real rows through a sync SQLAlchemy
 session against a live Postgres database (see the `db` fixture in `conftest.py`), so
@@ -22,9 +23,10 @@ from sqlalchemy.orm import Session
 from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_recording import DiveRecording
+from src.app.models.dive_species import DiveSpecies
 from src.app.models.user import User
 from tests.conftest import db_available
-from tests.helpers.generators import create_user
+from tests.helpers.generators import create_species, create_user
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -512,4 +514,31 @@ class TestDiveRecordingCheckConstraints:
         `gear_item.type` follow: the write schemas hold the vocabulary, and the read shapes
         widen to a string so one such row cannot fail a whole dive read."""
         db.add(self._recording(dive, mode="rebreather_semiclosed_unheard_of"))
+        db.commit()
+
+
+class TestDiveSpeciesCheckConstraints:
+    """A sighting's count, against the real database. `SightingWrite` and the importer's
+    planner both refuse a count below one before it gets here; this is the backstop."""
+
+    @pytest.fixture
+    def dive(self, db: Session, dive_owner: User) -> Generator[Dive, Any]:
+        dive = _make_dive(dive_owner.id)
+        db.add(dive)
+        db.commit()
+        db.refresh(dive)
+        yield dive
+
+    @pytest.mark.parametrize("count", [0, -3])
+    def test_a_count_below_one_is_rejected(self, db: Session, dive: Dive, count: int) -> None:
+        """Zero is not a sighting, and a null is how *seen, not counted* is spelled."""
+        _assert_violates(
+            db,
+            DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=0, count=count),
+            "ck_dive_species_count_positive",
+        )
+
+    def test_one_and_no_count_are_both_stored(self, db: Session, dive: Dive) -> None:
+        db.add(DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=0, count=1))
+        db.add(DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=1))
         db.commit()

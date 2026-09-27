@@ -491,20 +491,49 @@ def _in_milliseconds(profile: dict[str, Any]) -> None:
         profile["duration"] *= MILLISECONDS_PER_SECOND
 
 
+def _sightings_from_species_uuids(raw: dict[str, Any]) -> list[ReaderNote]:
+    """A dive's retired `species_uuids`, read as sightings with no count and no note.
+
+    Keyed on the member rather than on who wrote it: it is retired, so a dive carrying it is
+    from before the change whatever produced it. A dive that also carries `sightings` keeps
+    those and the old list is ignored, as any undefined member is (§5.6).
+    """
+    dives = 0
+    for dive in _list(raw, "dives"):
+        if not isinstance(dive, dict) or "species_uuids" not in dive or "sightings" in dive:
+            continue
+        uuids = _list(dive, "species_uuids")
+        del dive["species_uuids"]
+        dive["sightings"] = [{"species_uuid": value} for value in uuids]
+        dives += bool(uuids)
+    if not dives:
+        return []
+    return [
+        ReaderNote(
+            ImportNoteCode.READ_AS_WRITTEN,
+            "This logbook was written before DiveJSON gave a sighting a count and a note, so the species of "
+            f"{dives} dive(s) were read as sightings with neither.",
+            collection="dives",
+        )
+    ]
+
+
 def read_as_written(raw: dict[str, Any]) -> list[ReaderNote]:
-    """Read a document a known writer produced before the format moved, as that writer meant it.
+    """Read a document written before the format moved, as its writer meant it.
 
     Rewrites `raw` in place into the current shape and says what it read, one report line
-    per kind: the profile axis in seconds, multiplied; the readouts on the dive, onto its
+    per kind: a dive's `species_uuids` as sightings, whoever wrote it; and for a writer this
+    app knows, the profile axis in seconds, multiplied; the readouts on the dive, onto its
     first recording - minting one where the dive has none, a recording of readouts alone;
     `water_type: "en13319"` onto that recording's `salinity`, dropped where the dive has
     neither a recording nor a readout to carry it; and a cylinder's `po2_limit` as
-    `ppo2_limit`. Anything else passes untouched, and a document no known writer produced is
-    not looked at: without this every old spelling would vanish silently, the importer
-    ignoring what it does not know (§5.6).
+    `ppo2_limit`. Anything else passes untouched, and past the sightings a document no known
+    writer produced is not looked at: without this every old spelling would vanish silently,
+    the importer ignoring what it does not know (§5.6).
     """
+    sightings = _sightings_from_species_uuids(raw)
     if not _written_before_the_axis_moved(raw):
-        return []
+        return sightings
 
     axes = readouts = salinities = limits = 0
     notes: list[ReaderNote] = []
@@ -573,7 +602,7 @@ def read_as_written(raw: dict[str, Any]) -> list[ReaderNote]:
         )
         if count
     ]
-    return summary + notes
+    return sightings + summary + notes
 
 
 # What a document written before a dive site's `location` became an object looks like from

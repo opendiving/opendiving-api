@@ -27,6 +27,7 @@ from src.app.api.dependencies import get_current_user
 from src.app.api.v1.certifications import _cached_read_certifications
 from src.app.core.config import settings
 from src.app.core.db.database import async_engine, async_get_db
+from src.app.core.schemas import POSTGRES_INTEGER_MAX
 from src.app.core.setup import create_application
 from src.app.core.worker.functions import purge_expired_checkin_links
 from src.app.core.worker.settings import WorkerSettings
@@ -38,7 +39,6 @@ from src.app.models.user import User
 from src.app.models.user_dive_stats import UserDiveStats
 from src.app.schemas.certification import CertificationSide
 from src.app.schemas.checkin_link import (
-    POSTGRES_INTEGER_MAX,
     CheckinCertification,
     CheckinDiver,
     CheckinLinkCreate,

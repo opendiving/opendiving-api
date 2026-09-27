@@ -70,6 +70,7 @@ from ...schemas.export import (
     ExportPersonReference,
     ExportPosition,
     ExportRecording,
+    ExportSighting,
     ExportSpecies,
     ExportStoredFile,
     ExportTrip,
@@ -577,7 +578,10 @@ def _dive(
         contact_uuid=None if contact is None else contact.uuid,
         site_uuids=[site.uuid for site in bundle.sites_for(dive)],
         gear_uuids=[item.uuid for item in bundle.gear_for(dive)],
-        species_uuids=[species.uuid for species in bundle.species_for(dive)],
+        sightings=[
+            ExportSighting(species_uuid=species.uuid, count=sighting.count, notes=_text(sighting.notes))
+            for species, sighting in bundle.sightings_for(dive)
+        ],
         people=_people(bundle.people_for(dive)),
         cylinders=[_mixture(mixture) for mixture in bundle.mixtures_by_dive[dive.id]],
         recordings=recordings,

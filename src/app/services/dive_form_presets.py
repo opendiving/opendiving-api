@@ -57,7 +57,7 @@ DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
             DiveFormField.MIXTURES,
             DiveFormField.GEAR_ITEM_UUIDS,
             DiveFormField.WEIGHT,
-            DiveFormField.SPECIES_UUIDS,
+            DiveFormField.SIGHTINGS,
             DiveFormField.MIXTURE_PO2_LIMIT,
             DiveFormField.MIXTURE_HELIUM,
             DiveFormField.MIXTURE_START_PRESSURE,

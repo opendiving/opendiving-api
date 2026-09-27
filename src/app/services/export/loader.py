@@ -40,6 +40,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_dive_mixtures import get_mixtures_for_dives
+from ...crud.crud_dive_species import StoredSighting
 from ...crud.crud_trip_parts import get_parts_for_trips
 from ...crud.crud_trips import EARLIEST_PART_START
 from ...models.certification import Certification
@@ -145,7 +146,7 @@ class ExportBundle:
     mixtures_by_dive: dict[int, list[DiveMixtureRead]]
     site_ids_by_dive: dict[int, list[int]]
     gear_ids_by_dive: dict[int, list[int]]
-    species_ids_by_dive: dict[int, list[int]]
+    sightings_by_dive: dict[int, list[StoredSighting]]
     # **One entry per dive, holding an ordered list of recordings**, where there used to be
     # one file and one profile per dive. Every writer in this package walks it: the DiveJSON
     # envelope writes `recordings[]` per dive, the archive plans a member per file, `dives.csv`
@@ -224,17 +225,21 @@ class ExportBundle:
         """A dive's gear in the order the diver listed it."""
         return [item for item_id in self.gear_ids_by_dive[dive.id] if (item := self.gear_item_by_id.get(item_id))]
 
-    def species_for(self, dive: Dive) -> list[Species]:
-        """A dive's species in the order the diver listed them.
+    def sightings_for(self, dive: Dive) -> list[tuple[Species, StoredSighting]]:
+        """A dive's sightings in the order the diver listed them, each with its species.
 
         The `.get()` here cannot miss the way the two above can: `species` is loaded *from*
         these very join rows, so every id in the map is in the list by construction.
         """
         return [
-            species
-            for species_id in self.species_ids_by_dive[dive.id]
-            if (species := self.species_by_id.get(species_id))
+            (species, sighting)
+            for sighting in self.sightings_by_dive[dive.id]
+            if (species := self.species_by_id.get(sighting.species_id))
         ]
+
+    def species_for(self, dive: Dive) -> list[Species]:
+        """A dive's species in the order the diver listed them."""
+        return [species for species, _ in self.sightings_for(dive)]
 
     # Both of the above resolve through `.get()` rather than indexing, and there is exactly
     # one way left to hit the miss: a join row pointing at *another user's* site or item.
@@ -319,8 +324,9 @@ async def _linked_uuids(db: AsyncSession, *, user_id: int) -> dict[int, uuid_pkg
 
 async def _ordered_ids_by_dive(
     db: AsyncSession, dive_ids: list[int]
-) -> tuple[dict[int, list[int]], dict[int, list[int]], dict[int, list[int]]]:
-    """The site, gear and species links for a set of dives, as ordered integer ids.
+) -> tuple[dict[int, list[int]], dict[int, list[int]], dict[int, list[StoredSighting]]]:
+    """The site, gear and species links for a set of dives, as ordered integer ids - each
+    sighting with its count and note beside the id.
 
     The existing `get_dive_sites_for_dives`/`get_gear_items_for_dives`/
     `get_species_for_dives` return the *summaries* a dive response embeds, which would mean
@@ -330,9 +336,9 @@ async def _ordered_ids_by_dive(
     """
     sites: dict[int, list[int]] = {dive_id: [] for dive_id in dive_ids}
     gear: dict[int, list[int]] = {dive_id: [] for dive_id in dive_ids}
-    species: dict[int, list[int]] = {dive_id: [] for dive_id in dive_ids}
+    sightings: dict[int, list[StoredSighting]] = {dive_id: [] for dive_id in dive_ids}
     if not dive_ids:
-        return sites, gear, species
+        return sites, gear, sightings
 
     site_rows = await db.execute(
         select(DiveDiveSite.dive_id, DiveDiveSite.dive_site_id)
@@ -350,18 +356,18 @@ async def _ordered_ids_by_dive(
     for row in gear_rows:
         gear[row.dive_id].append(row.gear_item_id)
 
-    species_rows = await db.execute(
-        select(DiveSpecies.dive_id, DiveSpecies.species_id)
+    sighting_rows = await db.execute(
+        select(DiveSpecies.dive_id, DiveSpecies.species_id, DiveSpecies.count, DiveSpecies.notes)
         .where(DiveSpecies.dive_id.in_(dive_ids))
         .order_by(DiveSpecies.dive_id, DiveSpecies.position)
     )
-    for row in species_rows:
-        species[row.dive_id].append(row.species_id)
+    for dive_id, species_id, count, notes in sighting_rows:
+        sightings[dive_id].append(StoredSighting(species_id=species_id, count=count, notes=notes))
 
-    return sites, gear, species
+    return sites, gear, sightings
 
 
-async def _referenced_species(db: AsyncSession, species_ids_by_dive: dict[int, list[int]]) -> list[Species]:
+async def _referenced_species(db: AsyncSession, sightings_by_dive: dict[int, list[StoredSighting]]) -> list[Species]:
     """The catalog rows a diver's dives point at, ordered by scientific name.
 
     The one read in this module that is **not** scoped by a `user_id` column, because
@@ -373,7 +379,7 @@ async def _referenced_species(db: AsyncSession, species_ids_by_dive: dict[int, l
     Ordered here rather than by a writer, matching the bundle's pre-sorted contract: `id`
     breaks ties so two species sharing a name still come out in a stable order run after run.
     """
-    ids = {species_id for ids in species_ids_by_dive.values() for species_id in ids}
+    ids = {sighting.species_id for sightings in sightings_by_dive.values() for sighting in sightings}
     if not ids:
         return []
 
@@ -436,7 +442,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
     dives = await _owned(db, Dive, user_id=user_id, order_by=(Dive.start_time, Dive.dive_number, Dive.id))
     dive_ids = [dive.id for dive in dives]
 
-    site_ids_by_dive, gear_ids_by_dive, species_ids_by_dive = await _ordered_ids_by_dive(db, dive_ids)
+    site_ids_by_dive, gear_ids_by_dive, sightings_by_dive = await _ordered_ids_by_dive(db, dive_ids)
 
     gear_sets = await _owned(db, GearSet, user_id=user_id, order_by=(GearSet.name, GearSet.id))
     item_ids_by_set: dict[int, list[int]] = {gear_set.id: [] for gear_set in gear_sets}
@@ -477,7 +483,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         mixtures_by_dive=await get_mixtures_for_dives(db=db, dive_ids=dive_ids),
         site_ids_by_dive=site_ids_by_dive,
         gear_ids_by_dive=gear_ids_by_dive,
-        species_ids_by_dive=species_ids_by_dive,
+        sightings_by_dive=sightings_by_dive,
         recordings_by_dive=await _recordings_by_dive(db, dive_ids),
         attribution_by_dive=await get_gas_attribution_for_dives(db=db, dive_ids=dive_ids),
         trips=trips,
@@ -487,7 +493,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         dive_sites=dive_sites,
         gear_items=gear_items,
         # After `_ordered_ids_by_dive` above, which is what says which species to read.
-        species=await _referenced_species(db, species_ids_by_dive),
+        species=await _referenced_species(db, sightings_by_dive),
         gear_sets=gear_sets,
         item_ids_by_set=item_ids_by_set,
         dive_form_presets=await _owned(

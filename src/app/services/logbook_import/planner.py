@@ -47,6 +47,7 @@ from uuid6 import uuid7
 from ...core.schemas import NOTES_MAX_LENGTH
 from ...core.utils.datetime_offset import split_dive_start_time, split_local_start_time
 from ...core.utils.uploads import safe_filename
+from ...crud.crud_dive_species import StoredSighting
 from ...models.certification import Certification
 from ...models.contact import Contact
 from ...models.course import Course
@@ -532,6 +533,16 @@ _READOUT_BOUNDS: tuple[_Bound, ...] = (
 )
 _READOUT_COLUMN = {"surface_pressure": "surface_pressure_bar"}
 
+# A sighting's count, from `models/dive_species.py`, with the column's width as its ceiling:
+# the format floors it above zero and caps it nowhere.
+_SIGHTING_BOUNDS: tuple[_Bound, ...] = (
+    _Bound(
+        "count",
+        lambda value: 1 <= value <= _INT32_MAX,
+        f"a sighting's count must be between 1 and {_INT32_MAX}",
+    ),
+)
+
 # The mixture bounds, same rules, from `models/dive_mixture.py`. `volume`, `oxygen` and
 # `helium` are here rather than handled apart because they became nullable columns: they
 # are bounded-and-droppable like every other member on this list, and a document that
@@ -659,6 +670,8 @@ class _Planner:
         self._files_not_contained = 0
         self._files_skipped = 0
         self._species_row_by_uuid: dict[uuid_pkg.UUID, int] = {}
+        # The document's species records by uuid, once `_plan_species` has made each unique.
+        self._species_by_uuid: dict[uuid_pkg.UUID, ImportSpecies] = {}
         # Digests this account already stores, plus the ones this import is about to add.
         # `ux_dive_file_user_id_sha256` is per user, so a second recording carrying identical
         # bytes cannot have a row of its own - and one row names one `recording_id`, so it
@@ -1760,6 +1773,7 @@ class _Planner:
         for species in self._document.species:
             self._claim_document_uuid("species", species)
             self._records["species"][species.uuid] = self._plan_one_species(species, catalog)
+            self._species_by_uuid[species.uuid] = species
 
     def _plan_one_species(self, species: ImportSpecies, catalog: dict[int, int]) -> PlannedRecord:
         if species.aphia_id is None:
@@ -2363,31 +2377,33 @@ class _Planner:
             "contact_uuid": self._reference(collection, dive.uuid, "contacts", dive.contact_uuid),
             "site_uuids": self._reference_list(collection, dive.uuid, "sites", dive.site_uuids),
             "gear_uuids": self._reference_list(collection, dive.uuid, "gear", dive.gear_uuids),
-            "species_ids": self._plan_species_links(dive),
+            "sightings": self._plan_sightings(dive),
             "people": self._person_references(collection, dive.uuid, dive.people),
             "mixtures": mixtures,
             "recordings": recordings,
         }
         return record
 
-    def _plan_species_links(self, dive: ImportDive) -> list[int]:
-        """A dive's sightings, as catalog row ids.
+    def _plan_sightings(self, dive: ImportDive) -> list[StoredSighting]:
+        """A dive's sightings, each naming its catalog row, with the count bounded and the
+        note cut at the cap.
 
         The one reference kind that resolves to something the caller does not own, and the
         one that can legitimately come back short: a species the catalog cannot be made to
         hold is skipped, and the dive imports without it. Never the other way round.
+
+        **The first sighting of a species is kept and any other is reported.** A document
+        naming one species twice on a dive, or two species records sharing an AphiaID, breaks
+        the format's one-sighting-per-species rule; folding the two, as a merge does, would
+        invent a sighting neither record holds and hide the defect. Keyed on the AphiaID,
+        which every sighting reaching that check carries and which preview can see before
+        the pre-pass has found a row.
         """
-        ids: list[int] = []
-        for species_uuid in dive.species_uuids:
-            record = self._records["species"].get(species_uuid)
-            row_id = self._species_row_by_uuid.get(species_uuid)
-            if record is not None and record.action is not Action.SKIP and row_id is None:
-                # Preview, and this species is one the pre-pass has not looked up yet. The
-                # species collection's own note already says it will be, and saying "the
-                # sighting was not imported" here would contradict that in the same report -
-                # while every dive naming a new species spent a note against the cap.
-                continue
-            if record is None or record.action is Action.SKIP or row_id is None:
+        sightings: list[StoredSighting] = []
+        listed: set[int | None] = set()
+        for sighting in dive.sightings:
+            record = self._records["species"].get(sighting.species_uuid)
+            if record is None or record.action is Action.SKIP:
                 self._note(
                     ImportNoteCode.SPECIES_UNRESOLVED,
                     "A species this dive records could not be matched to this instance's catalog, so the sighting "
@@ -2396,9 +2412,27 @@ class _Planner:
                     uuid=dive.uuid,
                 )
                 continue
-            if row_id not in ids:
-                ids.append(row_id)
-        return ids
+            species = self._species_by_uuid[sighting.species_uuid]
+            if species.aphia_id in listed:
+                self._dropped(
+                    "dives",
+                    dive.uuid,
+                    f"A second sighting of {species.scientific_name or f'species {species.uuid}'} was dropped: a "
+                    "dive records each species once, and the first was kept",
+                )
+                continue
+            listed.add(species.aphia_id)
+            count = self._bounded("dives", dive.uuid, sighting, _SIGHTING_BOUNDS).get("count")
+            notes = self._notes_text("dives", dive.uuid, sighting.notes)
+            row_id = self._species_row_by_uuid.get(sighting.species_uuid)
+            if row_id is None:
+                # Preview, and this species is one the pre-pass has not looked up yet. The
+                # species collection's own note already says it will be, and saying "the
+                # sighting was not imported" here would contradict that in the same report -
+                # while every dive naming a new species spent a note against the cap.
+                continue
+            sightings.append(StoredSighting(species_id=row_id, count=count, notes=notes))
+        return sightings
 
     def _plan_cylinders(self, dive: ImportDive) -> list[dict[str, Any]]:
         """A dive's gas supplies, as `dive_mixture` rows.

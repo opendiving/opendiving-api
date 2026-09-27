@@ -4,11 +4,9 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import StoredVocabulary
-
 # `checkin_link.total_dives` is a Postgres `integer`, and so is the `user_dive_stats` column the
 # logged count comes from.
-POSTGRES_INTEGER_MAX = 2**31 - 1
+from ..core.schemas import POSTGRES_INTEGER_MAX, StoredVocabulary
 
 
 class CheckinLinkCreate(BaseModel):

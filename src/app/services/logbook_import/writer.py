@@ -460,7 +460,7 @@ class _Writer:
                 commit=False,
             )
             await replace_species_for_dive(
-                db=self._db, dive_id=dive_id, species_ids=record.children.get("species_ids") or [], commit=False
+                db=self._db, dive_id=dive_id, sightings=record.children.get("sightings") or [], commit=False
             )
             await replace_people_for_dive(self._db, dive_id, self._people(record), commit=False)
             for recording in record.children.get("recordings") or []:

@@ -356,6 +356,15 @@ class ImportPersonReference(_ReadModel):
 _People = Annotated[list[ImportPersonReference], Field(default_factory=list), _Collection]
 
 
+class ImportSighting(_ReadModel):
+    """One species seen on one dive (spec §6.3a). The count is read as written and bounded by
+    the planner, and the note is cut at this app's cap there."""
+
+    species_uuid: uuid_pkg.UUID
+    count: int | None = None
+    notes: str | None = None
+
+
 class ImportDive(_ReadModel):
     uuid: uuid_pkg.UUID
     number: int | None = None
@@ -384,7 +393,7 @@ class ImportDive(_ReadModel):
     contact_uuid: uuid_pkg.UUID | None = None
     site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
     gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
-    species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
+    sightings: Annotated[list[ImportSighting], Field(default_factory=list), _Collection]
     people: _People
     cylinders: Annotated[list[ImportCylinder], Field(default_factory=list), _Collection]
     # **`source_file` and `profile` are not members of a dive any more**, and this reader
@@ -672,9 +681,9 @@ class ImportNoteCode(StrEnum):
     RECORD_REMAPPED_REFERENCES_STAY = "record_remapped_references_stay"
     # A soft-deleted row of the caller's came back, under its original uuid.
     RECORD_RESTORED = "record_restored"
-    # The document was written before a change to the format, by a writer this app knows, and
-    # a value was read as that writer meant it - a profile axis in seconds, a readout on the
-    # dive, `en13319` as a dive's water, `po2_limit`. Nothing was lost.
+    # The document was written before a change to the format, and a value was read as its
+    # writer meant it - a profile axis in seconds, a readout on the dive, `en13319` as a
+    # dive's water, `po2_limit`, a dive's `species_uuids`. Nothing was lost.
     READ_AS_WRITTEN = "read_as_written"
     # The record imported, but one of its values could not be stored as written.
     VALUE_DROPPED = "value_dropped"

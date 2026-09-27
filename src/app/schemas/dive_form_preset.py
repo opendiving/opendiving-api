@@ -70,7 +70,9 @@ class DiveFormField(StrEnum):
     MIXTURES = "mixtures"
     GEAR_ITEM_UUIDS = "gear_item_uuids"
     WEIGHT = "weight"
-    SPECIES_UUIDS = "species_uuids"
+    # Where `species_uuids` stood, and it has to stay there: revision `c47b308253a3` renamed
+    # that member to this one in place in every stored set.
+    SIGHTINGS = "sightings"
     NOTES = "notes"
 
     MIXTURE_PO2_LIMIT = "mixture.po2_limit"

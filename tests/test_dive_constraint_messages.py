@@ -87,6 +87,14 @@ class TestFkErrorDetail:
             == "An imported position needs both a latitude and a longitude."
         )
 
+    def test_a_sightings_count_must_be_at_least_one(self):
+        """A backstop under `SightingWrite`, which refuses the count first - and without it a
+        violation would answer with a sentence about a missing related record."""
+        assert (
+            _fk_error_detail(_integrity_error("ck_dive_species_count_positive"))
+            == "A sighting's count must be at least 1."
+        )
+
     def test_unknown_violation_falls_back_to_generic_message(self):
         exc = IntegrityError("INSERT ...", {}, Exception("some other constraint"))
         assert _fk_error_detail(exc) == "Invalid reference: a related record does not exist."
