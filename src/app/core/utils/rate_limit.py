@@ -86,3 +86,27 @@ async def enforce_rate_limit(key: str, max_requests: int, window_seconds: int) -
 
     if current > max_requests:
         raise RateLimitException("Too many requests. Please try again later.")
+
+
+async def claim_rate_limit_slot(key: str, max_requests: int, window_seconds: int) -> bool:
+    """`enforce_rate_limit` as an answer rather than a raise: `False` where it would have
+    refused, for a caller to whom an exhausted window is an ordinary branch. Spends a slot
+    either way, as the raising form does."""
+    try:
+        await enforce_rate_limit(key, max_requests, window_seconds)
+    except RateLimitException:
+        return False
+    return True
+
+
+async def remaining_in_window(key: str, max_requests: int) -> int:
+    """How many more requests the window at `key` admits, **without spending one** - for a
+    preview that has to say what its apply would be allowed. Fails open, as the limiter
+    does."""
+    if cache.client is None:
+        return max_requests
+    try:
+        current = await cache.client.get(key)
+    except RedisError:
+        return max_requests
+    return max(0, max_requests - int(current or 0))

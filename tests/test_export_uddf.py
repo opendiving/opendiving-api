@@ -507,9 +507,12 @@ class TestDiveContent:
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         links = _dive(_tree(document), 0).findall(f"{UDDF}informationbeforedive/{UDDF}link")
         sites = _tree(document).findall(f"{UDDF}divesite/{UDDF}site")
-        # The dive's contact follows its sites, never ahead of the primary one.
+        # The dive's contact follows its sites, never ahead of the primary one, and its
+        # people follow the contact - the guide through its base's `<guide>`.
         assert [link.get("ref") for link in links] == [site.get("id") for site in sites] + [
-            f"contact-{UUIDS['contact-resort']}"
+            f"contact-{UUIDS['contact-resort']}",
+            f"person-{UUIDS['person-sam']}",
+            "guide-0",
         ]
 
     @pytest.mark.asyncio

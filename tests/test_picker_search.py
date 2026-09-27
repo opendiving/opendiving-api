@@ -1,6 +1,7 @@
 """Unit tests for the `search=` surface behind the dive form's pickers
 (`api/v1/dive_sites.py`, `api/v1/trips.py`, `api/v1/courses.py`, `api/v1/contacts.py`,
-`api/v1/gear_items.py`, `core/utils/search.py`, `core/utils/owned_resource_cache.py`).
+`api/v1/people.py`, `api/v1/gear_items.py`, `core/utils/search.py`,
+`core/utils/owned_resource_cache.py`).
 
 Like the other suites here these cover the pure-logic pieces - the `LIKE` escaping, the
 shape of the search `WHERE` clause, and the cache keys - rather than the endpoints on
@@ -26,10 +27,12 @@ from src.app.core.utils.search import escape_like, search_clause
 from src.app.crud.crud_contacts import CONTACT_SEARCH_COLUMNS
 from src.app.crud.crud_courses import COURSE_SEARCH_COLUMNS
 from src.app.crud.crud_gear_items import crud_gear_items
+from src.app.crud.crud_people import person_search_condition
 from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
+from src.app.models.person import Person
 from src.app.models.trip import Trip
 
 
@@ -101,6 +104,18 @@ class TestSearchClause:
         # literally instead of neutralizing the "%". (Backslashes render doubled in
         # literal SQL; the real query sends the pattern as a bound parameter.)
         assert "ILIKE '%50\\\\%%' ESCAPE '\\\\'" in sql
+
+
+class TestThePeopleSearch:
+    def test_it_matches_the_name_or_the_linked_username(self) -> None:
+        """A picker finds a friend by the handle they go by as well as by the name the
+        diver wrote, so the linked account's username is the second column - across a join
+        the other pickers do not need."""
+        sql = _as_sql(person_search_condition("alex"), model=Person)
+
+        assert "person.name ILIKE '%alex%' ESCAPE '\\\\'" in sql
+        assert "\"user\".username ILIKE '%alex%' ESCAPE '\\\\'" in sql
+        assert " OR " in sql
 
 
 class TestOwnedResourceSearchConditions:
@@ -188,6 +203,7 @@ PAGINATED_LIST_ROUTES: dict[str, tuple[str, ...]] = {
     "gear_service.py": ("read_gear_service_records", "read_gear_service_schedules"),
     "gear_sets.py": ("read_gear_sets",),
     "invitations.py": ("read_invitations",),
+    "people.py": ("read_people",),
     "trips.py": ("read_trips",),
     "users.py": ("read_species_life_list",),
 }

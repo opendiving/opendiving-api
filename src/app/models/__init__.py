@@ -6,12 +6,14 @@ from .certification_file import CertificationFile
 from .checkin_link import CheckinLink
 from .contact import Contact
 from .course import Course
+from .course_person import CoursePerson
 from .dive import Dive
 from .dive_dive_site import DiveDiveSite
 from .dive_file import DiveFile
 from .dive_form_preset import DiveFormPreset
 from .dive_gear_item import DiveGearItem
 from .dive_mixture import DiveMixture
+from .dive_person import DivePerson
 from .dive_profile import DiveProfile
 from .dive_recording import DiveRecording
 from .dive_site import DiveSite
@@ -23,10 +25,12 @@ from .gear_set import GearSet
 from .gear_set_item import GearSetItem
 from .invitation import Invitation
 from .invite_request import InviteRequest
+from .person import Person
 from .species import Species
 from .species_name import SpeciesName
 from .trip import Trip
 from .trip_part import TripPart
+from .trip_person import TripPerson
 from .user import User
 from .user_dive_stats import UserDiveStats
 from .user_picture import UserPicture

@@ -364,7 +364,11 @@ class TestWhatUddfCannotHold:
         assert course["name"] == "Advanced Nitrox + Decompression Procedures"
         assert (course["agency"], course["status"]) == ("tdi", "completed")
         assert (course["starts_on"], course["ends_on"]) == ("2026-03-02", "2026-03-06")
-        assert (course["instructor_name"], course["instructor_number"]) == ("Jae Kim", "TDI-88121")
+        assert course["instructor_number"] == "TDI-88121"
+        assert course["people"] == [
+            {"person_uuid": str(UUIDS["person-jae"]), "role": "instructor"},
+            {"person_uuid": str(UUIDS["person-sam"]), "role": "student"},
+        ]
         assert course["contact_uuid"] == str(UUIDS["contact-school"])
 
     @pytest.mark.asyncio
@@ -1009,8 +1013,9 @@ class TestAbsence:
             "site_uuids",
             "gear_uuids",
             "species_uuids",
+            "people",
             "cylinders",
-            # An empty array, like the four above it: a hand-entered dive was recorded by
+            # An empty array, like the five above it: a hand-entered dive was recorded by
             # nothing, and the collection members are written empty rather than omitted so a
             # reader never has to tell "no recordings" from "this writer omits the member".
             "recordings",

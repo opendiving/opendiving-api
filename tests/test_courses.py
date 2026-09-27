@@ -241,9 +241,9 @@ class TestCourseSchema:
         with pytest.raises(ValidationError, match="cannot be null"):
             CourseUpdate.model_validate({"status": None})
 
-    @pytest.mark.parametrize("field", ["start_date", "end_date", "instructor_name", "instructor_number", "agency"])
+    @pytest.mark.parametrize("field", ["start_date", "end_date", "instructor_number", "agency"])
     def test_the_update_schema_still_clears_a_nullable_field(self, field: str) -> None:
-        """Clearing these is a real edit - an instructor misremembered, a course that
+        """Clearing these is a real edit - an instructor's number misremembered, a course that
         turned out to be `planned` after all, an agency the course never ran under."""
         values = CourseUpdate.model_validate({field: None})
 
@@ -502,6 +502,13 @@ class TestListOrderingSql:
         assert "ORDER BY course.start_date DESC NULLS LAST, course.uuid DESC" in sql
 
 
+def _no_people(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A course read resolves its people and the shim's instructor name in two batched
+    queries; these tests are about the rest of the row."""
+    monkeypatch.setattr(courses_module, "get_people_for_courses", AsyncMock(return_value={}))
+    monkeypatch.setattr(courses_module, "get_course_instructor_names", AsyncMock(return_value={}))
+
+
 class TestReadPath:
     @pytest.mark.asyncio
     async def test_a_course_with_no_agency_reads_back_without_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -512,6 +519,7 @@ class TestReadPath:
         monkeypatch.setattr(
             courses_module, "get_courses_page", AsyncMock(return_value={"data": rows, "total_count": 1})
         )
+        _no_people(monkeypatch)
 
         page = await _read_courses_uncached(
             _get_request(),
@@ -535,6 +543,7 @@ class TestReadPath:
         ]
         page_query = AsyncMock(return_value={"data": rows, "total_count": 2})
         monkeypatch.setattr(courses_module, "get_courses_page", page_query)
+        _no_people(monkeypatch)
 
         page = await _read_courses_uncached(
             _get_request(),
@@ -683,6 +692,7 @@ class TestReadPath:
         invisible on the detail page until the entry expired."""
         course = _internal_course()
         monkeypatch.setattr(courses_module.crud_courses, "get", AsyncMock(return_value=course))
+        _no_people(monkeypatch)
         redis = _FakeRedis()
 
         with patch.object(cache_module, "client", redis):

@@ -11,6 +11,7 @@ from ..core.schemas import (
     validate_date_range,
 )
 from .location import LocationInput, LocationRead
+from .person import PeopleRead, PeopleUpdate, PeopleWrite
 
 MAX_TRIP_PARTS = 20
 
@@ -67,6 +68,9 @@ class TripRead(TripBase, PublicUUIDSchema):
     """
 
     parts: Annotated[list[TripPartRead], Field(default_factory=list)]
+    # Who came on the trip, which is not a walk of its dives: a companion who never dived is
+    # here and on none of them.
+    people: PeopleRead
     user_uuid: uuid_pkg.UUID
     created_at: datetime
 
@@ -93,6 +97,7 @@ class TripCreate(TripBase):
             description="The stretches this trip ran, in the order the diver arranged them",
         ),
     ]
+    people: PeopleWrite
 
 
 class TripCreateInternal(TripBase):
@@ -110,10 +115,10 @@ class TripUpdate(RejectsExplicitNulls):
 
 
 class TripUpdateRequest(TripUpdate):
-    """Request body for updating a trip, including replacing its parts.
+    """Request body for updating a trip, including replacing its parts and its people.
 
     Omit `parts` and the existing ones are left untouched; provide it - even as an empty
-    list - and they are replaced wholesale with what was sent.
+    list - and they are replaced wholesale with what was sent. `people` works the same way.
 
     Separate from `TripUpdate` rather than a field on it because `TripUpdate` is CRUDAdmin's
     Trip form schema (and the shape `test_update_explicit_nulls.py` sweeps against the
@@ -128,6 +133,7 @@ class TripUpdateRequest(TripUpdate):
             description="The stretches this trip ran, in order. Omit to leave them unchanged.",
         ),
     ]
+    people: PeopleUpdate
 
 
 class TripUpdateInternal(TripUpdate):

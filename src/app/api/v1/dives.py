@@ -49,6 +49,7 @@ from ...crud.crud_dive_species import (
 )
 from ...crud.crud_dives import crud_dives
 from ...crud.crud_gear_items import resolve_gear_item_ids_for_user
+from ...crud.crud_people import get_people_for_dives, replace_people_for_dive, resolve_person_ids_for_user
 from ...crud.crud_species import resolve_species_ids
 from ...crud.crud_trips import get_trip_uuids_by_ids, resolve_trip_id_for_user
 from ...schemas.dive import (
@@ -76,6 +77,7 @@ from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.dive_profile import RecordingProfileRead
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
+from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
 from ...services.dive_files import (
@@ -121,6 +123,7 @@ from ...services.dive_recordings import (
 )
 from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
+from ...services.person_links import resolve_people_references
 
 router = APIRouter(tags=["dives"])
 
@@ -170,8 +173,8 @@ def _validate_merged_depth_pair(avg_depth: float | None, max_depth: float | None
 def _fk_error_detail(exc: IntegrityError) -> str:
     """Translate a dive `IntegrityError` into a message worth showing a diver.
 
-    Covers both foreign keys (a trip/course/site/gear item/species that vanished between
-    validation and insert) and the domain `CheckConstraint`s. Constraint violations surface from the DB
+    Covers both foreign keys (a trip/course/site/gear item/species/person that vanished
+    between validation and insert) and the domain `CheckConstraint`s. Constraint violations surface from the DB
     layer, not Pydantic, so without this the caller would get a raw 500 instead of a
     sentence naming the field.
     """
@@ -188,6 +191,8 @@ def _fk_error_detail(exc: IntegrityError) -> str:
         return "Gear item not found."
     if "species_id_fkey" in msg:
         return "Species not found."
+    if "person_id_fkey" in msg:
+        return PERSON_NOT_FOUND
     for constraint, detail in _DIVE_CONSTRAINT_MESSAGES.items():
         if constraint in msg:
             return detail
@@ -375,6 +380,7 @@ def _to_public_dive_with_mixtures(
     gear_items: list[GearItemInfo],
     mixtures: list[DiveMixtureRead],
     species: list[SpeciesInfo],
+    people: list[PersonReferenceRead],
     recordings: list[RecordingRead] | None = None,
     attribution: ProfileGasAttribution | None = None,
 ) -> DiveReadWithMixtures:
@@ -401,6 +407,7 @@ def _to_public_dive_with_mixtures(
         gear_items=gear_items,
         mixtures=mixtures,
         species=species,
+        people=people,
         recordings=recordings or [],
         # Both callers of this function (creating a dive, and the cached single-dive
         # read) go through here, so gas use is derived in exactly one place. Safe to
@@ -542,16 +549,18 @@ async def write_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    """Log a dive, together with its gas mixtures, dive sites, gear and species in one request.
+    """Log a dive, together with its gas mixtures, dive sites, gear, species and people in one
+    request.
 
-    Every referenced trip, training course, contact, dive site and gear item must belong to
-    the caller: one that doesn't - or doesn't exist - is a 422 naming which, not a 403, since
-    from the caller's side the two are the same thing. Species are the exception, and only
-    because the catalog is global: a species uuid needs to exist, but it belongs to nobody,
-    so there is no ownership to fail. Dive sites keep the order given; index 0 is the
-    primary site, and species keep the order they were spotted in. Values the DB's domain
-    constraints reject (a non-positive duration, a mixture over 100%) also come back as 422
-    with the offending field named.
+    Every referenced trip, training course, contact, dive site, gear item and person must
+    belong to the caller: one that doesn't - or doesn't exist - is a 422 naming which, not a
+    403, since from the caller's side the two are the same thing. Species are the exception,
+    and only because the catalog is global: a species uuid needs to exist, but it belongs to
+    nobody, so there is no ownership to fail. Dive sites keep the order given; index 0 is the
+    primary site, and species keep the order they were spotted in. `people` keeps the
+    diver's order, each with the role the person had; one named twice keeps the first.
+    Values the DB's domain constraints reject (a non-positive duration, a mixture over 100%)
+    also come back as 422 with the offending field named.
     """
     trip_id: int | None = None
     if dive.trip_uuid is not None:
@@ -589,6 +598,7 @@ async def write_dive(
     if species_id_by_uuid is None:
         raise UnprocessableEntityException("Species not found.")
     species_ids = [species_id_by_uuid[u] for u in dive.species_uuids]
+    people = await resolve_people_references(db, dive.people, user_id=current_user["id"])
 
     dive_internal_dict = dive.model_dump(
         exclude={
@@ -596,6 +606,7 @@ async def write_dive(
             "dive_site_uuids",
             "gear_item_uuids",
             "species_uuids",
+            "people",
             "trip_uuid",
             "course_uuid",
             "contact_uuid",
@@ -639,6 +650,12 @@ async def write_dive(
     except IntegrityError as e:
         await db.rollback()
         raise UnprocessableEntityException(_fk_error_detail(e)) from e
+    if people:
+        try:
+            await replace_people_for_dive(db=db, dive_id=created_dive.id, references=people)
+        except IntegrityError as e:
+            await db.rollback()
+            raise UnprocessableEntityException(_fk_error_detail(e)) from e
     await recalculate_dive_stats(db=db, user_id=current_user["id"])
     await recalculate_gear_dive_counts(db=db, user_id=current_user["id"])
     await invalidate_dive_caches(current_user["id"])
@@ -653,6 +670,7 @@ async def write_dive(
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=created_dive.id)
     gear_items = await get_gear_items_for_dive(db=db, dive_id=created_dive.id)
     species = await get_species_for_dive(db=db, dive_id=created_dive.id)
+    stored_people = (await get_people_for_dives(db, [created_dive.id]))[created_dive.id] if people else []
     return _to_public_dive_with_mixtures(
         cast(dict[str, Any], dive_read_internal),
         user_uuid=current_user["uuid"],
@@ -663,6 +681,7 @@ async def write_dive(
         gear_items=gear_items,
         mixtures=mixtures,
         species=species,
+        people=stored_people,
     )
 
 
@@ -673,6 +692,7 @@ async def write_dive(
     key_prefix=(
         "user_{user_id}_dives:page_{page}:items_per_page:{items_per_page}"
         ":trip_{trip_id}:course_{course_id}:site_{dive_site_id}:gear_{gear_item_id}:species_{species_id}"
+        ":person_{person_id}"
     ),
     resource_id_name="user_id",
     expiration=60,
@@ -689,6 +709,7 @@ async def _cached_read_dives(
     dive_site_id: int | None,
     gear_item_id: int | None,
     species_id: int | None,
+    person_id: int | None,
 ) -> dict:
     """Fetches (and caches) a user's paginated dive list.
 
@@ -715,6 +736,9 @@ async def _cached_read_dives(
     if species_id is not None:
         # Same shape again: match dives that recorded this species.
         filters["id__showing_species"] = species_id
+    if person_id is not None:
+        # And again: the dives whose `people` name this person - the rows `dive_count` counts.
+        filters["id__with_person"] = person_id
 
     dives_data = await crud_dives.get_multi(
         db=db,
@@ -767,16 +791,17 @@ async def read_dives(
     dive_site_uuid: uuid_pkg.UUID | None = None,
     gear_item_uuid: uuid_pkg.UUID | None = None,
     species_uuid: uuid_pkg.UUID | None = None,
+    person_uuid: uuid_pkg.UUID | None = None,
 ) -> dict:
     """List the caller's dives, newest first, each with its trip, course, sites and gear.
 
-    The `trip_uuid`, `course_uuid`, `dive_site_uuid`, `gear_item_uuid` and `species_uuid`
-    filters are combinable, and one
+    The `trip_uuid`, `course_uuid`, `dive_site_uuid`, `gear_item_uuid`, `species_uuid` and
+    `person_uuid` filters are combinable, and one
     naming something that doesn't exist or isn't the caller's returns an empty page rather
     than an error - it reveals nothing about whether that resource exists. `dive_site_uuid`
     matches any dive that *includes* the site, since a dive can span several, and
-    `species_uuid` any dive that recorded that species. Out-of-range pagination is clamped,
-    not rejected.
+    `species_uuid` any dive that recorded that species, and `person_uuid` any dive whose
+    `people` name that person. Out-of-range pagination is clamped, not rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
@@ -816,6 +841,11 @@ async def read_dives(
         species_map = await resolve_species_ids(db=db, species_uuids=[species_uuid])
         species_id = (species_map or {}).get(species_uuid, -1)
 
+    person_id: int | None = None
+    if person_uuid is not None:
+        person_map = await resolve_person_ids_for_user(db, [person_uuid], current_user["id"])
+        person_id = (person_map or {}).get(person_uuid, -1)
+
     return await _cached_read_dives(
         request,
         user_id=current_user["id"],
@@ -828,6 +858,7 @@ async def read_dives(
         dive_site_id=dive_site_id,
         gear_item_id=gear_item_id,
         species_id=species_id,
+        person_id=person_id,
     )
 
 
@@ -971,6 +1002,7 @@ async def _cached_read_dive(
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=db_dive["id"])
     gear_items = await get_gear_items_for_dive(db=db, dive_id=db_dive["id"])
     species = await get_species_for_dive(db=db, dive_id=db_dive["id"])
+    people = (await get_people_for_dives(db, [db_dive["id"]]))[db_dive["id"]]
     # Written batched though only ever called with one id - see `get_recordings_for_dives`.
     # This is three queries rather than the two `source_file` and `profile` used to cost, and
     # the third is what a dive with two computers needs: its recordings, their files and
@@ -998,6 +1030,7 @@ async def _cached_read_dive(
         gear_items=gear_items,
         mixtures=mixtures,
         species=species,
+        people=people,
         recordings=recordings,
         attribution=attribution,
     )
@@ -1010,7 +1043,7 @@ async def read_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    """Return a single dive with its mixtures, sites, gear, species and recordings.
+    """Return a single dive with its mixtures, sites, gear, species, people and recordings.
 
     404 when no such dive exists - and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable.
@@ -1093,8 +1126,8 @@ async def patch_dive(
     """Partially update a dive; omitted fields are left untouched.
 
     404 unless the caller owns it, exactly as for a dive that doesn't exist. The
-    list-valued fields - `mixtures`, `dive_site_uuids`, `gear_item_uuids`, `species_uuids`
-    - are replaced wholesale when present rather than merged, so sending a shorter list
+    list-valued fields - `mixtures`, `dive_site_uuids`, `gear_item_uuids`, `species_uuids`,
+    `people` - are replaced wholesale when present rather than merged, so sending a shorter list
     removes the difference and omitting the key entirely leaves it alone. Passing `null` for
     `trip_uuid` detaches the dive from its trip, which is distinct from omitting the key.
     Passing `null` for `course_uuid` detaches it from its training course the same way, and
@@ -1121,6 +1154,7 @@ async def patch_dive(
             "dive_site_uuids",
             "gear_item_uuids",
             "species_uuids",
+            "people",
             "trip_uuid",
             "course_uuid",
             "contact_uuid",
@@ -1183,6 +1217,8 @@ async def patch_dive(
             raise UnprocessableEntityException("Species not found.")
         species_ids = [species_id_by_uuid[u] for u in values.species_uuids]
 
+    people = None if values.people is None else await resolve_people_references(db, values.people, user_id=owner_id)
+
     if update_data:
         try:
             await crud_dives.update(db=db, object=update_data, uuid=uuid)
@@ -1220,12 +1256,20 @@ async def patch_dive(
             await db.rollback()
             raise UnprocessableEntityException(_fk_error_detail(e)) from e
 
+    if people is not None:
+        try:
+            await replace_people_for_dive(db=db, dive_id=dive_id, references=people)
+        except IntegrityError as e:
+            await db.rollback()
+            raise UnprocessableEntityException(_fk_error_detail(e)) from e
+
     if (
         update_data
         or values.mixtures is not None
         or dive_site_ids is not None
         or gear_item_ids is not None
         or species_ids is not None
+        or people is not None
     ):
         await recalculate_dive_stats(db=db, user_id=owner_id)
         await recalculate_gear_dive_counts(db=db, user_id=owner_id)
@@ -1286,8 +1330,9 @@ async def merge_two_dives(
 
     **The earlier dive survives**, by the same clock rule the match gates use: by instant
     where both dives record a UTC offset, by wall clock where either does not. The other
-    dive's recordings, files, cylinders, sites, gear, species and notes move onto it and the
-    dive itself is soft-deleted; its uuid stops resolving and nothing here can be undone.
+    dive's recordings, files, cylinders, sites, gear, species, people and notes move onto it
+    and the dive itself is soft-deleted; its uuid stops resolving and nothing here can be
+    undone.
 
     **What happens to the recordings depends on whether one computer or two recorded the
     dive.** The same computer's two records fold into a single recording: the later record's

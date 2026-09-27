@@ -50,8 +50,12 @@ class Certification(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # oxygen provider and most technical cards do - which is exactly the set a diver is
     # most likely to be asked for at a shop.
     expires_on: Mapped[date | None] = mapped_column(Date, default=None)
-    instructor_name: Mapped[str | None] = mapped_column(String(255), default=None)
     instructor_number: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Who signed the card: one of the diver's people. `SET NULL`, a hidden card's included,
+    # so deleting the person unlinks the card.
+    instructor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("person.id", ondelete="SET NULL"), default=None, index=True
+    )
     # Who ran the course this card came out of. `SET NULL` fires for a hidden card too, as
     # it does for `course_id` below.
     contact_id: Mapped[int | None] = mapped_column(

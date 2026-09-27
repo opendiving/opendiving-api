@@ -31,6 +31,7 @@ from src.app.services.export.tabular import (
     GEAR_ITEMS_HEADER,
     GEAR_SERVICE_HEADER,
     MIXTURES_HEADER,
+    PEOPLE_HEADER,
     SPECIES_HEADER,
     TRIPS_HEADER,
     _utc_offset,
@@ -42,6 +43,7 @@ from src.app.services.export.tabular import (
     write_gear_items_csv,
     write_gear_service_csv,
     write_mixtures_csv,
+    write_people_csv,
     write_species_csv,
     write_trips_csv,
 )
@@ -67,6 +69,7 @@ _NORMALIZED_FILES = (
     (write_gear_service_csv, GEAR_SERVICE_HEADER),
     (write_certifications_csv, CERTIFICATIONS_HEADER),
     (write_contacts_csv, CONTACTS_HEADER),
+    (write_people_csv, PEOPLE_HEADER),
 )
 
 
@@ -421,6 +424,6 @@ class TestTheNormalizedFiles:
         one hits the same Excel mojibake. Pinned across every file, and the count with it, so
         a file added later cannot quietly be the exception."""
         bundle = full_bundle()
-        assert len(CSV_WRITERS) == 10
+        assert len(CSV_WRITERS) == 11
         for filename, writer in CSV_WRITERS:
             assert _render(writer(bundle)).startswith(BOM), filename

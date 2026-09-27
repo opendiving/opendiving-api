@@ -79,6 +79,21 @@ def create_contact(db: Session, user: models.User, *, roles: list[str] | None = 
     )
 
 
+def create_person(
+    db: Session, user: models.User, *, name: str | None = None, linked_to: models.User | None = None
+) -> models.Person:
+    """A person of this user's, named uniquely because `ux_person_user_id_name_lower` would
+    refuse a second run's row of the same name."""
+    return _persist(
+        db,
+        models.Person(
+            user_id=user.id,
+            name=name or f"Alex {uuid7().hex[-8:]}",
+            linked_user_id=None if linked_to is None else linked_to.id,
+        ),
+    )
+
+
 def create_trip(db: Session, user: models.User) -> models.Trip:
     """A trip with one dated part, which is the shape the migration gives every trip that
     had no place - and the shape every caller here was getting when a trip held its own

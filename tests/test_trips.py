@@ -507,6 +507,7 @@ class TestReadPath:
             "get_parts_for_trips",
             AsyncMock(return_value={11: [_part("Moalboal"), _part("Bohol")], 12: []}),
         )
+        monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
 
         with patch.object(cache_module, "client", _FakeRedis()):
             page = await trips_module._cached_read_trips(
@@ -585,6 +586,7 @@ class TestReadPath:
         monkeypatch.setattr(
             trips_module, "get_parts_for_trip", AsyncMock(return_value=[_part("Moalboal"), _part("Bohol")])
         )
+        monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
         redis = _FakeRedis()
 
         with patch.object(cache_module, "client", redis):

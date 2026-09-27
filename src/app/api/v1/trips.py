@@ -18,12 +18,14 @@ from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_contacts import resolve_contact_ids_for_user
 from ...crud.crud_dives import reassign_dives_to_trip
+from ...crud.crud_people import get_people_for_trips, replace_people_for_trip
 from ...crud.crud_trip_parts import (
     get_parts_for_trip,
     get_parts_for_trips,
     replace_parts_for_trip,
 )
 from ...crud.crud_trips import crud_trips, get_trips_page, resolve_trip_id_for_user, trip_name_exists
+from ...schemas.person import PersonReferenceRead
 from ...schemas.trip import (
     TripCreate,
     TripCreateInternal,
@@ -34,14 +36,15 @@ from ...schemas.trip import (
     TripUpdateRequest,
 )
 from ...services.cache_invalidation import invalidate_dive_caches
+from ...services.person_links import resolve_people_references
 
 router = APIRouter(tags=["trips"])
 
-# The only integrity failures the part writes below can hit are the trip row, or a contact
-# a part stays at, vanishing between the resolve and the insert (a concurrent hard delete):
-# lengths and ranges are already bounded by `TripPartInput`, and there is no unique
-# constraint to violate. 422 rather than a raw 500, matching how `patch_dive` treats its
-# child-row writes.
+# The only integrity failures the part and people writes below can hit are the trip row, a
+# contact a part stays at or a person on the trip vanishing between the resolve and the
+# insert (a concurrent hard delete): lengths and ranges are already bounded by
+# `TripPartInput`, and there is no unique constraint to violate. 422 rather than a raw 500,
+# matching how `patch_dive` treats its child-row writes.
 #
 # Both routes raise before invalidating anything, so this path knowingly leaves the trip's
 # caches as they were - including any column update `patch_trip` already committed. Same
@@ -49,6 +52,7 @@ router = APIRouter(tags=["trips"])
 # invalidating on the way out of a failed write would mean doing it in two places for a
 # race that narrow.
 _PART_ERROR_DETAIL = "Trip parts could not be saved."
+_PEOPLE_ERROR_DETAIL = "The trip's people could not be saved."
 
 
 async def _resolve_accommodations(
@@ -87,15 +91,18 @@ def _to_public_trip(
     *,
     user_uuid: uuid_pkg.UUID,
     parts: list[TripPartRead] | None = None,
+    people: list[PersonReferenceRead] | None = None,
 ) -> TripRead:
     """Convert an internal trip representation (integer FKs) into its public shape
-    (owning user referenced by `uuid`, parts embedded as read from the child table).
+    (owning user referenced by `uuid`, parts and people embedded as read from the child
+    tables).
     """
     data = db_trip if isinstance(db_trip, dict) else db_trip.model_dump()
     return TripRead(
         **{k: v for k, v in data.items() if k not in ("id", "user_id")},
         user_uuid=user_uuid,
         parts=parts or [],
+        people=people or [],
     )
 
 
@@ -134,7 +141,8 @@ async def write_trip(
     place, and the trip's span is the earliest start and latest end across them. `parts`
     keep the order given; index 0 is the one shown wherever only a single part fits. A part's
     `accommodation_uuid` names the contact the diver stayed at; one that isn't the caller's
-    own - or doesn't exist - is a 422.
+    own - or doesn't exist - is a 422. `people` names who came on the trip, each with a role
+    or none, and is refused the same way.
 
     The trip row commits before its parts do, so a failure inserting them leaves the trip
     behind without them - the same accepted semantics as `POST /dive` and its mixtures.
@@ -142,6 +150,7 @@ async def write_trip(
     if await trip_name_exists(db=db, user_id=current_user["id"], name=trip.name):
         raise DuplicateValueException("A trip with this name already exists")
     accommodation_ids = await _resolve_accommodations(db, trip.parts, current_user["id"])
+    people = await resolve_people_references(db, trip.people, user_id=current_user["id"])
 
     # Only the trip's own columns reach `TripCreateInternal`, which is `extra="forbid"`:
     # parts are rows in another table.
@@ -157,6 +166,12 @@ async def write_trip(
     except IntegrityError as e:
         await db.rollback()
         raise UnprocessableEntityException(_PART_ERROR_DETAIL) from e
+    if people:
+        try:
+            await replace_people_for_trip(db=db, trip_id=created_trip.id, references=people)
+        except IntegrityError as e:
+            await db.rollback()
+            raise UnprocessableEntityException(_PEOPLE_ERROR_DETAIL) from e
 
     await _trip_cache.invalidate_list(current_user["id"])
 
@@ -165,7 +180,10 @@ async def write_trip(
         raise NotFoundException("Created trip not found")
 
     stored_parts = await get_parts_for_trip(db=db, trip_id=created_trip.id)
-    return _to_public_trip(cast(TripReadInternal, trip_read), user_uuid=current_user["uuid"], parts=stored_parts)
+    stored_people = (await get_people_for_trips(db, [created_trip.id]))[created_trip.id] if people else []
+    return _to_public_trip(
+        cast(TripReadInternal, trip_read), user_uuid=current_user["uuid"], parts=stored_parts, people=stored_people
+    )
 
 
 @cache(
@@ -182,7 +200,7 @@ async def _cached_read_trips(
     items_per_page: int,
     search: str | None,
 ) -> dict:
-    """Fetches (and caches) a user's paginated trip list, each trip with its parts.
+    """Fetches (and caches) a user's paginated trip list, each trip with its parts and people.
 
     Only ever called after `read_trips` below has checked the caller's authorization - a
     `@cache` hit skips this body entirely, authorization logic included.
@@ -202,10 +220,14 @@ async def _cached_read_trips(
     # One batched query for the page rather than one per trip. `get_trips_page` returns
     # full-column dicts, matching `get_multi` without a `schema_to_select`, so the internal
     # `id` the child rows hang off is there to read.
-    parts_by_trip = await get_parts_for_trips(db=db, trip_ids=[trip["id"] for trip in trips_data["data"]])
+    trip_ids = [trip["id"] for trip in trips_data["data"]]
+    parts_by_trip = await get_parts_for_trips(db=db, trip_ids=trip_ids)
+    people_by_trip = await get_people_for_trips(db, trip_ids)
 
     trips_data["data"] = [
-        _to_public_trip(trip, user_uuid=user_uuid, parts=parts_by_trip.get(trip["id"], [])).model_dump()
+        _to_public_trip(
+            trip, user_uuid=user_uuid, parts=parts_by_trip.get(trip["id"], []), people=people_by_trip.get(trip["id"])
+        ).model_dump()
         for trip in trips_data["data"]
     ]
 
@@ -225,7 +247,7 @@ async def read_trips(
         Query(max_length=255, description="Case-insensitive substring match on the trip's name or its places"),
     ] = None,
 ) -> dict:
-    """List the caller's trips, most recent first, each with its parts.
+    """List the caller's trips, most recent first, each with its parts and people.
 
     A trip's position in the list is the earliest start date across its parts; a trip
     whose parts carry no dates at all sorts after every trip that has one.
@@ -256,7 +278,7 @@ async def read_trips(
 async def _cached_read_trip(
     request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> TripRead:
-    """Fetches (and caches) a single trip by uuid, with its parts attached.
+    """Fetches (and caches) a single trip by uuid, with its parts and people attached.
 
     Like `_cached_read_trips`, this must only be called once the route has established
     that the caller owns the trip: `@cache` can serve a hit without re-checking it.
@@ -267,7 +289,8 @@ async def _cached_read_trip(
     db_trip = cast(TripReadInternal, db_trip)
 
     parts = await get_parts_for_trip(db=db, trip_id=db_trip.id)
-    return _to_public_trip(db_trip, user_uuid=owner_uuid, parts=parts)
+    people = (await get_people_for_trips(db, [db_trip.id])).get(db_trip.id)
+    return _to_public_trip(db_trip, user_uuid=owner_uuid, parts=parts, people=people)
 
 
 @router.get("/trip/{uuid}", response_model=TripRead)
@@ -277,7 +300,7 @@ async def read_trip(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> TripRead:
-    """Return a single trip by its public uuid, with the parts it ran.
+    """Return a single trip by its public uuid, with the parts it ran and the people on it.
 
     404 when no such trip exists - and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable.
@@ -304,7 +327,8 @@ async def patch_trip(
     when present rather than merged, so sending a shorter list removes the difference and
     an empty list clears them; omitting the key leaves them alone. Each part's own
     `end_date` must be on or after its `start_date`, which is a 422 naming the part, and a
-    part's `accommodation_uuid` must name one of the caller's contacts.
+    part's `accommodation_uuid` must name one of the caller's contacts. `people` is replaced
+    the same way as `parts`, and every person in it must be the caller's.
     """
     db_trip = await _get_owned_trip(db, uuid, current_user)
 
@@ -321,6 +345,9 @@ async def patch_trip(
     # `None` leaves the existing parts alone; `[]` is a diver clearing them.
     parts = values.parts
     accommodation_ids = {} if parts is None else await _resolve_accommodations(db, parts, db_trip.user_id)
+    people = (
+        None if values.people is None else await resolve_people_references(db, values.people, user_id=db_trip.user_id)
+    )
 
     if update_data:
         await crud_trips.update(db=db, object=update_data, uuid=uuid)
@@ -332,9 +359,16 @@ async def patch_trip(
             await db.rollback()
             raise UnprocessableEntityException(_PART_ERROR_DETAIL) from e
 
-    # A parts-only edit has an empty `update_data` but still changes what the list pages
-    # say: the decorator on this route only drops `trip_cache:{uuid}`.
-    if update_data or parts is not None:
+    if people is not None:
+        try:
+            await replace_people_for_trip(db=db, trip_id=db_trip.id, references=people)
+        except IntegrityError as e:
+            await db.rollback()
+            raise UnprocessableEntityException(_PEOPLE_ERROR_DETAIL) from e
+
+    # A parts- or people-only edit has an empty `update_data` but still changes what the list
+    # pages say: the decorator on this route only drops `trip_cache:{uuid}`.
+    if update_data or parts is not None or people is not None:
         await _trip_cache.invalidate_list(db_trip.user_id)
 
     return {"message": "Trip updated"}
@@ -359,7 +393,7 @@ async def erase_trip(
     used to be idempotent to insure against a half-failed multi-statement delete; one
     `DELETE FROM trip` in one transaction cannot half-fail.
 
-    `trip_part` rows go with it (`ON DELETE CASCADE`) and the dives logged on it survive
+    `trip_part` and `trip_person` rows go with it (`ON DELETE CASCADE`) and the dives logged on it survive
     with `trip_id` nulled (`ON DELETE SET NULL`) - both rules were already declared on the
     FKs and finally fire. Re-point the dives with `move_dives_to` before deleting if the
     association matters; there is no way back after.

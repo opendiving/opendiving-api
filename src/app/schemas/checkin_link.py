@@ -75,8 +75,9 @@ class CheckinDiver(BaseModel):
 class CheckinCertification(BaseModel):
     """One card as the check-in page prints it, named as `CertificationRead` names it.
 
-    `contact_name` is the dive centre's name, which the page prints where `CertificationRead`
-    carries only `contact_uuid`. `front_content_type` is null when the card has no front; the
+    `contact_name` is the dive centre's name and `instructor_name` the instructor's, which the
+    page prints where `CertificationRead` carries only `contact_uuid` and `instructor_uuid`: an
+    anonymous page can resolve no uuid. `front_content_type` is null when the card has no front; the
     page draws an image front from `GET /checkin/{token}/certification/{uuid}/front` and a PDF
     one as a label. Nothing about the back.
     """

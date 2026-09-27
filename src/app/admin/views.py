@@ -16,6 +16,7 @@ from ..models.gear_service_record import GearServiceRecord
 from ..models.gear_service_schedule import GearServiceSchedule
 from ..models.gear_set import GearSet
 from ..models.gear_set_item import GearSetItem
+from ..models.person import Person
 from ..models.species import Species
 from ..models.species_name import SpeciesName
 from ..models.trip import Trip
@@ -42,6 +43,7 @@ from ..schemas.gear_service import (
 )
 from ..schemas.gear_set import GearSetCreateInternal, GearSetUpdate
 from ..schemas.gear_set_item import GearSetItemCreate, GearSetItemUpdate
+from ..schemas.person import PersonCreateInternal, PersonUpdate
 from ..schemas.species import (
     DiveSpeciesCreate,
     DiveSpeciesUpdate,
@@ -121,8 +123,8 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view"},
     )
 
-    # `DiveSite`, `Trip`, `Course`, `Contact`, `GearItem`, `GearSet`, `GearServiceSchedule`
-    # and `DiveFormPreset` are registered without `"delete"`, and that is not squeamishness about
+    # `DiveSite`, `Trip`, `Course`, `Contact`, `Person`, `GearItem`, `GearSet`,
+    # `GearServiceSchedule` and `DiveFormPreset` are registered without `"delete"`, and that is not squeamishness about
     # a superuser having the power. FastCRUD's `delete` branches on whether the model carries
     # `is_deleted`, and since they hard-delete it takes the `DELETE FROM` branch - so the button that
     # used to flag one row now destroys the row, its schedules, its service records and
@@ -161,6 +163,16 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         model=Contact,
         create_schema=ContactCreateInternal,
         update_schema=ContactUpdate,
+        allowed_actions={"view", "create", "update"},
+    )
+
+    # `PersonUpdate`, not `PersonUpdateRequest`: its `username` is a lookup this form does
+    # not make. `ck_person_not_linked_to_its_owner` stands behind the create form's
+    # `linked_user_id`.
+    admin.add_view(
+        model=Person,
+        create_schema=PersonCreateInternal,
+        update_schema=PersonUpdate,
         allowed_actions={"view", "create", "update"},
     )
 

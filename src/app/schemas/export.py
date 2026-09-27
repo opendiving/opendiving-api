@@ -38,9 +38,9 @@ Where it differs from the API's own read shapes, and why:
   closure: every uuid a record names is defined in the same document.
 - **Whatever the format has no core member for rides `extensions.opendiving`** (spec
   §5.5): the diver's account preferences, which parser read a stored dive-computer file,
-  the crop this app frames the portrait with, and at the document's root the axis marker
-  (`EXPORT_EXTENSIONS`). A writer may not invent core members, so this is the sanctioned
-  slot.
+  the crop this app frames the portrait with, the account a person is linked to, and at
+  the document's root the axis marker (`EXPORT_EXTENSIONS`). A writer may not invent core
+  members, so this is the sanctioned slot.
 
 The one derived value in here is `archive_path`, which is a fact about the zip rather than
 about the logbook.
@@ -61,6 +61,7 @@ from .dive_mixture import GasRole, TankUsage
 from .dive_profile import DiveProfileRead
 from .gear_item import GearType
 from .gear_service import ServiceKind
+from .person import PersonRole
 
 # The format marker and the version the writer declares, both spec-defined literals, and
 # written as the document's first two members so a reader can dispatch before parsing
@@ -394,6 +395,7 @@ class ExportDive(PublicUUIDSchema):
     site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In visit order")]
     gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
     species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
+    people: ExportPeople
     # Not the API's `DiveMixtureRead`, which carries the internal row `id`: nothing here
     # references a cylinder, so that id would be the one integer key in the document.
     cylinders: Annotated[list[ExportCylinder], Field(default_factory=list)]
@@ -440,6 +442,17 @@ class ExportTripPart(BaseModel):
     accommodation_uuid: uuid_pkg.UUID | None = None
 
 
+class ExportPersonReference(BaseModel):
+    """One person on one dive, trip or course, with the role they had (spec §6.20). A stored
+    role the format has no word for is written as absence, and the reference kept."""
+
+    person_uuid: uuid_pkg.UUID
+    role: PersonRole | None = None
+
+
+ExportPeople = Annotated[list[ExportPersonReference], Field(default_factory=list, description="In the diver's order")]
+
+
 class ExportTrip(PublicUUIDSchema):
     """A trip as a sequence of parts, with no dates of its own (spec §6.8).
 
@@ -453,6 +466,8 @@ class ExportTrip(PublicUUIDSchema):
         list[ExportTripPart],
         Field(default_factory=list, description="The stretches of this trip, in the order the diver arranged them"),
     ]
+    # Who came on the trip, which no walk of its dives derives.
+    people: ExportPeople
     notes: str | None = None
     created_at: datetime
 
@@ -480,9 +495,10 @@ class ExportCourse(PublicUUIDSchema):
     status: CourseStatus | None = None
     starts_on: date | None = None
     ends_on: date | None = None
-    instructor_name: str | None = None
     instructor_number: str | None = None
     contact_uuid: uuid_pkg.UUID | None = None
+    # Its instructors among them, by role.
+    people: ExportPeople
     notes: str | None = None
     created_at: datetime
 
@@ -589,7 +605,7 @@ class ExportCertification(PublicUUIDSchema):
     number: str | None = None
     certified_on: date | None = None
     expires_on: date | None = None
-    instructor_name: str | None = None
+    instructor_uuid: uuid_pkg.UUID | None = None
     instructor_number: str | None = None
     contact_uuid: uuid_pkg.UUID | None = None
     course_uuid: uuid_pkg.UUID | None = None
@@ -628,6 +644,24 @@ class ExportContact(PublicUUIDSchema):
     created_at: datetime
 
 
+class ExportPerson(PublicUUIDSchema):
+    """An individual the diver was with (spec §6.20). The dives, trips and courses that list
+    one, and the certifications it signed, carry its uuid; nothing here points back.
+
+    A person linked to an account on this instance carries that account's public id under
+    this producer's key, as `user_uuid` - the value that account's own export writes as its
+    diver's `uuid`. The format carries no identity for a person, so the link rides here
+    (spec §5.5), where an import into this app reads it back.
+    """
+
+    name: str
+    email: str | None = None
+    phone: str | None = None
+    notes: str | None = None
+    created_at: datetime
+    extensions: ExportExtensions = None
+
+
 class ExportEnvelope(BaseModel):
     """The whole document, in the member order spec §4 recommends.
 
@@ -656,4 +690,5 @@ class ExportEnvelope(BaseModel):
     gear_service_records: Annotated[list[ExportGearServiceRecord], Field(default_factory=list)]
     certifications: Annotated[list[ExportCertification], Field(default_factory=list)]
     contacts: Annotated[list[ExportContact], Field(default_factory=list)]
+    people: Annotated[list[ExportPerson], Field(default_factory=list)]
     extensions: ExportExtensions = None

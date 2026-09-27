@@ -3665,6 +3665,19 @@ class TestTheIntegerColumnCensus:
         ("course", "contact_id"): "resolved from a row this import wrote, or one the caller already had",
         ("contact", "id"): "the sequence's",
         ("contact", "user_id"): "the caller's",
+        ("person", "id"): "the sequence's",
+        ("person", "user_id"): "the caller's",
+        ("person", "linked_user_id"): "an account this instance already has, found by the document's uuid",
+        **{
+            (table, column): reason
+            for table, host in (("dive_person", "dive"), ("trip_person", "trip"), ("course_person", "course"))
+            for column, reason in (
+                ("id", "the sequence's"),
+                (f"{host}_id", "resolved from a row this import wrote"),
+                ("person_id", "resolved from a row this import wrote, or one the caller already had"),
+                ("position", "the list index, not the document's"),
+            )
+        },
         ("dive_site", "id"): "the sequence's",
         ("dive_site", "user_id"): "the caller's",
         ("gear_set", "id"): "the sequence's",
@@ -3673,6 +3686,7 @@ class TestTheIntegerColumnCensus:
         ("certification", "user_id"): "the caller's",
         ("certification", "course_id"): "resolved from a row this import wrote",
         ("certification", "contact_id"): "resolved from a row this import wrote, or one the caller already had",
+        ("certification", "instructor_id"): "resolved from a row this import wrote, or one the caller already had",
         ("user_dive_stats", "id"): "the sequence's",
         ("user_dive_stats", "user_id"): "the caller's",
         ("user_dive_stats", "total_dives"): "a count of rows, derived by `recalculate_dive_stats`",
@@ -3712,7 +3726,11 @@ class TestTheIntegerColumnCensus:
         from sqlalchemy import BigInteger, Integer
 
         from src.app.models.certification_file import CertificationFile
+        from src.app.models.course_person import CoursePerson
+        from src.app.models.dive_person import DivePerson
+        from src.app.models.person import Person
         from src.app.models.trip_part import TripPart
+        from src.app.models.trip_person import TripPerson
         from src.app.models.user_dive_stats import UserDiveStats
 
         written: tuple[Any, ...] = (
@@ -3721,6 +3739,10 @@ class TestTheIntegerColumnCensus:
             DiveRecording,
             DiveProfile,
             Contact,
+            Person,
+            DivePerson,
+            TripPerson,
+            CoursePerson,
             Trip,
             TripPart,
             Course,

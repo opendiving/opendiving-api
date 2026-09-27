@@ -26,7 +26,7 @@ class OwnedResourceCache[InternalT, PublicT]:
 
     Resources whose read/list logic does more than a straight `get_multi`/`get` plus a shape
     conversion don't fit this shape and should keep their own hand-written cache helpers
-    instead of forcing themselves through this factory. The eight that opt out, and why:
+    instead of forcing themselves through this factory. Those that opt out, and why:
 
     - `dives.py` - enriches each row with related trips/courses/dive sites/gear and supports
       several extra filters.
@@ -49,7 +49,7 @@ class OwnedResourceCache[InternalT, PublicT]:
       with no `nullslast()` reachable and (in `search_multi`'s case) only one sort column by
       signature. So one hand-written `select()` serves both its searched and unsearched
       branches. Like `trips.py` it still constructs one of these for the key shapes.
-    - `passkeys.py` - the first of the three that opt out for the opposite reason: not
+    - `passkeys.py` - the first of those that opt out for the opposite reason: not
       *enriched*, not cached at all. `GET /user/passkeys` is unpaginated and returns the
       handful of rows registration lets an account accumulate, and nothing anywhere embeds a
       credential - so there is no page to cache and no invalidation obligation to get wrong.
@@ -68,6 +68,11 @@ class OwnedResourceCache[InternalT, PublicT]:
       user-scoped by design (`user_{id}_...`, which is what pattern invalidation depends
       on). One device's "This device" marker would be served to another. The rows are also
       unpaginated, capped and embedded by nothing, so there is no page worth the risk.
+    - `people.py` - uncached because its answer changes on writes its owner never makes. A
+      person read carries the linked account's current username, and a rename or purge of
+      that other account reaches no key of this owner's, so a cache would serve the old one
+      for its TTL. The list is one query - the join, a dive count, a search over two
+      tables - over tens of rows.
 
     In each of the first four the enrichment is a second query whose results have to be
     zipped back into the page before conversion, which is precisely the step this factory has

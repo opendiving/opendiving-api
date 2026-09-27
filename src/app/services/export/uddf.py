@@ -72,6 +72,10 @@ reading the XSD, and each is exported in `logbook.divejson`/CSV instead:
   contrast, *does* map - `<mix><maximumpo2>` - which is why mixes dedupe on it below.
   `usage` deliberately stays out of that dedup key: it is a property of the cylinder, not
   of the gas, and folding it in would split one `<mix>` into two for no reason UDDF knows.
+- **A trip's and a course's people, and a dive's roles beyond `buddy` and `guide`.**
+  `<trippart>` links only a dive base and UDDF has no course, so every person still goes
+  out as a `<buddy>` and those references do not; on a dive, `instructor`, `student`,
+  `companion` and no role at all go out as the plain link a reader takes for `buddy`.
 
 Output is deterministic: fixed element order, fixed id derivation, and mixes sorted by
 their fractions rather than by encounter. Golden-file tests depend on that, and so does
@@ -100,6 +104,7 @@ from ...core.utils.datetime_offset import combine_dive_start_time
 from ...models.contact import Contact
 from ...models.dive import Dive
 from ...models.gear_item import GearItem
+from ...models.person import Person
 from ...schemas.dive import DiveMode
 from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.dive_profile import (
@@ -114,6 +119,7 @@ from ...schemas.dive_profile import (
     ProfileEventType,
 )
 from ...schemas.gear_item import GearType
+from ...schemas.person import PersonRole
 from ...schemas.trip import TripPartRead
 from ...schemas.user import is_blank
 from ..dive_profiles import load_profile
@@ -458,7 +464,8 @@ def _midnight(value: date) -> str:
 
 
 def _diver_element(bundle: ExportBundle) -> ET.Element:
-    """The owner, in the XSD's order: `personal`, `contact`, `equipment`, `diveinsurances`.
+    """The owner, in the XSD's order: `personal`, `contact`, `equipment`, `diveinsurances` -
+    and after it one `<buddy>` per person.
 
     The date of birth, the phone and the insurance go out, being what a shop's desk asks for.
     The emergency contact and the policy number have no element and stay in
@@ -490,7 +497,60 @@ def _diver_element(bundle: ExportBundle) -> ET.Element:
         _sub(insurance, "name", user.insurance_provider)
         if user.insurance_expires_on is not None:
             _sub(_sub(insurance, "validdate"), "datetime", _midnight(user.insurance_expires_on))
+    for person in bundle.people:
+        _buddy_element(diver, person)
     return diver
+
+
+def _buddy_element(diver: ET.Element, person: Person) -> None:
+    """One person as a `<buddy>`, every person whatever references them: the elements are
+    the logbook's people rather than any one dive's.
+
+    The name is split at its first space - the split Subsurface's and Bubbletrail's writers
+    make - so a reader joining the two parts gets it back whole, and a one-word name leaves
+    `<lastname>` empty, which `personalType` requires present. Then `<contact>` and `<notes>`
+    in `personType`'s order. A person's link to an account has no slot and stays in
+    `logbook.divejson`.
+    """
+    element = _sub(diver, "buddy", id=_uddf_id("person", person.uuid))
+    words = person.name.split()
+    personal = _sub(element, "personal")
+    _sub(personal, "firstname", words[0] if words else "")
+    _sub(personal, "lastname", " ".join(words[1:]))
+    listed = [(tag, value) for tag, value in (("phone", person.phone), ("email", person.email)) if value]
+    if listed:
+        block = _sub(element, "contact")
+        for tag, value in listed:
+            _sub(block, tag, value)
+    if person.notes:
+        _sub(_sub(element, "notes"), "para", person.notes)
+
+
+def _guide_base(bundle: ExportBundle, dive: Dive) -> Contact | None:
+    """The contact a dive's guide goes out under: the dive's own, where it is a `<divebase>`."""
+    contact = bundle.contact_for(dive)
+    return None if contact is None or _is_shop(contact) else contact
+
+
+def plan_guides(bundle: ExportBundle) -> dict[tuple[int, int], str]:
+    """Which guide references get a `<guide>`, decided before anything is written.
+
+    A `guide` on a dive whose contact goes out as a `<divebase>` is the one role besides
+    `buddy` that UDDF can say: a `<guide>` under that base linking the person's `<buddy>`, and
+    the dive linking the guide. One per base and person, numbered `guide-<n>` over the dives
+    in document order - planned ahead because the bases are written before the dives.
+    Every other role goes out as a plain link and reads back as `buddy`; this writer, like
+    the rest of it, has no report channel to say so.
+    """
+    guides: dict[tuple[int, int], str] = {}
+    for dive in bundle.dives:
+        base = _guide_base(bundle, dive)
+        if base is None:
+            continue
+        for reference in bundle.people_for(dive):
+            if reference.role == PersonRole.GUIDE:
+                guides.setdefault((base.id, reference.person.id), f"guide-{len(guides)}")
+    return guides
 
 
 def _is_shop(contact: Contact) -> bool:
@@ -500,9 +560,10 @@ def _is_shop(contact: Contact) -> bool:
     return list(contact.roles) == ["shop"]
 
 
-def _contact_contents(element: ET.Element, contact: Contact) -> None:
+def _contact_contents(element: ET.Element, contact: Contact, guides: Iterable[tuple[str, uuid_pkg.UUID]] = ()) -> None:
     """A contact's `<address>`, `<contact>` and `<notes>`, in the order a base, a shop and a
-    part's copy all declare them.
+    part's copy all declare them - and a base's `<guide>`s between the last two, where
+    `divebaseType` puts them.
 
     The address only with its country, which `addressType` requires and the column
     constraint guarantees whenever anything else is stored. One `<contact>` holds whichever
@@ -531,11 +592,15 @@ def _contact_contents(element: ET.Element, contact: Contact) -> None:
         block = _sub(element, "contact")
         for tag, value in listed:
             _sub(block, tag, value)
+    for guide_id, person_uuid in guides:
+        _sub(_sub(element, "guide", id=guide_id), "link", ref=_uddf_id("person", person_uuid))
     if contact.notes:
         _sub(_sub(element, "notes"), "para", contact.notes)
 
 
-def _contact_element(parent: ET.Element, tag: str, contact: Contact) -> None:
+def _contact_element(
+    parent: ET.Element, tag: str, contact: Contact, guides: Iterable[tuple[str, uuid_pkg.UUID]] = ()
+) -> None:
     """One contact as a `<divebase>` or a `<shop>`.
 
     `roles` has no element; the slot says `dive_center` or `shop` back and a part's copy
@@ -547,7 +612,7 @@ def _contact_element(parent: ET.Element, tag: str, contact: Contact) -> None:
     """
     element = _sub(parent, tag, id=_uddf_id("contact", contact.uuid))
     _sub(element, "name", contact.name)
-    _contact_contents(element, contact)
+    _contact_contents(element, contact, guides)
 
 
 def _business_element(bundle: ExportBundle) -> ET.Element | None:
@@ -560,14 +625,23 @@ def _business_element(bundle: ExportBundle) -> ET.Element | None:
     return business
 
 
-def _divesite_element(bundle: ExportBundle) -> ET.Element | None:
+def _divesite_element(bundle: ExportBundle, guides: dict[tuple[int, int], str]) -> ET.Element | None:
     bases = [contact for contact in bundle.contacts if not _is_shop(contact)]
     if not (bundle.dive_sites or bases):
         return None
     divesite = ET.Element("divesite")
     # Bases first: `<divesite>` is an `xs:sequence` of bases and then sites.
     for contact in bases:
-        _contact_element(divesite, "divebase", contact)
+        _contact_element(
+            divesite,
+            "divebase",
+            contact,
+            [
+                (guide_id, bundle.person_by_id[person_id].uuid)
+                for (base_id, person_id), guide_id in guides.items()
+                if base_id == contact.id
+            ],
+        )
     for site in bundle.dive_sites:
         element = _sub(divesite, "site", id=_uddf_id("site", site.uuid))
         _sub(element, "name", site.name)
@@ -982,6 +1056,7 @@ def _dive_element(
     dive: Dive,
     *,
     mix_ids: dict[_MixKey, str],
+    guides: dict[tuple[int, int], str],
     profile_data: dict | None,
     mode: str | None,
     surface_pressure_bar: float | None,
@@ -994,12 +1069,21 @@ def _dive_element(
     # that only reads one still reads the primary site because it is first.
     for site in bundle.sites_for(dive):
         _sub(before, "link", ref=_uddf_id("site", site.uuid))
-    # Who the dive was dived with, **after** the sites, so the first link is still the
+    # The contact that ran the dive, **after** the sites, so the first link is still the
     # primary site for the importer that reads one. The XSD's `<link>` here is a bare
     # `xs:IDREF`, so naming a base or a shop is schema-valid.
     contact = bundle.contact_for(dive)
     if contact is not None:
         _sub(before, "link", ref=_uddf_id("contact", contact.uuid))
+    # The people last, in the diver's order. A plain link reads back as `buddy`, UDDF's own
+    # reading of a dive linking a buddy directly; a guide goes through its base's `<guide>`.
+    base = _guide_base(bundle, dive)
+    for reference in bundle.people_for(dive):
+        guide = None if base is None else guides.get((base.id, reference.person.id))
+        if reference.role == PersonRole.GUIDE and guide is not None:
+            _sub(before, "link", ref=guide)
+        else:
+            _sub(before, "link", ref=_uddf_id("person", reference.person.uuid))
     if dive.dive_number > 0:
         # `xs:positiveInteger`. Nothing in the schema stops a dive being numbered 0, and
         # a 0 would make the whole document invalid rather than one element wrong.
@@ -1082,6 +1166,7 @@ async def write_uddf(db: AsyncSession, bundle: ExportBundle, *, exported_at: dat
     one dive's waypoints - see the module docstring.
     """
     mix_ids = collect_mixes(bundle)
+    guides = plan_guides(bundle)
 
     yield f'<?xml version="1.0" encoding="utf-8"?>\n<uddf xmlns="{UDDF_NAMESPACE}" version="{UDDF_VERSION}">\n'.encode()
 
@@ -1089,7 +1174,7 @@ async def write_uddf(db: AsyncSession, bundle: ExportBundle, *, exported_at: dat
         _generator_element(exported_at),
         _business_element(bundle),
         _diver_element(bundle),
-        _divesite_element(bundle),
+        _divesite_element(bundle, guides),
         _divetrip_element(bundle),
         _gasdefinitions_element(mix_ids),
     )
@@ -1121,6 +1206,7 @@ async def write_uddf(db: AsyncSession, bundle: ExportBundle, *, exported_at: dat
                 bundle,
                 dive,
                 mix_ids=mix_ids,
+                guides=guides,
                 profile_data=profile.data if profile else None,
                 mode=primary.mode if primary is not None else None,
                 # The primary's too: `<surfacepressure>` is one per dive, and the others' stay
