@@ -685,8 +685,9 @@ class _Planner:
         # **Where a link's count is spent.** The apply claims one slot per link it makes, an
         # exhausted window dropping that link rather than the import; the preview reads what
         # the window has left and spends nothing, so the plan is made twice and counted once.
+        # Read on the first link the preview meets, so an import that links nobody never asks.
         self._claim_links = claim_links
-        self._link_budget = 0
+        self._link_budget: int | None = None
 
     # ------------------------------------------------------------------ notes
 
@@ -1374,8 +1375,6 @@ class _Planner:
         self._accounts = await accounts_by_uuid(
             self._db, [account for person in people if (account := _person_account(person)) is not None]
         )
-        if not self._claim_links:
-            self._link_budget = await link_budget_remaining(self._user_id)
         for person in people:
             self._claim_document_uuid("people", person)
             self._records["people"][person.uuid] = await self._plan_person(person, existing)
@@ -1476,14 +1475,16 @@ class _Planner:
                     "This import is past the limit on linking people, so this one arrives unlinked",
                 )
                 return None
-        elif self._link_budget <= 0:
-            self._dropped(
-                "people",
-                person.uuid,
-                "This import is past the limit on linking people, so this one would arrive unlinked",
-            )
-            return None
         else:
+            if self._link_budget is None:
+                self._link_budget = await link_budget_remaining(self._user_id)
+            if self._link_budget <= 0:
+                self._dropped(
+                    "people",
+                    person.uuid,
+                    "This import is past the limit on linking people, so this one would arrive unlinked",
+                )
+                return None
             self._link_budget -= 1
         self._link_aliases[account.id] = person.uuid
         self._note(

@@ -2201,6 +2201,14 @@ def _account_entry(user: Any) -> dict[str, Any]:
 
 
 class TestPeople:
+    @pytest.fixture(autouse=True)
+    def _limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The link limit's Redis, stubbed as *"The local suite has no Redis"* in DECISIONS.md
+        says of any handler that reaches it: a real client is bound to the loop that opened it,
+        and each test runs on its own. A test about the limit patches these itself."""
+        monkeypatch.setattr(planner_module, "link_budget_remaining", AsyncMock(return_value=10))
+        monkeypatch.setattr(planner_module, "claim_link_slot", AsyncMock(return_value=True))
+
     @pytest.mark.asyncio
     async def test_people_arrive_once_with_every_reference_and_role(self, db: Session, async_db: AsyncSession) -> None:
         source, friend, _ = _seed_people_logbook(db)

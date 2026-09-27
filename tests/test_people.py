@@ -519,6 +519,13 @@ class TestTheLink:
     """The username resolver answers exactly as the availability check does, and refuses on
     the field the form shows it on."""
 
+    @pytest.fixture(autouse=True)
+    def _redis(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The limiter runs for real against a counter of our own: the module-level client is
+        bound to the loop that opened it, and each test runs on its own - *"The local suite
+        has no Redis"* in DECISIONS.md."""
+        monkeypatch.setattr(cache_module, "client", _CountingRedis())
+
     @pytest.mark.asyncio
     async def test_an_account_is_found_by_its_exact_username(
         self, async_db: AsyncSession, diver: User, other_diver: User
@@ -616,7 +623,6 @@ class TestTheLink:
     async def test_past_the_limit_a_link_is_a_429(
         self, async_db: AsyncSession, diver: User, other_diver: User, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(cache_module, "client", _CountingRedis())
         monkeypatch.setattr(person_links.settings, "PERSON_LINK_RATE_LIMIT_PER_USER", 1)
         body = {"username": f"n{uuid7().hex[-12:]}"}
 
