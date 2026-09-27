@@ -385,20 +385,16 @@ a used link; the web precheck never sends one.
 
 ## Current-user routes live at a bare `/user`, not `/user/me` or `/user/{uuid}`
 
-Current-user routes resolve the account from the access token at a bare `/user`: `GET /user`
-(`read_current_user`), `PATCH /user`, `DELETE /user`, `GET /user/dive-stats`. There is no `{uuid}`
-to mismatch, so no `403` ownership check, and `DELETE /user` does no
-`crud_users.get`/`NotFoundException` re-fetch — `get_current_user` already loaded a fresh,
-non-deleted row. "My account" and "someone else's public profile" are meant to be distinct,
-differently shaped endpoints — full data including `email` from the token versus a limited public
-subset keyed by `{uuid}` — rather than one `/user/{uuid}` route gated by a runtime
-`if current_user["uuid"] != uuid` check a new route can forget. There is no `GET /user/{uuid}`, no
-`GET /users` and no `read_users`: nothing fetches another user's data through this API but three
-named exceptions - a check-in link's card for whoever holds its token, the current username of an
-account a diver linked a person to, and that account's public id in the diver's own export.
-Public-profile-shaped replacements are separate work, and public dive stats would be a new route
-such as `GET /profile/{uuid}/dive-stats`. `opendiving-web` (`authAPI.getCurrentUser`/`updateProfile`
-in `lib/api/auth.ts`) and `opendiving-ios` (`AuthAPI.currentUser()`) match.
+Current-user routes resolve the account from the access token at a bare `/user`: `GET /user`,
+`PATCH /user`, `DELETE /user`, `GET /user/dive-stats`. There is no `{uuid}` to mismatch, so no
+ownership check, and `DELETE /user` re-fetches nothing: `get_current_user` already loaded a fresh,
+non-deleted row. "My account" and "someone else's public profile" are distinct, differently shaped
+endpoints — full data including `email` from the token versus a limited public subset keyed by
+`{uuid}` — rather than one `/user/{uuid}` route gated by a runtime `if current_user["uuid"] != uuid`
+check a new route can forget. There is no `GET /user/{uuid}`, no `GET /users` and no `read_users`.
+Another user's data reaches a caller only as a check-in link's card for its token holder, and as the
+account a diver linked a person to: its current username, and its public id in the diver's own
+export. Public dive stats would be `GET /profile/{uuid}/dive-stats`.
 
 ## `CORSMiddleware` is gated on `FrontendSettings`; without it every preflight is a 405
 
@@ -4443,22 +4439,15 @@ match. `expires_at` is indexed by a hand-written revision. Cost: a link past ret
 
 Every foreign key into `user.id` declares `ondelete="CASCADE"` but `person.linked_user_id`, which is
 `SET NULL`: it names *another* account, whose purge must unlink this diver's person rather than
-delete it. The cascades: `certification_user_id_fkey`, `dive_user_id_fkey`,
-`dive_file_user_id_fkey`, `dive_site_user_id_fkey`, `gear_item_user_id_fkey`,
-`gear_service_record_user_id_fkey`, `gear_service_schedule_user_id_fkey`, `gear_set_user_id_fkey`,
-`trip_user_id_fkey`, `user_dive_stats_user_id_fkey`, beside `authentication_provider`,
-`authentication_request` and `webauthn_credential`. `DELETE /user` soft-deletes (`SoftDeleteMixin`);
-the raw `DELETE FROM "user"` is the purge's. Two traps in the revision: autogenerate and
-`alembic check` do not detect an `ondelete` change, so it is hand-written; and Postgres cannot
-`ALTER` a delete rule, so each is `DROP CONSTRAINT` plus `ADD CONSTRAINT` under Postgres's default
-`<table>_<column>_fkey` name, with `downgrade` passing `ondelete=None` (NO ACTION). No index is
-added: all ten already carry a plain btree leading with `user_id`, and a cascade on an unindexed or
-partial-indexed FK seq-scans the child; `tests/test_foreign_key_indexes.py` checks every FK.
-`tests/test_user_cascade.py` is two halves: `TestEveryForeignKeyIntoUserCascades` walks
-`Base.metadata` to catch a bare `ForeignKey("user.id")` and names the one exception, and
-`TestDeletingAUserTakesEverythingWithIt` seeds one row per table plus second-order rows
-(`certification_file`, `dive_dive_site`, `gear_set_item`, `trip_part`, the three `*_person` tables)
-and issues the raw `DELETE` on Postgres (skipped without `POSTGRES_SERVER=localhost`).
+delete it. `DELETE /user` soft-deletes (`SoftDeleteMixin`); the raw `DELETE FROM "user"` is the
+purge's. Two traps in a revision that changes one: autogenerate and `alembic check` do not detect an
+`ondelete` change, so it is hand-written; and Postgres cannot `ALTER` a delete rule, so each is
+`DROP CONSTRAINT` plus `ADD CONSTRAINT` under Postgres's default `<table>_<column>_fkey` name, with
+`downgrade` passing `ondelete=None` (NO ACTION). A cascade on an unindexed or partial-indexed FK
+seq-scans the child; `tests/test_foreign_key_indexes.py` checks every FK.
+`tests/test_user_cascade.py` walks `Base.metadata` for a bare `ForeignKey("user.id")`, naming the
+one exception, and issues the raw `DELETE` on Postgres over one row per table plus second-order rows
+(skipped without `POSTGRES_SERVER=localhost`).
 
 ## Deleting an account is two changes with a fortnight between them
 
