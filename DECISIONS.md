@@ -1136,7 +1136,7 @@ sibling recording onto a primary's labels changes its samples and not its key. `
 query rather than decoding JSONB to discard it. The 304 is a bare `Response`, bypassing
 `response_model` validation. The endpoint sets `Cache-Control: private, max-age=300`;
 `ClientCacheMiddleware` never overrides one an endpoint set. `v` is declared and ignored so the
-contract is visible: the client varies it with the profile's `updated_at`.
+contract is visible: the client varies it with the profile's `uuid` and `updated_at`.
 
 `DiveProfileInfo` goes on `DiveReadWithMixtures`, never `DiveRead` — the inheritance trap
 `source_file` documents; on the parent it would cost `_cached_read_dives` a query per page.

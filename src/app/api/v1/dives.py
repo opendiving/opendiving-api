@@ -1,6 +1,6 @@
 import hashlib
 import uuid as uuid_pkg
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
@@ -503,6 +503,14 @@ async def parse_dive(
     )
 
 
+def _is_a_day(started_at: str) -> bool:
+    try:
+        date.fromisoformat(started_at)
+    except ValueError:
+        return False
+    return True
+
+
 async def _parse_matches(db: AsyncSession, *, user_id: int, parsed: ParsedDiveSchema) -> list[ParsedDiveMatch]:
     """The caller's dives this parsed file might belong to, nearest start first.
 
@@ -512,14 +520,18 @@ async def _parse_matches(db: AsyncSession, *, user_id: int, parsed: ParsedDiveSc
 
     A file with no start time matches nothing and the list is empty: every gate is anchored
     on the clock, and a header-only export with no timestamp gives them nothing to compare.
+    **Nor does a start that is a day** - a logbook file may state only the date - which
+    `fromisoformat` would read as midnight and offer every dive recorded around it; the
+    attach path takes a day as no recording's start (`dive_reader.start_of`), and so does
+    this.
     """
-    if parsed.start_time is None:
+    if parsed.start_time is None or _is_a_day(parsed.start_time):
         return []
     try:
         start_time, offset_minutes = split_local_start_time(datetime.fromisoformat(parsed.start_time))
     except ValueError:
-        # A start `fromisoformat` cannot read, or a bare date. Not a reason to fail
-        # the parse - the form still gets its values - just one with no clock to match on.
+        # A start `fromisoformat` cannot read. Not a reason to fail the parse - the form
+        # still gets its values - just one with no clock to match on.
         return []
 
     incoming = RecordingFacts(
@@ -1604,8 +1616,8 @@ async def read_dive_profile(
     a profile. Caching it would mean evicting and refetching tens of KB per dive for nothing.
 
     `v` is read by nothing here; it is declared so the contract is visible. The client varies
-    it with the profile's `uuid` so a re-extraction or a relabel gets its own cache entry
-    rather than being masked by the previous one for five minutes.
+    it with the profile's `uuid` and `updated_at` so a re-extraction or a relabel gets its own
+    cache entry rather than being masked by the previous one for five minutes.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 

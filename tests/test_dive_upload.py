@@ -16,10 +16,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.app.api.dependencies import get_current_user
+from src.app.api.v1 import dives as dives_module
+from src.app.api.v1.dives import _parse_matches
 from src.app.api.v1.dives import router as dives_router
 from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.core.security import verify_dive_file_token
+from src.app.schemas.parsed_dive import ParsedDiveSchema
 from src.app.services.dive_files import MAX_DIVE_FILE_SIZE
 from tests.helpers.fit import dense_record_stream
 
@@ -220,3 +223,43 @@ class TestTheReadersRefusals:
 
         assert status == 422
         assert "DOCTYPE" in body["detail"]
+
+
+class TestADayIsNoStartToMatchOn:
+    """A logbook file may state only the date a dive happened on. `fromisoformat` reads that
+    as midnight, which would offer every dive recorded around midnight that day."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("started_at", ["2026-09-01", "20260901"])
+    async def test_a_date_only_start_matches_nothing(self, monkeypatch: pytest.MonkeyPatch, started_at: str) -> None:
+        looked_up = AsyncMock(return_value=[])
+        monkeypatch.setattr(dives_module, "load_candidates", looked_up)
+        parsed = ParsedDiveSchema(
+            avg_depth=None,
+            bottom_temperature=None,
+            dive_number=None,
+            duration=1800,
+            max_depth=20.0,
+            start_time=started_at,
+            mixtures=[],
+        )
+
+        assert await _parse_matches(AsyncMock(), user_id=1, parsed=parsed) == []
+        looked_up.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_start_with_a_clock_is_still_looked_up(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        looked_up = AsyncMock(return_value=[])
+        monkeypatch.setattr(dives_module, "load_candidates", looked_up)
+        parsed = ParsedDiveSchema(
+            avg_depth=None,
+            bottom_temperature=None,
+            dive_number=None,
+            duration=1800,
+            max_depth=20.0,
+            start_time="2026-09-01T00:00:00",
+            mixtures=[],
+        )
+
+        assert await _parse_matches(AsyncMock(), user_id=1, parsed=parsed) == []
+        looked_up.assert_called_once()

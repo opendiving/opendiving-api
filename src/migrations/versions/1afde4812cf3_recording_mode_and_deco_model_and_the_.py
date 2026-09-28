@@ -15,8 +15,8 @@ pair.
 **Nothing backfills the profile channels.** `PROFILE_EXTRACTOR_VERSION` goes to 4 in the
 same change, so `backfill_dive_profiles` would re-extract every file-backed profile on its
 next run - and no part of this change runs it. Existing profiles keep the four channels they
-have until their recording is re-uploaded. See *"The decompression channels arrive for new
-dives only"* in DECISIONS.md; a data pass here would also be the wrong place for it, since a
+have until their recording is re-uploaded. See *"The decompression channels reach a stored
+dive when the backfill re-derives it"* in DECISIONS.md; a data pass here would also be the wrong place for it, since a
 migration cannot read a blob store.
 
 `downgrade()` drops the columns, which discards what they held - by construction, since

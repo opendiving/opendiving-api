@@ -447,7 +447,7 @@ class DiveProfileInfo(BaseModel):
     max_temperature: Annotated[float | None, Field(default=None, description="Warmest recorded sample, in Celsius")]
     min_pressure: Annotated[float | None, Field(default=None, description="Lowest recorded tank pressure, in bar")]
     max_pressure: Annotated[float | None, Field(default=None, description="Highest recorded tank pressure, in bar")]
-    # The `v` cache-buster the client sends to `GET /dive/{uuid}/recording/{rid}/profile`, so a
-    # re-extraction gets its own cache entry rather than being masked for five minutes by
-    # the previous one.
+    # Half of the `v` cache-buster the client sends to `GET /dive/{uuid}/recording/{rid}/profile`,
+    # beside `uuid`, so a re-extraction gets its own cache entry rather than being masked for
+    # five minutes by the previous one.
     updated_at: datetime | None = None
