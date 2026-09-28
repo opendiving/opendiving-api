@@ -3139,9 +3139,8 @@ class TestConcurrentResolvesDoNotExhaustThePool:
         first resolve can go outbound, and on a loaded runner that ramp-up was still running at
         300 ms, so the window caught resolves still holding their local read. The release was
         working the whole time - the later samples read zero - and the assertion was simply
-        looking at the wrong instants. Same lesson as `TestExtractAllSharesOneDecode`, which
-        counts scans rather than timing them: **assert on a signal the test controls, never on
-        a wall clock it only hopes to line up with.**
+        looking at the wrong instants. **Assert on a signal the test controls, never on a wall
+        clock it only hopes to line up with.**
 
         So the register now holds every resolve inside its record fetch until all fifteen have
         arrived there, and nothing is read until they have. What the burst is doing at the

@@ -254,8 +254,8 @@ def _num(value: float) -> str:
 # nonsense" failure this module is otherwise careful about, in its loudest form.
 #
 # They do reach here. Notes and names are plain Pydantic strings with no character
-# filter, and `<setmarker>` carries a device's own wording off an uploaded file
-# (`dive_parsers/fit.py` builds it with `str(data)`). Scrubbing at the single point every
+# filter, and `<setmarker>` carries a device's own wording off an uploaded file - a FIT
+# event's label is whatever the device wrote. Scrubbing at the single point every
 # string passes through is the only version of this that cannot be forgotten at a call
 # site. Dropped rather than replaced: they carry no meaning a diver put there.
 _FORBIDDEN_IN_XML = str.maketrans(dict.fromkeys(range(0x20), None) | {0x09: "\t", 0x0A: "\n", 0x0D: "\r", 0x7F: None})

@@ -43,6 +43,7 @@ from uuid6 import uuid7
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.core.schemas import NOTES_MAX_LENGTH
+from src.app.core.security import create_dive_file_token
 from src.app.models.certification import Certification
 from src.app.models.contact import Contact
 from src.app.models.course import Course
@@ -79,7 +80,9 @@ from src.app.schemas.logbook_import import (
 )
 from src.app.schemas.user import CHECK_IN_FIELDS
 from src.app.schemas.user_picture import PictureCrop, PictureKind
-from src.app.services import blob_store
+from src.app.services import blob_store, dive_reader
+from src.app.services.dive_files import store_recording_file
+from src.app.services.dive_profiles import READER_VERSION, backfill_profiles
 from src.app.services.export import load_export_bundle, write_divejson, write_uddf
 from src.app.services.export.archive import DIVEJSON_NAME, write_archive
 from src.app.services.export.paths import plan_archive_paths
@@ -96,10 +99,10 @@ from src.app.services.logbook_import import reader as import_reader
 from src.app.services.logbook_import.planner import (
     _DIVE_BOUNDS,
     _MIXTURE_BOUNDS,
-    _READOUT_BOUNDS,
     _SIGHTING_BOUNDS,
 )
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
+from src.app.services.recording_shape import READOUT_BOUNDS
 from src.app.services.user_pictures import PORTRAIT_FRAME, recrop_picture, store_picture
 from tests.conftest import db_available
 from tests.helpers.generators import (
@@ -674,6 +677,46 @@ class TestFilesFollowTheirBytes:
         assert stored.sha256 == digest
         assert await blob_store.get(stored.storage_key) == payload
         assert stored.stored_byte_size == (tmp_path / stored.storage_key).stat().st_size
+
+    @pytest.mark.asyncio
+    async def test_a_restored_file_this_build_reads_makes_its_recording_a_backfill_candidate(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """The profile an archive restore keeps is the document's, which no reader of this
+        instance produced, so its reader version is NULL - and the restored file beside it is
+        one this build reads, so the next backfill re-reads the recording from it."""
+        from src.app.services import blob_store
+
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        source = create_user(db)
+        dive = create_dive(db, source)
+        content = (Path(__file__).parent / "fixtures" / "dive_files" / "suunto-ocean-2026.json").read_bytes()
+        await store_recording_file(
+            async_db,
+            user_id=source.id,
+            user_uuid=source.uuid,
+            dive_id=dive.id,
+            upload=_upload(content, "dive.json"),
+            file_token=create_dive_file_token(
+                user_uuid=source.uuid, sha256=hashlib.sha256(content).hexdigest(), parser_key="suunto_json"
+            ),
+        )
+        document = await _export(async_db, source.id, archive_paths=True)
+        member = parse_document(document)["dives"][0]["recordings"][0]["source_files"][0]["archive_path"]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, _zip_of(document, {member: content}), filename="logbook.zip")
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+
+        assert plan.files_restored == 1
+        restored = select(DiveProfile.parser_key, DiveProfile.reader_version).where(
+            DiveProfile.dive_id.in_(select(Dive.id).where(Dive.user_id == destination.id))
+        )
+        assert (await async_db.execute(restored)).one() == ("suunto_json", None)
+
+        await backfill_profiles(async_db)
+
+        assert (await async_db.execute(restored)).one() == ("suunto_json", READER_VERSION)
 
     @pytest.mark.asyncio
     async def test_bytes_that_do_not_match_their_digest_are_skipped(
@@ -3770,7 +3813,7 @@ class TestTheBoundsCensus:
     `dive_mixture` must not be able to land without an import-side counterpart.
 
     The same shape as
-    `test_every_single_column_bound_a_parser_can_reach_has_a_parse_side_guard`, and for the
+    `test_every_single_column_bound_a_file_can_reach_has_a_parse_side_guard`, and for the
     same reason - a value the database refuses must not take the write it rode in on with
     it. Pair rules are excluded by name: there is no "the bad value" in a pair, so the
     planner handles those on their own terms.
@@ -3783,7 +3826,7 @@ class TestTheBoundsCensus:
             "ck_dive_exit_position_pair",
             "ck_dive_mixture_oxygen_helium_sum",
             "ck_dive_mixture_pressure_order",
-            # `_plan_deco_model` drops both halves of an inverted gradient-factor pair.
+            # `shape_deco_model` drops both halves of an inverted gradient-factor pair.
             "ck_dive_recording_deco_gf_low_within_high",
             # `split_dive_start_time` never pairs the date-only flag with an offset.
             "ck_dive_start_date_only_has_no_offset",
@@ -3812,7 +3855,7 @@ class TestTheBoundsCensus:
     def test_every_bound_the_document_can_reach_has_a_guard(self) -> None:
         guarded = {
             bound.field
-            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, _READOUT_BOUNDS, _SIGHTING_BOUNDS)
+            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, READOUT_BOUNDS, _SIGHTING_BOUNDS)
             for bound in bounds
         }
         # Column names, mapped onto the wire names the planner reads them under.
@@ -4127,18 +4170,18 @@ class TestTheIntegerColumnCensus:
         ("dive_profile", "duration"): "bounded in `_plan_profile`, against the samples and the declared span",
         ("dive_profile", "depth_sample_count"): "a length, capped by `MAX_POINTS_PER_CHANNEL`",
         ("dive_profile", "event_count"): "a count, capped by `MAX_EVENTS`",
-        ("dive_profile", "max_depth_cm"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_ceiling_cm"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "min_temperature_c10"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_temperature_c10"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "min_pressure_bar10"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_pressure_bar10"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "min_ndl_s"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_tts_s"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_ppo2_bar100"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_cns_pct10"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_gradient_factor_pct"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_surface_gradient_factor_pct"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "max_depth_cm"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_ceiling_cm"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "min_temperature_c10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_temperature_c10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "min_pressure_bar10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_pressure_bar10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "min_ndl_s"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_tts_s"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_ppo2_bar100"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_cns_pct10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_gradient_factor_pct"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_surface_gradient_factor_pct"): "an extreme of a channel `shape_series` bounds",
         ("gear_service_schedule", "id"): "the sequence's",
         ("gear_service_schedule", "user_id"): "the caller's",
         ("gear_service_schedule", "gear_item_id"): "resolved from a row this import wrote",
@@ -4210,9 +4253,9 @@ class TestTheIntegerColumnCensus:
         ("dive_recording", "dive_id"): "resolved from a row this import wrote",
         ("dive_recording", "ordinal"): "the list index, not the document's",
         ("dive_recording", "device_dive_number"): "bounded in `_plan_recordings`",
-        ("dive_recording", "deco_gf_low"): "bounded in `_DECO_MODEL_BOUNDS`, to 0..100",
-        ("dive_recording", "deco_gf_high"): "bounded in `_DECO_MODEL_BOUNDS`, to 0..100",
-        ("dive_recording", "deco_conservatism"): "bounded in `_DECO_MODEL_BOUNDS`, to the column's own width",
+        ("dive_recording", "deco_gf_low"): "bounded in `DECO_MODEL_BOUNDS`, to 0..100",
+        ("dive_recording", "deco_gf_high"): "bounded in `DECO_MODEL_BOUNDS`, to 0..100",
+        ("dive_recording", "deco_conservatism"): "bounded in `DECO_MODEL_BOUNDS`, to the column's own width",
         ("dive_recording", "utc_offset_minutes"): "derived from a parsed UTC offset, which Python bounds at a day",
         ("dive_recording", "duration"): "the samples' own span, capped by `_plan_profile`",
         ("dive_file", "byte_size"): "the restored bytes' own length, capped by `MAX_DIVE_FILE_SIZE`",
@@ -4292,33 +4335,50 @@ class TestTheAgencyVocabulary:
 
 
 class TestTheFormatLabelTable:
-    """`_FORMAT_LABELS` names every id `divejson.read_formats()` returns.
+    """`FORMAT_LABELS` and `FORMAT_CONTENT_TYPES` name every id `divejson.read_formats()` returns.
 
     The one guard in this repository that can see a **new reader** arrive. Everything else
     on both sides of the seam is written to tolerate an unknown format - the accepted set is
     computed per call and never listed, `formats_this_build_reads` falls back to the raw id,
-    and the picker's extension list is the web app's - so a version bump that adds a reader
-    changes what the API accepts with nothing anywhere reporting it. That is not
-    hypothetical: `suunto_xml` shipped in `divejson` 0.4.0, and the pin crossed it into a
-    build whose "formats this build reads" sentence rendered the bare string `suunto_xml`
-    while the web app's picker refused the extension. Nobody saw it for ten review rounds.
+    a stored file of an unnamed format is served as `application/octet-stream`, and the
+    picker's extension list is the web app's - so a version bump that adds a reader changes
+    what the API accepts, on the import and on the dive form alike, with nothing anywhere
+    reporting it. That is not hypothetical: `suunto_xml` shipped in `divejson` 0.4.0, and the
+    pin crossed it into a build whose "formats this build reads" sentence rendered the bare
+    string `suunto_xml` while the web app's picker refused the extension. Nobody saw it for
+    ten review rounds.
     """
 
     def test_every_read_format_has_a_label(self) -> None:
-        unlabelled = [fmt for fmt in divejson.read_formats() if fmt not in import_reader._FORMAT_LABELS]
+        unlabelled = [fmt for fmt in divejson.read_formats() if fmt not in dive_reader.FORMAT_LABELS]
 
         assert not unlabelled, (
             "`divejson` reads a format this build has no name for, so the API accepts it while every message "
-            f"about it renders the raw id: {unlabelled}. Add it to `_FORMAT_LABELS`, and to the prose in "
-            "`README.md`, `api/v1/logbook_import.py` and `schemas/logbook_import.py` that lists the set."
+            f"about it renders the raw id: {unlabelled}. Add it to `FORMAT_LABELS` in `services/dive_reader.py`, "
+            "and to the prose in `README.md`, `api/v1/logbook_import.py` and `schemas/logbook_import.py` that "
+            "lists the set."
+        )
+
+    def test_every_read_format_has_a_content_type(self) -> None:
+        """What a stored file of that format is downloaded as - the dive form stores every file it reads."""
+        untyped = [fmt for fmt in divejson.read_formats() if fmt not in dive_reader.FORMAT_CONTENT_TYPES]
+
+        assert not untyped, (
+            f"`divejson` reads a format this build serves as `application/octet-stream`: {untyped}. Add it to "
+            "`FORMAT_CONTENT_TYPES` in `services/dive_reader.py`."
         )
 
     def test_no_label_outlives_its_format(self) -> None:
         """The mirror, and it is not symmetry for its own sake: a label for a format the
         library has dropped is a format this build advertises and refuses."""
-        stale = [fmt for fmt in import_reader._FORMAT_LABELS if fmt not in divejson.read_formats()]
+        stale = [
+            fmt
+            for table in (dive_reader.FORMAT_LABELS, dive_reader.FORMAT_CONTENT_TYPES)
+            for fmt in table
+            if fmt not in divejson.read_formats()
+        ]
 
-        assert not stale, f"`_FORMAT_LABELS` names a format `divejson` no longer reads: {stale}"
+        assert not stale, f"`services/dive_reader.py` names a format `divejson` no longer reads: {stale}"
 
 
 class TestTheImportGates:
@@ -4444,7 +4504,7 @@ class TestTheImportGates:
         machine's arithmetic and one machine's labelling, and attributing them to the dive
         would credit the Shearwater's record with the Suunto's numbers.
 
-        The attach route has drawn that line since recordings arrived (`_rederive_recording`
+        The attach route has drawn that line since recordings arrived (`rederive_recording`
         returns before both for `ordinal != 0`). This side could not until the match carried
         an ordinal, so it wrote them for whichever recording the gate happened to pick.
         """

@@ -33,8 +33,6 @@ dependencies = [
     "crudadmin>=0.4.2",
     "google-auth[requests]>=2.28.0",
     "gunicorn>=23.0.0",
-    "defusedxml>=0.7.1",
-    "fitdecode>=0.11.0",
     # The DiveJSON converter, and the only reason logbook import accepts anything but
     # DiveJSON. Runtime rather than dev: `services/logbook_import/reader.py` sniffs and
     # converts on the request path, so an import that lives in the `dev` extra would fail
@@ -90,6 +88,9 @@ dev = [
     # as paragraphs. Settings live in `.mdformat.toml`.
     "mdformat>=1.0.0",
     "mdformat-gfm>=1.0.0",
+    # The FIT decoder `tests/helpers/fit.py` writes its inline fixtures with. `divejson` needs
+    # it at runtime and brings it into the image on its own; nothing under `src/` imports it.
+    "fitdecode>=0.11.0",
     # Validates generated UDDF exports against the vendored schema
     # (tests/fixtures/uddf/) in tests only - the runtime writer builds its XML with the
     # stdlib and never validates.

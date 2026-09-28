@@ -256,7 +256,7 @@ class DiveTechScalars(BaseModel):
     recording fills instead and cannot overwrite (`fill_tech_scalars`) - but that is a
     property of which write runs, not a protection these fields have, and the condition is
     "this upload created the recording" rather than "the recording had no files"
-    (`_rederive_recording` on `fresh`). Adding a hand-set position means taking it off this
+    (`rederive_recording` on `fresh`). Adding a hand-set position means taking it off this
     mixin, not relying on the fill or adding a special case to the outright write.
 
     The membership is load-bearing in the other direction too - `TECH_SCALAR_FIELDS` is

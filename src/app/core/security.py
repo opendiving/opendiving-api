@@ -636,11 +636,13 @@ async def verify_restore_token(token: str, db: AsyncSession) -> uuid_pkg.UUID | 
 def create_dive_file_token(*, user_uuid: uuid_pkg.UUID, sha256: str, parser_key: str) -> str:
     """Mints the receipt `POST /dive/parse` hands back with the parsed dive.
 
-    Binds three things the upload route needs to trust: who parsed the file, exactly
-    which bytes were parsed (by content hash), and which parser succeeded.
+    Binds three things the upload route needs to trust: who read the file, exactly which
+    bytes were read (by content hash), and the format id the reader answered for them.
     `POST /dive/{uuid}/recordings` re-hashes the body it receives and stores the file
     only if the hash matches, so the only bytes that can ever enter `dive_file` are
-    bytes this server has already parsed.
+    bytes this server has already read. The claim is still spelled `parser_key`, which
+    is what every token minted before the reader changed carries; the three formats the
+    form read then are the same three strings as the reader's ids, so those tokens verify.
 
     Deliberately *not* blacklisted after use, unlike `create_onboarding_token`:
     re-uploading the same file to the same dive is an idempotent no-op by design, and
@@ -649,9 +651,9 @@ def create_dive_file_token(*, user_uuid: uuid_pkg.UUID, sha256: str, parser_key:
     nothing revokes it by value, so two identical receipts are simply the same receipt
     (see `_new_jti` for what goes wrong when a *revocable* token collides).
 
-    The parser's `content_type` is deliberately absent. That value ends up in a response
-    header on download, so it is resolved from `parser_key` against the live registry at
-    store time rather than carried here, where a forged token could dictate it.
+    The format's content type is deliberately absent. That value ends up in a response
+    header on download, so it is resolved from the format id against this app's own table
+    at store time rather than carried here, where a forged token could dictate it.
     """
     expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=settings.DIVE_FILE_TOKEN_EXPIRE_MINUTES)
     to_encode: dict[str, Any] = {

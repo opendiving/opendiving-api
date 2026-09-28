@@ -1,4 +1,4 @@
-"""Wire and parser shapes for a dive's per-sample profile.
+"""Wire shapes for a dive's per-sample profile.
 
 Deliberately its own module rather than an addition to `parsed_dive.py`: that one is the
 `POST /dive/parse` contract, and a profile never travels over it. A profile is thousands
@@ -13,25 +13,25 @@ route converted, rather than anything this app wrote. `DECISIONS.md`, *"Importin
 logbook is the one client-supplied profile"*, records why that is a different question
 from posting a parse back, and why the answer does not rest on who produced the document.
 
-One shape here is neither wire nor parser: `GasAttribution` is what a summary *column*
-holds. It lives here rather than in the service because it is read back out of JSONB and
-wants validating on the way in, which is what the models in this package are for.
+One shape here is not a wire shape: `GasAttribution` is what a summary *column* holds. It
+lives here rather than in the service because it is read back out of JSONB and wants
+validating on the way in, which is what the models in this package are for.
 """
 
 import uuid as uuid_pkg
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 # The profile axis's unit: a series' `times`, a profile's `duration` and an event's `time` are
 # milliseconds (DiveJSON §5.1), and every consumer that wants seconds divides by this. The
 # `ndl` and `tts` *values* stay seconds - they are readings, not positions on the axis.
 MILLISECONDS_PER_SECOND = 1000
 
-# The integer scales every readings array is expressed in - `v` on the parser and stored
-# shapes, `values` on the wire. They live here (and, mirrored, in
+# The integer scales every readings array is expressed in - `v` in the stored shape, `values`
+# on the wire and in a document. They live here (and, mirrored, in
 # the frontend's `PROFILE_CHANNELS`) rather than travelling per-response: they are part
 # of the format, not of a particular dive. Integers rather than floats because a float
 # round-trip reintroduces `20.600000000000023`-class noise several thousand times per
@@ -114,12 +114,12 @@ PROFILE_CHANNEL_ORDER: tuple[str, ...] = (
 class ProfileEventType(StrEnum):
     """What a marker on the profile chart says happened.
 
-    A closed vocabulary, like `GasRole`, and for the same reason: three formats spell the
-    same occurrence three ways, and a chart that has to render a marker needs to know what
+    A closed vocabulary, like `GasRole`, and for the same reason: every format spells the
+    same occurrence its own way, and a chart that has to render a marker needs to know what
     it is drawing. Anything a device records that this vocabulary has no value for becomes
     `OTHER` **carrying the device's own wording in `label`** rather than being forced into
-    a neighbouring type - see the normalization tables in the parsers, and `_validate_events`
-    below, which is what stops an `OTHER` from being an unlabelled tick that says nothing.
+    a neighbouring type - `recording_shape.shape_events` drops an `OTHER` with no label,
+    which is what stops one from being an unlabelled tick that says nothing.
 
     **Thirteen of these fourteen values are the format's, and `OTHER` is not one of them.**
     DiveJSON §6.6 makes `type` OPTIONAL and spells "unclassified" as an *absent* type beside
@@ -153,12 +153,13 @@ class ProfileProvenance(StrEnum):
     """Where a stored profile's samples came from - a closed three-way question.
 
     Not `dive_profile.parser_key` itself, which is the storage spelling of the same fact and
-    a deliberately overloaded column: it holds a `DiveParser.key` when the samples were read
-    off the recording's files, and one of two sentinels otherwise (see
+    a deliberately overloaded column: it holds the format id the reader answered when the
+    samples were read off the recording's files, and one of two sentinels otherwise (see
     `UNREPRODUCIBLE_PROVENANCES` in `services/dive_profiles.py`). That overload is right for
     a column that also has to answer "can this be extracted again"; it is wrong for a wire
     member, because publishing it would make a client hard-code the two sentinel strings and
-    treat *every other value* - the open, growing set of parser keys - as the third case.
+    treat *every other value* - the open set of format ids, which grows with the reader - as
+    the third case.
     The question is closed, so the vocabulary is, like `ProfileEventType` and `GasRole`.
 
     `FILE` is not "this recording has files": a merged recording keeps whatever files either
@@ -169,131 +170,6 @@ class ProfileProvenance(StrEnum):
     FILE = "file"
     DIVEJSON_IMPORT = "divejson_import"
     MERGE = "merge"
-
-
-def _validate_series(t: list[float] | list[int], v: list[int], label: str) -> None:
-    if len(t) != len(v):
-        raise ValueError(f"{label}: series has {len(t)} timestamps but {len(v)} values")
-    if not t:
-        raise ValueError(f"{label}: series is empty (a channel with no readings must be omitted, not empty)")
-    if any(later < earlier for earlier, later in zip(t, t[1:], strict=False)):
-        raise ValueError(f"{label}: timestamps are not sorted")
-
-
-def _validate_events(events: list[ParsedProfileEvent]) -> None:
-    """The events' own invariants, which are not the series' invariants.
-
-    Its own function rather than a call to `_validate_series` with the timestamps pulled
-    out, because the two have almost nothing in common. An event has no `v` to be the same
-    length as, an empty list is the ordinary case rather than a channel that should have
-    been omitted, and - the part that would actually have been wrong - events are **not**
-    required to arrive sorted. A parser emits them in whatever order the file lists them,
-    and the Suunto XML export lists gas changes nested inside each `<DiveMixture>`, so the
-    second cylinder's switch at 2 356 s can follow the first's at 0 s or precede it
-    depending on how the cylinders were ordered. Sorting is done once in `normalize`,
-    where a single stream makes it unambiguous - unlike the sample channels, where only a
-    parser knows which timestamps belong to which sensor.
-
-    What is enforced is that an `OTHER` says what it was. The point of the escape hatch is
-    to surface a device's own wording; an `OTHER` with no `label` is a tick on a chart that
-    tells the diver nothing, and would mean a parser dropped the one thing it had to keep.
-    """
-    for event in events:
-        if event.type is ProfileEventType.OTHER and not (event.label or "").strip():
-            raise ValueError(f"event at {event.t}s is `other` with no label (the device's own wording is the point)")
-
-
-class ParsedSeries(BaseModel):
-    """One channel as a parser produces it: raw seconds, already in this channel's scale.
-
-    `t` is seconds from the file's own origin - the start its header states
-    (`Header.DateTime` for the JSON export, `<StartTime>` for the XML one's `<Time>` axis) -
-    and may be fractional and need not begin at zero: the millisecond grain, rounding and
-    deduping are format-independent and happen once in `services/dive_profiles.py`.
-    Sorting, however, is the parser's job: only it knows which timestamps belong to which
-    sensor stream, and the union of a Suunto Ocean
-    export's sample timestamps is *not* monotonic (adjacent entries go backwards by up to
-    0.7 s, because separate streams are appended out of order). Each channel's own
-    timestamps are monotonic, so a parser that groups by channel before emitting satisfies
-    this for free.
-
-    `v` is already integer-scaled by the parser, because the parser is the only layer that
-    knows a format's units (mbar here, Pascal there, Kelvin over there) and nothing
-    downstream should have to.
-    """
-
-    t: list[float]
-    v: list[int]
-
-
-class ParsedPressureSeries(ParsedSeries):
-    """A single cylinder's pressure readings, labelled by the gas number it reported as.
-
-    Pressure is a list of these rather than a scalar channel because it is genuinely
-    multi-tank: a Suunto Ocean reports five cylinder slots, and gas numbering differs
-    between device generations (1 on the 2025 D5, 0 on the Ocean). `gas_number` is a
-    label to display, not an index to trust.
-    """
-
-    gas_number: int
-
-
-class ParsedProfileEvent(BaseModel):
-    """One thing the device recorded happening, at a moment rather than over a channel.
-
-    `t` is in the same raw seconds-from-the-file's-origin as `ParsedSeries.t`, and is put on
-    the axis by `normalize` against the *sample* channels' origin - never against the
-    events' own earliest, which would let one mistimed marker slide every event on the
-    chart away from the curve it annotates.
-
-    `gas_number` is set only on a `GAS_SWITCH`, and is the same label the mixtures and the
-    profile's pressure channels use, so a switch marker and the cylinder it switched to
-    can be joined. `None` where the file records that a switch happened without saying to
-    what. `label` carries the device's own wording, and is required on an `OTHER`.
-    """
-
-    t: float
-    type: ProfileEventType
-    gas_number: int | None = None
-    label: str | None = None
-
-
-class ParsedProfileSchema(BaseModel):
-    """Everything `DiveParser.parse_profile` returns for one file.
-
-    A channel the file doesn't carry is absent (`None` / empty list), never an empty
-    series - "this export has no transmitter" and "this export has a transmitter that
-    recorded nothing" are the same thing to a chart, and both mean "don't draw the axis".
-    """
-
-    depth: ParsedSeries | None = None
-    ceiling: ParsedSeries | None = None
-    temperature: ParsedSeries | None = None
-    # The device's own decompression arithmetic, in the scales above. A parser emits one
-    # only where its format records it and its mapping document maps it - see each parser's
-    # class docstring for what it still refuses and why.
-    ndl: ParsedSeries | None = None
-    tts: ParsedSeries | None = None
-    ppo2: ParsedSeries | None = None
-    cns: ParsedSeries | None = None
-    gradient_factor: ParsedSeries | None = None
-    surface_gradient_factor: ParsedSeries | None = None
-    pressure: list[ParsedPressureSeries] = Field(default_factory=list)
-    events: list[ParsedProfileEvent] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _check_series(self) -> Self:
-        # Driven by the channel tuple rather than named one by one, so a channel added to
-        # this schema cannot ship unvalidated: the two lists would have to be edited
-        # separately, and only one of them fails a test when it isn't.
-        for channel in SINGLE_SERIES_CHANNELS:
-            series: ParsedSeries | None = getattr(self, channel)
-            if series is not None:
-                _validate_series(series.t, series.v, channel)
-        for cylinder in self.pressure:
-            _validate_series(cylinder.t, cylinder.v, f"pressure[gas {cylinder.gas_number}]")
-        _validate_events(self.events)
-        return self
 
 
 class GasAttribution(BaseModel):
@@ -519,9 +395,9 @@ class RecordingProfileRead(DiveProfileRead):
     provenance: Annotated[
         ProfileProvenance,
         Field(
-            description="Where these samples came from: `file` (read from this recording's files, and "
-            "re-readable from them), `divejson_import` (supplied by an imported document) or `merge` "
-            "(two recordings' samples folded onto one axis)."
+            description="Where these samples came from: `file` (read from this recording's stored files, and "
+            "read from them again whenever this app's reader moves on), `divejson_import` (supplied by an "
+            "imported document) or `merge` (two recordings' samples folded onto one axis)."
         ),
     ]
 
@@ -571,7 +447,7 @@ class DiveProfileInfo(BaseModel):
     max_temperature: Annotated[float | None, Field(default=None, description="Warmest recorded sample, in Celsius")]
     min_pressure: Annotated[float | None, Field(default=None, description="Lowest recorded tank pressure, in bar")]
     max_pressure: Annotated[float | None, Field(default=None, description="Highest recorded tank pressure, in bar")]
-    # The `v` cache-buster the client sends to `GET /dive/{uuid}/recording/{rid}/profile`, so a
-    # re-extraction gets its own cache entry rather than being masked for five minutes by
-    # the previous one.
+    # Half of the `v` cache-buster the client sends to `GET /dive/{uuid}/recording/{rid}/profile`,
+    # beside `uuid`, so a re-extraction gets its own cache entry rather than being masked for
+    # five minutes by the previous one.
     updated_at: datetime | None = None

@@ -3,9 +3,9 @@
 `core/security.py`, and the `/dive/{uuid}/file/{fid}` routes).
 
 Like `test_certifications.py`, these cover the pieces that are pure logic and so need no
-database: the token that admits a file into storage, the parser metadata that decides
-what it is recorded as, and the reconciliation that decides whether an upload is a
-replacement, a no-op or a duplicate. Endpoint behaviour on top of a live Postgres/Redis
+database: the token that admits a file into storage, the format it is recorded and served
+as, and the reconciliation that decides whether an upload is a replacement, a no-op or a
+duplicate. Endpoint behaviour on top of a live Postgres/Redis
 is exercised end to end by hand (see DECISIONS.md), not here.
 """
 
@@ -35,7 +35,6 @@ from src.app.schemas.dive import DiveFileInfo, DiveTechScalars, RecordingReadout
 from src.app.schemas.dive_mixture import DiveMixtureRead, GasRole
 from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
 from src.app.services import dive_files as dive_files_module
-from src.app.services import dive_parsers as parsers_module
 from src.app.services.blob_store import new_key
 from src.app.services.cache_invalidation import invalidate_dive_caches
 from src.app.services.dive_files import (
@@ -46,36 +45,29 @@ from src.app.services.dive_files import (
     READOUT_FIELDS,
     SCALAR_FIELDS,
     TECH_SCALAR_FIELDS,
+    InvalidDiveFileTokenError,
     LoadedDiveFile,
     RecordingExtraction,
+    _admit,
     _ExistingRow,
-    _extract_all,
-    _rederive_recording,
     backfill_tech_fields,
+    extract_file,
     extract_recording,
-    extract_tech_scalars,
     fill_mixture_fields,
-    fill_parsed_mixtures,
+    join_file_mixtures,
     merge_mixture_fields,
     reconcile,
+    rederive_recording,
+    renumber_onto_labels,
     store_recording_file,
 )
-from src.app.services.dive_parsers import (
-    PARSER_BY_KEY,
-    DiveParseError,
-    UnsupportedDiveFileError,
-    parse_dive_file_with_parser,
-)
-from src.app.services.dive_parsers.base import DiveParser
-from src.app.services.dive_parsers.fit import FitParser
-from src.app.services.dive_parsers.suunto_json import SuuntoJsonParser
-from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
-from tests.helpers.fit import dive_fit_file
+from src.app.services.dive_reader import FORMAT_CONTENT_TYPES
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 
 VALID_SUUNTO_XML = f"""<?xml version="1.0" encoding="utf-8"?>
 <Dive xmlns="{SUUNTO_NS}">
+  <StartTime>2026-06-03T12:15:00</StartTime>
   <MaxDepth>25.5</MaxDepth>
   <Duration>1800</Duration>
 </Dive>
@@ -198,80 +190,41 @@ class TestDiveFileToken:
         assert claims.sha256 != _digest(VALID_SUUNTO_JSON)
 
 
-class TestParserMetadata:
-    """`parser_key` is stored on every row and read back by future backfills, so the
-    registry has to declare it consistently."""
+class TestAdmittingAToken:
+    """`_admit` checks the claim against the formats this build's reader reads."""
 
-    def test_every_parser_declares_a_key_and_a_content_type(self) -> None:
-        for parser in parsers_module._PARSERS:
-            assert parser.key, f"{parser.__name__} has no key"
-            assert parser.content_type, f"{parser.__name__} has no content_type"
+    def test_a_token_minted_before_the_reader_changed_still_admits_its_file(self) -> None:
+        """The deploy-skew case: the previous build minted its tokens with its parsers' keys,
+        and the three formats the form read then are the same three strings as the reader's
+        format ids - so a form the old build prefilled still attaches on this one."""
+        for key in ("fit", "suunto_json", "suunto_xml"):
+            token = create_dive_file_token(user_uuid=USER_UUID, sha256=_digest(VALID_SUUNTO_XML), parser_key=key)
 
-    def test_keys_are_unique(self) -> None:
-        keys = [parser.key for parser in parsers_module._PARSERS]
+            assert _admit(user_uuid=USER_UUID, digest=_digest(VALID_SUUNTO_XML), file_token=token) == key
 
-        assert len(keys) == len(set(keys))
+    def test_a_format_this_build_does_not_read_is_refused(self) -> None:
+        token = create_dive_file_token(user_uuid=USER_UUID, sha256=_digest(VALID_SUUNTO_XML), parser_key="garmin_fitx")
 
-    def test_parser_by_key_covers_the_registry(self) -> None:
-        """`store_recording_file` resolves a token's `parser_key` through this map to get the
-        `content_type` it serves the file back as; a gap would reject a valid import."""
-        assert PARSER_BY_KEY == {parser.key: parser for parser in parsers_module._PARSERS}
+        with pytest.raises(InvalidDiveFileTokenError, match="no longer supported"):
+            _admit(user_uuid=USER_UUID, digest=_digest(VALID_SUUNTO_XML), file_token=token)
 
+
+class TestTheContentTypesAreOnesWeServe:
     def test_content_types_are_ones_we_are_willing_to_serve(self) -> None:
         """The closed set `read_dive_file` may put in a `Content-Type` header.
 
         The bar is that a browser handed one of these can't be talked into *executing* it
-        at the app's own origin - so nothing in the `text/*` family, and nothing
-        `nosniff` wouldn't already pin down. `application/vnd.ant.fit` (the ANT+
-        registered type for a FIT file) clears it more easily than the two before it: it
-        is opaque binary with no renderer at all.
+        at the app's own origin - so nothing in the `text/*` family, and nothing `nosniff`
+        wouldn't already pin down. `application/vnd.ant.fit` (the ANT+ registered type for
+        a FIT file) clears it more easily than the XML and JSON types: it is opaque binary
+        with no renderer at all. Every value also fits `dive_file.content_type`'s 32
+        characters.
         """
-        assert {parser.content_type for parser in parsers_module._PARSERS} <= {
+        assert set(FORMAT_CONTENT_TYPES.values()) <= {
             "application/xml",
             "application/json",
             "application/vnd.ant.fit",
         }
-
-
-class TestParseDiveFileWithParser:
-    def test_returns_the_parser_that_read_the_file(self) -> None:
-        parser, parsed = parse_dive_file_with_parser("export.xml", VALID_SUUNTO_XML)
-
-        assert parser is SuuntoXmlParser
-        assert parsed.max_depth == 25.5
-
-    def test_picks_the_json_parser_for_a_json_export(self) -> None:
-        parser, _ = parse_dive_file_with_parser("export.json", VALID_SUUNTO_JSON)
-
-        assert parser is SuuntoJsonParser
-
-    def test_reports_the_parser_that_succeeded_not_the_one_that_matched(self, monkeypatch) -> None:
-        """A parser may recognize a file and then find it isn't really its format, in
-        which case the next candidate gets a turn. Recording the first *match* would
-        label the stored file with a parser that never read it."""
-
-        class GreedyParser(DiveParser):
-            key = "greedy"
-            content_type = "application/xml"
-
-            @classmethod
-            def can_parse(cls, filename: str, content: bytes) -> bool:
-                return True
-
-            @classmethod
-            def parse(cls, content: bytes) -> ParsedDiveSchema:
-                raise UnsupportedDiveFileError("not mine after all")
-
-        monkeypatch.setattr(parsers_module, "_PARSERS", [GreedyParser, SuuntoXmlParser])
-
-        parser, parsed = parse_dive_file_with_parser("export.xml", VALID_SUUNTO_XML)
-
-        assert parser is SuuntoXmlParser
-        assert parsed.max_depth == 25.5
-
-    def test_raises_when_nothing_recognizes_the_file(self) -> None:
-        with pytest.raises(UnsupportedDiveFileError):
-            parse_dive_file_with_parser("notes.csv", b"time,depth\n0,0\n")
 
 
 class TestReconciliation:
@@ -389,8 +342,8 @@ def _attach_result() -> MagicMock:
 
 
 class TestProfileExtractionReleasesTheTransaction:
-    """Sampling a FIT file is up to ~1.5 s of CPU in a worker thread. The event loop is
-    free for that - `run_in_threadpool` bought that much - but the connection the lookups
+    """Decoding a FIT file is pure-Python CPU in a worker thread. The event loop is free for
+    that - `run_in_threadpool` bought that much - but the connection the lookups
     rode in on would otherwise sit idle-in-transaction for the whole of it, so a burst of
     FIT uploads ties up pool connections doing nothing.
 
@@ -398,8 +351,8 @@ class TestProfileExtractionReleasesTheTransaction:
     moving an extraction back above the release, and this is what would catch it.
 
     **The attach path releases twice, and the assertion below is written to see the second
-    one.** Recordings gave it a second hop - the incoming file is parsed to decide where it
-    lands, and then the whole recording is parsed to derive what comes off it - and the
+    one.** Recordings gave it a second hop - the incoming file is read to decide where it
+    lands, and then the whole recording is read to derive what comes off it - and the
     lookups in between reopen the transaction the first release closed. `calls.index()`
     reports the *first* occurrence of each, so a test written that way is satisfied by the
     first release alone and blind to a second hop taken with a connection pinned.
@@ -422,18 +375,18 @@ class TestProfileExtractionReleasesTheTransaction:
     @pytest.mark.asyncio
     async def test_releases_before_handing_the_file_to_the_thread(self, monkeypatch) -> None:
         calls: list[str] = []
-        real_extract_all = dive_files_module._extract_all
+        real_extract_file = dive_files_module.extract_file
         real_extract_recording = dive_files_module.extract_recording
 
-        def first_hop(parser, data):
+        def first_hop(data, format_id):
             calls.append("extract")
-            return real_extract_all(parser, data)
+            return real_extract_file(data, format_id)
 
         def second_hop(files, known=None, **start):
             calls.append("extract")
             return real_extract_recording(files, known, **start)
 
-        monkeypatch.setattr("src.app.services.dive_files._extract_all", first_hop)
+        monkeypatch.setattr("src.app.services.dive_files.extract_file", first_hop)
         monkeypatch.setattr("src.app.services.dive_files.extract_recording", second_hop)
 
         user_uuid = uuid7()
@@ -447,7 +400,7 @@ class TestProfileExtractionReleasesTheTransaction:
             file_token=create_dive_file_token(
                 user_uuid=user_uuid,
                 sha256=hashlib.sha256(content).hexdigest(),
-                parser_key=SuuntoXmlParser.key,
+                parser_key="suunto_xml",
             ),
         )
 
@@ -464,112 +417,27 @@ class TestProfileExtractionReleasesTheTransaction:
                 )
 
 
-class TestExtractAllSharesOneDecode:
-    """`_extract_all` goes through `parse_all`, and falls back when that fails.
+class TestFileExtraction:
+    """`extract_file` reads a stored file as the format it was admitted under, and never
+    fails the upload or the backfill run it rode in on."""
 
-    The point of the fallback is the property the two extractions have separately and
-    `parse_all` cannot: a file whose samples are malformed still yields its header
-    scalars. Losing it would be invisible - the dive would just quietly stop carrying
-    CNS and OTU whenever its profile was unreadable.
-    """
-
-    XML = f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><CnsEnd>20</CnsEnd><SurfacePressure>105700</SurfacePressure></Dive>
-""".encode()
-
-    def test_prefers_the_shared_decode(self) -> None:
-        calls: list[str] = []
-
-        class Sharing(SuuntoXmlParser):
-            @classmethod
-            def parse_all(cls, content):
-                calls.append("parse_all")
-                return super().parse_all(content)
-
-        extraction = _extract_all(Sharing, self.XML)
-
-        assert calls == ["parse_all"]
-        assert extraction.scalars is not None and extraction.scalars["cns_end"] == 20.0
-        assert extraction.profile is None  # this file carries no samples
-
-    def test_a_failed_shared_decode_still_yields_the_half_that_works(self) -> None:
-        """The case the fallback exists for. A `parse_all` that dies takes both halves
-        with it; the two methods behind it do not, so the header survives."""
-
-        class BrokenTogether(SuuntoXmlParser):
-            @classmethod
-            def parse_all(cls, content):
-                raise DiveParseError("samples are unreadable, and this took the header too")
-
-        extraction = _extract_all(BrokenTogether, self.XML)
-
-        assert extraction.profile is None
-        assert extraction.scalars is not None and extraction.scalars["cns_end"] == 20.0
-
-    def test_the_fallback_covers_an_unexpected_failure_too(self) -> None:
-        """Not just the two parser exceptions: an override is third-party code as far as
-        this function is concerned, and a `TypeError` out of it must not fail an upload
-        that the two methods behind it would have served."""
-
-        class Exploding(SuuntoXmlParser):
-            @classmethod
-            def parse_all(cls, content):
-                raise TypeError("an override with a bug in it")
-
-        extraction = _extract_all(Exploding, self.XML)
-
-        assert extraction.scalars is not None and extraction.scalars["cns_end"] == 20.0
-
-    def test_fit_decodes_once_where_it_used_to_decode_twice(self) -> None:
-        """The whole point of the override. Counted rather than timed - a wall-clock
-        assertion would be flaky on a loaded machine, and the scan count is the actual
-        claim."""
-        scans = 0
-        original = FitParser._scan.__func__  # type: ignore[attr-defined]
-
-        class Counting(FitParser):
-            @classmethod
-            def _scan(cls, content):
-                nonlocal scans
-                scans += 1
-                return original(cls, content)
-
-        _extract_all(Counting, dive_fit_file(end_cns=9, o2_toxicity=23))
-
-        assert scans == 1
-
-    def test_the_shared_decode_returns_what_the_two_methods_would_have(self) -> None:
-        """Pinned on FIT specifically, since it is the one parser where `parse_all` is a
-        different code path rather than a delegation."""
-        content = dive_fit_file(end_cns=9, o2_toxicity=23)
-
-        dive, samples = FitParser.parse_all(content)
-
-        assert dive == FitParser.parse(content)
-        assert samples == FitParser.parse_profile(content)
-
-
-class TestTechScalarExtraction:
-    """`extract_tech_scalars` mirrors `extract_profile`'s contract: it reads the header
-    off already-stored bytes, and it never fails the upload it rode in on."""
-
-    def test_reads_the_scalars_off_a_parseable_file(self) -> None:
+    def test_reads_the_readouts_off_a_readable_file(self) -> None:
         content = f"""<?xml version="1.0" encoding="utf-8"?>
 <Dive xmlns="{SUUNTO_NS}">
+  <StartTime>2026-06-03T12:15:00</StartTime>
   <CnsStart>8</CnsStart><CnsEnd>9</CnsEnd>
   <OtuStart>22</OtuStart><OtuEnd>23</OtuEnd>
   <SurfacePressure>105700</SurfacePressure>
 </Dive>
 """.encode()
 
-        assert extract_tech_scalars(SuuntoXmlParser, content) == {
+        assert extract_file(content, "suunto_xml").scalars == {
             "cns_start": 8.0,
             "cns_end": 9.0,
             "otu_start": 22.0,
             "otu_end": 23.0,
             "surface_pressure_bar": 1.057,
-            # A DM5 XML export carries no GPS at all - no file in the 384-export corpus
-            # has a coordinate anywhere in it - so this format contributes the columns
+            # A DM5 XML export carries no GPS at all, so this format contributes the columns
             # and never a value.
             "entry_latitude": None,
             "entry_longitude": None,
@@ -579,7 +447,7 @@ class TestTechScalarExtraction:
 
     def test_covers_exactly_the_columns_the_read_schema_publishes(self) -> None:
         """`TECH_SCALAR_FIELDS` is derived from `DiveTechScalars` rather than listed, so
-        adding a field to the schema without a parser writing it would show up here
+        adding a field to the schema without the projection writing it would show up here
         rather than as a column that silently stays null forever."""
         assert set(TECH_SCALAR_FIELDS) == set(DiveTechScalars.model_fields)
         assert set(TECH_SCALAR_FIELDS) <= set(ParsedDiveSchema.model_fields)
@@ -589,21 +457,24 @@ class TestTechScalarExtraction:
         # upload, rather than anywhere a developer would see it first.
         assert set(TECH_SCALAR_FIELDS) <= set(Dive.__table__.columns.keys())
 
-    def test_an_unreadable_file_returns_none_rather_than_raising(self) -> None:
-        """The upload must survive a header this build can't read: the file is the
-        durable artifact, and refusing the attach would discard the very corpus entry
-        needed to fix the parser. Note the catch is `DiveParseError`, *not*
-        `EXTRACTION_ERRORS` - that tuple is what parsers catch internally before
-        re-raising, and does not contain the parser errors themselves."""
-        assert extract_tech_scalars(SuuntoXmlParser, b"<Dive><Unclosed>") is None
+    def test_an_unreadable_file_comes_back_empty_rather_than_raising(self) -> None:
+        """The upload must survive a file this build can't read: the file is the durable
+        artifact, and refusing the attach would discard the very corpus entry needed to fix
+        the reader. Empty is what `extract_recording` counts as unreadable."""
+        extraction = extract_file(b"<Dive><Unclosed>", "suunto_xml")
+
+        assert (extraction.parsed, extraction.profile, extraction.scalars) == (None, None, None)
 
     def test_a_file_that_records_nothing_yields_an_all_null_write(self) -> None:
-        """Distinct from the `None` above, and the distinction is load-bearing: this is
-        "the file says nothing", which *clears* a previous export's readings, whereas
-        `None` is "couldn't read" and leaves them alone."""
-        content = f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}"/>'.encode()
+        """Distinct from the empty result above, and the distinction is load-bearing: this is
+        "the file says nothing", which *clears* a previous export's readings, whereas empty is
+        "couldn't read" and leaves them alone."""
+        content = (
+            f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}">'
+            "<StartTime>2026-06-03T12:15:00</StartTime></Dive>"
+        ).encode()
 
-        assert extract_tech_scalars(SuuntoXmlParser, content) == dict.fromkeys(SCALAR_FIELDS)
+        assert extract_file(content, "suunto_xml").scalars == dict.fromkeys(SCALAR_FIELDS)
 
 
 class TestMixtureFieldMerge:
@@ -640,8 +511,8 @@ class TestMixtureFieldMerge:
         stored = [self._stored(11), self._stored(12, oxygen=50.0)]
 
         assert merge_mixture_fields(parsed, stored) == [
-            (11, {"po2_limit": 1.4, "gas_number": 1}),
-            (12, {"po2_limit": 1.6, "gas_number": 2, "role": GasRole.DECO}),
+            (11, {"po2_limit": 1.4}),
+            (12, {"po2_limit": 1.6, "role": GasRole.DECO}),
         ]
 
     def test_a_field_the_file_does_not_record_is_never_written(self) -> None:
@@ -649,8 +520,8 @@ class TestMixtureFieldMerge:
         means "the file did not record this", so spreading one into an `UPDATE` turns an
         absent reading into a value.
 
-        All three fields are client-writable, which is what makes it data loss rather than
-        a tidiness point. A FIT import produces `po2_limit=None` always and `role=None` for
+        Both fields are client-writable, which is what makes it data loss rather than a
+        tidiness point. A FIT import produces `po2_limit=None` always and `role=None` for
         any open-circuit gas; the diver then sets 1.6 and `deco` on their stage bottle
         through the form, touching neither fraction - so the guard above still admits the
         join, and an overwriting backfill would put both back to `NULL` on a script whose
@@ -664,12 +535,22 @@ class TestMixtureFieldMerge:
 
     def test_a_recorded_value_still_overwrites_what_is_stored(self) -> None:
         """What fill-only does *not* cost: where the file records a value the backfill
-        still owns it, so a parser correction lands on the next run. It declines only where
+        still owns it, so a reader correction lands on the next run. It declines only where
         the file has nothing to say."""
         parsed = [self._parsed(po2_limit=1.6, role=GasRole.DECO)]
         stored = [self._stored(11, po2_limit=1.4, role=GasRole.BOTTOM)]
 
-        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.6, "gas_number": 1, "role": GasRole.DECO})]
+        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.6, "role": GasRole.DECO})]
+
+    def test_never_writes_a_cylinder_label(self) -> None:
+        """The join is positional, and a label written by it would put the reader's labels
+        on an old dive by a rule other than the labelling's - breaking the dive's join to its
+        stored channels until the profile backfill reached it. A label is the profile path's
+        to write."""
+        parsed = [self._parsed(gas_number=0, po2_limit=None)]
+        stored = [self._stored(11, gas_number=1)]
+
+        assert merge_mixture_fields(parsed, stored) == []
 
     def test_refuses_when_a_gas_fraction_no_longer_matches(self) -> None:
         """The diver swapped their deco bottle. Applying positionally would write the
@@ -701,7 +582,7 @@ class TestMixtureFieldMerge:
         parsed = [self._parsed(oxygen=None, helium=None)]
         stored = [self._stored(11, oxygen=21.0)]
 
-        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.4, "gas_number": 1})]
+        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.4})]
 
     def test_a_fraction_the_stored_row_never_recorded_is_not_a_mismatch_either(self) -> None:
         """The mirror of the case above, and the one the columns becoming nullable created.
@@ -713,7 +594,7 @@ class TestMixtureFieldMerge:
         parsed = [self._parsed(oxygen=21.0, helium=0.0)]
         stored = [self._stored(11, oxygen=None, helium=None)]
 
-        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.4, "gas_number": 1})]
+        assert merge_mixture_fields(parsed, stored) == [(11, {"po2_limit": 1.4})]
 
     def test_a_fraction_both_sides_recorded_is_still_compared(self) -> None:
         """What the widened guard does not cost: a real disagreement is still a refusal."""
@@ -725,25 +606,22 @@ class TestMixtureFieldMerge:
     def test_the_fraction_guard_cannot_catch_a_mis_ordered_all_null_list(self) -> None:
         """Why `get_mixtures_for_dive` has to order by `id`, stated as a test.
 
-        A 2026 Suunto Ocean export reconstructs its cylinders from sample data, which
-        carries gas numbers and pressures but no fractions at all - so every parsed row is
+        A file whose cylinders record no fractions at all makes every parsed row
         `oxygen=None, helium=None`, the guard above compares nothing, and *both* orderings
-        below are accepted. The ordering of `stored` is the only thing deciding which
-        cylinder gets `gas_number=0`, and `gas_number` is the join key to the profile's
-        per-cylinder pressure channels: swap it and each tank's curve is attributed to the
-        other one. Four exports in the corpus are exactly this shape.
+        below are accepted. The ordering of `stored` is then the only thing deciding which
+        cylinder gets which ppO2 limit: swap it and the back gas carries the deco bottle's.
         """
         parsed = [
-            self._parsed(oxygen=None, helium=None, gas_number=0),
-            self._parsed(oxygen=None, helium=None, gas_number=1),
+            self._parsed(oxygen=None, helium=None, po2_limit=1.4),
+            self._parsed(oxygen=None, helium=None, po2_limit=1.6),
         ]
 
         in_order = merge_mixture_fields(parsed, [self._stored(11), self._stored(12)])
         reversed_order = merge_mixture_fields(parsed, [self._stored(12), self._stored(11)])
 
         assert in_order is not None and reversed_order is not None
-        assert [(mixture_id, values["gas_number"]) for mixture_id, values in in_order] == [(11, 0), (12, 1)]
-        assert [(mixture_id, values["gas_number"]) for mixture_id, values in reversed_order] == [(12, 0), (11, 1)]
+        assert [(mixture_id, values["po2_limit"]) for mixture_id, values in in_order] == [(11, 1.4), (12, 1.6)]
+        assert [(mixture_id, values["po2_limit"]) for mixture_id, values in reversed_order] == [(12, 1.4), (11, 1.6)]
 
 
 class TestMixtureFieldFill:
@@ -854,9 +732,10 @@ class TestMixtureFieldFill:
         ]
 
 
-class TestARecordingsCylindersFillMemberByMember:
-    """`fill_parsed_mixtures`, which is the same rule one level up: across a recording's own
-    files rather than between a file and the dive's rows.
+class TestARecordingsCylindersJoinMemberByMember:
+    """`join_file_mixtures`, the fill rule one level up: across a recording's own files rather
+    than between a file and the dive's rows - and the map a later file's channels are
+    rewritten through before they join.
 
     Per member rather than per list, and that is the whole of it. Taking the first list whole
     lands the JSON's pressures and drops the FIT's `oxygen` - the one gas fraction the corpus
@@ -869,27 +748,151 @@ class TestARecordingsCylindersFillMemberByMember:
 
     def test_each_member_comes_from_the_first_file_that_recorded_it(self) -> None:
         earlier = [self._mix(gas_number=0, start_pressure=207.34, end_pressure=47.47)]
-        later = [self._mix(gas_number=1, oxygen=33.0, start_pressure=210.0)]
+        later = [self._mix(gas_number=None, oxygen=33.0, start_pressure=210.0)]
 
-        filled = fill_parsed_mixtures(earlier, later)
+        joined, labels = join_file_mixtures(earlier, later)
 
-        assert [(row.oxygen, row.start_pressure, row.end_pressure, row.gas_number) for row in filled] == [
+        assert [(row.oxygen, row.start_pressure, row.end_pressure, row.gas_number) for row in joined] == [
             (33.0, 207.34, 47.47, 0)
         ]
+        assert labels == {}
 
     def test_a_first_file_with_no_cylinders_takes_the_later_ones_whole(self) -> None:
         later = [self._mix(gas_number=1, oxygen=33.0)]
 
-        assert fill_parsed_mixtures([], later) == later
+        assert join_file_mixtures([], later) == (later, {})
 
-    def test_cylinders_that_cannot_be_joined_leave_the_earlier_list_alone(self) -> None:
-        """The earlier list is what the recording's stored profile is already labelled
-        against, so a later file describing other cylinders contributes nothing rather than
-        replacing it."""
+    def test_a_later_files_label_is_the_recordings_where_the_first_labelled_nothing(self) -> None:
+        """The corpus pair FIT first: the FIT labels no cylinder - it has no channel to point
+        one at - and the JSON's transmitter channel names its cylinder `0`. The recording
+        takes the label, so the channel names the cylinder whichever file came first."""
+        earlier = [self._mix(gas_number=None, oxygen=33.0)]
+        later = [self._mix(gas_number=0, oxygen=None, start_pressure=207.34)]
+
+        joined, labels = join_file_mixtures(earlier, later)
+
+        assert [(row.oxygen, row.start_pressure, row.gas_number) for row in joined] == [(33.0, 207.34, 0)]
+        assert labels == {0: 0}
+
+    def test_a_file_with_no_mix_joins_by_position(self) -> None:
+        """The two-cylinder Ocean pair: its JSON records no mix, so its two cylinders join
+        the FIT's two by position, and its transmitter's channel lands on the first."""
+        earlier = [self._mix(gas_number=None, oxygen=21.0), self._mix(gas_number=None, oxygen=54.0)]
+        later = [
+            self._mix(gas_number=0, oxygen=None, start_pressure=211.63),
+            self._mix(gas_number=1, oxygen=None),
+        ]
+
+        joined, labels = join_file_mixtures(earlier, later)
+
+        assert [(row.oxygen, row.gas_number, row.start_pressure) for row in joined] == [
+            (21.0, 0, 211.63),
+            (54.0, 1, None),
+        ]
+        assert labels == {0: 0, 1: 1}
+
+    def test_a_later_label_is_mapped_onto_the_recordings_own(self) -> None:
+        """By mix first: the later file lists the deco bottle first and labels it 0, and the
+        recording already calls it 1. Its channels are rewritten through the map."""
+        earlier = [self._mix(gas_number=0, oxygen=21.0), self._mix(gas_number=1, oxygen=50.0)]
+        later = [self._mix(gas_number=0, oxygen=50.0), self._mix(gas_number=1, oxygen=21.0)]
+
+        joined, labels = join_file_mixtures(earlier, later)
+
+        assert [row.gas_number for row in joined] == [0, 1]
+        assert labels == {0: 1, 1: 0}
+
+    def test_a_cylinder_only_the_later_file_saw_is_appended_under_a_free_label(self) -> None:
+        """A positional pair whose recorded fractions disagree is not a pair, and the later
+        cylinder is one the later file saw: appended, under the next free label, so none of
+        its channels names another tank."""
         earlier = [self._mix(gas_number=0, oxygen=32.0)]
-        later = [self._mix(gas_number=1, oxygen=50.0), self._mix(gas_number=2, oxygen=21.0)]
+        later = [self._mix(gas_number=0, oxygen=50.0)]
 
-        assert fill_parsed_mixtures(earlier, later) == earlier
+        joined, labels = join_file_mixtures(earlier, later)
+
+        assert [(row.oxygen, row.gas_number) for row in joined] == [(32.0, 0), (50.0, 1)]
+        assert labels == {0: 1}
+
+
+class TestRenumberingOntoTheReadersLabels:
+    """`renumber_onto_labels`: a primary recording's labels onto the dive's own rows, and the
+    map the dive's other recordings are rewritten through."""
+
+    @staticmethod
+    def _stored(mixture_id: int, oxygen: float | None, gas_number: int | None) -> DiveMixtureRead:
+        return DiveMixtureRead(
+            id=mixture_id, oxygen=oxygen, helium=None if oxygen is None else 0.0, gas_number=gas_number
+        )
+
+    @staticmethod
+    def _read(oxygen: float | None, gas_number: int | None) -> DiveMixtureSchema:
+        return TestMixtureFieldFill._parsed(
+            oxygen=oxygen, helium=None if oxygen is None else 0.0, gas_number=gas_number
+        )
+
+    def test_rows_already_on_the_readers_labels_are_left_alone(self) -> None:
+        stored = [self._stored(11, 21.0, 0), self._stored(12, 49.0, 1)]
+
+        assert renumber_onto_labels([self._read(21.0, 0), self._read(49.0, 1)], stored) is None
+
+    def test_a_previous_readers_labels_move_onto_this_ones(self) -> None:
+        """The D5-shape JSON the previous parsers numbered from 1."""
+        stored = [self._stored(11, 21.0, 1), self._stored(12, 49.0, 2)]
+
+        labels, siblings = renumber_onto_labels([self._read(21.0, 0), self._read(49.0, 1)], stored) or ({}, {})
+
+        assert labels == {11: 0, 12: 1}
+        assert siblings == {1: 0, 2: 1}
+
+    def test_a_row_the_reader_does_not_have_keeps_its_label_unless_a_new_one_claims_it(self) -> None:
+        """Cleared rather than kept, since two rows sharing a label would join one channel to
+        both - and a sibling that pointed at it is sent to a label no row carries rather than
+        to the cylinder that took its number."""
+        stored = [
+            self._stored(11, 21.0, 1),
+            self._stored(12, 49.0, 2),
+            self._stored(13, 32.0, 0),
+            self._stored(14, 36.0, 7),
+            self._stored(15, 30.0, None),
+        ]
+
+        labels, siblings = renumber_onto_labels([self._read(21.0, 0), self._read(49.0, 1)], stored) or ({}, {})
+
+        assert labels == {11: 0, 12: 1, 13: None, 14: 7, 15: None}
+        assert siblings == {1: 0, 2: 1, 0: 8}
+
+    def test_a_file_with_no_mix_joins_the_rows_by_position(self) -> None:
+        """The Ocean JSON the previous parser labelled `[1, 0]` where the reader says `[0, 1]`
+        - the one place the two readings differed on a real dive."""
+        stored = [self._stored(11, None, 1), self._stored(12, None, 0)]
+
+        labels, siblings = renumber_onto_labels([self._read(None, 0), self._read(None, 1)], stored) or ({}, {})
+
+        assert labels == {11: 0, 12: 1}
+        assert siblings == {1: 0, 0: 1}
+
+
+class TestAFileThisBuildCannotRead:
+    def test_a_stored_file_under_a_format_the_reader_does_not_name_makes_the_recording_unreadable(self) -> None:
+        """A restored file this build does not read keeps the import's key, and a recording
+        holding one cannot be re-derived - which the backfill counts rather than swallows."""
+        extraction = extract_recording(
+            [
+                LoadedDiveFile(
+                    data=b"anything",
+                    content_type="application/octet-stream",
+                    original_filename="dive.bin",
+                    sha256=_digest(b"anything"),
+                    parser_key="divejson_import",
+                )
+            ],
+            start_time=None,
+            utc_offset_minutes=None,
+        )
+
+        assert extraction.unreadable is True
+        assert extraction.profile is None
 
 
 class TestStoredMixturesAreReadInSavedOrder:
@@ -950,7 +953,7 @@ class TestReExtractionFailureDoesNotFailTheRequest:
     """
 
     XML = f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><CnsEnd>20</CnsEnd></Dive>
+<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-06-03T12:15:00</StartTime><CnsEnd>20</CnsEnd></Dive>
 """.encode()
 
     @staticmethod
@@ -1009,7 +1012,7 @@ class TestReExtractionFailureDoesNotFailTheRequest:
             file_token=create_dive_file_token(
                 user_uuid=user_uuid,
                 sha256=hashlib.sha256(self.XML).hexdigest(),
-                parser_key=SuuntoXmlParser.key,
+                parser_key="suunto_xml",
             ),
         )
 
@@ -1025,7 +1028,7 @@ class TestReExtractionFailureDoesNotFailTheRequest:
         was read off this recording before, so the write is outright and a reading nothing
         yields is cleared; here the recording already had files, so "couldn't read it *this*
         build" is not "the files say nothing" - and a later backfill, or a re-upload after a
-        parser fix, can still get them.
+        reader fix, can still get them.
 
         **The asymmetry is now structural rather than conditional**, which is the change worth
         pinning: the re-derivation picks `store_tech_scalars` (which clears) or
@@ -1068,7 +1071,7 @@ class TestReExtractionFailureDoesNotFailTheRequest:
             file_token=create_dive_file_token(
                 user_uuid=user_uuid,
                 sha256=hashlib.sha256(self.XML).hexdigest(),
-                parser_key=SuuntoXmlParser.key,
+                parser_key="suunto_xml",
             ),
         )
 
@@ -1088,7 +1091,7 @@ class TestBackfillDoesNotStopOnOneBadDive:
     """
 
     XML = f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><CnsEnd>20</CnsEnd></Dive>
+<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-06-03T12:15:00</StartTime><CnsEnd>20</CnsEnd></Dive>
 """.encode()
 
     class _Savepoint:
@@ -1130,7 +1133,7 @@ class TestBackfillDoesNotStopOnOneBadDive:
                     SimpleNamespace(
                         data=self.XML,
                         sha256=_digest(self.XML),
-                        parser_key=SuuntoXmlParser.key,
+                        parser_key="suunto_xml",
                         content_type="application/xml",
                         original_filename="export.xml",
                     )
@@ -1157,12 +1160,13 @@ class TestScalarsAreWrittenAtAttach:
     that split is what the tests below are about. A recording with nothing yet has nothing to
     lose by a write that clears what the files no longer yield; a recording gaining a file it
     did not begin with has earlier readings and must not overwrite them. The condition is
-    `_rederive_recording`'s `fresh`, which is *not* "the recording had no files" - see its
+    `rederive_recording`'s `fresh`, which is *not* "the recording had no files" - see its
     docstring for the case where the two differ.
     """
 
     XML_WITH_EXPOSURE = f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><CnsEnd>20</CnsEnd><SurfacePressure>105700</SurfacePressure></Dive>
+<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-06-03T12:15:00</StartTime><CnsEnd>20</CnsEnd>
+<SurfacePressure>105700</SurfacePressure></Dive>
 """.encode()
 
     @staticmethod
@@ -1173,7 +1177,7 @@ class TestScalarsAreWrittenAtAttach:
                 content_type="application/xml",
                 original_filename="export.xml",
                 sha256=_digest(content),
-                parser_key=SuuntoXmlParser.key,
+                parser_key="suunto_xml",
             )
             for content in contents
         ]
@@ -1214,7 +1218,7 @@ class TestScalarsAreWrittenAtAttach:
         monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
         monkeypatch.setattr("src.app.services.dive_files.delete_profile_for_recording", AsyncMock())
 
-        await _rederive_recording(
+        await rederive_recording(
             AsyncMock(),
             recording_id=1,
             dive_id=7,
@@ -1244,7 +1248,10 @@ class TestScalarsAreWrittenAtAttach:
         """Unconditional on the `fresh` branch, unlike the profile write beside it: leaving a
         previous export's CNS on a recording whose files have changed would attribute a
         reading to bytes it didn't come from."""
-        empty = f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}"/>'.encode()
+        empty = (
+            f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}">'
+            "<StartTime>2026-06-03T12:15:00</StartTime></Dive>"
+        ).encode()
 
         chosen = await self._rederive(self._files(empty), monkeypatch, fresh=True)
 
@@ -1256,7 +1263,10 @@ class TestScalarsAreWrittenAtAttach:
         """The rule a recording exists to make expressible. The FIT beside the JSON of one
         Ocean dive contributes what the JSON had none of and takes nothing away - so the
         write is the filling one."""
-        empty = f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}"/>'.encode()
+        empty = (
+            f'<?xml version="1.0" encoding="utf-8"?><Dive xmlns="{SUUNTO_NS}">'
+            "<StartTime>2026-06-03T12:15:00</StartTime></Dive>"
+        ).encode()
 
         chosen = await self._rederive(self._files(empty, self.XML_WITH_EXPOSURE), monkeypatch, fresh=False, joined=True)
 
@@ -1295,7 +1305,7 @@ class TestScalarsAreWrittenAtAttach:
         write: a diver who corrected a reading between two uploads keeps the correction, and
         the later file supplies only what the earlier one was silent about."""
         second = f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><CnsEnd>99</CnsEnd><OtuEnd>44</OtuEnd></Dive>
+<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-06-03T12:15:00</StartTime><CnsEnd>99</CnsEnd><OtuEnd>44</OtuEnd></Dive>
 """.encode()
 
         extraction = extract_recording(
@@ -1307,9 +1317,9 @@ class TestScalarsAreWrittenAtAttach:
 
 
 class TestARecordingsProfileIsAttributedBeforeItIsCapped:
-    """`extract_recording` runs `finalize_profile`'s last two steps, in that order.
+    """`extract_recording` runs `attribute_and_cap`, whose two steps run in that order.
 
-    The ordering `derive_gas_attribution`'s own docstring states and `finalize_profile`
+    The ordering `derive_gas_attribution`'s own docstring states and `attribute_and_cap`
     implements: attribution reads a mean depth off the channel, and `downsample` keeps each
     bucket's extremes and throws the rest away, so attributing afterwards is a mean of the
     dive's peaks and troughs rather than of the dive.
@@ -1317,7 +1327,7 @@ class TestARecordingsProfileIsAttributedBeforeItIsCapped:
     **It regressed once and nothing caught it**, because it is invisible below
     `MAX_POINTS_PER_CHANNEL` and because the wrong number is a summary column no other test
     re-derives. So this is asserted against the *dive*'s own mean rather than against
-    `finalize_profile`'s output - two implementations agreeing is not evidence when the same
+    `attribute_and_cap`'s output - two implementations agreeing is not evidence when the same
     hand wrote both.
     """
 
@@ -1334,7 +1344,7 @@ class TestARecordingsProfileIsAttributedBeforeItIsCapped:
             for second, depth in enumerate(cls.DEPTHS_M)
         )
         return f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><DiveMixtures><DiveMixture><Oxygen>0.21</Oxygen>
+<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-06-03T12:15:00</StartTime><DiveMixtures><DiveMixture><Oxygen>21</Oxygen>
 <DiveGasChanges><DiveGasChange><GasChangeTime>0</GasChangeTime></DiveGasChange></DiveGasChanges>
 </DiveMixture></DiveMixtures><DiveSamples>{samples}</DiveSamples></Dive>
 """.encode()
@@ -1350,7 +1360,7 @@ class TestARecordingsProfileIsAttributedBeforeItIsCapped:
                     content_type="application/xml",
                     original_filename="export.xml",
                     sha256=_digest(content),
-                    parser_key=SuuntoXmlParser.key,
+                    parser_key="suunto_xml",
                 )
             ],
             start_time=None,
@@ -1382,7 +1392,7 @@ def _loaded(content: bytes) -> LoadedDiveFile:
         content_type="application/json",
         original_filename="export.json",
         sha256=_digest(content),
-        parser_key=SuuntoJsonParser.key,
+        parser_key="suunto_json",
     )
 
 

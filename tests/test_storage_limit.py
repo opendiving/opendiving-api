@@ -48,7 +48,6 @@ from src.app.services import blob_store
 from src.app.services.certification_files import store_certification_file
 from src.app.services.dive_files import KEY_KIND as DIVE_FILE_KIND
 from src.app.services.dive_files import store_recording_file
-from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from src.app.services.export import load_export_bundle
 from src.app.services.export.archive import DIVEJSON_NAME, write_archive
 from src.app.services.storage_usage import format_size, get_storage_usage
@@ -70,7 +69,8 @@ REFUSAL = "of 1.0 MB used"
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 EXPORT = f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><MaxDepth>25.5</MaxDepth><Duration>1800</Duration></Dive>
+<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-09-08T15:17:38</StartTime>
+<MaxDepth>25.5</MaxDepth><Duration>1800</Duration></Dive>
 """.encode()
 
 
@@ -146,7 +146,7 @@ async def _attach(async_db: AsyncSession, user: User, dive_id: int, content: byt
         dive_id=dive_id,
         upload=_upload(content, "export.xml"),
         file_token=create_dive_file_token(
-            user_uuid=user.uuid, sha256=hashlib.sha256(content).hexdigest(), parser_key=SuuntoXmlParser.key
+            user_uuid=user.uuid, sha256=hashlib.sha256(content).hexdigest(), parser_key="suunto_xml"
         ),
     )
 

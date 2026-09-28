@@ -10,7 +10,8 @@ Fills each recording's readouts (`cns_start/cns_end/otu_start/otu_end/surface_pr
 its six device columns, the mode and salinity the computer ran with and the five `deco_*`
 columns of its model; and, from the primary recording, the dive's entry/exit coordinates and -
 where the stored cylinders still demonstrably match the file's -
-`dive_mixture.po2_limit/gas_number/role`. The readouts and the dive columns are whatever
+`dive_mixture.po2_limit/role`. Never a cylinder's `gas_number`: a label is the profile
+backfill's to write, through the same labelling every re-derivation runs. The readouts and the dive columns are whatever
 `RecordingReadouts` and `DiveTechScalars` publish rather than a list kept here.
 
 **The recording's settings are the exception to that**: they come off `ParsedDiveSchema`
@@ -20,8 +21,8 @@ follows the same never-overwrite rule as the device columns, so a run fills what
 file recorded and takes nothing away.
 
 **It does not touch the profile's samples**, which are a different backfill's
-(`backfill_dive_profiles`) and a different question - see *"The decompression channels
-arrive for new dives only"* in `DECISIONS.md` for why nothing runs that one.
+(`backfill_dive_profiles`) and a different question: that one runs after a release that moves
+the reader or the extractor, and stops once every profile is current.
 
 **Every recording holding a stored file is a candidate on every run**; the dive's own columns
 are written from the primary alone. See `services/dive_files.py::backfill_tech_fields` for why
@@ -31,7 +32,7 @@ yields, and why the mixture half is deliberately the timid one.
 **One run is the upgrade step for an existing instance.** The migration that introduced
 recordings left every migrated one device-less, and the one that moved the readouts onto the
 recording copied them onto the primary alone - neither reads a file - so this is what fills
-the rest, because it re-parses every stored export anyway.
+the rest, because it re-reads every stored export anyway.
 
 A script rather than an arq job, and a second script rather than a flag on
 `backfill_dive_profiles`, for the reasons recorded in that file and in DECISIONS.md.
@@ -55,7 +56,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--parser-key",
         default=None,
-        help="Only re-read recordings holding a file recorded under this parser (e.g. `suunto_xml`). "
+        help="Only re-read recordings holding a file recorded under this format (e.g. `suunto_xml`). "
         "This is what `dive_file.parser_key` is for; a recording holding two files is a candidate "
         "when either of them names it.",
     )

@@ -21,7 +21,7 @@ contact_links:
   - name: Question about the API itself
     url: https://github.com/opendiving/opendiving/discussions
     about: >-
-      Endpoints, parsers, the schema, running it from source — anything about this codebase rather
+      Endpoints, file import, the schema, running it from source — anything about this codebase rather
       than about an instance. The project keeps one Discussions space, in opendiving/opendiving, and
       it covers this repository too; it gets answered faster there than in the tracker.
 

@@ -8,17 +8,16 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     """One dive-computer export, belonging to one recording of one dive.
 
-    Kept so that new parsing features can be developed and backfilled against real data.
-    The parsers currently read a handful of header fields (see `services/dive_parsers/`);
-    the files themselves carry per-sample depth and temperature profiles, deco stops,
-    surface intervals and device metadata that nothing persists yet. Extracting any of
-    that later is only testable against a corpus of the exports divers actually upload -
-    and only *backfillable* if each file is still attached to the dive it produced.
+    Kept so that what is read from them can be re-read against real data when the reader
+    or this app's shaping moves on (`backfill_dive_profiles`). A file carries more than any
+    reader carries yet, and re-reading it is only testable against a corpus of the exports
+    divers actually upload - and only *backfillable* if each file is still attached to the
+    dive it produced.
 
     Only files that became a dive are stored. `POST /dive/parse` stays parse-only and
     in-memory; the bytes arrive here from `POST /dive/{uuid}/recordings` after the dive
     exists, carrying a signed token from that parse (see `create_dive_file_token` in
-    `core/security.py`) which proves this server parsed these exact bytes for this user.
+    `core/security.py`) which proves this server read these exact bytes for this user.
     Without it the endpoint would accept any blob shaped vaguely like an export, and a
     stored file could not be trusted to be the one that pre-filled the dive's form.
 
@@ -66,11 +65,11 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # Hex SHA-256 of the bytes as uploaded, which is what every reader gets back whatever the
     # store holds. Four jobs now: the `ETag` on the download endpoint, the dedupe key below,
     # the value the upload token is checked against - it is what ties a set of bytes to a
-    # parse this server performed - and half of `storage_key`.
+    # read this server performed - and half of `storage_key`.
     sha256: Mapped[str] = mapped_column(String(64))
-    # Taken from the parser that successfully read the file (`DiveParser.content_type`),
-    # never from the client's claimed `Content-Type` - it is what the download route
-    # serves the bytes back as.
+    # Taken from this app's table for the format the reader read the file as
+    # (`dive_reader.FORMAT_CONTENT_TYPES`), never from the client's claimed `Content-Type` -
+    # it is what the download route serves the bytes back as.
     content_type: Mapped[str] = mapped_column(String(32))
     # The upload's length: what the API reports and the export manifest carries.
     byte_size: Mapped[int] = mapped_column(Integer)
@@ -79,9 +78,10 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # counts this.
     stored_byte_size: Mapped[int] = mapped_column(Integer)
     original_filename: Mapped[str] = mapped_column(String(255))
-    # `DiveParser.key` of the parser that produced this dive's values. Records what read
-    # the file at import time - not a promise the same parser would still claim it - so
-    # that a later backfill can select the subset it knows how to re-read.
+    # The format id the reader read the file as - `fit`, `suunto_json`, `uddf`, whatever
+    # `divejson.read_formats()` names - or `divejson_import` for a restored file this build
+    # does not read. The key a stored file is re-read by, and what a backfill's
+    # `--parser-key` selects on.
     parser_key: Mapped[str] = mapped_column(String(32))
     # Where the bytes are, in whichever store `blob_store` is configured for:
     # `dive-files/{sha256[:2]}/{nonce}_{sha256}.zst`, minted by `blob_store.new_key`; a key

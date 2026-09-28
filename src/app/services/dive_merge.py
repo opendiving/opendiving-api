@@ -427,6 +427,7 @@ async def _write_fold(db: AsyncSession, fold: _Fold, *, dive_id: int) -> None:
             profile=fold.profile,
             source_sha256=profile_payload_digest(fold.profile),
             parser_key=MERGE_PARSER_KEY,
+            reader_version=None,
             commit=False,
         )
 

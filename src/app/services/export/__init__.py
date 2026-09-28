@@ -23,11 +23,11 @@ All four read one `ExportBundle` (`loader.py`), which is the single batched quer
 
 Two rules hold across the package and are worth stating once:
 
-**Nothing is invented.** The same discipline as the parsers (*"Parsers report what a file
-recorded"* in DECISIONS.md): a value the log does not hold is an absent element or an
-empty cell - never a default wearing a reading's clothes. In DiveJSON that rule is
-normative and absence is its *only* spelling, so the writer emits no nulls at all (spec
-§5.4). Where a format *requires* something we do not have, that is called out at the site.
+**Nothing is invented.** The same discipline the `divejson` package holds its readers to: a
+value the log does not hold is an absent element or an empty cell - never a default wearing a
+reading's clothes. In DiveJSON that rule is normative and absence is its *only* spelling, so
+the writer emits no nulls at all (spec §5.4). Where a format *requires* something we do not
+have, that is called out at the site.
 
 **Nothing is held whole.** Every writer is a generator, blobs are read one row at a time,
 and the endpoints spool to disk past 32 MB. A thousand-dive logbook with its profiles is

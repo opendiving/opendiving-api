@@ -41,9 +41,9 @@ from src.app.models.user import User
 from src.app.schemas.dive import DiveMergeRequest
 from src.app.services import blob_store
 from src.app.services.dive_files import store_recording_file
-from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from src.app.services.dive_profiles import MERGE_PARSER_KEY
 from tests.conftest import db_available
+from tests.helpers.dive_files import suunto_json
 from tests.helpers.generators import (
     create_dive,
     create_dive_site,
@@ -55,26 +55,25 @@ from tests.helpers.generators import (
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
-SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
-
-# The two halves of the interrupted Perdix dive, as this repository can actually express
-# them: `opendiving-api` has no UDDF reader, so the pair is built from the numbers rather
-# than from the file. The Suunto XML parser is the cheapest of the three and the only one
-# whose bytes can be written inline.
-FIRST_START = "2026-09-08T15:17:38+03:00"
-SECOND_START = "2026-09-08T15:21:21+03:00"  # 223 s later
+# The two halves of the interrupted Perdix dive, as numbers rather than as the file: what
+# these pin is the fold, and an inline Suunto app JSON export (`tests/helpers/dive_files.py`)
+# is the cheapest file that states a start with its offset.
+FIRST_START = "2026-09-08T15:17:38.000+03:00"
+SECOND_START = "2026-09-08T15:21:21.000+03:00"  # 223 s later
 RESTART_DELTA = 223
 FIRST_PART_SAMPLES = 19
 SECOND_PART_SAMPLES = 295
 
 
-def _samples(count: int, *, step: int = 10, depth_cm: int = 500, pressure_mbar: int | None = None) -> str:
-    pressure = "" if pressure_mbar is None else f"<Pressure>{pressure_mbar}</Pressure>"
-    inner = "".join(
-        f"<Dive.Sample><Time>{index * step}</Time><Depth>{depth_cm / 100}</Depth>{pressure}</Dive.Sample>"
+def _samples(
+    count: int, *, step: int = 10, depth_cm: int = 500, pressure_mbar: int | None = None
+) -> tuple[tuple[float, float] | tuple[float, float, int, int], ...]:
+    return tuple(
+        (index * step, depth_cm / 100)
+        if pressure_mbar is None
+        else (index * step, depth_cm / 100, 0, pressure_mbar * 100)
         for index in range(count)
     )
-    return f"<DiveSamples>{inner}</DiveSamples>"
 
 
 def _export(
@@ -83,15 +82,9 @@ def _export(
     serial: str = "253810000400",
     duration: int = 1800,
     max_depth: str = "19.04",
-    samples: str = "",
-    cylinder: str = "",
+    samples: tuple[tuple[float, float] | tuple[float, float, int, int], ...] = (),
 ) -> bytes:
-    mixtures = "" if not cylinder else f"<DiveMixtures><DiveMixture>{cylinder}</DiveMixture></DiveMixtures>"
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><StartTime>{start}</StartTime><Duration>{duration}</Duration>
-<MaxDepth>{max_depth}</MaxDepth><SerialNumber>{serial}</SerialNumber>
-{mixtures}{samples}</Dive>
-""".encode()
+    return suunto_json(start=start, serial=serial, duration=duration, max_depth=float(max_depth), samples=samples)
 
 
 @pytest.fixture
@@ -141,7 +134,7 @@ async def _attach(db: AsyncSession, diver: User, dive: Dive, content: bytes, *, 
         dive_id=dive.id,
         upload=UploadFile(filename=filename, file=io.BytesIO(content)),
         file_token=create_dive_file_token(
-            user_uuid=diver.uuid, sha256=hashlib.sha256(content).hexdigest(), parser_key=SuuntoXmlParser.key
+            user_uuid=diver.uuid, sha256=hashlib.sha256(content).hexdigest(), parser_key="suunto_json"
         ),
     )
 
@@ -200,7 +193,7 @@ async def _two_halves(db: AsyncSession, sync_db: Session, diver: User) -> tuple[
         diver,
         first,
         _export(start=FIRST_START, duration=180, max_depth="5.0", samples=_samples(FIRST_PART_SAMPLES, depth_cm=500)),
-        filename="part-one.xml",
+        filename="part-one.json",
     )
     await _attach(
         db,
@@ -209,7 +202,7 @@ async def _two_halves(db: AsyncSession, sync_db: Session, diver: User) -> tuple[
         _export(
             start=SECOND_START, duration=2921, max_depth="19.04", samples=_samples(SECOND_PART_SAMPLES, depth_cm=1904)
         ),
-        filename="part-two.xml",
+        filename="part-two.json",
     )
     return first, second
 
@@ -294,7 +287,7 @@ class TestOneComputersTwoRecordsFoldIntoOne:
 
         recording = (await _recordings(async_db, first))[0]
         files = (await async_db.execute(select(DiveFile).where(DiveFile.recording_id == recording.id))).scalars().all()
-        assert sorted(row.original_filename for row in files) == ["part-one.xml", "part-two.xml"]
+        assert sorted(row.original_filename for row in files) == ["part-one.json", "part-two.json"]
         assert all(row.dive_id == first.id for row in files)
         assert all((volume / row.storage_key).exists() for row in files)
 
@@ -364,13 +357,13 @@ class TestTwoDifferentComputers:
         nothing to fold - their samples describe the same seconds from two wrists."""
         first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
         second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 18, 10, tzinfo=UTC), number=215)
-        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(5)), filename="suunto.xml")
+        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(5)), filename="suunto.json")
         await _attach(
             async_db,
             diver,
             second,
-            _export(start="2026-09-08T15:18:10+03:00", serial="D9772626", samples=_samples(5)),
-            filename="perdix.xml",
+            _export(start="2026-09-08T15:18:10.000+03:00", serial="D9772626", samples=_samples(5)),
+            filename="perdix.json",
         )
 
         result = await _merge(async_db, diver, first, second)
@@ -388,13 +381,13 @@ class TestTwoDifferentComputers:
         nothing about its profile changes when it changes dive."""
         first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
         second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 18, 10, tzinfo=UTC), number=215)
-        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(5)), filename="a.xml")
+        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(5)), filename="a.json")
         await _attach(
             async_db,
             diver,
             second,
-            _export(start="2026-09-08T15:18:10+03:00", serial="D9772626", samples=_samples(5)),
-            filename="b.xml",
+            _export(start="2026-09-08T15:18:10.000+03:00", serial="D9772626", samples=_samples(5)),
+            filename="b.json",
         )
 
         await _merge(async_db, diver, first, second)
@@ -415,7 +408,7 @@ class TestWhatTheMergeRefuses:
         of the two it was - the diver is looking at both."""
         recorded = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
         by_hand = _dive_at(db, diver, datetime(2026, 9, 8, 12, 21, 38, tzinfo=UTC), number=215)
-        await _attach(async_db, diver, recorded, _export(start=FIRST_START), filename="a.xml")
+        await _attach(async_db, diver, recorded, _export(start=FIRST_START), filename="a.json")
 
         with pytest.raises(UnprocessableEntityException, match="Dive 215"):
             await _merge(async_db, diver, recorded, by_hand)
@@ -426,7 +419,7 @@ class TestWhatTheMergeRefuses:
     ) -> None:
         recorded = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
         by_hand = _dive_at(db, diver, datetime(2026, 9, 8, 12, 21, 38, tzinfo=UTC), number=215)
-        await _attach(async_db, diver, recorded, _export(start=FIRST_START), filename="a.xml")
+        await _attach(async_db, diver, recorded, _export(start=FIRST_START), filename="a.json")
 
         with pytest.raises(UnprocessableEntityException):
             await _merge(async_db, diver, recorded, by_hand)
@@ -443,7 +436,7 @@ class TestWhatTheMergeRefuses:
         stranger = create_user(db)
         mine = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
         theirs = _dive_at(db, stranger, datetime(2026, 9, 8, 12, 21, 38, tzinfo=UTC), number=1)
-        await _attach(async_db, diver, mine, _export(start=FIRST_START), filename="a.xml")
+        await _attach(async_db, diver, mine, _export(start=FIRST_START), filename="a.json")
 
         with pytest.raises(NotFoundException, match="Dive not found"):
             await _merge(async_db, diver, mine, theirs)
@@ -651,28 +644,26 @@ class TestWhatElseMoves:
         db.add_all(
             [
                 DiveMixture(dive_id=first.id, gas_number=7, oxygen=21.0, helium=0.0),
-                # The second computer's own numbering, which is what its stored profile's
-                # pressure channel is labelled under: this format counts its cylinders
-                # from 1.
-                DiveMixture(dive_id=second.id, gas_number=1, oxygen=21.0, helium=0.0),
+                # The second dive's own label, which is what its stored profile's pressure
+                # channel names: the reader labels the one transmitting slot 0.
+                DiveMixture(dive_id=second.id, gas_number=0, oxygen=21.0, helium=0.0),
             ]
         )
         db.commit()
-        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(5)), filename="a.xml")
+        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(5)), filename="a.json")
         await _attach(
             async_db,
             diver,
             second,
             _export(
-                start="2026-09-08T15:18:10+03:00",
+                start="2026-09-08T15:18:10.000+03:00",
                 serial="D9772626",
                 samples=_samples(5, pressure_mbar=200000),
-                cylinder="<TransmitterId>2b</TransmitterId><StartPressure>200000</StartPressure>",
             ),
-            filename="b.xml",
+            filename="b.json",
         )
         before = await _profile(async_db, (await _recordings(async_db, second))[0].id)
-        assert [series["gas_number"] for series in before.data["pressure"]] == [1]
+        assert [series["gas_number"] for series in before.data["pressure"]] == [0]
 
         await _merge(async_db, diver, first, second)
 
@@ -699,8 +690,8 @@ class TestTheSurvivingDiveReadsBackWhole:
         assert result.dive.recordings[0].profile.duration == 3_163_000
         assert result.dive.recordings[0].profile.depth_sample_count == 314
         assert [file.original_filename for file in result.dive.recordings[0].files] == [
-            "part-one.xml",
-            "part-two.xml",
+            "part-one.json",
+            "part-two.json",
         ]
 
 
@@ -718,10 +709,10 @@ class TestWhenTheSurvivingDivesOwnRecordStartedLater:
         later_logged = _dive_at(db, diver, datetime(2026, 9, 8, 12, 30, 0, tzinfo=UTC), number=215)
         # The surviving dive's own record is the *later* of the two records.
         await _attach(
-            async_db, diver, earlier_logged, _export(start=SECOND_START, samples=_samples(3)), filename="late.xml"
+            async_db, diver, earlier_logged, _export(start=SECOND_START, samples=_samples(3)), filename="late.json"
         )
         await _attach(
-            async_db, diver, later_logged, _export(start=FIRST_START, samples=_samples(3)), filename="early.xml"
+            async_db, diver, later_logged, _export(start=FIRST_START, samples=_samples(3)), filename="early.json"
         )
 
         await _merge(async_db, diver, earlier_logged, later_logged)
@@ -746,8 +737,8 @@ class TestASameDeviceParedWithNoStartToPlaceIt:
         """
         first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
         second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 21, 38, tzinfo=UTC), number=215)
-        await _attach(async_db, diver, first, _export(start=FIRST_START), filename="a.xml")
-        await _attach(async_db, diver, second, _export(start=SECOND_START, max_depth="19.05"), filename="b.xml")
+        await _attach(async_db, diver, first, _export(start=FIRST_START), filename="a.json")
+        await _attach(async_db, diver, second, _export(start=SECOND_START, max_depth="19.05"), filename="b.json")
         # Both records lose their start, which is what a timestamp-less export produces.
         for dive in (first, second):
             recording = (await _recordings(async_db, dive))[0]
@@ -790,8 +781,8 @@ class TestADiveWithNothingToReSeedFrom:
         """
         first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214, duration=2400)
         second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 21, 38, tzinfo=UTC), number=215)
-        await _attach(async_db, diver, first, _export(start=FIRST_START), filename="a.xml")
-        await _attach(async_db, diver, second, _export(start=SECOND_START), filename="b.xml")
+        await _attach(async_db, diver, first, _export(start=FIRST_START), filename="a.json")
+        await _attach(async_db, diver, second, _export(start=SECOND_START), filename="b.json")
 
         await _merge(async_db, diver, first, second)
 
@@ -829,9 +820,9 @@ class TestTheTimeSpanWhenTheGapIsLonger:
         being small: the offset is a delta in seconds and nothing here bounds it."""
         first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
         second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 40, 0, tzinfo=UTC), number=215)
-        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(3)), filename="a.xml")
+        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(3)), filename="a.json")
         later = (datetime(2026, 9, 8, 15, 17, 38) + timedelta(minutes=30)).isoformat() + "+03:00"
-        await _attach(async_db, diver, second, _export(start=later, samples=_samples(3)), filename="b.xml")
+        await _attach(async_db, diver, second, _export(start=later, samples=_samples(3)), filename="b.json")
 
         await _merge(async_db, diver, first, second)
 

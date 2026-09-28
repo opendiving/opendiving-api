@@ -31,7 +31,6 @@ Four rules run through everything below, and each is the format's rather than th
 """
 
 import hashlib
-import math
 import uuid as uuid_pkg
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
@@ -45,7 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from uuid6 import uuid7
 
 from ...core.schemas import NOTES_MAX_LENGTH
-from ...core.utils.datetime_offset import split_dive_start_time, split_local_start_time
+from ...core.utils.datetime_offset import split_dive_start_time
 from ...core.utils.uploads import safe_filename
 from ...crud.crud_dive_species import StoredSighting
 from ...models.certification import Certification
@@ -65,7 +64,7 @@ from ...models.trip import Trip
 from ...models.user import User
 from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, CertificationAgency, CertificationSide
 from ...schemas.contact import ADDRESS_FIELDS, CONTACT_ADDRESS_PREFIX, canonical_roles, check_website
-from ...schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND, SINGLE_SERIES_CHANNELS, ProfileEventType
+from ...schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ...schemas.export import DIVEJSON_PRODUCER_KEY
 from ...schemas.gear_item import GearType
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
@@ -76,7 +75,6 @@ from ...schemas.logbook_import import (
     ImportCollectionReport,
     ImportContact,
     ImportCourse,
-    ImportDecoModel,
     ImportDive,
     ImportDiveSite,
     ImportFileReport,
@@ -92,7 +90,6 @@ from ...schemas.logbook_import import (
     ImportPortraitChoice,
     ImportPortraitOffer,
     ImportProfile,
-    ImportRecording,
     ImportSpecies,
     ImportStoredFile,
     ImportTrip,
@@ -105,21 +102,14 @@ from ..certification_files import KEY_KIND as CERTIFICATION_KEY_KIND
 from ..certification_files import MAX_CARD_FILE_SIZE
 from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
 from ..dive_files import MAX_DIVE_FILE_SIZE
-from ..dive_parsers import PARSER_BY_KEY
 from ..dive_profiles import (
     IMPORT_PARSER_KEY,
-    MAX_LABEL_CHARS,
     NormalizedProfile,
-    ProfileEvent,
-    ProfilePressureSeries,
-    ProfileSeries,
     derive_gas_attribution,
     downsample,
-    with_channels,
 )
+from ..dive_reader import FALLBACK_CONTENT_TYPE, content_type_of, reads
 from ..dive_recordings import (
-    DECO_MODEL_COLUMNS,
-    DEVICE_COLUMNS,
     DeviceIdentity,
     RecordingCandidate,
     RecordingFacts,
@@ -128,6 +118,7 @@ from ..dive_recordings import (
     load_candidates,
 )
 from ..person_links import Account, accounts_by_uuid, claim_link_slot, link_budget_remaining
+from ..recording_shape import INT32_MAX, Bound, Drop, bounded, finite, gate_figures, shape_recording
 from ..storage_usage import ensure_room
 from ..user_pictures import (
     MAX_PICTURE_UPLOAD_SIZE,
@@ -198,25 +189,8 @@ MAX_NOTES = 500
 # stopped being how that query works when recordings arrived. The guard is on the *profile's*
 # provenance now, so the constant and the rule that reads it belong together.
 
-# What a restored dive-computer file is recorded as when the document does not say which
-# parser read it, or names one this build no longer has. `dive_file.content_type` is
-# `String(32)`, and this is what the download route will serve it as.
-_FALLBACK_FILE_CONTENT_TYPE = "application/octet-stream"
-
 _LATITUDE_LIMIT = 90.0
 _LONGITUDE_LIMIT = 180.0
-
-# Postgres `Integer` is 32-bit, and **the format puts no ceiling on any of its integer
-# members** - a dive's `number` is a bare `{"type": "integer"}` in the published schema, and
-# `duration`, `visibility`, the profile's own `duration` and every `values` entry carry
-# only a minimum. So a *conforming* document can hold a number this app's columns cannot,
-# and a converter with a unit bug (a duration in microseconds, a depth in micrometres) is
-# exactly how one arrives. Unbounded, that is SQLSTATE 22003 raised from the middle of the
-# apply transaction: the whole logbook refused over one number, which is the failure every
-# other bound here exists to prevent. A `CheckConstraint` census cannot see this, because
-# the limit is the column's *width* rather than a rule written on it.
-_INT32_MAX = 2**31 - 1
-_INT32_MIN = -(2**31)
 
 # **A column's width is not the bound where a derived column adds the values up.** Two
 # imported numbers each inside `Integer` can sum past it, and the write that fails is then
@@ -343,7 +317,7 @@ class PlannedRecordingMatch:
     # fills its cylinders, and both of those are the *primary* recording's to write - the
     # dive's columns come from its primary, and a second computer's cylinder labelling is its
     # own. The attach path has enforced that since recordings arrived
-    # (`_rederive_recording` returns before both for `ordinal != 0`); this side could not,
+    # (`rederive_recording` returns before both for `ordinal != 0`); this side could not,
     # having no ordinal to hand, so it wrote them for whichever recording matched. `None`
     # on an `attach`, where no stored recording is named and the writer computes the slot.
     ordinal: int | None
@@ -487,63 +461,36 @@ class _ExistingRow:
     is_deleted: bool
 
 
-@dataclass(frozen=True, slots=True)
-class _Bound:
-    """One column's bound, mirrored from the `CheckConstraint` that enforces it.
-
-    Mirrored rather than derived, on the same terms as `schemas/parsed_dive.py`'s
-    validators and for the same reason: a value the database refuses must not take the
-    write it rode in on with it. `tests/test_logbook_import.py` counts the single-column
-    `ck_dive_*` and `ck_dive_mixture_*` constraints against these tables, so a new one
-    cannot be added without a guard here.
-    """
-
-    field: str
-    ok: Callable[[float], bool]
-    message: str
-
-
 # Every single-column bound on `dive` a document can reach. The pair rules
 # (`ck_dive_avg_depth_within_max` and the two position pairs) are deliberately absent:
 # there is no "the bad value" to drop in a pair, which is the same reason `parsed_dive.py`
 # has no guard for them either. `_plan_dive` handles the depth pair on its own terms, and a
 # position is all-or-nothing by shape.
-_DIVE_BOUNDS: tuple[_Bound, ...] = (
-    _Bound(
+_DIVE_BOUNDS: tuple[Bound, ...] = (
+    Bound(
         "number",
         lambda value: 0 <= value <= _MAX_DIVE_COUNT,
         f"a dive number must be between 0 and {_MAX_DIVE_COUNT}",
     ),
-    _Bound(
+    Bound(
         "duration",
         lambda value: 0 < value <= _MAX_DIVE_DURATION_SECONDS,
         "a dive's duration must be greater than zero and shorter than a year",
     ),
-    _Bound("max_depth", lambda value: value > 0, "a maximum depth must be greater than zero"),
-    _Bound("avg_depth", lambda value: value > 0, "an average depth must be greater than zero"),
-    _Bound("visibility", lambda value: 0 <= value <= _INT32_MAX, "visibility must be a non-negative number of metres"),
-    _Bound("weight", lambda value: value >= 0, "ballast cannot be negative"),
-    _Bound("altitude", lambda value: -450 <= value <= 6500, "altitude must be between -450 and 6500 metres"),
+    Bound("max_depth", lambda value: value > 0, "a maximum depth must be greater than zero"),
+    Bound("avg_depth", lambda value: value > 0, "an average depth must be greater than zero"),
+    Bound("visibility", lambda value: 0 <= value <= INT32_MAX, "visibility must be a non-negative number of metres"),
+    Bound("weight", lambda value: value >= 0, "ballast cannot be negative"),
+    Bound("altitude", lambda value: -450 <= value <= 6500, "altitude must be between -450 and 6500 metres"),
 )
-
-# A recording's readouts, same rules, from `models/dive_recording.py` - keyed by the format's
-# member name, which is the column's for all but the surface pressure (`_READOUT_COLUMN`).
-_READOUT_BOUNDS: tuple[_Bound, ...] = (
-    _Bound("surface_pressure", lambda value: 0.4 <= value <= 1.2, "surface pressure must be between 0.4 and 1.2 bar"),
-    _Bound("cns_start", lambda value: value >= 0, "a CNS reading cannot be negative"),
-    _Bound("cns_end", lambda value: value >= 0, "a CNS reading cannot be negative"),
-    _Bound("otu_start", lambda value: value >= 0, "an OTU reading cannot be negative"),
-    _Bound("otu_end", lambda value: value >= 0, "an OTU reading cannot be negative"),
-)
-_READOUT_COLUMN = {"surface_pressure": "surface_pressure_bar"}
 
 # A sighting's count, from `models/dive_species.py`, with the column's width as its ceiling:
 # the format floors it above zero and caps it nowhere.
-_SIGHTING_BOUNDS: tuple[_Bound, ...] = (
-    _Bound(
+_SIGHTING_BOUNDS: tuple[Bound, ...] = (
+    Bound(
         "count",
-        lambda value: 1 <= value <= _INT32_MAX,
-        f"a sighting's count must be between 1 and {_INT32_MAX}",
+        lambda value: 1 <= value <= INT32_MAX,
+        f"a sighting's count must be between 1 and {INT32_MAX}",
     ),
 )
 
@@ -551,72 +498,19 @@ _SIGHTING_BOUNDS: tuple[_Bound, ...] = (
 # `helium` are here rather than handled apart because they became nullable columns: they
 # are bounded-and-droppable like every other member on this list, and a document that
 # recorded none of them now produces a cylinder rather than a note - see `_plan_cylinders`.
-_MIXTURE_BOUNDS: tuple[_Bound, ...] = (
-    _Bound("volume", lambda value: value > 0, "a cylinder volume must be greater than zero"),
-    _Bound("oxygen", lambda value: 0 <= value <= 100, "an oxygen fraction must be between 0 and 100 percent"),
-    _Bound("helium", lambda value: 0 <= value <= 100, "a helium fraction must be between 0 and 100 percent"),
-    _Bound("start_pressure", lambda value: 0 < value <= 350, "a start pressure must be between 0 and 350 bar"),
-    _Bound("end_pressure", lambda value: 0 <= value <= 350, "an end pressure must be between 0 and 350 bar"),
-    _Bound("ppo2_limit", lambda value: 0.4 <= value <= 2.0, "a ppO2 limit must be between 0.4 and 2.0 bar"),
-    _Bound(
+_MIXTURE_BOUNDS: tuple[Bound, ...] = (
+    Bound("volume", lambda value: value > 0, "a cylinder volume must be greater than zero"),
+    Bound("oxygen", lambda value: 0 <= value <= 100, "an oxygen fraction must be between 0 and 100 percent"),
+    Bound("helium", lambda value: 0 <= value <= 100, "a helium fraction must be between 0 and 100 percent"),
+    Bound("start_pressure", lambda value: 0 < value <= 350, "a start pressure must be between 0 and 350 bar"),
+    Bound("end_pressure", lambda value: 0 <= value <= 350, "an end pressure must be between 0 and 350 bar"),
+    Bound("ppo2_limit", lambda value: 0.4 <= value <= 2.0, "a ppO2 limit must be between 0.4 and 2.0 bar"),
+    Bound(
         "gas_number",
-        lambda value: 0 <= value <= _INT32_MAX,
-        f"a gas number must be between 0 and {_INT32_MAX}",
+        lambda value: 0 <= value <= INT32_MAX,
+        f"a gas number must be between 0 and {INT32_MAX}",
     ),
 )
-
-# The channels §6.4 floors at zero - every one the computer computed rather than measured.
-# Depth, ceiling and temperature are absent because a signed reading is real in all three: a
-# temperature below zero is ordinary, and a depth of zero at the surface is what a Suunto
-# Ocean records.
-_UNSIGNED_CHANNELS = frozenset(SINGLE_SERIES_CHANNELS) - {"depth", "ceiling", "temperature"}
-
-# The deco model's three integers, same rules, from `models/dive_recording.py`. The gradient
-# factors are 0-100 because the member is a whole percent of the M-value and no computer
-# offers a setting above it - deliberately *not* the per-sample `gradient_factor` channel
-# above, which is uncapped because a GF99 past 100 is a real reading.
-#
-# **`conservatism` is bounded only by the column's width**, which makes it the one entry on
-# any of these three lists with no floor: it is the device's own scale, and Suunto's P-1 is a
-# genuine `-1`. Reading a negative as an absent-marker here, which is right for every channel,
-# would delete a real setting.
-_DECO_MODEL_BOUNDS: tuple[_Bound, ...] = (
-    _Bound("gf_low", lambda value: 0 <= value <= 100, "a gradient factor must be between 0 and 100 percent"),
-    _Bound("gf_high", lambda value: 0 <= value <= 100, "a gradient factor must be between 0 and 100 percent"),
-    _Bound(
-        "conservatism",
-        lambda value: -_INT32_MAX <= value <= _INT32_MAX,
-        "a conservatism setting must be a whole number this app can store",
-    ),
-)
-
-
-def _finite(value: float | None) -> bool:
-    """`NaN` and `inf` are not readings, whatever the column's bound says.
-
-    Checked before every comparison below rather than folded into one, because a `NaN`
-    compares `False` against `<` and `>` alike and so slips through any one-sided guard -
-    the exact lesson `_ParserOutput._drop_non_finite` is written up for. Python's `json`
-    accepts a bare `NaN` token, so a document really can carry one.
-    """
-    return value is None or math.isfinite(value)
-
-
-def _deepest_metres(profile: PlannedProfile | None) -> float | None:
-    """A planned profile's deepest sample, in metres, or `None`.
-
-    Off the stored integer centimetres rather than off any summary, because at this point
-    there is no row to have a summary: this is the figure the strict gate compares, and it
-    has to come out of the same samples that are about to be written.
-    """
-    if profile is None or profile.profile.depth is None or not profile.profile.depth.v:
-        return None
-    return max(profile.profile.depth.v) / DEPTH_SCALE
-
-
-def _within_int32(values: Sequence[int]) -> bool:
-    """Every element storable in a Postgres `Integer` column."""
-    return all(_INT32_MIN <= value <= _INT32_MAX for value in values)
 
 
 def _key(*parts: str | None) -> tuple[str, ...]:
@@ -930,22 +824,14 @@ class _Planner:
     # ------------------------------------------------------------------ values
 
     def _bounded(
-        self, collection: str, record_uuid: uuid_pkg.UUID, source: Any, bounds: Sequence[_Bound]
+        self, collection: str, record_uuid: uuid_pkg.UUID, source: Any, bounds: Sequence[Bound]
     ) -> dict[str, Any]:
-        """Every bounded member of one record, with the unstorable ones dropped."""
-        kept: dict[str, Any] = {}
-        for bound in bounds:
-            value = getattr(source, bound.field)
-            if value is None:
-                continue
-            if not _finite(value):
-                self._dropped(collection, record_uuid, f"A value for `{bound.field}` was not a number, and was dropped")
-                continue
-            if not bound.ok(value):
-                self._dropped(collection, record_uuid, f"A value for `{bound.field}` was dropped: {bound.message}")
-                continue
-            kept[bound.field] = value
-        return kept
+        """Every bounded member of one record, with the unstorable ones dropped and noted."""
+        return bounded(source, bounds, self._drop_on(collection, record_uuid))
+
+    def _drop_on(self, collection: str, record_uuid: uuid_pkg.UUID) -> Drop:
+        """Where the session-free shaping says what it dropped: a note on this record."""
+        return lambda reason: self._dropped(collection, record_uuid, reason)
 
     def _position(
         self, collection: str, record_uuid: uuid_pkg.UUID, position: Any, label: str
@@ -959,7 +845,7 @@ class _Planner:
         if position is None:
             return None, None
         latitude, longitude = position.latitude, position.longitude
-        if not (_finite(latitude) and _finite(longitude)):
+        if not (finite(latitude) and finite(longitude)):
             self._dropped(collection, record_uuid, f"The {label} position was not a pair of numbers, and was dropped")
             return None, None
         if abs(latitude) > _LATITUDE_LIMIT or abs(longitude) > _LONGITUDE_LIMIT:
@@ -1012,7 +898,7 @@ class _Planner:
         bbox = location.bbox
         if bbox is not None and latitude is not None:
             if bbox.south <= bbox.north and all(
-                _finite(corner) for corner in (bbox.south, bbox.north, bbox.west, bbox.east)
+                finite(corner) for corner in (bbox.south, bbox.north, bbox.west, bbox.east)
             ):
                 place |= {
                     f"{prefix}bbox_south": bbox.south,
@@ -1885,7 +1771,7 @@ class _Planner:
             return record
 
         weight = gear_set.weight
-        if weight is not None and not (_finite(weight) and weight >= 0):
+        if weight is not None and not (finite(weight) and weight >= 0):
             self._dropped("gear_sets", gear_set.uuid, "A negative ballast weight was dropped")
             weight = None
         record.values = {
@@ -1934,7 +1820,7 @@ class _Planner:
         if schedule.starts_on is None:
             return self._skip(collection, schedule.uuid, "A service schedule needs the date its clock starts from.")
         months, dives = schedule.interval_months, schedule.interval_dives
-        if months is not None and not 0 < months <= _INT32_MAX:
+        if months is not None and not 0 < months <= INT32_MAX:
             self._dropped(collection, schedule.uuid, "A month interval this app cannot store was dropped")
             months = None
         # Capped at `_MAX_DIVE_COUNT` rather than at the column's width, because
@@ -2340,7 +2226,7 @@ class _Planner:
             "notes": self._notes_text("dives", dive.uuid, dive.notes),
             "max_depth": max_depth,
             "avg_depth": avg_depth,
-            "bottom_temperature": dive.bottom_temperature if _finite(dive.bottom_temperature) else None,
+            "bottom_temperature": dive.bottom_temperature if finite(dive.bottom_temperature) else None,
             "visibility": None if visibility is None else int(visibility),
             "weight": bounded.get("weight"),
             "water_type": None if dive.water_type is None else dive.water_type.value,
@@ -2494,286 +2380,72 @@ class _Planner:
             )
         return rows
 
-    def _plan_profile(self, dive_uuid: uuid_pkg.UUID, source: Any) -> PlannedProfile | None:
-        """A dive's samples, as the stored shape - or nothing, with a note.
+    def _plan_profile(
+        self, dive_uuid: uuid_pkg.UUID, source: ImportProfile, shaped: NormalizedProfile
+    ) -> PlannedProfile:
+        """A recording's shaped samples, attributed and capped, with the span they cover.
 
-        Built directly rather than through `normalize()`: a document's `times` are already
-        integer milliseconds from the recording's start (spec §6.5), which is the stored
-        axis, so there is nothing to round or place. What the import does reuse is everything
-        downstream of that: `derive_gas_attribution` and `downsample`, in that order, because
-        attribution reads a mean depth off the full-resolution channel. Every axis entry and
-        the span keep an int32 bound, which in milliseconds is twenty-four days - still far
-        past any dive.
+        `recording_shape.shape_profile` has already checked every channel under §6.5's rules;
+        what the import adds is the one thing only a document has, its declared `duration`.
+        The attribution runs before the cap, because it reads a mean depth off the
+        full-resolution channel.
         """
-        if source is None:
-            return None
-        # Every single-series channel through the same check, driven by the channel tuple:
-        # a document's `ndl` is re-validated under §6.5's rules exactly as its `depth` is,
-        # and a channel added to the format cannot ship here unchecked.
-        channels = {
-            channel: self._series(
-                "dives", dive_uuid, getattr(source, channel), channel, unsigned=channel in _UNSIGNED_CHANNELS
-            )
-            for channel in SINGLE_SERIES_CHANNELS
-        }
-        pressures: list[ProfilePressureSeries] = []
-        for series in source.pressures:
-            if series.gas_number is None or series.gas_number < 0:
-                self._dropped("dives", dive_uuid, "A pressure channel with no gas number was dropped")
-                continue
-            checked = self._series("dives", dive_uuid, series, f"pressure (gas {series.gas_number})")
-            if checked is not None:
-                pressures.append(ProfilePressureSeries(t=checked.t, v=checked.v, gas_number=series.gas_number))
-
-        if not any(channels.values()) and not pressures:
-            if any(getattr(source, channel) for channel in SINGLE_SERIES_CHANNELS) or source.pressures:
-                self._dropped("dives", dive_uuid, "A recording's profile carried no usable channel, and was dropped")
-            return None
-
-        profile = with_channels(
-            channels,
-            pressure=pressures,
-            events=self._events(dive_uuid, source),
-        )
-        attributed = replace(profile, gas_attribution=derive_gas_attribution(profile))
-        capped = downsample(attributed)
+        capped = downsample(replace(shaped, gas_attribution=derive_gas_attribution(shaped)))
         # The document's own `duration` when it covers the samples, which is the case §6.4
         # blesses: a computer that stops sampling at the surface can keep timing the dive,
         # and that span is what the app's gas-coverage fraction is a fraction *of*. A
         # `duration` that fails to cover its own samples is incoherent, so the samples win.
         declared = source.duration if source.duration is not None else 0
-        if not 0 <= declared <= _INT32_MAX:
+        if not 0 <= declared <= INT32_MAX:
             self._dropped(
                 "dives", dive_uuid, "The profile declared a span this app cannot store, so its samples' own was used"
             )
             declared = 0
         return PlannedProfile(profile=capped, duration=max(declared, capped.duration))
 
-    def _series(
-        self, collection: str, record_uuid: uuid_pkg.UUID, series: Any, label: str, *, unsigned: bool = False
-    ) -> ProfileSeries | None:
-        """One channel, or `None` with a note. Spec §6.5's rules, exactly.
-
-        `unsigned` is §6.4's floor on the six decompression channels: none of them is a
-        quantity that runs below zero, and a negative in one is what several devices write to
-        mean "no figure". Depth, ceiling and temperature keep the signed reading - a
-        temperature below zero is ordinary, and so is a depth of zero at the surface - which
-        is why this is a parameter rather than a rule applied to every channel.
-
-        The whole channel goes rather than the offending sample, which is `_series`' rule
-        throughout: there is no half of a series to keep, and a document whose `values` and
-        `times` no longer line up is worse than one channel short.
-        """
-        if series is None:
-            return None
-        times, values = series.times, series.values
-        if len(times) != len(values):
-            self._dropped(
-                collection, record_uuid, f"The {label} channel had mismatched times and values, and was dropped"
-            )
-            return None
-        if not times:
-            # "A channel with no readings must be omitted, not empty" - the same rule
-            # `_validate_series` states on the parser side.
-            return None
-        if times[0] < 0 or any(later <= earlier for earlier, later in zip(times, times[1:], strict=False)):
-            self._dropped(
-                collection, record_uuid, f"The {label} channel's times were not increasing from zero, and was dropped"
-            )
-            return None
-        # The stored `data` payload is JSONB and holds any integer, but the summary columns
-        # `store_profile` derives from these - `max_depth_cm` and the five extremes beside
-        # it, and the span - are `Integer`. A channel carrying a value outside that width
-        # goes whole, because there is no half of a series to keep.
-        if not (_within_int32(times) and _within_int32(values)):
-            self._dropped(
-                collection, record_uuid, f"The {label} channel carried readings this app cannot store, and was dropped"
-            )
-            return None
-        if unsigned and any(value < 0 for value in values):
-            self._dropped(collection, record_uuid, f"The {label} channel carried a negative reading, and was dropped")
-            return None
-        return ProfileSeries(t=list(times), v=list(values))
-
-    def _events(self, record_uuid: uuid_pkg.UUID, source: ImportProfile) -> list[ProfileEvent]:
-        """The markers, sorted, deduped and capped - `_rebase_events` minus the rebasing.
-
-        Sorted here because `derive_gas_attribution` walks them in time order and nothing
-        upstream guarantees it.
-
-        **An absent or unrecognized `type` reads as `OTHER`**, which is the boundary this
-        app's storage keeps with the format: §6.6 makes `type` OPTIONAL and spells
-        "unclassified" as its absence, while a JSONB key and an enum both want a value, so
-        `OTHER` is what that absence is stored as. `_unknown_is_absent` has already turned a
-        value from a later minor version into `None` before it reaches here, and this reads
-        that `None` as the unclassified marker it is rather than dropping a real event over a
-        vocabulary this build predates.
-
-        Which makes the `label` REQUIRED there, and that is §6.6's rule rather than this
-        app's: an event that is neither classified nor labelled carries no information at
-        all, so it is dropped with a note.
-        """
-        usable: list[tuple[int, ProfileEventType, int | None, str | None]] = []
-        for event in source.events:
-            if event.time is None:
-                # `time` is REQUIRED (spec §6.6); without it there is no marker to place.
-                self._dropped("dives", record_uuid, "A profile event with no time was dropped")
-                continue
-            label = event.label[:MAX_LABEL_CHARS] if event.label is not None else None
-            kind = event.type if event.type is not None else ProfileEventType.OTHER
-            if kind is ProfileEventType.OTHER and not (label or "").strip():
-                self._dropped("dives", record_uuid, "An unclassified event with no label was dropped")
-                continue
-            usable.append((max(0, event.time), kind, event.gas_number, label))
-
-        seen: set[tuple[int, ProfileEventType, int | None, str | None]] = set()
-        ordered: list[ProfileEvent] = []
-        for key in sorted(usable, key=lambda entry: entry[0]):
-            if key in seen:
-                continue
-            seen.add(key)
-            ordered.append(ProfileEvent(t=key[0], type=key[1], gas_number=key[2], label=key[3]))
-        return ordered
-
     # ------------------------------------------------------------------ recordings
 
     def _plan_recordings(self, dive: ImportDive) -> list[PlannedRecording]:
         """A dive's recordings, in the document's order - the first primary.
 
-        **A recording carrying none of its device, its profile, its files and a readout is
-        dropped**, which is §3's beyond-schema rule 4 applied on the way in rather than
-        asserted about the way out: an object that describes nothing would become a row
-        nothing can render, with a `start_time` and no reason to exist. A readout alone is a
-        record - a computer's own arithmetic, which a hand-logged dive in Subsurface keeps
-        with no samples at all - and a setting alone is not.
-
-        `started_at` absent means the dive's (§6.4a), so it is substituted here rather than
-        left NULL - a reader that treated the absence as "unknown" would put every
-        single-computer recording outside every gate's reach. The exception is a dive whose
-        start is a bare date: a day is no recording's start, so the recording keeps a NULL one
-        and its axis counts from an unknown time that day, until a file attached to it states
-        one (`is_same_recording`, `fill_start`).
+        Each is shaped by `recording_shape.shape_recording`, the function the attach path
+        shapes a dive-computer file's recording with, so the import and the attach store one
+        recording for one file; what this adds is the archive's files and the document's
+        declared span. A recording that describes nothing is dropped there, with its note.
         """
         planned: list[PlannedRecording] = []
         for source in dive.recordings:
-            device = {
-                DEVICE_COLUMNS[member]: self._text(getattr(source.device, member))
-                if isinstance(getattr(source.device, member), str)
-                else getattr(source.device, member)
-                for member in DEVICE_COLUMNS
-                if source.device is not None and getattr(source.device, member) is not None
-            }
-            counter = device.get("device_dive_number")
-            if isinstance(counter, int) and not 0 <= counter <= _INT32_MAX:
-                self._dropped("dives", dive.uuid, "A device's own dive counter was outside the storable range")
-                device.pop("device_dive_number")
-
-            profile = self._plan_profile(dive.uuid, source.profile)
+            shaped = shape_recording(dive, source, self._drop_on("dives", dive.uuid))
+            if shaped is None:
+                continue
             files = [
                 planned_file
                 for stored in source.source_files
                 if (planned_file := self._plan_dive_file(dive, stored)) is not None
             ]
-            readouts = {
-                _READOUT_COLUMN.get(member, member): value
-                for member, value in self._bounded("dives", dive.uuid, source, _READOUT_BOUNDS).items()
-            }
-            if not device and profile is None and not source.source_files and not readouts:
-                self._dropped(
-                    "dives",
-                    dive.uuid,
-                    "A recording described no device, no samples, no file and no reading, and was dropped",
-                )
-                continue
-
-            started_at = self._recording_start(dive, source)
-            start_time, offset_minutes = (None, None)
-            if started_at is not None:
-                start_time, offset_minutes = split_local_start_time(started_at)
-
+            profile = (
+                None
+                if shaped.profile is None or source.profile is None
+                else self._plan_profile(dive.uuid, source.profile, shaped.profile)
+            )
+            duration, max_depth = gate_figures(None if profile is None else profile.profile)
             planned.append(
                 PlannedRecording(
                     ordinal=len(planned),
-                    device=device,
-                    mode=None if source.mode is None else source.mode.value,
-                    deco_model=self._plan_deco_model(dive.uuid, source.deco_model),
-                    salinity=None if source.salinity is None else source.salinity.value,
-                    readouts=readouts,
-                    start_time=start_time,
-                    utc_offset_minutes=offset_minutes,
-                    # **Derived from the samples**, which is the only place a document offers
-                    # them: a Recording carries no such scalars of its own, so a recording with
-                    # no profile has no figures and cannot be strict-matched. Left NULL rather
-                    # than borrowed from the dive - the dive's are the diver's logbook entry
-                    # and may have been hand-edited, and a gate comparing an edited number
-                    # against another device's samples is comparing two different things.
-                    duration=None if profile is None else round(profile.profile.duration / MILLISECONDS_PER_SECOND),
-                    max_depth=_deepest_metres(profile),
+                    device=shaped.device,
+                    mode=shaped.mode,
+                    deco_model=shaped.deco_model,
+                    salinity=shaped.salinity,
+                    readouts=shaped.readouts,
+                    start_time=shaped.start_time,
+                    utc_offset_minutes=shaped.utc_offset_minutes,
+                    duration=duration,
+                    max_depth=max_depth,
                     profile=profile,
                     files=files,
                 )
             )
         return planned
-
-    def _recording_start(self, dive: ImportDive, source: ImportRecording) -> datetime | None:
-        """A recording's own start, or the dive's where it states none (§6.4a) - and `None`
-        where that is a bare date, which no recording's start can be.
-
-        A recording's start is a date-time and never a bare date; one that arrives as a date
-        is read as absent, with a note, rather than as midnight.
-        """
-        fallback = dive.started_at if isinstance(dive.started_at, datetime) else None
-        if source.started_at is not None and not isinstance(source.started_at, datetime):
-            outcome = "so the dive's start was used" if fallback is not None else "and none was stored"
-            self._dropped("dives", dive.uuid, f"A recording's start carried no time of day, {outcome}")
-        if isinstance(source.started_at, datetime):
-            return source.started_at
-        return fallback
-
-    def _plan_deco_model(self, dive_uuid: uuid_pkg.UUID, source: ImportDecoModel | None) -> dict[str, Any]:
-        """One recording's deco model, as the columns that carry it - keyed by column name.
-
-        **The gradient-factor pair is enforced here and not left to the `CheckConstraint`**,
-        which is the difference between one bad reading and a lost logbook: a document whose
-        pair is inverted would otherwise reach the database, and an `IntegrityError` inside
-        the import transaction takes every dive in the archive with it. `_plan_cylinders`
-        makes exactly this move for an oxygen and a helium summing past 100 - neither number
-        says which of the two is wrong, so both go and the record stays.
-
-        Both-or-neither goes the same way and for §6.4c's own reason: one gradient factor
-        alone names no setting. A document carrying one half therefore contributes neither,
-        with a note, rather than half a setting.
-
-        An empty dict where the document recorded no model, which is what the writer needs:
-        every value is a column it may write, and a member the document did not carry is a
-        column it must leave alone.
-        """
-        if source is None:
-            return {}
-
-        bounded = self._bounded("dives", dive_uuid, source, _DECO_MODEL_BOUNDS)
-        gf_low, gf_high = bounded.get("gf_low"), bounded.get("gf_high")
-        if (gf_low is None) != (gf_high is None):
-            self._dropped(
-                "dives", dive_uuid, "A recording's deco model named one gradient factor without the other, so it went"
-            )
-            gf_low = gf_high = None
-        elif gf_low is not None and gf_high is not None and gf_low > gf_high:
-            self._dropped("dives", dive_uuid, "A recording's low gradient factor was above its high one, so both went")
-            gf_low = gf_high = None
-
-        members: dict[str, Any] = {
-            "algorithm": None if source.algorithm is None else source.algorithm.value,
-            # Not `self._text`, which answers `""` - that is right for a `NOT NULL` notes
-            # column whose own spelling of "the diver wrote nothing" is the empty string, and
-            # wrong for a nullable one, where `""` would be a model named nothing rather than
-            # no model recorded.
-            "name": (source.name or "").strip() or None,
-            "gf_low": gf_low,
-            "gf_high": gf_high,
-            "conservatism": bounded.get("conservatism"),
-        }
-        return {DECO_MODEL_COLUMNS[member]: value for member, value in members.items() if value is not None}
 
     # ------------------------------------------------------------------ files
 
@@ -2865,20 +2537,19 @@ class _Planner:
 
         self._claimed_digests.add(stored.sha256)
         self._files_restored += 1
-        # The parser registry decides the content type, exactly as `store_recording_file` does -
-        # that value ends up in a response header on download, so it is resolved here rather
-        # than taken from a document that could name anything.
+        # The format the document says read the file, when this build's reader reads it: a
+        # backfill can then re-read the restored file, and the content type comes from this
+        # app's own table rather than from a document that could name anything, since that
+        # value ends up in a response header on download. The import's own key otherwise,
+        # which is the truth about where the row came from.
         parser_key = _producer_entry(stored, "parser_key")
-        parser = PARSER_BY_KEY.get(parser_key) if isinstance(parser_key, str) else None
+        readable = isinstance(parser_key, str) and reads(parser_key)
         return PlannedFile(
             archive_path=stored.archive_path,
             sha256=stored.sha256,
             original_filename=stored.original_filename or "dive-file",
-            content_type=parser.content_type if parser is not None else _FALLBACK_FILE_CONTENT_TYPE,
-            # The document's key when this build still has that parser, so a backfill can
-            # re-read the restored file; this import's own otherwise, which is the truth
-            # about where the row came from.
-            parser_key=parser.key if parser is not None else IMPORT_PARSER_KEY,
+            content_type=content_type_of(parser_key) if readable else FALLBACK_CONTENT_TYPE,
+            parser_key=parser_key if readable else IMPORT_PARSER_KEY,
         )
 
     def _plan_card_file(

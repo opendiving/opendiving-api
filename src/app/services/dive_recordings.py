@@ -296,12 +296,10 @@ class RecordingFacts:
     """One side of a match: what it was recorded by, when, and the two figures the strict
     gate compares.
 
-    `duration` and `max_depth` are **the recording's own**, never the dive's, and their
-    provenance is the path that produced them - the device's logged figures on the attach
-    path, the samples' own span and deepest reading on the import path. `duration` is
-    seconds. `sampled_span` is separately the profile's span, in the axis's milliseconds,
-    which the same-recording gate compares and the strict gate does not: the same file is
-    3 051 logged seconds and 3 473 sampled ones, so the two questions need two numbers.
+    `duration` and `max_depth` are **the recording's own**, never the dive's: its samples'
+    span and deepest reading, on every path (`recording_shape.gate_figures`). `duration` is
+    whole seconds. `sampled_span` is the same span in the axis's milliseconds, which the
+    same-recording gate compares at a two-second tolerance the strict gate has no use for.
 
     `start_time` is `None` only on a stored side: a recording whose source stated no start,
     which on a date-only dive is every recording that did not state its own.
@@ -735,10 +733,31 @@ async def fill_readouts(db: AsyncSession, *, recording_id: int, readouts: Mappin
         await db.execute(update(DiveRecording).where(DiveRecording.id == recording_id).values(**values))
 
 
+async def store_gate_figures(
+    db: AsyncSession, *, recording_id: int, duration: int | None, max_depth: float | None
+) -> None:
+    """Write the two match figures **outright**, from the samples a re-derivation just stored.
+
+    Outright rather than filled because nobody edits them and they have one rule: the
+    samples' span and deepest reading (`recording_shape.gate_figures`). A recording stored
+    with a device's logged figures would otherwise keep them beside a sampled span the strict
+    gate cannot bridge - 3 051 s logged against 3 473 s sampled on the corpus Ocean file,
+    past `STRICT_DURATION_TOLERANCE`.
+    """
+    await db.execute(
+        update(DiveRecording).where(DiveRecording.id == recording_id).values(duration=duration, max_depth=max_depth)
+    )
+
+
 async def fill_gate_figures(
     db: AsyncSession, *, recording_id: int, duration: int | None, max_depth: float | None
 ) -> None:
-    """Fill the two match figures where the recording has none. Same fill-only rule."""
+    """Fill the two match figures where the recording has none. Same fill-only rule.
+
+    The import's, for a document's recording matching one this account holds: it stores no
+    samples over the ones that recording has, so it has no samples of its own to rewrite the
+    figures from.
+    """
     values: dict[str, object] = {}
     if duration is not None:
         values["duration"] = func.coalesce(DiveRecording.duration, duration)

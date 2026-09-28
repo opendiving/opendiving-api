@@ -37,7 +37,7 @@ from src.app.schemas.dive_mixture import (
     DiveMixtureUpdate,
 )
 from src.app.schemas.parsed_dive import DiveMixtureSchema
-from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
+from src.app.services.dive_reader import read_prefill
 from src.app.services.export.envelope import _mixture
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
@@ -187,7 +187,7 @@ class TestTheParseLayerNullsRatherThanRejects:
 
     def test_the_band_is_the_same_on_both_fields_here(self) -> None:
         """Unlike the request layer, which floors `end_pressure` at 0 and `start_pressure`
-        above it. A parser has no diver asserting anything: a 0 from a file is an
+        above it. A file has no diver asserting anything: a 0 from a file is an
         absent-marker in either column, so both are nulled."""
         assert _parsed_mixture(end_pressure=0).end_pressure is None
 
@@ -197,17 +197,17 @@ class TestEveryParsedPressureSatisfiesTheRequestSchema:
     having passed the bound the column applies.**
 
     Scoped naively - a sweep of the corpus fixtures - this passes green while proving
-    nothing, because no fixture produces an out-of-range value. So it drives a real
-    parser with a file that is out of range on *each* side of the bound, which is the
-    recurrence it exists to catch: the DM5 millibar bug stored `start_pressure = 205203`,
-    and without the parse-side clause a repeat would prefill the form with it and 422 on
-    Save - a field the diver never chose and cannot see.
+    nothing, because no fixture produces an out-of-range value. So it drives the real
+    reader and the form's projection with a file that is out of range on *each* side of
+    the bound, which is the recurrence it exists to catch: a millibar reading taken for bar
+    once stored `start_pressure = 205203`, and without the parse-side clause a repeat would
+    prefill the form with it and 422 on Save - a field the diver never chose and cannot see.
     """
 
     @staticmethod
     def _xml(start_millibar: str, end_millibar: str) -> bytes:
         return f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}">
+<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-06-03T12:15:00</StartTime><Duration>1800</Duration>
   <DiveMixtures>
     <DiveMixture>
       <StartPressure>{start_millibar}</StartPressure>
@@ -230,7 +230,7 @@ class TestEveryParsedPressureSatisfiesTheRequestSchema:
     def test_an_out_of_range_export_still_yields_a_savable_mixture(
         self, start_millibar: str, end_millibar: str
     ) -> None:
-        parsed = SuuntoXmlParser.parse(self._xml(start_millibar, end_millibar)).mixtures[0]
+        parsed = read_prefill(self._xml(start_millibar, end_millibar))[1].mixtures[0]
 
         # What the form does with a parsed cylinder: keep the file's numbers, fill what
         # the file omitted from its own defaults. The pressures have to pass on their own.
@@ -249,7 +249,7 @@ class TestEveryParsedPressureSatisfiesTheRequestSchema:
     def test_a_real_export_keeps_its_pressures(self) -> None:
         """The other half of the guard: nulling everything would pass the test above and
         lose the data. 205203 millibar is 205.2 bar and is a real fill."""
-        parsed = SuuntoXmlParser.parse(self._xml("205203", "86781")).mixtures[0]
+        parsed = read_prefill(self._xml("205203", "86781"))[1].mixtures[0]
 
         pressures = parsed.model_dump(include={"start_pressure", "end_pressure"})
         mixture = DiveMixtureCreate.model_validate({"volume": 11.1, "oxygen": 21.0, "helium": 0.0} | pressures)

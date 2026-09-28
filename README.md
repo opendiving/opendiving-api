@@ -27,11 +27,13 @@ else; what is here is the source, and the notes for working on it.
 - **Technical diving** — per-cylinder ppO₂ limits and gas roles, each computer's CNS/OTU and surface
   pressure persisted from imports, and per-tank gas consumption derived from recorded gas switches
   on multi-tank dives.
-- **Dive-computer file parsing** — upload a FIT file (Garmin Descent, Suunto Ocean/D5) or a Suunto
-  XML/JSON export to `POST /dive/parse` and get structured dive data back to pre-fill a form. Attach
-  the file to the dive afterwards and the **per-sample profile** (depth, temperature, tank pressure,
-  deco ceiling, **the computer's own no-decompression clock, time to surface, ppO₂, CNS clock and
-  both gradient factors**, dive events) is extracted server-side and served with ETag caching.
+- **Dive-computer files on the dive form** — upload one file of one dive, in any format logbook
+  import reads, to `POST /dive/parse` and get the dive back to pre-fill a form; the same reader, the
+  `divejson` package, reads both doors. A file of several dives, or of one dive two computers
+  recorded, goes through logbook import instead. Attach the file to the dive afterwards and the
+  **per-sample profile** (depth, temperature, tank pressure, deco ceiling, **the computer's own
+  no-decompression clock, time to surface, ppO₂, CNS clock and both gradient factors**, dive events)
+  is extracted server-side and served with ETag caching.
 - **Recordings** — a dive holds what recorded it, in order, and each of those holds its own files
   and its own profile. So a diver on two computers keeps both accounts of the dive, the same
   computer exported twice fills one record rather than making two, and every device the file named —
@@ -112,7 +114,8 @@ else; what is here is the source, and the notes for working on it.
   here, and this app reads whatever the release it pins registers. Shearwater Cloud's whole-database
   export is the one still outstanding, and it is not an adapter's worth of work: the sample data
   sits in the computer's own binary log rather than in readable rows, so getting at it takes a
-  dive-computer parser. Shearwater Cloud's UDDF export of the same dives already imports.
+  reader for that log, in the package like every other. Shearwater Cloud's UDDF export of the same
+  dives already imports.
 - **Public share links** — read-only dive/trip pages.
 - **Statistics endpoints** — records, per-year aggregates, site maps, a life list.
 
@@ -277,8 +280,7 @@ curl -X POST http://localhost:8000/api/v1/import/logbook \
 
 ## Development notes
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, the checks CI runs, and how to add a dive-computer
-  parser.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, the checks CI runs, and how a new format arrives.
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability privately. Please don't open a public
   issue for one.
 - `docs/authentication.md` — the auth design, with sequence diagrams for every flow.
@@ -291,8 +293,9 @@ curl -X POST http://localhost:8000/api/v1/import/logbook \
   `docker-compose.test.yml` is an overlay and does nothing on its own. Note that the Postgres-backed
   tests skip themselves unless the test process can reach the database; see
   [CONTRIBUTING.md](CONTRIBUTING.md).
-- Re-extract profiles after a parser fix:
-  `docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml`
+- Re-read stored profiles after a release that moves the `divejson` pin or the extractor version:
+  `docker compose exec api python -m src.scripts.backfill_dive_profiles`. Until it runs, every
+  profile is served as the previous reader left it.
 
 ## Related repositories
 

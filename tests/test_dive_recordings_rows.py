@@ -37,7 +37,6 @@ from src.app.schemas.dive_profile import ProfileProvenance
 from src.app.schemas.parsed_dive import ParsedDecoModel
 from src.app.services import blob_store
 from src.app.services.dive_files import delete_dive_file, store_recording_file
-from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from src.app.services.dive_profiles import IMPORT_PARSER_KEY, MERGE_PARSER_KEY, NormalizedProfile, ProfileSeries
 from src.app.services.dive_recordings import (
     delete_recording,
@@ -49,35 +48,25 @@ from src.app.services.dive_recordings import (
     renumber_ordinals,
 )
 from tests.conftest import db_available
+from tests.helpers.dive_files import suunto_json
 from tests.helpers.generators import create_dive, create_dive_recording, create_user
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
-
-SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 
 
 def _export(
     *,
     cns_end: float | None = None,
-    samples: str = "",
-    start: str = "2026-09-08T15:17:38.67+03:00",
-    cylinder: str = "",
+    samples: tuple[tuple[float, float], ...] = (),
+    start: str = "2026-09-08T15:17:38.670+03:00",
+    cylinder: dict[str, Any] | None = None,
 ) -> bytes:
-    """A minimal Suunto XML export. `SuuntoXmlParser` is the cheapest of the three and the
-    one whose bytes can be written inline, which is what keeps these tests about the
-    recording rather than about a format."""
-    exposure = "" if cns_end is None else f"<CnsEnd>{cns_end}</CnsEnd>"
-    mixtures = "" if not cylinder else f"<DiveMixtures><DiveMixture>{cylinder}</DiveMixture></DiveMixtures>"
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><StartTime>{start}</StartTime><Duration>1800</Duration>
-<MaxDepth>19.04</MaxDepth><SerialNumber>253810000400</SerialNumber>{exposure}
-{mixtures}{samples}</Dive>
-""".encode()
+    """A minimal Suunto app JSON export - see `tests/helpers/dive_files.py` for why that one."""
+    return suunto_json(start=start, cns_end=cns_end, gases=() if cylinder is None else (cylinder,), samples=samples)
 
 
-def _samples(*depths: tuple[int, str]) -> str:
-    inner = "".join(f"<Dive.Sample><Time>{t}</Time><Depth>{d}</Depth></Dive.Sample>" for t, d in depths)
-    return f"<DiveSamples>{inner}</DiveSamples>"
+def _samples(*depths: tuple[int, str]) -> tuple[tuple[float, float], ...]:
+    return tuple((t, float(d)) for t, d in depths)
 
 
 async def _readings(db: AsyncSession, dive: Dive) -> tuple[float | None, float | None]:
@@ -126,7 +115,7 @@ def routed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dives_module, "invalidate_dive_caches", AsyncMock())
 
 
-async def _attach(db: AsyncSession, diver: User, dive: Dive, content: bytes, *, filename: str = "export.xml") -> Any:
+async def _attach(db: AsyncSession, diver: User, dive: Dive, content: bytes, *, filename: str = "export.json") -> Any:
     return await store_recording_file(
         db,
         user_id=diver.id,
@@ -134,7 +123,7 @@ async def _attach(db: AsyncSession, diver: User, dive: Dive, content: bytes, *, 
         dive_id=dive.id,
         upload=UploadFile(filename=filename, file=io.BytesIO(content)),
         file_token=create_dive_file_token(
-            user_uuid=diver.uuid, sha256=hashlib.sha256(content).hexdigest(), parser_key=SuuntoXmlParser.key
+            user_uuid=diver.uuid, sha256=hashlib.sha256(content).hexdigest(), parser_key="suunto_json"
         ),
     )
 
@@ -210,10 +199,9 @@ class TestWhereAFileLands:
         assert recordings[0].id == stored.recording_id
         assert recordings[0].device_serial == "253810000400"
         assert recordings[0].device_brand == "Suunto"
-        # The device's own logged figures, off the header - not the samples' span. The two
-        # differ on a real file and the column's meaning is "a duration the gate can
-        # compare", not one number with one meaning.
-        assert (recordings[0].duration, recordings[0].max_depth) == (1800, 19.04)
+        # The samples' span and deepest reading, the import's rule - not the header's logged
+        # 1800 s and 19.04 m, which a recording imported from the same file would not carry.
+        assert (recordings[0].duration, recordings[0].max_depth) == (10, 5.0)
 
     @pytest.mark.asyncio
     async def test_a_second_export_of_one_computer_fills_the_same_recording(
@@ -221,15 +209,15 @@ class TestWhereAFileLands:
     ) -> None:
         """The whole point of a recording. Two spellings of one record, and the second
         contributes what the first was silent about without overwriting anything."""
-        first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="dive.xml")
+        first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="dive.json")
         # Half a second later by its own clock, and it records an exposure reading the first
         # did not. Same serial, so the same-recording gate takes it.
         second = await _attach(
             async_db,
             diver,
             dive,
-            _export(start="2026-09-08T15:17:39.17+03:00", samples=_samples((0, "0"), (10, "5"))),
-            filename="dive.fit.xml",
+            _export(start="2026-09-08T15:17:39.170+03:00", samples=_samples((0, "0"), (10, "5"))),
+            filename="dive.fit.json",
         )
 
         assert second.recording_id == first.recording_id
@@ -254,10 +242,10 @@ class TestWhereAFileLands:
         """Two minutes apart and a different serial: a second computer, appended after the
         first, and carrying its own readouts - a second machine's CNS clock is its own
         device's arithmetic, and the primary's stays what it was."""
-        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
-        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.json")
+        other = _export(start="2026-09-08T15:19:38.670+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
 
-        stored = await _attach(async_db, diver, dive, other, filename="second.xml")
+        stored = await _attach(async_db, diver, dive, other, filename="second.json")
 
         recordings = await _recordings(async_db, dive)
         assert [row.ordinal for row in recordings] == [0, 1]
@@ -269,9 +257,9 @@ class TestWhereAFileLands:
     async def test_the_read_shape_carries_each_recordings_readouts_and_none_on_the_dive(
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
     ) -> None:
-        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
-        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
-        await _attach(async_db, diver, dive, other, filename="second.xml")
+        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.json")
+        other = _export(start="2026-09-08T15:19:38.670+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        await _attach(async_db, diver, dive, other, filename="second.json")
 
         recordings = (await get_recordings_for_dives(async_db, dive_ids=[dive.id]))[dive.id]
 
@@ -346,27 +334,28 @@ class TestFillingTheDivesCylinders:
             async_db,
             diver,
             dive,
-            _export(cns_end=9.0, cylinder="<StartPressure>207340</StartPressure><EndPressure>47470</EndPressure>"),
-            filename="ocean.xml",
+            _export(cns_end=9.0, cylinder={"StartPressure": 20734000, "EndPressure": 4747000}),
+            filename="ocean.json",
         )
         await _attach(
             async_db,
             diver,
             dive,
             _export(
-                start="2026-09-08T15:17:39.17+03:00",
+                start="2026-09-08T15:17:39.170+03:00",
                 samples=_samples((0, "0"), (10, "5")),
-                cylinder="<Oxygen>33</Oxygen>",
+                cylinder={"Oxygen": 0.33},
             ),
-            filename="ocean-fit.xml",
+            filename="ocean-fit.json",
         )
 
         assert [row.ordinal for row in await _recordings(async_db, dive)] == [0]
         cylinder = await self._cylinder(async_db, dive)
         assert cylinder.oxygen == 33.0
         assert (cylinder.start_pressure, cylinder.end_pressure) == (200.0, 47.47)
-        # The label the dive's stored pressure channels are attributed under. A second file's
-        # own numbering must never rename it - this format counts from 1, the Ocean from 0.
+        # The label the dive's stored pressure channels are attributed under. Neither file
+        # labels a cylinder - neither carries a channel or a switch to point one at - so the
+        # labelling has nothing to move it to.
         assert cylinder.gas_number == 0
 
     @pytest.mark.asyncio
@@ -380,7 +369,7 @@ class TestFillingTheDivesCylinders:
         one of them fills."""
         self._seed_cylinder(db, dive, gas_number=0, start_pressure=200.0)
 
-        await _attach(async_db, diver, dive, _export(cylinder="<Oxygen>33</Oxygen>"), filename="ocean.xml")
+        await _attach(async_db, diver, dive, _export(cylinder={"Oxygen": 0.33}), filename="ocean.json")
 
         assert (await self._cylinder(async_db, dive)).oxygen is None
 
@@ -397,10 +386,10 @@ class TestFillingTheDivesCylinders:
         from the form, and reading it straight back off those bytes is the edit undone.
         """
         self._seed_cylinder(db, dive, gas_number=0, start_pressure=200.0)
-        export = _export(cylinder="<Oxygen>33</Oxygen>")
-        await _attach(async_db, diver, dive, export, filename="ocean.xml")
+        export = _export(cylinder={"Oxygen": 0.33})
+        await _attach(async_db, diver, dive, export, filename="ocean.json")
 
-        await _attach(async_db, diver, dive, export, filename="ocean.xml")
+        await _attach(async_db, diver, dive, export, filename="ocean.json")
 
         assert (await self._cylinder(async_db, dive)).oxygen is None
 
@@ -426,7 +415,7 @@ class TestFillingTheDivesCylinders:
         await async_db.commit()
         self._seed_cylinder(db, dive, gas_number=0, start_pressure=200.0)
 
-        await _attach(async_db, diver, dive, _export(cylinder="<Oxygen>33</Oxygen>"), filename="ocean.xml")
+        await _attach(async_db, diver, dive, _export(cylinder={"Oxygen": 0.33}), filename="ocean.json")
 
         # One recording still, so the file landed on the imported one rather than beside it.
         assert [row.id for row in await _recordings(async_db, dive)] == [recording.id]
@@ -783,7 +772,7 @@ class TestDeletingASecondComputersFile:
 
         The diver imported a document, then attached the export it was converted from - the
         primary's *first* file, which fills and cannot overwrite, so the primary keeps the
-        document's `cns_end` and the `otu_end` no parser here reads at all. Rewriting outright
+        document's `cns_end` and the `otu_end` this file does not carry at all. Rewriting outright
         off that file would replace the first with the file's own 9.0 and clear the second,
         on the strength of deleting an unrelated recording's export.
         """
@@ -796,9 +785,9 @@ class TestDeletingASecondComputersFile:
             otu_end=31.0,
             start=datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC),
         )
-        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="primary.xml")
-        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
-        stored = await _attach(async_db, diver, dive, other, filename="second.xml")
+        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="primary.json")
+        other = _export(start="2026-09-08T15:19:38.670+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        stored = await _attach(async_db, diver, dive, other, filename="second.json")
         assert [row.ordinal for row in await _recordings(async_db, dive)] == [0, 1]
         file_id = (
             await async_db.execute(select(DiveFile.id).where(DiveFile.recording_id == stored.recording_id))
@@ -817,9 +806,9 @@ class TestDeletingASecondComputersFile:
         computer's recording is promoted into ordinal 0, and the reading the dive shows becomes
         that machine's own.
         """
-        first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
-        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
-        second = await _attach(async_db, diver, dive, other, filename="second.xml")
+        first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.json")
+        other = _export(start="2026-09-08T15:19:38.670+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        second = await _attach(async_db, diver, dive, other, filename="second.json")
         file_id = (
             await async_db.execute(select(DiveFile.id).where(DiveFile.recording_id == first.recording_id))
         ).scalar_one()
@@ -855,9 +844,9 @@ class TestDeletingARecording:
     async def test_erasing_the_primary_re_derives_from_whatever_is_promoted(
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive, routed: None
     ) -> None:
-        first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
-        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
-        second = await _attach(async_db, diver, dive, other, filename="second.xml")
+        first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.json")
+        other = _export(start="2026-09-08T15:19:38.670+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        second = await _attach(async_db, diver, dive, other, filename="second.json")
         primary = next(row for row in await _recordings(async_db, dive) if row.id == first.recording_id)
 
         await _erase_recording(async_db, diver, dive, primary.uuid)
@@ -881,9 +870,9 @@ class TestPromotingARecording:
     ) -> None:
         """The readings follow the recording the diver made primary, and come off that
         machine's own file rather than staying at the one the dive was showing."""
-        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.xml")
-        other = _export(start="2026-09-08T15:19:38.67+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
-        stored = await _attach(async_db, diver, dive, other, filename="second.xml")
+        await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.json")
+        other = _export(start="2026-09-08T15:19:38.670+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
+        stored = await _attach(async_db, diver, dive, other, filename="second.json")
         second = next(row for row in await _recordings(async_db, dive) if row.id == stored.recording_id)
 
         await patch_dive_recording(
@@ -1001,19 +990,19 @@ class TestTheDiveRead:
         ]
 
     @pytest.mark.asyncio
-    async def test_a_profile_read_off_a_file_says_file_rather_than_which_parser(
+    async def test_a_profile_read_off_a_file_says_file_rather_than_which_format(
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
     ) -> None:
-        """Which parser read which file is already on `files[].parser_key`, where it is a fact
-        about that file. The profile answers the three-way question and nothing else, so the
-        open, growing set of parser keys never reaches this member."""
+        """Which format each file was read as is already on `files[].parser_key`, where it is a
+        fact about that file. The profile answers the three-way question and nothing else, so
+        the open set of format ids never reaches this member."""
         await _attach(async_db, diver, dive, _export(samples=_samples((0, "0"), (10, "5"))))
 
         read = (await get_recordings_for_dives(async_db, dive_ids=[dive.id]))[dive.id]
 
         assert read[0].profile is not None
         assert read[0].profile.provenance is ProfileProvenance.FILE
-        assert [row.parser_key for row in read[0].files] == [SuuntoXmlParser.key]
+        assert [row.parser_key for row in read[0].files] == ["suunto_json"]
 
     @pytest.mark.asyncio
     async def test_a_recording_whose_source_named_no_computer_reports_no_device(

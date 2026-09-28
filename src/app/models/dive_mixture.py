@@ -32,9 +32,10 @@ class DiveMixture(Base):
     # How the source export identifies this cylinder, and the join key to the profile's
     # per-cylinder pressure channels (`dive_profile.data.pressure[].gas_number`).
     #
-    # **A label, never an index**, and the corpus is emphatic about it: a Suunto Ocean
-    # numbers from 0, while the parsers that synthesize a position because their format
-    # carries no number at all (XML, FIT) count from 1. Nullable, because a hand-entered
+    # **A label, never an index.** The reader numbers a dive's cylinders from 0 in document
+    # order, and only where a pressure channel or a gas switch needs one to point at, so a
+    # cylinder a file never joins to anything carries none; the dive's rows take the primary
+    # recording's labels (`dive_files.label_cylinders`). Nullable, because a hand-entered
     # cylinder has no position in any file.
     gas_number: Mapped[int | None] = mapped_column(Integer, default=None)
     # What the cylinder was carried for - see `GasRole` (`schemas/dive_mixture.py`) for

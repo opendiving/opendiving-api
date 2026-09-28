@@ -249,10 +249,10 @@ class ExportDecoModel(BaseModel):
     writes `Suunto Fused RGBM 2` as a string and never names a family.
 
     `gf_low` and `gf_high` are written both or neither, and `gf_low <= gf_high` is a §3 rule
-    the schema cannot express. Both hold here by construction rather than by assertion - the
-    parsers and the import planner each drop both halves before a row can carry a half or an
-    inverted pair, and `ck_dive_recording_deco_gf_low_within_high` is the backstop under
-    them.
+    the schema cannot express. Both hold here by construction rather than by assertion -
+    `recording_shape.shape_deco_model`, which the attach path and the importer both shape a
+    recording with, drops both halves before a row can carry a half or an inverted pair, and
+    `ck_dive_recording_deco_gf_low_within_high` is the backstop under it.
     """
 
     algorithm: Annotated[DecoAlgorithm | None, Field(default=None, description="The model's family, not the product")]
