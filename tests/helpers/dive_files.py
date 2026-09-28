@@ -33,7 +33,7 @@ def suunto_json(
     fraction, pressures in Pascal. `samples` are `(seconds from the start, depth in metres)`,
     or `(seconds, depth, gas number, pressure in Pascal)` for a sample carrying a
     transmitter's reading - which, with no `gases`, is the Ocean's shape: the reader lists a
-    cylinder per transmitting slot and labels it with the file's own number. `cns_end` is a
+    cylinder per transmitting slot and labels each by its position from 0. `cns_end` is a
     percentage, written as the fraction the export states.
     """
     origin = datetime.fromisoformat(start)

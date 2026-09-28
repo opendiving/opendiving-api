@@ -280,9 +280,9 @@ class TestTheTables:
 
 class TestNoParserSurvives:
     def test_nothing_under_src_imports_a_parser_of_its_own(self) -> None:
-        """The deletion is the point: one reader, so no module under `src/` may import the
-        app's own parsers or the XML hardening only they needed. `fitdecode` stays loaded -
-        the package imports it at module scope for its FIT reader.
+        """One reader, so nothing under `src/` loads a parser package of its own
+        (`dive_parsers`) or the XML hardening only such a package needs (`defusedxml`).
+        `fitdecode` stays loaded - the package imports it at module scope for its FIT reader.
 
         In a subprocess, because this suite's own helpers import `fitdecode` to write FIT
         fixtures, and a module another test imported would say nothing about the app.

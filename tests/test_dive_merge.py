@@ -187,7 +187,7 @@ class TestWhatJoiningTwoProfilesDoesToTheOtherChannels:
 class TestShiftingAProfile:
     def test_every_channel_and_every_marker_moves_together(self) -> None:
         """One axis, so a shift that moved the depth curve and not the temperature one would
-        slide the two apart - the same reason `normalize` picks one origin for all of them.
+        slide the two apart - the same reason every channel of a recording counts from one start.
         """
         shifted = shift_profile(
             NormalizedProfile(

@@ -3826,7 +3826,7 @@ class TestTheBoundsCensus:
             "ck_dive_exit_position_pair",
             "ck_dive_mixture_oxygen_helium_sum",
             "ck_dive_mixture_pressure_order",
-            # `_plan_deco_model` drops both halves of an inverted gradient-factor pair.
+            # `shape_deco_model` drops both halves of an inverted gradient-factor pair.
             "ck_dive_recording_deco_gf_low_within_high",
             # `split_dive_start_time` never pairs the date-only flag with an offset.
             "ck_dive_start_date_only_has_no_offset",
@@ -4170,18 +4170,18 @@ class TestTheIntegerColumnCensus:
         ("dive_profile", "duration"): "bounded in `_plan_profile`, against the samples and the declared span",
         ("dive_profile", "depth_sample_count"): "a length, capped by `MAX_POINTS_PER_CHANNEL`",
         ("dive_profile", "event_count"): "a count, capped by `MAX_EVENTS`",
-        ("dive_profile", "max_depth_cm"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_ceiling_cm"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "min_temperature_c10"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_temperature_c10"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "min_pressure_bar10"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_pressure_bar10"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "min_ndl_s"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_tts_s"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_ppo2_bar100"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_cns_pct10"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_gradient_factor_pct"): "an extreme of a channel `_series` bounds",
-        ("dive_profile", "max_surface_gradient_factor_pct"): "an extreme of a channel `_series` bounds",
+        ("dive_profile", "max_depth_cm"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_ceiling_cm"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "min_temperature_c10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_temperature_c10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "min_pressure_bar10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_pressure_bar10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "min_ndl_s"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_tts_s"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_ppo2_bar100"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_cns_pct10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_gradient_factor_pct"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_surface_gradient_factor_pct"): "an extreme of a channel `shape_series` bounds",
         ("gear_service_schedule", "id"): "the sequence's",
         ("gear_service_schedule", "user_id"): "the caller's",
         ("gear_service_schedule", "gear_item_id"): "resolved from a row this import wrote",
@@ -4253,9 +4253,9 @@ class TestTheIntegerColumnCensus:
         ("dive_recording", "dive_id"): "resolved from a row this import wrote",
         ("dive_recording", "ordinal"): "the list index, not the document's",
         ("dive_recording", "device_dive_number"): "bounded in `_plan_recordings`",
-        ("dive_recording", "deco_gf_low"): "bounded in `_DECO_MODEL_BOUNDS`, to 0..100",
-        ("dive_recording", "deco_gf_high"): "bounded in `_DECO_MODEL_BOUNDS`, to 0..100",
-        ("dive_recording", "deco_conservatism"): "bounded in `_DECO_MODEL_BOUNDS`, to the column's own width",
+        ("dive_recording", "deco_gf_low"): "bounded in `DECO_MODEL_BOUNDS`, to 0..100",
+        ("dive_recording", "deco_gf_high"): "bounded in `DECO_MODEL_BOUNDS`, to 0..100",
+        ("dive_recording", "deco_conservatism"): "bounded in `DECO_MODEL_BOUNDS`, to the column's own width",
         ("dive_recording", "utc_offset_minutes"): "derived from a parsed UTC offset, which Python bounds at a day",
         ("dive_recording", "duration"): "the samples' own span, capped by `_plan_profile`",
         ("dive_file", "byte_size"): "the restored bytes' own length, capped by `MAX_DIVE_FILE_SIZE`",
@@ -4504,7 +4504,7 @@ class TestTheImportGates:
         machine's arithmetic and one machine's labelling, and attributing them to the dive
         would credit the Shearwater's record with the Suunto's numbers.
 
-        The attach route has drawn that line since recordings arrived (`_rederive_recording`
+        The attach route has drawn that line since recordings arrived (`rederive_recording`
         returns before both for `ordinal != 0`). This side could not until the match carried
         an ordinal, so it wrote them for whichever recording the gate happened to pick.
         """
