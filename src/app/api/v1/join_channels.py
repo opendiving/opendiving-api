@@ -20,7 +20,7 @@ from ...schemas.join_channel import JoinChannelRead
 router = APIRouter(tags=["config"])
 
 
-@router.get("/join-channels/{slug}", response_model=JoinChannelRead)
+@router.get("/join-channel/{slug}", response_model=JoinChannelRead)
 async def read_join_channel(slug: str) -> JoinChannelRead:
     """The label a live join link is shown by, or 404.
 

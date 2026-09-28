@@ -33,6 +33,6 @@ class InstanceConfigRead(BaseModel):
     registration_mode: RegistrationMode
     project_operated: bool
     # Whether any join link exists here - a yes or no, never the list, which is resolved one
-    # slug at a time (`GET /join-channels/{slug}`) so a visitor holding one link learns
+    # slug at a time (`GET /join-channel/{slug}`) so a visitor holding one link learns
     # nothing about the others. The privacy page shows its join-link paragraph on it.
     join_links: bool

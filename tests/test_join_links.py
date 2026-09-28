@@ -114,7 +114,7 @@ def anonymous_client() -> Generator[TestClient]:
 class TestTheResolveRouteOverTheWire:
     def test_it_answers_without_a_token(self, anonymous_client: TestClient) -> None:
         with _channels():
-            response = anonymous_client.get("/api/v1/join-channels/reddit")
+            response = anonymous_client.get("/api/v1/join-channel/reddit")
 
         assert response.status_code == 200
         assert response.json() == {"slug": "reddit", "label": "Reddit"}
@@ -126,7 +126,7 @@ class TestTheResolveRouteOverTheWire:
         """Not a 422: a value no operator could configure is simply not a link, and the
         route has one answer for that."""
         with _channels():
-            assert anonymous_client.get(f"/api/v1/join-channels/{segment}").status_code == 404
+            assert anonymous_client.get(f"/api/v1/join-channel/{segment}").status_code == 404
 
 
 class TestTheRequestBodies:

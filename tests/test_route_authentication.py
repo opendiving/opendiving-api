@@ -97,7 +97,7 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "session exists. Discloses three bits the pages disclose anyway: by which form the landing page "
         "shows, by which copy that form carries, and by whether the privacy page describes join links."
     ),
-    ("GET", "/api/v1/join-channels/{slug}"): (
+    ("GET", "/api/v1/join-channel/{slug}"): (
         "Tells the join page whether the link it was opened with is live, before anyone has signed in. "
         "Answers for one slug and never lists the others, and a live link is public by design - it is "
         "posted where anyone can follow it."
