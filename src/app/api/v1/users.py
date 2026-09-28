@@ -780,8 +780,9 @@ async def read_storage_usage(
     """What the caller's uploads occupy, by kind, against this instance's storage limit.
 
     `used_bytes` is what an upload is checked against: one that would take it past
-    `limit_bytes` is a 413. Dive-computer files count as stored, compressed, so their figure
-    is less than the sizes their recordings list.
+    `limit_bytes` is a 413. Dive-computer files count as stored: compressed, and so less
+    than the sizes their recordings list, for every file uploaded since compression began;
+    at their full size for any stored before it.
 
     Not cached, like `GET /user`: every upload and delete would otherwise owe it an
     invalidation, and the sums are a handful of indexed rows.
