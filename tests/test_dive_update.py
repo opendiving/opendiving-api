@@ -32,6 +32,7 @@ from uuid6 import uuid7
 
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
+from src.app.crud.crud_dive_species import StoredSighting
 from src.app.schemas.dive import DiveCreateRequest, DiveUpdate, DiveUpdateRequest, WaterType
 from src.app.schemas.dive_mixture import GasRole, TankUsage
 
@@ -59,8 +60,8 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             return None
         return {value: index + 100 for index, value in enumerate(species_uuids)}
 
-    async def _record_species(*, db: Any, dive_id: int, species_ids: list[int]) -> None:
-        seen["species_ids"] = species_ids
+    async def _record_sightings(*, db: Any, dive_id: int, sightings: list[StoredSighting]) -> None:
+        seen["sightings"] = sightings
 
     db_dive = MagicMock()
     db_dive.id = 11
@@ -79,7 +80,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(dives_module, "resolve_trip_id_for_user", AsyncMock(return_value=77))
     monkeypatch.setattr(dives_module, "resolve_course_id_for_user", AsyncMock(return_value=88))
     monkeypatch.setattr(dives_module, "resolve_species_ids", AsyncMock(side_effect=_fake_resolve_species))
-    monkeypatch.setattr(dives_module, "replace_species_for_dive", AsyncMock(side_effect=_record_species))
+    monkeypatch.setattr(dives_module, "replace_species_for_dive", AsyncMock(side_effect=_record_sightings))
     monkeypatch.setattr(dives_module, "recalculate_dive_stats", AsyncMock())
     monkeypatch.setattr(dives_module, "recalculate_gear_dive_counts", AsyncMock())
     monkeypatch.setattr(dives_module, "invalidate_dive_caches", AsyncMock())
@@ -195,60 +196,125 @@ class TestCourseDetach:
 
 
 class TestSpeciesReplacement:
-    """`species_uuids` follows the rule the other list-valued fields already follow -
-    omitted leaves them alone, `[]` clears them, a list replaces them wholesale.
+    """`sightings` follows the rule the other list-valued fields already follow - omitted
+    leaves them alone, `[]` clears them, a list replaces them wholesale.
 
     Worth its own class rather than trusting the symmetry, because species arrived last and
-    the branch that gates cache invalidation had to grow a fourth clause. A `species_uuids`
-    edit that skipped it would leave a dive's cached read showing the old sightings for the
-    full hour that key lives.
+    the branch that gates cache invalidation had to grow a fourth clause. A `sightings` edit
+    that skipped it would leave a dive's cached read showing the old sightings for the full
+    hour that key lives.
     """
 
     @pytest.mark.asyncio
     async def test_a_list_is_written_in_the_order_given(self, captured: dict[str, Any]) -> None:
         first, second = uuid7(), uuid7()
 
-        await _patch(DiveUpdateRequest.model_validate({"species_uuids": [str(first), str(second)]}))
+        await _patch(
+            DiveUpdateRequest.model_validate(
+                {
+                    "sightings": [
+                        {"species_uuid": str(first), "count": 3, "notes": "Hunting over the sand"},
+                        {"species_uuid": str(second)},
+                    ]
+                }
+            )
+        )
 
-        # Resolved to internal ids, in order: the public uuid must never reach the column.
-        assert captured["species_ids"] == [100, 101]
+        # Resolved to internal ids, in order, each keeping its count and note: the public uuid
+        # must never reach the column.
+        assert captured["sightings"] == [
+            StoredSighting(species_id=100, count=3, notes="Hunting over the sand"),
+            StoredSighting(species_id=101),
+        ]
 
     @pytest.mark.asyncio
     async def test_an_empty_list_clears_them(self, captured: dict[str, Any]) -> None:
         """Distinct from omitting the key, and the only way a diver removes their last
         sighting."""
-        await _patch(DiveUpdateRequest.model_validate({"species_uuids": []}))
+        await _patch(DiveUpdateRequest.model_validate({"sightings": []}))
 
-        assert captured["species_ids"] == []
+        assert captured["sightings"] == []
 
     @pytest.mark.asyncio
     async def test_an_omitted_key_leaves_them_untouched(self, captured: dict[str, Any]) -> None:
         await _patch(DiveUpdateRequest.model_validate({"notes": "Turtle on the safety stop"}))
 
-        assert "species_ids" not in captured
+        assert "sightings" not in captured
 
     @pytest.mark.asyncio
     async def test_an_unknown_species_is_rejected_before_the_write(self, captured: dict[str, Any]) -> None:
         """A 422 naming which, like an unknown trip or gear item - not a 403. There is no
         ownership to fail here (the catalog is global), only existence."""
         with pytest.raises(UnprocessableEntityException, match="Species not found."):
-            await _patch(DiveUpdateRequest.model_validate({"species_uuids": [str(UNKNOWN_SPECIES_UUID)]}))
+            await _patch(DiveUpdateRequest.model_validate({"sightings": [{"species_uuid": str(UNKNOWN_SPECIES_UUID)}]}))
 
-        assert "species_ids" not in captured
+        assert "sightings" not in captured
 
     @pytest.mark.asyncio
     async def test_a_species_only_edit_still_invalidates_the_caches(
         self, captured: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The fourth clause on the invalidation gate. A PATCH carrying nothing but
-        `species_uuids` leaves `update_data` empty, so without it the whole block is skipped
-        and `user_{id}_dive:{uuid}` keeps serving the old sightings for an hour."""
+        `sightings` leaves `update_data` empty, so without it the whole block is skipped and
+        `user_{id}_dive:{uuid}` keeps serving the old sightings for an hour."""
         invalidate = AsyncMock()
         monkeypatch.setattr(dives_module, "invalidate_dive_caches", invalidate)
 
-        await _patch(DiveUpdateRequest.model_validate({"species_uuids": [str(uuid7())]}))
+        await _patch(DiveUpdateRequest.model_validate({"sightings": [{"species_uuid": str(uuid7())}]}))
 
         invalidate.assert_awaited_once()
+
+
+class TestTheSightingRules:
+    """A sighting's two rules the format states and the write schemas hold: one per species
+    on a dive, and a count that is a positive number the column can store or no count."""
+
+    @pytest.mark.parametrize("schema", [DiveCreateRequest, DiveUpdateRequest])
+    def test_a_species_named_twice_is_refused_naming_it(self, schema: type[BaseModel]) -> None:
+        """Not collapsed to the first: the two may carry different counts, and nothing says
+        which the diver meant."""
+        repeated = uuid7()
+        body: dict[str, Any] = {
+            "sightings": [
+                {"species_uuid": str(repeated), "count": 2},
+                {"species_uuid": str(uuid7())},
+                {"species_uuid": str(repeated), "count": 5},
+            ]
+        }
+        if schema is DiveCreateRequest:
+            body |= {"dive_number": 1, "start_time": START_TIME.isoformat(), "duration": 1800}
+
+        with pytest.raises(ValidationError) as caught:
+            schema.model_validate(body)
+
+        [error] = caught.value.errors()
+        assert error["loc"] == ("sightings",)
+        assert str(repeated) in error["msg"]
+
+    @pytest.mark.parametrize("count", [0, -1, 2**31])
+    def test_a_count_outside_one_to_the_columns_width_is_refused(self, count: int) -> None:
+        """Zero is not a sighting - "looked for and not seen" is a survey fact - and the top is
+        where a Postgres `integer` ends."""
+        with pytest.raises(ValidationError):
+            DiveUpdateRequest.model_validate({"sightings": [{"species_uuid": str(uuid7()), "count": count}]})
+
+    def test_an_absent_count_and_note_read_as_seen_and_nothing_written(self) -> None:
+        """Seen, not counted - never `1` - and the empty note every notes column spells
+        absence with."""
+        body = DiveUpdateRequest.model_validate({"sightings": [{"species_uuid": str(uuid7())}]})
+
+        assert body.sightings is not None
+        [sighting] = body.sightings
+        assert (sighting.count, sighting.notes) == (None, "")
+
+    def test_a_sighting_takes_no_member_it_does_not_define(self) -> None:
+        with pytest.raises(ValidationError):
+            DiveUpdateRequest.model_validate({"sightings": [{"species_uuid": str(uuid7()), "size": "large"}]})
+
+    def test_the_retired_member_is_refused(self) -> None:
+        """No spelling of the old list is accepted for the deploy window."""
+        with pytest.raises(ValidationError):
+            DiveUpdateRequest.model_validate({"species_uuids": [str(uuid7())]})
 
 
 class TestNonNullableFields:

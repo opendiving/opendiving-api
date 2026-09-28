@@ -44,6 +44,7 @@ from ...crud.crud_dive_gear_items import (
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
 from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
 from ...crud.crud_dive_species import (
+    StoredSighting,
     get_species_for_dive,
     replace_species_for_dive,
 )
@@ -70,7 +71,8 @@ from ...schemas.dive import (
     DiveUpdateRequest,
     RecordingRead,
     RecordingUpdateRequest,
-    SpeciesInfo,
+    SightingRead,
+    SightingWrite,
     validate_depth_pair,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
@@ -153,6 +155,8 @@ _DIVE_CONSTRAINT_MESSAGES = {
     # carrying one depth against a stored other half is checked before the write, and a
     # concurrent edit between that check and the UPDATE lands here.
     "ck_dive_avg_depth_within_max": "Average depth cannot be greater than max depth.",
+    # A backstop: `SightingWrite` bounds the count before anything is written.
+    "ck_dive_species_count_positive": "A sighting's count must be at least 1.",
 }
 
 
@@ -168,6 +172,20 @@ def _validate_merged_depth_pair(avg_depth: float | None, max_depth: float | None
         validate_depth_pair(avg_depth, max_depth)
     except ValueError as e:
         raise UnprocessableEntityException(str(e)) from e
+
+
+async def _resolve_sightings(db: AsyncSession, sightings: list[SightingWrite]) -> list[StoredSighting]:
+    """A write's sightings as the join table stores them, or the 422 an unknown species gets.
+
+    No user filter, unlike every other reference a dive write resolves: the species catalog
+    is global, so there is no owner to check against. See `resolve_species_ids`.
+    """
+    species_id_by_uuid = await resolve_species_ids(db=db, species_uuids=[s.species_uuid for s in sightings])
+    if species_id_by_uuid is None:
+        raise UnprocessableEntityException("Species not found.")
+    return [
+        StoredSighting(species_id=species_id_by_uuid[s.species_uuid], count=s.count, notes=s.notes) for s in sightings
+    ]
 
 
 def _fk_error_detail(exc: IntegrityError) -> str:
@@ -379,7 +397,7 @@ def _to_public_dive_with_mixtures(
     dive_sites: list[DiveSiteInfo],
     gear_items: list[GearItemInfo],
     mixtures: list[DiveMixtureRead],
-    species: list[SpeciesInfo],
+    sightings: list[SightingRead],
     people: list[PersonReferenceRead],
     recordings: list[RecordingRead] | None = None,
     attribution: ProfileGasAttribution | None = None,
@@ -406,7 +424,7 @@ def _to_public_dive_with_mixtures(
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
-        species=species,
+        sightings=sightings,
         people=people,
         recordings=recordings or [],
         # Both callers of this function (creating a dive, and the cached single-dive
@@ -549,7 +567,7 @@ async def write_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    """Log a dive, together with its gas mixtures, dive sites, gear, species and people in one
+    """Log a dive, together with its gas mixtures, dive sites, gear, sightings and people in one
     request.
 
     Every referenced trip, training course, contact, dive site, gear item and person must
@@ -557,8 +575,9 @@ async def write_dive(
     403, since from the caller's side the two are the same thing. Species are the exception,
     and only because the catalog is global: a species uuid needs to exist, but it belongs to
     nobody, so there is no ownership to fail. Dive sites keep the order given; index 0 is the
-    primary site, and species keep the order they were spotted in. `people` keeps the
-    diver's order, each with the role the person had; one named twice keeps the first.
+    primary site, and sightings keep the order they were spotted in, each with an optional
+    count and note - a species named twice is a 422 naming it. `people` keeps the diver's
+    order, each with the role the person had; one named twice keeps the first.
     Values the DB's domain constraints reject (a non-positive duration, a mixture over 100%)
     also come back as 422 with the offending field named.
     """
@@ -592,12 +611,7 @@ async def write_dive(
         raise UnprocessableEntityException("Gear item not found.")
     gear_item_ids = [gear_id_by_uuid[u] for u in dive.gear_item_uuids]
 
-    # No user filter here, unlike the two above, and deliberately so: the species catalog is
-    # global, so there is no owner to check against. See `resolve_species_ids`.
-    species_id_by_uuid = await resolve_species_ids(db=db, species_uuids=dive.species_uuids)
-    if species_id_by_uuid is None:
-        raise UnprocessableEntityException("Species not found.")
-    species_ids = [species_id_by_uuid[u] for u in dive.species_uuids]
+    sightings = await _resolve_sightings(db, dive.sightings)
     people = await resolve_people_references(db, dive.people, user_id=current_user["id"])
 
     dive_internal_dict = dive.model_dump(
@@ -605,7 +619,7 @@ async def write_dive(
             "mixtures",
             "dive_site_uuids",
             "gear_item_uuids",
-            "species_uuids",
+            "sightings",
             "people",
             "trip_uuid",
             "course_uuid",
@@ -646,7 +660,7 @@ async def write_dive(
         await db.rollback()
         raise UnprocessableEntityException(_fk_error_detail(e)) from e
     try:
-        await replace_species_for_dive(db=db, dive_id=created_dive.id, species_ids=species_ids)
+        await replace_species_for_dive(db=db, dive_id=created_dive.id, sightings=sightings)
     except IntegrityError as e:
         await db.rollback()
         raise UnprocessableEntityException(_fk_error_detail(e)) from e
@@ -669,7 +683,7 @@ async def write_dive(
     mixtures = await get_mixtures_for_dive(db=db, dive_id=created_dive.id)
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=created_dive.id)
     gear_items = await get_gear_items_for_dive(db=db, dive_id=created_dive.id)
-    species = await get_species_for_dive(db=db, dive_id=created_dive.id)
+    stored_sightings = await get_species_for_dive(db=db, dive_id=created_dive.id)
     stored_people = (await get_people_for_dives(db, [created_dive.id]))[created_dive.id] if people else []
     return _to_public_dive_with_mixtures(
         cast(dict[str, Any], dive_read_internal),
@@ -680,7 +694,7 @@ async def write_dive(
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
-        species=species,
+        sightings=stored_sightings,
         people=stored_people,
     )
 
@@ -1001,7 +1015,7 @@ async def _cached_read_dive(
     mixtures = await get_mixtures_for_dive(db=db, dive_id=db_dive["id"])
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=db_dive["id"])
     gear_items = await get_gear_items_for_dive(db=db, dive_id=db_dive["id"])
-    species = await get_species_for_dive(db=db, dive_id=db_dive["id"])
+    sightings = await get_species_for_dive(db=db, dive_id=db_dive["id"])
     people = (await get_people_for_dives(db, [db_dive["id"]]))[db_dive["id"]]
     # Written batched though only ever called with one id - see `get_recordings_for_dives`.
     # This is three queries rather than the two `source_file` and `profile` used to cost, and
@@ -1029,7 +1043,7 @@ async def _cached_read_dive(
         dive_sites=dive_sites,
         gear_items=gear_items,
         mixtures=mixtures,
-        species=species,
+        sightings=sightings,
         people=people,
         recordings=recordings,
         attribution=attribution,
@@ -1043,7 +1057,7 @@ async def read_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    """Return a single dive with its mixtures, sites, gear, species, people and recordings.
+    """Return a single dive with its mixtures, sites, gear, sightings, people and recordings.
 
     404 when no such dive exists - and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable.
@@ -1126,7 +1140,7 @@ async def patch_dive(
     """Partially update a dive; omitted fields are left untouched.
 
     404 unless the caller owns it, exactly as for a dive that doesn't exist. The
-    list-valued fields - `mixtures`, `dive_site_uuids`, `gear_item_uuids`, `species_uuids`,
+    list-valued fields - `mixtures`, `dive_site_uuids`, `gear_item_uuids`, `sightings`,
     `people` - are replaced wholesale when present rather than merged, so sending a shorter list
     removes the difference and omitting the key entirely leaves it alone. Passing `null` for
     `trip_uuid` detaches the dive from its trip, which is distinct from omitting the key.
@@ -1153,7 +1167,7 @@ async def patch_dive(
             "mixtures",
             "dive_site_uuids",
             "gear_item_uuids",
-            "species_uuids",
+            "sightings",
             "people",
             "trip_uuid",
             "course_uuid",
@@ -1210,12 +1224,7 @@ async def patch_dive(
             raise UnprocessableEntityException("Gear item not found.")
         gear_item_ids = [gear_id_by_uuid[u] for u in values.gear_item_uuids]
 
-    species_ids: list[int] | None = None
-    if values.species_uuids is not None:
-        species_id_by_uuid = await resolve_species_ids(db=db, species_uuids=values.species_uuids)
-        if species_id_by_uuid is None:
-            raise UnprocessableEntityException("Species not found.")
-        species_ids = [species_id_by_uuid[u] for u in values.species_uuids]
+    sightings = None if values.sightings is None else await _resolve_sightings(db, values.sightings)
 
     people = None if values.people is None else await resolve_people_references(db, values.people, user_id=owner_id)
 
@@ -1249,9 +1258,9 @@ async def patch_dive(
             await db.rollback()
             raise UnprocessableEntityException(_fk_error_detail(e)) from e
 
-    if species_ids is not None:
+    if sightings is not None:
         try:
-            await replace_species_for_dive(db=db, dive_id=dive_id, species_ids=species_ids)
+            await replace_species_for_dive(db=db, dive_id=dive_id, sightings=sightings)
         except IntegrityError as e:
             await db.rollback()
             raise UnprocessableEntityException(_fk_error_detail(e)) from e
@@ -1268,7 +1277,7 @@ async def patch_dive(
         or values.mixtures is not None
         or dive_site_ids is not None
         or gear_item_ids is not None
-        or species_ids is not None
+        or sightings is not None
         or people is not None
     ):
         await recalculate_dive_stats(db=db, user_id=owner_id)

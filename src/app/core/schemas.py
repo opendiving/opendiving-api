@@ -9,6 +9,10 @@ from pydantic import BaseModel, model_validator
 # limit exists purely to keep payloads sane - not because of any storage constraint.
 NOTES_MAX_LENGTH = 100_000
 
+# The largest value a Postgres `integer` column holds, for a write schema whose only ceiling on
+# a number is the width of the column it lands in.
+POSTGRES_INTEGER_MAX = 2**31 - 1
+
 DATE_RANGE_MESSAGE = "end_date must be on or after start_date"
 
 # The read-side type for a column that stores one of a closed vocabulary - `ServiceKind`,

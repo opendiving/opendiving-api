@@ -3495,14 +3495,12 @@ self-healing within the same 3600 s; `SpeciesRead` is uncached and the life list
 a 60 s key. The taxonomy is written once, not the row; an immediate photo correction would need the
 sweep, so `--force` on the backfill is an operator action, not an endpoint.
 
-## Species embed on `DiveReadWithMixtures`, not `DiveRead`
+## Sightings embed on `DiveReadWithMixtures`, not `DiveRead`
 
 On `DiveRead` the field would land on the paginated list and cost `_cached_read_dives`, the hottest
 path in the app, a query per page for something only the detail page renders.
 `get_species_for_dives` is batched for the day a list surface needs species chips: move it with the
-batched loader, never fetch per row. `DiveReadWithMixtures.species` has `default_factory=list`
-because `user_{id}_dive:{uuid}` entries live an hour and replay through this schema, so an entry
-written without the key must still validate.
+batched loader, never fetch per row.
 
 ## ILIKE with no `pg_trgm`, and no manual DDL anywhere
 
@@ -6857,7 +6855,7 @@ columns are what `channels` means by no such curve.
 reshaped response owes no `:v3`. A stale detail body is a wrong answer rather than a 500:
 `RecordingRead.mode` and `.deco_model` are `Field(default=None)` and `DiveProfileInfo.channels` is a
 plain `list[str]`, so an old entry validates and tells a diver their dive has no mode and four
-curves for the hour-long TTL; `DiveReadWithMixtures.species` and `.recordings` carry
+curves for the hour-long TTL; `DiveReadWithMixtures.sightings` and `.recordings` carry
 `default_factory=list` for the same reason. Only the detail read is exposed: `DiveProfileInfo`
 reaches the wire through `RecordingRead.profile` under `GET /dive/{uuid}`, `_cached_read_dives`
 builds `DiveRead` without `recordings` or `profile`, and `read_dive_profile` is uncached. Any suffix

@@ -7,6 +7,7 @@ from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Fie
 
 from ..core.schemas import (
     NOTES_MAX_LENGTH,
+    POSTGRES_INTEGER_MAX,
     PublicUUIDSchema,
     RejectsExplicitNulls,
     StoredVocabulary,
@@ -329,20 +330,79 @@ class SpeciesInfo(PublicUUIDSchema):
     `photo_sha256` is **the whole photo contract**, following the avatar precedent verbatim:
     one nullable digest answers existence, version and cache-busting at once, and no URL goes
     on the wire. Non-null means "there is a photo, and this is which one"; the client builds
-    `/api/v1/species/{uuid}/photo?v=<digest prefix>` itself. It has a `default` for the same
-    load-bearing reason `DiveReadWithMixtures.species` does: `user_{id}_dive:{uuid}` entries
-    live an hour and replay through this schema, so every entry written before this field
-    existed lacks the key and would fail validation on read.
+    `/api/v1/species/{uuid}/photo?v=<digest prefix>` itself.
 
-    That replay is also the staleness this feature accepts: for up to the single-dive TTL
-    after a photo lands, a cached dive still says the species has none. Bounded, self-healing,
-    and the alternative is the cross-user cache sweep iteration 1 exists to defer.
+    A photo landing drops no cached dive, which is the staleness this feature accepts: for up
+    to the single-dive TTL after a photo lands, a cached dive still says the species has none.
+    Bounded, self-healing, and the alternative is the cross-user cache sweep iteration 1
+    exists to defer.
     """
 
     scientific_name: str
     common_name: str | None = None
     rank: str
     photo_sha256: str | None = None
+
+
+class SightingRead(SpeciesInfo):
+    """One species seen on a dive: the species' summary, how many and what the diver wrote.
+
+    `uuid` is the species' own, as on `SpeciesInfo`, and what a write names as `species_uuid`.
+    """
+
+    count: Annotated[int | None, Field(default=None, description="How many were counted; null is seen, not counted")]
+    notes: Annotated[str, Field(default="", description="What the diver wrote about this sighting")]
+
+
+class SightingWrite(BaseModel):
+    """One species seen on a dive, on the way in - DiveJSON's Sighting.
+
+    An absent `count` is *seen, not counted*, which is not `1`, and zero is not a sighting.
+    The format puts no ceiling on it, so the column's width is the only one here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    species_uuid: uuid_pkg.UUID
+    count: Annotated[
+        int | None,
+        Field(
+            default=None,
+            ge=1,
+            le=POSTGRES_INTEGER_MAX,
+            description="How many were counted; omit for seen, not counted",
+            examples=[3],
+        ),
+    ]
+    notes: Annotated[
+        str, Field(default="", max_length=NOTES_MAX_LENGTH, description="What the diver wrote about this sighting")
+    ]
+
+
+def _one_sighting_per_species(sightings: list[SightingWrite] | None) -> list[SightingWrite] | None:
+    """Refuse a species listed twice, naming it, rather than keep one of the two.
+
+    Two sightings of one species on one dive are two answers to how many were seen, and
+    nothing says which one the diver meant. The format forbids the pair for that reason.
+    """
+    listed: set[uuid_pkg.UUID] = set()
+    for sighting in sightings or []:
+        if sighting.species_uuid in listed:
+            raise ValueError(f"Species {sighting.species_uuid} is listed twice; a dive has one sighting per species")
+        listed.add(sighting.species_uuid)
+    return sightings
+
+
+Sightings = Annotated[
+    list[SightingWrite],
+    AfterValidator(_one_sighting_per_species),
+    Field(default_factory=list, description="The species spotted, in the order listed, each at most once"),
+]
+SightingsUpdate = Annotated[
+    list[SightingWrite] | None,
+    AfterValidator(_one_sighting_per_species),
+    Field(default=None, description="Replaces the sightings wholesale. Omit to leave them."),
+]
 
 
 class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
@@ -770,14 +830,13 @@ class DiveReadWithMixtures(DiveRead):
     # the app - a batched query per page for something only the detail page renders. The
     # loader is already batched (`get_species_for_dives`) for the day a list surface wants
     # species chips; move it then, don't fetch per row.
-    #
-    # `default_factory=list` is load-bearing rather than tidy: `user_{id}_dive:{uuid}` entries
-    # live an hour and replay through this schema, so every entry written before this field
-    # existed lacks the key and would fail validation on read.
-    species: Annotated[list[SpeciesInfo], Field(default_factory=list)]
-    # Here for `species`' reason, and defaulted for it too. References only - each person's
-    # uuid and the role they had - never a summary of the person: a client resolves names
-    # from `GET /people`, so renaming a person reaches no cached dive.
+    sightings: Annotated[
+        list[SightingRead],
+        Field(default_factory=list, description="The species spotted, in the order listed, each at most once"),
+    ]
+    # Here for `sightings`' reason. References only - each person's uuid and the role they
+    # had - never a summary of the person: a client resolves names from `GET /people`, so
+    # renaming a person reaches no cached dive.
     people: PeopleRead
     # **`source_file` and `profile` are gone**, and `recordings` replaces both. A dive had
     # at most one of each while a dive had at most one record; it now has an ordered list of
@@ -790,9 +849,6 @@ class DiveReadWithMixtures(DiveRead):
     # adding queries to `_cached_read_dives` - the hottest path in the app - for something
     # only the detail page renders. `get_recordings_for_dives` is already batched for the
     # day a recordings marker in the list changes that.
-    #
-    # `default_factory=list` is load-bearing rather than tidy, for `species`' reason one
-    # field up: `user_{id}_dive:{uuid}` entries live an hour and replay through this schema.
     #
     # Summaries only. The series themselves are tens of KB and are fetched separately, with
     # their own ETag, from `GET /dive/{uuid}/recording/{rid}/profile`.
@@ -1050,10 +1106,7 @@ class DiveCreateRequest(DiveCreate):
         list[uuid_pkg.UUID],
         Field(default_factory=list, description="Public ids of the gear items used, in the order listed"),
     ]
-    species_uuids: Annotated[
-        list[uuid_pkg.UUID],
-        Field(default_factory=list, description="Public ids of the species spotted, in the order listed"),
-    ]
+    sightings: Sightings
     people: PeopleWrite
 
 
@@ -1124,7 +1177,7 @@ class DiveUpdateRequest(DiveUpdate):
     """Request body for updating a dive, including replacing its gas mixtures, dive site(s)
     and gear.
 
-    If `mixtures`/`dive_site_uuids`/`gear_item_uuids`/`species_uuids`/`people` is omitted,
+    If `mixtures`/`dive_site_uuids`/`gear_item_uuids`/`sightings`/`people` is omitted,
     the existing ones are left untouched. If provided (even as an empty list), the existing
     ones are replaced with the given list.
     """
@@ -1138,10 +1191,7 @@ class DiveUpdateRequest(DiveUpdate):
         list[uuid_pkg.UUID] | None,
         Field(default=None, description="Public ids of the gear items used, in the order listed"),
     ]
-    species_uuids: Annotated[
-        list[uuid_pkg.UUID] | None,
-        Field(default=None, description="Public ids of the species spotted, in the order listed"),
-    ]
+    sightings: SightingsUpdate
     people: PeopleUpdate
 
 

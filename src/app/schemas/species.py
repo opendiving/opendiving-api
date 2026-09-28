@@ -17,7 +17,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import PublicUUIDSchema
+from ..core.schemas import NOTES_MAX_LENGTH, POSTGRES_INTEGER_MAX, PublicUUIDSchema
 from .dive import DiveLocalStartTime
 
 # The source that supplied a search result. `catalog` means the row already exists locally
@@ -308,6 +308,11 @@ class DiveSpeciesBase(BaseModel):
     dive_id: Annotated[int, Field(examples=[1], description="ID of the dive")]
     species_id: Annotated[int, Field(examples=[1], description="ID of the species")]
     position: Annotated[int, Field(default=0, examples=[0], description="Order the species was listed in")]
+    count: Annotated[
+        int | None,
+        Field(default=None, ge=1, le=POSTGRES_INTEGER_MAX, description="How many were counted; empty is not counted"),
+    ]
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
 
 class DiveSpeciesRead(DiveSpeciesBase):
@@ -324,6 +329,11 @@ class DiveSpeciesUpdate(BaseModel):
     dive_id: Annotated[int | None, Field(default=None, description="ID of the dive")]
     species_id: Annotated[int | None, Field(default=None, description="ID of the species")]
     position: Annotated[int | None, Field(default=None, description="Order the species was listed in")]
+    count: Annotated[
+        int | None,
+        Field(default=None, ge=1, le=POSTGRES_INTEGER_MAX, description="How many were counted; empty is not counted"),
+    ]
+    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
 
 class DiveSpeciesDelete(BaseModel):

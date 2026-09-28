@@ -43,13 +43,14 @@ else; what is here is the source, and the notes for working on it.
   left empty, and nothing is invented to bridge it.
 - **Air consumption** — SAC and RMV derived automatically, per tank on multi-tank dives, plus a
   gas-use history endpoint powering the dashboard trend chart.
-- **Species log** — record what you saw on a dive, from a catalog searched live against
-  [WoRMS](https://www.marinespecies.org/) for the taxonomy and [Wikidata](https://www.wikidata.org/)
-  for the common names — so typing "clownfish" finds *Amphiprion ocellaris*, which WoRMS alone would
-  not. Catalog rows are shared across the instance, and search falls back to what is already stored
-  rather than failing when a register is unreachable. Distinct species seen is part of the dive
-  statistics, and `GET /user/species` is the whole life list: every species you have logged, with
-  how many dives saw it and when. The taxonomy is WoRMS's, whose text content is available under
+- **Species log** — record what you saw on a dive, and for each species how many you counted and a
+  note if you like, from a catalog searched live against [WoRMS](https://www.marinespecies.org/) for
+  the taxonomy and [Wikidata](https://www.wikidata.org/) for the common names — so typing
+  "clownfish" finds *Amphiprion ocellaris*, which WoRMS alone would not. Catalog rows are shared
+  across the instance, and search falls back to what is already stored rather than failing when a
+  register is unreachable. Distinct species seen is part of the dive statistics, and
+  `GET /user/species` is the whole life list: every species you have logged, with how many dives saw
+  it and when. The taxonomy is WoRMS's, whose text content is available under
   [CC BY](https://creativecommons.org/licenses/by/4.0/) and which asks to be cited in full: *WoRMS
   Editorial Board (2026). World Register of Marine Species. Available from
   https://www.marinespecies.org at VLIZ. Accessed 2026-09-11. doi:10.14284/170* — an accessed date a

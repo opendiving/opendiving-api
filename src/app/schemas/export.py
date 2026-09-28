@@ -336,12 +336,21 @@ class ExportRecording(BaseModel):
     profile: DiveProfileRead | None = None
 
 
+class ExportSighting(BaseModel):
+    """One species seen on one dive (spec §6.3a). An absent `count` is seen, not counted, and
+    an empty note is written as absence, as on every record."""
+
+    species_uuid: uuid_pkg.UUID
+    count: int | None = None
+    notes: str | None = None
+
+
 class ExportDive(PublicUUIDSchema):
     """One dive, with everything that hangs off it embedded rather than referenced.
 
     `site_uuids` is in visit order - index 0 is the primary site - which is the ordering
     UDDF cannot express and the reason this list exists at all. `gear_uuids` and
-    `species_uuids` are the diver's own order in the same way.
+    `sightings` are the diver's own order in the same way.
 
     **`source_file` and `profile` are not members of a dive**, and that is the format's
     change rather than this app's preference: both moved onto `recordings[]` with nothing
@@ -394,7 +403,7 @@ class ExportDive(PublicUUIDSchema):
     contact_uuid: uuid_pkg.UUID | None = None
     site_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In visit order")]
     gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
-    species_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the diver's own order")]
+    sightings: Annotated[list[ExportSighting], Field(default_factory=list, description="In the diver's own order")]
     people: ExportPeople
     # Not the API's `DiveMixtureRead`, which carries the internal row `id`: nothing here
     # references a cylinder, so that id would be the one integer key in the document.
@@ -525,7 +534,7 @@ class ExportSpecies(PublicUUIDSchema):
     The odd one out in this document: every other collection here is the diver's own rows,
     while the species catalog belongs to nobody (see `models/species.py`). What is
     exported is the slice the logbook points at, which is what makes the document
-    self-contained - a reader resolving `ExportDive.species_uuids` finds every one of them
+    self-contained - a reader resolving a sighting's `species_uuid` finds every one of them
     defined here.
 
     `aphia_id` is the field that matters outside this database, and the format says so:

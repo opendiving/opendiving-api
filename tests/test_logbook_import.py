@@ -42,6 +42,7 @@ from uuid6 import uuid7
 
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
+from src.app.core.schemas import NOTES_MAX_LENGTH
 from src.app.models.certification import Certification
 from src.app.models.contact import Contact
 from src.app.models.course import Course
@@ -92,7 +93,12 @@ from src.app.services.logbook_import import (
 )
 from src.app.services.logbook_import import planner as planner_module
 from src.app.services.logbook_import import reader as import_reader
-from src.app.services.logbook_import.planner import _DIVE_BOUNDS, _MIXTURE_BOUNDS, _READOUT_BOUNDS
+from src.app.services.logbook_import.planner import (
+    _DIVE_BOUNDS,
+    _MIXTURE_BOUNDS,
+    _READOUT_BOUNDS,
+    _SIGHTING_BOUNDS,
+)
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
 from src.app.services.user_pictures import PORTRAIT_FRAME, recrop_picture, store_picture
 from tests.conftest import db_available
@@ -225,7 +231,7 @@ def _seed_logbook(db: Session) -> Any:
             DiveDiveSite(dive_id=dive.id, dive_site_id=site_a.id, position=0),
             DiveDiveSite(dive_id=dive.id, dive_site_id=site_b.id, position=1),
             DiveGearItem(dive_id=dive.id, gear_item_id=item.id, position=0),
-            DiveSpecies(dive_id=dive.id, species_id=species.id, position=0),
+            DiveSpecies(dive_id=dive.id, species_id=species.id, position=0, count=3, notes="On the cleaning station."),
             GearSetItem(gear_set_id=gear_set.id, gear_item_id=item.id, position=0),
         ]
     )
@@ -381,6 +387,8 @@ class TestTheRoundTrip:
             assert restored_dive.get(member) == source_dive.get(member), member
         assert len(restored_dive["site_uuids"]) == 2
         assert restored_dive["cylinders"] == source_dive["cylinders"]
+        # The catalog row is this instance's either way, so the sighting names the same one.
+        assert restored_dive["sightings"] == source_dive["sightings"]
 
     @pytest.mark.asyncio
     async def test_uuids_are_remapped_because_they_belong_to_the_source(
@@ -1127,7 +1135,7 @@ class TestSpeciesLinks:
         parsed = json.loads(document)
         aphia_id = parsed["species"][0]["aphia_id"]
         parsed["species"][0]["uuid"] = str(uuid7())
-        parsed["dives"][0]["species_uuids"] = [parsed["species"][0]["uuid"]]
+        parsed["dives"][0]["sightings"] = [{"species_uuid": parsed["species"][0]["uuid"]}]
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
@@ -1181,6 +1189,158 @@ class TestSpeciesLinks:
             .scalars()
             .all()
         )
+
+    @staticmethod
+    async def _sightings(db: AsyncSession, user_id: int) -> list[tuple[int, int | None, str]]:
+        dive = (await db.execute(select(Dive).where(Dive.user_id == user_id))).scalars().one()
+        rows = await db.execute(
+            select(DiveSpecies.species_id, DiveSpecies.count, DiveSpecies.notes)
+            .where(DiveSpecies.dive_id == dive.id)
+            .order_by(DiveSpecies.position)
+        )
+        return [(species_id, count, notes) for species_id, count, notes in rows]
+
+    @pytest.mark.asyncio
+    async def test_a_count_and_a_note_arrive_with_the_sighting(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        catalog_id = (
+            (await async_db.execute(select(Species.id).where(Species.aphia_id == parsed["species"][0]["aphia_id"])))
+            .scalars()
+            .one()
+        )
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert await self._sightings(async_db, destination.id) == [(catalog_id, 3, "On the cleaning station.")]
+        assert ImportNoteCode.VALUE_DROPPED not in _codes(plan)
+
+    @pytest.mark.asyncio
+    async def test_a_sighting_with_neither_is_seen_not_counted(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """A null count - never `1` - and the empty note the column spells absence with."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["sightings"] = [{"species_uuid": parsed["species"][0]["uuid"]}]
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        [(_, count, notes)] = await self._sightings(async_db, destination.id)
+        assert (count, notes) == (None, "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("count", [0, -2, 2**31])
+    async def test_a_count_the_column_cannot_hold_is_dropped_and_the_sighting_kept(
+        self, seeded: Any, db: Session, async_db: AsyncSession, count: int
+    ) -> None:
+        """The format floors a count above zero and caps it nowhere; either way the value goes
+        with a line, and the species it was a count of stays on the dive."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["sightings"][0]["count"] = count
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        [(_, stored_count, notes)] = await self._sightings(async_db, destination.id)
+        assert (stored_count, notes) == (None, "On the cleaning station.")
+        assert [note.message for note in plan.notes if "`count`" in note.message] == [
+            f"A value for `count` was dropped: a sighting's count must be between 1 and {2**31 - 1}"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_note_past_the_cap_is_cut_with_a_line(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["sightings"][0]["notes"] = "x" * (NOTES_MAX_LENGTH + 5)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        [(_, count, notes)] = await self._sightings(async_db, destination.id)
+        assert (count, len(notes)) == (3, NOTES_MAX_LENGTH)
+        assert any("notes ran past" in note.message for note in plan.notes if note.collection == "dives")
+
+    @pytest.mark.asyncio
+    async def test_a_species_named_twice_keeps_the_first_sighting_and_reports_the_second(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Twice by one uuid, and once more through a second species record carrying the same
+        AphiaID - both the format's rule broken, both reaching one catalog row. Kept whole
+        rather than folded: the document is one record the format refuses, not two records
+        of one dive."""
+        _, document = seeded
+        parsed = json.loads(document)
+        species = parsed["species"][0]
+        alias = {**species, "uuid": str(uuid7()), "scientific_name": "Alias of the first"}
+        parsed["species"].append(alias)
+        parsed["dives"][0]["sightings"] = [
+            {"species_uuid": species["uuid"], "count": 3, "notes": "First."},
+            {"species_uuid": species["uuid"], "count": 5, "notes": "Second."},
+            {"species_uuid": alias["uuid"], "count": 7},
+        ]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        [(_, count, notes)] = await self._sightings(async_db, destination.id)
+        assert (count, notes) == (3, "First.")
+        dropped = [note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED]
+        assert dropped == [
+            f"A second sighting of {species['scientific_name']} was dropped: a dive records each species once, and "
+            "the first was kept",
+            "A second sighting of Alias of the first was dropped: a dive records each species once, and the first "
+            "was kept",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_preview_reports_a_repeat_the_apply_will_drop(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Keyed on the AphiaID, so a species the pre-pass has not looked up yet is caught
+        before there is a row to compare."""
+        _, document = seeded
+        parsed = json.loads(document)
+        species = parsed["species"][0]
+        species["aphia_id"] = 900_000_000 + int(uuid7().hex[-6:], 16)
+        parsed["dives"][0]["sightings"] = [{"species_uuid": species["uuid"]}, {"species_uuid": species["uuid"]}]
+        destination = create_user(db)
+
+        plan = await _preview(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert [note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED] == [
+            f"A second sighting of {species['scientific_name']} was dropped: a dive records each species once, and "
+            "the first was kept"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_pre_sightings_export_lands_its_species_as_sightings(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Every export this app wrote before sightings spells a dive's species as
+        `species_uuids`. Ignored as an undefined member, each would vanish silently; read as
+        written, each is a sighting with no count and no note, said once."""
+        _, document = seeded
+        parsed = json.loads(document)
+        dive = parsed["dives"][0]
+        dive["species_uuids"] = [sighting["species_uuid"] for sighting in dive.pop("sightings")]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        [(_, count, notes)] = await self._sightings(async_db, destination.id)
+        assert (count, notes) == (None, "")
+        assert [note.message for note in plan.notes if note.code is ImportNoteCode.READ_AS_WRITTEN] == [
+            "This logbook was written before DiveJSON gave a sighting a count and a note, so the species of 1 dive(s) "
+            "were read as sightings with neither."
+        ]
 
 
 class TestTwoSchedulesOnOneNewGearItem:
@@ -3646,13 +3806,17 @@ class TestTheBoundsCensus:
     )
 
     def test_every_bound_the_document_can_reach_has_a_guard(self) -> None:
-        guarded = {bound.field for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, _READOUT_BOUNDS) for bound in bounds}
+        guarded = {
+            bound.field
+            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, _READOUT_BOUNDS, _SIGHTING_BOUNDS)
+            for bound in bounds
+        }
         # Column names, mapped onto the wire names the planner reads them under.
         wire = {"surface_pressure_bar": "surface_pressure", "po2_limit": "ppo2_limit"}
         unguarded = []
         # `tuple[Any, ...]` because `Model.__table__` is typed `FromClause` on a precisely
         # typed class, and only `Table` carries `.constraints`.
-        models: tuple[Any, ...] = (Dive, DiveMixture, DiveRecording)
+        models: tuple[Any, ...] = (Dive, DiveMixture, DiveRecording, DiveSpecies)
         for model in models:
             table = model.__table__
             for constraint in table.constraints:
@@ -4010,6 +4174,11 @@ class TestTheIntegerColumnCensus:
                 ("position", "the list index, not the document's"),
             )
         },
+        ("dive_species", "id"): "the sequence's",
+        ("dive_species", "dive_id"): "resolved from a row this import wrote",
+        ("dive_species", "species_id"): "a catalog row, found by the document's AphiaID",
+        ("dive_species", "position"): "the list index, not the document's",
+        ("dive_species", "count"): "bounded in `_SIGHTING_BOUNDS`, to 1..the column's own width",
         ("dive_site", "id"): "the sequence's",
         ("dive_site", "user_id"): "the caller's",
         ("gear_set", "id"): "the sequence's",
@@ -4075,6 +4244,7 @@ class TestTheIntegerColumnCensus:
             DivePerson,
             TripPerson,
             CoursePerson,
+            DiveSpecies,
             Trip,
             TripPart,
             Course,

@@ -16,6 +16,7 @@ import uuid as uuid_pkg
 from datetime import UTC, date, datetime
 from typing import Any
 
+from src.app.crud.crud_dive_species import StoredSighting
 from src.app.models.certification import Certification
 from src.app.models.contact import Contact
 from src.app.models.course import Course
@@ -209,7 +210,7 @@ def build_bundle(
     mixtures_by_dive: dict[int, list[DiveMixtureRead]] | None = None,
     site_ids_by_dive: dict[int, list[int]] | None = None,
     gear_ids_by_dive: dict[int, list[int]] | None = None,
-    species_ids_by_dive: dict[int, list[int]] | None = None,
+    sightings_by_dive: dict[int, list[StoredSighting]] | None = None,
     recordings_by_dive: dict[int, list[ExportRecordingRow]] | None = None,
     trips: list[Trip] | None = None,
     parts_by_trip: dict[int, list[TripPartRead]] | None = None,
@@ -263,7 +264,7 @@ def build_bundle(
         mixtures_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(mixtures_by_dive or {})},
         site_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(site_ids_by_dive or {})},
         gear_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(gear_ids_by_dive or {})},
-        species_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(species_ids_by_dive or {})},
+        sightings_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(sightings_by_dive or {})},
         recordings_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(recordings_by_dive or {})},
         attribution_by_dive={dive_id: ProfileGasAttribution() for dive_id in dive_ids},
         trips=trips or [],
@@ -627,7 +628,12 @@ def full_bundle() -> ExportBundle:
         },
         site_ids_by_dive={1: [1, 2], 2: [2]},
         gear_ids_by_dive={1: [1, 2, 3], 2: [1]},
-        species_ids_by_dive={1: [1, 2], 2: [1]},
+        # The air dive counted its clownfish and wrote about them and only saw the morays; the
+        # trimix dive saw clownfish and recorded nothing else about them.
+        sightings_by_dive={
+            1: [StoredSighting(species_id=1, count=2, notes="A pair in one anemone."), StoredSighting(species_id=2)],
+            2: [StoredSighting(species_id=1)],
+        },
         recordings_by_dive={
             # A recording of readouts alone - a computer's own figures with no device, samples
             # or file behind them, which the format admits and the migration creates.

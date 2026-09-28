@@ -256,7 +256,7 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     if fold is not None:
         await _write_fold(db, fold, dive_id=survivor.id)
     await _move_recordings(db, moving, dive_id=survivor.id, mapping=mapping)
-    await _move_links(db, from_dive_id=absorbed.id, to_dive_id=survivor.id)
+    await _move_links(db, from_dive_id=absorbed.id, to_dive_id=survivor.id, dive_number=absorbed.dive_number)
 
     values: dict[str, object] = {
         "notes": merged_notes(survivor.notes, absorbed.notes, dive_number=absorbed.dive_number)
@@ -473,9 +473,10 @@ async def _move_recordings(
                     await replace_profile_samples(db, recording_id=recording.id, profile=remapped)
 
 
-async def _move_links(db: AsyncSession, *, from_dive_id: int, to_dive_id: int) -> None:
-    """Carry the other dive's sites, gear, species and people across, skipping what is
-    already there - a person on both dives keeps the surviving dive's role.
+async def _move_links(db: AsyncSession, *, from_dive_id: int, to_dive_id: int, dive_number: int) -> None:
+    """Carry the other dive's sites, gear, sightings and people across, skipping what is
+    already there - a person on both dives keeps the surviving dive's role, and a species on
+    both keeps the surviving dive's sighting, which `_fold_sightings` completes first.
 
     One statement per table, because each carries a `(dive_id, x_id)` uniqueness constraint
     and the two dives may name the same site or the same wing: the rows that would collide are
@@ -486,6 +487,7 @@ async def _move_links(db: AsyncSession, *, from_dive_id: int, to_dive_id: int) -
     `position` is rewritten rather than kept, so the surviving dive's own list stays first and
     the incoming one follows in its own order.
     """
+    await _fold_sightings(db, from_dive_id=from_dive_id, to_dive_id=to_dive_id, dive_number=dive_number)
     for model, reference in _LINKED_COLLECTIONS:
         highest = (
             await db.execute(select(func.max(model.position)).where(model.dive_id == to_dive_id))
@@ -508,6 +510,29 @@ async def _move_links(db: AsyncSession, *, from_dive_id: int, to_dive_id: int) -
         for offset, row_id in enumerate(moving):
             await db.execute(
                 update(model).where(model.id == row_id).values(dive_id=to_dive_id, position=next_position + offset)
+            )
+
+
+async def _fold_sightings(db: AsyncSession, *, from_dive_id: int, to_dive_id: int, dive_number: int) -> None:
+    """Complete each sighting both dives record from the other dive's, before it is left behind.
+
+    Two records of one dive counted the same animals, so the surviving dive's count stands
+    rather than the two being summed, and the other's fills one it lacks - as the absorbed
+    recording's readouts fill the surviving one's blanks. The other's note joins under its
+    dive's number, as the dives' own notes do (`merged_notes`).
+    """
+    absorbed = aliased(DiveSpecies)
+    rows = await db.execute(
+        select(DiveSpecies.id, DiveSpecies.count, DiveSpecies.notes, absorbed.count, absorbed.notes)
+        .join(absorbed, (absorbed.species_id == DiveSpecies.species_id) & (absorbed.dive_id == from_dive_id))
+        .where(DiveSpecies.dive_id == to_dive_id)
+    )
+    for row_id, count, notes, absorbed_count, absorbed_notes in rows.all():
+        folded_count = count if count is not None else absorbed_count
+        folded_notes = merged_notes(notes, absorbed_notes, dive_number=dive_number)
+        if (folded_count, folded_notes) != (count, notes):
+            await db.execute(
+                update(DiveSpecies).where(DiveSpecies.id == row_id).values(count=folded_count, notes=folded_notes)
             )
 
 

@@ -1,20 +1,21 @@
-from sqlalchemy import ForeignKey, Index, Integer, UniqueConstraint
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
 
 
 class DiveSpecies(Base):
-    """Join table linking a dive to the species spotted on it.
+    """Join table holding a dive's sightings: each species spotted on it, how many, and what
+    the diver wrote about it.
 
     `position` preserves the order the diver listed them in, so a dive's sightings read back
-    the way they were entered. Mirrors `DiveGearItem` field for field - see
-    `crud_dive_species.py`, which replaces a dive's whole species list wholesale rather than
-    diffing it.
+    the way they were entered. `crud_dive_species.py` replaces a dive's whole list wholesale
+    rather than diffing it, as the gear join's crud does. The unique constraint below is
+    DiveJSON's one-sighting-per-species rule seen from the table.
 
-    Species-only in v1: no count, no size, no per-sighting note. Those are additive columns
-    here when they are wanted, and the dive's own `notes` field is the escape hatch
-    meanwhile.
+    `count` is null for *seen, not counted* - never `1`, which is a count - and `notes` is
+    empty for no note, the app's spelling of absent on every notes column. Size, life stage
+    and sex are additive columns here when they are wanted.
 
     **Both cascades are dormant, for different reasons.** `Dive` is soft-deleted, so no
     `DELETE FROM dive` is ever issued and the `dive_id` cascade never fires - the same
@@ -35,8 +36,13 @@ class DiveSpecies(Base):
     # here. Same rationale as `DiveGearItem.gear_item_id`.
     species_id: Mapped[int] = mapped_column(ForeignKey("species.id", ondelete="CASCADE"), index=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
+    count: Mapped[int | None] = mapped_column(Integer, default=None)
+    # The server default is what fills the outgoing build's inserts while a deploy overlaps
+    # it: that build writes no note and knows no column to write one into.
+    notes: Mapped[str] = mapped_column(Text, default="", server_default="")
 
     __table_args__ = (
         UniqueConstraint("dive_id", "species_id", name="ux_dive_species_dive_id_species_id"),
         Index("ix_dive_species_dive_id_position", "dive_id", "position"),
+        CheckConstraint("count IS NULL OR count >= 1", name="ck_dive_species_count_positive"),
     )

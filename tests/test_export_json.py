@@ -952,25 +952,29 @@ class TestReferences:
         assert parts[2] == {"ends_on": "2026-06-06"}
 
     @pytest.mark.asyncio
-    async def test_the_species_a_dive_saw_are_a_list_of_uuids_the_document_defines(self, monkeypatch):
+    async def test_a_dives_sightings_name_species_the_document_defines(self, monkeypatch):
         """The catalog is global, so `species` is the one collection here that is not the
         diver's own rows - it is the slice their dives reference. The point of exporting it
-        at all is that the document stays self-contained: every uuid a dive names is
+        at all is that the document stays self-contained: every species a sighting names is
         defined in it, which the format requires (spec §5.3) and the conformance check
         enforces.
+
+        Each sighting carries what the diver recorded and nothing else: a count where they
+        counted, a note where they wrote one. A sighting with neither is the species alone -
+        seen, not counted - rather than a count of one or an empty note (spec §5.4).
         """
         document = await _render(full_bundle(), monkeypatch)
 
-        assert document["dives"][0]["species_uuids"] == [
-            str(UUIDS["species-clownfish"]),
-            str(UUIDS["species-manta"]),
+        assert document["dives"][0]["sightings"] == [
+            {"species_uuid": str(UUIDS["species-clownfish"]), "count": 2, "notes": "A pair in one anemone."},
+            {"species_uuid": str(UUIDS["species-manta"])},
         ]
         # The dive with no sightings says so as an empty list rather than by omitting it -
         # an absent collection and an empty one mean the same thing (spec §4).
-        assert document["dives"][2]["species_uuids"] == []
+        assert document["dives"][2]["sightings"] == []
         defined = {species["uuid"] for species in document["species"]}
         for dive in document["dives"]:
-            assert set(dive["species_uuids"]) <= defined
+            assert {sighting["species_uuid"] for sighting in dive["sightings"]} <= defined
 
     @pytest.mark.asyncio
     async def test_a_species_carries_the_identifier_that_means_something_elsewhere(self, monkeypatch):
@@ -1067,7 +1071,7 @@ class TestAbsence:
             "duration",
             "site_uuids",
             "gear_uuids",
-            "species_uuids",
+            "sightings",
             "people",
             "cylinders",
             # An empty array, like the five above it: a hand-entered dive was recorded by

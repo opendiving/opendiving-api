@@ -527,6 +527,42 @@ class TestWhatElseMoves:
         assert list(species) == [fish.id]
 
     @pytest.mark.asyncio
+    async def test_a_sighting_both_dives_record_keeps_this_dives_count_and_gains_the_others_blanks(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """Two records of one dive counted the same animals, so nothing is summed: the
+        surviving dive's count stands, the other's fills one it lacks, and the other's note
+        joins under its dive's number as the dives' own notes do. A sighting only the other
+        dive has arrives whole."""
+        first, second = await _two_halves(async_db, db, diver)
+        lionfish, turtle, octopus = create_species(db), create_species(db), create_species(db)
+        db.add_all(
+            [
+                DiveSpecies(dive_id=first.id, species_id=lionfish.id, position=0, notes="Under the bow."),
+                DiveSpecies(dive_id=first.id, species_id=turtle.id, position=1, count=2),
+                DiveSpecies(dive_id=second.id, species_id=lionfish.id, position=0, count=4, notes="Hunting."),
+                DiveSpecies(dive_id=second.id, species_id=turtle.id, position=1, count=5),
+                DiveSpecies(dive_id=second.id, species_id=octopus.id, position=2, count=1, notes="In a bottle."),
+            ]
+        )
+        db.commit()
+
+        await _merge(async_db, diver, first, second)
+
+        rows = (
+            await async_db.execute(
+                select(DiveSpecies.species_id, DiveSpecies.count, DiveSpecies.notes)
+                .where(DiveSpecies.dive_id == first.id)
+                .order_by(DiveSpecies.position)
+            )
+        ).all()
+        assert [tuple(row) for row in rows] == [
+            (lionfish.id, 4, "Under the bow.\n\nNotes from dive 215, merged into this one:\nHunting."),
+            (turtle.id, 2, ""),
+            (octopus.id, 1, "In a bottle."),
+        ]
+
+    @pytest.mark.asyncio
     async def test_the_other_dives_people_arrive_and_a_shared_one_keeps_this_dives_role(
         self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
     ) -> None:

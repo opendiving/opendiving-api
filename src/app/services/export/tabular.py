@@ -414,16 +414,17 @@ SPECIES_HEADER = ("scientific_name", "common_name", "rank", "aphia_id", "dives",
 def write_species_csv(bundle: ExportBundle) -> Iterator[str]:
     """One row per species the diver's dives reference, with how many of them saw it.
 
-    The count is over dives rather than over sightings, which is the same distinction
-    `species_seen` makes: a species logged on ten dives is one row reading `10`, because v1
-    stores no per-sighting count for it to mean anything else.
+    `dives` counts dives, the same distinction `species_seen` makes: a species logged on ten
+    dives is one row reading `10`, whatever each sighting counted. A column summing those
+    counts would count one turtle met on two dives as two, so how many were seen stays with
+    its dive, in the DiveJSON document beside this file.
     """
     counts: dict[int, int] = {}
-    for species_ids in bundle.species_ids_by_dive.values():
+    for sightings in bundle.sightings_by_dive.values():
         # De-duplicated per dive, though the unique constraint on `dive_species` already
         # guarantees it - the count means "dives", so a shape change that ever allowed the
         # same species twice on one dive must not silently turn this into a sightings count.
-        for species_id in set(species_ids):
+        for species_id in {sighting.species_id for sighting in sightings}:
             counts[species_id] = counts.get(species_id, 0) + 1
 
     def rows() -> Iterator[tuple[Any, ...]]:

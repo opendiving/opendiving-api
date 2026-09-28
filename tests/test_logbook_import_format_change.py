@@ -149,6 +149,57 @@ class TestReadAsWritten:
 
         assert read_as_written(document) == []
 
+    def test_a_dives_species_uuids_are_read_as_sightings_whoever_wrote_it(self) -> None:
+        """Keyed on the retired member alone: a document the axis gate reads as current -
+        marked, or from no writer this app knows - still carries it from before, and the
+        converter never wrote one."""
+        species = ["019f0000-0000-7000-8000-00000000a001", "019f0000-0000-7000-8000-00000000a002"]
+        marked = _pre_change_export(species_uuids=species)
+        marked["extensions"] = {"opendiving": {"profile_axis": "milliseconds"}}
+        unknown = _pre_change_export(species_uuids=species)
+        del unknown["diver"]
+
+        for document in (marked, unknown):
+            notes = read_as_written(document)
+
+            dive = document["dives"][0]
+            assert "species_uuids" not in dive
+            assert dive["sightings"] == [{"species_uuid": species[0]}, {"species_uuid": species[1]}]
+            assert [(note.code, note.message) for note in notes] == [
+                (
+                    ImportNoteCode.READ_AS_WRITTEN,
+                    "This logbook was written before DiveJSON gave a sighting a count and a note, so the species of "
+                    "1 dive(s) were read as sightings with neither.",
+                )
+            ]
+
+    def test_the_sightings_line_joins_the_pre_axis_lines(self) -> None:
+        """One line per kind, the species among them, when both changes predate the document."""
+        document = _pre_change_export(species_uuids=["019f0000-0000-7000-8000-00000000a001"])
+
+        notes = read_as_written(document)
+
+        assert [note.code for note in notes] == [ImportNoteCode.READ_AS_WRITTEN] * 5
+        assert "sighting" in notes[0].message
+
+    def test_a_dive_carrying_both_keeps_its_sightings(self) -> None:
+        """The old list is then an undefined member, ignored as any is (§5.6)."""
+        sightings = [{"species_uuid": "019f0000-0000-7000-8000-00000000a001", "count": 4}]
+        document = _pre_change_export(
+            species_uuids=["019f0000-0000-7000-8000-00000000a002"], sightings=copy.deepcopy(sightings)
+        )
+        document["extensions"] = {"opendiving": {"profile_axis": "milliseconds"}}
+
+        assert read_as_written(document) == []
+        assert document["dives"][0]["sightings"] == sightings
+
+    def test_an_empty_list_becomes_no_sightings_and_no_line(self) -> None:
+        document = _pre_change_export(species_uuids=[])
+        document["extensions"] = {"opendiving": {"profile_axis": "milliseconds"}}
+
+        assert read_as_written(document) == []
+        assert document["dives"][0]["sightings"] == []
+
 
 pytestmark_db = pytest.mark.skipif(not db_available(), reason="No database connection available")
 

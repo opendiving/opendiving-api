@@ -50,11 +50,11 @@ from src.app.api.v1.species import read_species
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.setup import create_application
-from src.app.crud.crud_dive_species import replace_species_for_dive
+from src.app.crud.crud_dive_species import StoredSighting, replace_species_for_dive
 from src.app.models.dive_species import DiveSpecies
 from src.app.models.species import Species
 from src.app.models.species_name import SpeciesName
-from src.app.schemas.dive import DiveCreateRequest, SpeciesInfo
+from src.app.schemas.dive import DiveCreateRequest, SightingRead
 from src.app.schemas.species import SpeciesSearchResponse, SpeciesSearchResult
 from src.app.services import species_service
 from src.app.services.dive_stats import recalculate_dive_stats
@@ -2634,29 +2634,40 @@ class TestReplaceJoinRows:
     async def test_species_are_written_in_the_order_given(self) -> None:
         db = _replace_db_mock()
 
-        await replace_species_for_dive(db, dive_id=5, species_ids=[9, 4, 7])
+        await replace_species_for_dive(
+            db,
+            dive_id=5,
+            sightings=[StoredSighting(9, count=3, notes="Under the ledge"), StoredSighting(4), StoredSighting(7)],
+        )
 
         added = [call.args[0] for call in db.add.call_args_list]
         assert all(isinstance(row, DiveSpecies) for row in added)
-        assert [(row.species_id, row.position) for row in added] == [(9, 0), (4, 1), (7, 2)]
+        assert [(row.species_id, row.position, row.count, row.notes) for row in added] == [
+            (9, 0, 3, "Under the ledge"),
+            (4, 1, None, ""),
+            (7, 2, None, ""),
+        ]
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_duplicate_ids_are_collapsed_keeping_first_position(self) -> None:
-        """A diver picking the same species twice meant "I saw it", not "I saw two" - and v1
-        stores no count for the difference to live in."""
+    async def test_a_species_twice_is_written_twice_for_the_constraint_to_refuse(self) -> None:
+        """Not collapsed: the two may carry different counts, and choosing one is the caller's
+        call - the write schemas refuse the pair and the importer keeps the first, each on its
+        own terms. What reaches here anyway is `ux_dive_species_dive_id_species_id`'s."""
         db = _replace_db_mock()
 
-        await replace_species_for_dive(db, dive_id=5, species_ids=[9, 4, 9])
+        await replace_species_for_dive(
+            db, dive_id=5, sightings=[StoredSighting(9, count=2), StoredSighting(4), StoredSighting(9, count=5)]
+        )
 
         added = [call.args[0] for call in db.add.call_args_list]
-        assert [(row.species_id, row.position) for row in added] == [(9, 0), (4, 1)]
+        assert [(row.species_id, row.position, row.count) for row in added] == [(9, 0, 2), (4, 1, None), (9, 2, 5)]
 
     @pytest.mark.asyncio
     async def test_an_empty_list_clears_the_sightings(self) -> None:
         db = _replace_db_mock()
 
-        await replace_species_for_dive(db, dive_id=5, species_ids=[])
+        await replace_species_for_dive(db, dive_id=5, sightings=[])
 
         db.add.assert_not_called()
         # The DELETE still runs, so passing [] genuinely empties the list.
@@ -2666,7 +2677,7 @@ class TestReplaceJoinRows:
     async def test_skips_commit_when_commit_is_false(self) -> None:
         db = _replace_db_mock()
 
-        await replace_species_for_dive(db, dive_id=5, species_ids=[1], commit=False)
+        await replace_species_for_dive(db, dive_id=5, sightings=[StoredSighting(1)], commit=False)
 
         db.commit.assert_not_awaited()
 
@@ -2696,8 +2707,9 @@ class TestConstraints:
         db.rollback()
 
     def test_a_dive_cannot_list_the_same_species_twice(self, db: Session):
-        """`replace_species_for_dive` dedups before it inserts, so this is the backstop -
-        and the reason the dedup has to exist rather than being tidiness."""
+        """DiveJSON's one-sighting-per-species rule seen from the table. The write schemas
+        refuse a repeat and the importer drops one, so this is the backstop beneath both -
+        and the reason each of them has to decide which answer it owes."""
         user = create_user(db)
         dive = create_dive(db, user)
         species = create_species(db)
@@ -2708,6 +2720,16 @@ class TestConstraints:
         with pytest.raises(IntegrityError, match="ux_dive_species_dive_id_species_id"):
             db.commit()
         db.rollback()
+
+    def test_a_sighting_with_no_count_and_no_note_is_stored_as_seen(self, db: Session):
+        """A null count and the empty note the column's default spells absence with."""
+        user = create_user(db)
+        dive = create_dive(db, user)
+        db.add(DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=0))
+        db.commit()
+
+        row = db.query(DiveSpecies).filter(DiveSpecies.dive_id == dive.id).one()
+        assert (row.count, row.notes) == (None, "")
 
     def test_a_species_cannot_carry_the_same_name_twice_for_one_kind(self, db: Session):
         species = create_species(db)
@@ -2838,8 +2860,8 @@ class TestWriteDiveEmbedsSightings:
         async def resolve(*, db: Any, species_uuids: list[uuid_pkg.UUID]) -> dict | None:
             return {value: index + 100 for index, value in enumerate(species_uuids)} if resolves else None
 
-        async def replace(*, db: Any, dive_id: int, species_ids: list[int]) -> None:
-            seen["species_ids"] = species_ids
+        async def replace(*, db: Any, dive_id: int, sightings: list[StoredSighting]) -> None:
+            seen["sightings"] = sightings
 
         monkeypatch.setattr(dives_module.crud_dives, "create", AsyncMock(return_value=created))
         monkeypatch.setattr(dives_module.crud_dives, "get", AsyncMock(return_value={}))
@@ -2862,8 +2884,8 @@ class TestWriteDiveEmbedsSightings:
             "get_species_for_dive",
             AsyncMock(
                 return_value=[
-                    SpeciesInfo(uuid=uuid7(), scientific_name="Mobula birostris", rank="Species"),
-                    SpeciesInfo(uuid=uuid7(), scientific_name="Muraenidae", rank="Family"),
+                    SightingRead(uuid=uuid7(), scientific_name="Mobula birostris", rank="Species", count=2),
+                    SightingRead(uuid=uuid7(), scientific_name="Muraenidae", rank="Family"),
                 ]
             ),
         )
@@ -2878,7 +2900,7 @@ class TestWriteDiveEmbedsSightings:
                 "start_time": "2026-06-01T09:00:00+02:00",
                 "duration": 1800,
                 "notes": "",
-                "species_uuids": [str(value) for value in species_uuids],
+                "sightings": [{"species_uuid": str(value), "count": 2} for value in species_uuids],
             }
         )
         return await dives_module.write_dive(
@@ -2894,10 +2916,13 @@ class TestWriteDiveEmbedsSightings:
 
         result = await self._write([uuid7(), uuid7()])
 
-        assert seen["species_ids"] == [100, 101]
+        assert seen["sightings"] == [StoredSighting(100, count=2), StoredSighting(101, count=2)]
         # And they come back embedded, rather than needing a second request to see what was
         # just saved.
-        assert [s.scientific_name for s in result["species"]] == ["Mobula birostris", "Muraenidae"]
+        assert [(s.scientific_name, s.count) for s in result["sightings"]] == [
+            ("Mobula birostris", 2),
+            ("Muraenidae", None),
+        ]
 
     @pytest.mark.asyncio
     async def test_an_unknown_species_is_a_422_before_the_dive_is_written(
@@ -2912,7 +2937,7 @@ class TestWriteDiveEmbedsSightings:
         with pytest.raises(UnprocessableEntityException, match="Species not found."):
             await self._write([uuid7()])
 
-        assert "species_ids" not in seen
+        assert "sightings" not in seen
         # The resolve runs *before* the insert, so a bad uuid costs no write at all.
         create = cast(AsyncMock, dives_module.crud_dives.create)
         create.assert_not_awaited()
