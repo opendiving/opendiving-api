@@ -5,6 +5,7 @@ from fastcrud import FastCRUD
 from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.config import AccountSource
 from ..models.invitation import Invitation
 from ..models.user import User
 from ..schemas.invitation import InvitationCreateInternal, InvitationReadInternal, InvitationUpdate
@@ -38,6 +39,24 @@ async def live_invitation_exists(db: AsyncSession, *, email: str) -> bool:
         select(func.count()).select_from(Invitation).where(Invitation.email == email, Invitation.revoked_at.is_(None))
     )
     return bool(exists)
+
+
+async def invitation_source(db: AsyncSession, *, email: str) -> AccountSource | None:
+    """The door an invited address is counted under, or `None` when nothing invites it.
+
+    `live_invitation_exists`'s predicate, read once more for the flag beside it: `waitlist`
+    when the operator sent any of the address's invitations from the queue, `invitation`
+    otherwise. `bool_or` over no rows is `NULL`, which is the "nothing invites it" answer.
+    `email` must already be lowercased, for the reason given there.
+    """
+    from_queue = await db.scalar(
+        select(func.bool_or(Invitation.from_invite_request)).where(
+            Invitation.email == email, Invitation.revoked_at.is_(None)
+        )
+    )
+    if from_queue is None:
+        return None
+    return AccountSource.WAITLIST if from_queue else AccountSource.INVITATION
 
 
 async def live_invitation_from(db: AsyncSession, *, email: str, user_id: int) -> bool:
@@ -82,7 +101,12 @@ async def invitations_created_since(db: AsyncSession, *, user_id: int, window_da
 
 
 async def accept_invitations(db: AsyncSession, *, email: str, commit: bool = False) -> int:
-    """Stamp `accepted_at` on every live, unaccepted invitation for `email`.
+    """Stamp `accepted_at` on every live, unaccepted invitation for `email`, clearing
+    `from_invite_request` in the same statement.
+
+    The flag has been read by then - the gate, earlier in the same transaction - and an
+    accepted row is never swept, so keeping it would make "this address asked to be let
+    in" a fact about the account for as long as the account lasts.
 
     Called with `commit=False` from inside `POST /auth/complete`'s creating transaction, so
     that "account created" and "invitation accepted" land or roll back together - the
@@ -104,7 +128,7 @@ async def accept_invitations(db: AsyncSession, *, email: str, commit: bool = Fal
         await db.execute(
             update(Invitation)
             .where(Invitation.email == email, Invitation.revoked_at.is_(None), Invitation.accepted_at.is_(None))
-            .values(accepted_at=datetime.now(UTC))
+            .values(accepted_at=datetime.now(UTC), from_invite_request=False)
         ),
     )
     # Read before any commit: the count belongs to the statement, not to the transaction.

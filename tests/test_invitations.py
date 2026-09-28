@@ -1,4 +1,4 @@
-"""The invitation routes, the request queue, the operator's three, and `GET /config`.
+"""The invitation routes, the request queue, the operator's queue routes, and `GET /config`.
 
 Mostly unit tests calling the handlers directly with a mocked session: what these routes do
 is branch on mode, count, compare and choose a status code, and every one of those is a
@@ -626,7 +626,7 @@ class TestTheOperatorsBatch:
             ),
             patch("src.app.api.v1.admin.live_invitation_from", new_callable=AsyncMock, side_effect=[True, False]),
             patch("src.app.api.v1.admin.crud_invitations") as crud,
-            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock),
+            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock, return_value=0),
             patch("src.app.api.v1.admin.record_auth_event", new_callable=AsyncMock),
             patch("src.app.api.v1.admin.send_invitation_email", new_callable=AsyncMock),
         ):
@@ -654,7 +654,7 @@ class TestTheOperatorsBatch:
             patch("src.app.api.v1.admin.account_exists_for", new_callable=AsyncMock, return_value=False),
             patch("src.app.api.v1.admin.live_invitation_from", new_callable=AsyncMock, return_value=False),
             patch("src.app.api.v1.admin.crud_invitations") as crud,
-            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock),
+            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock, return_value=0),
             patch("src.app.api.v1.admin.record_auth_event", new_callable=AsyncMock),
             patch(
                 "src.app.api.v1.admin.send_invitation_email",
@@ -677,7 +677,7 @@ class TestTheOperatorsBatch:
             patch("src.app.api.v1.admin.account_exists_for", new_callable=AsyncMock, return_value=False),
             patch("src.app.api.v1.admin.live_invitation_from", new_callable=AsyncMock, return_value=False),
             patch("src.app.api.v1.admin.crud_invitations") as crud,
-            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock),
+            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock, return_value=0),
             patch("src.app.api.v1.admin.record_auth_event", new_callable=AsyncMock),
             patch(
                 "src.app.api.v1.admin.send_invitation_email",
@@ -706,7 +706,7 @@ class TestTheOperatorsBatch:
             patch("src.app.api.v1.admin.account_exists_for", new_callable=AsyncMock, return_value=False),
             patch("src.app.api.v1.admin.live_invitation_from", new_callable=AsyncMock, return_value=False),
             patch("src.app.api.v1.admin.crud_invitations") as crud,
-            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock),
+            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock, return_value=0),
             patch("src.app.api.v1.admin.record_auth_event", new_callable=AsyncMock),
             patch("src.app.api.v1.admin.send_invitation_email", new_callable=AsyncMock),
         ):
@@ -760,14 +760,22 @@ class TestTheConfigRoute:
             assert (await read_instance_config()).project_operated is operated
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("channels", "expected"), [(None, False), ("", False), ("scubaboard=ScubaBoard", True)])
+    async def test_it_reports_whether_any_join_link_exists(self, channels: str | None, expected: bool) -> None:
+        """A yes or no, never the list - that is resolved one slug at a time."""
+        with patch.object(settings, "JOIN_CHANNELS", channels):
+            assert (await read_instance_config()).join_links is expected
+
+    @pytest.mark.asyncio
     async def test_it_carries_nothing_else(self) -> None:
-        """Two fields, and adding another is a decision rather than a convenience: this
+        """Three fields, and adding another is a decision rather than a convenience: this
         endpoint is anonymous, so everything on it is public. Dumped in JSON mode because
         this is the wire shape the web app is written against, name for name."""
-        with _mode(RegistrationMode.INVITE), _operated(False):
+        with _mode(RegistrationMode.INVITE), _operated(False), patch.object(settings, "JOIN_CHANNELS", None):
             assert (await read_instance_config()).model_dump(mode="json") == {
                 "registration_mode": "invite",
                 "project_operated": False,
+                "join_links": False,
             }
 
 

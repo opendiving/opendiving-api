@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -69,3 +69,11 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     # Stamped by `DELETE /user/invitation/{uuid}`. Revoking an already-accepted invitation
     # is refused (409): the account exists, and the stamp would be a lie.
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    # Whether the operator sent this from the waiting-list queue - set by the admin batch
+    # route exactly when it deleted a pending request for the address, never by a member.
+    # The gate reads it to count the account under `waitlist`, and `accept_invitations`
+    # clears it in the same statement that stamps `accepted_at`: an accepted row is never
+    # swept, so leaving it set would keep "this address asked to be let in" for the life of
+    # the account. It is a fact about a pending invitation only.
+    from_invite_request: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")

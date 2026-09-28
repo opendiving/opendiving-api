@@ -5767,11 +5767,13 @@ not one. The comparison is case-insensitive.
 invitation tables store lowercase. The narrow fix is chosen: compare on `lower(User.email)` wherever
 an invitation address meets an account — the `409` on `POST /user/invitations`, `has_account` on
 `GET /admin/invite-requests`, the skip arm of `POST /admin/invitations` — all through
-`crud.crud_invitations.account_exists_for`. Rejected: normalising `User.email` on write, which
-touches the account path, the email-change path and every row. `_purge_one_account` is the mirror
-image: its `authentication_request` and `auth_audit_event` deletes compare the stored email raw
-because those tables hold what sign-in wrote, while the two invitation deletes lowercase first; the
-difference is commented at the call site.
+`crud.crud_invitations.account_exists_for`; `POST /auth/complete`'s delete of a pending request for
+the new account's address; and the revision backfilling `daily_total`, which matches accepted
+invitations to accounts. Rejected: normalising `User.email` on write, which touches the account
+path, the email-change path and every row. `_purge_one_account` is the mirror image: its
+`authentication_request` and `auth_audit_event` deletes compare the stored email raw because those
+tables hold what sign-in wrote, while the two invitation deletes lowercase first; the difference is
+commented at the call site.
 
 ## `invite_request.created_at` needs a `server_default`, unlike every other one in this app
 
@@ -7152,3 +7154,38 @@ gzip-encoded objects on read and documents nothing for zstd; a codec column woul
 on Suunto exports: level 3 leaves 18% more bytes for a fifth of the CPU, level 19 costs sixty times
 the CPU for 13% fewer. Cards, pictures and species photos are JPEG, PNG, PDF or WebP, which zstd
 cannot shrink, so only this kind compresses.
+
+## `JOIN_CHANNELS` is the project's switch, and the template says no more than that
+
+`JOIN_CHANNELS` (`slug=Label` pairs) admits whoever follows `/join?via=<slug>` without an invitation
+and counts the account under the slug. Empty, the default, turns join links off everywhere: the
+resolve route 404s, `GET /config` says `join_links: false`, a sign-in carrying a slug is a stale
+link. `PROJECT_OPERATED` is not involved and stays copy-only. `src/.env.example` carries a commented
+line because it lists every setting, saying only that a self-hosted install never sets it; the
+install bundle's `example.env` and docs carry nothing. Slugs are validated at import against the
+fixed source words, since both share the counter's key space. The list is resolved one slug at a
+time, never published whole. Rejected: a per-link cap or expiry - a link retires by leaving the
+setting, and its history stays under its slug.
+
+## A join link's slug rides the sign-in request row and the onboarding token, not the URL
+
+`POST /auth/email/request` stores `via` on the `authentication_request` row, and the link and the
+code - often redeemed on another device - hand the gate the row's value; `POST /auth/google` takes
+it in its body, from the web's attempt record keyed by `state`. The onboarding token signs it in, so
+`POST /auth/complete` counts under the slug the identity was verified with. Rejected: appending
+`via` to the magic link for the verify page to send back - the code path has no link and would need
+web state, the API would build two link shapes, and the row exists to carry a sign-in across the
+mailbox hop. Nothing keeps the slug past the completion: the account has no source column, and the
+row is swept a week after it expires.
+
+## A daily total is never lowered, and the active count is taken inside the session sweep
+
+`daily_total` holds one anonymous count per UTC day, metric and key; every write is an upsert on
+that identity, and recomputed metrics are written as `GREATEST(stored, computed)` because their
+inputs erode - audit rows at 90 days or with an account, session rows once dead - and a recount
+would zero a real day. `purge_expired_user_sessions` snapshots `active_accounts` before its
+`DELETE`, in one transaction, and keeps a revoked row until the UTC day of its last use has closed,
+so each hourly snapshot sees the whole day. Rejected: a rollup job at the same minute (arq gives
+concurrent crons no order, so it races the sweep); snapshots over a sweep deleting sign-outs within
+the hour (the busiest hour, not the day); a per-account last-seen date or per-day id set (a
+per-person usage record).

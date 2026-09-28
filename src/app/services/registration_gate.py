@@ -19,7 +19,18 @@ learns can change before the completion, which is why the check above still exis
 of the address - a magic link delivered to it, the code from that email, or Google's
 `email_verified` claim - so the 403 tells them nothing about an address that is not theirs.
 The endpoint that *is* reachable without proving anything, `POST /auth/email/request`,
-stays ignorant of invitations entirely.
+stays ignorant of invitations entirely; the one thing it learns is whether a join link it
+was handed is still live, which is a fact about a public link and not about an address.
+
+**What it returns is the door.** `admit_or_refuse` answers with the source the new account
+is counted under in the daily totals: `bootstrap`, `open`, `invitation`, `waitlist`, or the
+join-channel slug the verified identity arrived through. In order: an empty table admits
+as the operator; open mode admits under the slug if a configured one came along, else
+`open`; in invite mode a configured slug admits under itself, even over an invitation - the
+link is what the person clicked; then a live invitation admits, under `waitlist` if the
+operator sent any of them from the queue; then a slug that names no configured channel is
+refused as a stale link, and anything left as uninvited. `refuse_uninvited` asks the same
+questions without the lock and without an answer.
 
 **The bootstrap exemption.** While the `user` table is empty, the address is admitted
 whatever the mode, and the row it creates carries `is_superuser = true`. That resolves the
@@ -36,9 +47,9 @@ import logging
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.config import RegistrationMode, settings
+from ..core.config import AccountSource, RegistrationMode, settings
 from ..core.exceptions.http_exceptions import ForbiddenException
-from ..crud.crud_invitations import live_invitation_exists
+from ..crud.crud_invitations import invitation_source, live_invitation_exists
 from ..models.user import User
 
 logger = logging.getLogger(__name__)
@@ -48,6 +59,11 @@ logger = logging.getLogger(__name__)
 # same thing. It names the way forward rather than only the refusal - on an invite-mode
 # instance the landing page is where an invitation is asked for.
 NOT_INVITED = "This address hasn't been invited to this instance yet. You can request an invitation from the home page."
+
+# What somebody holding a join link that has since been removed is told, at every site that
+# can refuse one. Not `NOT_INVITED`: "hasn't been invited" reads as nonsense to a person who
+# followed a link that said they were.
+STALE_JOIN_LINK = "This join link is no longer active. You can request an invitation from the home page."
 
 # The advisory-lock key the bootstrap decision is serialised on. `pg_advisory_xact_lock`
 # takes a namespace of the caller's choosing, so the value is arbitrary - but it is not
@@ -100,7 +116,33 @@ async def _hold_the_gate(db: AsyncSession) -> None:
     await db.execute(select(func.pg_advisory_xact_lock(_REGISTRATION_LOCK_KEY)))
 
 
-async def refuse_uninvited(db: AsyncSession, *, email: str) -> None:
+def configured_channel(via: str | None) -> str | None:
+    """`via` if it names a join channel configured right now, else `None`.
+
+    Read from `settings` at every call rather than once, so a channel removed between a
+    sign-in request and its completion is refused at the completion, as a revoked
+    invitation is.
+    """
+    return via if via is not None and via in settings.join_channels else None
+
+
+def refuse_a_stale_join_link(via: str | None) -> str | None:
+    """What `POST /auth/email/request` records as the request's `via`, refusing a dead link.
+
+    A slug naming no configured channel is a 403 in invite mode, before anything is written,
+    so the person reads it on the form they are looking at rather than after the mailbox
+    hop. In open mode it is dropped and the request goes ahead: that mode admits the
+    address anyway, and the sentence's way forward - the request form - does not exist there.
+    This reveals whether a public link is live, never anything about an address.
+    """
+    if via is None or configured_channel(via) is not None:
+        return via
+    if registration_is_invite_only():
+        raise ForbiddenException(STALE_JOIN_LINK)
+    return None
+
+
+async def refuse_uninvited(db: AsyncSession, *, email: str, via: str | None = None) -> None:
     """Raise `ForbiddenException` if this address would be refused at account creation.
 
     The advisory check, run at the onboarding branch so the refusal arrives before the
@@ -113,16 +155,18 @@ async def refuse_uninvited(db: AsyncSession, *, email: str) -> None:
     """
     if not registration_is_invite_only():
         return
+    if configured_channel(via) is not None:
+        return
     if await live_invitation_exists(db, email=email.lower()):
         return
     if await _no_accounts_exist(db):
         return
 
-    raise ForbiddenException(NOT_INVITED)
+    raise ForbiddenException(STALE_JOIN_LINK if via is not None else NOT_INVITED)
 
 
-async def admit_or_refuse(db: AsyncSession, *, email: str) -> bool:
-    """The authoritative gate. Returns whether this account is the bootstrap one.
+async def admit_or_refuse(db: AsyncSession, *, email: str, via: str | None = None) -> str:
+    """The authoritative gate. Returns the source the new account is counted under.
 
     **Call it below `release_read_transaction` and inside the transaction that inserts the
     row**, or it decides nothing: the rollback in that helper discards the lock and every
@@ -130,18 +174,27 @@ async def admit_or_refuse(db: AsyncSession, *, email: str) -> bool:
     gate. The caller commits; a caller that raises must roll back, since the advisory lock
     lives until the transaction ends and `async_get_db` does not end it on unwind.
 
-    `True` means the `user` table was empty under the lock, so the row about to be created
-    is the instance's first and carries `is_superuser = true`. It is returned rather than
-    re-derived by the caller because the answer is only true *inside this transaction*, and
-    asking again after the insert would answer `False` - the caller's own row is now there.
+    `bootstrap` means the `user` table was empty under the lock, so the row about to be
+    created is the instance's first and carries `is_superuser = true`. It is returned rather
+    than re-derived by the caller because the answer is only true *inside this transaction*,
+    and asking again after the insert would say otherwise - the caller's own row is now
+    there. The same holds for `waitlist`: `accept_invitations` clears the flag it is read
+    from, later in the same transaction.
     """
     await _hold_the_gate(db)
 
     if await _no_accounts_exist(db):
         logger.info("Admitting the first account on an empty instance; it will be a superuser")
-        return True
+        return AccountSource.BOOTSTRAP
 
-    if registration_is_invite_only() and not await live_invitation_exists(db, email=email.lower()):
-        raise ForbiddenException(NOT_INVITED)
+    channel = configured_channel(via)
+    if not registration_is_invite_only():
+        return channel or AccountSource.OPEN
+    if channel is not None:
+        return channel
 
-    return False
+    invited = await invitation_source(db, email=email.lower())
+    if invited is not None:
+        return invited
+
+    raise ForbiddenException(STALE_JOIN_LINK if via is not None else NOT_INVITED)

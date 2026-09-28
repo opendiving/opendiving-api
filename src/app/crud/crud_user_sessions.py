@@ -1,9 +1,9 @@
 import uuid as uuid_pkg
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import cast
 
 from fastcrud import FastCRUD
-from sqlalchemy import ColumnElement, CursorResult, and_, or_, select, update
+from sqlalchemy import ColumnElement, CursorResult, and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.user_session import UserSession
@@ -29,10 +29,10 @@ MAX_LIVE_SESSIONS_PER_USER = 100
 def _live(now: datetime) -> ColumnElement[bool]:
     """The predicate for "this row can still authenticate something".
 
-    One definition, used by the list, the cap count, the bulk revoke and `live_session_for`
-    - which is itself asked by two callers now, `/auth/refresh` before it rotates and
-    `get_current_user` on every authenticated request. Another spelling of it would be
-    another chance to forget one of the two clauses.
+    One definition, used by the list, the cap count, the bulk revoke, the operator's
+    active-now count and `live_session_for` - which is itself asked by two callers now,
+    `/auth/refresh` before it rotates and `get_current_user` on every authenticated request.
+    Another spelling of it would be another chance to forget one of the two clauses.
     """
     return and_(UserSession.revoked_at.is_(None), UserSession.expires_at > now)
 
@@ -175,11 +175,28 @@ async def live_sessions_for_user(db: AsyncSession, *, user_id: int, limit: int) 
     return [UserSessionReadInternal.model_validate(row, from_attributes=True) for row in rows.scalars()]
 
 
-def swept_session_predicate(now: datetime) -> ColumnElement[bool]:
-    """What the hourly sweep deletes: a row that can no longer authenticate anything.
+async def accounts_with_a_live_session(db: AsyncSession) -> int:
+    """How many distinct accounts hold a session that can still authenticate - "active
+    now" on the operator's stats, and `_live` by construction rather than by a copy of it."""
+    count = await db.scalar(select(func.count(UserSession.user_id.distinct())).where(_live(datetime.now(UTC))))
+    return int(count or 0)
 
-    Expressed here rather than in the worker so it sits beside `_live`, whose exact
-    complement it is - the two drifting apart would either strand rows forever or delete
-    live ones.
+
+def swept_session_predicate(now: datetime) -> ColumnElement[bool]:
+    """What the hourly sweep deletes: a row that can no longer authenticate anything and is
+    no longer needed to count the day it was last used on.
+
+    Expressed here rather than in the worker so it sits beside `_live`. Every row it matches
+    is outside `_live`, and every row outside `_live` is matched eventually: a row past its
+    `expires_at` at once - it was last used a week ago - and a revoked one at the first sweep
+    after the UTC day of its last use has closed. That wait is the daily active count's:
+    the sweep snapshots the day before it deletes, and a signed-out session deleted within
+    the hour would be missing from every later snapshot of the day it was used on. Nothing
+    authenticates with a row in that window - `_live` refuses it - and the two drifting
+    apart would either strand rows forever or delete live ones.
     """
-    return or_(UserSession.revoked_at.is_not(None), UserSession.expires_at < now)
+    start_of_today = datetime.combine(now.astimezone(UTC).date(), time.min, tzinfo=UTC)
+    return or_(
+        UserSession.expires_at < now,
+        and_(UserSession.revoked_at.is_not(None), UserSession.last_used_at < start_of_today),
+    )

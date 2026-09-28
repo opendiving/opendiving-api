@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.api.v1.auth import complete_profile
-from src.app.core.config import RegistrationMode, settings
+from src.app.core.config import AccountSource, RegistrationMode, settings
 from src.app.core.exceptions.http_exceptions import ForbiddenException
 from src.app.core.schemas import OnboardingTokenData
 from src.app.models.invitation import Invitation
@@ -303,14 +303,14 @@ class TestTheBootstrapExemption:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("mode", [RegistrationMode.INVITE, RegistrationMode.OPEN])
     async def test_an_empty_table_admits_and_says_so(self, empty_instance: Any, mode: RegistrationMode) -> None:
-        """`True` means "this is the first account", which is what `complete_profile` turns
-        into `is_superuser`. It holds in both modes: a fresh *open* instance also gets an
-        operator without SQL."""
+        """`bootstrap` means "this is the first account", which is what `complete_profile`
+        turns into `is_superuser`. It holds in both modes: a fresh *open* instance also gets
+        an operator without SQL."""
         async with empty_instance() as session:
             await self._hide_every_account(session)
 
             with _mode(mode):
-                assert await admit_or_refuse(session, email=unique_email()) is True
+                assert await admit_or_refuse(session, email=unique_email()) == AccountSource.BOOTSTRAP
 
             await session.rollback()
 
@@ -372,7 +372,7 @@ class TestTheBootstrapExemption:
             async with empty_instance() as session:
                 await self._hide_every_account(session)
                 try:
-                    bootstrap = await admit_or_refuse(session, email=email)
+                    bootstrap = await admit_or_refuse(session, email=email) == AccountSource.BOOTSTRAP
                 except ForbiddenException:
                     await session.rollback()
                     return "refused"

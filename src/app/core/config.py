@@ -1,7 +1,8 @@
 import logging
 import os
+import re
 import warnings
-from enum import Enum
+from enum import Enum, StrEnum
 from importlib import metadata
 from typing import Self
 from urllib.parse import quote, urlparse
@@ -235,6 +236,55 @@ class RegistrationMode(Enum):
     INVITE = "invite"
 
 
+class AccountSource(StrEnum):
+    """The fixed words an account's creation is counted under in the daily totals.
+
+    Every other key of `accounts_created` is a join-channel slug, which is why
+    `JOIN_CHANNELS` may not name a slug that is one of these: the two share one key space,
+    and a channel called `waitlist` would be counted as the waiting list. Declared here
+    rather than beside the counter because the setting is validated against it at import.
+    """
+
+    BOOTSTRAP = "bootstrap"
+    OPEN = "open"
+    INVITATION = "invitation"
+    WAITLIST = "waitlist"
+
+
+# What a join-channel slug may be. The route, the request bodies and the setting's own
+# validator all accept exactly this, so a value that cannot be configured cannot be sent.
+JOIN_CHANNEL_SLUG_PATTERN = r"^[a-z0-9-]{1,32}$"
+JOIN_CHANNEL_LABEL_MAX_LENGTH = 40
+
+
+def parse_join_channels(raw: str | None) -> dict[str, str]:
+    """`JOIN_CHANNELS` as a slug-to-label mapping, refusing a value that is not one.
+
+    Each comma-separated entry is `slug=Label`. A bad entry raises naming it, so a typo stops
+    the process at startup rather than quietly making a link dead.
+    """
+    channels: dict[str, str] = {}
+    for pair in split_csv(raw):
+        slug, _, label = pair.partition("=")
+        slug, label = slug.strip(), label.strip()
+        if not re.fullmatch(JOIN_CHANNEL_SLUG_PATTERN, slug):
+            raise ValueError(f"JOIN_CHANNELS entry {pair!r}: a slug is 1 to 32 lowercase letters, digits or hyphens.")
+        if slug in set(AccountSource):
+            raise ValueError(
+                f"JOIN_CHANNELS entry {pair!r}: {slug!r} is reserved - the daily totals count "
+                f"accounts under {', '.join(source.value for source in AccountSource)} already."
+            )
+        if slug in channels:
+            raise ValueError(f"JOIN_CHANNELS entry {pair!r}: the slug {slug!r} is listed twice.")
+        if not label or len(label) > JOIN_CHANNEL_LABEL_MAX_LENGTH:
+            raise ValueError(
+                f"JOIN_CHANNELS entry {pair!r}: each slug needs a label after '=', "
+                f"of at most {JOIN_CHANNEL_LABEL_MAX_LENGTH} characters."
+            )
+        channels[slug] = label
+    return channels
+
+
 class RegistrationSettings(BaseSettings):
     # **`invite` is the default, and that is a deliberate breaking change.** An instance
     # reachable from the internet with no setting touched would otherwise take anyone who
@@ -265,6 +315,25 @@ class RegistrationSettings(BaseSettings):
     # copy selection and route each one through this field, so a single grep for it lists
     # every place the app knows who runs it.
     PROJECT_OPERATED: bool = config("PROJECT_OPERATED", default=False)
+
+    # `slug=Label` pairs, comma-separated: each one a link, `/join?via=<slug>`, that admits
+    # whoever follows it without an invitation and counts the account under its slug. Empty
+    # is the default and turns the feature off everywhere - the resolve route 404s, `GET
+    # /config` says `join_links: false`, and a sign-in carrying a slug is a stale link.
+    # Read through `join_channels` below at the moment of each decision and never copied
+    # into a module constant, so a channel removed by a restart between a sign-in request
+    # and its completion is refused at the completion.
+    JOIN_CHANNELS: str | None = config("JOIN_CHANNELS", default=None)
+
+    @field_validator("JOIN_CHANNELS")
+    @classmethod
+    def _parseable_join_channels(cls, value: str | None) -> str | None:
+        parse_join_channels(value)
+        return value
+
+    @property
+    def join_channels(self) -> dict[str, str]:
+        return parse_join_channels(self.JOIN_CHANNELS)
 
     # A *rate*, not a lifetime allotment: a member who invites five friends today can
     # invite five more tomorrow. Counted from the `invitation` table rather than from the

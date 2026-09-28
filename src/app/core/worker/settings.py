@@ -11,6 +11,7 @@ from .functions import (
     purge_expired_invite_requests,
     purge_expired_tokens,
     purge_expired_user_sessions,
+    record_sign_in_totals,
     send_gear_service_digests,
     send_renewal_reminders,
     send_year_in_review,
@@ -33,12 +34,16 @@ class WorkerSettings:
         cron(purge_expired_authentication_requests, minute=0, run_at_startup=True),
         # Both new sweeps join the same hour mark on the same criterion the comment above
         # states: idempotent housekeeping that deletes only rows already past their own
-        # expiry (or, for a session, already revoked), so a restart loop costs a no-op
-        # `DELETE`. Neither destroys anything a diver could ask for back - a dead session
-        # cannot authenticate and an expired audit row has aged out of its retention - which
-        # is what keeps them on this side of the line `purge_deleted_accounts` sits on.
+        # expiry (or, for a session, revoked and last used before today), so a restart loop
+        # costs a no-op `DELETE`. Neither destroys anything a diver could ask for back - a
+        # dead session cannot authenticate and an expired audit row has aged out of its
+        # retention - which is what keeps them on this side of the line
+        # `purge_deleted_accounts` sits on.
         cron(purge_expired_user_sessions, minute=0, run_at_startup=True),
         cron(purge_expired_auth_audit_events, minute=0, run_at_startup=True),
+        # Writes rather than deletes, and joins them on the same criterion: rerun, it writes
+        # the same counts, and it never lowers one, so a restart loop changes nothing.
+        cron(record_sign_in_totals, minute=0, run_at_startup=True),
         # A dead check-in link opens nothing either, and joins them on the same criterion.
         cron(purge_expired_checkin_links, minute=0, run_at_startup=True),
         # The two invitation sweeps join the hour mark on the same criterion, with one

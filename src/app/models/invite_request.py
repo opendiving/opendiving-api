@@ -12,8 +12,10 @@ class InviteRequest(Base):
     Written by `POST /invite-requests`, which is anonymous. A row exists only while the
     request is *pending*, so there is no state column: inviting the address deletes the row
     in the same transaction that creates the invitation, and from then on the invitation
-    carries the address. The operator removing it and the 90-day sweep are its only other
-    exits, plus the by-address arm of an account purge.
+    carries the address. Its only other exits are the operator removing it, an account being
+    created for the address (`POST /auth/complete` deletes it in the creating transaction,
+    whichever door let the account in), the 90-day sweep, and the by-address arm of an
+    account purge.
 
     **Three columns, and the omissions are the design.**
 

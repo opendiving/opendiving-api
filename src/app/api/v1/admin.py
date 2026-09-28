@@ -1,12 +1,13 @@
-"""The operator's contract: the invite queue, and inviting from it in a batch.
+"""The operator's contract: the invite queue, inviting from it in a batch, and the daily
+totals of accounts and sign-ins.
 
 **The first routes in `/api/v1` to be superuser-gated.** `is_superuser` has existed on
 `User` since the beginning and until now gated exactly one thing - the docs router on
-`staging` (`core/setup.py`). These three are the second, and they are gated by a
+`staging` (`core/setup.py`). The routes here are the second, and they are gated by a
 **router-level** dependency rather than per handler, so the route-walking auth guard
 (`tests/helpers/routes.py`, which reads include-level dependencies through the merged
-dependant) sees the marker on every route here without each one naming it, and a fourth
-route added to this module cannot arrive unprotected.
+dependant) sees the marker on every route here without each one naming it, and a route
+added to this module later cannot arrive unprotected.
 
 **Not the CRUDAdmin panel, and not a page.** These are ordinary JSON routes; the UI that
 drives them is a superuser-gated section of the web app. The deciding argument is auth:
@@ -21,23 +22,30 @@ refused here whatever page they came from.
 """
 
 import logging
+from collections import defaultdict
+from datetime import date, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_superuser
+from ...core.config import settings
 from ...core.db.database import async_get_db
+from ...core.exceptions.http_exceptions import UnprocessableEntityException
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.request_context import RequestContext
 from ...crud.crud_auth_audit_events import record_auth_event
+from ...crud.crud_daily_totals import daily_totals_between
 from ...crud.crud_invitations import account_exists_for, crud_invitations, live_invitation_from
 from ...crud.crud_invite_requests import delete_invite_requests
+from ...crud.crud_user_sessions import accounts_with_a_live_session
 from ...models.invite_request import InviteRequest
 from ...models.user import User
 from ...schemas.auth_audit_event import AuthEventType
+from ...schemas.daily_total import DailyMetric, DailyStatsDay, DailyStatsRead, DailyStatsTotals
 from ...schemas.invitation import (
     AdminInvitationBatchRequest,
     AdminInvitationBatchResponse,
@@ -50,6 +58,7 @@ from ...schemas.invite_request import (
     AdminInviteRequestDeleteResponse,
     AdminInviteRequestRead,
 )
+from ...schemas.join_channel import JoinChannelRead
 from ...services.email_service import send_invitation_email
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_current_superuser)])
@@ -137,16 +146,18 @@ async def invite_batch(
             results.append(AdminInvitationOutcome(email=email, outcome="already_invited"))
             continue
 
+        # Same transaction as the insert, for the same reason the member's route does it:
+        # an address with a live invitation must not also be sitting in this queue. First,
+        # because whether it was there is what the invitation records: the account it lets
+        # in is counted under `waitlist` rather than `invitation`.
+        from_queue = await delete_invite_requests(db, emails=[email], commit=False) > 0
         await crud_invitations.create(
             db=db,
-            object=InvitationCreateInternal(email=email, user_id=current_user["id"]),
+            object=InvitationCreateInternal(email=email, user_id=current_user["id"], from_invite_request=from_queue),
             commit=False,
             schema_to_select=InvitationReadInternal,
             return_as_model=True,
         )
-        # Same transaction as the insert, for the same reason the member's route does it:
-        # an address with a live invitation must not also be sitting in this queue.
-        await delete_invite_requests(db, emails=[email], commit=False)
         await record_auth_event(
             db,
             event_type=AuthEventType.INVITATION_CREATED,
@@ -193,3 +204,62 @@ async def remove_invite_requests(
     """
     removed = await delete_invite_requests(db, emails=[email.lower() for email in body.emails])
     return AdminInviteRequestDeleteResponse(removed=removed)
+
+
+# The longest range `GET /admin/stats` answers: the longest run of three calendar months,
+# so one request stays a bounded read however the dates are typed.
+MAX_STATS_DAYS = 92
+
+
+@router.get("/stats", response_model=DailyStatsRead)
+async def read_daily_stats(
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    first: Annotated[date, Query(alias="from")],
+    last: Annotated[date, Query(alias="to")],
+) -> DailyStatsRead:
+    """The daily totals for every UTC day from `from` to `to` inclusive, zero-filled, with
+    the configured join channels and two figures as of now.
+
+    Every number is a count that names no account: accounts created per day and per door,
+    distinct accounts that signed in, distinct accounts with a session used that day.
+    `totals.accounts` counts every `user` row, an account inside its deletion grace period
+    included, and `totals.active_now` the accounts holding a session that can still
+    authenticate. A window count of distinct accounts - "active in the last 30 days" - is
+    not here because nothing records one: the sessions that would say so are deleted once
+    dead, and a per-account last-seen date is a record this app does not keep.
+
+    `422` for a range running backwards or longer than `MAX_STATS_DAYS`.
+    """
+    if last < first:
+        raise UnprocessableEntityException("`to` is before `from`.")
+    span = (last - first).days + 1
+    if span > MAX_STATS_DAYS:
+        raise UnprocessableEntityException(f"A range is at most {MAX_STATS_DAYS} days; this one is {span}.")
+
+    created: dict[date, dict[str, int]] = defaultdict(dict)
+    counted: dict[tuple[date, str], int] = {}
+    for row in await daily_totals_between(db, first=first, last=last):
+        if row.metric == DailyMetric.ACCOUNTS_CREATED:
+            created[row.day][row.key] = row.count
+        else:
+            counted[(row.day, row.metric)] = row.count
+
+    days = [first + timedelta(days=offset) for offset in range(span)]
+    return DailyStatsRead(
+        from_=first,
+        to=last,
+        channels=[JoinChannelRead(slug=slug, label=label) for slug, label in settings.join_channels.items()],
+        days=[
+            DailyStatsDay(
+                day=day,
+                accounts_created=created.get(day, {}),
+                sign_ins=counted.get((day, DailyMetric.SIGN_INS), 0),
+                active_accounts=counted.get((day, DailyMetric.ACTIVE_ACCOUNTS), 0),
+            )
+            for day in days
+        ],
+        totals=DailyStatsTotals(
+            accounts=int(await db.scalar(select(func.count()).select_from(User)) or 0),
+            active_now=await accounts_with_a_live_session(db),
+        ),
+    )

@@ -69,7 +69,7 @@ class TestIsSuperuserOnTheCallersOwnRecord:
     Not a disclosure about anybody else: `GET /user` returns the caller's own row, and of
     another account no route returns more than the exceptions `DECISIONS.md` names under
     *Current-user routes live at a bare `/user`* - never this field. It is also not the
-    gate - the three `/api/v1/admin/*` routes take `get_current_superuser`, and a client
+    gate - the `/api/v1/admin/*` routes take `get_current_superuser`, and a client
     that lied about this field to itself would still be refused there.
     """
 

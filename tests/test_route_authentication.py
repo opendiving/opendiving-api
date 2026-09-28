@@ -94,8 +94,13 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/config"): (
         "Tells the landing page whether registration is open or by invitation, and whether the project "
         "itself operates the instance, which it has to know before its first paint - and before any "
-        "session exists. Discloses two bits the page discloses anyway: by which form it then shows, "
-        "and by which copy that form carries."
+        "session exists. Discloses three bits the pages disclose anyway: by which form the landing page "
+        "shows, by which copy that form carries, and by whether the privacy page describes join links."
+    ),
+    ("GET", "/api/v1/join-channels/{slug}"): (
+        "Tells the join page whether the link it was opened with is live, before anyone has signed in. "
+        "Answers for one slug and never lists the others, and a live link is public by design - it is "
+        "posted where anyone can follow it."
     ),
     # 6. The caller holds a check-in link a diver shared, and the token in the path is the
     # credential: a desk opens the page with no account, and its `<img>` tags carry nothing.

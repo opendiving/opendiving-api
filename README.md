@@ -222,19 +222,21 @@ either of the first and the last, or from any format the converter reads; **invi
 exist only where the operator has closed registration (`REGISTRATION_MODE`, documented with the rest
 of the settings in `src/.env.example`) — a member sends and revokes their own, and the routes answer
 404 on an open instance; and **admin**, the operator's own — the queue of people who have asked to
-be let in, and inviting or removing them in a batch — which is the one family gated on
-`is_superuser` rather than merely on having a token. All of those want a bearer token. The ones that
-don't are **support**, the auth routes themselves, the two health checks — `/health` says the
-process is up, `/health/ready` says Postgres and Redis answered, and 503s when they didn't —
-`POST /invite-requests`, which is how somebody with no account asks a closed instance for an
-invitation, `GET /config`, which tells the web app whether registration is open - and whether the
-project itself operates the instance - before anyone has signed in, `GET /species/{uuid}/photo`,
-which serves a public Commons image to an `<img>` tag that has no way to send a token, and
-`GET /checkin/{token}` with its `/portrait` and `/certification/{uuid}/front`, the check-in page a
-diver shared as a link, where the token in the path is the credential.
-`tests/test_route_authentication.py` is the guard that keeps the *anonymous* half of that list
-honest — it compares the app's real route table against its own allowlist and holds the reason for
-each — but nothing checks this paragraph, so a new route family belongs here by hand.
+be let in, inviting or removing them in a batch, and the daily totals of accounts created, sign-ins
+and active accounts — which is the one family gated on `is_superuser` rather than merely on having a
+token. All of those want a bearer token. The ones that don't are **support**, the auth routes
+themselves, the two health checks — `/health` says the process is up, `/health/ready` says Postgres
+and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how somebody with
+no account asks a closed instance for an invitation, `GET /config`, which tells the web app whether
+registration is open - whether the project itself operates the instance, and whether any join link
+exists (`join_links`) - before anyone has signed in, `GET /join-channels/{slug}`, which says whether
+one join link is live, `GET /species/{uuid}/photo`, which serves a public Commons image to an
+`<img>` tag that has no way to send a token, and `GET /checkin/{token}` with its `/portrait` and
+`/certification/{uuid}/front`, the check-in page a diver shared as a link, where the token in the
+path is the credential. `tests/test_route_authentication.py` is the guard that keeps the *anonymous*
+half of that list honest — it compares the app's real route table against its own allowlist and
+holds the reason for each — but nothing checks this paragraph, so a new route family belongs here by
+hand.
 
 A typical import flow:
 
