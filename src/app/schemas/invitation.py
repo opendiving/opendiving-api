@@ -23,6 +23,9 @@ class InvitationCreateInternal(BaseModel):
 
     email: str
     user_id: int
+    # Only the admin batch route ever sets it, and only when it deleted a pending request
+    # for the address - see `Invitation.from_invite_request`.
+    from_invite_request: bool = False
 
 
 class InvitationUpdate(BaseModel):

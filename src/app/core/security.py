@@ -528,6 +528,7 @@ async def create_onboarding_token(data: OnboardingTokenData) -> str:
         "provider_user_id": data.provider_user_id,
         "name": data.name,
         "avatar": data.avatar,
+        "via": data.via,
         "exp": expire,
         "jti": _new_jti(),
         "token_type": TokenType.ONBOARDING,
@@ -564,6 +565,7 @@ async def verify_onboarding_token(token: str, db: AsyncSession) -> OnboardingTok
         provider_user_id=payload.get("provider_user_id"),
         name=payload.get("name"),
         avatar=payload.get("avatar"),
+        via=payload.get("via"),
     )
 
 

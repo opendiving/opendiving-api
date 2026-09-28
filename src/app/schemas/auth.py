@@ -5,12 +5,20 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from ..core.config import JOIN_CHANNEL_SLUG_PATTERN
 
 # -------------- email magic link --------------
+# The join-channel slug a sign-in arrived through, from `/join?via=<slug>`. Optional on
+# both doors that can create an account; the format is the setting's own, so a value no
+# operator could configure is a 422 rather than a stale link.
+JoinVia = Annotated[str | None, Field(pattern=JOIN_CHANNEL_SLUG_PATTERN, examples=["scubaboard"])]
+
+
 class EmailAuthRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: Annotated[EmailStr, Field(examples=["diver@example.com"])]
+    via: JoinVia = None
 
 
 class EmailAuthRequestResponse(BaseModel):
@@ -125,6 +133,10 @@ class GoogleAuthRequest(BaseModel):
     # turns a misconfigured deployment into this app's own error. Bounded because the
     # refusal quotes it back.
     redirect_uri: Annotated[str, Field(min_length=1, max_length=2048)]
+
+    # Carried by the browser on the attempt record it keyed by `state`, and sent back here
+    # with the code - `state` itself stays an opaque nonce.
+    via: JoinVia = None
 
 
 # -------------- profile completion --------------

@@ -166,6 +166,9 @@ class OnboardingTokenData(BaseModel):
     provider_user_id: str | None = None
     name: str | None = None
     avatar: str | None = None
+    # The join-channel slug the verified identity arrived through, signed into the token so
+    # `/auth/complete` hands the gate the one it was verified with and no other.
+    via: str | None = None
 
 
 class DiveFileTokenData(BaseModel):

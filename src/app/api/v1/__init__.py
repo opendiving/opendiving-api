@@ -17,6 +17,7 @@ from .gear_sets import router as gear_sets_router
 from .geocoding import router as geocoding_router
 from .health import router as health_router
 from .invitations import router as invitations_router
+from .join_channels import router as join_channels_router
 from .logbook_import import router as logbook_import_router
 from .passkeys import router as passkeys_router
 from .people import router as people_router
@@ -29,6 +30,7 @@ from .users import router as users_router
 router = APIRouter(prefix="/v1")
 router.include_router(health_router)
 router.include_router(config_router)
+router.include_router(join_channels_router)
 router.include_router(auth_router)
 router.include_router(users_router)
 router.include_router(passkeys_router)

@@ -92,4 +92,11 @@ class AuthenticationRequest(Base, PublicUUIDMixin):
     # before any `User` row exists at all.
     user_id: Mapped[int | None] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True, default=None)
 
+    # The join-channel slug a `purpose="sign_in"` request was made through, or `None`. A
+    # transit label: the link and the code are often redeemed on another device, and both
+    # hand the gate this row's value, so nothing has to be carried across the mailbox hop.
+    # It admits and it names the counter the account is created under; nothing counts it
+    # here, and it goes with the row.
+    via: Mapped[str | None] = mapped_column(String(32), default=None)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))

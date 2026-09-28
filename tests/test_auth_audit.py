@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.api.v1.auth import _REFRESH_REPLAY_THRESHOLD, _handle_revoked_refresh
+from src.app.core.config import AccountSource
 from src.app.core.db.database import async_engine
 from src.app.core.utils.request_context import RequestContext
 from src.app.core.worker.functions import (
@@ -526,7 +527,7 @@ class TestTheNamedExclusions:
 
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as verify,
-            patch("src.app.api.v1.auth.admit_or_refuse", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.auth.admit_or_refuse", new_callable=AsyncMock, return_value=AccountSource.INVITATION),
             patch("src.app.api.v1.auth.accept_invitations", new_callable=AsyncMock, return_value=2) as accepted,
             patch("src.app.api.v1.auth.crud_users") as users,
             patch("src.app.api.v1.auth.crud_authentication_providers") as providers,
@@ -821,8 +822,10 @@ class TestRetentionSweepAgainstPostgres:
 
 @needs_a_database
 class TestSessionSweepAgainstPostgres:
-    """A row that can no longer authenticate anything, gone. The predicate is the exact
-    complement of the liveness one, which is why both live in `crud_user_sessions`."""
+    """A row that can no longer authenticate anything, gone - an expired one at once, a
+    revoked one once the UTC day of its last use has closed, so the sweep's own snapshot of
+    that day still sees it. The predicate sits beside the liveness one in
+    `crud_user_sessions`; `test_daily_totals.py` pins the snapshot on a fixed clock."""
 
     @pytest_asyncio.fixture(autouse=True)
     async def _dispose_the_app_engine(self) -> AsyncGenerator[None]:
@@ -831,7 +834,14 @@ class TestSessionSweepAgainstPostgres:
         await async_engine.dispose()
 
     @staticmethod
-    def _session(db: Session, diver: User, *, expires_at: datetime, revoked_at: datetime | None = None) -> int:
+    def _session(
+        db: Session,
+        diver: User,
+        *,
+        expires_at: datetime,
+        revoked_at: datetime | None = None,
+        last_used_at: datetime | None = None,
+    ) -> int:
         row = UserSession(
             user_id=diver.id,
             expires_at=expires_at,
@@ -839,6 +849,8 @@ class TestSessionSweepAgainstPostgres:
             user_agent="TestAgent/1.0",
             revoked_at=revoked_at,
         )
+        if last_used_at is not None:
+            row.last_used_at = last_used_at
         db.add(row)
         db.commit()
         db.refresh(row)
@@ -855,11 +867,26 @@ class TestSessionSweepAgainstPostgres:
         assert db.get(UserSession, row_id) is None
 
     @pytest.mark.asyncio
-    async def test_a_revoked_but_unexpired_session_is_swept_too(self, db: Session, diver: User) -> None:
-        """Nothing ever reads a revoked row: the audit trail is what records that a session
-        was revoked, and this table is not a second copy of it."""
+    async def test_a_session_revoked_after_use_today_waits_for_the_day_to_close(self, db: Session, diver: User) -> None:
+        """Kept so the next snapshot still counts the day it was used on. It authenticates
+        nothing meanwhile - `_live` refuses a revoked row."""
+        now = datetime.now(UTC)
+        row_id = self._session(db, diver, expires_at=now + timedelta(days=7), revoked_at=now, last_used_at=now)
+
+        await purge_expired_user_sessions({})
+
+        assert db.get(UserSession, row_id) is not None
+
+    @pytest.mark.asyncio
+    async def test_a_session_revoked_after_use_yesterday_is_swept(self, db: Session, diver: User) -> None:
+        """Its day has closed and been counted by this very run, before the `DELETE`."""
+        start_of_today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         row_id = self._session(
-            db, diver, expires_at=datetime.now(UTC) + timedelta(days=7), revoked_at=datetime.now(UTC)
+            db,
+            diver,
+            expires_at=datetime.now(UTC) + timedelta(days=6),
+            revoked_at=datetime.now(UTC),
+            last_used_at=start_of_today - timedelta(minutes=1),
         )
 
         await purge_expired_user_sessions({})

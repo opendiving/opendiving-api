@@ -1,10 +1,11 @@
 """What an anonymous browser may know about how this instance is configured.
 
-Two fields - the registration mode, and whether the OpenDiving project itself operates
-this instance - because the web app has to decide, before its landing page paints, whether
-the hero shows a sign-in form or a request-an-invite form and, when the latter, whether that
-form carries the project's waitlist wording or the generic wording true of any instance. It
-has no other channel by which to learn either.
+The registration mode and whether the OpenDiving project itself operates this instance,
+because the web app has to decide, before its landing page paints, whether the hero shows a
+sign-in form or a request-an-invite form and, when the latter, whether that form carries the
+project's waitlist wording or the generic wording true of any instance. It has no other
+channel by which to learn either. And whether any join link exists, which is what decides
+whether the privacy page describes them.
 
 **An endpoint rather than a copy in the web container's own environment**, and the reason
 is three-fold. The mode is API truth, and the app has a recorded precedent for what two
@@ -30,9 +31,14 @@ async def read_instance_config() -> InstanceConfigRead:
     """This instance's public configuration.
 
     Anonymous, and not a leak: the landing page discloses the mode anyway by which form it
-    shows, and the operator by which copy that form carries, so this only saves a client
-    from inferring them. Nothing here is per-caller, which is what makes it safe for
+    shows, the operator by which copy that form carries, and the privacy page whether join
+    links exist by whether it describes them, so this only saves a client from inferring
+    them. Nothing here is per-caller, which is what makes it safe for
     `ClientCacheMiddleware` to mark publicly cacheable - and a minute of caching is right,
     since the values change only when the operator restarts the API.
     """
-    return InstanceConfigRead(registration_mode=settings.REGISTRATION_MODE, project_operated=settings.PROJECT_OPERATED)
+    return InstanceConfigRead(
+        registration_mode=settings.REGISTRATION_MODE,
+        project_operated=settings.PROJECT_OPERATED,
+        join_links=bool(settings.join_channels),
+    )

@@ -11,7 +11,7 @@ from ..core.config import RegistrationMode
 
 
 class InstanceConfigRead(BaseModel):
-    """Two fields, and neither discloses anything a visitor could not already see.
+    """Three fields, and none discloses anything a visitor could not already see.
 
     In `invite` mode the landing page shows a request-an-invite form and in `open` mode a
     sign-in form, so the mode is legible from the page itself; and that form carries either
@@ -32,3 +32,7 @@ class InstanceConfigRead(BaseModel):
 
     registration_mode: RegistrationMode
     project_operated: bool
+    # Whether any join link exists here - a yes or no, never the list, which is resolved one
+    # slug at a time (`GET /join-channel/{slug}`) so a visitor holding one link learns
+    # nothing about the others. The privacy page shows its join-link paragraph on it.
+    join_links: bool

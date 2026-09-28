@@ -15,6 +15,7 @@ class AuthenticationRequestCreate(BaseModel):
     code_hash: str | None = None
     purpose: str = "sign_in"
     user_id: int | None = None
+    via: str | None = None
 
 
 class AuthenticationRequestUpdate(BaseModel):
@@ -36,4 +37,5 @@ class AuthenticationRequestRead(BaseModel):
     invalidated_at: datetime | None
     purpose: str
     user_id: int | None
+    via: str | None
     created_at: datetime

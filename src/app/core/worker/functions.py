@@ -10,6 +10,7 @@ from sqlalchemy import CursorResult, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_auth_audit_events import expired_event_predicate
+from ...crud.crud_daily_totals import record_sign_ins, snapshot_active_accounts
 from ...crud.crud_user_sessions import swept_session_predicate
 from ...models.auth_audit_event import AuthAuditEvent
 from ...models.authentication_request import AuthenticationRequest
@@ -124,8 +125,9 @@ INVITATION_RETENTION = timedelta(days=90)
 # alternative that was refused is unbounded retention "because it is the operator's queue",
 # which would have been the same silent retention decision.
 #
-# A request row has four exits and no others: it is invited (deleted in the transaction that
-# creates the invitation, from either route), the operator removes it, the account its
+# A request row has five exits and no others: it is invited (deleted in the transaction that
+# creates the invitation, from either route), the operator removes it, an account is created
+# for its address (deleted in `POST /auth/complete`'s creating transaction), the account its
 # address belongs to is purged, or this sweep takes it.
 INVITE_REQUEST_RETENTION = timedelta(days=90)
 
@@ -247,7 +249,8 @@ async def purge_expired_invite_requests(ctx: dict[Any, Any]) -> str:
 
     The table this app is least able to bound any other way: `POST /invite-requests` is
     anonymous, so every row here was written by somebody with no account, and the only other
-    things that remove one are an operator acting on it and an invitation being sent.
+    things that remove one are an operator acting on it, an invitation being sent and an
+    account being created for the address.
 
     The address is never told. There is no state to keep and nothing to notify - a person
     whose request ages out may simply ask again, and the rate limits on the endpoint are
@@ -268,18 +271,23 @@ async def purge_expired_invite_requests(ctx: dict[Any, Any]) -> str:
 
 
 async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
-    """Delete `user_session` rows that can no longer authenticate anything - past their own
-    `expires_at`, or revoked.
+    """Count today's and yesterday's active accounts, then delete the `user_session` rows
+    that can no longer authenticate anything and are no longer needed for that count.
 
-    The criterion is exactly the complement of the liveness predicate the refresh path and
-    the list endpoint share (`crud_user_sessions._live`), which is why both live in that one
-    module: the two drifting apart would either strand rows forever or delete live ones.
+    **The count comes first, in the same transaction, and that order is the design.** A
+    session row is the only record that an account was active on a day, and a row gone is
+    a row no snapshot sees - so the count is taken from the table this sweep is about to
+    thin, before it thins it (`crud_daily_totals.snapshot_active_accounts`). For that
+    snapshot to be the day's count rather than the busiest hour's, a revoked row is kept
+    until the UTC day of its last use has closed, and the first run after midnight counts
+    it into yesterday before deleting it. A row past its `expires_at` goes at the next
+    sweep: it was last used a week ago, never today. `swept_session_predicate` holds both
+    arms beside `_live`, which refuses every kept row either way.
 
-    No retention margin, unlike `purge_expired_authentication_requests` - and the asymmetry
-    is the point. That table's margin protects a documented *leniency*, where a spent row is
-    still read to explain itself; nothing here reads a dead session for any reason. A
-    revoked row is deleted rather than kept as a tombstone because the audit trail is what
-    records that a session was revoked, and this table is not a second copy of it.
+    The kept revoked row is read by nothing that authenticates. `DELETE /user/session/
+    {uuid}` loads a row without a liveness filter, so a second revoke of one still waiting
+    here is a 200 and a second `SESSION_REVOKED` event - a success by design, not a 404 -
+    and the view-only admin panel lists it, as it lists every row.
 
     `expires_at` is `DateTime(timezone=True)`, so the comparison is UTC-aware for the reason
     `purge_expired_tokens` spells out.
@@ -289,6 +297,7 @@ async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
     """
     now = datetime.now(UTC)
     async with local_session() as db:
+        await snapshot_active_accounts(db, now=now)
         result = cast(CursorResult, await db.execute(delete(UserSession).where(swept_session_predicate(now))))
         # Read before the commit: the count belongs to the statement, not the transaction.
         purged = result.rowcount
@@ -307,8 +316,8 @@ async def purge_expired_checkin_links(ctx: dict[Any, Any]) -> str:
     revoked.
 
     `swept_checkin_link_predicate` is the complement of the liveness predicate the check-in
-    routes read, as for sessions. No retention margin: nothing reads a dead link, and a desk
-    holding one sees the same 404 whether its row is still here or not.
+    routes read. No retention margin, unlike a revoked session's: nothing counts or reads a
+    dead link, and a desk holding one sees the same 404 whether its row is still here or not.
     """
     async with local_session() as db:
         result = cast(
@@ -363,6 +372,23 @@ async def purge_expired_auth_audit_events(ctx: dict[Any, Any]) -> str:
 
     logging.info("Purged %d expired auth audit event(s)", purged)
     return f"Purged {purged} expired auth audit event(s)"
+
+
+async def record_sign_in_totals(ctx: dict[Any, Any]) -> str:
+    """Recompute the daily `sign_ins` totals from the audit trail.
+
+    Idempotent and never lowering a stored count (`crud_daily_totals`), so a restart loop
+    rewrites the same numbers, and a day whose audit rows have aged out keeps the count it
+    had while they were there. It runs at the audit sweep's minute in no order with it, and
+    needs none: that sweep only ever takes the oldest day's rows, which earlier runs have
+    already counted, and a count never goes down.
+    """
+    async with local_session() as db:
+        await record_sign_ins(db)
+        await db.commit()
+
+    logging.info("Recorded daily sign-in totals")
+    return "Recorded daily sign-in totals"
 
 
 # One sweep's worth of accounts. The work per account is a cascade delete over every dive,

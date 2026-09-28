@@ -76,5 +76,7 @@ class UserSession(Base, PublicUUIDMixin):
     last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
 
     # Set by a revoke (either session route, logout, `DELETE /user`) or by cap eviction.
-    # A revoked row can no longer refresh anything and is swept on the next hourly pass.
+    # A revoked row can no longer refresh anything, and is swept at the first hourly pass
+    # after the UTC day of its `last_used_at` has closed - that day's active-account count
+    # is snapshotted from the rows still here (`swept_session_predicate`).
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

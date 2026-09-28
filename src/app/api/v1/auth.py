@@ -37,7 +37,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...core.config import settings
+from ...core.config import AccountSource, settings
 from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import (
     BadRequestException,
@@ -76,7 +76,9 @@ from ...crud.crud_authentication_requests import (
     crud_authentication_requests,
     register_failed_code_attempt,
 )
+from ...crud.crud_daily_totals import count_account_created
 from ...crud.crud_invitations import accept_invitations
+from ...crud.crud_invite_requests import delete_invite_requests
 from ...crud.crud_user_sessions import live_session_for, revoke_session
 from ...crud.crud_users import crud_users
 from ...models.user import User
@@ -110,7 +112,7 @@ from ...services.auth_service import (
 from ...services.dive_form_presets import seed_default_presets
 from ...services.email_service import send_magic_link_email
 from ...services.passkey_service import finish_sign_in, start_sign_in
-from ...services.registration_gate import admit_or_refuse, refuse_uninvited
+from ...services.registration_gate import admit_or_refuse, refuse_a_stale_join_link, refuse_uninvited
 from ...services.user_pictures import import_google_avatar, seed_google_avatar
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -149,6 +151,7 @@ async def _start_onboarding_or_sign_in(
     *,
     db: AsyncSession,
     context: RequestContext,
+    via: str | None = None,
 ) -> AuthOutcome:
     """Turn a verified identity into a signed-in session, an onboarding handoff, or the
     offer of a deleted account back.
@@ -180,6 +183,11 @@ async def _start_onboarding_or_sign_in(
     emitting inside `finish_sign_in` would additionally record its `DeletionPending`
     outcome, which mints no tokens and signs nobody in. That is why `AuthenticatedUser`
     carries the provider: it is the one thing this site cannot work out for itself.
+
+    `via` is the join-channel slug the identity arrived through, if any. It matters only on
+    the onboarding branch, where it can admit an uninvited address and is signed into the
+    onboarding token for the completion to count; an existing account signing in through a
+    join link is simply signed in.
     """
     if isinstance(outcome, AuthenticatedUser):
         tokens = await issue_tokens(response, outcome.user["uuid"], db=db, context=context, user_id=outcome.user["id"])
@@ -220,7 +228,7 @@ async def _start_onboarding_or_sign_in(
     # No audit event on the refusal: the vocabulary's membership rule takes a site that
     # commits a row, mints a token or revokes a credential, and a refusal that does none of
     # those is neither rare nor a WARNING (`schemas/auth_audit_event.py`).
-    await refuse_uninvited(db, email=outcome.email)
+    await refuse_uninvited(db, email=outcome.email, via=via)
 
     onboarding_token = await create_onboarding_token(
         OnboardingTokenData(
@@ -229,6 +237,7 @@ async def _start_onboarding_or_sign_in(
             provider_user_id=outcome.provider_user_id,
             name=outcome.name,
             avatar=outcome.avatar,
+            via=via,
         )
     )
     # "Registration-request creation": there is no registration table, so the onboarding
@@ -272,8 +281,15 @@ async def request_email_link(
     the browser that asked for it - a stranger who knows an address cannot burn a diver's
     code, let alone their link. It is not an oracle either way: a row is minted for every
     address, so the id is a fresh random value whether or not an account exists.
+
+    `via`, the join-channel slug of the page the form was on, is stored on the row for the
+    link and the code to hand the gate. One that names no live channel is refused (403) on
+    an invite-only instance before anything is written, and dropped on an open one - which
+    says whether a public link is live, and nothing about the address.
     """
     email = body.email.lower()
+    # First, so a dead join link costs nothing: no row, no audit event, no rate-limit charge.
+    via = refuse_a_stale_join_link(body.via)
 
     await enforce_rate_limit(
         f"auth:email-request:email:{email}",
@@ -314,6 +330,7 @@ async def request_email_link(
             code_hash=hash_sign_in_code(code),
             expires_at=expires_at,
             purpose="sign_in",
+            via=via,
         ),
         schema_to_select=AuthenticationRequestRead,
         return_as_model=True,
@@ -450,7 +467,7 @@ async def verify_email_link(
 
     context = RequestContext.from_request(request)
     outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"], context=context)
-    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context)
+    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context, via=auth_request.get("via"))
 
 
 @router.post("/email/verify-code", response_model=AuthOutcome)
@@ -532,7 +549,7 @@ async def verify_email_code(
         raise UnauthorizedException(_CODE_REJECTED)
 
     outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"], context=context)
-    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context)
+    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context, via=auth_request.get("via"))
 
 
 @router.post("/google", response_model=AuthOutcome)
@@ -599,7 +616,7 @@ async def auth_with_google(
         name=google_user.name,
         avatar=google_user.avatar,
     )
-    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context)
+    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context, via=body.via)
 
 
 @router.post("/passkey/options", response_model=PasskeySignInOptions)
@@ -682,11 +699,13 @@ async def complete_profile(
     gate below by construction.
 
     **On an `invite`-mode instance this refuses (403) an address with no live
-    invitation**, and creates nothing. The check is `services.registration_gate.
-    admit_or_refuse` and it runs *below* `release_read_transaction`, inside the transaction
-    that inserts the row, for the reason spelled out at that call - the helper rolls back,
-    so a check above it decides nothing. The first account on an empty instance is admitted
-    in either mode and is created with `is_superuser = true`.
+    invitation**, unless the onboarding token carries a live join-channel slug, and creates
+    nothing. The check is `services.registration_gate.admit_or_refuse` and it runs *below*
+    `release_read_transaction`, inside the transaction that inserts the row, for the reason
+    spelled out at that call - the helper rolls back, so a check above it decides nothing.
+    The first account on an empty instance is admitted in either mode and is created with
+    `is_superuser = true`. The same transaction adds one to the day's count under the door
+    the gate named and drops any pending invite request for the address.
 
     Rate limited per-IP because the username check below is an availability oracle:
     someone holding a single onboarding token could otherwise walk a wordlist through
@@ -739,7 +758,8 @@ async def complete_profile(
         # transaction, which is what makes a revocation or a mode flip committed between
         # verification and completion honoured, and what makes "account created" and
         # "invitation accepted" a single commit.
-        bootstrap = await admit_or_refuse(db, email=token_data.email)
+        source = await admit_or_refuse(db, email=token_data.email, via=token_data.via)
+        bootstrap = source == AccountSource.BOOTSTRAP
 
         user_fields = {
             "name": body.name,
@@ -774,6 +794,12 @@ async def complete_profile(
         # arrived. Emits no event of its own: this is the same commit as
         # `ACCOUNT_CREATED`, and the vocabulary is one event per site.
         await accept_invitations(db, email=token_data.email.lower(), commit=False)
+        # The address has an account now, so a request for it has nothing left to ask for -
+        # dropped here rather than left in the queue for the operator to remove by hand.
+        await delete_invite_requests(db, emails=[token_data.email.lower()], commit=False)
+        # The day's count for the door the gate named, and nothing about the account: the
+        # total names no one, and the slug is kept nowhere else.
+        await count_account_created(db, source=source, now=datetime.now(UTC))
         # "Registration-request completion", in the same transaction as the account it
         # records - so an account that fails to be created leaves no event saying it was.
         # One event for the whole act: the provider row above gets none of its own, because

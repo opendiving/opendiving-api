@@ -72,8 +72,9 @@ status must not fall through to its onboarding branch: there is no `onboarding_t
 ### Registration can be closed, and the onboarding branch is where it shows
 
 `REGISTRATION_MODE` is `invite` by default. On such an instance the "no account yet" branch above is
-not automatic: the address has to hold a live `invitation` row, or the account is refused with a
-`403` whose `detail` says so.
+not automatic: the address has to hold a live `invitation` row, or have arrived through a join link
+still listed in `JOIN_CHANNELS` - the `via` the sign-in request stored or the Google body carried,
+signed into the onboarding token - or the account is refused with a `403` whose `detail` says so.
 
 The refusal happens **twice**, at two points and for two different reasons, and both are in
 `services.registration_gate`:
@@ -87,7 +88,8 @@ The refusal happens **twice**, at two points and for two different reasons, and 
 
 Neither is an enumeration oracle. Both run only after the caller has proven the address, so the
 `403` tells them nothing about an address that is not theirs - and `POST /auth/email/request` stays
-ignorant of invitations entirely, exactly as it stays ignorant of accounts.
+ignorant of invitations entirely, exactly as it stays ignorant of accounts. The one thing it checks
+is whether a join link it was handed is still live, which is a fact about a public link.
 
 **The first account on an empty instance is exempt in both modes**, and is created with
 `is_superuser = true`. That is what makes "the first account to sign in is yours" literally true,

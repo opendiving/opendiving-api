@@ -9,6 +9,7 @@ an `@` in it, and a `LOG_LEVEL` typo.
 
 import importlib.util
 import logging
+import re
 from importlib import metadata
 from pathlib import Path
 from unittest.mock import patch
@@ -398,6 +399,7 @@ class TestRegistrationSettings:
             "INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS",
             "INVITE_REQUEST_RATE_LIMIT_PER_EMAIL",
             "INVITE_REQUEST_RATE_LIMIT_PER_IP",
+            "JOIN_CHANNELS",
         ):
             assert name in template, name
 
@@ -406,6 +408,64 @@ class TestRegistrationSettings:
         # a decision, and a template that restated the default would make it a no-op.
         assert '# REGISTRATION_MODE="open"' in template
         assert "# PROJECT_OPERATED=true" in template
+        assert "# JOIN_CHANNELS=" in template
+
+
+class TestJoinChannels:
+    """`JOIN_CHANNELS`: `slug=Label` pairs, validated at startup like `REGISTRATION_MODE`,
+    so a typo stops the process rather than quietly making a posted link dead."""
+
+    def test_an_instance_that_configures_nothing_has_no_channels(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("JOIN_CHANNELS", raising=False)
+        module = _config_loaded_without_an_env_file(tmp_path, monkeypatch)
+
+        assert module.settings.JOIN_CHANNELS is None
+        assert module.settings.join_channels == {}
+
+    @pytest.mark.parametrize("value", ["", " ", ",,"])
+    def test_empty_is_no_channels(self, value: str):
+        assert _settings(JOIN_CHANNELS=value).join_channels == {}
+
+    def test_pairs_become_a_mapping_in_order(self):
+        channels = _settings(JOIN_CHANNELS=" scubaboard = ScubaBoard , reddit=Reddit r/scuba ").join_channels
+
+        assert list(channels.items()) == [("scubaboard", "ScubaBoard"), ("reddit", "Reddit r/scuba")]
+
+    @pytest.mark.parametrize(
+        "pair",
+        [
+            "ScubaBoard=ScubaBoard",
+            "scuba_board=ScubaBoard",
+            "=ScubaBoard",
+            f"{'a' * 33}=Long",
+            "waitlist=The Waitlist",
+            "bootstrap=First",
+            "scubaboard",
+            "scubaboard=",
+            f"scubaboard={'x' * 41}",
+        ],
+    )
+    def test_a_bad_pair_refuses_to_start_and_names_itself(self, pair: str):
+        with pytest.raises(ValueError, match=re.escape(repr(pair))):
+            _settings(JOIN_CHANNELS=f"reddit=Reddit,{pair}")
+
+    def test_a_slug_listed_twice_refuses_to_start(self):
+        with pytest.raises(ValueError, match="listed twice"):
+            _settings(JOIN_CHANNELS="reddit=Reddit,reddit=Reddit again")
+
+    def test_every_fixed_source_word_is_refused(self):
+        """The guarantee the counter's key space rests on: a channel named after one of the
+        fixed words would be counted as that door."""
+        from src.app.core.config import AccountSource
+
+        for word in AccountSource:
+            with pytest.raises(ValueError, match="reserved"):
+                _settings(JOIN_CHANNELS=f"{word.value}=Anything")
+
+    def test_the_longest_slug_and_label_are_accepted(self):
+        slug, label = "a" * 32, "x" * 40
+
+        assert _settings(JOIN_CHANNELS=f"{slug}={label}").join_channels == {slug: label}
 
 
 class TestTheObjectStoreBackendNeedsItsCredentials:
