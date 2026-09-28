@@ -9,9 +9,9 @@ from .dive import DecoAlgorithm, DiveMode, Salinity
 from .dive_mixture import GasRole
 
 # The bounds `ck_dive_entry_latitude_range` and its three siblings enforce, and the only
-# bounds a coordinate has. Named here rather than written out at each guard because three
-# places mirror them - these validators, `services/dive_parsers/positions.py` (which drops
-# a junk fix before it can displace a real one), and the `CHECK`s themselves.
+# bounds a coordinate has. Named here rather than written out at each guard because more
+# than one place mirrors them - these validators, the import planner's, and the `CHECK`s
+# themselves.
 LATITUDE_LIMIT = 90.0
 LONGITUDE_LIMIT = 180.0
 
@@ -23,8 +23,8 @@ MODEL_NAME_MAX_LENGTH = 64
 
 
 class _ParserOutput(BaseModel):
-    """Base for the shapes a parser returns, holding the one rule that applies to all of
-    them: **no non-finite float leaves a parser.**
+    """Base for the shapes `POST /dive/parse` returns, holding the one rule that applies to
+    all of them: **no non-finite float leaves the parse.**
 
     Stated once, on every field, rather than per-field alongside the bounds below, because
     the bounds are the wrong place to catch this and the first attempt proved it. Each of
@@ -65,8 +65,8 @@ class _ParserOutput(BaseModel):
 class DiveMixtureSchema(_ParserOutput):
     """One cylinder as a dive-computer export describes it.
 
-    **Every field is nullable, and `None` means "the file did not record this"** - a
-    parser reports what it read and never substitutes a plausible value for a missing
+    **Every field is nullable, and `None` means "the file did not record this"** - the
+    reader reports what it read and never substitutes a plausible value for a missing
     one. This schema describes a *file*; `DiveMixtureCreate` (`schemas/dive_mixture.py`)
     describes a dive being saved, and that is still the difference between them even
     though the two shapes have converged: `oxygen`, `helium` and `volume` used to be
@@ -74,15 +74,15 @@ class DiveMixtureSchema(_ParserOutput):
     Their columns are nullable now and mean the same thing on both sides, which is what
     lets an absence travel all the way to the row instead of being defaulted at the door
     (see *A cylinder may record a mix without a vessel* in `DECISIONS.md`). What has not
-    changed is who may guess: a parser still never does, and a *form* still may.
+    changed is who may guess: a reader still never does, and a *form* still may.
 
     The distinction is load-bearing rather than pedantic. These formats routinely omit
     gas data - a FIT file has nowhere to record cylinder size at all, and the 2026 Suunto
-    Ocean JSON export records no gas fraction anywhere - and the parsers used to fill the
-    gap with `0.0`, which is indistinguishable from a reading. A 0 % oxygen mix is a
+    Ocean JSON export records no gas fraction anywhere - and filling the gap with `0.0` is
+    indistinguishable from a reading. A 0 % oxygen mix is a
     hypoxic gas nobody dives, and a 0 L cylinder violates a DB constraint, so both were
-    obviously-wrong values presented as data; worse, the parsed `volume: 0.0` overwrote
-    the dive form's own sensible 11.1 L default. Nulling them instead lets the form apply
+    obviously-wrong values presented as data; worse, a parsed `volume: 0.0` overwrites the
+    dive form's own sensible 11.1 L default. Nulling them instead lets the form apply
     `DEFAULT_MIXTURE` exactly as it does for a manually added cylinder, and leaves the
     guess visible to any caller that wants to say "this wasn't in your file".
     """
@@ -99,13 +99,12 @@ class DiveMixtureSchema(_ParserOutput):
     @field_validator("start_pressure", "end_pressure")
     @classmethod
     def _drop_unpressurized(cls, value: float | None) -> float | None:
-        """Outside `(0, 350]` bar this is not a cylinder pressure, whichever parser
-        produced it.
+        """Outside `(0, 350]` bar this is not a cylinder pressure, whichever format wrote it.
 
         This is **not** the "treat zero as missing" rule DECISIONS.md rejects, and the
         two are worth holding apart. A gas fraction of 0 is inside the range the
-        quantity takes on a real dive - a nitrox mix genuinely contains 0 % helium, and
-        `TestParsersInventNothing` pins that it survives. A start pressure of 0 is not: a
+        quantity takes on a real dive - a nitrox mix genuinely contains 0 % helium, and it
+        survives. A start pressure of 0 is not: a
         cylinder at 0 bar delivers no gas, so it is not a fill anyone dived.
 
         DM5's XML doesn't mean it as one either. 255 of the 353 mixtures in the 384-file
@@ -117,14 +116,15 @@ class DiveMixtureSchema(_ParserOutput):
         same 22 L/11 L and 21 %/49 % cylinders), and where the XML writes `0` for the
         untransmitted 49 % bottle, the JSON simply omits `StartPressure`/`EndPressure` -
         while keeping `Helium: 0` in the same object. One format's absent-marker is the
-        other's absent key, and a parser that read the zero literally made the two
-        exports of one dive disagree.
+        other's absent key, and reading the zero literally would make the two exports of
+        one dive disagree.
 
-        Enforced here rather than in `SuuntoXmlParser`, though that is where the evidence
-        is, because the fact is about the field and not the format: no export can express
-        a cylinder that was breathed from 0 bar, so no parser should claim one. It is the
-        same judgement `_mixtures_from_cylinders` already makes for a `null` Ocean
-        reading, and putting it on the schema means a fourth parser inherits it.
+        Enforced here rather than per format, though DM5 is where the evidence is, because
+        the fact is about the field and not the format: no export can express a cylinder
+        that was breathed from 0 bar, so no reading of one should claim it. The reader drops
+        a both-zero pair of its own accord; a document carrying one zero, as a Shearwater
+        UDDF's end pressure does, reaches here, and the form gets no end pressure rather
+        than a zero it would refuse.
 
         The lower clause excludes everything `<= 0` rather than just `== 0` - a negative
         gauge reading is no more a fill than a zero - though only the zero is attested.
@@ -136,7 +136,7 @@ class DiveMixtureSchema(_ParserOutput):
         no parsed value should reach a bounded column without having passed the bound the
         column applies, and `ck_dive_mixture_start_pressure_range` /
         `ck_dive_mixture_end_pressure_range` now band both fields at 350 bar. That bound
-        is attested from this exact direction - the DM5 XML parser read millibar as bar
+        is attested from this exact direction - a DM5 XML reading took millibar for bar
         and stored `start_pressure = 205203` (see DECISIONS.md) - so without this clause a
         recurrence would hand `/dive/parse` a 205203, prefill the form with it, and 422 on
         Save: a field the diver never chose, which is the failure the other two are
@@ -144,7 +144,7 @@ class DiveMixtureSchema(_ParserOutput):
         fill, the highest real one, and rejects everything above it.
 
         The band is deliberately the same on both fields even though the request layer's
-        floors differ (`gt=0` for start, `ge=0` for end): a parser has no diver asserting
+        floors differ (`gt=0` for start, `ge=0` for end): a file has no diver asserting
         anything, and a 0 from a file is an absent-marker in either column.
         """
         return None if value is not None and not (0 < value <= 350) else value
@@ -159,13 +159,11 @@ class DiveMixtureSchema(_ParserOutput):
         Ocean numbers its cylinders from 0 and the stored profiles label their pressure
         channels to match.
 
-        Only one parser can produce a number a file chose: `_mixtures_from_cylinders`
-        reads `int(cylinder["GasNumber"])` out of the Ocean's sample data. The other three
-        paths synthesize it with `enumerate`, so they cannot go negative by construction.
-        That one path is enough - a negative label reaches `/dive/parse`, pre-fills the
-        form, and `DiveMixtureCreate`'s `ge=0` then 422s a field the diver never chose and
-        cannot see, which is exactly the failure `_drop_implausible_po2_limit` below is
-        written up for.
+        The reader numbers cylinders from 0 by position, so a negative label means a
+        document this app did not expect; one is enough - a negative label reaches
+        `/dive/parse`, pre-fills the form, and `DiveMixtureCreate`'s `ge=0` then 422s a field
+        the diver never chose and cannot see, which is exactly the failure
+        `_drop_implausible_po2_limit` below is written up for.
         """
         return None if value is not None and value < 0 else value
 
@@ -183,8 +181,8 @@ class DiveMixtureSchema(_ParserOutput):
 
         Unattested, and the *format* trap `_drop_unpressurized` documents does not apply
         here: DM5 says "no ppO₂ recorded" with `<PO2 i:nil="true"/>` (363 of 716 mixtures)
-        rather than with a zero, and across the whole corpus the three parsers produce 371
-        `po2_limit` values of which every one is 1.4 or 1.6. This is the unattested half
+        rather than with a zero, and across the whole corpus the 371 `po2_limit` values the
+        Suunto exports carry are every one 1.4 or 1.6. This is the unattested half
         of the same rule - a limit of 0 bar is not a limit, the way 0 bar is not a fill.
         """
         return None if value is not None and not (0.4 <= value <= 2.0) else value
@@ -205,9 +203,9 @@ class ParsedDevice(_ParserOutput):
     the diver named their computer after it.
 
     Every field is defaulted, unlike `DiveMixtureSchema`'s undefaulted block, and for the
-    reason `salinity` is: no format carries all six, so each parser passes the subset
-    its format records and matching the stricter style would make every parse a
-    `ValidationError`. What each parser reads is documented on its own `_device`.
+    reason `salinity` is: no format carries all six, so the projection passes the subset
+    the file records and matching the stricter style would make every parse a
+    `ValidationError`. What each format carries is its mapping document's, in `divejson`.
 
     No length bound on any member, unlike the bounded readings on `ParsedDiveSchema`
     below. Those mirror a `CHECK` on the column they land in; nothing stores a device yet,
@@ -232,11 +230,9 @@ class ParsedDevice(_ParserOutput):
     def _as_trimmed_text(cls, value: object) -> str | None:
         """Whatever the file wrote, as the text an identity is - or nothing.
 
-        `mode="before"`, and it does two jobs each of the three parsers would otherwise do
-        for itself. **Coercion**, because one member arrives in several shapes: a FIT
-        `serial_number` is a `uint32z` and its `software_version` a `uint16` the profile
-        scales to a float, while `<SerialNumber>` and `Header.Device.SerialNumber` are
-        already text. One member, one type, decided once. **Trimming**, because an empty or
+        `mode="before"`, and it does two jobs a caller would otherwise do for itself.
+        **Coercion**, because one member can arrive in several shapes - a number where a
+        serial is text - and one member is one type, decided once. **Trimming**, because an empty or
         padded string is not an identity - `""` compares unequal to `None`, so a device
         that named itself nothing would fail to match the same computer read out of
         another export, which is the one comparison a device exists to support.
@@ -415,7 +411,8 @@ class ParsedDiveSchema(_ParserOutput):
 
     # Oxygen exposure and surface pressure, on the same all-nullable terms as everything
     # above: the device's own accounting, written server-side onto the recording at file
-    # attach rather than pre-filling anything. They ride on this schema anyway because
+    # attach - as the import stores it, unrounded - rather than pre-filling anything. They
+    # ride on this schema anyway, CNS and OTU rounded to the form's two decimals, because
     # `/dive/parse` returns it, which makes them visible in the import preview for free.
     cns_start: float | None = None
     cns_end: float | None = None
@@ -425,8 +422,9 @@ class ParsedDiveSchema(_ParserOutput):
 
     # Where the diver got in and where they got out, in decimal degrees, on the same
     # server-side-only terms as the exposure readings above: a file records these, a form
-    # does not offer them. See `services/dive_parsers/positions.py` for which fix becomes
-    # which - and for why an entry position is routinely absent while an exit one is not.
+    # does not offer them. Which fix becomes which is the reader's, and so is why an entry
+    # position is routinely absent while an exit one is not - see `divejson`'s mapping
+    # documents.
     entry_latitude: float | None = None
     entry_longitude: float | None = None
     exit_latitude: float | None = None
@@ -468,9 +466,8 @@ class ParsedDiveSchema(_ParserOutput):
         constraints are `>= 0` rather than `> 0`. `test_zero_cns_and_otu_are_allowed`
         pins the boundary from the database's side.
 
-        All three parsers pass these through raw - XML `_float(root, "CnsStart")`, JSON
-        `_fraction_to_percent(start_tissue.get("CNS"))`, FIT `float(value)` off the
-        summary - so a negative in any export reached the `UPDATE` unmodified. `NaN` is
+        The form is handed these as the file wrote them, rounded, so a negative in any
+        export would reach the preview unmodified. `NaN` is
         `_ParserOutput._drop_non_finite`'s job, and reading that docstring is the point:
         this guard was written as `< 0` alone and did not catch one.
         """
@@ -516,9 +513,9 @@ class ParsedDiveSchema(_ParserOutput):
         """Past the antimeridian this is not a longitude - `ck_dive_entry_longitude_range`
         and its exit twin.
 
-        Worth stating even though `positions.py` has already filtered the fixes it built
-        these from: this schema is also what `backfill_tech_fields` writes through, and
-        that path reaches the columns via a Core `UPDATE` with no Pydantic after it.
+        Worth stating even though the reader has already filtered the fixes it built these
+        from: this schema is also what `backfill_tech_fields` writes through, and that path
+        reaches the columns via a Core `UPDATE` with no Pydantic after it.
         """
         return None if value is not None and abs(value) > LONGITUDE_LIMIT else value
 
@@ -528,20 +525,20 @@ class ParsedDiveSchema(_ParserOutput):
 
         The same rule `WholeCoordinatePair` applies to a dive site's coordinates, in the
         one place it can be applied here: these fields are never named by a caller, so
-        there is no request body to check and nothing to reject - a parser hands over what
-        it read, and the wrong halves are dropped rather than 422'd.
+        there is no request body to check and nothing to reject - the projection hands over
+        what the file said, and the wrong halves are dropped rather than 422'd.
 
         Both conditions are reachable *only* through this schema's own field validators,
-        which is why this runs after them rather than instead of them. `positions.py`
-        emits a pair or nothing; `_drop_non_finite` nulling a `NaN` latitude, or
+        which is why this runs after them rather than instead of them. A document carries
+        a position whole or not at all; `_drop_non_finite` nulling a `NaN` latitude, or
         `_drop_impossible_longitude` nulling a longitude of 400, is what leaves a lone
         ordinate behind - and a lone ordinate written to the column is a dive pinned to
         the equator or the prime meridian, which is a claim the file never made. It also
         violates `ck_dive_entry_position_pair`, so the alternative to dropping it is an
         `IntegrityError` on an otherwise importable file.
 
-        Exactly `0.0, 0.0` goes the same way. See `geo_fix`, and *"What divelogs.de does
-        with our UDDF"* in DECISIONS.md, where Null Island was first written up.
+        Exactly `0.0, 0.0` goes the same way. See *"What divelogs.de does with our UDDF"* in
+        DECISIONS.md, where Null Island was first written up.
         """
         for latitude, longitude in (("entry_latitude", "entry_longitude"), ("exit_latitude", "exit_longitude")):
             values = (getattr(self, latitude), getattr(self, longitude))
@@ -555,11 +552,11 @@ class ParsedDiveSchema(_ParserOutput):
         """A device with nothing on it is not a device the file described.
 
         Reachable only through `ParsedDevice`'s own field validators, which is why this
-        runs after them rather than instead of them: a parser that hands over five empty
-        strings and an unreadable counter has built an object of six `None`s, and
-        reporting that would tell a caller the export named a computer when it named
-        nothing at all. The same move `_drop_half_positions` makes above, and here rather
-        than in each parser for the same reason it is: a fourth parser inherits it.
+        runs after them rather than instead of them: five empty strings and an unreadable
+        counter build an object of six `None`s, and reporting that would tell a caller the
+        export named a computer when it named nothing at all. The same move
+        `_drop_half_positions` makes above, on the schema for the same reason: every caller
+        building one inherits it.
         """
         if self.device is not None and all(
             getattr(self.device, member) is None for member in ParsedDevice.model_fields
@@ -623,8 +620,8 @@ class ParsedDiveResponse(ParsedDiveSchema):
 
     A subclass rather than a wrapper object (`{dive: ..., file_token: ...}`) so the
     response stays flat and the frontend's existing form-filling code is unaffected.
-    Parsers keep returning a bare `ParsedDiveSchema` - the token and the matches are added
-    by the route, which is the only layer that knows who is asking.
+    `dive_reader.prefill` returns a bare `ParsedDiveSchema` - the token and the matches are
+    added by the route, which is the only layer that knows who is asking.
     """
 
     file_token: str

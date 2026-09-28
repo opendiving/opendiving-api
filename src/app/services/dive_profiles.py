@@ -14,10 +14,11 @@ The **only** module that reads or writes `dive_profile.data` - the same seam dis
 as `services/dive_files.py`, for the same reason: the payload's encoding is an
 implementation detail, and everything above this module deals in `NormalizedProfile`.
 
-Two halves. The top one is pure and DB-free (`normalize`, `derive_gas_attribution`,
-`downsample`, `extract_profile`, `should_extract`), following the `reconcile()` idiom in
-`dive_files.py`: the decisions worth testing are testable without a database. The bottom
-one persists.
+Two halves. The top one is pure and DB-free (`derive_gas_attribution`, `downsample`,
+`fill_channels`, `should_extract`), following the `reconcile()` idiom in `dive_files.py`: the
+decisions worth testing are testable without a database. The bottom one persists. Reading the
+samples out of a file is `services/dive_reader.py`'s and shaping them is
+`services/recording_shape.py`'s; this module takes a `NormalizedProfile` from there.
 
 One thing here is not a curve: `derive_gas_attribution` reads the gas switches back
 against the depth channel to work out which cylinder was breathed for how long and how
@@ -41,8 +42,10 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
+import divejson
 from pydantic import ValidationError
 from sqlalchemy import CursorResult, delete, func, insert, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
 from uuid6 import uuid7
@@ -64,21 +67,18 @@ from ..schemas.dive_profile import (
     DiveProfileRead,
     DiveProfileSeries,
     GasAttribution,
-    ParsedProfileSchema,
-    ParsedSeries,
     ProfileEventType,
     ProfileProvenance,
     RecordingProfileRead,
 )
 from .blob_store import BlobMissingError
-from .dive_parsers import DiveParseError, DiveParser
 
 logger = logging.getLogger(__name__)
 
-# Bumped whenever a change to this module or to any `parse_profile` would produce
-# different samples from the same bytes. Stored on the row, so `should_extract` can tell
-# "already done" from "done by an older extractor", and so the backfill script has
-# something to select on.
+# Bumped whenever a change to this app's own pipeline - the shaping, the labelling, the
+# attribution, the cap - would produce different samples from the same bytes. Stored on the
+# row, so `should_extract` can tell "already done" from "done by an older extractor", and so
+# the backfill script has something to select on. What the *reader* does is `READER_VERSION`'s.
 #
 # 2: the deco `ceiling` channel and `events`, which every parser had been dropping.
 # 3: `gas_attribution`, derived from those events - which gas was breathed for how long
@@ -90,17 +90,27 @@ logger = logging.getLogger(__name__)
 # 5: the axis in milliseconds, counted from the file's own start rather than from its first
 #    reading. Revision `ce09bc7d4c64` stamps it on every row it multiplies, which keeps the
 #    ordinary backfill off them; `--force` is what re-derives their sub-second offsets.
+# 6: every file read through `divejson` and shaped as logbook import shapes a document's
+#    recording - cylinders labelled from 0 by position, as the reader labels them, and two
+#    readings on one millisecond resolved by the reader's rule.
 #
-# **A profile already stored stays on the channels it has**, which is a decision rather than
-# an oversight: `backfill_profiles` would re-extract everything behind this number and
-# nothing runs it. See *"The decompression channels arrive for new dives only"* in
-# `DECISIONS.md`.
-PROFILE_EXTRACTOR_VERSION = 5
+# A profile stored before a bump stays valid and is served as it is until
+# `backfill_profiles` re-reads it, which an operator runs after the release that moves it.
+PROFILE_EXTRACTOR_VERSION = 6
 
-# The two `parser_key` values that are **not** a parser's, and the set both backfills refuse
+# The reader's version, stored beside the extractor's: a profile read from stored bytes is a
+# function of those bytes, of this and of `PROFILE_EXTRACTOR_VERSION`, and the row records all
+# three. It names the package and moves with every pin bump whether or not a reader changed,
+# so after a bump every profile is behind until the backfill runs, and valid meanwhile. It
+# does not name the package's FIT decoder: `fitdecode` is pinned beside it, and a bump of it
+# alone is followed by a forced backfill over the FIT files (`--force --parser-key fit`).
+READER_VERSION: str = divejson.__version__
+
+# The two `parser_key` values that are **not** a format id, and the set both backfills refuse
 # to overwrite. `dive_profile.parser_key` answers "which of three things is this profile":
-# a `DiveParser.key` means the samples were read out of the recording's files and can be
-# read again; these two mean nothing on this instance can re-yield them.
+# a format id the reader names (`divejson.read_formats()`) means the samples were read out of
+# the recording's files and can be read again; these two mean nothing on this instance can
+# re-yield them.
 #
 # `divejson_import` is a profile a document supplied - see *"Importing a logbook is the one
 # client-supplied profile"* in `DECISIONS.md`. `merge` is two recordings' samples folded
@@ -111,8 +121,8 @@ IMPORT_PARSER_KEY = "divejson_import"
 MERGE_PARSER_KEY = "merge"
 UNREPRODUCIBLE_PROVENANCES = frozenset({IMPORT_PARSER_KEY, MERGE_PARSER_KEY})
 
-# The published spelling of each sentinel. Everything *not* in here is a `DiveParser.key`
-# and reads as `FILE` - which is why this maps the closed side rather than listing the open
+# The published spelling of each sentinel. Everything *not* in here is a format id and reads
+# as `FILE` - which is why this maps the closed side rather than listing the open
 # one. `test_every_unreproducible_provenance_has_a_wire_value` fails the build if a third
 # sentinel is added to the set above without a spelling here, because the fallback would
 # otherwise publish it as "read from the files" - the one answer that is never true of a
@@ -135,10 +145,10 @@ MAX_POINTS_PER_CHANNEL = 1200
 
 # Events are capped by count and **not** by the bucketing below: min/max over a bucket is
 # meaningless for a marker, and a chart that showed "some of the gas switches" would be
-# worse than one that showed none. The cap exists for the reason `_MAX_CYLINDERS` does in
-# the parsers - nothing else bounds how many markers a file may claim, and every one of
-# them is a few dozen bytes in a payload that is fetched whole - not because any real dive
-# approaches it: the worst dive in the corpus produces 17.
+# worse than one that showed none. The cap exists because nothing else bounds how many
+# markers a file may claim, and every one of them is a few dozen bytes in a payload that is
+# fetched whole - not because any real dive approaches it: the worst dive in the corpus
+# produces 17.
 MAX_EVENTS = 200
 
 # And how long one marker's `label` may be, which is what makes the cap above mean anything.
@@ -401,12 +411,14 @@ class ExistingProfileRow:
 
     `parser_key` rides along because the *provenance* question and the *currency* question
     are asked in the same breath now: a profile a document supplied or a merge produced is
-    never re-extracted, whatever its digest says.
+    never re-extracted, whatever its digest says. `reader_version` is NULL on every row no
+    reader wrote - those two, and every row stored before the column existed.
     """
 
     source_sha256: str
     extractor_version: int
     parser_key: str
+    reader_version: str | None = None
 
     @property
     def is_reproducible(self) -> bool:
@@ -417,7 +429,7 @@ class ExistingProfileRow:
 @dataclass(frozen=True, slots=True)
 class BackfillReport:
     """What one run of `backfill_profiles` did. All five counts, always - a run that
-    reports only successes hides the parser that stopped working."""
+    reports only successes hides the file that stopped reading."""
 
     examined: int = 0
     extracted: int = 0
@@ -427,112 +439,6 @@ class BackfillReport:
 
 
 # ---------------------------------------------------------------- pure, DB-free
-
-
-def _milliseconds(seconds: float) -> int:
-    """A parser's fractional seconds as whole milliseconds, never below zero.
-
-    Clamped rather than dropped: a reading before the axis origin is real - a FIT record
-    stamped before its session's start, a second file whose clock started early - and the
-    start of the axis is the one place a chart can put it.
-    """
-    return max(0, round(seconds * MILLISECONDS_PER_SECOND))
-
-
-def _rebase(points: list[tuple[float, int]], origin: float) -> ProfileSeries:
-    """Round a channel onto integer milliseconds from `origin`, keeping the last reading per millisecond.
-
-    Where two readings land on one millisecond - which a clamp at zero produces as well as
-    rounding - the later one wins: an arbitrary but consistent choice, and the alternative,
-    averaging, would invent a reading the sensor never took.
-    """
-    by_millisecond: dict[int, int] = {}
-    for seconds, value in points:
-        by_millisecond[_milliseconds(seconds - origin)] = value
-    ordered = sorted(by_millisecond)
-    return ProfileSeries(t=ordered, v=[by_millisecond[moment] for moment in ordered])
-
-
-def _rebase_events(parsed: ParsedProfileSchema, origin: float) -> list[ProfileEvent]:
-    """Put the file's markers on the same millisecond axis as the channels.
-
-    **Clamped at zero rather than dropped below it**, for `_milliseconds`' reason: a marker
-    before the origin is the ordinary case where the origin is a file's first reading - a DM5
-    export records its opening gas at `<GasChangeTime>0</GasChangeTime>` and its first sample
-    at `<Time>1</Time>` - and discarding it would lose which gas the dive started on.
-
-    **The high end is deliberately not clamped.** `duration` is the span of the *samples*,
-    and a device goes on recording after the last one - a FIT `user_marker` can be pressed
-    after the final `record`. A marker there happened when the file says it happened, and a
-    chart that draws past its x domain is the chart's to clip.
-
-    Sorted here because the Suunto XML export lists gas changes nested inside each
-    `<DiveMixture>`, so file order is cylinder order; a stable sort keeps two markers on one
-    millisecond in the order the file listed them. Deduped on the whole event, keeping the
-    first, because the same `GasSwitch` can arrive under both `Events` and `DiveEvents` on one
-    Suunto JSON sample.
-
-    `label` is truncated here rather than bounded on the schema, which would raise: a file
-    whose one long alert took its depth curve down with it is what the never-fail contract on
-    `extract_profile` exists to prevent.
-    """
-    seen: set[tuple[int, ProfileEventType, int | None, str | None]] = set()
-    ordered: list[ProfileEvent] = []
-    for event in sorted(parsed.events, key=lambda event: event.t):
-        label = event.label[:MAX_LABEL_CHARS] if event.label is not None else None
-        key = (_milliseconds(event.t - origin), event.type, event.gas_number, label)
-        if key in seen:
-            continue
-        seen.add(key)
-        ordered.append(ProfileEvent(t=key[0], type=event.type, gas_number=event.gas_number, label=label))
-    return ordered
-
-
-def normalize(parsed: ParsedProfileSchema, *, from_file_start: bool = False) -> NormalizedProfile | None:
-    """Turn a parser's raw per-channel arrays into the stored shape, or `None` if empty.
-
-    Format-independent work, done exactly once here rather than in each parser: rounding to
-    integer milliseconds, deduping collisions, and dropping channels that turned out to carry
-    nothing.
-
-    **`from_file_start` says the parser's axis counts from a start the file's header
-    states**, which every parser's does: `Header.DateTime` for the Suunto JSON export, the
-    session's `start_time` for FIT, `<StartTime>` for DM5's `<Time>`. The axis is then kept
-    as it is, so a first reading keeps the offset its file states and the stored axis counts
-    from the instant the recording's `started_at` names. Without a stated start - a header
-    that names none, or a caller holding no header - the earliest reading across every
-    channel is zero, which is the only origin the file offers.
-
-    **Events never set the origin**, though they are rebased against it: a marker a device
-    wrote alongside the samples is not a stream with its own cadence. A file consisting only
-    of events has no profile to draw and returns `None`.
-    """
-    points_by_channel: dict[str, list[tuple[float, int]]] = {}
-    for channel in SINGLE_SERIES_CHANNELS:
-        parsed_series: ParsedSeries | None = getattr(parsed, channel)
-        points_by_channel[channel] = list(zip(parsed_series.t, parsed_series.v, strict=True)) if parsed_series else []
-    pressure_points = [
-        (cylinder.gas_number, list(zip(cylinder.t, cylinder.v, strict=True))) for cylinder in parsed.pressure
-    ]
-    sampled = [points for points in (*points_by_channel.values(), *(p for _, p in pressure_points)) if points]
-
-    if not sampled:
-        return None
-
-    # Each channel is sorted (the schema validates it), so its first timestamp is its
-    # minimum. The union across channels is not sorted, hence the `min`.
-    origin = 0.0 if from_file_start else min(points[0][0] for points in sampled)
-
-    return with_channels(
-        {channel: _rebase(points, origin) if points else None for channel, points in points_by_channel.items()},
-        pressure=[
-            ProfilePressureSeries(gas_number=gas_number, t=series.t, v=series.v)
-            for gas_number, series in (
-                (number, _rebase(points, origin)) for number, points in pressure_points if points
-            )
-        ],
-        events=_rebase_events(parsed, origin),
-    )
 
 
 def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
@@ -560,8 +466,9 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
       corpus carries a pressure channel without a gas-switch event beside it.
 
     A switch before the first depth sample is the dive *starting* on that gas - the
-    ordinary case, since a Suunto records the opening selection at t=0 (see
-    `_rebase_events`) - so it is clipped forward to the first sample rather than dropped.
+    ordinary case, since a Suunto records the opening selection at t=0 and its first sample
+    a second or more later - so it is clipped forward to the first sample rather than
+    dropped.
     A stretch *before* the first switch, however, is left unattributed: nothing says what
     was breathed then, and `compute_multi_tank_gas_use` reports the shortfall as
     `attributed_seconds` rather than quietly dividing a cylinder's gas by less time than it
@@ -593,7 +500,7 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
     the alternative (counting it into the stretch that was ending) is no more correct, since
     the switch happened at some unrecorded instant within that sampling interval either way.
 
-    **Runs before `downsample`**, which is what `finalize_profile` exists to sequence.
+    **Runs before `downsample`**, which is what `attribute_and_cap` exists to sequence.
     Min/max bucketing keeps each bucket's extremes and discards everything between them,
     so a mean taken afterwards would be a mean of the dive's peaks and troughs rather than
     of the dive.
@@ -607,7 +514,7 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
     for event in profile.events:
         if event.type is not ProfileEventType.GAS_SWITCH or event.gas_number is None:
             continue
-        # Sorted by `normalize`, so the first switch at or before the first sample is the
+        # Sorted by `shape_events`, so the first switch at or before the first sample is the
         # gas the dive began on and any earlier one is superseded by it.
         moment = max(event.t, first_sample)
         if moment > last_sample:
@@ -618,7 +525,7 @@ def derive_gas_attribution(profile: NormalizedProfile) -> list[GasAttribution]:
             continue
         if switch_times and switch_times[-1] == moment:
             # Two switches on one millisecond: the later one is what the diver ended up on,
-            # the same last-reading-wins rule `_rebase` applies to a channel.
+            # the same last-reading-wins rule `shift_profile` applies to a channel.
             switch_gases[-1] = event.gas_number
             continue
         switch_times.append(moment)
@@ -773,50 +680,14 @@ def downsample(
     )
 
 
-def extract_profile(parser: type[DiveParser], content: bytes) -> NormalizedProfile | None:
-    """Run a parser's profile extraction over some bytes, normalized and capped.
-
-    **Never raises.** A failed extraction must not fail the upload it rode in on: the
-    file is the durable artifact and can be re-extracted after the extractor is fixed,
-    whereas refusing the attach would discard the very corpus entry needed to fix it. So
-    `DiveParseError` - and anything unexpected - is logged with the parser key and
-    swallowed, and the dive simply has no profile until a backfill run picks it up.
-    """
-    try:
-        return finalize_profile(parser.parse_profile(content))
-    except DiveParseError:
-        logger.warning("Profile extraction failed for a %s file: malformed samples", parser.key, exc_info=True)
-        return None
-    except Exception:
-        logger.exception("Unexpected error extracting a profile from a %s file", parser.key)
-        return None
-
-
-def finalize_profile(parsed: ParsedProfileSchema | None) -> NormalizedProfile | None:
-    """Normalize and cap an already-parsed profile.
-
-    Split out of `extract_profile` for `_extract_all`, which gets its `parsed` from
-    `parse_all` and would otherwise have to repeat these three steps - and repeat them
-    exactly, since a profile normalized one way at attach and another way in a backfill
-    is the kind of drift nothing would notice. **Raises**, unlike its caller: the
-    never-raises promise belongs to the wrappers, and this is the shared middle.
-
-    The order of the last two steps is load-bearing rather than incidental: gas attribution
-    reads a mean depth off the depth channel, and `downsample` keeps each bucket's extremes
-    and throws away the samples between them. Deriving it here, where both are in view,
-    is what stops the two ever being sequenced the other way round.
-    """
-    return attribute_and_cap(normalize(parsed) if parsed is not None else None)
-
-
 def attribute_and_cap(normalized: NormalizedProfile | None) -> NormalizedProfile | None:
-    """`finalize_profile`'s last two steps, over an already-normalized profile.
+    """The pipeline's last two steps, run once over a recording's shaped samples.
 
-    Split out for `dive_files.extract_recording`, which normalizes each of a recording's files
-    separately, fills the channels across them and then has to finish the pipeline **once**
-    over the merged result. Doing it per file and merging afterwards would attribute against
-    the wrong channels - a recording whose depth came from one file and whose gas switches came
-    from another - and would cap twice.
+    Once rather than per file: `dive_files.extract_recording` shapes each of a recording's
+    files separately, fills the channels across them and finishes here over the merged
+    result. Doing it per file and merging afterwards would attribute against the wrong
+    channels - a recording whose depth came from one file and whose gas switches came from
+    another - and would cap twice.
 
     **The order is the whole of what this function is for**, and getting it backwards is not
     hypothetical: `derive_gas_attribution` reads a mean depth off the channel, `downsample`
@@ -832,10 +703,9 @@ def attribute_and_cap(normalized: NormalizedProfile | None) -> NormalizedProfile
 def recording_source_digest(digests: Sequence[str]) -> str:
     """The `source_sha256` a recording's profile records, from its files' digests in order.
 
-    **One file gives back that file's own digest, unchanged.** That is not an optimisation:
-    it is what keeps `should_extract` and the profile ETag identical for every row that
-    existed before recordings did, so no migrated profile becomes a backfill candidate and
-    no client's cached profile is invalidated by this change alone.
+    **One file gives back that file's own digest, unchanged**, which is what every row
+    written before recordings existed recorded - so the digest term of `should_extract` reads
+    those rows the way it reads a one-file recording today.
 
     Several files hash their digests concatenated in attach order, so that attaching a
     second file to a recording changes the value and the profile the first produced is
@@ -862,7 +732,7 @@ def fill_channels(base: NormalizedProfile | None, addition: NormalizedProfile | 
 
     `gas_attribution` is deliberately **not** filled and is left empty here - it is derived
     from the merged events and depth together, so it has to be recomputed after the fill
-    rather than carried across from a half of it. `finalize_profile`'s ordering rule, one
+    rather than carried across from a half of it. `attribute_and_cap`'s ordering rule, one
     level up.
 
     Either side may be `None`, which is the ordinary case: a file whose samples this build
@@ -933,10 +803,11 @@ def shift_profile(profile: NormalizedProfile, milliseconds: int) -> NormalizedPr
     records stays a gap, which is what DiveJSON §5.4 requires.
 
     **A reading moved before zero is clamped to it**, the last reading per millisecond kept
-    where the clamp makes two collide - `_rebase`'s rule, for `_milliseconds`' reason: a
-    second device whose clock started early has readings before the recording's start, and a
-    filled channel loses its first samples if they are dropped. Events clamp the same way and
-    keep the first of two identical markers, as `_rebase_events` does.
+    where the clamp makes two collide - averaging would invent a reading the sensor never
+    took. A reading before the start is real: a second device whose clock started early has
+    readings before the recording's start, and a filled channel loses its first samples if
+    they are dropped. Events clamp the same way and keep the first of two identical markers,
+    as `shape_events` does.
 
     `gas_attribution` is left behind for `profile_from_data`'s reason: its entries are
     durations rather than instants, but they are about to be recomputed over the joined
@@ -1047,7 +918,7 @@ def _join_events(earlier: Sequence[ProfileEvent], later: Sequence[ProfileEvent])
 
     A stable sort with the earlier half first, so two markers on one instant keep the order
     the records were written in, and the dedupe keeps the first - the same shape
-    `_rebase_events` uses within one file.
+    `shape_events` uses within one file.
     """
     seen: set[tuple[int, ProfileEventType, int | None, str | None]] = set()
     ordered: list[ProfileEvent] = []
@@ -1073,13 +944,19 @@ def profile_payload_digest(profile: NormalizedProfile) -> str:
 
 
 def should_extract(
-    existing: ExistingProfileRow | None, *, sha256: str, version: int = PROFILE_EXTRACTOR_VERSION
+    existing: ExistingProfileRow | None,
+    *,
+    sha256: str,
+    version: int = PROFILE_EXTRACTOR_VERSION,
+    reader_version: str = READER_VERSION,
 ) -> Literal["extract", "skip"]:
     """Decide whether a recording's profile is still current.
 
-    `(source digest, extractor version)` is the whole test for a profile a parser produced -
-    it is a pure function of those two things. Split out from its callers so the table of
-    cases is testable without a database.
+    `(source digest, extractor version, reader version)` is the whole test for a profile read
+    from stored bytes - it is a pure function of those three things. Any of them differing is
+    `extract`, a newer reader's row included: this build cannot vouch for what another
+    reader made of the bytes. Split out from its callers so the table of cases is testable
+    without a database.
 
     **A profile no file can re-yield is always `skip`**, whatever its digest says. A document
     supplied it (`divejson_import`) or a merge produced it (`merge`), and re-extracting would
@@ -1093,6 +970,8 @@ def should_extract(
     if existing.source_sha256 != sha256:
         return "extract"
     if existing.extractor_version != version:
+        return "extract"
+    if existing.reader_version != reader_version:
         return "extract"
     return "skip"
 
@@ -1144,10 +1023,15 @@ async def store_profile(
     profile: NormalizedProfile,
     source_sha256: str,
     parser_key: str,
+    reader_version: str | None,
     commit: bool = False,
     duration: int | None = None,
 ) -> None:
     """Replace this recording's profile with `profile`.
+
+    `reader_version` is `READER_VERSION` for samples read from the recording's stored files
+    and `None` for samples that were not - a document's or a merge's. Required, so a new
+    caller has to say which it has.
 
     `commit=False` by default because the caller that matters (`store_recording_file`) has
     to write the file and the profile in one transaction: a recording must never end up with
@@ -1178,6 +1062,7 @@ async def store_profile(
             source_sha256=source_sha256,
             parser_key=parser_key,
             extractor_version=PROFILE_EXTRACTOR_VERSION,
+            reader_version=reader_version,
             duration=profile.duration if duration is None else duration,
             depth_sample_count=profile.depth_sample_count,
             # A count rather than `None` when there are none: this extractor version looked
@@ -1191,7 +1076,8 @@ async def store_profile(
             data=profile.to_data(),
             # Spelled out rather than left to `PublicUUIDMixin`'s `default_factory`: that
             # is a dataclass-level default applied when the ORM constructs an instance,
-            # and this Core-level INSERT never constructs one.
+            # and this Core-level INSERT never constructs one. A fresh one per write is also
+            # what makes it the profile's ETag - see `get_profile_version`.
             uuid=uuid7(),
             created_at=datetime.now(UTC),
         )
@@ -1243,6 +1129,11 @@ async def replace_profile_samples(db: AsyncSession, *, recording_id: int, profil
     stored span may be a document's declared one rather than the samples' own.
     `gas_attribution` is re-derived rather than carried - its entries are keyed by
     `gas_number`, which is precisely what just moved.
+
+    Also the rewrite that keeps a dive's other recordings pointing at its cylinders when a
+    primary's labels renumber them (`dive_files.label_cylinders`). **The row's `uuid` is
+    minted afresh** either way, because it is the profile's ETag: samples that changed under
+    an unchanged ETag would be served from a client's cache against cylinders that moved.
     """
     attributed = replace(profile, gas_attribution=derive_gas_attribution(profile))
 
@@ -1255,16 +1146,17 @@ async def replace_profile_samples(db: AsyncSession, *, recording_id: int, profil
             **summary_extremes(attributed),
             gas_attribution=[entry.model_dump() for entry in attributed.gas_attribution],
             data=attributed.to_data(),
+            uuid=uuid7(),
         )
     )
 
 
 async def get_existing_profile(db: AsyncSession, *, recording_id: int) -> ExistingProfileRow | None:
-    """The three columns `should_extract` and the backfill guard need. Explicit columns, so
-    `data` can't ride along."""
-    stmt = select(DiveProfile.source_sha256, DiveProfile.extractor_version, DiveProfile.parser_key).where(
-        DiveProfile.recording_id == recording_id
-    )
+    """The columns `should_extract` and the backfill guard need. Explicit columns, so `data`
+    can't ride along."""
+    stmt = select(
+        DiveProfile.source_sha256, DiveProfile.extractor_version, DiveProfile.parser_key, DiveProfile.reader_version
+    ).where(DiveProfile.recording_id == recording_id)
     row = (await db.execute(stmt)).one_or_none()
     return None if row is None else ExistingProfileRow(*row)
 
@@ -1272,12 +1164,16 @@ async def get_existing_profile(db: AsyncSession, *, recording_id: int) -> Existi
 async def get_profile_version(db: AsyncSession, *, recording_id: int) -> str | None:
     """The ETag for a recording's profile, or `None` when it has none.
 
-    `"{source_sha256}:{extractor_version}"` because those two things are exactly what the
-    payload is a function of. Lets the read route answer a conditional request after one
-    narrow query rather than decoding tens of KB of JSONB only to discard it.
+    **The row's own identity**, its `uuid`, which every write of samples renews: `store_profile`
+    inserts a fresh row and `replace_profile_samples` mints a fresh one. Not the key the
+    samples are a function of - `(source digest, extractor version, reader version)` - because
+    a relabel changes the samples without changing the key, when a dive's other recordings are
+    renumbered onto a primary's labels. Lets the read route answer a conditional request after
+    one narrow query rather than decoding tens of KB of JSONB only to discard it.
     """
-    existing = await get_existing_profile(db, recording_id=recording_id)
-    return None if existing is None else f"{existing.source_sha256}:{existing.extractor_version}"
+    stmt = select(DiveProfile.uuid).where(DiveProfile.recording_id == recording_id)
+    identity = (await db.execute(stmt)).scalar_one_or_none()
+    return None if identity is None else str(identity)
 
 
 async def load_profile(db: AsyncSession, *, recording_id: int) -> LoadedProfile | None:
@@ -1539,73 +1435,65 @@ async def backfill_profiles(
     force: bool = False,
     dry_run: bool = False,
 ) -> BackfillReport:
-    """Re-extract profiles from the exports already stored against recordings.
+    """Re-read the recordings whose profile is behind the files they hold.
 
-    Selects the **recordings** whose profile is missing, was produced by an older extractor,
-    or came out of different bytes than the files now on the recording. `force` re-extracts
-    everything matching `parser_key` regardless - what you want after fixing a parser
-    without bumping `PROFILE_EXTRACTOR_VERSION`.
+    Selects the **recordings** whose profile is missing, came out of different bytes than the
+    files now on the recording, or was read by an older extractor or another reader - a NULL
+    reader version included, which is every profile stored before the column existed and
+    every one an archive restore kept from its document beside a file this build reads.
+    `force` re-reads everything matching `parser_key` regardless: what you want after a bump
+    of the FIT decoder alone, which moves neither version.
 
     **A recording whose profile no file can re-yield is never a candidate**, `force`
     included: a document supplied those samples or a merge produced them, and there is
     nothing on this instance to derive them from a second time. That test is on the
-    *profile's* provenance rather than on a file's, which is the correction this change
-    carries - a merged recording may still hold the files either part had, so asking a file
-    would have selected it and overwritten a folded profile with one half of itself.
+    *profile's* provenance rather than on a file's - a merged recording may still hold the
+    files either part had.
 
-    A multi-file recording is re-derived from **all** of its files, in attach order, under
-    the same fill rule the attach path applies (`fill_channels`).
+    **What it stores goes through the re-derivation**, called as a repeat upload calls it -
+    `fresh` and `joined` both false, because it re-reads bytes the recording already has: it
+    fills readouts and fixes and never clears them, rewrites the recording's gate figures from
+    its samples, and runs the cylinder labelling for a primary and a later recording alike, so
+    a dive stored under a previous reader's labels comes out on this one's. Each recording in
+    a savepoint of its own, so one the database refuses costs only itself.
 
     A one-shot script drives this, not an arq job: the API-side queue plumbing was
     deliberately deleted (see DECISIONS.md) and the worker runs crons only, so a backfill
-    scheduled as a cron would rescan the whole corpus forever for a job that finishes
-    once per extractor version. See `src/scripts/backfill_dive_profiles.py`.
+    scheduled as a cron would rescan the whole corpus forever for a job that finishes once
+    per version. See `src/scripts/backfill_dive_profiles.py`.
     """
     # Imported here rather than at module scope: `dive_files` imports *this* module for
     # the extraction hooks in `store_recording_file`, so a top-level import would be circular.
-    from .dive_files import extract_recording_profile, load_recording_files
+    from .dive_files import extract_recording, load_recording_files, rederive_recording
 
-    # **Candidates are recordings now, not files**, and the guard moved with them. It used
-    # to select `dive_file` rows and test the *file's* `parser_key`, which would let a merged
-    # recording that kept its files be selected and its merged samples overwritten by one
-    # half of themselves. The provenance that matters is the *profile's*, so a recording
-    # whose profile is `divejson_import` or `merge` is excluded outright and `should_extract`
-    # is asked only of the rest.
     stmt = (
         select(
             DiveRecording.id.label("recording_id"),
             DiveRecording.dive_id,
             DiveRecording.user_id,
+            DiveRecording.ordinal,
             DiveRecording.start_time,
             DiveRecording.utc_offset_minutes,
         )
-        # Explicit columns, never `select(DiveRecording)`: the same discipline the file
-        # query kept for the payload's sake, retained because it says what is read.
+        # Explicit columns, never `select(DiveRecording)`: what a decision reads should be
+        # visible in the statement that reads it.
         .outerjoin(DiveProfile, DiveProfile.recording_id == DiveRecording.id)
         .where(DiveProfile.parser_key.is_(None) | DiveProfile.parser_key.not_in(UNREPRODUCIBLE_PROVENANCES))
         .order_by(DiveRecording.id)
     )
     if parser_key is not None:
-        # Narrowed by the *files*' parser, which is what a "I fixed the FIT parser" run
-        # means: a recording is a candidate when any of its files was read by that parser.
+        # Narrowed by the *files*' format, which is what a "re-read the FITs" run means: a
+        # recording is a candidate when any of its files is recorded under it.
         stmt = stmt.where(
             select(DiveFile.id)
             .where(DiveFile.recording_id == DiveRecording.id, DiveFile.parser_key == parser_key)
             .exists()
         )
     if not force:
-        # **The digest term survives the move to recordings**, and it is the one the old query
-        # spelled `DiveProfile.source_sha256 != DiveFile.sha256` - "the profile came out of
-        # different bytes than the file now on the dive". Dropping it would have left
-        # `should_extract` below unable to answer `skip` for any row that reached it, and a
-        # recording whose stored profile is current-version but was derived from a different
-        # set of files unrepairable without `--force`.
-        #
-        # Only the single-file case is expressible here, because a recording holding several
-        # has a digest `recording_source_digest` derives in Python. So a recording holding
-        # anything other than exactly one file is admitted by the count term and settled by
-        # `should_extract` a few lines down - which is the same answer, one load later, and
-        # costs a re-read only for the rare recording with two files.
+        # **The digest term is the single-file case only**, because a recording holding
+        # several has a digest `recording_source_digest` derives in Python. So a recording
+        # holding anything other than exactly one file is admitted by the count term and
+        # settled by `should_extract` a few lines down - the same answer, one load later.
         one_file = (
             select(DiveFile.sha256)
             .where(DiveFile.recording_id == DiveRecording.id)
@@ -1622,6 +1510,8 @@ async def backfill_profiles(
         stmt = stmt.where(
             (DiveProfile.id.is_(None))
             | (DiveProfile.extractor_version != PROFILE_EXTRACTOR_VERSION)
+            | (DiveProfile.reader_version.is_(None))
+            | (DiveProfile.reader_version != READER_VERSION)
             | (file_count != 1)
             | (DiveProfile.source_sha256 != one_file)
         )
@@ -1631,8 +1521,11 @@ async def backfill_profiles(
     candidates = list(await db.execute(stmt))
     examined = extracted = skipped = no_samples = failed = 0
     touched_user_ids: set[int] = set()
+    # Recordings written since the last commit, rather than a position in `candidates`: an
+    # index-modulo test below several `continue`s skips the commit a failure lands on.
+    pending = 0
 
-    for index, row in enumerate(candidates, start=1):
+    for row in candidates:
         examined += 1
 
         try:
@@ -1660,21 +1553,18 @@ async def backfill_profiles(
 
         # Synchronously: a one-shot script's loop has nothing else on it, so the threadpool
         # hop the request paths need (`dive_files.read_recording`) would buy nothing here.
-        profile, unreadable = extract_recording_profile(
-            files, start_time=row.start_time, utc_offset_minutes=row.utc_offset_minutes
-        )
-        if unreadable:
-            # At least one of this recording's files is recorded under a parser key this
-            # build no longer has, or stopped parsing. Counted rather than swallowed: a file
-            # that parsed at import time and does not now is a parser regression, and a run
-            # reporting only successes would hide it.
+        extraction = extract_recording(files, start_time=row.start_time, utc_offset_minutes=row.utc_offset_minutes)
+        if extraction.unreadable:
+            # At least one of this recording's files is recorded under a format this build no
+            # longer reads, or stopped reading. Counted rather than swallowed: a file that read
+            # at attach time and does not now is a reader regression, and a run reporting
+            # only successes would hide it.
             logger.warning("Recording %s has a file this build could not re-read", row.recording_id)
             failed += 1
             continue
-        if profile is None:
-            # Either the files genuinely carry no samples (every pre-transmitter export in
-            # the corpus that predates sample logging) or extraction failed and was logged
-            # inside `extract_profile`. Both leave the recording without a profile.
+        if extraction.profile is None:
+            # The files carry no samples - a header-only export, or a dive the document gives
+            # no recording. The recording keeps what it has.
             no_samples += 1
             continue
 
@@ -1682,28 +1572,37 @@ async def backfill_profiles(
             extracted += 1
             continue
 
-        await store_profile(
-            db,
-            recording_id=row.recording_id,
-            dive_id=row.dive_id,
-            profile=profile,
-            source_sha256=digest,
-            # The parser that read the **first** file of the recording, which is the one the
-            # rest filled around. A recording whose files were read by two parsers has no
-            # single key to record, and the first is the one whose channels won every
-            # contest.
-            parser_key=files[0].parser_key,
-        )
+        try:
+            async with db.begin_nested():
+                await rederive_recording(
+                    db,
+                    recording_id=row.recording_id,
+                    dive_id=row.dive_id,
+                    ordinal=row.ordinal,
+                    fresh=False,
+                    joined=False,
+                    files=files,
+                    extraction=extraction,
+                )
+        except IntegrityError:
+            logger.warning(
+                "Skipping recording %s: its re-read values violate a constraint", row.recording_id, exc_info=True
+            )
+            failed += 1
+            continue
         extracted += 1
         touched_user_ids.add(row.user_id)
 
-        if index % _BACKFILL_BATCH_SIZE == 0:
+        pending += 1
+        if pending >= _BACKFILL_BATCH_SIZE:
             await db.commit()
+            pending = 0
 
     if not dry_run:
         await db.commit()
-        # Cached dive reads embed `profile`, and every dive this run touched is now
-        # claiming it has none. See the script for why this needs a live Redis pool.
+        # Cached dive reads embed `profile`, the readouts and the mixtures, and every dive
+        # this run touched is now serving stale ones. See the script for why this needs a
+        # live Redis pool.
         from .cache_invalidation import invalidate_dive_caches
 
         for user_id in touched_user_ids:

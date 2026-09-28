@@ -101,7 +101,6 @@ from ...services.dive_gas import resolve_gas_use
 from ...services.dive_merge import DiveNotMergeableError, merge_dives
 from ...services.dive_neighbors import find_dive_neighbors
 from ...services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
-from ...services.dive_parsers import DiveParseError, UnsupportedDiveFileError, parse_dive_file_with_parser
 from ...services.dive_profiles import (
     ProfileGasAttribution,
     get_gas_attribution_for_dives,
@@ -109,6 +108,7 @@ from ...services.dive_profiles import (
     load_profile,
     to_recording_read_schema,
 )
+from ...services.dive_reader import DiveFileReadError, UnsupportedDiveFileError, read_prefill
 from ...services.dive_recordings import (
     DeviceIdentity,
     RecordingFacts,
@@ -142,7 +142,7 @@ _DIVE_CONSTRAINT_MESSAGES = {
     # (see DECISIONS.md) - but a constraint with no message here is worse than a raw 500:
     # both write paths already wrap `IntegrityError`, so an unmapped constraint falls
     # through to the generic "Invalid reference" below and 422s with a sentence about
-    # something else entirely. A violation would mean a parser unit bug, so the messages
+    # something else entirely. A violation would mean a reader unit bug, so the messages
     # say so.
     "ck_dive_entry_latitude_range": "Imported latitudes must be between -90 and 90.",
     "ck_dive_exit_latitude_range": "Imported latitudes must be between -90 and 90.",
@@ -236,16 +236,16 @@ _MIXTURE_CONSTRAINT_MESSAGES = {
 _RECORDING_CONSTRAINT_MESSAGES = {
     # Unreachable through any path that exists today, and here for the reason the imported
     # block in `_DIVE_CONSTRAINT_MESSAGES` is: both writers drop an inverted gradient-factor
-    # pair before it can reach the column - the parsers in
-    # `ParsedDecoModel._pair_the_gradient_factors`, the importer in its planner - so a
-    # violation would mean one of those stopped working. Without a message the attach route
-    # would answer a 500 to a diver whose file is perfectly importable apart from two
-    # numbers, and a parser bug would be invisible in the response.
+    # pair before it can reach the column - `recording_shape.shape_deco_model`, which the
+    # attach path and the importer both shape a recording with - so a violation would mean
+    # it stopped working. Without a message the attach route would answer a 500 to a diver
+    # whose file is perfectly importable apart from two numbers, and a reader bug would be
+    # invisible in the response.
     "ck_dive_recording_deco_gf_low_within_high": (
         "This file's decompression settings are inconsistent: its low gradient factor is above its high one."
     ),
-    # The readouts, on the same terms: the parse-side validators on `ParsedDiveSchema` null
-    # every value these would refuse, so a violation is a parser unit bug.
+    # The readouts, on the same terms: `recording_shape.READOUT_BOUNDS` drops every value
+    # these would refuse, so a violation is a reader unit bug.
     "ck_dive_recording_cns_start_non_negative": "Imported CNS values must be zero or positive.",
     "ck_dive_recording_cns_end_non_negative": "Imported CNS values must be zero or positive.",
     "ck_dive_recording_otu_start_non_negative": "Imported OTU values must be zero or positive.",
@@ -445,16 +445,25 @@ def _to_public_dive_with_mixtures(
 async def parse_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    file: Annotated[UploadFile, File(description="Dive-computer export file (Suunto XML or JSON, or a FIT file)")],
+    file: Annotated[
+        UploadFile,
+        File(description="One dive-computer file, in any format logbook import reads, recording one dive"),
+    ],
 ) -> ParsedDiveResponse:
-    """Upload a dive-computer export file and receive the parsed dive data as JSON.
+    """Upload a dive-computer file and receive the dive it records, as the dive form's values.
 
-    Nothing is stored here - the bytes are parsed and dropped. What comes back alongside
-    the dive is a `file_token` attesting that this parse happened: hand it to
-    `POST /dive/{uuid}/recordings` with the same file, once the dive it pre-filled exists,
-    and the export is kept against that dive. So a file the account has no room to keep is
-    a 413 here, before it is parsed, naming the storage used and the limit; the dive can
-    still be logged without it.
+    Any format logbook import reads is read here, by the same reader: a file recording one
+    dive by one computer prefills the form. Its head decides the format and its name decides
+    nothing. A file of several dives, or of one dive recorded by two computers, is a 422
+    pointing at logbook import; a file recording no dive is a 422; a zip is a 415 saying the
+    form takes one file; bytes nothing reads are a 415 naming the formats this build reads.
+
+    Nothing is stored here - the bytes are read and dropped. What comes back alongside the
+    dive is a `file_token` attesting that this read happened, naming the format it was read
+    as: hand it to `POST /dive/{uuid}/recordings` with the same file, once the dive it
+    pre-filled exists, and the export is kept against that dive. So a file the account has
+    no room to keep is a 413 here, before it is read, naming the storage used and the limit;
+    the dive can still be logged without it.
 
     `matches` is the second thing that comes back: dives of the caller's whose recordings
     started near this file's, so a form can offer *attach there* instead of logging a
@@ -470,18 +479,17 @@ async def parse_dive(
     digest = hashlib.sha256(content).hexdigest()
     await ensure_room_to_attach(db, user_id=current_user["id"], data=content, digest=digest)
     try:
-        # Off the event loop: parsing is pure CPU with nothing awaited inside it, and the
-        # FIT decoder is pure Python, roughly two orders of magnitude more CPU per byte
-        # than the C-accelerated `json`/`expat` the Suunto parsers ride on (0.07 s for a
-        # 2.8 MB JSON export, against ~2 s per MB of densely-encoded FIT). What actually
-        # bounds the worst case is `_MAX_FRAMES`, not this: a 5 MB file of bare `record`
-        # messages took ~10 s to decode before that cap, and ~1.7 s after.
-        parser, parsed = await run_in_threadpool(parse_dive_file_with_parser, file.filename, content)
+        # Off the event loop: reading is pure CPU with nothing awaited inside it, and the
+        # FIT decoder is pure Python, roughly two orders of magnitude more CPU per byte than
+        # the C-accelerated `json`/`expat` the text formats ride on. What bounds the worst
+        # case is the reader's own cap on the messages one FIT may hold, which a file under
+        # the upload cap can reach and no single dive does.
+        format_id, parsed = await run_in_threadpool(read_prefill, content)
     except UnsupportedDiveFileError as exc:
         # 415 and 409 stay raw `HTTPException`s - unlike 400/403/404/422, `http_exceptions`
         # has no class for either code.
         raise HTTPException(status_code=415, detail=str(exc)) from exc
-    except DiveParseError as exc:
+    except DiveFileReadError as exc:
         raise UnprocessableEntityException(str(exc)) from exc
 
     return ParsedDiveResponse(
@@ -489,7 +497,7 @@ async def parse_dive(
         file_token=create_dive_file_token(
             user_uuid=current_user["uuid"],
             sha256=digest,
-            parser_key=parser.key,
+            parser_key=format_id,
         ),
         matches=await _parse_matches(db, user_id=current_user["id"], parsed=parsed),
     )
@@ -510,7 +518,7 @@ async def _parse_matches(db: AsyncSession, *, user_id: int, parsed: ParsedDiveSc
     try:
         start_time, offset_minutes = split_local_start_time(datetime.fromisoformat(parsed.start_time))
     except ValueError:
-        # A parser that produced something `fromisoformat` cannot read. Not a reason to fail
+        # A start `fromisoformat` cannot read, or a bare date. Not a reason to fail
         # the parse - the form still gets its values - just one with no clock to match on.
         return []
 
@@ -1466,10 +1474,10 @@ async def write_dive_recording(
     except DiveFileConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except IntegrityError as exc:
-        # A parsed value the schemas let through and the database will not take. Every
-        # writable column here is filled from a file rather than from a body, so this is a
-        # parser bug rather than a diver's mistake - but a 500 would say nothing at all, and
-        # the message names the field so the file can be reported.
+        # A value the shaping let through and the database will not take. Every writable
+        # column here is filled from a file rather than from a body, so this is a reader bug
+        # rather than a diver's mistake - but a 500 would say nothing at all, and the message
+        # names the field so the file can be reported.
         raise UnprocessableEntityException(_recording_error_detail(exc)) from exc
 
     # Dive reads embed every recording, its files' metadata *and* the summary of the profile
@@ -1539,7 +1547,8 @@ async def read_dive_file(
             # and hands it to the browser as a download, so it never navigates here. XML
             # opened in a tab at the app's own origin is exactly what we don't want.
             "Content-Disposition": content_disposition_attachment(file.original_filename, default="dive-file"),
-            # The stored type comes from the parser that read the file, but say so
+            # The stored type comes from this app's table for the format that read the file
+            # (`dive_reader.FORMAT_CONTENT_TYPES`), but say so
             # explicitly: the browser must not be free to re-interpret user-uploaded
             # content as something scriptable.
             "X-Content-Type-Options": "nosniff",
@@ -1588,15 +1597,15 @@ async def read_dive_profile(
     read already need not fetch the samples to ask.
 
     Deliberately *not* `@cache`d, and for a sharper reason than the file route above. A
-    profile is **immutable** for a given (source digest, extractor version) pair, which makes
-    it the ideal `ETag` case and the worst Redis case: every dive cache key lives under
-    `user_{id}_dive*` and `invalidate_dive_caches` sweeps the lot on every dive edit and
-    every dive-site or gear rename - none of which can change a profile. Caching it would
-    mean evicting and refetching tens of KB per dive for nothing.
+    profile's samples change only when its row is rewritten, and its `ETag` is the row's own
+    identity, which every rewrite renews - the ideal `ETag` case and the worst Redis case:
+    every dive cache key lives under `user_{id}_dive*` and `invalidate_dive_caches` sweeps
+    the lot on every dive edit and every dive-site or gear rename - none of which can change
+    a profile. Caching it would mean evicting and refetching tens of KB per dive for nothing.
 
     `v` is read by nothing here; it is declared so the contract is visible. The client varies
-    it with the profile's `updated_at` so a re-extraction gets its own cache entry rather
-    than being masked by the previous one for five minutes.
+    it with the profile's `uuid` so a re-extraction or a relabel gets its own cache entry
+    rather than being masked by the previous one for five minutes.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 

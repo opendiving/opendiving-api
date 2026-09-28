@@ -483,11 +483,12 @@ class _Writer:
         out of - `should_extract` and the backfill's candidate query both select on the
         mismatch - so it splits by path. On the **archive** path it records the restored
         files' digest, which is truthful (the source instance extracted precisely this
-        profile from precisely those bytes) and leaves files and profile in agreement, so an
-        archive-restored recording is never a backfill candidate and the profile ETag still
-        names real file digests. On the **bare** path there are no file rows - the recording
-        cannot be a candidate regardless - and the column records the imported payload's own
-        digest, purely as provenance.
+        profile from precisely those bytes) and leaves files and profile in agreement. The
+        profile is still the document's, which no reader of this instance produced, so its
+        `reader_version` is NULL - and a restored file this build reads makes the recording a
+        backfill candidate, re-read from its restored bytes on the next run. On the **bare**
+        path there are no file rows - the recording cannot be a candidate - and the column
+        records the imported payload's own digest, purely as provenance.
 
         That is not the invention rule being bent: §5.4 governs logbook data a writer emits,
         and these columns describe where *this instance's copy* came from, which really is
@@ -532,6 +533,7 @@ class _Writer:
             profile=planned.profile.profile,
             source_sha256=recording_source_digest(digests) if digests else _payload_digest(planned.profile),
             parser_key=(parser_key or IMPORT_PARSER_KEY) if digests else IMPORT_PARSER_KEY,
+            reader_version=None,
             commit=False,
             duration=planned.profile.duration,
         )
@@ -632,7 +634,7 @@ class _Writer:
                     dive_id=match.dive_id,
                     mixtures=[
                         *(as_create(row) for row in stored_mixtures),
-                        # `appended` is the parser's own shape, not a stored row - its `role`/
+                        # `appended` is the document's own shape, not a stored row - its `role`/
                         # `usage` are enums already, so it needs no `as_create`.
                         *(DiveMixtureCreate(**row.model_dump()) for row in appended),
                     ],
@@ -714,12 +716,13 @@ class _Writer:
                 profile=planned.profile.profile,
                 source_sha256=_payload_digest(planned.profile),
                 parser_key=IMPORT_PARSER_KEY,
+                reader_version=None,
                 commit=False,
                 duration=planned.profile.duration,
             )
 
         # **Everything below this line is the dive's rather than the recording's, and only
-        # the primary recording may write it** - `_rederive_recording`'s rule on the attach
+        # the primary recording may write it** - `rederive_recording`'s rule on the attach
         # path. A secondary recording is a second computer's account of the same dive: its
         # positions are its own, and its cylinder labelling is its own numbering.
         if match.ordinal != 0:
@@ -738,9 +741,8 @@ class _Writer:
         # function the attach route uses: this document is a second reading of a record the
         # logbook already holds, so its `oxygen` lands in a cylinder that has none and never
         # over one that has. Not `merge_mixture_fields` - that is the backfill's question
-        # (may these values be written *over* these rows?) and it would put this document's
-        # `gas_number` on top of the label the stored profile's pressure channels are already
-        # attributed under.
+        # (may these values be written *over* these rows?), and it would overwrite the ppO2
+        # limit and the role a diver may have set since.
         await fill_dive_mixtures(
             self._db, dive_id=match.dive_id, parsed=[DiveMixtureSchema(**row) for row in match.mixtures]
         )

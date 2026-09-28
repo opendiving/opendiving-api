@@ -158,13 +158,11 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     utc_offset_minutes: Mapped[int | None] = mapped_column(Integer, default=None)
 
-    # **For the match gates, and never shown as the dive's.** Their provenance is the path
-    # that wrote them and the two genuinely differ by it: on the attach path they are the
-    # device's own logged figures off the parse, and on the import path they are computed
-    # from the recording's samples, because a DiveJSON Recording carries no scalars of its
-    # own to read them from. The same Suunto file is 3051 seconds one way and 3473 the
-    # other, so the column holds *a duration the gate can compare* rather than one number
-    # with one meaning. NULL where an imported recording has no profile.
+    # **For the match gates, and never shown as the dive's.** The recording's samples' span in
+    # whole seconds and their deepest reading, on every path - a DiveJSON Recording carries no
+    # scalars of its own to read them from, and an attached file is read as one - and
+    # rewritten from the samples whenever a re-derivation stores them (`store_gate_figures`).
+    # NULL where the recording has no profile.
     duration: Mapped[int | None] = mapped_column(Integer, default=None)
     max_depth: Mapped[float | None] = mapped_column(Float, default=None)
 
@@ -173,8 +171,9 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     def __table_args__(cls) -> tuple:
         return (
             # A gradient factor pair runs low-to-high, which no schema can express and every
-            # write path already enforces: the parsers drop both halves and the import
-            # planner drops both halves with a note, precisely so this never fires. It is
+            # write path already enforces: `recording_shape.shape_deco_model`, which the attach
+            # path and the import both shape a recording with, drops both halves, precisely so
+            # this never fires. It is
             # here because the rule is about the row rather than about any one path into it,
             # and because a value that reached the column inverted would be a setting nobody
             # could have dialled in. NULL on either side passes - the pair is both-or-neither

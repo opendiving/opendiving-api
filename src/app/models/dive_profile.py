@@ -16,10 +16,10 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     `schemas/dive_profile.py` holds the scale each is stored in.
 
     Derived from the recording's stored exports (`DiveFile`) on every path but one: the
-    samples are extracted server-side by `DiveParser.parse_profile` during
-    `POST /dive/{uuid}/recordings`, which is the only place that has both the bytes and the
-    parse token proving where they came from. That is still the whole reason `/dive/parse`
-    doesn't return a profile - see `services/dive_profiles.py`.
+    samples are read server-side through `divejson` during `POST /dive/{uuid}/recordings`,
+    which is the only place that has both the bytes and the parse token proving where they
+    came from. That is still the whole reason `/dive/parse` doesn't return a profile - see
+    `services/dive_profiles.py`.
 
     **One row per recording, not per dive.** A diver on two computers has two profiles of
     one dive, drawn from two devices' samples, and neither is a version of the other. The
@@ -101,18 +101,19 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"), index=True)
 
     # Idempotency key for extraction. `source_sha256` is what these samples came out of;
-    # together with `extractor_version` it is the whole test for "is this profile still
-    # current" (`should_extract`), and the pair is also the ETag the read endpoint serves.
-    # For a recording holding one file it is that file's own `sha256`, exactly as before;
-    # for one holding several it is the SHA-256 over their digests concatenated in attach
-    # order, so a second file arriving invalidates the profile the first produced.
+    # together with `extractor_version` and `reader_version` it is the whole test for "is this
+    # profile still current" (`should_extract`). The ETag the read endpoint serves is the
+    # row's own `uuid` instead, which every write of samples renews. For a recording holding
+    # one file it is that file's own `sha256`; for one holding several it is the SHA-256 over
+    # their digests concatenated in attach order, so a second file arriving invalidates the
+    # profile the first produced.
     source_sha256: Mapped[str] = mapped_column(String(64))
-    # **Which of three things this profile is**, which is more than "which parser read it":
-    # a `DiveParser.key` means the samples were extracted from the recording's files in
-    # order and can be extracted again; `divejson_import` means a document supplied them and
-    # no file here can re-yield them; `merge` means two recordings' samples were folded on
-    # one axis. The two non-parser values are what both backfills refuse to overwrite, and
-    # the distinction is on the *profile* rather than on a file precisely because a merged
+    # **Which of three things this profile is**, which is more than "which format was read":
+    # a format id the reader names means the samples were read from the recording's files in
+    # order and can be read again; `divejson_import` means a document supplied them and no
+    # file here can re-yield them; `merge` means two recordings' samples were folded on one
+    # axis. The two sentinels are what both backfills refuse to overwrite, and the
+    # distinction is on the *profile* rather than on a file precisely because a merged
     # recording may still hold the files either part had.
     parser_key: Mapped[str] = mapped_column(String(32))
     extractor_version: Mapped[int] = mapped_column(Integer)
@@ -194,6 +195,11 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # found nothing to attribute" - the same distinction `event_count` draws, and the same
     # one a later backfill selects on.
     gas_attribution: Mapped[list | None] = mapped_column(JSONB, default=None)
+    # The `divejson` version whose reader produced these samples from the stored files -
+    # `READER_VERSION` in `services/dive_profiles.py`. NULL where no reader of this instance
+    # did: a document supplied them, a merge produced them, or the row predates the column,
+    # which is what makes every such row with a file behind it a backfill candidate.
+    reader_version: Mapped[str | None] = mapped_column(String(32), default=None)
 
     __table_args__ = (
         # One profile per recording. `ux_dive_profile_dive_id` - one per *dive* - is gone:

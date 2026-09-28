@@ -72,6 +72,7 @@ from ...schemas.logbook_import import (
     ImportDocument,
     ImportNoteCode,
 )
+from ..dive_reader import formats_this_build_reads
 from ..export.archive import DIVEJSON_NAME, SPOOL_THRESHOLD
 
 logger = logging.getLogger(__name__)
@@ -123,20 +124,6 @@ MAX_ARCHIVE_MEMBERS = 5000
 _ZIP_MAGIC = b"PK\x03\x04"
 
 _READ_CHUNK_SIZE = 1024 * 1024
-
-# How each registered format is named to a diver. An id the library grows past this table
-# falls back to the id itself, so the sentence stays true and only gets terser - but that
-# tolerance is a floor, not the plan: `test_every_read_format_has_a_label` fails the build
-# when the pin moves past this table, because the fallback is invisible in every other
-# guard. A whole reader (`suunto_xml`, added in 0.4.0) arrived unnoticed that way, offered
-# by the API and greyed out by the picker, with nothing on either side able to see it.
-_FORMAT_LABELS = {
-    "uddf": "UDDF (.uddf)",
-    "ssrf": "Subsurface (.ssrf)",
-    "fit": "FIT (.fit)",
-    "suunto_json": "Suunto app JSON (.json)",
-    "suunto_xml": "Suunto DM5 XML (.xml)",
-}
 
 # The major version this reader implements. A reader accepts any document whose *major*
 # version it implements and ignores what it does not recognize (spec §§4, 5.6, 7), so a
@@ -647,16 +634,6 @@ def _first_error(exc: ValidationError) -> str:
     first = errors[0]
     location = ".".join(str(part) for part in first["loc"]) or "the document"
     return f"This DiveJSON document could not be read: {location}: {first['msg']}."
-
-
-def formats_this_build_reads() -> str:
-    """The registry's read formats, as a diver would name them.
-
-    Derived from `divejson.read_formats()` on every call rather than written out: the pin
-    moves on its own, and a sentence listing four formats while the build reads five is the
-    one failure a message like this can have.
-    """
-    return ", ".join(_FORMAT_LABELS.get(fmt, fmt) for fmt in divejson.read_formats())
 
 
 def _unrecognized() -> UnsupportedImportError:

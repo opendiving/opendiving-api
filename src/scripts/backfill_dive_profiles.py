@@ -1,6 +1,6 @@
-"""Extract dive profiles from the exports already stored against a dive's recordings.
+"""Re-read dive profiles from the exports already stored against a dive's recordings.
 
-Run once per extractor version, from the API container:
+Run after a release that moves the reader or the extractor, from the API container:
 
     docker compose exec api python -m src.scripts.backfill_dive_profiles
     docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
@@ -8,13 +8,17 @@ Run once per extractor version, from the API container:
 
 A script rather than an arq job, deliberately. DECISIONS.md's "The Arq worker now does
 one real thing" records that the API-side queue plumbing was removed and the worker runs
-crons only; a backfill finishes once per extractor version, so scheduling it as a cron
-would mean rescanning the whole corpus forever for a job that is already done.
+crons only; a backfill finishes once per version, so scheduling it as a cron would mean
+rescanning the whole corpus forever for a job that is already done.
 
-Selects the **recordings** whose profile is missing, was produced by an older extractor, or
-came out of different bytes than the files now on the recording, and re-reads each one's
-stored exports - all of them, in attach order, under the same fill rule the attach path
-applies. Safe to run repeatedly: the second run reports 0 extracted.
+Selects the **recordings** whose profile is missing, was read by an older extractor or
+another reader (`dive_profile.reader_version`, NULL on every profile stored before it
+existed), or came out of different bytes than the files now on the recording, and re-reads
+each one's stored exports - all of them, in attach order, through the same re-derivation an
+attach runs. That relabels a dive's cylinders onto the reader's labels and rewrites its
+recordings' gate figures from their samples. Until a run reaches a profile it is served as it
+is, valid, as the previous reader left it. Safe to run repeatedly: the second run reports 0
+extracted.
 
 **A recording whose profile no file can re-yield is never a candidate**, `--force` included:
 a document supplied those samples (`divejson_import`) or a merge produced them (`merge`), and
@@ -39,7 +43,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--parser-key",
         default=None,
-        help="Only re-read recordings holding a file recorded under this parser (e.g. `suunto_xml`). "
+        help="Only re-read recordings holding a file recorded under this format (e.g. `suunto_xml`). "
         "This is what `dive_file.parser_key` is for; a recording holding two files is a candidate "
         "when either of them names it.",
     )
@@ -47,8 +51,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Re-extract even where the stored profile is already current - for after a parser fix "
-        "that didn't bump PROFILE_EXTRACTOR_VERSION.",
+        help="Re-read even where the stored profile is already current - for after a bump of the FIT "
+        "decoder alone, which moves neither version: `--force --parser-key fit`.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report what would be extracted, write nothing.")
     return parser.parse_args()

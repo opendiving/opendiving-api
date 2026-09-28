@@ -96,9 +96,8 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     )
 
     # Where the diver got in and where they got out, in decimal degrees. Written by the
-    # import path only - a dive computer's own satellite fixes, which
-    # `services/dive_parsers/positions.py` reduces to these two - so they are not on the
-    # dive form either.
+    # import path only - a dive computer's own satellite fixes, which the reader reduces to
+    # these two - so they are not on the dive form either.
     #
     # Per-dive rather than on the dive site the dive links to, which is the decision this
     # reverses: a site is one pin, and an entry and an exit are two different places on a
