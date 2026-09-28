@@ -46,14 +46,15 @@ PERDIX_DEVICE = DeviceIdentity(brand="Shearwater Research, Inc", model="Perdix 3
 
 
 def _suunto_json() -> RecordingFacts:
-    """The app's JSON export: the device's own logged figures, and a sampled span 422 s
-    longer than them - the file goes on sampling at the surface."""
+    """The app's JSON export, with its samples' span and deepest reading - the two figures
+    every recording carries, whichever door it came in by. The span runs 422 s past the
+    dive's logged 3 051: the file goes on sampling at the surface."""
     return RecordingFacts(
         device=SUUNTO_DEVICE,
         start_time=SUUNTO_INSTANT,
         utc_offset_minutes=180,
-        duration=3051,
-        max_depth=19.04,
+        duration=3473,
+        max_depth=19.0,
         sampled_span=3_473_000,
     )
 
@@ -64,8 +65,8 @@ def _suunto_fit() -> RecordingFacts:
         device=SUUNTO_FIT_DEVICE,
         start_time=SUUNTO_INSTANT - timedelta(milliseconds=670),
         utc_offset_minutes=180,
-        duration=3051,
-        max_depth=19.04,
+        duration=3473,
+        max_depth=19.0,
         sampled_span=3_473_000,
     )
 
@@ -247,15 +248,16 @@ class TestAStoredRecordingWithNoStart:
 class TestSameDiveStrict:
     """A different computer's record of one dive - the gate logbook import attaches on."""
 
-    def test_the_perdix_and_the_suunto_are_one_dive(self) -> None:
-        """255 s apart against a window of 1525, 19.0 m against 19.04, 2940 s against 3051 -
-        and the two figures come from different paths, which is the point: the Perdix's are
-        its samples' and the Suunto's are its device's logged ones."""
+    def test_the_perdix_second_record_is_not_the_suunto_dive_by_duration(self) -> None:
+        """255 s apart against a window of 1736.5 and 19.0 m against 19.0 - but 2940 s against
+        3473, both samples' spans, and the Perdix's second record covers only the stretch after
+        its restart. Past the five minutes the gate allows, so it arrives as a dive of its own
+        for the merge action, as its first record does."""
         perdix, suunto = _perdix(2), _suunto_json()
 
         assert delta_seconds(PERDIX_TWO_WALL, None, SUUNTO_INSTANT, 180) == pytest.approx(255, abs=1)
-        assert max(60.0, max(perdix.duration or 0, suunto.duration or 0) / 2) == 1525.5
-        assert is_same_dive_strict(perdix, suunto)
+        assert max(60.0, max(perdix.duration or 0, suunto.duration or 0) / 2) == 1736.5
+        assert not is_same_dive_strict(perdix, suunto)
 
     def test_two_devices_half_a_minute_apart_pass(self) -> None:
         """Synthetic, and the ordinary case this gate exists for: two computers on one
@@ -264,9 +266,9 @@ class TestSameDiveStrict:
             device=DeviceIdentity(brand="Garmin", model="Descent Mk2i", serial="3542000001"),
             start_time=SUUNTO_INSTANT + timedelta(seconds=32),
             utc_offset_minutes=180,
-            duration=3040,
+            duration=3460,
             max_depth=19.1,
-            sampled_span=3_040_000,
+            sampled_span=3_460_000,
         )
 
         assert is_same_dive_strict(other, _suunto_json())
@@ -278,7 +280,7 @@ class TestSameDiveStrict:
         assert not is_same_dive_strict(_perdix(2), _perdix(1))
 
     def test_the_perdix_first_part_is_its_own_dive_beside_the_suunto(self) -> None:
-        """180 s against 3051 fails the five-minute duration clause outright, so part 1
+        """180 s against 3473 fails the five-minute duration clause outright, so part 1
         arrives as a dive of its own for the merge action to fold."""
         assert not is_same_dive_strict(_perdix(1), _suunto_json())
 
@@ -334,8 +336,8 @@ class TestSameDiveLoose:
             device=SUUNTO_DEVICE,
             start_time=SUUNTO_INSTANT + timedelta(days=1),
             utc_offset_minutes=180,
-            duration=3051,
-            max_depth=19.04,
+            duration=3473,
+            max_depth=19.0,
         )
 
         assert not is_same_dive_loose(next_day, _suunto_json())

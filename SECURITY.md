@@ -101,8 +101,9 @@ In that case `docker compose pull` is the whole fix even with a version pinned.
 **In scope** — a defect in the code and configuration this project ships:
 
 - The API and worker: authentication and magic-link handling, ownership and authorization checks,
-  cache key scoping, upload handling and the dive-computer parsers, rate limiting, anything that
-  serves one account's data to another.
+  cache key scoping, upload handling and how an uploaded dive-computer file is read, rate limiting,
+  anything that serves one account's data to another. A defect in a format's reader itself belongs
+  to the [`divejson`](https://github.com/divejson/divejson-py) package, which reads every file.
 - The admin panel as shipped, including its defaults.
 
 **The install bundle and the self-hosting docs are not here.** `docker-compose.yml`, `Caddyfile`,

@@ -1028,7 +1028,7 @@ class TestReExtractionFailureDoesNotFailTheRequest:
         was read off this recording before, so the write is outright and a reading nothing
         yields is cleared; here the recording already had files, so "couldn't read it *this*
         build" is not "the files say nothing" - and a later backfill, or a re-upload after a
-        parser fix, can still get them.
+        reader fix, can still get them.
 
         **The asymmetry is now structural rather than conditional**, which is the change worth
         pinning: the re-derivation picks `store_tech_scalars` (which clears) or

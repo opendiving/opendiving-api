@@ -23,8 +23,10 @@ Pure CPU and never on the event loop: every caller on a request path hands these
 """
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import divejson
 from divejson import ConverterError, NonConformingOutputError, SourceTooLargeError
@@ -70,6 +72,8 @@ FORMAT_CONTENT_TYPES = {
 # file the document does not say how it was read, or one this build no longer reads.
 # `dive_file.content_type` is `String(32)`.
 FALLBACK_CONTENT_TYPE = "application/octet-stream"
+
+_HUNDREDTHS = Decimal("0.01")
 
 # A `NonConformingOutputError`, or a converted document this app's own envelope refuses.
 CONVERTER_BUG = (
@@ -228,11 +232,13 @@ def start_of(read: ReadDive, shaped: ShapedRecording | None) -> tuple[datetime, 
 def _two_places(value: float | None) -> float | None:
     """The app's precision for a number the form shows beside a cylinder or a readout.
 
-    `round` rather than a decimal quantize: it is what the form has always been handed, and
-    the web renders these at two decimals, so a finer value would come back re-rounded on the
-    first edit.
+    A decimal quantize of the value's shortest spelling rather than `round`, which works on the
+    binary float and lands `2.675` on `2.67`. The web renders these at two decimals, so a finer
+    value would come back re-rounded on the first edit.
     """
-    return None if value is None else round(value, 2)
+    if value is None or not math.isfinite(value):
+        return value
+    return float(Decimal(str(value)).quantize(_HUNDREDTHS))
 
 
 def _six_places(value: float | None) -> float | None:

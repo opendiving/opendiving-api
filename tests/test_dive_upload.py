@@ -21,6 +21,7 @@ from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.core.security import verify_dive_file_token
 from src.app.services.dive_files import MAX_DIVE_FILE_SIZE
+from tests.helpers.fit import dense_record_stream
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -182,6 +183,14 @@ class TestTheReadersRefusals:
 
         assert status == 422
         assert "not a readable FIT file" in body["detail"]
+
+    def test_a_fit_past_the_readers_bound_is_a_422_saying_it_is_an_activity_log(self) -> None:
+        """Under the upload cap and past what one dive's record can hold. A 413 would tell the
+        diver to shrink a file that is already small enough, so the answer says what it is."""
+        status, body = _parse("watch.fit", dense_record_stream(100_001))
+
+        assert status == 422
+        assert "activity log rather than a dive" in body["detail"]
 
     @pytest.mark.parametrize(
         "document",

@@ -417,8 +417,8 @@ class TestDiveMixtureCheckConstraints:
 class TestDiveRecordingCheckConstraints:
     """The constraints on a recording's own columns, against the real database.
 
-    Nothing that exists today can reach them: the parsers' validators and the importer's
-    planner drop a value these would refuse before it gets here, which is what stops one bad
+    Nothing that exists today can reach them: the shaping the attach path and the importer
+    share drops a value these would refuse before it gets here, which is what stops one bad
     reading costing a whole upload or a whole archive. These are the backstop under them,
     and a test that inserts the row directly is the only way to see one fire.
     """

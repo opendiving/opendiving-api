@@ -151,7 +151,7 @@ class TestMixtureErrorDetail:
 
 class TestRecordingErrorDetail:
     """The attach route's own translation. Its columns are filled from a file rather than
-    from a body, so a violation here is a parser bug - but a 500 would say nothing at all,
+    from a body, so a violation here is a reader bug - but a 500 would say nothing at all,
     and the fallback message has to name the *file* rather than a field a diver typed."""
 
     def test_an_inverted_gradient_factor_pair(self):

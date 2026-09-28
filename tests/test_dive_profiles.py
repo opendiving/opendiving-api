@@ -688,7 +688,7 @@ class TestProvenance:
 
     def test_every_unreproducible_provenance_has_a_wire_value(self):
         """The guard on the fallback. Anything not named in the mapping reads as `FILE` -
-        "read off this recording's files, and re-readable from them" - which is the one
+        "read off this recording's stored files, and read from them again" - which is the one
         answer that is never true of a member of this set, so a third sentinel added without
         a spelling would publish a lie rather than raise.
         """

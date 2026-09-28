@@ -8,7 +8,7 @@ README there for which were recorded whole and which were built by hand).
 import json
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -32,6 +32,8 @@ from src.app.services.dive_reader import (
 from src.app.services.export.uddf import write_uddf
 from tests.helpers.dive_files import suunto_json
 from tests.helpers.export import EXPORTED_AT, UUIDS, build_bundle, make_dive
+from tests.helpers.fit import dive_fit_file
+from tests.helpers.fit import message as fit_message
 
 FIXTURES = Path(__file__).parent / "fixtures" / "dive_files"
 
@@ -146,6 +148,12 @@ class TestThePrefill:
         # The readouts ride the same rule, the form's preview being where they show.
         assert (parsed.otu_start, parsed.otu_end) == (23.1, 45.13)
 
+    def test_the_rounding_is_of_the_decimal_the_file_wrote_not_of_the_binary_float(self) -> None:
+        """200.675 bar is 200.674999... as a float, which `round` would take to 200.67."""
+        content = suunto_json(gases=[{"Oxygen": 0.21, "Helium": 0, "StartPressure": 20067500}])
+
+        assert read_prefill(content)[1].mixtures[0].start_pressure == 200.68
+
     def test_the_dm5_xml_rounds_its_pressures_the_same_way(self) -> None:
         _, parsed = read_prefill(_fixture("nitrox-deco.xml"))
 
@@ -216,6 +224,39 @@ class TestThePrefill:
         assert parsed.mode is DiveMode.OPEN_CIRCUIT
         assert parsed.deco_model is not None and parsed.deco_model.name == "Suunto Fused RGBM 2"
         assert parsed.surface_pressure_bar == 1.049
+
+    def test_a_fit_transmitter_labels_its_cylinder_and_its_channel_alike(self) -> None:
+        """No recorded FIT carries tank telemetry, so the file is written: a Garmin pod's
+        readings and its summary. The reader lists the cylinder and labels it `0`, and the
+        pressure channel names the same label - the join the form and the chart share."""
+        start = datetime(2026, 4, 17, 9, 49, 23, tzinfo=UTC)
+        content = dive_fit_file(
+            *(
+                fit_message("record", timestamp=start + timedelta(seconds=s), depth=5.0 + s / 10)
+                for s in range(0, 50, 10)
+            ),
+            *(
+                fit_message("tank_update", timestamp=start + timedelta(seconds=s), sensor=12345, pressure=200.0 - s)
+                for s in range(0, 50, 10)
+            ),
+            fit_message(
+                "tank_summary",
+                timestamp=start + timedelta(seconds=50),
+                sensor=12345,
+                start_pressure=200.0,
+                end_pressure=150.0,
+                volume_used=100.0,
+            ),
+        )
+
+        read = read_dive_file(content)
+        shaped = shape(read)
+
+        assert [(row.gas_number, row.start_pressure, row.end_pressure) for row in prefill(read, shaped).mixtures] == [
+            (0, 200.0, 150.0)
+        ]
+        assert shaped is not None and shaped.profile is not None
+        assert [series.gas_number for series in shaped.profile.pressure] == [0]
 
     def test_a_cylinder_the_file_records_a_zero_end_for_arrives_empty(self) -> None:
         """A zero pressure is a file's absent-marker, and the form's pressure band drops it

@@ -1,7 +1,7 @@
 # Contributing to OpenDiving API
 
-Thanks for wanting to help. Bug reports, a fix for a typo in a docstring, a parser for a dive
-computer nobody has covered yet — all welcome.
+Thanks for wanting to help. Bug reports, a fix for a typo in a docstring, a sample export from a
+dive computer nobody has covered yet — all welcome.
 
 For anything bigger than a small fix, **open an issue first** so we can agree on the shape before
 you spend an evening on it. That is especially true for changes to the database schema or the public
@@ -238,24 +238,31 @@ under 150 words, present tense, what was chosen and why. Most reasons belong in 
 at the site instead. The auth design, with sequence diagrams for every flow, is in
 [docs/authentication.md](docs/authentication.md).
 
-## Adding a dive-computer parser
+## Adding a format
 
-This is the most useful contribution available right now, and it is self-contained:
+Every dive-computer file this app reads - on the dive form and in logbook import alike - is read by
+the [`divejson`](https://github.com/divejson/divejson-py) package, so **a reader is a contribution
+to that package, not to this repository**. Its `CONTRIBUTING.md` says how an adapter is written and
+what a sample file needs; a real export from a computer nobody on either project owns is the scarce
+ingredient.
 
-1. Implement `DiveParser` (`src/app/services/dive_parsers/base.py`) — `can_parse()`, `parse()`, and
-   optionally `parse_profile()` if the format carries per-sample data. A parser that recognizes a
-   file and then finds it isn't really its format should raise `UnsupportedDiveFileError` from
-   `parse()` so the next candidate gets a turn.
-2. Register the class in `dive_parsers/__init__.py`, in the order it should be tried.
-3. Pick the `key` carefully. It is written to `dive_file.parser_key` on every stored export and is
-   part of the data model — renaming one orphans every row already written under the old name.
-4. Add tests to `tests/test_dive_parsers.py` with a small anonymised sample file.
+What a new format owes this repository, once a `divejson` release carries it and the pin moves, is
+two table rows in `src/app/services/dive_reader.py`: the label a diver reads it by (`FORMAT_LABELS`)
+and the content type a stored file of it is served back as (`FORMAT_CONTENT_TYPES`).
+`test_every_read_format_has_a_label` and its content-type sibling fail the build until both are
+there. The format id is written to `dive_file.parser_key` on every stored file and is part of the
+data model.
 
-Existing profiles can be re-extracted after a parser fix:
+A release that moves the pin moves the reader version every stored profile records, so the profiles
+are behind until the backfill re-reads them from their stored files - valid meanwhile, and served as
+the previous reader left them:
 
 ```bash
-docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
+docker compose exec api python -m src.scripts.backfill_dive_profiles
 ```
+
+A bump of the FIT decoder alone (`fitdecode`) moves no version, so it is followed by the backfill
+forced over the FIT files: `--force --parser-key fit`.
 
 ## Refreshing the vendored data files
 

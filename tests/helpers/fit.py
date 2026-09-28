@@ -1,16 +1,15 @@
-"""A minimal FIT *writer*, so FIT fixtures can be declared inline like every other
-parser test's.
+"""A minimal FIT *writer*, for the FIT files no recorded fixture carries.
 
-FIT is the one supported export that is binary, which would otherwise force the choice
-between committing opaque `.fit` blobs and not testing the parser's interesting cases at
-all. Neither is good: a blob can't be edited to express "a file whose developer field
-shadows a native one" or "a dive with no `activity` message", which is exactly what
-`FitParser` needs pinned down.
+FIT is the one supported export that is binary, so a case the corpus has no file for -
+a Garmin transmitter's tank readings, a file of more messages than any dive - cannot be
+written by hand the way a text export can. `tests/fixtures/dive_files/` holds the real
+recordings; this is for the shapes none of them has.
 
 So this encodes messages the way a dive computer does, driven by `fitdecode`'s own copy
 of the global FIT profile - field numbers, base types, scale factors and enum values are
 all looked up rather than hardcoded, so a fixture says `session(max_depth=32.41)` and
-cannot drift out of step with the profile the parser reads through.
+cannot drift out of step with the profile the reader decodes through: the `divejson`
+package decodes with this same library.
 
 Only what these tests need is implemented: little-endian, one definition per local
 message type, no compressed timestamp headers, no accumulators.
@@ -249,8 +248,8 @@ def dense_record_stream(records: int) -> bytes:
     `fit_file` above emits a definition record per message, which is fine for fixtures but
     makes it impossible to build the shape that actually matters for cost: one definition
     followed by a long run of 10-byte data records. That is how a 5 MB file comes to hold
-    half a million samples, and it is the case `_MAX_FRAMES` exists for - so the encoder
-    for it lives here rather than in a benchmark script nobody runs.
+    half a million samples, and it is the case the reader's own cap on messages exists for -
+    so the encoder for it lives here rather than in a benchmark script nobody runs.
     """
     file_id_global, _ = _message_type("file_id")
     record_global, _ = _message_type("record")

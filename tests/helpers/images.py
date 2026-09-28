@@ -1,8 +1,7 @@
 """Image fixtures for the picture tests.
 
-Built rather than committed as files, for the same reason `tests/helpers/fit.py` builds FIT
-binaries: a fixture whose bytes are checked in is a fixture nobody can read the intent of,
-and every one of these exists to exercise a specific branch of
+Built rather than committed as files: a fixture whose bytes are checked in is a fixture nobody
+can read the intent of, and every one of these exists to exercise a specific branch of
 `services/user_pictures._normalize` or of the metadata strip in
 `services/picture_originals.py`.
 
