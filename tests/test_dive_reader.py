@@ -10,11 +10,12 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import divejson
 import pytest
-from divejson import Conversion, NonConformingOutputError, SourceTooLargeError
+from divejson import Conversion, Issue, NonConformingOutputError, SourceTooLargeError
 
 from src.app.schemas.dive import DiveMode
 from src.app.services import dive_reader
@@ -92,7 +93,8 @@ class TestTheReader:
 
     def test_a_non_conforming_conversion_is_the_converters_bug(self, monkeypatch) -> None:
         def non_conforming(*args: object, **kwargs: object) -> Conversion:
-            raise NonConformingOutputError("dives[0].duration: -1 is less than the minimum of 0")
+            issue = Issue(path="dives[0].duration", message="-1 is less than the minimum of 0")
+            raise NonConformingOutputError([issue])
 
         monkeypatch.setattr(divejson, "convert", non_conforming)
 
@@ -103,8 +105,8 @@ class TestTheReader:
     def test_a_document_this_app_cannot_read_is_the_converters_bug_too(self, monkeypatch) -> None:
         real = divejson.convert
 
-        def unreadable(*args: object, **kwargs: object) -> Conversion:
-            conversion = real(*args, **kwargs)
+        def unreadable(source: bytes, **kwargs: Any) -> Conversion:
+            conversion = real(source, **kwargs)
             conversion.document["dives"][0]["recordings"][0]["device"]["serial"] = "x" * 65
             return conversion
 

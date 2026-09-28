@@ -53,6 +53,7 @@ from tests.helpers.generators import create_dive, create_dive_recording, create_
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
+
 def _export(
     *,
     cns_end: float | None = None,

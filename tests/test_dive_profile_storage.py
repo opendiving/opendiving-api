@@ -195,3 +195,58 @@ class TestTheBackfillSeesADigestThatDrifted:
             "a recording whose stored profile came out of different bytes has to be a candidate "
             "without --force; the digest term is what selects it"
         )
+
+
+class TestTheBackfillSeesAReaderThatMoved:
+    """A profile is a function of its bytes, the extractor's version and the reader's, so a
+    row the current reader did not write is a candidate - a NULL, which is every row stored
+    before the column, and a version other than this build's either way.
+
+    Measured the way the digest test above is, and for its reason: a delta in `failed` over
+    one dry run, this recording's file naming bytes that were never written.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_null_and_a_stale_reader_are_selected_and_the_current_one_is_not(
+        self, async_db: AsyncSession, db: Session, dive: Dive, recording: DiveRecording
+    ) -> None:
+        stored = b'{"DeviceLog": {}}'
+        digest = hashlib.sha256(stored).hexdigest()
+        db.add(
+            DiveFile(
+                user_id=dive.user_id,
+                recording_id=recording.id,
+                dive_id=dive.id,
+                sha256=digest,
+                content_type="application/json",
+                byte_size=len(stored),
+                stored_byte_size=len(stored),
+                original_filename="export.json",
+                parser_key="suunto_json",
+                storage_key=f"dive-files/cd/{uuid7()}_{digest}",
+            )
+        )
+        db.commit()
+        await store_profile(
+            async_db,
+            recording_id=recording.id,
+            dive_id=dive.id,
+            profile=_profile(),
+            source_sha256=digest,
+            parser_key="suunto_json",
+            reader_version=READER_VERSION,
+            commit=True,
+        )
+        current = (await backfill_profiles(async_db, dry_run=True)).failed
+
+        selected = []
+        for reader_version in (None, "0.0.1"):
+            await async_db.execute(
+                update(DiveProfile)
+                .where(DiveProfile.recording_id == recording.id)
+                .values(reader_version=reader_version)
+            )
+            await async_db.commit()
+            selected.append((await backfill_profiles(async_db, dry_run=True)).failed - current)
+
+        assert selected == [1, 1]

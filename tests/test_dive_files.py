@@ -58,6 +58,7 @@ from src.app.services.dive_files import (
     merge_mixture_fields,
     reconcile,
     rederive_recording,
+    renumber_onto_labels,
     store_recording_file,
 )
 from src.app.services.dive_reader import FORMAT_CONTENT_TYPES
@@ -812,6 +813,86 @@ class TestARecordingsCylindersJoinMemberByMember:
 
         assert [(row.oxygen, row.gas_number) for row in joined] == [(32.0, 0), (50.0, 1)]
         assert labels == {0: 1}
+
+
+class TestRenumberingOntoTheReadersLabels:
+    """`renumber_onto_labels`: a primary recording's labels onto the dive's own rows, and the
+    map the dive's other recordings are rewritten through."""
+
+    @staticmethod
+    def _stored(mixture_id: int, oxygen: float | None, gas_number: int | None) -> DiveMixtureRead:
+        return DiveMixtureRead(
+            id=mixture_id, oxygen=oxygen, helium=None if oxygen is None else 0.0, gas_number=gas_number
+        )
+
+    @staticmethod
+    def _read(oxygen: float | None, gas_number: int | None) -> DiveMixtureSchema:
+        return TestMixtureFieldFill._parsed(
+            oxygen=oxygen, helium=None if oxygen is None else 0.0, gas_number=gas_number
+        )
+
+    def test_rows_already_on_the_readers_labels_are_left_alone(self) -> None:
+        stored = [self._stored(11, 21.0, 0), self._stored(12, 49.0, 1)]
+
+        assert renumber_onto_labels([self._read(21.0, 0), self._read(49.0, 1)], stored) is None
+
+    def test_a_previous_readers_labels_move_onto_this_ones(self) -> None:
+        """The D5-shape JSON the previous parsers numbered from 1."""
+        stored = [self._stored(11, 21.0, 1), self._stored(12, 49.0, 2)]
+
+        labels, siblings = renumber_onto_labels([self._read(21.0, 0), self._read(49.0, 1)], stored) or ({}, {})
+
+        assert labels == {11: 0, 12: 1}
+        assert siblings == {1: 0, 2: 1}
+
+    def test_a_row_the_reader_does_not_have_keeps_its_label_unless_a_new_one_claims_it(self) -> None:
+        """Cleared rather than kept, since two rows sharing a label would join one channel to
+        both - and a sibling that pointed at it is sent to a label no row carries rather than
+        to the cylinder that took its number."""
+        stored = [
+            self._stored(11, 21.0, 1),
+            self._stored(12, 49.0, 2),
+            self._stored(13, 32.0, 0),
+            self._stored(14, 36.0, 7),
+            self._stored(15, 30.0, None),
+        ]
+
+        labels, siblings = renumber_onto_labels([self._read(21.0, 0), self._read(49.0, 1)], stored) or ({}, {})
+
+        assert labels == {11: 0, 12: 1, 13: None, 14: 7, 15: None}
+        assert siblings == {1: 0, 2: 1, 0: 8}
+
+    def test_a_file_with_no_mix_joins_the_rows_by_position(self) -> None:
+        """The Ocean JSON the previous parser labelled `[1, 0]` where the reader says `[0, 1]`
+        - the one place the two readings differed on a real dive."""
+        stored = [self._stored(11, None, 1), self._stored(12, None, 0)]
+
+        labels, siblings = renumber_onto_labels([self._read(None, 0), self._read(None, 1)], stored) or ({}, {})
+
+        assert labels == {11: 0, 12: 1}
+        assert siblings == {1: 0, 0: 1}
+
+
+class TestAFileThisBuildCannotRead:
+    def test_a_stored_file_under_a_format_the_reader_does_not_name_makes_the_recording_unreadable(self) -> None:
+        """A restored file this build does not read keeps the import's key, and a recording
+        holding one cannot be re-derived - which the backfill counts rather than swallows."""
+        extraction = extract_recording(
+            [
+                LoadedDiveFile(
+                    data=b"anything",
+                    content_type="application/octet-stream",
+                    original_filename="dive.bin",
+                    sha256=_digest(b"anything"),
+                    parser_key="divejson_import",
+                )
+            ],
+            start_time=None,
+            utc_offset_minutes=None,
+        )
+
+        assert extraction.unreadable is True
+        assert extraction.profile is None
 
 
 class TestStoredMixturesAreReadInSavedOrder:

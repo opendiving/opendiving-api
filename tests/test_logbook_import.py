@@ -43,6 +43,7 @@ from uuid6 import uuid7
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.core.schemas import NOTES_MAX_LENGTH
+from src.app.core.security import create_dive_file_token
 from src.app.models.certification import Certification
 from src.app.models.contact import Contact
 from src.app.models.course import Course
@@ -79,7 +80,9 @@ from src.app.schemas.logbook_import import (
 )
 from src.app.schemas.user import CHECK_IN_FIELDS
 from src.app.schemas.user_picture import PictureCrop, PictureKind
-from src.app.services import blob_store
+from src.app.services import blob_store, dive_reader
+from src.app.services.dive_files import store_recording_file
+from src.app.services.dive_profiles import READER_VERSION, backfill_profiles
 from src.app.services.export import load_export_bundle, write_divejson, write_uddf
 from src.app.services.export.archive import DIVEJSON_NAME, write_archive
 from src.app.services.export.paths import plan_archive_paths
@@ -92,7 +95,6 @@ from src.app.services.logbook_import import (
     write_import,
 )
 from src.app.services.logbook_import import planner as planner_module
-from src.app.services import dive_reader
 from src.app.services.logbook_import import reader as import_reader
 from src.app.services.logbook_import.planner import (
     _DIVE_BOUNDS,
@@ -675,6 +677,46 @@ class TestFilesFollowTheirBytes:
         assert stored.sha256 == digest
         assert await blob_store.get(stored.storage_key) == payload
         assert stored.stored_byte_size == (tmp_path / stored.storage_key).stat().st_size
+
+    @pytest.mark.asyncio
+    async def test_a_restored_file_this_build_reads_makes_its_recording_a_backfill_candidate(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """The profile an archive restore keeps is the document's, which no reader of this
+        instance produced, so its reader version is NULL - and the restored file beside it is
+        one this build reads, so the next backfill re-reads the recording from it."""
+        from src.app.services import blob_store
+
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        source = create_user(db)
+        dive = create_dive(db, source)
+        content = (Path(__file__).parent / "fixtures" / "dive_files" / "suunto-ocean-2026.json").read_bytes()
+        await store_recording_file(
+            async_db,
+            user_id=source.id,
+            user_uuid=source.uuid,
+            dive_id=dive.id,
+            upload=_upload(content, "dive.json"),
+            file_token=create_dive_file_token(
+                user_uuid=source.uuid, sha256=hashlib.sha256(content).hexdigest(), parser_key="suunto_json"
+            ),
+        )
+        document = await _export(async_db, source.id, archive_paths=True)
+        member = parse_document(document)["dives"][0]["recordings"][0]["source_files"][0]["archive_path"]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, _zip_of(document, {member: content}), filename="logbook.zip")
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+
+        assert plan.files_restored == 1
+        restored = select(DiveProfile.parser_key, DiveProfile.reader_version).where(
+            DiveProfile.dive_id.in_(select(Dive.id).where(Dive.user_id == destination.id))
+        )
+        assert (await async_db.execute(restored)).one() == ("suunto_json", None)
+
+        await backfill_profiles(async_db)
+
+        assert (await async_db.execute(restored)).one() == ("suunto_json", READER_VERSION)
 
     @pytest.mark.asyncio
     async def test_bytes_that_do_not_match_their_digest_are_skipped(

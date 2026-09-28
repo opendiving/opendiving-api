@@ -13,3 +13,8 @@ tests/fixtures/export/dives.csv -text
 # literal CRLF to LF before the parser sees it, so a wholesale line-ending rewrite still
 # validates against the XSD. Same `-text`, same reason for not saying `binary`.
 tests/fixtures/uddf/demo-account.uddf -text
+
+# The dive-computer fixtures are copies of another repository's corpus, and a stored file is
+# identified by its digest, so the bytes are what a test reads. Same `-text`, same reason for
+# not saying `binary`.
+tests/fixtures/dive_files/* -text

@@ -69,7 +69,8 @@ REFUSAL = "of 1.0 MB used"
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 EXPORT = f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-09-08T15:17:38</StartTime><MaxDepth>25.5</MaxDepth><Duration>1800</Duration></Dive>
+<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-09-08T15:17:38</StartTime>
+<MaxDepth>25.5</MaxDepth><Duration>1800</Duration></Dive>
 """.encode()
 
 

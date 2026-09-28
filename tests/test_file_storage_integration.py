@@ -52,7 +52,8 @@ from tests.helpers.generators import create_dive, create_user
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 
 XML = f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-09-08T15:17:38</StartTime><MaxDepth>25.5</MaxDepth><Duration>1800</Duration></Dive>
+<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-09-08T15:17:38</StartTime>
+<MaxDepth>25.5</MaxDepth><Duration>1800</Duration></Dive>
 """.encode()
 XML_DIGEST = hashlib.sha256(XML).hexdigest()
 
