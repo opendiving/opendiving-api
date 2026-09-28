@@ -414,38 +414,33 @@ middleware headers on an `OPTIONS` request needs no Postgres.
 ## `/dive/parse` takes any one-dive file the reader converts, and the head names the format
 
 `POST /dive/parse` (`parse_dive` in `dives.py`) hands the bytes to `read_prefill`
-(`services/dive_reader.py`): `divejson.sniff` over the first `divejson.SNIFF_BYTES` names the
-format, the filename decides nothing, and `divejson.convert` reads the whole file into the DiveJSON
-document logbook import reads too. One route for every format rather than one per format: the format
-is the reader's call on the bytes, so a reader the pin gains reaches the form with a label and a
-content type and no route.
+(`services/dive_reader.py`): `divejson.sniff` over the head names the format, the filename decides
+nothing, and `divejson.convert` reads the file into the DiveJSON document logbook import reads too.
+One route for every format: a reader the pin gains reaches the form with a label and a content type
+and no route.
 
-The document must be one dive recorded by at most one computer. An archive, or bytes no reader
-claims, is a 415; a document of no dive or of several, a dive two computers recorded, and a file
-past the reader's own bound (`SourceTooLargeError`, an activity log rather than a dive) are 422s
-whose sentence says where the file goes instead. A `ConverterError` is a 422 carrying the reader's
-own sentence. A `NonConformingOutputError`, or a document this app's envelope refuses, is a 422
-naming a converter bug, since the file was recognised.
+The document must be one dive recorded by at most one computer. An archive or unclaimed bytes is a
+415\. No dive, several, two computers' records, or a file past the reader's bound
+(`SourceTooLargeError`) is a 422 saying where the file goes instead. A `ConverterError` is a 422
+carrying the reader's sentence; a `NonConformingOutputError`, or a document this app's envelope
+refuses, a 422 naming a converter bug.
 
 ## `ParsedDiveSchema`/`DiveMixtureSchema` carry only fields the backend models support
 
-`ParsedDiveSchema` (`schemas/parsed_dive.py`) carries only what `Dive` (`models/dive.py`) persists —
-`avg_depth`, `bottom_temperature`, `dive_number`, `duration`, `max_depth`, `start_time`, `mixtures`
-— plus `device` (`serial`, `firmware`, `model`), an identity for the recording device that lands on
-`dive_recording`'s device columns, never the dive's. `DiveMixtureSchema` carries `end_pressure`,
-`helium`, `oxygen`, `start_pressure` and `volume`, named after `DiveMixtureBase.volume`. The rest of
-the export formats' field sets (algorithm, tissue loading, CNS/OTU, PO2 set points, gas-change
-events, per-sample profiles, `transmitter_id`, `type`) is not mirrored: nothing downstream persists
-or renders it, so the prefill never projects it. There is no `DiveSampleSchema` or
-`DiveGasChangeSchema`; samples never cross `/dive/parse` (*"A profile is never read over
-`/dive/parse`"*).
+`ParsedDiveSchema` (`schemas/parsed_dive.py`) is the form's values: what `Dive` persists
+(`avg_depth`, `bottom_temperature`, `dive_number`, `duration`, `max_depth`, `start_time`,
+`mixtures`, the entry and exit fixes) and what lands on the first recording (`device`, `mode`,
+`deco_model`, `salinity`, the CNS, OTU and surface-pressure readouts). `DiveMixtureSchema` carries
+`end_pressure`, `helium`, `oxygen`, `start_pressure`, `volume`, `po2_limit`, `role` and
+`gas_number`. What nothing stores (tissue loading, `transmitter_id`, a mixture's `type`) is not
+projected, and samples never cross `/dive/parse` (*"A profile is never read over `/dive/parse`"*).
 
 The prefill rounds a cylinder's pressures, fractions, ppO₂ limit and volume, and the CNS and OTU
 readouts, to two decimals (`_two_places` in `services/dive_reader.py`): the reader passes the file's
-own digits, more than a gauge is precise to (`20714062 Pa -> 207.14062 bar`), and the web renders
-two. It quantizes via `Decimal(str(value)).quantize(Decimal("0.01"))`, not `round(value, 2)`, which
-can land `2.675` on `2.67`. Depths and temperatures keep the document's precision. The rounding is
-the form's; a stored recording keeps the reader's digits.
+digits (`20714062 Pa -> 207.14062 bar`), and the web renders two. It quantizes via
+`Decimal(str(value)).quantize(Decimal("0.01"))`, not `round(value, 2)`, which lands `2.675` on
+`2.67`. Depths and temperatures keep the document's precision; a stored recording keeps the reader's
+digits.
 
 ## Gear is `GearItem` + `GearSet`, not a single `Gear` table
 
@@ -926,21 +921,16 @@ preserve a nicety would be worse than losing the file.
 `POST /dive/{uuid}/recordings` requires a `file_token`: a short-lived JWT (`create_dive_file_token`,
 `TokenType.DIVE_FILE`) minted by `/dive/parse` binding
 `(user uuid, sha256 of the bytes, the format id the reader answered)`. The store path re-hashes the
-body, and re-reads it as that format rather than sniffing again.
-
-Accepting whatever sniffs as a dive-computer file on upload is rejected: it would store any
-export-shaped blob, including one no reader takes as one dive. The claim is spelled `parser_key`, as
-every token already minted spells it; a token naming a format this build no longer reads is refused
-as a stale import.
+body and re-reads it as that format. Accepting whatever sniffs as a dive-computer file is rejected:
+it would store bytes no reader takes as one dive. The claim keeps the spelling `parser_key`; a token
+naming a format this build no longer reads is refused.
 
 The token proves only that this server read these bytes for this user recently. The route still
-checks dive ownership; the token is **not** blacklisted after use, unlike `create_onboarding_token`,
-since re-upload is an idempotent no-op. `DIVE_FILE_TOKEN_EXPIRE_MINUTES` defaults to 24 h: it bounds
-staleness, not credential lifetime.
+checks dive ownership; the token is **not** blacklisted after use, since re-upload is an idempotent
+no-op. `DIVE_FILE_TOKEN_EXPIRE_MINUTES` (24 h) bounds staleness, not credential lifetime.
 
-`content_type` is resolved from the format id via `FORMAT_CONTENT_TYPES` (`services/dive_reader.py`)
-at store time, never taken from the token, since it reaches a response header. `sniff_content_type`
-still governs certification uploads.
+`content_type` comes from `FORMAT_CONTENT_TYPES` (`services/dive_reader.py`) by format id at store
+time, never from the token, since it reaches a response header.
 
 ## A dive has at most one source file, and identical bytes are stored once per diver
 
@@ -1042,17 +1032,15 @@ re-running the function, so call it only with the calling user's own id.
 ```
 
 Per channel because channels are independently sampled, so a shared axis is mostly nulls. Each
-channel's timestamps are monotonic, the export's union is not; the reader emits each channel in time
-order.
+channel's timestamps are monotonic, the export's union is not.
 
 Not row-per-sample: profiles are only ever fetched whole. JSONB, not packed `bytea`:
 `SELECT data->'depth' FROM dive_profile` beats a 3x saving on a TOASTed column.
 
-Values are integers (centimetres, tenths of a degree, tenths of a bar), DiveJSON's units, stored as
-the reader wrote them; the scale lives in `schemas/dive_profile.py` and the web app's
-`PROFILE_CHANNELS`. `t` is integer milliseconds from the recording's start, strictly increasing per
-channel. A dropout is a gap in `t`, never a null. Pressure is a list keyed by `gas_number`, a label
-not an index.
+Values are integers (centimetres, tenths of a degree, tenths of a bar) as the reader wrote them; the
+scale lives in `schemas/dive_profile.py` and the web app's `PROFILE_CHANNELS`. `t` is integer
+milliseconds from the recording's start, strictly increasing per channel. A dropout is a gap in `t`,
+never a null. Pressure is a list keyed by `gas_number`, a label not an index.
 
 Summary columns (`duration`, `depth_sample_count`, five extremes) sit outside `data`; `channels`
 derives from them, never stored.
@@ -1085,26 +1073,23 @@ client-supplied samples.
 
 ## Profile extraction is idempotent on (file digest, extractor version, reader version), and never fails an upload
 
-`should_extract(existing, sha256=, version=, reader_version=)` is the whole test, split out so the
-case table is testable without a database. A profile is a function of the bytes, the reader that
-converted them and the app's shaping of the document, so `dive_profile.source_sha256`,
-`extractor_version` and `reader_version` together are the idempotency key. A newer reader's row is
-`extract` too: this build cannot vouch for what another reader made of the bytes.
+`should_extract(existing, sha256=, version=, reader_version=)` is the whole test, pure so the case
+table needs no database. A profile is a function of the bytes, the reader and the app's shaping, so
+`source_sha256`, `extractor_version` and `reader_version` together are the idempotency key; a newer
+reader's row is `extract` too, since this build cannot vouch for it.
 
 In `store_recording_file`:
 
-- The `insert` branch deletes any existing profile with the `DiveFile`, same transaction,
-  unconditionally, so a sample-less replacement clears the old curves.
-- The `noop` branch (same bytes) calls `should_extract`, so a `PUT` after a
-  `PROFILE_EXTRACTOR_VERSION` bump or a reader pin bump upgrades the profile.
-- Extraction runs before the `try` block, so a read failure is not reported as an `IntegrityError`
+- The `insert` branch deletes any existing profile with the `DiveFile`, same transaction, so a
+  sample-less replacement clears the old curves.
+- The `noop` branch calls `should_extract`, so a re-upload after either version moves upgrades the
+  profile.
+- Extraction runs before the `try`, so a read failure is not reported as an `IntegrityError`
   conflict.
 
-`extract_file` never raises: a refusal, or anything unexpected from the reader, is logged with the
-format id and reads as a file with nothing in it; the file stays for re-extraction.
-
-Extraction never writes `dive` columns: `dive.max_depth` is the diver's record, possibly
-hand-edited; profile `duration` is the sample span, not `dive.duration`.
+`extract_file` never raises: a refusal or anything unexpected is logged and reads as an empty file,
+which stays for re-extraction. Extraction never writes `dive` columns: `dive.max_depth` is the
+diver's record; profile `duration` is the sample span.
 
 ## The profile's `ON DELETE CASCADE` never fires, so two explicit deletes do the work
 
@@ -1124,49 +1109,39 @@ file belongs to one of them"*.
 
 ## `GET /dive/{uuid}/recording/{rid}/profile` uses an ETag, not `@cache`
 
-Modelled on `read_dive_file`. A profile changes only when something writes its samples, the ideal
-`ETag` case and the worst Redis case: every dive cache key lives under `user_{id}_dive*`, and
-`invalidate_dive_caches` sweeps the lot on every dive edit and every dive-site or gear rename, none
-of which can change a profile.
+Modelled on `read_dive_file`. A profile changes only when its samples are written: the ideal `ETag`
+case and the worst Redis case, since `invalidate_dive_caches` sweeps every `user_{id}_dive*` key on
+every dive edit and every dive-site or gear rename, none of which can change a profile.
 
-The ETag is the row's `uuid`, which every write of samples renews (`store_profile` inserts a row,
-`replace_profile_samples` mints one), not the key the samples are a function of: renumbering a
-sibling recording onto a primary's labels changes its samples and not its key. `get_profile_version`
-(a one-column query) is checked before the payload loads, so a conditional request costs one narrow
-query rather than decoding JSONB to discard it. The 304 is a bare `Response`, bypassing
-`response_model` validation. The endpoint sets `Cache-Control: private, max-age=300`;
-`ClientCacheMiddleware` never overrides one an endpoint set. `v` is declared and ignored so the
-contract is visible: the client varies it with the profile's `uuid` and `updated_at`.
+The ETag is the row's `uuid`, renewed by every write of samples (`store_profile`,
+`replace_profile_samples`), not the key the samples are a function of: relabelling a sibling
+recording changes its samples and not its key. `get_profile_version` runs before the payload loads,
+so a conditional request costs one narrow query. The 304 is a bare `Response`, bypassing
+`response_model`. The endpoint sets `Cache-Control: private, max-age=300`, which
+`ClientCacheMiddleware` never overrides. `v` is declared and ignored so the contract is visible; the
+client varies it with the profile's `uuid` and `updated_at`.
 
 `DiveProfileInfo` goes on `DiveReadWithMixtures`, never `DiveRead` — the inheritance trap
-`source_file` documents; on the parent it would cost `_cached_read_dives` a query per page.
-`get_profile_infos_for_dives` is batched like `get_file_infos_for_dives`.
+`source_file` documents. `get_profile_infos_for_dives` is batched like `get_file_infos_for_dives`.
 
 ## The profile backfill is a script, not an arq job
 
 The worker runs crons only (*"The Arq worker now does one real thing"*); a backfill finishes once
 per extractor version and reader pin, so a cron would rescan the corpus forever.
 
-`src/scripts/backfill_dive_profiles.py`:
-
 ```bash
 docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
 ```
 
-It selects `dive_recording` LEFT JOIN `dive_profile` where no profile exists, the extractor version
-is behind, the reader version is NULL or not this build's, or `source_sha256` differs from the
-files' hash — explicit columns, never `select(DiveRecording)` (a `bytea` would ride along). One
-recording at a time via `load_recording_files`, committing every 50, always reporting
-`examined / extracted / skipped / no_samples / failed`, since success-only output hides a broken
-reader. Each recording goes through `rederive_recording` inside a savepoint, as a repeat upload
-does, so it relabels and rewrites the gate figures as well as the samples.
+It selects recordings with no profile, a stale extractor or reader version, or a `source_sha256` the
+files no longer hash to — explicit columns, never `select(DiveRecording)`. One recording at a time,
+each through `rederive_recording` in a savepoint as a repeat upload is, committing every 50 and
+always reporting `examined / extracted / skipped / no_samples / failed`, since success-only output
+hides a broken reader.
 
 It calls `create_redis_cache_pool()` first: `delete_keys_by_pattern` silently returns when
-`cache.client is None`, which only the API lifespan sets; cached dive details would otherwise claim
-no profile for an hour.
-
-`src/scripts/` is bind-mounted into `api` (`./src:/code/src`) so the host copy runs, though the
-image's virtualenv carries an installed `src` package regardless.
+`cache.client is None`, which only the API lifespan sets. `src/scripts/` is bind-mounted into `api`,
+so the host copy runs.
 
 ## No manual DDL for the dive-profile feature
 
@@ -1207,21 +1182,19 @@ absent (Suunto's "Primary" is `bottom`); the app stores the document's role as i
 
 ## `DiveMixture.gas_number` is a label, and the primary recording's labels are the dive's
 
-The join key to the profile's per-cylinder pressure channels
-(`dive_profile.data.pressure[].gas_number`) and gas-switch markers, for per-tank gas accounting.
+The join key to the profile's per-cylinder pressure channels and gas-switch markers, for per-tank
+gas accounting. The reader numbers a document's cylinders from 0 in document order, only where a
+channel or a switch points at one, resolving any number the file states; so it is a label, not an
+index.
 
-The reader numbers a document's cylinders from 0 in document order, and only where a pressure
-channel or a switch points at one; a file's own numbering is resolved through that, never passed
-through. So it is a label, not an index into anything the diver sees.
-
-`label_cylinders` (`services/dive_files.py`) makes the dive's rows carry the primary recording's
-labels on every re-derivation: each row takes the label of the file cylinder it matches by mix then
-order, a row no file cylinder matches has its label cleared, and a sibling recording's channels and
-markers are renumbered onto the new labels with `replace_profile_samples`, a cleared label moving to
-a fresh unused one. A later recording's cylinders are mapped onto the dive's by the same join.
+`label_cylinders` (`services/dive_files.py`) gives the dive's rows the primary recording's labels on
+every re-derivation: a row takes the label of the file cylinder it matches by mix then order; a row
+the file does not match keeps its label unless a matched row claims it, and is then cleared. A
+sibling recording's channels and markers follow with `replace_profile_samples`, a cleared label
+moving to a fresh unused one. A later recording's cylinders map onto the dive's by the same join.
 `merge_mixture_fields` never writes a label.
 
-The constraint is `ck_dive_mixture_gas_number_non_negative` (`>= 0`), not `>= 1`: labels start at 0.
+`ck_dive_mixture_gas_number_non_negative` is `>= 0`: labels start at 0.
 
 ## CNS, OTU and surface pressure are written by the import, never by the form
 
@@ -1248,20 +1221,20 @@ algorithm and prior exposure, which nothing in a logged dive reconstructs.
 docker compose exec api python -m src.scripts.backfill_dive_tech_fields
 ```
 
-Separate from `backfill_dive_profiles` because the selection differs: the extractor and reader
-versions let that one skip a current profile; these columns have no version, so every recording with
-a file is a candidate each run.
+Separate from `backfill_dive_profiles` because the selection differs: its versions let that one skip
+a current profile; these columns have no version, so every recording with a file is a candidate each
+run.
 
 It fills each recording's readouts, device and settings columns; the dive's entry and exit fixes and
 its mixtures come from the primary alone. It fills blanks and never clears a reading the file lacks:
 a logbook-import match can fill one without bytes (*"A profile has one of three provenances, and a
 recording need not have a file"*).
 
-Mixture fields (`po2_limit` and `role`, never the label) are best-effort via `merge_mixture_fields`
-(pure). Saves replace mixtures wholesale, so a stored `id` cannot name its parsed cylinder and
-position alone is too weak; counts must match and every pair must agree on `(oxygen, helium)`,
-all-or-nothing per dive, else `mixtures_skipped`. A parsed `None` fraction is not compared: the form
-filled `DEFAULT_MIXTURE`.
+Mixture fields (`po2_limit`, `role`) are best-effort via `merge_mixture_fields` (pure). Saves
+replace mixtures wholesale, so a stored `id` cannot name its parsed cylinder and position alone is
+too weak; counts must match and every pair must agree on `(oxygen, helium)`, all-or-nothing per
+dive, else `mixtures_skipped`. A parsed `None` fraction is not compared: the form filled
+`DEFAULT_MIXTURE`.
 
 ## Manual DDL for the Phase 2 tech fields
 
@@ -1315,15 +1288,14 @@ in `shape_events` rather than refused, since a stored file's extraction never fa
 ## A `PROFILE_EXTRACTOR_VERSION` bump re-extracts the corpus, and the two summary columns are nullable
 
 `PROFILE_EXTRACTOR_VERSION` is 2 because the same bytes now yield different samples;
-`should_extract` re-extracts anything behind it, on the extractor version or the reader's, so the
-existing script picks the corpus up unchanged:
+`should_extract` re-extracts anything behind either version, so the existing script picks the corpus
+up:
 
 ```bash
 docker compose exec api python -m src.scripts.backfill_dive_profiles
 ```
 
-Every profile it rewrites gets a new ETag (the row's `uuid`) and the backfill flushes every touched
-user's dive caches, so run it off-peak.
+The backfill flushes every touched user's dive caches, so run it off-peak.
 
 Two summary columns on `dive_profile`, applied by hand per *"Schema changes have no migration
 tool"*:
@@ -1831,8 +1803,7 @@ ordering.
 
 A thread is not a bound: a 5 MB file of bare `record` messages takes ~10 s to decode against AnyIO's
 40-thread limiter. The reader bounds the messages it decodes and raises `SourceTooLargeError` rather
-than truncating, since a FIT `session` follows the samples it summarizes; the parse route refuses
-such a file as an activity log rather than a dive.
+than truncating, since a FIT `session` follows the samples it summarizes.
 
 ## A zero cylinder pressure is not a reading
 
@@ -1976,9 +1947,8 @@ the import's position. `TestStoredMixturesAreReadInSavedOrder` pins it; `fill_mi
 it.
 
 The `(oxygen, helium)` check is no backstop: a parsed `None` is not a mismatch, and a Suunto Ocean
-export with no `Gases` block leaves every fraction `None`. A swap would put one cylinder's
-`po2_limit` and `role` on another; the label, which a swap would cross with the tanks' pressure
-curves, is not the merge's to write.
+export with no `Gases` block leaves every fraction `None`, so a swap would put one cylinder's
+`po2_limit` and `role` on another.
 
 The mixture half is fill-only — `po2_limit` and `role` are written only where read — because both
 are client-writable (`DiveMixtureCreate`, `PATCH /dive/{uuid}`), and a reader's `None` means the
@@ -5802,15 +5772,13 @@ instance holds. `parser_key` is `divejson_import` on a bare import, the restored
 archive path.
 
 `source_sha256` is the dive's file digest (`should_extract` and the backfill query select on it):
-the restored file's on the archive path, the payload's on the bare path. A restored profile's
-`reader_version` is NULL, so the backfill re-derives it from the restored file with this build's
-reader; a bare import's is never re-derived, its provenance being `divejson_import`.
+the restored file's on the archive path, the payload's on the bare path. A restored profile's NULL
+`reader_version` has the backfill re-derive it.
 
 The profile's `duration` is the document's (§6.4 allows it past the last sample; it is the
 gas-coverage denominator) via a `store_profile` override, clamped up if below its samples.
 
-Samples are shaped by `shape_recording` (`services/recording_shape.py`), the functions a stored
-file's document is shaped with too.
+Samples are shaped by `shape_recording` (`services/recording_shape.py`), as a stored file's are.
 
 ## A bare document creates no file rows, and only the archive restores bytes
 
@@ -6168,14 +6136,13 @@ Everything a file says about a recording comes from the first file that recorded
 wins, losing corrections. Profiles fill by channel, never by sample. Fills are a `COALESCE` per
 column except `fill_start`, whose two columns hold one value (filling a NULL `utc_offset_minutes`
 also converts the stored wall clock to an instant), and `fill_dive_mixtures`, whose join is
-positional. The gate figures are the exception on the attach path: every re-derivation rewrites them
-from the joined samples (`store_gate_figures`), so they are the samples' span whichever file is
-first. The dive's scalars are the primary recording's. `fill_mixture_fields` writes
+positional. Gate figures are the exception: every re-derivation rewrites them
+(`store_gate_figures`). The dive's scalars are the primary recording's. `fill_mixture_fields` writes
 `FILLABLE_MIXTURE_FIELDS` only where the stored row has none, sharing `merge_mixture_fields`' join;
-neither writes a label, which is `label_cylinders`' alone. `_fill_is_storable` drops per row a fill
-the `CHECK`s would refuse. `rederive_recording` requires `fresh` (this upload created the recording,
-so scalars write outright) and `joined` (new bytes on an existing recording; only that fills
-cylinders); `_repeat_upload` and `delete_dive_file` pass `joined=False`.
+neither writes a label. `_fill_is_storable` drops per row a fill the `CHECK`s would refuse.
+`rederive_recording` requires `fresh` (this upload created the recording, so scalars write outright)
+and `joined` (new bytes on an existing recording; only that fills cylinders); `_repeat_upload` and
+`delete_dive_file` pass `joined=False`.
 
 ## A profile has one of three provenances, and a recording need not have a file
 
@@ -6199,12 +6166,11 @@ falls back to the raw id, so a reader the pin gains is accepted while the senten
 the API reads renders a bare id like `suunto_xml` and the web picker's own extension list greys it
 out. No CI job, route test or exception sees that.
 
-So `FORMAT_LABELS` is a table, beside `FORMAT_CONTENT_TYPES`, what a stored file of each format is
-served back as (`services/dive_reader.py`), and `test_every_read_format_has_a_label` fails the build
-when the pin outgrows either. The mirror case is checked too: a label for a format the library has
-dropped is a format this build advertises and refuses. The prose that spells the set out —
-`README.md`, `api/v1/logbook_import.py`, `schemas/logbook_import.py` — cannot be derived, so the
-test's message names those files.
+So `FORMAT_LABELS` and `FORMAT_CONTENT_TYPES` (`services/dive_reader.py`) are tables, and
+`test_every_read_format_has_a_label` fails the build when the pin outgrows either. The mirror case
+is checked too: a label for a format the library has dropped is a format this build advertises and
+refuses. The prose that spells the set out — `README.md`, `api/v1/logbook_import.py`,
+`schemas/logbook_import.py` — cannot be derived, so the test's message names those files.
 
 ## Merging two dives keeps the gap and synthesises nothing
 
