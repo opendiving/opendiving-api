@@ -316,8 +316,8 @@ async def purge_expired_checkin_links(ctx: dict[Any, Any]) -> str:
     revoked.
 
     `swept_checkin_link_predicate` is the complement of the liveness predicate the check-in
-    routes read, as for sessions. No retention margin: nothing reads a dead link, and a desk
-    holding one sees the same 404 whether its row is still here or not.
+    routes read. No retention margin, unlike a revoked session's: nothing counts or reads a
+    dead link, and a desk holding one sees the same 404 whether its row is still here or not.
     """
     async with local_session() as db:
         result = cast(

@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.api.v1.auth import _REFRESH_REPLAY_THRESHOLD, _handle_revoked_refresh
+from src.app.core.config import AccountSource
 from src.app.core.db.database import async_engine
 from src.app.core.utils.request_context import RequestContext
 from src.app.core.worker.functions import (
@@ -526,7 +527,7 @@ class TestTheNamedExclusions:
 
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as verify,
-            patch("src.app.api.v1.auth.admit_or_refuse", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.auth.admit_or_refuse", new_callable=AsyncMock, return_value=AccountSource.INVITATION),
             patch("src.app.api.v1.auth.accept_invitations", new_callable=AsyncMock, return_value=2) as accepted,
             patch("src.app.api.v1.auth.crud_users") as users,
             patch("src.app.api.v1.auth.crud_authentication_providers") as providers,

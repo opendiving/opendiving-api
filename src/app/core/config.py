@@ -251,8 +251,9 @@ class AccountSource(StrEnum):
     WAITLIST = "waitlist"
 
 
-# What a join-channel slug may be. The route, the request bodies and the setting's own
-# validator all accept exactly this, so a value that cannot be configured cannot be sent.
+# What a join-channel slug may be. The request bodies and the setting's own validator both
+# accept exactly this, so a value that cannot be configured cannot be sent; the resolve
+# route takes any segment and answers one outside it with the same 404 as an unknown slug.
 JOIN_CHANNEL_SLUG_PATTERN = r"^[a-z0-9-]{1,32}$"
 JOIN_CHANNEL_LABEL_MAX_LENGTH = 40
 

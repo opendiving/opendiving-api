@@ -3858,8 +3858,7 @@ passwordless sign-in delivers that account's magic link to whoever controls the 
 `admin@admin.com` has a real owner. The same rule as `EMAIL_FROM_ADDRESS` and `CONTACT_FORM_EMAIL`.
 
 `is_superuser` gates `/docs`, `/redoc` and `/openapi.json` on non-local non-production environments
-(`core/setup.py`) and the three `/api/v1/admin/*` routes (`api.v1.admin`); it grants no access to
-dives.
+(`core/setup.py`) and the `/api/v1/admin/*` routes (`api.v1.admin`); it grants no access to dives.
 
 `ADMIN_NAME` keeps `"admin"`: a display name nothing is keyed on or delivered to.
 
