@@ -65,6 +65,7 @@ from .dive_profiles import (
     should_extract,
     store_profile,
 )
+from .storage_usage import ensure_room, storage_limit_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +199,29 @@ async def _find_by_digest(db: AsyncSession, *, user_id: int, digest: str) -> _Ex
     ).where(DiveFile.user_id == user_id, DiveFile.sha256 == digest)
     row = (await db.execute(stmt)).one_or_none()
     return None if row is None else _ExistingRow(*row)
+
+
+async def _ensure_room_for(db: AsyncSession, *, user_id: int, data: bytes) -> None:
+    await ensure_room(
+        db,
+        user_id=user_id,
+        incoming=blob_store.stored_size_ceiling(KEY_KIND, len(data)),
+        exact=lambda: blob_store.stored_size(KEY_KIND, data),
+    )
+
+
+async def ensure_room_to_attach(db: AsyncSession, *, user_id: int, data: bytes, digest: str) -> None:
+    """Refuse an export this account would have no room to store, before anything parses it.
+
+    `POST /dive/parse` asks this of every upload, so a diver learns before filling in the
+    form rather than after. Bytes the account already holds add nothing and pass: a repeat
+    attach is the no-op `_repeat_upload` makes it, and the repair after a lost blob re-puts
+    under the row's own key - and attach admits only bytes carrying a parse's token, so a
+    refusal here would make both impossible.
+    """
+    if storage_limit_bytes() is None or await _find_by_digest(db, user_id=user_id, digest=digest) is not None:
+        return
+    await _ensure_room_for(db, user_id=user_id, data=data)
 
 
 def extract_tech_scalars(parser: type[DiveParser], content: bytes) -> dict[str, float | None] | None:
@@ -810,9 +834,11 @@ async def store_recording_file(
     """Attach one dive-computer export to this dive, in the recording it belongs to.
 
     Raises `HTTPException(413)` via `read_upload_within_limit` if the upload is
-    oversized, `InvalidDiveFileTokenError` if it isn't accompanied by a valid parse
-    receipt for these exact bytes, and `DiveFileAlreadyLinkedError` if the same content
-    is already stored against another dive.
+    oversized and via `ensure_room` if storing it would take the account past its storage
+    limit, `InvalidDiveFileTokenError` if it isn't accompanied by a valid parse receipt for
+    these exact bytes, and `DiveFileAlreadyLinkedError` if the same content is already
+    stored against another dive. A repeat of bytes the dive already has adds nothing and
+    is never refused for storage.
 
     The token is the admission control, unchanged. Re-running the parser registry here would
     only establish that the bytes *look* parseable, which would let this endpoint store any
@@ -842,6 +868,10 @@ async def store_recording_file(
 
     if outcome == "noop" and existing is not None:
         return await _repeat_upload(db, existing=existing, data=data, dive_id=dive_id, user_id=user_id)
+
+    # Before the parse, so a file the account has no room for costs no extraction; and
+    # before the release below, since it reads.
+    await _ensure_room_for(db, user_id=user_id, data=data)
 
     # Deliberately *before* the transaction below, not inside it: an exception raised in
     # there is caught by the `IntegrityError` handler and reported to the diver as a
@@ -906,7 +936,7 @@ async def store_recording_file(
     # sweeper reclaims it. The key carries a nonce minted per write - see
     # `blob_store.new_key`.
     storage_key = blob_store.new_key(KEY_KIND, sha256=digest)
-    await blob_store.put(storage_key, data)
+    stored_byte_size = await blob_store.put(storage_key, data)
 
     try:
         if matched is not None:
@@ -957,6 +987,7 @@ async def store_recording_file(
                 sha256=digest,
                 content_type=parser.content_type,
                 byte_size=len(data),
+                stored_byte_size=stored_byte_size,
                 original_filename=filename,
                 parser_key=parser.key,
                 storage_key=storage_key,
@@ -1234,9 +1265,14 @@ async def _repeat_upload(
 
     And re-uploading is the natural repair after a partial loss of the blob store, on
     either backend: without the `has`/`put` below the row says "already stored", the
-    download 500s forever, and the server refuses the very bytes that would fix it. The
-    write re-`put`s the key the row already carries rather than minting one, and a `put` of
-    a key whose name ends in these bytes' hash is byte-identical to what was there.
+    download 500s forever, and the server refuses the very bytes that would fix it. `has`
+    decodes a compressed object, so a frame cut short is repaired as a lost file is. The
+    write re-`put`s the key the row already carries rather than minting one, which writes an
+    object decoding to these same bytes - not necessarily the same frame, since libzstd
+    versions may encode one input differently, so the row's `stored_byte_size` is written
+    again from what `put` reports. That write commits on its own, straight away: the
+    re-extraction below releases with a rollback before it writes anything, and the paths
+    that skip it commit nothing at all.
 
     **The blob repair runs first, before anything reads the recording's files.** It has to:
     re-deriving a recording loads every file it holds, and `load_recording_files` raises
@@ -1247,7 +1283,9 @@ async def _repeat_upload(
     """
     if not await blob_store.has(existing.storage_key):
         logger.warning("Rewriting the missing stored file for dive %s from a re-upload", dive_id)
-        await blob_store.put(existing.storage_key, data)
+        stored_byte_size = await blob_store.put(existing.storage_key, data)
+        await db.execute(update(DiveFile).where(DiveFile.id == existing.id).values(stored_byte_size=stored_byte_size))
+        await db.commit()
 
     ordinal = (
         await db.execute(select(DiveRecording.ordinal).where(DiveRecording.id == existing.recording_id))
@@ -1266,9 +1304,9 @@ async def _repeat_upload(
         await get_existing_profile(db, recording_id=existing.recording_id),
         sha256=recording_source_digest(digests),
     ) == ("extract"):
-        # `release=True`: nothing above this has written anything - the blob repair is on the
-        # volume, not in the transaction - so the connection is freed for the parse rather
-        # than pinned across it.
+        # `release=True`: nothing above this is left in the transaction - the blob repair's
+        # size is already committed - so the connection is freed for the parse rather than
+        # pinned across it.
         files, extraction = await read_recording(db, recording_id=existing.recording_id, release=True)
         try:
             await _rederive_recording(

@@ -134,6 +134,22 @@ class TestRoundTrip:
         assert blob_store.stat_mtime("dive-files/zz/nothing") is None
 
 
+class TestCompressedObjects:
+    @pytest.mark.asyncio
+    async def test_a_frame_goes_out_with_no_content_headers(self, s3: FakeS3Client) -> None:
+        """No `Content-Encoding`, no `Content-Type`, no metadata: R2 acts on an encoding header
+        by decoding on the way out, which would hand a reader bytes the key says are a frame.
+        The key alone names the codec, so the call carries exactly these three."""
+        key = blob_store.new_key("dive-files", sha256="ab" + "0" * 62)
+        await blob_store.put(key, DATA)
+
+        ((operation, kwargs),) = s3.calls
+        assert operation == "put_object"
+        assert set(kwargs) == {"Bucket", "Key", "Body"}
+        assert kwargs["Body"][:4] == b"\x28\xb5\x2f\xfd"
+        assert await blob_store.get(key) == DATA
+
+
 class TestMissingObjectsAndRealFailures:
     """A row whose bytes are gone is data loss and says so; a store that is broken must not
     be reported as one."""

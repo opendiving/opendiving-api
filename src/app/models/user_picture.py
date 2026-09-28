@@ -46,6 +46,10 @@ class UserPicture(Base, PublicUUIDMixin, TimestampMixin):
     rendition_storage_key: Mapped[str] = mapped_column(String(255))
     # The rendition's digest: the download route's `ETag` and the `?v=` a client appends.
     rendition_sha256: Mapped[str] = mapped_column(String(64))
+    # The rendition's length, which the storage limit counts. Every write sets it; null only
+    # on a row stored before it existed, until the lifespan measures that rendition
+    # (`core/setup.py`, `measure_unsized_renditions`).
+    rendition_byte_size: Mapped[int | None] = mapped_column(Integer, default=None)
 
     original_storage_key: Mapped[str | None] = mapped_column(String(255), default=None)
     original_sha256: Mapped[str | None] = mapped_column(String(64), default=None)

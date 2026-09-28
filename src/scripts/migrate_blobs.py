@@ -12,10 +12,10 @@ carries is the same string on both backends (`blob_store.new_key`), which is the
 reason this is a copy and not a migration.
 
 **Idempotent and resumable**, and the key format is what makes it so. A key ends in the
-sha256 of its own content, so an object already present under that key cannot hold
-different bytes than the file it came from - skipping it is not an optimisation but the
-correct answer. Interrupt this at any point, run it again, and it picks up where it
-stopped.
+sha256 of the file as uploaded - followed by `.zst` where it is stored compressed - so an
+object already present under that key cannot hold a different file than the one it came
+from, and skipping it is not an optimisation but the correct answer. Interrupt this at any
+point, run it again, and it picks up where it stopped.
 
 **It never deletes from the source.** A switch that goes wrong has to be a restart away
 from working again, so reclaiming the old copy is a separate, deliberate act - `rm -rf` on
@@ -45,9 +45,10 @@ logger = logging.getLogger(__name__)
 #: of thousands of objects gives otherwise is silence.
 _PROGRESS_EVERY = 500
 
-#: The content hash a key ends in. Anchored, so a key shaped some other way - anything
-#: written before the format settled - simply skips the digest check rather than failing it.
-_DIGEST_TAIL = re.compile(r"_([0-9a-f]{64})$")
+#: The content hash a key ends in, before the suffix of a compressed object. Anchored, so a
+#: key shaped some other way - anything written before the format settled - simply skips the
+#: digest check rather than failing it.
+_DIGEST_TAIL = re.compile(rf"_([0-9a-f]{{64}})(?:{re.escape(blob_store.ZSTD_SUFFIX)})?$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,13 +79,21 @@ def _copy_one(source: blob_store.Backend, target: blob_store.Backend, key: str) 
     data = source.read(key)
 
     expected = _expected_digest(key)
-    if expected is not None and hashlib.sha256(data).hexdigest() != expected:
-        # Refusing rather than copying is the point. The key is the claim that the bytes
-        # hash to this; bytes that do not are a corrupted source file, and carrying them
-        # to the new backend would launder the corruption into somewhere with no older
-        # copy to compare against.
-        logger.error("%s does not match the content hash in its own key; not copied", key)
-        return "failed"
+    if expected is not None:
+        # The digest is of the file as uploaded, so a compressed object is decoded to be
+        # checked - and copied as it is, frame and all.
+        try:
+            content = blob_store.decode(key, data)
+        except blob_store.BlobCorruptError:
+            logger.error("%s does not decode; not copied", key)
+            return "failed"
+        if hashlib.sha256(content).hexdigest() != expected:
+            # Refusing rather than copying is the point. The key is the claim that the file
+            # hashes to this; one that does not is corrupted at the source, and carrying it
+            # to the new backend would launder the corruption into somewhere with no older
+            # copy to compare against.
+            logger.error("%s does not match the content hash in its own key; not copied", key)
+            return "failed"
 
     target.write(key, data)
     return "copied"

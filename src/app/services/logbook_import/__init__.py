@@ -14,7 +14,7 @@ Four stages, in this order, and the order is the design:
 4. `writer.write_import` issues the statements. The caller commits, once.
 """
 
-from .planner import ImportPlan, plan_import, unresolved_aphia_ids
+from .planner import ImportPlan, ensure_room_for_import, plan_import, unresolved_aphia_ids
 from .reader import (
     MAX_ARCHIVE_MEMBERS,
     MAX_ARCHIVE_SIZE,
@@ -43,6 +43,7 @@ __all__ = [
     "MalformedImportError",
     "UnsupportedImportError",
     "conversion_report",
+    "ensure_room_for_import",
     "formats_this_build_reads",
     "load_import",
     "parse_document",

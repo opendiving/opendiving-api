@@ -28,6 +28,7 @@ from ..core.utils.uploads import read_upload_within_limit, safe_filename
 from ..models.certification_file import CertificationFile
 from ..schemas.certification import CertificationFileInfo, CertificationSide
 from . import blob_store
+from .storage_usage import ensure_room
 
 # The key prefix every card file is stored under. A "kind" rather than a directory, so a
 # later kind (dive photos, species images) can pick its own layout without moving anything
@@ -96,12 +97,15 @@ def sniff_content_type(data: bytes) -> str:
 
 
 async def store_certification_file(
-    db: AsyncSession, *, certification_id: int, side: CertificationSide, upload: UploadFile
+    db: AsyncSession, *, user_id: int, certification_id: int, side: CertificationSide, upload: UploadFile
 ) -> CertificationFileInfo:
     """Store (or replace) one side's card file.
 
     Raises `HTTPException(413)` via `read_upload_within_limit` if the upload is oversized
-    and `UnsupportedCardFileError` if its bytes aren't an accepted format.
+    and via `ensure_room` if it would take `user_id`, the certification's owner, past the
+    storage limit - counting what the side already holds as retired, so a smaller
+    replacement always passes - and `UnsupportedCardFileError` if its bytes aren't an
+    accepted format.
 
     The write is an `ON CONFLICT ... DO UPDATE` against the `(certification_id, side)`
     unique index rather than a read-then-insert-or-update: re-uploading a side is the
@@ -128,19 +132,21 @@ async def store_certification_file(
     digest = hashlib.sha256(data).hexdigest()
     now = datetime.now(UTC)
 
-    # A narrow read of the key this side currently holds, purely so the file it names can be
-    # unlinked once the replacement is committed. It does not make the upsert below any less
-    # atomic - that is still one statement against the unique index - and a concurrent
-    # insert winning between this read and that statement costs nothing worse than an orphan
-    # for the sweeper.
-    existing_key = (
+    # A narrow read of what this side currently holds, so the file it names can be unlinked
+    # once the replacement is committed and its size counted as retired. It does not make the
+    # upsert below any less atomic - that is still one statement against the unique index -
+    # and a concurrent insert winning between this read and that statement costs nothing
+    # worse than an orphan for the sweeper.
+    existing = (
         await db.execute(
-            select(CertificationFile.storage_key).where(
+            select(CertificationFile.storage_key, CertificationFile.byte_size).where(
                 CertificationFile.certification_id == certification_id,
                 CertificationFile.side == side.value,
             )
         )
-    ).scalar_one_or_none()
+    ).one_or_none()
+    existing_key = None if existing is None else existing.storage_key
+    await ensure_room(db, user_id=user_id, incoming=len(data), retired=0 if existing is None else existing.byte_size)
 
     # Minted fresh, never derived from the row. This row *survives* replacement by design -
     # the `DO UPDATE` below deliberately preserves its uuid - so a key built from that uuid
@@ -150,10 +156,10 @@ async def store_certification_file(
     # See `blob_store.new_key`, which is where that reasoning lives.
     key = blob_store.new_key(KEY_KIND, sha256=digest)
     # Before the write, not after: `blob_store.put` is a threadpool hop with an `fsync` in
-    # it, and the lookup above autobegan a transaction that would otherwise be held open
-    # across the whole of it. What that lookup returned is a bare `str | None`, not an ORM
-    # entity, so it is trivially safe across the rollback - see `release_read_transaction`
-    # for why that precondition is the caller's to check.
+    # it, and the lookups above autobegan a transaction that would otherwise be held open
+    # across the whole of it. What they returned is plain values, not an ORM entity, so it
+    # is trivially safe across the rollback - see `release_read_transaction` for why that
+    # precondition is the caller's to check.
     await release_read_transaction(db)
     await blob_store.put(key, data)
 

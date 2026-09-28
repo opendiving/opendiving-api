@@ -169,8 +169,8 @@ something to look up, not to restate it.
   and the registration gate, which are all of them; **not** "someone else's resource", which is a
   404), 404 (not found, *or* found but not the caller's — see *"Ownership checks go through one
   `fetch_owned_or_raise`"* in `DECISIONS.md`), 409 (conflict, e.g. a dive file already linked to
-  another dive), 413 (upload over the size limit), 415 (unrecognized dive-computer export), 422
-  (validation failure), 500 (server error)
+  another dive), 413 (upload over the size limit, or over the account's storage limit), 415
+  (unrecognized dive-computer export), 422 (validation failure), 500 (server error)
 - Paginated endpoints: FastCRUD's `PaginatedListResponse` —
   `{ data: [...], total_count: number, has_more: boolean, page: number, items_per_page: number }`.
   Page/size, not limit/offset; clamp the query params with `clamp_pagination` (see

@@ -2,11 +2,13 @@
 
 import uuid as uuid_pkg
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.app.api.dependencies import get_current_user
 from src.app.api.v1.dives import router as dives_router
+from src.app.core.config import settings
 from src.app.services.dive_files import MAX_DIVE_FILE_SIZE
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
@@ -19,6 +21,13 @@ VALID_SUUNTO_XML = f"""<?xml version="1.0" encoding="utf-8"?>
   <Duration>1800</Duration>
 </Dive>
 """.encode()
+
+
+@pytest.fixture(autouse=True)
+def no_storage_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These run with no database, and the storage check reads one; the storage limit's
+    parse pre-check has its own tests, against Postgres, in `tests/test_storage_limit.py`."""
+    monkeypatch.setattr(settings, "STORAGE_LIMIT_MB", None)
 
 
 def _make_dive_upload_client() -> TestClient:

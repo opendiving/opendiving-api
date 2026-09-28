@@ -370,14 +370,15 @@ class TestCacheInvalidation:
 def _attach_result() -> MagicMock:
     """One mock result that is plausible for every statement the attach path issues.
 
-    The dedupe lookup finds nothing (`one_or_none`), the dive has no recordings yet
-    (iteration), the recording insert returns an id (`scalar_one`), and the recording holds
-    no files when the re-derivation reads them back (`all`) - which is the shape a mocked
-    session can honestly represent, since no row it "wrote" is really there.
+    The dedupe lookup finds nothing (`one_or_none`), the account stores nothing yet (the
+    storage sum's `one`), the dive has no recordings yet (iteration), the recording insert
+    returns an id (`scalar_one`), and the recording holds no files when the re-derivation
+    reads them back (`all`) - which is the shape a mocked session can honestly represent,
+    since no row it "wrote" is really there.
     """
     result = MagicMock()
     result.one_or_none.return_value = None
-    result.one.return_value = SimpleNamespace(uuid=uuid7(), updated_at=None)
+    result.one.return_value = (0, 0, 0)
     result.scalar_one.return_value = 1
     result.scalar_one_or_none.return_value = 0
     result.scalars.return_value = []

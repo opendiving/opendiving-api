@@ -55,6 +55,7 @@ from ..models.user_picture import UserPicture
 from ..schemas.user_picture import PictureCrop, PictureKind
 from . import blob_store
 from .picture_originals import DamagedImageError, sniff_original, strip_metadata
+from .storage_usage import ensure_room
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,7 @@ class StoredAvatar:
 
     storage_key: str
     sha256: str
+    byte_size: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +242,10 @@ class HeldPicture:
     original_storage_key: str | None
     original_sha256: str | None
     crop: PictureCrop | None
+    # What replacing it retires from the account's storage. A rendition not yet measured
+    # (`rendition_byte_size` null) counts as 0.
+    original_byte_size: int | None
+    rendition_byte_size: int | None
 
 
 def picture_filename(kind: PictureKind, content_type: str) -> str:
@@ -498,7 +504,8 @@ async def store_picture(
 ) -> str:
     """Store (or replace) one picture from an upload. Returns the rendition's hex digest.
 
-    Raises `HTTPException(413)` via `read_upload_within_limit` if the upload is oversized,
+    Raises `HTTPException(413)` via `read_upload_within_limit` if the upload is oversized
+    and via `ensure_room` if the picture would take the account past its storage limit,
     `UnsupportedPictureError` if the bytes are not an image it accepts, and
     `InvalidCropError` if the crop does not frame it. `crop` is `None` only for an avatar,
     which then keeps no original.
@@ -561,14 +568,26 @@ async def _write(
     and unlinking them would destroy the other request's committed blobs. Reading them here
     narrows that to two writes genuinely overlapping this function, which costs an orphan
     and never a live file, since `blob_store.new_key` mints a fresh nonce per write.
+
+    Their sizes come from the same select, as what the write retires from the account's
+    storage: both files go, whether or not the new picture keeps an original.
     """
     existing = (
         await db.execute(
-            select(UserPicture.original_storage_key, UserPicture.rendition_storage_key).where(
-                UserPicture.user_id == user_id, UserPicture.kind == frame.kind.value
-            )
+            select(
+                UserPicture.original_storage_key,
+                UserPicture.rendition_storage_key,
+                UserPicture.original_byte_size,
+                UserPicture.rendition_byte_size,
+            ).where(UserPicture.user_id == user_id, UserPicture.kind == frame.kind.value)
         )
     ).one_or_none()
+    await ensure_room(
+        db,
+        user_id=user_id,
+        incoming=len(prepared.rendition) + len(prepared.original or b""),
+        retired=0 if existing is None else (existing.original_byte_size or 0) + (existing.rendition_byte_size or 0),
+    )
 
     rendition_sha256 = hashlib.sha256(prepared.rendition).hexdigest()
     rendition_key = blob_store.new_key(frame.key_kind, sha256=rendition_sha256)
@@ -591,7 +610,7 @@ async def _write(
     await release_read_transaction(db)
     if prepared.original is not None:
         await blob_store.put(cast(str, original["original_storage_key"]), prepared.original)
-    await blob_store.put(rendition_key, prepared.rendition)
+    rendition_byte_size = await blob_store.put(rendition_key, prepared.rendition)
 
     now = datetime.now(UTC)
     values = {
@@ -599,6 +618,7 @@ async def _write(
         "uuid": uuid7(),
         "rendition_storage_key": rendition_key,
         "rendition_sha256": rendition_sha256,
+        "rendition_byte_size": rendition_byte_size,
         **original,
         **_crop_columns(crop),
     }
@@ -630,6 +650,8 @@ async def get_held_picture(db: AsyncSession, *, user_id: int, frame: Frame) -> H
                 UserPicture.crop_y,
                 UserPicture.crop_width,
                 UserPicture.crop_height,
+                UserPicture.original_byte_size,
+                UserPicture.rendition_byte_size,
             ).where(UserPicture.user_id == user_id, UserPicture.kind == frame.kind.value)
         )
     ).one_or_none()
@@ -646,6 +668,8 @@ async def get_held_picture(db: AsyncSession, *, user_id: int, frame: Frame) -> H
         original_storage_key=row.original_storage_key,
         original_sha256=row.original_sha256,
         crop=crop,
+        original_byte_size=row.original_byte_size,
+        rendition_byte_size=row.rendition_byte_size,
     )
 
 
@@ -694,7 +718,7 @@ async def write_imported_portrait(
         put.append(original_key)
         if held is not None:
             retired = [held.original_storage_key, held.rendition_storage_key]
-    await blob_store.put(rendition_key, picture.rendition)
+    values["rendition_byte_size"] = await blob_store.put(rendition_key, picture.rendition)
 
     now = datetime.now(UTC)
     if held is None:
@@ -736,6 +760,7 @@ async def recrop_picture(db: AsyncSession, *, user_id: int, frame: Frame, crop: 
                 UserPicture.original_storage_key,
                 UserPicture.original_content_type,
                 UserPicture.rendition_storage_key,
+                UserPicture.rendition_byte_size,
             ).where(UserPicture.user_id == user_id, UserPicture.kind == frame.kind.value)
         )
     ).one_or_none()
@@ -745,9 +770,13 @@ async def recrop_picture(db: AsyncSession, *, user_id: int, frame: Frame, crop: 
     await release_read_transaction(db)
     original = await blob_store.get(held.original_storage_key)
     rendition = await anyio.to_thread.run_sync(_normalize, original, frame, crop, limiter=_DECODE_LIMITER)
+    # Only the rendition changes, so only it is retired: a crop that draws a larger file than
+    # the one it replaces is the one case this can refuse.
+    await ensure_room(db, user_id=user_id, incoming=len(rendition), retired=held.rendition_byte_size or 0)
+    await release_read_transaction(db)
     rendition_sha256 = hashlib.sha256(rendition).hexdigest()
     rendition_key = blob_store.new_key(frame.key_kind, sha256=rendition_sha256)
-    await blob_store.put(rendition_key, rendition)
+    rendition_byte_size = await blob_store.put(rendition_key, rendition)
 
     result = cast(
         CursorResult,
@@ -762,6 +791,7 @@ async def recrop_picture(db: AsyncSession, *, user_id: int, frame: Frame, crop: 
             .values(
                 rendition_storage_key=rendition_key,
                 rendition_sha256=rendition_sha256,
+                rendition_byte_size=rendition_byte_size,
                 updated_at=datetime.now(UTC),
                 **_crop_columns(crop),
             )
@@ -880,6 +910,7 @@ async def seed_google_avatar(db: AsyncSession, *, user_id: int, stored: StoredAv
             kind=PictureKind.AVATAR.value,
             rendition_storage_key=stored.storage_key,
             rendition_sha256=stored.sha256,
+            rendition_byte_size=stored.byte_size,
             created_at=datetime.now(UTC),
         )
     )
@@ -961,9 +992,9 @@ async def import_google_avatar(url: str | None) -> StoredAvatar | None:
     digest = hashlib.sha256(processed).hexdigest()
     key = blob_store.new_key(AVATAR_FRAME.key_kind, sha256=digest)
     try:
-        await blob_store.put(key, processed)
+        byte_size = await blob_store.put(key, processed)
     except OSError:
         logger.warning("Could not store the imported Google profile picture", exc_info=True)
         return None
 
-    return StoredAvatar(storage_key=key, sha256=digest)
+    return StoredAvatar(storage_key=key, sha256=digest, byte_size=byte_size)

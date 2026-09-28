@@ -15,14 +15,19 @@ same one `delete_after_commit` is shaped for.
 import hashlib
 import io
 import uuid as uuid_pkg
+from compression import zstd
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import UploadFile
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+from sqlalchemy.sql.dml import Insert, Update
 from uuid6 import uuid7
 
+from src.app.api.v1.dives import read_dive_file
 from src.app.core.security import create_dive_file_token
 from src.app.schemas.certification import CertificationSide
 from src.app.services import blob_store
@@ -41,6 +46,8 @@ from src.app.services.dive_files import (
     store_recording_file,
 )
 from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
+from tests.conftest import db_available
+from tests.helpers.generators import create_dive, create_user
 
 # The namespace `SuuntoXmlParser` matches on, copied from `tests/test_dive_files.py`.
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
@@ -64,6 +71,23 @@ def _upload(content: bytes, filename: str) -> UploadFile:
     return UploadFile(filename=filename, file=io.BytesIO(content))
 
 
+def _row(**columns: object) -> MagicMock:
+    """A result row both readers of `.one()` on these paths can take: a `RETURNING` read by
+    attribute, and the storage sum read by position - an account holding nothing."""
+    row = MagicMock(**columns)
+    row.__getitem__.return_value = 0
+    return row
+
+
+def _written(db: AsyncMock, statement: type[Insert] | type[Update], table: str) -> list[dict[str, object]]:
+    """The values of every `statement` a mocked session was handed against `table`."""
+    return [
+        dict(call.args[0].compile().params)
+        for call in db.execute.call_args_list
+        if call.args and isinstance(call.args[0], statement) and call.args[0].table.description == table
+    ]
+
+
 def _token() -> tuple[str, uuid_pkg.UUID]:
     user_uuid = uuid7()
     return create_dive_file_token(user_uuid=user_uuid, sha256=XML_DIGEST, parser_key=SuuntoXmlParser.key), user_uuid
@@ -83,7 +107,7 @@ class TestDiveFileWriteOrdering:
         """
         result = MagicMock()
         result.one_or_none.return_value = existing_row
-        result.one.return_value = SimpleNamespace(uuid=uuid7(), updated_at=None)
+        result.one.return_value = _row(uuid=uuid7(), updated_at=None)
         result.scalars.return_value = retired_keys or []
         result.scalar_one.return_value = 1
         result.scalar_one_or_none.return_value = 0
@@ -126,7 +150,24 @@ class TestDiveFileWriteOrdering:
         kind, shard, name = written[0].split("/")
         assert kind == DIVE_KIND
         assert shard == XML_DIGEST[:2]
-        assert name.endswith(f"_{XML_DIGEST}")
+        assert name.endswith(f"_{XML_DIGEST}.zst")
+
+    @pytest.mark.asyncio
+    async def test_the_object_is_a_frame_of_the_upload_and_the_row_records_its_length(self, volume: Path) -> None:
+        """The row's `sha256` stays the digest of what was uploaded - the `ETag`, the dedupe
+        key, the token's subject - while `stored_byte_size` is what the object occupies."""
+        db = self._session()
+        token, user_uuid = _token()
+        await store_recording_file(
+            db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
+        )
+
+        (key,) = blob_store.iter_keys()
+        frame = (volume / key).read_bytes()
+        (row,) = _written(db, Insert, "dive_file")
+        assert frame[:4] == b"\x28\xb5\x2f\xfd"
+        assert hashlib.sha256(zstd.decompress(frame)).hexdigest() == row["sha256"] == XML_DIGEST
+        assert (row["byte_size"], row["stored_byte_size"]) == (len(XML), len(frame))
 
     @pytest.fixture
     def no_reextraction(self, monkeypatch: pytest.MonkeyPatch):
@@ -156,11 +197,46 @@ class TestDiveFileWriteOrdering:
             db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
         )
 
-        assert (volume / key).read_bytes() == XML
+        assert await blob_store.get(key) == XML
+
+    @pytest.mark.asyncio
+    async def test_the_repair_records_the_length_it_wrote_and_commits_it(self, volume: Path, no_reextraction) -> None:
+        """A frame another libzstd wrote need not be the same length, and the re-extraction
+        after this re-reads with a rollback - so the length is written back and committed
+        straight away, or the row lags the object for good."""
+        key = blob_store.new_key(DIVE_KIND, sha256=XML_DIGEST)
+        existing = (1, 7, 1, uuid7(), "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
+        db = self._session(existing_row=existing)
+        token, user_uuid = _token()
+
+        await store_recording_file(
+            db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
+        )
+
+        (update,) = _written(db, Update, "dive_file")
+        assert update["stored_byte_size"] == (volume / key).stat().st_size
+        db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_re_upload_replaces_a_frame_cut_short(self, volume: Path, no_reextraction) -> None:
+        """An interrupted restore can leave a frame that is there and does not decode, which
+        is no file at all to anyone reading it - so the bytes that would fix it do."""
+        key = blob_store.new_key(DIVE_KIND, sha256=XML_DIGEST)
+        await blob_store.put(key, XML)
+        (volume / key).write_bytes((volume / key).read_bytes()[:-4])
+        existing = (1, 7, 1, uuid7(), "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
+        db = self._session(existing_row=existing)
+        token, user_uuid = _token()
+
+        await store_recording_file(
+            db, user_id=1, user_uuid=user_uuid, dive_id=7, upload=_upload(XML, "export.xml"), file_token=token
+        )
+
+        assert await blob_store.get(key) == XML
 
     @pytest.mark.asyncio
     async def test_a_re_upload_leaves_an_intact_file_alone(self, volume: Path, no_reextraction) -> None:
-        """The normal `noop` path costs one `stat` and touches nothing."""
+        """The normal `noop` path reads the frame to see that it decodes, and writes nothing."""
         row_uuid = uuid7()
         key = blob_store.new_key(DIVE_KIND, sha256=XML_DIGEST)
         await blob_store.put(key, XML)
@@ -179,11 +255,13 @@ class TestDiveFileWriteOrdering:
 class TestCardFileWriteOrdering:
     @staticmethod
     def _session(*, existing: str | None = None) -> AsyncMock:
-        """`existing` is the `storage_key` the side currently holds, which is all the upsert
-        path reads about it."""
+        """`existing` is the `storage_key` the side currently holds, which with its size is
+        all the upsert path reads about it."""
         result = MagicMock()
-        result.scalar_one_or_none.return_value = existing
-        result.one.return_value = SimpleNamespace(uuid=uuid7(), updated_at=None)
+        result.one_or_none.return_value = (
+            None if existing is None else SimpleNamespace(storage_key=existing, byte_size=9)
+        )
+        result.one.return_value = _row(uuid=uuid7(), updated_at=None)
 
         db = AsyncMock()
         db.execute = AsyncMock(return_value=result)
@@ -197,7 +275,7 @@ class TestCardFileWriteOrdering:
         db.commit = AsyncMock(side_effect=lambda: when_committed.append(any(volume.rglob(f"{CARD_KIND}/*/*"))))
 
         await store_certification_file(
-            db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
+            db, user_id=1, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
         )
 
         assert when_committed == [True]
@@ -209,7 +287,7 @@ class TestCardFileWriteOrdering:
 
         db = self._session(existing=old_key)
         await store_certification_file(
-            db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
+            db, user_id=1, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
         )
 
         assert db.info[blob_store._PENDING_DELETES] == [old_key]
@@ -232,7 +310,7 @@ class TestCardFileWriteOrdering:
 
         db = self._session(existing=old_key)
         await store_certification_file(
-            db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
+            db, user_id=1, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
         )
 
         assert db.info[blob_store._PENDING_DELETES] == [old_key]
@@ -259,8 +337,10 @@ class TestTheReadTransactionIsReleasedBeforeTheBlobWrite:
     @staticmethod
     def _tracking_session(calls: list[str], *, existing: str | None = None) -> AsyncMock:
         result = MagicMock()
-        result.scalar_one_or_none.return_value = existing
-        result.one.return_value = SimpleNamespace(uuid=uuid7(), updated_at=None)
+        result.one_or_none.return_value = (
+            None if existing is None else SimpleNamespace(storage_key=existing, byte_size=9)
+        )
+        result.one.return_value = _row(uuid=uuid7(), updated_at=None)
 
         def record_query(*args: object, **kwargs: object) -> MagicMock:
             calls.append("query")
@@ -303,9 +383,9 @@ class TestTheReadTransactionIsReleasedBeforeTheBlobWrite:
         calls: list[str] = []
         real_put = blob_store.put
 
-        async def record(key: str, data: bytes) -> None:
+        async def record(key: str, data: bytes) -> int:
             calls.append("write")
-            await real_put(key, data)
+            return await real_put(key, data)
 
         monkeypatch.setattr("src.app.services.certification_files.blob_store.put", record)
         return calls
@@ -315,7 +395,7 @@ class TestTheReadTransactionIsReleasedBeforeTheBlobWrite:
         db = self._tracking_session(recording_put)
 
         await store_certification_file(
-            db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
+            db, user_id=1, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
         )
 
         self._assert_no_query_is_held_open(recording_put)
@@ -327,7 +407,7 @@ class TestTheReadTransactionIsReleasedBeforeTheBlobWrite:
         db = self._tracking_session(recording_put, existing=blob_store.new_key(CARD_KIND, sha256="ef" + "0" * 62))
 
         await store_certification_file(
-            db, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
+            db, user_id=1, certification_id=3, side=CertificationSide.FRONT, upload=_upload(JPEG, "card.jpg")
         )
 
         self._assert_no_query_is_held_open(recording_put)
@@ -380,3 +460,35 @@ class TestAMissingFileIsNotAMissingRow:
         )
         with pytest.raises(blob_store.BlobMissingError):
             await load_certification_file(self._session(row), certification_id=3, side=CertificationSide.FRONT)
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestTheDownloadServesTheUpload:
+    @pytest.mark.asyncio
+    async def test_the_bytes_that_went_in_come_back_under_their_digest(
+        self, volume: Path, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The frame is the store's business: the route serves what was uploaded, byte for
+        byte and at its own length, with the digest of those bytes as its `ETag`."""
+        diver = create_user(db)
+        dive = create_dive(db, diver)
+        stored = await store_recording_file(
+            async_db,
+            user_id=diver.id,
+            user_uuid=diver.uuid,
+            dive_id=dive.id,
+            upload=_upload(XML, "export.xml"),
+            file_token=create_dive_file_token(user_uuid=diver.uuid, sha256=XML_DIGEST, parser_key=SuuntoXmlParser.key),
+        )
+
+        response = await read_dive_file(
+            request=MagicMock(headers={}),
+            uuid=dive.uuid,
+            fid=stored.file_uuid,
+            current_user={"id": diver.id, "uuid": diver.uuid, "is_superuser": False},
+            db=async_db,
+        )
+
+        assert response.body == XML
+        assert response.headers["etag"] == f'"{XML_DIGEST}"'
+        assert response.headers["content-length"] == str(len(XML))

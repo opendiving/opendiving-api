@@ -486,6 +486,64 @@ class TestTheObjectStoreBackendNeedsItsCredentials:
             assert name in template, name
 
 
+class TestTheStorageLimit:
+    """One account's share of the store, in MB. On unless blanked, and never zero."""
+
+    def test_an_instance_that_configures_nothing_allows_a_gigabyte(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("STORAGE_LIMIT_MB", raising=False)
+        module = _config_loaded_without_an_env_file(tmp_path, monkeypatch)
+
+        assert module.settings.STORAGE_LIMIT_MB == 1024
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_is_no_limit(self, blank: str):
+        assert _settings(STORAGE_LIMIT_MB=blank).STORAGE_LIMIT_MB is None
+
+    def test_a_blank_line_in_the_env_file_is_no_limit(self, tmp_path, monkeypatch):
+        """The file a host run reads through `Config`, where the value arrives as the default.
+        It goes through the same validator as an environment variable: pydantic-settings
+        validates defaults."""
+        monkeypatch.delenv("STORAGE_LIMIT_MB", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text("STORAGE_LIMIT_MB=\n")
+        monkeypatch.setenv("SECRET_KEY", "test-secret-key-for-testing-only")
+        monkeypatch.setenv("ENVIRONMENT", "local")
+        original = starlette.config.Config
+        monkeypatch.setattr(starlette.config, "Config", lambda *_args, **_kwargs: original(env_file))
+        source = Path(__file__).resolve().parents[1] / "src" / "app" / "core" / "config.py"
+        spec = importlib.util.spec_from_file_location("_config_with_a_blank_limit", source)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        assert module.settings.STORAGE_LIMIT_MB is None
+
+    def test_a_blank_environment_variable_is_no_limit(self, tmp_path, monkeypatch):
+        """What compose's `env_file` hands the process for `STORAGE_LIMIT_MB=`."""
+        monkeypatch.setenv("STORAGE_LIMIT_MB", "")
+        module = _config_loaded_without_an_env_file(tmp_path, monkeypatch)
+
+        assert module.settings.STORAGE_LIMIT_MB is None
+
+    def test_a_number_is_megabytes(self):
+        assert _settings(STORAGE_LIMIT_MB="2048").STORAGE_LIMIT_MB == 2048
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_below_one_fails_startup_naming_the_setting_and_the_file(self, value: int):
+        """`0` reads as "unlimited" to anyone who has met that convention elsewhere, and would
+        refuse every upload here."""
+        with pytest.raises(ValueError) as raised:
+            _settings(STORAGE_LIMIT_MB=value)
+
+        message = str(raised.value)
+        assert "STORAGE_LIMIT_MB" in message
+        assert ".env" in message
+        assert "blank" in message
+
+    def test_it_is_in_the_template(self):
+        template = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text()
+        assert "STORAGE_LIMIT_MB" in template
+
+
 class TestLogLevel:
     def test_a_level_name_is_normalized(self):
         assert _settings(LOG_LEVEL=" debug ").LOG_LEVEL == "DEBUG"

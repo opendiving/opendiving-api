@@ -28,6 +28,11 @@ Whole `bytes` rather than streams, because every caller already holds the whole 
 `read_upload_within_limit` buffers at most 10 MB, and the routes, the export archive and
 the backfills all read the entire file. A streaming interface is photo-era work, added
 when there is a caller that can use it.
+
+**A key names its encoding.** A dive-computer export is stored as one zstd frame under a key
+ending `.zst`, and every other kind as the bytes themselves; `put` encodes and `get` decodes
+by the key, so no caller outside this module ever holds a frame. See `DECISIONS.md`,
+*"Dive-computer files are stored as zstd frames, and the key says so"*.
 """
 
 import asyncio
@@ -35,6 +40,7 @@ import hashlib
 import logging
 import os
 from collections.abc import Iterator
+from compression import zstd
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -76,6 +82,20 @@ _S3_DELETE_BATCH = 1000
 # see `_unlink_committed_blobs`.
 _pending_removals: set[asyncio.Future[None]] = set()
 
+# The kinds stored compressed: dive-computer exports alone, the kind `services/dive_files.py`
+# stores under. Card scans are JPEG, PNG or PDF and pictures and species photos are WebP -
+# bytes that are compressed already and that zstd cannot shrink.
+_COMPRESSED_KINDS = frozenset({"dive-files"})
+
+# What ends a key whose object is one zstd frame. The codec lives in the key and never in a
+# `Content-Encoding` header, which an object store may act on: R2 decompresses gzip-encoded
+# objects on the way out unless the client asks otherwise.
+ZSTD_SUFFIX = ".zst"
+
+# Measured against real Suunto exports: level 3 leaves 18% more bytes for a fifth of the
+# CPU, and level 19 costs about sixty times the CPU for 13% fewer.
+_ZSTD_LEVEL = 9
+
 
 class BlobMissingError(Exception):
     """A row names a key the store does not have.
@@ -91,8 +111,27 @@ class BlobMissingError(Exception):
         super().__init__(f"No stored file for key {key!r}")
 
 
+class BlobCorruptError(BlobMissingError):
+    """A compressed object is there and does not decode - a frame cut short by an interrupted
+    copy or restore.
+
+    A `BlobMissingError` because every caller's answer is the one it already has for a
+    missing file: the bytes the row promises cannot be had.
+    """
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        Exception.__init__(self, f"The stored file for key {key!r} does not decode")
+
+
+def compresses(kind: str) -> bool:
+    """Whether a key minted for `kind` names a compressed object."""
+    return kind in _COMPRESSED_KINDS
+
+
 def new_key(kind: str, *, sha256: str) -> str:
-    """Mint a key for one write: `{kind}/{sha256[:2]}/{uuid7}_{sha256}`.
+    """Mint a key for one write: `{kind}/{sha256[:2]}/{uuid7}_{sha256}`, with `.zst` after it
+    for a kind stored compressed.
 
     Backend-independent on purpose, and the reason an install can switch between the two
     and back: the same string is a relative path under `FILE_STORAGE_DIR` and an object key
@@ -117,18 +156,72 @@ def new_key(kind: str, *, sha256: str) -> str:
     old one rather than landing byte-identically on the same path. Cheap, and the row's
     `updated_at` moved on that request anyway.
 
-    The **content hash** still earns its place - it lets an operator verify any file in the
-    tree with `sha256sum`, and it keeps blobs immutable, since new content always means a new
-    key and a reader mid-replacement can never be handed new bytes under old metadata. On
-    the object store it also makes `migrate_blobs.py` resumable: an object that is already
-    there under a key cannot hold different bytes than the file that key names.
+    The **content hash** still earns its place - it is the digest of the bytes as uploaded,
+    so an operator can verify any file in the tree with `sha256sum`, after `zstd -d` for a
+    `.zst` one; and it keeps blobs immutable, since new content always means a new key and a
+    reader mid-replacement can never be handed new bytes under old metadata. On the object
+    store it also makes `migrate_blobs.py` resumable: an object that is already there under a
+    key cannot hold different content than the file that key names.
 
     Sharded on the hash prefix rather than the uuid's: uuid7's leading hex is a millisecond
     timestamp, so uuid-sharding would put every key minted in one month in a handful of
     directories. sha256's first byte is uniformly random. One level of 256 is plenty for a
     corpus of thousands - the same fanout git and the OCI registry use.
     """
-    return f"{kind}/{sha256[:2]}/{uuid7()}_{sha256}"
+    suffix = ZSTD_SUFFIX if compresses(kind) else ""
+    return f"{kind}/{sha256[:2]}/{uuid7()}_{sha256}{suffix}"
+
+
+def _is_compressed(key: str) -> bool:
+    return key.endswith(ZSTD_SUFFIX)
+
+
+def _compress(data: bytes) -> bytes:
+    """One zstd frame. One-shot, so the frame header carries the content size."""
+    return zstd.compress(data, level=_ZSTD_LEVEL)
+
+
+def _encode(key: str, data: bytes) -> bytes:
+    """What goes into the object under `key`."""
+    return _compress(data) if _is_compressed(key) else data
+
+
+def decode(key: str, stored: bytes) -> bytes:
+    """The bytes as uploaded, from what the object under `key` holds.
+
+    Raises `BlobCorruptError` for a frame that does not decode. Public for
+    `migrate_blobs.py`, which reads objects through a `Backend` directly and checks each
+    against the digest in its key.
+    """
+    if not _is_compressed(key):
+        return stored
+    try:
+        return zstd.decompress(stored)
+    except zstd.ZstdError as exc:
+        raise BlobCorruptError(key) from exc
+
+
+def stored_size_ceiling(kind: str, size: int) -> int:
+    """The most `size` bytes can occupy under `kind`, without compressing them.
+
+    zstd's own worst-case bound for one-shot compression (`ZSTD_COMPRESSBOUND` in `zstd.h`),
+    which covers the frame header as well as incompressible content. What lets a caller
+    skip compressing to measure when even the worst case fits.
+    """
+    if not compresses(kind):
+        return size
+    small_input_margin = ((128 << 10) - size) >> 11 if size < (128 << 10) else 0
+    return size + (size >> 8) + small_input_margin
+
+
+async def stored_size(kind: str, data: bytes) -> int:
+    """How many bytes `data` would occupy stored under `kind`, off the event loop.
+
+    Compresses to find out, so it costs what a `put` does - about 10 ms for a 1.5 MB export.
+    """
+    if not compresses(kind):
+        return len(data)
+    return len(await anyio.to_thread.run_sync(_compress, data))
 
 
 class Backend(Protocol):
@@ -220,7 +313,8 @@ class LocalBackend:
         Write to a temp file, `fsync` it, `os.replace` into place, then `fsync` the parent
         directory - the last step being what makes the *rename* durable rather than merely the
         contents. `os.replace` is atomic on POSIX, so four workers writing the same key
-        concurrently is safe: keys embed the content hash, so they are writing identical bytes.
+        concurrently is safe: keys embed the content hash, so whichever object lands last
+        decodes to the same bytes as the others.
         """
         root = storage_root()
         destination = root / key
@@ -310,8 +404,8 @@ def new_s3_client() -> Any:
     - **`request_checksum_calculation` / `response_checksum_validation` at
       `when_required`.** botocore 1.36 started sending a CRC32 trailer on every `PutObject`
       by default, which several S3-compatible stores rejected outright. The default costs
-      nothing here - the key already carries the content's sha256, so integrity is checked
-      by construction on the way back out.
+      nothing here - the key already carries the sha256 of the bytes as uploaded, which is
+      what `migrate_blobs.py` checks every object against, decoding it first.
     - **standard retries.** The default legacy mode retries fewer error classes; this is a
       network the request path now depends on.
 
@@ -621,18 +715,32 @@ def ensure_storage_ready() -> None:
     _backend().ensure_ready()
 
 
-async def put(key: str, data: bytes) -> None:
-    """Store bytes under `key`.
+def _write_encoded(backend: Backend, key: str, data: bytes) -> int:
+    stored = _encode(key, data)
+    backend.write(key, stored)
+    return len(stored)
 
-    Idempotent by construction: keys embed the content hash, so re-`put`ting the same key
-    writes byte-identical content over itself.
+
+def _read_decoded(backend: Backend, key: str) -> bytes:
+    return decode(key, backend.read(key))
+
+
+async def put(key: str, data: bytes) -> int:
+    """Store bytes under `key`, compressed when the key says so, and return the length of
+    the object written - what the row records as the bytes it occupies.
+
+    Idempotent by construction: keys embed the content hash, so re-`put`ting a key writes an
+    object that decodes to the same bytes as the one it replaces. Not byte-identical, for a
+    compressed key: two libzstd versions may encode one input differently, which is why the
+    self-heal that re-puts a key records the length again.
     """
-    await anyio.to_thread.run_sync(_backend().write, key, data)
+    return await anyio.to_thread.run_sync(_write_encoded, _backend(), key, data)
 
 
 async def get(key: str) -> bytes:
-    """Fetch the bytes stored under `key`, or raise `BlobMissingError`."""
-    return await anyio.to_thread.run_sync(_backend().read, key)
+    """Fetch the bytes stored under `key`, as uploaded, or raise `BlobMissingError` - its
+    `BlobCorruptError` subclass for a compressed object that does not decode."""
+    return await anyio.to_thread.run_sync(_read_decoded, _backend(), key)
 
 
 async def delete(key: str) -> None:
@@ -646,9 +754,23 @@ def exists(key: str) -> bool:
     return _backend().exists(key)
 
 
+def _intact(backend: Backend, key: str) -> bool:
+    if not _is_compressed(key):
+        return backend.exists(key)
+    try:
+        _read_decoded(backend, key)
+    except BlobMissingError:
+        return False
+    return True
+
+
 async def has(key: str) -> bool:
-    """`exists`, off the event loop - for the request path."""
-    return await anyio.to_thread.run_sync(exists, key)
+    """Whether `get(key)` would hand bytes back, off the event loop - for the request path.
+
+    `exists` for a raw key, which reads nothing. A compressed one is read and decoded,
+    because a frame cut short is there and is still no file.
+    """
+    return await anyio.to_thread.run_sync(_intact, _backend(), key)
 
 
 def iter_keys() -> Iterator[str]:

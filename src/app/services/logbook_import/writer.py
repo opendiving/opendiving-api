@@ -123,6 +123,8 @@ class _StoredBlob:
     storage_key: str
     digest: str
     byte_size: int
+    # What the object occupies, which for a dive-computer file is its zstd frame.
+    stored_byte_size: int
     content_type: str
 
 
@@ -231,8 +233,14 @@ class _Writer:
         # whole rule: a retired key must never be mintable again, or a concurrent write's
         # post-commit unlink deletes the file another request has just put there.
         key = new_key(kind, sha256=digest)
-        await put_blob(key, data)
-        return _StoredBlob(storage_key=key, digest=digest, byte_size=len(data), content_type=content_type)
+        stored_byte_size = await put_blob(key, data)
+        return _StoredBlob(
+            storage_key=key,
+            digest=digest,
+            byte_size=len(data),
+            stored_byte_size=stored_byte_size,
+            content_type=content_type,
+        )
 
     def _file_skipped(self, collection: str, record_uuid: uuid_pkg.UUID, reason: str) -> None:
         """Correct the plan's file counts for the one thing planning cannot know.
@@ -566,6 +574,7 @@ class _Writer:
                     sha256=stored.digest,
                     content_type=stored.content_type,
                     byte_size=stored.byte_size,
+                    stored_byte_size=stored.stored_byte_size,
                     original_filename=planned_file.original_filename,
                     parser_key=planned_file.parser_key or IMPORT_PARSER_KEY,
                     storage_key=stored.storage_key,
