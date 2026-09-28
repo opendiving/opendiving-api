@@ -4099,17 +4099,18 @@ trip would block the loop; `blob_store._await_pending_removals()` is for tests o
 
 ## Every key carries a per-write nonce, and that is what makes the unlink safe
 
-Keys are `{kind}/{sha256[:2]}/{uuid7}_{sha256}`, minted by `blob_store.new_key`, which is
-deliberately impure: the same arguments give a different key every call. Blobs and rows live in two
-stores, so the rule is write the file, then commit the row; delete the row, then unlink. With
-re-derivable keys that second rule is data loss: one request's post-commit unlink destroys a blob a
-concurrent request has since committed a row against. Keying on the owning row's uuid is rejected
-because a card's row survives replacement (`ON CONFLICT DO UPDATE` preserves its uuid). The nonce
-makes a retired key unrepeatable and closes the sweeper's TOCTOU; re-uploading a card's existing
-bytes therefore writes a new file. The content hash keeps blobs immutable and lets `sha256sum`
-verify any file; sharding uses its prefix because uuid7's leading hex is a timestamp. No cross-row
-sharing: dedupe is `ux_dive_file_user_id_sha256`, and deletion is `DELETE … RETURNING storage_key`
-into `delete_after_commit`.
+Keys are `{kind}/{sha256[:2]}/{uuid7}_{sha256}` (plus `.zst` for a dive-computer file), minted by
+`blob_store.new_key`, which is deliberately impure: the same arguments give a different key every
+call. Blobs and rows live in two stores, so the rule is write the file, then commit the row; delete
+the row, then unlink. With re-derivable keys that second rule is data loss: one request's
+post-commit unlink destroys a blob a concurrent request has since committed a row against. Keying on
+the owning row's uuid is rejected because a card's row survives replacement (`ON CONFLICT DO UPDATE`
+preserves its uuid). The nonce makes a retired key unrepeatable and closes the sweeper's TOCTOU;
+re-uploading a card's existing bytes therefore writes a new file. The content hash, of the file as
+uploaded, keeps blobs immutable and lets `sha256sum` verify any file, after `zstd -d` for a `.zst`
+one; sharding uses its prefix because uuid7's leading hex is a timestamp. No cross-row sharing:
+dedupe is `ux_dive_file_user_id_sha256`, and deletion is `DELETE … RETURNING storage_key` into
+`delete_after_commit`.
 
 ## Orphans are the only failure product, and there is a script for them
 
@@ -7140,3 +7141,14 @@ current username, and their own export carries its public id, a uuid7 that dates
 which that account's export carries anyway. An import links a person by that id, under the same
 limit, and reports the current username, which the file did not carry. *Rejected:* linking by email,
 a second oracle over guessable addresses.
+
+## Dive-computer files are stored as zstd frames, and the key says so
+
+`blob_store.put` compresses a `dive-files` object into one zstd frame at level 9 and `get` decodes
+it; its key ends `.zst`, and a key without the suffix names raw bytes, so older objects still read.
+The codec lives in the key, not in `Content-Encoding`, which R2 acts on - it decompresses
+gzip-encoded objects on read and documents nothing for zstd; a codec column would leave the sweeper,
+`migrate_blobs.py` and an operator with `ls` unable to tell a frame from a file. Level 9, measured
+on Suunto exports: level 3 leaves 18% more bytes for a fifth of the CPU, level 19 costs sixty times
+the CPU for 13% fewer. Cards, pictures and species photos are JPEG, PNG, PDF or WebP, which zstd
+cannot shrink, so only this kind compresses.

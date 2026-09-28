@@ -160,6 +160,7 @@ class TestTheBackfillSeesADigestThatDrifted:
                 sha256=digest,
                 content_type="application/xml",
                 byte_size=len(stored),
+                stored_byte_size=len(stored),
                 original_filename="export.xml",
                 parser_key="suunto_xml",
                 storage_key=f"dive-files/ab/{uuid7()}_{digest}",

@@ -188,6 +188,7 @@ class TestDeletingAUserTakesEverythingWithIt:
                     sha256="a" * 64,
                     content_type="application/octet-stream",
                     byte_size=1,
+                    stored_byte_size=1,
                     original_filename="dive.uddf",
                     parser_key="uddf",
                     storage_key=f"dive-files/aa/{diver.uuid}_{'a' * 64}",

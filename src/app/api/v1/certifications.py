@@ -480,11 +480,17 @@ async def write_certification_file(
 ) -> CertificationFileInfo:
     """Attach or replace one side's card image. Uploading a side that already has a file
     replaces it.
+
+    A 413 for a file over 10 MB, or one that would take the account past its storage limit -
+    the detail then names the storage used and the limit. A replacement no larger than the
+    file it replaces is never refused for storage.
     """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
     try:
-        info = await store_certification_file(db=db, certification_id=db_certification.id, side=side, upload=file)
+        info = await store_certification_file(
+            db=db, user_id=db_certification.user_id, certification_id=db_certification.id, side=side, upload=file
+        )
     except UnsupportedCardFileError as exc:
         raise HTTPException(status_code=415, detail=str(exc)) from exc
 

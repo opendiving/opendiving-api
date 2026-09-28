@@ -298,7 +298,7 @@ class TestWhereAFileLands:
         again = await _attach(async_db, diver, dive, content)
 
         assert again.recording_id == stored.recording_id
-        assert (volume / key).read_bytes() == content
+        assert await blob_store.get(key) == content
 
     @pytest.mark.asyncio
     async def test_the_same_bytes_twice_are_a_no_op(

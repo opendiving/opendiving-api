@@ -208,6 +208,7 @@ async def _with_a_portrait_and_a_card_front(db: Session, async_db: AsyncSession,
     db.commit()
     await store_certification_file(
         async_db,
+        user_id=diver.id,
         certification_id=card.id,
         side=CertificationSide.FRONT,
         upload=_upload(plain_png(size=(9, 6)), "c.png"),
@@ -349,15 +350,24 @@ class TestAgainstPostgres:
         db.commit()
         await store_certification_file(
             async_db,
+            user_id=diver.id,
             certification_id=newest.id,
             side=CertificationSide.FRONT,
             upload=_upload(plain_png(size=(8, 5)), "f.png"),
         )
         await store_certification_file(
-            async_db, certification_id=newest.id, side=CertificationSide.BACK, upload=_upload(PDF_BYTES, "b.pdf")
+            async_db,
+            user_id=diver.id,
+            certification_id=newest.id,
+            side=CertificationSide.BACK,
+            upload=_upload(PDF_BYTES, "b.pdf"),
         )
         await store_certification_file(
-            async_db, certification_id=older.id, side=CertificationSide.FRONT, upload=_upload(PDF_BYTES, "f.pdf")
+            async_db,
+            user_id=diver.id,
+            certification_id=older.id,
+            side=CertificationSide.FRONT,
+            upload=_upload(PDF_BYTES, "f.pdf"),
         )
         await store_picture(
             async_db,
@@ -495,14 +505,26 @@ class TestAgainstPostgres:
         db.commit()
         image = plain_png(size=(9, 6))
         await store_certification_file(
-            async_db, certification_id=pdf_card.id, side=CertificationSide.FRONT, upload=_upload(PDF_BYTES, "f.pdf")
+            async_db,
+            user_id=diver.id,
+            certification_id=pdf_card.id,
+            side=CertificationSide.FRONT,
+            upload=_upload(PDF_BYTES, "f.pdf"),
         )
         await store_certification_file(
-            async_db, certification_id=bare_card.id, side=CertificationSide.BACK, upload=_upload(image, "b.png")
+            async_db,
+            user_id=diver.id,
+            certification_id=bare_card.id,
+            side=CertificationSide.BACK,
+            upload=_upload(image, "b.png"),
         )
         for card in (deleted_card, strangers_card):
             await store_certification_file(
-                async_db, certification_id=card.id, side=CertificationSide.FRONT, upload=_upload(image, "f.png")
+                async_db,
+                user_id=card.user_id,
+                certification_id=card.id,
+                side=CertificationSide.FRONT,
+                upload=_upload(image, "f.png"),
             )
         token = await _mint(http, sign_in, diver)
         dead = _dead(await http.get("/api/v1/checkin/never-minted/portrait"))

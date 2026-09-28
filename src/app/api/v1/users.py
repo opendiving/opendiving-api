@@ -46,6 +46,7 @@ from ...schemas.email_change import (
     EmailChangeVerifyResponse,
 )
 from ...schemas.species import SpeciesLifeListEntry
+from ...schemas.storage import StorageUsageRead
 from ...schemas.user import (
     ANCHOR_REQUIRED_MESSAGES,
     EMERGENCY_CONTACT_FIELDS,
@@ -65,6 +66,7 @@ from ...services.email_service import (
     send_email_changed_notification,
 )
 from ...services.species_life_list import species_life_list
+from ...services.storage_usage import get_storage_usage, storage_limit_bytes
 from ...services.user_pictures import (
     AVATAR_FRAME,
     MAX_PICTURE_UPLOAD_SIZE,
@@ -316,7 +318,8 @@ async def write_user_avatar(
     WebP. `PATCH /user/avatar` re-crops it later. **Without one**, nothing is kept but that
     rendition, drawn from the centred square of any of four formats. A crop outside the image
     or off 1:1 is a 422; a file that will not decode, or an original that is not a JPEG or
-    PNG, a 415; anything over the size limit a 413.
+    PNG, a 415; anything over the size limit, or a picture that would take the account past
+    its storage limit, a 413.
 
     The response carries the rendition's digest, which is its version: append it to
     `GET /user/avatar` as `?v=` so a replacement lands on a URL the browser has not cached.
@@ -339,8 +342,9 @@ async def adjust_user_avatar(
     """Re-crop the caller's profile picture from the original it holds, which is untouched.
 
     404 when the avatar holds no original - one stored before originals were kept, seeded
-    from Google, or uploaded without a crop - and 409 if it is replaced or removed while
-    this renders. Answers the new rendition's digest, as `PUT` does.
+    from Google, or uploaded without a crop - 409 if it is replaced or removed while this
+    renders, and 413 if the new rendition is larger than the old and the account has no room
+    for the difference. Answers the new rendition's digest, as `PUT` does.
     """
     with _picture_errors(body.crop):
         digest = await recrop_picture(db=db, user_id=current_user["id"], frame=AVATAR_FRAME, crop=body.crop)
@@ -419,7 +423,8 @@ async def write_user_portrait(
     cropped at 7:9 - 35x45 mm in proportion, the passport photo's shape - bounded to 900 px
     high, filled with white where it is transparent, and encoded as WebP. The crop is
     required, and a crop outside the image or off 7:9 is a 422; a file that is not a JPEG
-    or PNG, or will not decode, a 415; anything over the size limit a 413.
+    or PNG, or will not decode, a 415; anything over the size limit, or a portrait that
+    would take the account past its storage limit, a 413.
 
     Answers the rendition's digest, the `?v=` for `GET /user/portrait`.
     """
@@ -443,7 +448,8 @@ async def copy_user_avatar_to_portrait(
     A copy under keys of its own, carrying the original's name and type, so removing or
     replacing either picture later leaves the other whole. Replaces any portrait there is.
     404 while the avatar holds no original, which is what an avatar seeded from Google or
-    stored before originals were kept looks like - upload the portrait instead.
+    stored before originals were kept looks like - upload the portrait instead. A 413 when
+    the copy would take the account past its storage limit.
     """
     with _picture_errors(body.crop):
         digest = await copy_avatar_to_portrait(db=db, user_id=current_user["id"], crop=body.crop)
@@ -461,7 +467,8 @@ async def adjust_user_portrait(
 ) -> PictureRead:
     """Re-crop the caller's portrait from its original, which is untouched.
 
-    404 without a portrait, 409 if it is replaced or removed while this renders.
+    404 without a portrait, 409 if it is replaced or removed while this renders, 413 as for
+    the avatar's re-crop.
     """
     with _picture_errors(body.crop):
         digest = await recrop_picture(db=db, user_id=current_user["id"], frame=PORTRAIT_FRAME, crop=body.crop)
@@ -761,6 +768,31 @@ async def read_dive_stats(
     stats = cast(UserDiveStatsReadInternal, stats)
     return UserDiveStatsRead(
         **{k: v for k, v in stats.model_dump().items() if k != "user_id"}, user_uuid=current_user["uuid"]
+    )
+
+
+@router.get("/user/storage", response_model=StorageUsageRead)
+async def read_storage_usage(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> StorageUsageRead:
+    """What the caller's uploads occupy, by kind, against this instance's storage limit.
+
+    `used_bytes` is what an upload is checked against: one that would take it past
+    `limit_bytes` is a 413. Dive-computer files count as stored, compressed, so their figure
+    is less than the sizes their recordings list.
+
+    Not cached, like `GET /user`: every upload and delete would otherwise owe it an
+    invalidation, and the sums are a handful of indexed rows.
+    """
+    usage = await get_storage_usage(db, user_id=current_user["id"])
+    return StorageUsageRead(
+        used_bytes=usage.used_bytes,
+        limit_bytes=storage_limit_bytes(),
+        dive_files_bytes=usage.dive_files_bytes,
+        certification_files_bytes=usage.certification_files_bytes,
+        pictures_bytes=usage.pictures_bytes,
     )
 
 

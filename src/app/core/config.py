@@ -6,7 +6,7 @@ from importlib import metadata
 from typing import Self
 from urllib.parse import quote, urlparse
 
-from pydantic import SecretStr, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from starlette.config import Config
 
@@ -627,6 +627,22 @@ class FileStorageSettings(BaseSettings):
     # holds are identical on both backends and an install can move either way.
     S3_PREFIX: str | None = config("S3_PREFIX", default=None)
 
+    # How much one account may keep stored, in MB (1024-based, as every size here is): its
+    # dive-computer files as stored - compressed - plus its card scans and pictures. An
+    # upload that would take the account past it is refused with a 413; nothing already
+    # stored is ever removed. On by default, because the operator pays for every byte and
+    # "free for everyone" without one means one account can fill the disk. Blank turns it
+    # off; below 1 refuses startup (`Settings._require_a_usable_storage_limit`).
+    STORAGE_LIMIT_MB: int | None = config("STORAGE_LIMIT_MB", default=1024)
+
+    @field_validator("STORAGE_LIMIT_MB", mode="before")
+    @classmethod
+    def _blank_storage_limit_is_none(cls, value: object) -> object:
+        """A blank value is no limit. Compose hands `.env` to the process through
+        `env_file`, where `STORAGE_LIMIT_MB=` arrives as the empty string, which an integer
+        field would refuse at startup."""
+        return None if isinstance(value, str) and not value.strip() else value
+
 
 #: The four `S3_*` settings that have no sensible default and no safe absence.
 #: `S3_REGION` and `S3_PREFIX` are not here: both have defaults that work.
@@ -1076,6 +1092,23 @@ class Settings(
                 "halves of the OAuth client. Copy the client secret from the same Google Cloud "
                 "Console credential the id came from, or unset GOOGLE_CLIENT_ID to turn Google "
                 "sign-in off."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_a_usable_storage_limit(self) -> Self:
+        """Refuses to boot with a storage limit of nothing.
+
+        `STORAGE_LIMIT_MB=0` reads as "no limit" to anyone who has met that convention
+        elsewhere and would mean the opposite here - every upload refused, on an instance
+        that otherwise looks healthy. A limit below 1 MB is never what an operator meant, so
+        it fails startup naming the setting, and blank is the one spelling of "no limit".
+        """
+        if self.STORAGE_LIMIT_MB is not None and self.STORAGE_LIMIT_MB < 1:
+            raise ValueError(
+                f"STORAGE_LIMIT_MB is {self.STORAGE_LIMIT_MB}, and a limit below 1 MB would refuse every "
+                "upload. Set it in your .env to the MB one account may store, or leave it blank for no "
+                "limit."
             )
         return self
 

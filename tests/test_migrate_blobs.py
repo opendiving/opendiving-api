@@ -3,16 +3,21 @@ backends.
 
 Three properties carry the whole script, and none of them is the copy loop:
 
-- **It is resumable**, because a key ends in the hash of its own content, so an object
-  already present under that key is already the right bytes. A second run is cheap and
+- **It is resumable**, because a key ends in the hash of the file it names, so an object
+  already present under that key is already the right file. A second run is cheap and
   correct rather than merely tolerated - which matters, because the documented procedure is
   to run it, switch, and run it again for whatever arrived in between.
 - **It never deletes the source.** A switch that goes wrong has to be one restart away from
   working.
 - **It refuses to carry corruption.** A local file whose bytes do not hash to what its own
-  key claims is not copied into a store with no older copy to compare against.
+  key claims - decoded first, for a compressed one - is not copied into a store with no older
+  copy to compare against.
+
+The raw-key tests use keys minted before dive-computer files were compressed, which every
+instance upgraded across that change still holds; `TestCompressedObjects` is the `.zst` half.
 """
 
+from compression import zstd
 from pathlib import Path
 
 import pytest
@@ -43,7 +48,8 @@ def both_backends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeS3Clie
 
 
 def _local_key(sha256: str = DIGEST) -> str:
-    return blob_store.new_key("dive-files", sha256=sha256)
+    """A dive-file key as minted before compression: no suffix, raw bytes under it."""
+    return blob_store.new_key("dive-files", sha256=sha256).removesuffix(blob_store.ZSTD_SUFFIX)
 
 
 class TestCopyingToTheObjectStore:
@@ -136,6 +142,45 @@ class TestCopyingToTheObjectStore:
 
         assert (report.copied, report.failed) == (1, 0)
         assert both_backends.objects[key] == DATA
+
+
+class TestCompressedObjects:
+    @pytest.mark.asyncio
+    async def test_a_frame_is_copied_as_it_is_and_checked_by_decoding(
+        self, both_backends: FakeS3Client, tmp_path: Path
+    ) -> None:
+        """The digest in a `.zst` key is the file's as uploaded, which the frame never hashes
+        to - so the check decodes, and what crosses is the frame itself, under the same key."""
+        key = blob_store.new_key("dive-files", sha256=DIGEST)
+        await blob_store.put(key, DATA)
+
+        report = await migrate_blobs.migrate(to=FileStorageBackendOption.S3)
+
+        assert (report.copied, report.failed) == (1, 0)
+        assert both_backends.objects[key] == (tmp_path / key).read_bytes()
+        assert zstd.decompress(both_backends.objects[key]) == DATA
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_frame_is_refused(self, both_backends: FakeS3Client, tmp_path: Path) -> None:
+        key = blob_store.new_key("dive-files", sha256=DIGEST)
+        await blob_store.put(key, DATA)
+        frame = tmp_path / key
+        frame.write_bytes(frame.read_bytes()[:-4])
+
+        report = await migrate_blobs.migrate(to=FileStorageBackendOption.S3)
+
+        assert (report.copied, report.failed) == (0, 1)
+        assert both_backends.objects == {}
+
+    @pytest.mark.asyncio
+    async def test_a_frame_of_the_wrong_file_is_refused(self, both_backends: FakeS3Client) -> None:
+        key = blob_store.new_key("dive-files", sha256=DIGEST)
+        await blob_store.put(key, b"not the file this key claims")
+
+        report = await migrate_blobs.migrate(to=FileStorageBackendOption.S3)
+
+        assert (report.copied, report.failed) == (0, 1)
+        assert both_backends.objects == {}
 
 
 class TestCopyingBack:

@@ -52,7 +52,7 @@ from src.app.crud.crud_users import read_account
 from src.app.models.user import User
 from src.app.models.user_picture import _ORIGINAL_COLUMNS, UserPicture
 from src.app.schemas.user import UserRead
-from src.app.schemas.user_picture import PictureCrop
+from src.app.schemas.user_picture import PictureCrop, PictureKind
 from src.app.services import blob_store, user_pictures
 from src.app.services.picture_originals import strip_metadata
 from src.app.services.user_pictures import (
@@ -678,6 +678,8 @@ def _held(
         rendition_storage_key=rendition,
         original_content_type="image/jpeg",
         original_filename="me.jpg",
+        original_byte_size=None if original is None else 4096,
+        rendition_byte_size=1024,
     )
 
 
@@ -905,6 +907,7 @@ class TestGoogleImport:
         assert stored.storage_key.startswith(f"{user_pictures.AVATAR_FRAME.key_kind}/")
         data = (volume / stored.storage_key).read_bytes()
         assert hashlib.sha256(data).hexdigest() == stored.sha256
+        assert stored.byte_size == len(data)
         assert _open(data).format == "WEBP"
 
     @pytest.mark.asyncio
@@ -1516,7 +1519,7 @@ class TestAgainstPostgres:
     @pytest.mark.asyncio
     async def test_the_google_seed_writes_a_rendition_only_row(self, db: Session, async_db: AsyncSession) -> None:
         diver = create_user(db)
-        seeded = StoredAvatar(storage_key=f"user-avatars/ab/{uuid7()}_{'a' * 64}", sha256="a" * 64)
+        seeded = StoredAvatar(storage_key=f"user-avatars/ab/{uuid7()}_{'a' * 64}", sha256="a" * 64, byte_size=4321)
 
         await seed_google_avatar(async_db, user_id=diver.id, stored=seeded)
         await async_db.commit()
@@ -1527,6 +1530,31 @@ class TestAgainstPostgres:
             seeded.storage_key,
             seeded.sha256,
         )
+
+    @pytest.mark.asyncio
+    async def test_a_seeded_avatar_carries_its_rendition_length_from_the_start(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The column is nullable - for renditions stored before it, which the lifespan
+        measures - so nothing but this stops the seed leaving it out and its account's avatar
+        counting as nothing until the next boot."""
+        diver = create_user(db)
+        processed = b"RIFF\x00\x00\x00\x00WEBPa seeded rendition"
+        digest = hashlib.sha256(processed).hexdigest()
+        key = blob_store.new_key(AVATAR_FRAME.key_kind, sha256=digest)
+        seeded = StoredAvatar(storage_key=key, sha256=digest, byte_size=await blob_store.put(key, processed))
+
+        await seed_google_avatar(async_db, user_id=diver.id, stored=seeded)
+        await async_db.commit()
+
+        stored = (
+            await async_db.execute(
+                select(UserPicture.rendition_byte_size).where(
+                    UserPicture.user_id == diver.id, UserPicture.kind == PictureKind.AVATAR.value
+                )
+            )
+        ).scalar_one()
+        assert stored == len(processed)
 
 
 # The revision that moved the avatar into `user_picture` and kept its columns, and the one

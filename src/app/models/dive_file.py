@@ -63,22 +63,29 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # loader and the archive writer all want "this dive's files" and none of them wants
     # anything else off `dive_recording`.
     dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"), index=True)
-    # Hex SHA-256 of the stored bytes. Four jobs now: the `ETag` on the download endpoint,
-    # the dedupe key below, the value the upload token is checked against - it is what ties
-    # a set of bytes to a parse this server performed - and half of `storage_key`.
+    # Hex SHA-256 of the bytes as uploaded, which is what every reader gets back whatever the
+    # store holds. Four jobs now: the `ETag` on the download endpoint, the dedupe key below,
+    # the value the upload token is checked against - it is what ties a set of bytes to a
+    # parse this server performed - and half of `storage_key`.
     sha256: Mapped[str] = mapped_column(String(64))
     # Taken from the parser that successfully read the file (`DiveParser.content_type`),
     # never from the client's claimed `Content-Type` - it is what the download route
     # serves the bytes back as.
     content_type: Mapped[str] = mapped_column(String(32))
+    # The upload's length: what the API reports and the export manifest carries.
     byte_size: Mapped[int] = mapped_column(Integer)
+    # What the object under `storage_key` occupies - the length of the zstd frame
+    # `blob_store.put` wrote, or `byte_size` for an object stored raw. The storage limit
+    # counts this.
+    stored_byte_size: Mapped[int] = mapped_column(Integer)
     original_filename: Mapped[str] = mapped_column(String(255))
     # `DiveParser.key` of the parser that produced this dive's values. Records what read
     # the file at import time - not a promise the same parser would still claim it - so
     # that a later backfill can select the subset it knows how to re-read.
     parser_key: Mapped[str] = mapped_column(String(32))
     # Where the bytes are, in whichever store `blob_store` is configured for:
-    # `dive-files/{sha256[:2]}/{nonce}_{sha256}`, minted by `blob_store.new_key`. Opaque to
+    # `dive-files/{sha256[:2]}/{nonce}_{sha256}.zst`, minted by `blob_store.new_key`; a key
+    # without the suffix, written before exports were compressed, names raw bytes. Opaque to
     # everything but that module, and spelled so that it is a valid S3 object key and a
     # relative path at once - which is what lets an instance move between the two backends
     # without rewriting a single row. The nonce is per *write*, not the row's uuid: that is

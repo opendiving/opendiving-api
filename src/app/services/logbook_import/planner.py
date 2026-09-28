@@ -33,7 +33,7 @@ Four rules run through everything below, and each is the format's rather than th
 import hashlib
 import math
 import uuid as uuid_pkg
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -100,7 +100,10 @@ from ...schemas.logbook_import import (
 from ...schemas.person import PersonRole
 from ...schemas.user import CHECK_IN_FIELDS
 from ...schemas.user_picture import PictureCrop
+from .. import blob_store
+from ..certification_files import KEY_KIND as CERTIFICATION_KEY_KIND
 from ..certification_files import MAX_CARD_FILE_SIZE
+from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
 from ..dive_files import MAX_DIVE_FILE_SIZE
 from ..dive_parsers import PARSER_BY_KEY
 from ..dive_profiles import (
@@ -125,6 +128,7 @@ from ..dive_recordings import (
     load_candidates,
 )
 from ..person_links import Account, accounts_by_uuid, claim_link_slot, link_budget_remaining
+from ..storage_usage import ensure_room
 from ..user_pictures import (
     MAX_PICTURE_UPLOAD_SIZE,
     PORTRAIT_FRAME,
@@ -2997,6 +3001,73 @@ async def plan_import(
         claim_links=claim_links,
     )
     return await planner.plan()
+
+
+def _stored_files(plan: ImportPlan) -> Iterator[tuple[str, PlannedFile]]:
+    """Every file the writer would store, with the kind it goes under: the dive-computer
+    files of the dives it writes and of the recordings it matched to dives already here, and
+    the card images of the certifications it writes."""
+    for record in plan.writable("dives"):
+        for recording in record.children.get("recordings") or []:
+            for planned in recording.files:
+                yield DIVE_FILE_KEY_KIND, planned
+    for match in plan.recording_matches:
+        for planned in match.recording.files:
+            yield DIVE_FILE_KEY_KIND, planned
+    for record in plan.writable("certifications"):
+        for side in CertificationSide:
+            if (planned := record.children.get(side.value)) is not None:
+                yield CERTIFICATION_KEY_KIND, planned
+
+
+def _portrait_change(plan: ImportPlan) -> tuple[int, int]:
+    """What taking the archive's portrait adds and retires, as `(incoming, retired)`.
+
+    Nothing unless the plan takes it, so a preview - which has no choice yet - measures the
+    import with the account's own portrait kept, the apply's default. Where the account
+    already holds this original only the rendition is written, as `write_imported_portrait`
+    does.
+    """
+    portrait = plan.portrait
+    if portrait is None or not portrait.take:
+        return 0, 0
+    picture, held = portrait.picture, portrait.held
+    if held is not None and held.original_sha256 == picture.original_sha256:
+        return len(picture.rendition), held.rendition_byte_size or 0
+    retired = 0 if held is None else (held.original_byte_size or 0) + (held.rendition_byte_size or 0)
+    return len(picture.original) + len(picture.rendition), retired
+
+
+async def ensure_room_for_import(db: AsyncSession, *, user_id: int, plan: ImportPlan, loaded: LoadedImport) -> None:
+    """Refuse an import whose files would take `user_id` past the storage limit, whole.
+
+    The preview and the apply both call this on their own plan, so an archive that does not
+    fit is refused before the diver approves anything, and a `take` of the portrait that
+    tips it over is refused at the apply. Members whose digest the account already stores
+    were never planned, so they add nothing.
+
+    Exact rather than estimated, so an archive that fits once compressed is not refused on
+    its raw size: each dive-computer file is read and measured the way `blob_store.put`
+    would store it. That costs a compression per file, so it is done only when the members'
+    declared sizes, at zstd's worst case, would not fit on their own.
+    """
+    files = list(_stored_files(plan))
+    portrait_incoming, retired = _portrait_change(plan)
+    ceiling = portrait_incoming + sum(
+        blob_store.stored_size_ceiling(kind, loaded.member_size(planned.archive_path) or 0) for kind, planned in files
+    )
+
+    async def measure() -> int:
+        incoming = portrait_incoming
+        for kind, planned in files:
+            data = loaded.read_member(planned.archive_path)
+            # A member the writer would skip - unreadable, or not the bytes its digest names -
+            # stores nothing.
+            if data is not None and hashlib.sha256(data).hexdigest() == planned.sha256:
+                incoming += await blob_store.stored_size(kind, data)
+        return incoming
+
+    await ensure_room(db, user_id=user_id, incoming=ceiling, retired=retired, exact=measure)
 
 
 def unresolved_aphia_ids(document_species: Iterable[ImportSpecies]) -> list[int]:

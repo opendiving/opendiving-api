@@ -613,6 +613,7 @@ class TestFilesFollowTheirBytes:
                 sha256="a" * 64,
                 content_type="application/json",
                 byte_size=3,
+                stored_byte_size=3,
                 original_filename="dive.json",
                 parser_key="suunto_json",
                 storage_key=f"dive-files/{uuid7().hex}",
@@ -644,7 +645,7 @@ class TestFilesFollowTheirBytes:
         payload = b'{"hello": "dive"}'
         digest = hashlib.sha256(payload).hexdigest()
         key = blob_store.new_key("dive-files", sha256=digest)
-        await blob_store.put(key, payload)
+        stored_byte_size = await blob_store.put(key, payload)
         db.add(
             DiveFile(
                 user_id=user.id,
@@ -653,6 +654,7 @@ class TestFilesFollowTheirBytes:
                 sha256=digest,
                 content_type="application/json",
                 byte_size=len(payload),
+                stored_byte_size=stored_byte_size,
                 original_filename="dive.json",
                 parser_key="suunto_json",
                 storage_key=key,
@@ -671,6 +673,7 @@ class TestFilesFollowTheirBytes:
         stored = (await async_db.execute(select(DiveFile).where(DiveFile.user_id == destination.id))).scalars().one()
         assert stored.sha256 == digest
         assert await blob_store.get(stored.storage_key) == payload
+        assert stored.stored_byte_size == (tmp_path / stored.storage_key).stat().st_size
 
     @pytest.mark.asyncio
     async def test_bytes_that_do_not_match_their_digest_are_skipped(
@@ -684,7 +687,7 @@ class TestFilesFollowTheirBytes:
         payload = b'{"hello": "dive"}'
         digest = hashlib.sha256(payload).hexdigest()
         key = blob_store.new_key("dive-files", sha256=digest)
-        await blob_store.put(key, payload)
+        stored_byte_size = await blob_store.put(key, payload)
         db.add(
             DiveFile(
                 user_id=user.id,
@@ -693,6 +696,7 @@ class TestFilesFollowTheirBytes:
                 sha256=digest,
                 content_type="application/json",
                 byte_size=len(payload),
+                stored_byte_size=stored_byte_size,
                 original_filename="dive.json",
                 parser_key="suunto_json",
                 storage_key=key,
@@ -3895,7 +3899,7 @@ class TestAnArchiveThatWillNotInflate:
         payload = b"AAAABBBBCCCCDDDD"
         digest = hashlib.sha256(payload).hexdigest()
         key = blob_store.new_key("dive-files", sha256=digest)
-        await blob_store.put(key, payload)
+        stored_byte_size = await blob_store.put(key, payload)
         db.add(
             DiveFile(
                 user_id=user.id,
@@ -3904,6 +3908,7 @@ class TestAnArchiveThatWillNotInflate:
                 sha256=digest,
                 content_type="application/json",
                 byte_size=len(payload),
+                stored_byte_size=stored_byte_size,
                 original_filename="dive.json",
                 parser_key="suunto_json",
                 storage_key=key,
@@ -4211,6 +4216,7 @@ class TestTheIntegerColumnCensus:
         ("dive_recording", "utc_offset_minutes"): "derived from a parsed UTC offset, which Python bounds at a day",
         ("dive_recording", "duration"): "the samples' own span, capped by `_plan_profile`",
         ("dive_file", "byte_size"): "the restored bytes' own length, capped by `MAX_DIVE_FILE_SIZE`",
+        ("dive_file", "stored_byte_size"): "what `blob_store.put` wrote for them, within zstd's bound over that cap",
         ("certification_file", "id"): "the sequence's",
         ("certification_file", "certification_id"): "resolved from a row this import wrote",
         ("certification_file", "byte_size"): "the restored bytes' own length, capped by `MAX_CARD_FILE_SIZE`",

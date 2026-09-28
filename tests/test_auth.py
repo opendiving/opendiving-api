@@ -1211,7 +1211,7 @@ class TestCompleteProfile:
         """Seeded inside the account's transaction, before its one commit: the blob is
         already in the store by this point, so that commit is what makes it referenced - the
         write-file-then-commit-row ordering."""
-        imported = StoredAvatar(storage_key="user-avatars/ab/nonce_abc", sha256="ab" * 32)
+        imported = StoredAvatar(storage_key="user-avatars/ab/nonce_abc", sha256="ab" * 32, byte_size=1234)
 
         outcome, mock_seed, mock_import, commits_at_seed = await self._complete_with_avatar(mock_db, imported)
 

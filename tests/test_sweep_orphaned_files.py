@@ -91,6 +91,25 @@ class TestReporting:
         assert (volume / ORPHAN).is_file()
 
 
+class TestCompressedKeys:
+    @pytest.mark.asyncio
+    async def test_a_compressed_key_is_referenced_or_swept_by_its_exact_string(self, volume: Path) -> None:
+        """A `.zst` key is a key like any other: the suffix is part of the string the row
+        holds, so the referenced one stays and the unreferenced one goes."""
+        referenced = blob_store.new_key("dive-files", sha256="aa" + "0" * 62)
+        orphan = blob_store.new_key("dive-files", sha256="bb" + "0" * 62)
+        assert referenced.endswith(blob_store.ZSTD_SUFFIX) and orphan.endswith(blob_store.ZSTD_SUFFIX)
+        _write(volume, referenced, age_hours=48)
+        _write(volume, orphan, age_hours=48)
+
+        with _with_referenced({referenced}):
+            report = await sweeper.sweep(delete=True)
+
+        assert (report.on_disk, report.orphaned, report.deleted) == (2, 1, 1)
+        assert (volume / referenced).is_file()
+        assert not (volume / orphan).exists()
+
+
 class TestTheWrongDatabaseGuard:
     @pytest.mark.asyncio
     async def test_it_refuses_when_the_database_references_nothing_at_all(self, volume: Path) -> None:

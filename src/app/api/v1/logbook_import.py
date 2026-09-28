@@ -26,10 +26,11 @@ here rather than in the service layer because each is an HTTP concern:
   records why a whole-logbook endpoint is throttled at all, and this one is dearer than any
   export.
 - **The error taxonomy is `POST /dive/parse`'s.** 415 is "no reader here claims these
-  bytes", 422 is "one did, and it failed", 413 is over the cap. A file that is *readable*
-  never fails: a record this app cannot store is skipped and reported, a value it cannot
-  hold is dropped and reported, and what a conversion could not carry comes back on
-  `ImportReport.conversion` rather than as a refusal.
+  bytes", 422 is "one did, and it failed", 413 is over the upload cap or over the account's
+  storage limit. Short of those, a file that is *readable* never fails: a record this app
+  cannot store is skipped and reported, a value it cannot hold is dropped and reported, and
+  what a conversion could not carry comes back on `ImportReport.conversion` rather than as
+  a refusal.
 - **Atomic in rows.** Apply is one transaction, committed once at the end, so an import
   that fails or is interrupted writes nothing and a retry cannot half-duplicate a logbook.
 """
@@ -65,6 +66,7 @@ from ...services.logbook_import import (
     MalformedImportError,
     UnsupportedImportError,
     conversion_report,
+    ensure_room_for_import,
     formats_this_build_reads,
     load_import,
     plan_import,
@@ -164,10 +166,15 @@ async def preview_logbook_import(
     The `token` in the response goes to `POST /import/logbook` with the same file. It says
     which bytes this report describes and nothing more: the import re-reads, re-converts and
     re-plans, because your logbook may have moved between the two calls.
+
+    A 413 naming the storage used and the limit when the files the archive would restore do
+    not fit in what your account has left, measured as they would be stored and with your
+    own portrait kept.
     """
     await _enforce_import_limit(current_user["id"])
     with await _load(file) as loaded:
         plan = await plan_import(db, user_id=current_user["id"], loaded=loaded)
+        await ensure_room_for_import(db, user_id=current_user["id"], plan=plan, loaded=loaded)
         return ImportPreview(
             format=loaded.document.format,
             version=loaded.document.version,
@@ -229,6 +236,9 @@ async def apply_logbook_import(
     Each link to an account the import makes counts against the limit on linking people,
     and one past it is dropped with a note rather than failing the import. A link counts
     whether or not the import completes.
+
+    Files that would take your account past its storage limit refuse the import whole, with
+    the preview's 413 - which here also counts the archive's portrait if `portrait` takes it.
     """
     if check_in_details is not None and (anchor_errors := check_in_details.anchor_errors()):
         raise RequestValidationError(
@@ -259,6 +269,7 @@ async def apply_logbook_import(
             portrait=portrait,
             claim_links=True,
         )
+        await ensure_room_for_import(db, user_id=current_user["id"], plan=plan, loaded=loaded)
         await write_import(db, user_id=current_user["id"], loaded=loaded, plan=plan)
         await db.commit()
 

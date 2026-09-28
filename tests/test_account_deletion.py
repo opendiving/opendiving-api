@@ -508,6 +508,7 @@ class TestPurgeDeletedAccountsAgainstPostgres:
                     sha256="c" * 64,
                     content_type="application/octet-stream",
                     byte_size=20,
+                    stored_byte_size=20,
                     original_filename="dive.uddf",
                     parser_key="uddf",
                     storage_key=dive_key,

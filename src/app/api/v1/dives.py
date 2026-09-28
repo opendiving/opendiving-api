@@ -90,6 +90,7 @@ from ...services.dive_files import (
     InvalidDiveFileTokenError,
     delete_dive_file,
     delete_files_for_dive,
+    ensure_room_to_attach,
     get_dive_file_sha256,
     load_dive_file,
     refresh_tech_scalars,
@@ -451,7 +452,9 @@ async def parse_dive(
     Nothing is stored here - the bytes are parsed and dropped. What comes back alongside
     the dive is a `file_token` attesting that this parse happened: hand it to
     `POST /dive/{uuid}/recordings` with the same file, once the dive it pre-filled exists,
-    and the export is kept against that dive.
+    and the export is kept against that dive. So a file the account has no room to keep is
+    a 413 here, before it is parsed, naming the storage used and the limit; the dive can
+    still be logged without it.
 
     `matches` is the second thing that comes back: dives of the caller's whose recordings
     started near this file's, so a form can offer *attach there* instead of logging a
@@ -464,6 +467,8 @@ async def parse_dive(
         raise BadRequestException("Missing filename")
 
     content = await read_upload_within_limit(file, MAX_DIVE_FILE_SIZE)
+    digest = hashlib.sha256(content).hexdigest()
+    await ensure_room_to_attach(db, user_id=current_user["id"], data=content, digest=digest)
     try:
         # Off the event loop: parsing is pure CPU with nothing awaited inside it, and the
         # FIT decoder is pure Python, roughly two orders of magnitude more CPU per byte
@@ -483,7 +488,7 @@ async def parse_dive(
         **parsed.model_dump(),
         file_token=create_dive_file_token(
             user_uuid=current_user["uuid"],
-            sha256=hashlib.sha256(content).hexdigest(),
+            sha256=digest,
             parser_key=parser.key,
         ),
         matches=await _parse_matches(db, user_id=current_user["id"], parsed=parsed),

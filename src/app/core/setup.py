@@ -54,6 +54,8 @@ logger = logging.getLogger(__name__)
 # `apply_migrations` picks the same one. Namespaced mentally as "opendiving schema
 # bootstrap".
 _SCHEMA_BOOTSTRAP_LOCK_KEY = 8231907441002137
+# Its neighbour, for `measure_unsized_renditions`.
+_RENDITION_MEASURE_LOCK_KEY = 8231907441002138
 
 
 async def apply_migrations() -> None:
@@ -124,6 +126,61 @@ async def warn_if_files_volume_looks_empty() -> None:
         )
 
 
+async def measure_unsized_renditions() -> None:
+    """Record the length of every picture rendition stored before `rendition_byte_size`
+    existed, reading each through the live blob store.
+
+    Revision `6849ff025422` adds the column empty: a revision is frozen history that reads
+    no live storage code, and the store may be a bucket it knows nothing about. The storage
+    limit counts an unmeasured rendition as 0 until this has run, and after the first boot
+    that follows the upgrade it finds nothing to do. A rendition the previous build writes
+    during a deploy's overlap is caught by the boot after.
+
+    One worker measures and the rest move on: every gunicorn worker runs the lifespan, and a
+    transaction-scoped try-lock lets whichever gets there first do it, rather than each one
+    reading every rendition. A rendition whose file is missing stays unmeasured and is
+    counted in one warning; anything else goes wrong, the transaction rolls back and the next
+    boot tries again. Never a reason to fail startup.
+    """
+    missing = 0
+    try:
+        async with engine.begin() as conn:
+            if conn.dialect.name == "postgresql":
+                locked = await conn.execute(
+                    text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _RENDITION_MEASURE_LOCK_KEY}
+                )
+                if not locked.scalar_one():
+                    return
+            rows = (
+                await conn.execute(
+                    text("SELECT id, rendition_storage_key FROM user_picture WHERE rendition_byte_size IS NULL")
+                )
+            ).all()
+            for row_id, key in rows:
+                try:
+                    size = len(await blob_store.get(key))
+                except blob_store.BlobMissingError:
+                    missing += 1
+                    continue
+                await conn.execute(
+                    text(
+                        "UPDATE user_picture SET rendition_byte_size = :size "
+                        "WHERE id = :id AND rendition_byte_size IS NULL"
+                    ),
+                    {"size": size, "id": row_id},
+                )
+    except Exception:
+        logger.warning("Could not measure the stored picture renditions; the next start will retry", exc_info=True)
+        return
+
+    if missing:
+        logger.warning(
+            "%d picture rendition(s) are missing from %s and stay unmeasured; the storage limit counts them as 0",
+            missing,
+            blob_store.describe_location(),
+        )
+
+
 # -------------- cache --------------
 async def create_redis_cache_pool() -> None:
     cache.pool = redis.ConnectionPool.from_url(settings.REDIS_CACHE_URL)
@@ -174,6 +231,7 @@ def lifespan_factory(
                 await apply_migrations()
 
             await warn_if_files_volume_looks_empty()
+            await measure_unsized_renditions()
 
             initialization_complete.set()
 

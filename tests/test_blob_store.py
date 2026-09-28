@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.app.services import blob_store
+from src.app.services import blob_store, certification_files, dive_files, species_photos, user_pictures
 from tests.conftest import db_available
 
 DATA = b"a dive-computer export, more or less"
@@ -44,9 +44,23 @@ def volume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 class TestKeys:
     def test_a_key_carries_the_kind_the_shard_and_the_content(self) -> None:
         digest = "ff" + "0" * 62
-        kind, shard, name = blob_store.new_key("dive-files", sha256=digest).split("/")
-        assert (kind, shard) == ("dive-files", "ff")
+        kind, shard, name = blob_store.new_key("certification-files", sha256=digest).split("/")
+        assert (kind, shard) == ("certification-files", "ff")
         assert name.endswith(f"_{digest}")
+
+    def test_a_dive_file_key_says_it_is_compressed_and_no_other_kind_does(self) -> None:
+        """The kind rule: the key is the only place the encoding is recorded, and only
+        dive-computer exports - the one kind zstd can shrink - carry the suffix. Taken from
+        the services that mint them, so a renamed kind cannot silently stop compressing."""
+        digest = "ff" + "0" * 62
+        assert blob_store.new_key(dive_files.KEY_KIND, sha256=digest).endswith(f"_{digest}.zst")
+        for kind in (
+            certification_files.KEY_KIND,
+            user_pictures.AVATAR_FRAME.key_kind,
+            user_pictures.PORTRAIT_FRAME.key_kind,
+            species_photos.KEY_KIND,
+        ):
+            assert blob_store.new_key(kind, sha256=digest).endswith(f"_{digest}"), kind
 
     def test_the_shard_comes_from_the_hash_not_the_nonce(self) -> None:
         """uuid7's leading hex is a millisecond timestamp, so sharding on it would put every
@@ -120,6 +134,90 @@ class TestRoundTrip:
             await blob_store.put(KEY, DATA)
 
         assert list((volume / blob_store.TMP_DIRNAME).iterdir()) == []
+
+
+def _suunto_like_json(samples: int = 2000) -> bytes:
+    """What a Suunto app export looks like to a compressor: one line of JSON, no whitespace,
+    and the same few keys on every sample - which is why it shrinks to a tenth."""
+    body = ",".join(
+        f'{{"TimeISO8601":"2026-09-01T10:{n // 60:02d}:{n % 60:02d}Z",'
+        f'"Depth":{n % 37 * 0.5},"Temperature":{295 + n % 3}}}'
+        for n in range(samples)
+    )
+    return f'{{"DeviceLog":{{"Header":{{"Mode":"Air"}},"Samples":[{body}]}}}}'.encode()
+
+
+class TestCompression:
+    """A dive-file key names a zstd frame, and nothing outside the module ever sees one."""
+
+    @pytest.fixture
+    def zst_key(self) -> str:
+        return blob_store.new_key(dive_files.KEY_KIND, sha256="ab" + "0" * 62)
+
+    @pytest.mark.asyncio
+    async def test_a_compressed_key_round_trips_to_the_bytes_that_went_in(self, volume: Path, zst_key: str) -> None:
+        payload = _suunto_like_json()
+        await blob_store.put(zst_key, payload)
+        assert await blob_store.get(zst_key) == payload
+
+    @pytest.mark.asyncio
+    async def test_what_is_on_disk_is_one_zstd_frame_much_smaller_than_the_file(
+        self, volume: Path, zst_key: str
+    ) -> None:
+        payload = _suunto_like_json()
+        await blob_store.put(zst_key, payload)
+
+        on_disk = (volume / zst_key).read_bytes()
+        assert on_disk[:4] == b"\x28\xb5\x2f\xfd"
+        assert len(on_disk) < len(payload) / 5
+
+    @pytest.mark.asyncio
+    async def test_put_answers_the_length_of_the_object_it_wrote(self, volume: Path, zst_key: str) -> None:
+        """What the row records as the bytes the file occupies, on both kinds of key."""
+        payload = _suunto_like_json()
+
+        assert await blob_store.put(zst_key, payload) == (volume / zst_key).stat().st_size
+        assert await blob_store.put(KEY, DATA) == len(DATA) == (volume / KEY).stat().st_size
+
+    @pytest.mark.asyncio
+    async def test_the_measure_before_a_put_is_what_the_put_writes(self, volume: Path, zst_key: str) -> None:
+        payload = _suunto_like_json()
+        measured = await blob_store.stored_size(dive_files.KEY_KIND, payload)
+
+        assert measured == await blob_store.put(zst_key, payload)
+        assert await blob_store.stored_size(certification_files.KEY_KIND, payload) == len(payload)
+
+    @pytest.mark.parametrize("size", [0, 1, 100, 4096, 128 * 1024 - 1, 128 * 1024, 200_000, 1024 * 1024])
+    def test_the_ceiling_holds_for_bytes_that_do_not_compress(self, size: int) -> None:
+        """Random bytes are the worst case a frame can hold: bigger than they went in. The
+        ceiling is what lets a caller skip measuring, so it must never be below the truth."""
+        incompressible = os.urandom(size)
+        stored = len(blob_store._encode(f"dive-files/ab/x_{'0' * 64}.zst", incompressible))
+        assert stored > size
+        assert blob_store.stored_size_ceiling(dive_files.KEY_KIND, size) >= stored
+        assert blob_store.stored_size_ceiling(certification_files.KEY_KIND, size) == size
+
+    @pytest.mark.asyncio
+    async def test_a_raw_key_still_round_trips_raw(self, volume: Path) -> None:
+        """Every dive file stored before compression has a key with no suffix, and must
+        still read."""
+        await blob_store.put(KEY, DATA)
+        assert (volume / KEY).read_bytes() == DATA
+        assert await blob_store.get(KEY) == DATA
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_frame_reads_as_a_missing_file(self, volume: Path, zst_key: str) -> None:
+        """An interrupted restore can leave a frame cut short. Every caller already knows what
+        to do with a file it cannot have, so that is what this is."""
+        await blob_store.put(zst_key, _suunto_like_json())
+        frame = volume / zst_key
+        frame.write_bytes(frame.read_bytes()[:-16])
+
+        with pytest.raises(blob_store.BlobMissingError) as exc:
+            await blob_store.get(zst_key)
+        assert isinstance(exc.value, blob_store.BlobCorruptError)
+        assert exc.value.key == zst_key
+        assert await blob_store.has(zst_key) is False
 
 
 class TestMissingFiles:
