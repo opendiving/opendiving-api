@@ -5910,7 +5910,7 @@ not impossible.
 
 No parse-side guard: a pair rule has no single bad value to null, as with
 `ck_dive_mixture_oxygen_helium_sum` and `ck_dive_mixture_pressure_order`;
-`test_every_single_column_bound_a_parser_can_reach_has_a_parse_side_guard` lists it among the
+`test_every_single_column_bound_a_file_can_reach_has_a_parse_side_guard` lists it among the
 exclusions.
 
 Revision `c4d81e6b3f57` nulls `avg_depth` on violating rows before adding the constraint, so

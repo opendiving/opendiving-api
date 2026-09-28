@@ -92,14 +92,15 @@ from src.app.services.logbook_import import (
     write_import,
 )
 from src.app.services.logbook_import import planner as planner_module
+from src.app.services import dive_reader
 from src.app.services.logbook_import import reader as import_reader
 from src.app.services.logbook_import.planner import (
     _DIVE_BOUNDS,
     _MIXTURE_BOUNDS,
-    _READOUT_BOUNDS,
     _SIGHTING_BOUNDS,
 )
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
+from src.app.services.recording_shape import READOUT_BOUNDS
 from src.app.services.user_pictures import PORTRAIT_FRAME, recrop_picture, store_picture
 from tests.conftest import db_available
 from tests.helpers.generators import (
@@ -3770,7 +3771,7 @@ class TestTheBoundsCensus:
     `dive_mixture` must not be able to land without an import-side counterpart.
 
     The same shape as
-    `test_every_single_column_bound_a_parser_can_reach_has_a_parse_side_guard`, and for the
+    `test_every_single_column_bound_a_file_can_reach_has_a_parse_side_guard`, and for the
     same reason - a value the database refuses must not take the write it rode in on with
     it. Pair rules are excluded by name: there is no "the bad value" in a pair, so the
     planner handles those on their own terms.
@@ -3812,7 +3813,7 @@ class TestTheBoundsCensus:
     def test_every_bound_the_document_can_reach_has_a_guard(self) -> None:
         guarded = {
             bound.field
-            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, _READOUT_BOUNDS, _SIGHTING_BOUNDS)
+            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, READOUT_BOUNDS, _SIGHTING_BOUNDS)
             for bound in bounds
         }
         # Column names, mapped onto the wire names the planner reads them under.
@@ -4292,33 +4293,50 @@ class TestTheAgencyVocabulary:
 
 
 class TestTheFormatLabelTable:
-    """`_FORMAT_LABELS` names every id `divejson.read_formats()` returns.
+    """`FORMAT_LABELS` and `FORMAT_CONTENT_TYPES` name every id `divejson.read_formats()` returns.
 
     The one guard in this repository that can see a **new reader** arrive. Everything else
     on both sides of the seam is written to tolerate an unknown format - the accepted set is
     computed per call and never listed, `formats_this_build_reads` falls back to the raw id,
-    and the picker's extension list is the web app's - so a version bump that adds a reader
-    changes what the API accepts with nothing anywhere reporting it. That is not
-    hypothetical: `suunto_xml` shipped in `divejson` 0.4.0, and the pin crossed it into a
-    build whose "formats this build reads" sentence rendered the bare string `suunto_xml`
-    while the web app's picker refused the extension. Nobody saw it for ten review rounds.
+    a stored file of an unnamed format is served as `application/octet-stream`, and the
+    picker's extension list is the web app's - so a version bump that adds a reader changes
+    what the API accepts, on the import and on the dive form alike, with nothing anywhere
+    reporting it. That is not hypothetical: `suunto_xml` shipped in `divejson` 0.4.0, and the
+    pin crossed it into a build whose "formats this build reads" sentence rendered the bare
+    string `suunto_xml` while the web app's picker refused the extension. Nobody saw it for
+    ten review rounds.
     """
 
     def test_every_read_format_has_a_label(self) -> None:
-        unlabelled = [fmt for fmt in divejson.read_formats() if fmt not in import_reader._FORMAT_LABELS]
+        unlabelled = [fmt for fmt in divejson.read_formats() if fmt not in dive_reader.FORMAT_LABELS]
 
         assert not unlabelled, (
             "`divejson` reads a format this build has no name for, so the API accepts it while every message "
-            f"about it renders the raw id: {unlabelled}. Add it to `_FORMAT_LABELS`, and to the prose in "
-            "`README.md`, `api/v1/logbook_import.py` and `schemas/logbook_import.py` that lists the set."
+            f"about it renders the raw id: {unlabelled}. Add it to `FORMAT_LABELS` in `services/dive_reader.py`, "
+            "and to the prose in `README.md`, `api/v1/logbook_import.py` and `schemas/logbook_import.py` that "
+            "lists the set."
+        )
+
+    def test_every_read_format_has_a_content_type(self) -> None:
+        """What a stored file of that format is downloaded as - the dive form stores every file it reads."""
+        untyped = [fmt for fmt in divejson.read_formats() if fmt not in dive_reader.FORMAT_CONTENT_TYPES]
+
+        assert not untyped, (
+            f"`divejson` reads a format this build serves as `application/octet-stream`: {untyped}. Add it to "
+            "`FORMAT_CONTENT_TYPES` in `services/dive_reader.py`."
         )
 
     def test_no_label_outlives_its_format(self) -> None:
         """The mirror, and it is not symmetry for its own sake: a label for a format the
         library has dropped is a format this build advertises and refuses."""
-        stale = [fmt for fmt in import_reader._FORMAT_LABELS if fmt not in divejson.read_formats()]
+        stale = [
+            fmt
+            for table in (dive_reader.FORMAT_LABELS, dive_reader.FORMAT_CONTENT_TYPES)
+            for fmt in table
+            if fmt not in divejson.read_formats()
+        ]
 
-        assert not stale, f"`_FORMAT_LABELS` names a format `divejson` no longer reads: {stale}"
+        assert not stale, f"`services/dive_reader.py` names a format `divejson` no longer reads: {stale}"
 
 
 class TestTheImportGates:

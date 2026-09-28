@@ -33,6 +33,7 @@ from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
 from src.app.schemas.dive_profile import GasAttribution
 from src.app.services.dive_profiles import (
+    READER_VERSION,
     NormalizedProfile,
     ProfileSeries,
     backfill_profiles,
@@ -96,6 +97,7 @@ class TestGasAttributionRoundTrip:
             profile=_profile(*entries),
             source_sha256="a" * 64,
             parser_key="suunto_json",
+            reader_version=READER_VERSION,
             commit=True,
         )
         attribution = await get_gas_attribution_for_dives(async_db, dive_ids=[dive.id])
@@ -121,6 +123,7 @@ class TestGasAttributionRoundTrip:
             profile=_profile(),
             source_sha256="b" * 64,
             parser_key="suunto_xml",
+            reader_version=READER_VERSION,
             commit=True,
         )
 
@@ -176,6 +179,7 @@ class TestTheBackfillSeesADigestThatDrifted:
             profile=_profile(),
             source_sha256=digest,
             parser_key="suunto_xml",
+            reader_version=READER_VERSION,
             commit=True,
         )
         agreeing = (await backfill_profiles(async_db, dry_run=True)).failed

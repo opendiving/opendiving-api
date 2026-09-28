@@ -128,7 +128,7 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # `schemas/dive.py` so the caller gets a sentence rather than an
             # `IntegrityError`; it is a *pair* rule, so the parse-side single-column
             # guards deliberately do not cover it (see
-            # `test_every_single_column_bound_a_parser_can_reach_has_a_parse_side_guard`).
+            # `test_every_single_column_bound_a_file_can_reach_has_a_parse_side_guard`).
             CheckConstraint(
                 "avg_depth IS NULL OR max_depth IS NULL OR avg_depth <= max_depth",
                 name="ck_dive_avg_depth_within_max",
@@ -153,8 +153,8 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # dive somewhere unusual.
             #
             # One constraint per column, mirrored one-for-one by a validator on
-            # `ParsedDiveSchema`, so that every single-column bound a parser can reach
-            # still has a parse-side guard (`test_every_single_column_bound_a_parser_can
+            # `ParsedDiveSchema`, so that every single-column bound a file can reach
+            # still has a parse-side guard (`test_every_single_column_bound_a_file_can
             # _reach_has_a_parse_side_guard` counts them).
             CheckConstraint(
                 "entry_latitude IS NULL OR (entry_latitude >= -90 AND entry_latitude <= 90)",

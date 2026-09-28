@@ -45,15 +45,14 @@ from src.app.services.dive_files import (
     load_dive_file,
     store_recording_file,
 )
-from src.app.services.dive_parsers.suunto_xml import SuuntoXmlParser
 from tests.conftest import db_available
 from tests.helpers.generators import create_dive, create_user
 
-# The namespace `SuuntoXmlParser` matches on, copied from `tests/test_dive_files.py`.
+# The namespace a Suunto DM5 export is sniffed on.
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 
 XML = f"""<?xml version="1.0" encoding="utf-8"?>
-<Dive xmlns="{SUUNTO_NS}"><MaxDepth>25.5</MaxDepth><Duration>1800</Duration></Dive>
+<Dive xmlns="{SUUNTO_NS}"><StartTime>2026-09-08T15:17:38</StartTime><MaxDepth>25.5</MaxDepth><Duration>1800</Duration></Dive>
 """.encode()
 XML_DIGEST = hashlib.sha256(XML).hexdigest()
 
@@ -90,7 +89,7 @@ def _written(db: AsyncMock, statement: type[Insert] | type[Update], table: str) 
 
 def _token() -> tuple[str, uuid_pkg.UUID]:
     user_uuid = uuid7()
-    return create_dive_file_token(user_uuid=user_uuid, sha256=XML_DIGEST, parser_key=SuuntoXmlParser.key), user_uuid
+    return create_dive_file_token(user_uuid=user_uuid, sha256=XML_DIGEST, parser_key="suunto_xml"), user_uuid
 
 
 class TestDiveFileWriteOrdering:
@@ -478,7 +477,7 @@ class TestTheDownloadServesTheUpload:
             user_uuid=diver.uuid,
             dive_id=dive.id,
             upload=_upload(XML, "export.xml"),
-            file_token=create_dive_file_token(user_uuid=diver.uuid, sha256=XML_DIGEST, parser_key=SuuntoXmlParser.key),
+            file_token=create_dive_file_token(user_uuid=diver.uuid, sha256=XML_DIGEST, parser_key="suunto_xml"),
         )
 
         response = await read_dive_file(
