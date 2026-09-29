@@ -56,11 +56,6 @@ async def get_tags_page(
     return {"data": [TagRead.model_validate(dict(row._mapping)) for row in rows], "total_count": total_count or 0}
 
 
-async def get_tag_read(db: AsyncSession, *, tag_id: int) -> TagRead | None:
-    row = (await db.execute(_select_tags().where(Tag.id == tag_id))).first()
-    return None if row is None else TagRead.model_validate(dict(row._mapping))
-
-
 async def tag_name_exists(db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None) -> bool:
     """Checked on the unique index's own expression, so the answer is the one the index
     would give. Names arrive trimmed."""

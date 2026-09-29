@@ -73,6 +73,9 @@ class OwnedResourceCache[InternalT, PublicT]:
       that other account reaches no key of this owner's, so a cache would serve the old one
       for its TTL. The list is one query - the join, a dive count, a search over two
       tables - over tens of rows.
+    - `tags.py` - uncached for `people.py`'s cost and a plainer reason: each tag carries the
+      count of live dives that name it, which every dive write moves, so a cache would owe an
+      invalidation to every dive route for a list of one query over tens of rows.
 
     In each of the first four the enrichment is a second query whose results have to be
     zipped back into the page before conversion, which is precisely the step this factory has
