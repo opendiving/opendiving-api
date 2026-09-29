@@ -62,6 +62,10 @@ DIVES_HEADER = (
     "time",
     "utc_offset",
     "duration_seconds",
+    "type",
+    "rating",
+    # By name, `;`-joined in the diver's order; `tags.csv` has the uuids.
+    "tags",
     "max_depth_m",
     "avg_depth_m",
     "bottom_temperature_c",
@@ -69,6 +73,12 @@ DIVES_HEADER = (
     "weight_kg",
     "water_type",
     "altitude_m",
+    "air_temperature_c",
+    "current",
+    "waves",
+    "weather",
+    "entry_type",
+    "boat_name",
     "trip",
     # The course a training dive was logged on, as its *name* - the same shape as `trip`
     # beside it. `courses.csv` carries the uuid that actually joins the two files.
@@ -193,6 +203,9 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         clock,
         _utc_offset(dive.utc_offset_minutes),
         dive.duration,
+        dive.type,
+        dive.rating,
+        "; ".join(tag.name for tag in bundle.tags_for(dive)),
         dive.max_depth,
         dive.avg_depth,
         dive.bottom_temperature,
@@ -200,6 +213,12 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         dive.weight,
         dive.water_type,
         dive.altitude,
+        dive.air_temperature,
+        dive.current,
+        dive.waves,
+        dive.weather,
+        dive.entry_type,
+        dive.boat_name,
         None if trip is None else trip.name,
         None if course is None else course.name,
         None if contact is None else contact.name,
@@ -668,6 +687,20 @@ def write_people_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(PEOPLE_HEADER, rows())
 
 
+TAGS_HEADER = ("name", "dives", "tag_uuid")
+
+
+def write_tags_csv(bundle: ExportBundle) -> Iterator[str]:
+    """One row per tag, with how many of the exported dives carry it - zero for a tag on none,
+    which is in the account all the same."""
+    dive_counts: dict[int, int] = {}
+    for dive in bundle.dives:
+        for tag in bundle.tags_for(dive):
+            dive_counts[tag.id] = dive_counts.get(tag.id, 0) + 1
+
+    return _rows_to_csv(TAGS_HEADER, ((tag.name, dive_counts.get(tag.id, 0), str(tag.uuid)) for tag in bundle.tags))
+
+
 # The archive's `csv/` directory, in the order the files are added to it.
 CSV_WRITERS = (
     ("dives.csv", write_dives_csv),
@@ -681,4 +714,5 @@ CSV_WRITERS = (
     ("certifications.csv", write_certifications_csv),
     ("contacts.csv", write_contacts_csv),
     ("people.csv", write_people_csv),
+    ("tags.csv", write_tags_csv),
 )

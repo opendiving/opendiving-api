@@ -168,7 +168,7 @@ class TestTheCanonicalForm:
             DiveFormField.CONTACT_UUID,
             DiveFormField.PEOPLE,
             DiveFormField.DIVE_SITE_UUIDS,
-            DiveFormField.MAX_DEPTH,
+            DiveFormField.TYPE,
         ]
         assert list(DiveFormField)[-1] == DiveFormField.MIXTURE_USAGE
 
@@ -380,6 +380,8 @@ class TestTheDefaults:
         assert visible == [
             DiveFormField.DIVE_SITE_UUIDS,
             DiveFormField.MAX_DEPTH,
+            DiveFormField.RATING,
+            DiveFormField.TAGS,
             DiveFormField.NOTES,
         ]
 

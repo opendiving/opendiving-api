@@ -82,6 +82,19 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # themselves bucket altitude into 300 m bands.
     water_type: Mapped[str | None] = mapped_column(String(32), default=None)
     altitude: Mapped[int | None] = mapped_column(Integer, default=None)
+    # The diver's own classification and conditions, each on `water_type`'s terms: the
+    # vocabularies are plain `VARCHAR(32)` with a `StrEnum` in `schemas/dive.py` and no
+    # `CHECK`, and the number that has a range gets one. `type` is what kind of dive it was,
+    # never derived from a recording's `mode` nor the reverse - a backup computer in gauge mode
+    # was on an open-circuit dive.
+    type: Mapped[str | None] = mapped_column(String(32), default=None)
+    rating: Mapped[int | None] = mapped_column(Integer, default=None)
+    air_temperature: Mapped[float | None] = mapped_column(Float, default=None)
+    current: Mapped[str | None] = mapped_column(String(32), default=None)
+    waves: Mapped[str | None] = mapped_column(String(32), default=None)
+    weather: Mapped[str | None] = mapped_column(String(32), default=None)
+    entry_type: Mapped[str | None] = mapped_column(String(32), default=None)
+    boat_name: Mapped[str | None] = mapped_column(String(255), default=None)
     trip_id: Mapped[int | None] = mapped_column(ForeignKey("trip.id", ondelete="SET NULL"), default=None, index=True)
     # The training course this dive was logged on, if any - character-for-character the
     # shape of `trip_id` above, and for the same reasons: deleting the course leaves the
@@ -147,6 +160,8 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
                 "altitude IS NULL OR (altitude >= -450 AND altitude <= 6500)",
                 name="ck_dive_altitude_range",
             ),
+            # DiveJSON's five steps; unrated is NULL, never a zero.
+            CheckConstraint("rating IS NULL OR rating BETWEEN 1 AND 5", name="ck_dive_rating_range"),
             # Bounded on both sides for a plain reason: these are the limits of the
             # coordinate system. A value outside them is a unit error - a FIT semicircle
             # count read as degrees, or a Suunto radian read the same way - rather than a

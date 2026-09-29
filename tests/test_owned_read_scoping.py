@@ -47,11 +47,12 @@ from src.app.crud.crud_gear_set_items import (
     get_gear_items_for_sets,
     replace_gear_items_for_set,
 )
+from src.app.crud.crud_tags import resolve_tag_id_for_user, tag_ids_by_name
 from src.app.crud.crud_trips import get_trip_uuids_by_ids
 from src.app.models.user import User
-from src.app.schemas.dive import DiveReadInternal
+from src.app.schemas.dive import DiveListSort, DiveReadInternal
 from tests.conftest import db_available
-from tests.helpers.generators import create_dive, create_gear_item, create_gear_set, create_trip
+from tests.helpers.generators import create_dive, create_gear_item, create_gear_set, create_tag, create_trip
 
 # The `@cache` decorator would need Redis and would serve a hit without re-running the
 # body, which is the opposite of what these assert. `__wrapped__` is the undecorated
@@ -83,6 +84,33 @@ class TestTripUuidLookupScoping:
     @pytest.mark.asyncio
     async def test_no_ids_is_no_query(self, async_db: AsyncSession, diver: User) -> None:
         assert await get_trip_uuids_by_ids(async_db, trip_ids=[], user_id=diver.id) == {}
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestTagLookupScoping:
+    """A tag is found by uuid for the list's filter and by name for a dive write, and both
+    are the caller's alone: another diver's tag of the same name is theirs, not a match."""
+
+    @pytest.mark.asyncio
+    async def test_another_divers_tag_never_resolves_by_uuid(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        theirs, mine = create_tag(db, other_diver), create_tag(db, diver)
+        theirs_uuid, mine_uuid, mine_id, user_id = theirs.uuid, mine.uuid, mine.id, diver.id
+
+        assert await resolve_tag_id_for_user(async_db, tag_uuid=theirs_uuid, user_id=user_id) is None
+        assert await resolve_tag_id_for_user(async_db, tag_uuid=mine_uuid, user_id=user_id) == mine_id
+
+    @pytest.mark.asyncio
+    async def test_another_divers_tag_of_the_same_name_is_not_used(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        theirs = create_tag(db, other_diver)
+        theirs_id, name, user_id = theirs.id, theirs.name, diver.id
+
+        (tag_id,) = (await tag_ids_by_name(async_db, user_id=user_id, names=[name])).values()
+
+        assert tag_id != theirs_id
 
 
 class TestTheDiveReadsScopeThatLookup:
@@ -140,7 +168,7 @@ class TestTheDiveReadsScopeThatLookup:
 
         with (
             patch(
-                "src.app.api.v1.dives.crud_dives.get_multi",
+                "src.app.api.v1.dives.get_dives_page",
                 AsyncMock(return_value={"data": rows, "total_count": len(rows)}),
             ),
             patch("src.app.api.v1.dives.get_trip_uuids_by_ids", lookup),
@@ -160,6 +188,9 @@ class TestTheDiveReadsScopeThatLookup:
                 gear_item_id=None,
                 species_id=None,
                 person_id=None,
+                tag_id=None,
+                dive_type=None,
+                sort=DiveListSort.DATE,
             )
 
         assert lookup.await_args is not None

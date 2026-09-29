@@ -182,6 +182,17 @@ class TestDiveCheckConstraints:
         db.add(_make_dive(dive_owner.id))
         db.commit()
 
+    def test_a_rating_outside_the_five_steps_is_rejected(self, db: Session, dive_owner: User) -> None:
+        """Unrated is NULL, never a zero, and there is no sixth star."""
+        _assert_violates(db, _make_dive(dive_owner.id, rating=0), "ck_dive_rating_range")
+        _assert_violates(db, _make_dive(dive_owner.id, rating=6), "ck_dive_rating_range")
+
+    def test_the_rating_bounds_and_no_rating_are_allowed(self, db: Session, dive_owner: User) -> None:
+        db.add(_make_dive(dive_owner.id, rating=1))
+        db.add(_make_dive(dive_owner.id, rating=5))
+        db.add(_make_dive(dive_owner.id))
+        db.commit()
+
     def test_any_water_type_string_is_accepted_by_the_database(self, db: Session, dive_owner: User) -> None:
         """Deliberately unconstrained, exactly like `gear_item.type`: `WaterType` is a
         Pydantic enum on every write path, so a DB copy of the vocabulary would buy

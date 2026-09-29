@@ -370,6 +370,12 @@ FETCH_OWNED_ROUTES = [
         OwnedRoute(method, "/api/v1/person/{uuid}", "src.app.api.v1.people:crud_people", "Person not found", extra)
         for method, extra in _CRUD_METHODS
     ),
+    # No `GET`: a tag is read through `GET /tags` and on the dives that carry it.
+    *(
+        OwnedRoute(method, "/api/v1/tag/{uuid}", "src.app.api.v1.tags:crud_tags", "Tag not found", extra)
+        for method, extra in _CRUD_METHODS
+        if method != "GET"
+    ),
     *(
         OwnedRoute(
             method,

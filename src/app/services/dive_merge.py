@@ -39,6 +39,7 @@ from ..models.dive_person import DivePerson
 from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
 from ..models.dive_species import DiveSpecies
+from ..models.dive_tag import DiveTag
 from ..schemas.dive import DiveReadInternal
 from ..schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND
 from .dive_files import apply_gas_mapping, relabel_gas_numbers
@@ -466,7 +467,7 @@ async def _move_recordings(
 
 
 async def _move_links(db: AsyncSession, *, from_dive_id: int, to_dive_id: int, dive_number: int) -> None:
-    """Carry the other dive's sites, gear, sightings and people across, skipping what is
+    """Carry the other dive's sites, gear, sightings, people and tags across, skipping what is
     already there - a person on both dives keeps the surviving dive's role, and a species on
     both keeps the surviving dive's sighting, which `_fold_sightings` completes first.
 
@@ -536,6 +537,7 @@ _LINKED_COLLECTIONS = (
     (DiveGearItem, DiveGearItem.gear_item_id),
     (DiveSpecies, DiveSpecies.species_id),
     (DivePerson, DivePerson.person_id),
+    (DiveTag, DiveTag.tag_id),
 )
 
 

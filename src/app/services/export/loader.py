@@ -58,6 +58,7 @@ from ...models.dive_profile import DiveProfile
 from ...models.dive_recording import DiveRecording
 from ...models.dive_site import DiveSite
 from ...models.dive_species import DiveSpecies
+from ...models.dive_tag import DiveTag
 from ...models.gear_item import GearItem
 from ...models.gear_service_record import GearServiceRecord
 from ...models.gear_service_schedule import GearServiceSchedule
@@ -65,6 +66,7 @@ from ...models.gear_set import GearSet
 from ...models.gear_set_item import GearSetItem
 from ...models.person import Person
 from ...models.species import Species
+from ...models.tag import Tag
 from ...models.trip import Trip
 from ...models.trip_person import TripPerson
 from ...models.user import User
@@ -192,6 +194,10 @@ class ExportBundle:
     person_ids_by_dive: dict[int, list[tuple[int, str | None]]]
     person_ids_by_trip: dict[int, list[tuple[int, str | None]]]
     person_ids_by_course: dict[int, list[tuple[int, str | None]]]
+    # By name, as `GET /tags` lists them - every one, a tag on no live dive included - and
+    # each dive's in the diver's order.
+    tags: list[Tag]
+    tag_ids_by_dive: dict[int, list[int]]
 
     trip_by_id: dict[int, Trip] = field(init=False)
     course_by_id: dict[int, Course] = field(init=False)
@@ -202,6 +208,7 @@ class ExportBundle:
     contact_by_id: dict[int, Contact] = field(init=False)
     contact_by_uuid: dict[uuid_pkg.UUID, Contact] = field(init=False)
     person_by_id: dict[int, Person] = field(init=False)
+    tag_by_id: dict[int, Tag] = field(init=False)
 
     def __post_init__(self) -> None:
         # `object.__setattr__` because the dataclass is frozen: these are lookup indexes
@@ -216,6 +223,7 @@ class ExportBundle:
         object.__setattr__(self, "contact_by_id", {contact.id: contact for contact in self.contacts})
         object.__setattr__(self, "contact_by_uuid", {contact.uuid: contact for contact in self.contacts})
         object.__setattr__(self, "person_by_id", {person.id: person for person in self.people})
+        object.__setattr__(self, "tag_by_id", {tag.id: tag for tag in self.tags})
 
     def sites_for(self, dive: Dive) -> list[DiveSite]:
         """A dive's sites in visit order; index 0 is the primary site."""
@@ -285,6 +293,10 @@ class ExportBundle:
             return self._references(self.person_ids_by_trip[row.id])
         return self._references(self.person_ids_by_course[row.id])
 
+    def tags_for(self, dive: Dive) -> list[Tag]:
+        """A dive's tags in the order the diver listed them."""
+        return [tag for tag_id in self.tag_ids_by_dive[dive.id] if (tag := self.tag_by_id.get(tag_id))]
+
     def instructor_for(self, row: Course | Certification) -> Person | None:
         """A card's instructor, or a course's first by position - the one name each of the
         CSV's instructor columns holds."""
@@ -311,6 +323,21 @@ async def _person_ids_by_host(
     for row in rows:
         by_host[row.host_id].append((row.person_id, row.role))
     return by_host
+
+
+async def _tag_ids_by_dive(db: AsyncSession, dive_ids: list[int]) -> dict[int, list[int]]:
+    """Each dive's tag ids in position order, keyed for every dive."""
+    by_dive: dict[int, list[int]] = {dive_id: [] for dive_id in dive_ids}
+    if not dive_ids:
+        return by_dive
+    rows = await db.execute(
+        select(DiveTag.dive_id, DiveTag.tag_id)
+        .where(DiveTag.dive_id.in_(dive_ids))
+        .order_by(DiveTag.dive_id, DiveTag.position)
+    )
+    for row in rows:
+        by_dive[row.dive_id].append(row.tag_id)
+    return by_dive
 
 
 async def _linked_uuids(db: AsyncSession, *, user_id: int) -> dict[int, uuid_pkg.UUID]:
@@ -519,6 +546,8 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         person_ids_by_course=await _person_ids_by_host(
             db, CoursePerson.course_id, CoursePerson, [course.id for course in courses]
         ),
+        tags=await _owned(db, Tag, user_id=user_id, order_by=(Tag.name, Tag.id)),
+        tag_ids_by_dive=await _tag_ids_by_dive(db, dive_ids),
     )
 
 

@@ -49,7 +49,7 @@ from src.app.schemas.contact import (
     address_columns,
 )
 from src.app.schemas.course import CourseCreate, CourseReadInternal, CourseStatus, CourseUpdateRequest
-from src.app.schemas.dive import DiveUpdateRequest
+from src.app.schemas.dive import DiveListSort, DiveUpdateRequest
 from src.app.schemas.gear_service import GearServiceRecordUpdateRequest
 from src.app.schemas.trip import TripCreate, TripPartInput
 from src.app.services import contact_links
@@ -633,6 +633,9 @@ class TestTheReadsCarryTheReference:
             gear_item_id=None,
             species_id=None,
             person_id=None,
+            tag_id=None,
+            dive_type=None,
+            sort=DiveListSort.DATE,
         )
         single = await dives_module._cached_read_dive.__wrapped__(  # type: ignore[attr-defined]
             request=None, user_id=user_id, uuid=dive_uuid, owner_uuid=user_uuid, db=async_db

@@ -19,6 +19,7 @@ from ..models.gear_set_item import GearSetItem
 from ..models.person import Person
 from ..models.species import Species
 from ..models.species_name import SpeciesName
+from ..models.tag import Tag
 from ..models.trip import Trip
 from ..models.trip_part import TripPart
 from ..models.user import User
@@ -52,6 +53,7 @@ from ..schemas.species import (
     SpeciesNameUpdate,
     SpeciesUpdate,
 )
+from ..schemas.tag import TagCreateInternal, TagUpdate
 from ..schemas.trip import TripCreateInternal, TripUpdate
 from ..schemas.trip_part import TripPartCreate, TripPartUpdate
 from ..schemas.user import UserAdminUpdate, UserCreateInternal
@@ -123,7 +125,7 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view"},
     )
 
-    # `DiveSite`, `Trip`, `Course`, `Contact`, `Person`, `GearItem`, `GearSet`,
+    # `DiveSite`, `Trip`, `Course`, `Contact`, `Person`, `Tag`, `GearItem`, `GearSet`,
     # `GearServiceSchedule` and `DiveFormPreset` are registered without `"delete"`, and that is not squeamishness about
     # a superuser having the power. FastCRUD's `delete` branches on whether the model carries
     # `is_deleted`, and since they hard-delete it takes the `DELETE FROM` branch - so the button that
@@ -173,6 +175,15 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         model=Person,
         create_schema=PersonCreateInternal,
         update_schema=PersonUpdate,
+        allowed_actions={"view", "create", "update"},
+    )
+
+    # `ux_tag_user_id_name_folded` is what stops this form storing a second spelling of a
+    # tag; the name check is the route's.
+    admin.add_view(
+        model=Tag,
+        create_schema=TagCreateInternal,
+        update_schema=TagUpdate,
         allowed_actions={"view", "create", "update"},
     )
 

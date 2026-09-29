@@ -24,6 +24,7 @@ from .people import router as people_router
 from .sessions import router as sessions_router
 from .species import router as species_router
 from .support import router as support_router
+from .tags import router as tags_router
 from .trips import router as trips_router
 from .users import router as users_router
 
@@ -41,6 +42,7 @@ router.include_router(trips_router)
 router.include_router(courses_router)
 router.include_router(contacts_router)
 router.include_router(people_router)
+router.include_router(tags_router)
 router.include_router(dive_sites_router)
 router.include_router(geocoding_router)
 router.include_router(gear_items_router)

@@ -32,6 +32,7 @@ from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_person import DivePerson
 from src.app.models.dive_site import DiveSite
+from src.app.models.dive_tag import DiveTag
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
@@ -42,7 +43,7 @@ from src.app.models.trip_part import TripPart
 from src.app.models.user import User
 from src.app.services.export.loader import ExportBundle, load_export_bundle
 from tests.conftest import db_available
-from tests.helpers.generators import create_person, create_user
+from tests.helpers.generators import create_person, create_tag, create_user
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -207,6 +208,33 @@ class TestPeople:
         assert bundle.linked_uuid_by_person == {linked.id: stranger.uuid}
         assert bundle.person_ids_by_dive == {live.id: [(plain.id, "buddy"), (linked.id, None)]}
         assert [(ref.person.name, ref.role) for ref in bundle.people_for(live)] == [("Sam", "buddy"), ("Alex", None)]
+
+
+class TestTags:
+    @pytest.mark.asyncio
+    async def test_every_one_of_the_callers_tags_and_a_live_dives_in_its_order(
+        self, db: Session, owner: User, stranger: User
+    ):
+        """Every tag, the one no live dive carries included - it is in the account - and a
+        soft-deleted dive's tags stay out of the per-dive map, as its people do."""
+        night, wreck = create_tag(db, owner, name="night"), create_tag(db, owner, name="wreck")
+        unused = create_tag(db, owner, name="drift")
+        create_tag(db, stranger, name="theirs")
+        live, hidden = _dive(db, owner, number=1), _dive(db, owner, number=2, deleted=True)
+        db.add_all(
+            [
+                DiveTag(dive_id=live.id, tag_id=wreck.id, position=0),
+                DiveTag(dive_id=live.id, tag_id=night.id, position=1),
+                DiveTag(dive_id=hidden.id, tag_id=unused.id, position=0),
+            ]
+        )
+        db.commit()
+
+        bundle = await _load(owner.id)
+
+        assert [tag.name for tag in bundle.tags] == ["drift", "night", "wreck"]
+        assert bundle.tag_ids_by_dive == {live.id: [wreck.id, night.id]}
+        assert [tag.name for tag in bundle.tags_for(live)] == ["wreck", "night"]
 
 
 class TestTheCascadeLeavesNothingDangling:

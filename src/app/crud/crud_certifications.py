@@ -60,8 +60,8 @@ async def get_certifications_page(
     Hand-written for `_LIST_ORDER` alone - `get_multi` cannot ask for `NULLS LAST`. Rows
     come back as plain dicts of every table column, matching `get_multi` called without a
     `schema_to_select`, so the caller still reads the internal `id` it needs to batch its
-    card-file and course lookups. Mirrors `search_multi` in `core/utils/search.py`, the
-    other place a list query outgrew `get_multi`.
+    card-file and course lookups. Mirrors `search_multi` in `core/utils/search.py`, another
+    place a list query outgrew `get_multi`.
 
     `course_id` narrows the page to the cards one training course issued, which is what a
     course's own page reads. It is the internal id rather than the public uuid because the

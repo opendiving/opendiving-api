@@ -553,10 +553,8 @@ class TestTheDiveFilter:
             assert segment in source
         assert "species_{species_id}" in source
 
-    def test_the_filter_is_registered_on_the_crud_instance(self) -> None:
-        from src.app.crud.crud_dives import crud_dives
-
-        assert "showing_species" in (crud_dives.custom_filters or {})
+    def test_the_list_applies_the_filter(self) -> None:
+        assert "showing_species(species_id)" in _route_source()
 
     def test_the_species_filter_takes_no_owner(self) -> None:
         """Unlike its two siblings, which scope by `user_id` because attaching another diver's
@@ -583,7 +581,7 @@ class TestTheDiveFilterAgainstPostgres:
     @pytest.mark.asyncio
     async def test_it_returns_only_the_dives_carrying_that_species(self, db: Session, async_db: AsyncSession) -> None:
         """The `IN (subquery)` executed, not built. Its correctness is entirely in the SQL."""
-        from src.app.crud.crud_dives import crud_dives
+        from src.app.crud.crud_dives import get_dives_page, showing_species
 
         diver = create_user(db)
         species = create_species(db)
@@ -592,8 +590,8 @@ class TestTheDiveFilterAgainstPostgres:
         db.add(DiveSpecies(dive_id=seen.id, species_id=species.id, position=0))
         db.commit()
 
-        page = await crud_dives.get_multi(
-            db=async_db, user_id=diver.id, is_deleted=False, id__showing_species=species.id, limit=10
+        page = await get_dives_page(
+            async_db, user_id=diver.id, offset=0, limit=10, conditions=[showing_species(species.id)]
         )
 
         assert [row["id"] for row in page["data"]] == [seen.id]
@@ -603,7 +601,7 @@ class TestTheDiveFilterAgainstPostgres:
         """-1 can never be a real `species.id`, so a well-formed uuid naming no species comes
         back as an empty page rather than a 404 - which reveals nothing about whether that
         species exists."""
-        from src.app.crud.crud_dives import crud_dives
+        from src.app.crud.crud_dives import get_dives_page, showing_species
 
         diver = create_user(db)
         species = create_species(db)
@@ -611,9 +609,7 @@ class TestTheDiveFilterAgainstPostgres:
         db.add(DiveSpecies(dive_id=dive.id, species_id=species.id, position=0))
         db.commit()
 
-        page = await crud_dives.get_multi(
-            db=async_db, user_id=diver.id, is_deleted=False, id__showing_species=-1, limit=10
-        )
+        page = await get_dives_page(async_db, user_id=diver.id, offset=0, limit=10, conditions=[showing_species(-1)])
 
         assert page["data"] == []
         assert page["total_count"] == 0
@@ -622,7 +618,8 @@ class TestTheDiveFilterAgainstPostgres:
     async def test_it_combines_with_the_other_filters(self, db: Session, async_db: AsyncSession) -> None:
         """Combinable, like the four that were already there - the filters are AND'd, so a
         species filter narrowing an already-narrowed page must not widen it back."""
-        from src.app.crud.crud_dives import crud_dives
+        from src.app.crud.crud_dives import get_dives_page, showing_species
+        from src.app.models.dive import Dive
         from tests.helpers.generators import create_trip
 
         diver = create_user(db)
@@ -634,13 +631,12 @@ class TestTheDiveFilterAgainstPostgres:
             db.add(DiveSpecies(dive_id=dive.id, species_id=species.id, position=0))
         db.commit()
 
-        page = await crud_dives.get_multi(
-            db=async_db,
+        page = await get_dives_page(
+            async_db,
             user_id=diver.id,
-            is_deleted=False,
-            trip_id=trip.id,
-            id__showing_species=species.id,
+            offset=0,
             limit=10,
+            conditions=[Dive.trip_id == trip.id, showing_species(species.id)],
         )
 
         assert [row["id"] for row in page["data"]] == [on_trip.id]

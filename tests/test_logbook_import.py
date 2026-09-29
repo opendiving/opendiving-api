@@ -58,6 +58,7 @@ from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_site import DiveSite
 from src.app.models.dive_species import DiveSpecies
+from src.app.models.dive_tag import DiveTag
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
@@ -65,6 +66,7 @@ from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
 from src.app.models.person import Person
 from src.app.models.species import Species
+from src.app.models.tag import Tag
 from src.app.models.trip import Trip
 from src.app.models.trip_part import TripPart
 from src.app.models.trip_person import TripPerson
@@ -118,6 +120,7 @@ from tests.helpers.generators import (
     create_gear_set,
     create_person,
     create_species,
+    create_tag,
     create_trip,
     create_user,
 )
@@ -2685,6 +2688,134 @@ class TestPeople:
         assert tuple(on_dive) == (sam.id, None)
 
 
+def _seed_tagged_logbook(db: Session) -> Any:
+    """A diver with one dive carrying every member of its classification and conditions, two
+    tags on it in their own order, and a third tag on no dive."""
+    user = create_user(db)
+    dive = create_dive(db, user)
+    dive.type, dive.rating, dive.air_temperature = "closed_circuit", 4, 24.0
+    dive.current, dive.waves, dive.weather = "strong", "slight", "overcast"
+    dive.entry_type, dive.boat_name = "boat", "Legend"
+    wreck, night = create_tag(db, user, name="Wreck"), create_tag(db, user, name="night dive")
+    create_tag(db, user, name="drift")
+    db.add_all(
+        [DiveTag(dive_id=dive.id, tag_id=wreck.id, position=0), DiveTag(dive_id=dive.id, tag_id=night.id, position=1)]
+    )
+    db.commit()
+    return user
+
+
+async def _tags_of(db: AsyncSession, user_id: int) -> list[str]:
+    return list((await db.execute(select(Tag.name).where(Tag.user_id == user_id).order_by(Tag.name))).scalars())
+
+
+def _dive_document(dive: dict[str, Any], **document: Any) -> bytes:
+    """One hand-written dive, for the values this app's own writer never produces."""
+    return json.dumps(
+        {
+            "format": "divejson",
+            "version": "1.0",
+            "dives": [{"uuid": str(uuid7()), "started_at": "2026-06-01T09:00:00+02:00", "duration": 1800, **dive}],
+            **document,
+        }
+    ).encode()
+
+
+class TestTheClassificationConditionsAndTags:
+    @pytest.mark.asyncio
+    async def test_a_round_trip_brings_every_member_and_every_tag_back(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The tag on no dive comes back from the diver's extension alone, the first value the
+        import reads from that block. The report counts no tag row - a tag is a member of a
+        dive, not a collection - and the preview names every tag it will add instead."""
+        document = await _export(async_db, _seed_tagged_logbook(db).id)
+        destination = create_user(db)
+
+        preview = await _preview(async_db, destination.id, document)
+        plan = await _apply(async_db, destination.id, document)
+
+        (note,) = [note for note in preview.notes if note.code is ImportNoteCode.TAGS_CREATED]
+        assert note.message == 'This import adds these tags to your list: "Wreck", "night dive", "drift".'
+        assert "tags" not in _counts(plan)
+        assert await _tags_of(async_db, destination.id) == ["drift", "night dive", "Wreck"]
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalar_one()
+        assert (dive.type, dive.rating, dive.air_temperature) == ("closed_circuit", 4, 24.0)
+        assert (dive.current, dive.waves, dive.weather) == ("strong", "slight", "overcast")
+        assert (dive.entry_type, dive.boat_name) == ("boat", "Legend")
+        on_dive = (
+            await async_db.execute(
+                select(Tag.name)
+                .join(DiveTag, DiveTag.tag_id == Tag.id)
+                .where(DiveTag.dive_id == dive.id)
+                .order_by(DiveTag.position)
+            )
+        ).scalars()
+        assert list(on_dive) == ["Wreck", "night dive"]
+
+    @pytest.mark.asyncio
+    async def test_a_tag_the_account_already_has_is_used_under_its_own_spelling(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        document = await _export(async_db, _seed_tagged_logbook(db).id)
+        destination = create_user(db)
+        create_tag(db, destination, name="WRECK")
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert await _tags_of(async_db, destination.id) == ["drift", "night dive", "WRECK"]
+        (note,) = [note for note in plan.notes if note.code is ImportNoteCode.TAGS_CREATED]
+        assert '"Wreck"' not in note.message
+
+    @pytest.mark.asyncio
+    async def test_what_the_app_cannot_hold_is_dropped_and_the_dive_is_not(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The import validates no schema of its own, so the read model's rules are restated:
+        each tag trimmed, a blank one dropped, an over-long one dropped and noted, two that
+        fold to one kept once; a rating off the five steps noted; an unknown vocabulary value
+        absent (§5.6); a blank boat name gone."""
+        destination = create_user(db)
+        document = _dive_document(
+            {
+                "tags": ["  night ", "\u3000", "x" * 65, "Night", "Großes Riff", "GROSSES RIFF"],
+                "rating": 7,
+                "type": "gauge",
+                "current": "whirlpool",
+                "boat_name": "   ",
+                "air_temperature": 21.5,
+            }
+        )
+
+        plan = await _apply(async_db, destination.id, document)
+
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalar_one()
+        assert (dive.rating, dive.type, dive.current, dive.boat_name, dive.air_temperature) == (
+            None,
+            None,
+            None,
+            None,
+            21.5,
+        )
+        assert await _tags_of(async_db, destination.id) == ["Großes Riff", "night"]
+        dropped = [note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED]
+        assert any("rating" in message for message in dropped)
+        assert any("tag longer than 64" in message for message in dropped)
+
+    @pytest.mark.asyncio
+    async def test_a_diver_block_carrying_only_tags_applies_nothing_it_would_have_to_report(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """`DIVER_NOT_APPLIED` says the name, the email and the settings are not applied, so
+        it fires on those - never on a block that carries the tag list alone, which is read."""
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, _diver_document(extensions={"opendiving": {"tags": ["drift"]}}))
+
+        assert ImportNoteCode.DIVER_NOT_APPLIED not in _codes(plan)
+        assert await _tags_of(async_db, destination.id) == ["drift"]
+
+
 class TestNothingInventedNothingFatal:
     @pytest.mark.asyncio
     async def test_a_value_the_database_refuses_is_dropped_and_the_dive_imports(
@@ -4154,6 +4285,7 @@ class TestTheIntegerColumnCensus:
         ("dive", "duration"): "bounded in `_DIVE_BOUNDS`",
         ("dive", "visibility"): "bounded in `_DIVE_BOUNDS`",
         ("dive", "altitude"): "bounded in `_DIVE_BOUNDS`, to the model's own -450..6500",
+        ("dive", "rating"): "bounded in `_DIVE_BOUNDS`, to the model's own 1..5",
         ("dive", "id"): "the sequence's, never the document's",
         ("dive", "user_id"): "the caller's",
         ("dive", "trip_id"): "resolved from a row this import wrote",
@@ -4227,6 +4359,12 @@ class TestTheIntegerColumnCensus:
         ("dive_species", "species_id"): "a catalog row, found by the document's AphiaID",
         ("dive_species", "position"): "the list index, not the document's",
         ("dive_species", "count"): "bounded in `_SIGHTING_BOUNDS`, to 1..the column's own width",
+        ("tag", "id"): "the sequence's",
+        ("tag", "user_id"): "the caller's",
+        ("dive_tag", "id"): "the sequence's",
+        ("dive_tag", "dive_id"): "resolved from a row this import wrote",
+        ("dive_tag", "tag_id"): "a tag this import wrote, or one the caller already had",
+        ("dive_tag", "position"): "the list index, not the document's",
         ("dive_site", "id"): "the sequence's",
         ("dive_site", "user_id"): "the caller's",
         ("gear_set", "id"): "the sequence's",
@@ -4278,7 +4416,9 @@ class TestTheIntegerColumnCensus:
         from src.app.models.certification_file import CertificationFile
         from src.app.models.course_person import CoursePerson
         from src.app.models.dive_person import DivePerson
+        from src.app.models.dive_tag import DiveTag
         from src.app.models.person import Person
+        from src.app.models.tag import Tag
         from src.app.models.trip_part import TripPart
         from src.app.models.trip_person import TripPerson
         from src.app.models.user_dive_stats import UserDiveStats
@@ -4294,6 +4434,8 @@ class TestTheIntegerColumnCensus:
             TripPerson,
             CoursePerson,
             DiveSpecies,
+            Tag,
+            DiveTag,
             Trip,
             TripPart,
             Course,

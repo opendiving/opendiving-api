@@ -8,7 +8,7 @@ here rather than in the service layer because each is an HTTP concern:
   the bearer token names the only logbook there is to import into, so there is no
   authorization decision to get wrong. The document's own diver identity and settings are
   read, reported and never applied; its check-in details and its portrait are written only
-  as the diver confirms them in the preview.
+  as the diver confirms them in the preview, and its tag list is the diver's tags.
 - **Any format the converter reads, and the app's own two.** A DiveJSON document, the
   full-export archive, a UDDF file, a Subsurface `.ssrf`, a FIT, a Suunto app export, a
   Suunto DM5 XML export, or a zip whose members are all one of those - a watch writes one file per dive, and one file

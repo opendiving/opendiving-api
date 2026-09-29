@@ -403,6 +403,9 @@ class TestWhatUddfCannotHold:
                     # from a preset that failed to export.
                     {"name": "Technical", "hidden_fields": []},
                 ],
+                # Every tag, `drift` on no dive among them: a tag is in the account until the
+                # diver deletes it, whether or not a dive still carries it.
+                "tags": ["drift", "night", "wreck"],
             }
         }
         assert document["dives"][0]["max_depth"] == 28.4
@@ -487,6 +490,23 @@ class TestWhatUddfCannotHold:
         assert document["dives"][0]["altitude"] == 0
         assert "water_type" not in document["dives"][1]
         assert "altitude" not in document["dives"][1]
+
+    @pytest.mark.asyncio
+    async def test_the_tags_waves_weather_and_boat_name_are_here_because_uddf_has_no_slot(self, monkeypatch):
+        """With the rest of the classification and conditions beside them, and the tags in
+        the diver's own order rather than the list's."""
+        document = await _render(full_bundle(), monkeypatch)
+        air = document["dives"][0]
+
+        assert {member: air[member] for member in ("type", "rating", "tags", "air_temperature")} == {
+            "type": "open_circuit",
+            "rating": 4,
+            "tags": ["wreck", "night"],
+            "air_temperature": 31.5,
+        }
+        assert (air["current"], air["waves"], air["weather"]) == ("strong", "slight", "partly_cloudy")
+        assert (air["entry_type"], air["boat_name"]) == ("boat", "Blue Horizon")
+        assert document["dives"][1]["tags"] == ["night"]
 
     @pytest.mark.asyncio
     async def test_the_ceiling_channel_survives_in_the_embedded_profile(self, monkeypatch):
@@ -1073,8 +1093,9 @@ class TestAbsence:
             "gear_uuids",
             "sightings",
             "people",
+            "tags",
             "cylinders",
-            # An empty array, like the five above it: a hand-entered dive was recorded by
+            # An empty array, like the collections above it: a hand-entered dive was recorded by
             # nothing, and the collection members are written empty rather than omitted so a
             # reader never has to tell "no recordings" from "this writer omits the member".
             "recordings",
@@ -1231,6 +1252,27 @@ class TestAnUnrecognizedVocabularyValueDoesNotFiveHundredTheExport:
         cylinder = document["dives"][0]["cylinders"][0]
         assert cylinder["start_pressure"] == 200.0
         assert "role" not in cylinder and "usage" not in cylinder
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_dive_keeps_itself_when_its_type_or_conditions_are_unspeakable(self, monkeypatch) -> None:
+        """Every one of them OPTIONAL, like `water_type`: the member goes, the dive stays."""
+        dive = make_dive(
+            1,
+            UUIDS["dive-air"],
+            type="frobnicator",
+            current="frobnicator",
+            waves="frobnicator",
+            weather="frobnicator",
+            entry_type="frobnicator",
+            rating=3,
+        )
+
+        document = await _render(build_bundle(dives=[dive]), monkeypatch)
+
+        exported = document["dives"][0]
+        assert not {"type", "current", "waves", "weather", "entry_type"} & set(exported)
+        assert exported["rating"] == 3
         _assert_conforms(document)
 
     @pytest.mark.asyncio

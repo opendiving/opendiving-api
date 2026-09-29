@@ -19,6 +19,7 @@ from .dive_profile import DiveProfile
 from .dive_recording import DiveRecording
 from .dive_site import DiveSite
 from .dive_species import DiveSpecies
+from .dive_tag import DiveTag
 from .gear_item import GearItem
 from .gear_service_record import GearServiceRecord
 from .gear_service_schedule import GearServiceSchedule
@@ -29,6 +30,7 @@ from .invite_request import InviteRequest
 from .person import Person
 from .species import Species
 from .species_name import SpeciesName
+from .tag import Tag
 from .trip import Trip
 from .trip_part import TripPart
 from .trip_person import TripPerson

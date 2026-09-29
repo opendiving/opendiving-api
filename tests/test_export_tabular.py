@@ -33,6 +33,7 @@ from src.app.services.export.tabular import (
     MIXTURES_HEADER,
     PEOPLE_HEADER,
     SPECIES_HEADER,
+    TAGS_HEADER,
     TRIPS_HEADER,
     _utc_offset,
     write_certifications_csv,
@@ -45,6 +46,7 @@ from src.app.services.export.tabular import (
     write_mixtures_csv,
     write_people_csv,
     write_species_csv,
+    write_tags_csv,
     write_trips_csv,
 )
 from tests.helpers.export import UUIDS, _with_id, build_bundle, full_bundle, make_dive, mixture
@@ -70,6 +72,7 @@ _NORMALIZED_FILES = (
     (write_certifications_csv, CERTIFICATIONS_HEADER),
     (write_contacts_csv, CONTACTS_HEADER),
     (write_people_csv, PEOPLE_HEADER),
+    (write_tags_csv, TAGS_HEADER),
 )
 
 
@@ -128,6 +131,22 @@ class TestDivesCsv:
         assert rows[1][DIVES_HEADER.index("altitude_m")] == "0"
         assert rows[2][DIVES_HEADER.index("water_type")] == ""
         assert rows[2][DIVES_HEADER.index("altitude_m")] == ""
+
+    def test_the_classification_and_conditions_are_their_own_columns(self):
+        """As stored, a vocabulary its value and the air temperature in °C, and the tags one
+        cell in the diver's own order - `tags.csv` has the uuids."""
+        rows = _parse(_render(write_dives_csv(full_bundle())))
+        air = dict(zip(DIVES_HEADER, rows[1], strict=True))
+
+        assert (air["type"], air["rating"], air["tags"]) == ("open_circuit", "4", "wreck; night")
+        assert (air["air_temperature_c"], air["current"], air["waves"], air["weather"]) == (
+            "31.5",
+            "strong",
+            "slight",
+            "partly_cloudy",
+        )
+        assert (air["entry_type"], air["boat_name"]) == ("boat", "Blue Horizon")
+        assert rows[3][DIVES_HEADER.index("tags")] == ""
 
     def test_only_the_dive_on_a_course_names_one(self):
         """The `course` cell mirrors `trip` beside it: the dive logged on the course names
@@ -323,6 +342,15 @@ class TestTheNormalizedFiles:
         ) == ("Jae Kim", "TDI-88121")
         assert certifications[1][CERTIFICATIONS_HEADER.index("instructor_name")] == "Jae Kim"
 
+    def test_every_tag_has_a_row_with_its_dives_one_on_none_among_them(self):
+        """A tag stays until the diver deletes it, so the one no dive carries is here with a
+        count of zero - the file is its one home in the CSV set."""
+        rows = _parse(_render(write_tags_csv(full_bundle())))
+        by_name = {row[0]: dict(zip(TAGS_HEADER, row, strict=True)) for row in rows[1:]}
+
+        assert {name: row["dives"] for name, row in by_name.items()} == {"drift": "0", "night": "2", "wreck": "1"}
+        assert by_name["drift"]["tag_uuid"] == str(UUIDS["tag-drift"])
+
     def test_dive_sites_count_visits_not_dives(self):
         """Yolanda is the second site of one dive and the only site of another."""
         rows = _parse(_render(write_dive_sites_csv(full_bundle())))
@@ -446,6 +474,6 @@ class TestTheNormalizedFiles:
         one hits the same Excel mojibake. Pinned across every file, and the count with it, so
         a file added later cannot quietly be the exception."""
         bundle = full_bundle()
-        assert len(CSV_WRITERS) == 11
+        assert len(CSV_WRITERS) == 12
         for filename, writer in CSV_WRITERS:
             assert _render(writer(bundle)).startswith(BOM), filename

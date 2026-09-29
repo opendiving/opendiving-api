@@ -49,7 +49,7 @@ from ..core.utils.datetime_offset import full_date_is_a_date
 from .certification import CertificationAgency
 from .contact import ADDRESS_POSTCODE_MAX, CONTACT_EMAIL_MAX, CONTACT_WEBSITE_MAX, ContactRole
 from .course import CourseStatus
-from .dive import DecoAlgorithm, DiveMode, Salinity, WaterType
+from .dive import Current, DecoAlgorithm, DiveMode, DiveType, EntryType, Salinity, WaterType, Waves, Weather
 from .dive_mixture import GasRole, TankUsage
 from .dive_profile import ProfileEventType
 from .gear_service import ServiceKind
@@ -211,7 +211,8 @@ class ImportStoredFile(_ReadModel):
 class ImportDiver(_ReadModel):
     """Whose logbook the document is. Its identity and settings are read and reported, and
     never applied; its check-in details and its portrait are offered in the preview and
-    written as the diver confirms them - see `DECISIONS.md`. Every member is optional
+    written as the diver confirms them - see `DECISIONS.md`. The tag list this app's writer
+    puts under its key is read, so a tag on no dive comes back. Every member is optional
     because §6.1 makes them so: a converter whose source records nothing about an owner
     omits the whole object rather than minting identity for a person."""
 
@@ -386,6 +387,16 @@ class ImportDive(_ReadModel):
     weight: float | None = None
     water_type: Annotated[WaterType | None, _unknown_is_absent(WaterType), Field(default=None)]
     altitude: int | None = None
+    type: Annotated[DiveType | None, _unknown_is_absent(DiveType), Field(default=None)]
+    rating: int | None = None
+    # Read as written: the planner trims each, and drops what the app cannot hold.
+    tags: Annotated[list[str], Field(default_factory=list), _Collection]
+    air_temperature: float | None = None
+    current: Annotated[Current | None, _unknown_is_absent(Current), Field(default=None)]
+    waves: Annotated[Waves | None, _unknown_is_absent(Waves), Field(default=None)]
+    weather: Annotated[Weather | None, _unknown_is_absent(Weather), Field(default=None)]
+    entry_type: Annotated[EntryType | None, _unknown_is_absent(EntryType), Field(default=None)]
+    boat_name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     entry_position: ImportPosition | None = None
     exit_position: ImportPosition | None = None
     trip_uuid: uuid_pkg.UUID | None = None
@@ -717,6 +728,9 @@ class ImportNoteCode(StrEnum):
     # A person was linked (apply), or would be (preview), to the account on this instance its
     # entry names - the sentence names that account's current username.
     ACCOUNT_LINKED = "account_linked"
+    # The tags the import adds to the caller's list, named in one note. Tags are members of a
+    # dive rather than a collection, so no collection report counts them.
+    TAGS_CREATED = "tags_created"
 
 
 class ImportNote(BaseModel):

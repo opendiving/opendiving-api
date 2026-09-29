@@ -56,7 +56,18 @@ from ..core.schemas import PublicUUIDSchema
 from .certification import CertificationAgency
 from .contact import ContactRole
 from .course import CourseStatus
-from .dive import DecoAlgorithm, DiveLocalStartTime, DiveMode, Salinity, WaterType
+from .dive import (
+    Current,
+    DecoAlgorithm,
+    DiveLocalStartTime,
+    DiveMode,
+    DiveType,
+    EntryType,
+    Salinity,
+    WaterType,
+    Waves,
+    Weather,
+)
 from .dive_mixture import GasRole, TankUsage
 from .dive_profile import DiveProfileRead
 from .gear_item import GearType
@@ -196,6 +207,8 @@ class ExportDiver(PublicUUIDSchema):
     member and they travel under this producer's key (spec §6.1). They are here at all
     because `/export/archive` promises nothing in the account is reachable only through the
     app - which is the whole reason the presets ride along too, UI configuration or not.
+    The diver's `tags` ride there for the same promise: a tag on no live dive is on no
+    dive's `tags`, and still in the account.
     """
 
     name: str
@@ -315,8 +328,8 @@ class ExportRecording(BaseModel):
     # **The device's, not the dive's.** A backup computer run in gauge mode beside a primary
     # on open circuit is ordinary practice and the dive was not a gauge dive; two computers
     # running different gradient factors give the diver two ceilings, which is exactly why
-    # divers wear two. A dive-level mode would be the diver's own statement about the kind of
-    # dive it was, which is a different member and one nothing in this version writes.
+    # divers wear two. The diver's own statement about the kind of dive it was is the dive's
+    # `type`, and neither is ever derived from the other.
     mode: DiveMode | None = None
     deco_model: ExportDecoModel | None = None
     salinity: Salinity | None = None
@@ -392,6 +405,17 @@ class ExportDive(PublicUUIDSchema):
     altitude: Annotated[
         int | None, Field(default=None, description="Elevation of the water surface, in meters above sea level")
     ]
+    type: DiveType | None = None
+    rating: Annotated[int | None, Field(default=None, description="The diver's own, 1 to 5")]
+    tags: Annotated[
+        list[str], Field(default_factory=list, description="In the diver's order, no two alike once case-folded")
+    ]
+    air_temperature: Annotated[float | None, Field(default=None, description="In degrees Celsius")]
+    current: Current | None = None
+    waves: Waves | None = None
+    weather: Weather | None = None
+    entry_type: EntryType | None = None
+    boat_name: str | None = None
     # UDDF 3.2.2 has nowhere to put a per-dive position - its only `<geography>` hangs off
     # a `<site>`, and neither `informationbeforedive` nor `waypoint` has a coordinate
     # element - so this document and `dives.csv` are the only two exports that carry them.

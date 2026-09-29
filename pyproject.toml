@@ -40,11 +40,13 @@ dependencies = [
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
     #
-    # 0.16.0 is the floor because it is the first release whose schema has a dive's
-    # `sightings`, each a species reference with an optional count and notes, in place of
-    # `species_uuids`, and whose validator refuses one species twice on a dive. Resolved lower,
-    # the export of every account fails the conformance check the export tests run. The floor
-    # still carries what 0.15.0's did: `people`, the person references on a dive, a trip and a
+    # 0.17.0 is the floor because it is the first release whose schema has a dive's `type`,
+    # `rating`, `tags`, `air_temperature`, `current`, `waves`, `weather`, `entry_type` and
+    # `boat_name`, and whose validator refuses a tag repeated once trimmed and case-folded.
+    # Resolved lower, the export of every account fails the conformance check the export tests
+    # run. The floor still carries what 0.16.0's did: a dive's `sightings`, each a species
+    # reference with an optional count and notes, and a validator refusing one species twice on
+    # a dive; what 0.15.0's did: `people`, the person references on a dive, a trip and a
     # course and a certification's `instructor_uuid`, and UDDF and `.ssrf` readers that bring
     # buddies and guides in as people; what 0.14.0's did:
     # the `contacts` collection and its references; what 0.13.0's did: the profile axis in
@@ -59,7 +61,7 @@ dependencies = [
     # `agency`, and the readers spell a dive's number `number`, so a UDDF or `.ssrf` dive
     # `services/logbook_import/reader.py` converts on the request path keeps its own number
     # rather than the placeholder `0`.
-    "divejson>=0.16.0",
+    "divejson>=0.17.0",
     "webauthn>=3.0.0",
     # Decodes and renders the uploaded pictures (`services/user_pictures.py`) and the species
     # photos (`services/species_photos.py`) - the only image processing in the app. 12.0.0 is the first release with official Python 3.14
