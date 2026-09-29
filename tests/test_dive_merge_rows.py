@@ -672,6 +672,52 @@ class TestWhatElseMoves:
         assert [series["gas_number"] for series in profile.data["pressure"]] == [7]
 
 
+    @pytest.mark.asyncio
+    async def test_a_channel_matching_an_unlabelled_cylinder_names_it_after_the_move(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """The surviving dive's back gas carries no label - a FIT alone labels nothing it has
+        no channel for - so the arriving computer's channel matches a row with nothing to map
+        onto, and the row has to take a label for the channel to name it.
+        """
+        first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
+        second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 18, 10, tzinfo=UTC), number=215)
+        db.add_all(
+            [
+                DiveMixture(dive_id=first.id, gas_number=None, oxygen=21.0, helium=0.0),
+                DiveMixture(dive_id=first.id, gas_number=0, oxygen=50.0, helium=0.0),
+                DiveMixture(dive_id=second.id, gas_number=0, oxygen=21.0, helium=0.0),
+            ]
+        )
+        db.commit()
+        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(5)), filename="a.json")
+        await _attach(
+            async_db,
+            diver,
+            second,
+            _export(
+                start="2026-09-08T15:18:10.000+03:00",
+                serial="D9772626",
+                samples=_samples(5, pressure_mbar=200000),
+            ),
+            filename="b.json",
+        )
+
+        await _merge(async_db, diver, first, second)
+
+        rows = (
+            await async_db.execute(
+                select(DiveMixture.oxygen, DiveMixture.gas_number)
+                .where(DiveMixture.dive_id == first.id)
+                .order_by(DiveMixture.id)
+            )
+        ).all()
+        assert [(row.oxygen, row.gas_number) for row in rows] == [(21.0, 1), (50.0, 0)]
+        appended = (await _recordings(async_db, first))[1]
+        profile = await _profile(async_db, appended.id)
+        assert [series["gas_number"] for series in profile.data["pressure"]] == [1]
+
+
 class TestTheSurvivingDiveReadsBackWhole:
     @pytest.mark.asyncio
     async def test_the_response_is_the_merged_dive(
