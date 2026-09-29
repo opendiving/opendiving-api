@@ -34,10 +34,11 @@ class DiveFormField(StrEnum):
     names a field of *every* cylinder, not of one, and hiding it hides that input on every
     tank card.
 
-    Declaration order is form order, and it is load-bearing twice over: it is the canonical
-    order every stored list is rewritten into (`canonical_hidden_fields`), so two equal sets
-    are two equal lists and a client can compare them with one loop, and it is the order the
-    clients take their panel rows from.
+    Declaration order is the canonical order every stored list is rewritten into
+    (`canonical_hidden_fields`), chosen so that two equal sets are two equal lists. It is not
+    the form's order: each client lays out its own form and panel, and orders what it reads
+    from here itself. Reordering members to follow one client's layout buys nothing and
+    leaves every stored set out of canonical order until a migration rewrites it.
 
     Fields that cannot be hidden are deliberately absent, and for two different reasons.
     `dive_number`, `start_time` and `duration` the form requires. A cylinder's `volume`
@@ -100,9 +101,9 @@ def canonical_hidden_fields(values: Iterable[DiveFormField]) -> list[DiveFormFie
     """Collapse duplicates and impose `DiveFormField`'s declaration order.
 
     Every write goes through this, on a preset and on the user column alike, so a stored
-    hidden set is a *set* spelled as a list: two equal sets are two equal lists, and a client
-    deciding which preset matches the current state compares element by element instead of
-    building sets of its own. Callers may send any order; what comes back is form order.
+    hidden set is a *set* spelled as a list: two equal sets are two equal lists, whatever
+    order each was sent in. Callers may send any order; what comes back is declaration order,
+    which is canonical and no client's display order.
     """
     present = set(values)
     return [field for field in DiveFormField if field in present]
@@ -118,7 +119,7 @@ class DiveFormPresetBase(BaseModel):
             # it is checked before duplicates collapse - a body padded with repeats is a
             # 422 rather than a large list that canonicalizes down to a small one.
             max_length=len(DiveFormField),
-            description="Fields hidden by this preset, in any order - stored in form order with duplicates collapsed",
+            description="Fields hidden by this preset, in any order - stored canonically with duplicates collapsed",
             examples=[[DiveFormField.ALTITUDE, DiveFormField.MIXTURE_PO2_LIMIT]],
         ),
     ]

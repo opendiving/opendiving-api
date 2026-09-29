@@ -62,9 +62,8 @@ async def write_dive_form_preset(
     the same rule trips, dive sites and gear sets keep.
 
     `hidden_fields` may arrive in any order and with repeats; what is stored is the
-    canonical form - form order, duplicates collapsed - so two equal sets are two equal
-    lists and a client can decide which preset matches the account's current state by
-    comparing them element by element. A name the vocabulary does not contain is a 422.
+    canonical form - `DiveFormField` declaration order, duplicates collapsed - so two equal
+    sets are two equal lists. A name the vocabulary does not contain is a 422.
     """
     if await dive_form_preset_name_exists(db=db, user_id=current_user["id"], name=preset.name):
         raise DuplicateValueException(_DUPLICATE_NAME)
