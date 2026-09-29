@@ -150,17 +150,16 @@ class TestTheVocabularyNamesRealFields:
 class TestTheCanonicalForm:
     """What is stored is a set spelled as a list, and this is what makes that true.
 
-    The client compares the account's current state against each preset's list to decide
-    which one to mark. That is a loop over two lists, which is only correct if two equal sets
-    are always the same list - so every write is rewritten into form order with duplicates
-    collapsed, on a preset and on the user column alike.
+    Two equal sets are always the same list, because every write is rewritten into
+    `DiveFormField` declaration order with duplicates collapsed, on a preset and on the user
+    column alike. That order is canonical, not any client's form order.
     """
 
-    def test_declaration_order_is_form_order(self) -> None:
-        """Not alphabetical, and not the order anything was added: a client takes its panel
-        rows from this, so the enum's order is part of the contract. The contact sits right
-        after the course, and the people right after the contact, because a migration
-        inserted each into stored sets beside its neighbour.
+    def test_declaration_order_is_the_stored_order(self) -> None:
+        """Not alphabetical: every stored set is spelled in this order, so moving a member
+        leaves those sets out of canonical order. The contact sits right after the course,
+        and the people right after the contact, because a migration inserted each into
+        stored sets beside its neighbour.
         """
         assert list(DiveFormField)[:6] == [
             DiveFormField.TRIP_UUID,
@@ -172,7 +171,7 @@ class TestTheCanonicalForm:
         ]
         assert list(DiveFormField)[-1] == DiveFormField.MIXTURE_USAGE
 
-    def test_any_input_order_becomes_form_order(self) -> None:
+    def test_any_input_order_becomes_declaration_order(self) -> None:
         scrambled = [DiveFormField.NOTES, DiveFormField.TRIP_UUID, DiveFormField.ALTITUDE]
 
         assert canonical_hidden_fields(scrambled) == [
@@ -194,8 +193,8 @@ class TestTheCanonicalForm:
         assert preset.hidden_fields == [DiveFormField.ALTITUDE, DiveFormField.NOTES]
 
     def test_the_user_column_stores_the_canonical_form(self) -> None:
-        """The same rule on the other write path. If only one of the two canonicalized, the
-        client's "which preset matches?" comparison would answer no for sets that are equal.
+        """The same rule on the other write path. If only one of the two canonicalized, a
+        preset and the account's current state could store one set as two different lists.
         """
         values = UserUpdate.model_validate({"dive_form_hidden_fields": ["notes", "altitude", "notes"]})
 

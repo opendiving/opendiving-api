@@ -271,7 +271,7 @@ class UserUpdate(RejectsExplicitNulls):
         Field(
             default=None,
             max_length=len(DiveFormField),
-            description="Dive form fields to keep hidden, in any order - stored in form order, duplicates collapsed",
+            description="Dive form fields to keep hidden, in any order - stored canonically, duplicates collapsed",
         ),
     ]
 

@@ -6010,12 +6010,12 @@ a new field visible everywhere and lets "Technical" be `[]`.
 
 Every write — a preset's `hidden_fields` and `user.dive_form_hidden_fields` on `PATCH /user` — is
 rewritten into `DiveFormField` declaration order with duplicates collapsed; a caller may send any
-order. This serves the client: the panel marks the preset whose hidden set equals the account's
-current state, which with a canonical form is one loop over two lists rather than set-building in
-every client, forever. The single definition is `canonical_hidden_fields`, used by both schemas, so
-the two write paths cannot drift. The cap `max_length=len(DiveFormField)` sits on the input list,
-before duplicates collapse, so a body padded with repeats is a 422; nothing legitimate sends more
-entries than the vocabulary has members.
+order. A stored set then has one spelling, whichever client wrote it. The order is canonical, not
+the form's: each client orders its own form and panel and re-sorts what it reads, so the members are
+not reordered to follow a layout. The single definition is `canonical_hidden_fields`, used by both
+schemas, so the two write paths cannot drift. The cap `max_length=len(DiveFormField)` sits on the
+input list, before duplicates collapse, so a body padded with repeats is a 422; nothing legitimate
+sends more entries than the vocabulary has members.
 
 ## Dive form presets are seeded at registration, not lazily
 
