@@ -422,6 +422,43 @@ class TestFillingTheDivesCylinders:
         assert (await self._cylinder(async_db, dive)).oxygen == 33.0
 
 
+class TestASecondComputersPressureOnUnlabelledCylinders:
+    """A dive logged from a FIT alone has cylinders the reader labelled nothing, since no
+    channel points at them. A second computer that does carry tank pressure attaches beside
+    it, and its channel has to name one of the dive's cylinders."""
+
+    @pytest.mark.asyncio
+    async def test_the_matched_row_takes_the_label_the_channel_names(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        db.add(DiveMixture(dive_id=dive.id, gas_number=None, oxygen=21.0, helium=0.0))
+        db.commit()
+        await _attach(async_db, diver, dive, _export(samples=_samples((0, "5"), (10, "5"))), filename="ocean.json")
+        second = await _attach(
+            async_db,
+            diver,
+            dive,
+            suunto_json(
+                start="2026-09-08T15:17:40.000+03:00",
+                serial="999999999999",
+                samples=((0, 5.0, 0, 20_000_000), (10, 5.0, 0, 19_900_000)),
+            ),
+            filename="second.json",
+        )
+
+        labels = (
+            (await async_db.execute(select(DiveMixture.gas_number).where(DiveMixture.dive_id == dive.id)))
+            .scalars()
+            .all()
+        )
+        data = (
+            await async_db.execute(select(DiveProfile.data).where(DiveProfile.recording_id == second.recording_id))
+        ).scalar_one()
+        assert [row.ordinal for row in await _recordings(async_db, dive)] == [0, 1]
+        assert labels != [None]
+        assert [series["gas_number"] for series in data["pressure"]] == labels
+
+
 class TestFillingAStart:
     """The two start columns are one value, and filling half of them corrupts the other.
 

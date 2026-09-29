@@ -345,10 +345,13 @@ class TestSameDiveLoose:
 
 class TestRelabellingASecondComputersCylinders:
     """`gas_number` is dive-scoped, so a second computer's labels are mapped onto the dive's
-    own list: by mix first, then by order, unmatched appended with the next free label."""
+    own list: by mix first, then by order, unmatched appended with the next free label.
+
+    The second value is the dive's whole cylinder list to write, or `None` where the dive's
+    rows stand as they are."""
 
     @staticmethod
-    def _stored(*mixes: tuple[int, float | None, float | None]):
+    def _stored(*mixes: tuple[int | None, float | None, float | None]):
         from src.app.schemas.dive_mixture import DiveMixtureRead
 
         return [
@@ -357,7 +360,7 @@ class TestRelabellingASecondComputersCylinders:
         ]
 
     @staticmethod
-    def _parsed(*mixes: tuple[int, float | None, float | None]):
+    def _parsed(*mixes: tuple[int | None, float | None, float | None]):
         from src.app.schemas.parsed_dive import DiveMixtureSchema
 
         return [
@@ -379,36 +382,75 @@ class TestRelabellingASecondComputersCylinders:
         """The second computer calls the deco bottle 1 and the back gas 2; the dive has them
         the other way round. Attributing the second computer's pressures by position would
         put its deco readings on the back gas."""
-        mapping, appended = relabel_gas_numbers(
+        mapping, cylinders = relabel_gas_numbers(
             self._parsed((1, 50.0, 0.0), (2, 21.0, 35.0)), self._stored((1, 21.0, 35.0), (2, 50.0, 0.0))
         )
 
         assert mapping == {1: 2, 2: 1}
-        assert appended == []
+        assert cylinders is None
 
     def test_position_is_the_fallback_where_no_mix_was_recorded(self) -> None:
         """A pair of air cylinders records no distinguishing fraction at all, which is what a
         2026 Suunto Ocean's reconstructed cylinders look like."""
-        mapping, appended = relabel_gas_numbers(
+        mapping, cylinders = relabel_gas_numbers(
             self._parsed((0, None, None), (1, None, None)), self._stored((3, None, None), (4, None, None))
         )
 
         assert mapping == {0: 3, 1: 4}
-        assert appended == []
+        assert cylinders is None
 
     def test_a_cylinder_the_dive_does_not_have_is_appended_with_the_next_free_label(self) -> None:
         """A real tank the second computer saw. Dropping it would lose a cylinder from the
         dive; reusing a label would attribute two tanks' pressures to one."""
-        mapping, appended = relabel_gas_numbers(
+        mapping, cylinders = relabel_gas_numbers(
             self._parsed((1, 21.0, 0.0), (2, 99.0, 0.0)), self._stored((1, 21.0, 0.0))
         )
 
         assert mapping == {1: 1, 2: 2}
-        assert [row.gas_number for row in appended] == [2]
+        assert cylinders is not None
+        assert [(row.oxygen, row.gas_number) for row in cylinders] == [(21.0, 1), (99.0, 2)]
 
     def test_the_primary_recordings_own_labels_map_to_themselves(self) -> None:
         """The identity case, and the reason an empty map leaves a profile alone."""
-        mapping, appended = relabel_gas_numbers(self._parsed((1, 32.0, 0.0)), self._stored((1, 32.0, 0.0)))
+        mapping, cylinders = relabel_gas_numbers(self._parsed((1, 32.0, 0.0)), self._stored((1, 32.0, 0.0)))
 
         assert mapping == {1: 1}
-        assert appended == []
+        assert cylinders is None
+
+    def test_a_matched_row_with_no_label_takes_a_free_one(self) -> None:
+        """A dive logged from a FIT alone: the reader labels no cylinder where no channel
+        points at one. A second computer's pressure channel matching that row has to name it,
+        or it names a label no cylinder of the dive carries."""
+        mapping, cylinders = relabel_gas_numbers(self._parsed((0, 49.0, 0.0)), self._stored((None, 49.0, 0.0)))
+
+        assert cylinders is not None
+        assert [row.gas_number for row in cylinders] == [1]
+        assert mapping == {0: 1}
+
+    def test_two_cylinders_never_collapse_onto_one_label(self) -> None:
+        """The unlabelled row's label must not be the one its neighbour already carries."""
+        mapping, cylinders = relabel_gas_numbers(
+            self._parsed((0, 21.0, 0.0), (1, 49.0, 0.0)), self._stored((None, 21.0, 0.0), (0, 49.0, 0.0))
+        )
+
+        assert cylinders is not None
+        assert [(row.oxygen, row.gas_number) for row in cylinders] == [(21.0, 1), (49.0, 0)]
+        assert mapping == {0: 1, 1: 0}
+
+    def test_a_labelled_row_and_an_appended_cylinder_never_share_a_label(self) -> None:
+        """One counter for both: a labelled row and an appended cylinder never share one."""
+        mapping, cylinders = relabel_gas_numbers(
+            self._parsed((0, 21.0, 0.0), (1, 32.0, 0.0), (2, 99.0, 0.0)),
+            self._stored((None, 21.0, 0.0), (0, 32.0, 0.0)),
+        )
+
+        assert cylinders is not None
+        assert [(row.oxygen, row.gas_number) for row in cylinders] == [(21.0, 1), (32.0, 0), (99.0, 2)]
+        assert mapping == {0: 1, 1: 0, 2: 2}
+
+    def test_a_row_nothing_points_at_stays_unlabelled(self) -> None:
+        """No incoming label, no channel to name the row: the dive's list is left alone."""
+        mapping, cylinders = relabel_gas_numbers(self._parsed((None, 49.0, 0.0)), self._stored((None, 49.0, 0.0)))
+
+        assert mapping == {}
+        assert cylinders is None

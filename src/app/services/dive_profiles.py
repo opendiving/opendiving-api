@@ -93,10 +93,12 @@ logger = logging.getLogger(__name__)
 # 6: every file read through `divejson` and shaped as logbook import shapes a document's
 #    recording - cylinders labelled from 0 by position, as the reader labels them, and two
 #    readings on one millisecond resolved by the reader's rule.
+# 7: a second computer's cylinder matching a dive cylinder with no label gives that cylinder
+#    a free label and maps onto it, where its channels used to keep a label naming nothing.
 #
 # A profile stored before a bump stays valid and is served as it is until
 # `backfill_profiles` re-reads it, which an operator runs after the release that moves it.
-PROFILE_EXTRACTOR_VERSION = 6
+PROFILE_EXTRACTOR_VERSION = 7
 
 # The reader's version, stored beside the extractor's: a profile read from stored bytes is a
 # function of those bytes, of this and of `PROFILE_EXTRACTOR_VERSION`, and the row records all
