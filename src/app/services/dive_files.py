@@ -458,21 +458,21 @@ async def fill_tech_scalars(db: AsyncSession, *, dive_id: int, scalars: dict[str
         await db.execute(update(Dive).where(Dive.id == dive_id).values(**values))
 
 
-def relabel_gas_numbers[MixtureRow: (DiveMixtureSchema, DiveMixtureRead)](
-    parsed: Sequence[MixtureRow], stored: Sequence[DiveMixtureRead]
-) -> tuple[dict[int, int], list[MixtureRow]]:
+def relabel_gas_numbers(
+    parsed: Sequence[DiveMixtureSchema | DiveMixtureRead], stored: Sequence[DiveMixtureRead]
+) -> tuple[dict[int, int], list[DiveMixtureCreate] | None]:
     """Map a second computer's cylinder labels onto the dive's own list.
 
-    Returns `(old gas_number -> the dive's gas_number, mixtures to append)`.
+    Returns `(old gas_number -> the dive's gas_number, the dive's cylinders to write)`, the
+    second `None` where the dive's rows stand as they are.
 
-    **Generic over the incoming row, and the appended rows come back as whatever went in.**
-    The two shapes this is asked about are a *file's* cylinders (`DiveMixtureSchema`, the
-    attach and import paths) and a *dive's* stored ones (`DiveMixtureRead`, which is what
-    the other half of a merge holds). Narrowing the parameter to the parsed shape would make
-    a merge convert its stored rows to it first, and that conversion silently drops `usage` -
-    a member no format records and only a diver can have typed, which is exactly the value
-    that must survive the cylinder being carried onto another dive. The join reads only
-    `oxygen`, `helium` and `gas_number`, which both shapes carry and mean the same thing by.
+    **Either shape comes in, and a cylinder carried across keeps what it had.** The two
+    shapes this is asked about are a *file's* cylinders (`DiveMixtureSchema`, the attach and
+    import paths) and a *dive's* stored ones (`DiveMixtureRead`, which is what the other half
+    of a merge holds). A stored row goes through `as_create`, which keeps `usage` - a member
+    no format records and only a diver can have typed, which is exactly the value that must
+    survive the cylinder being carried onto another dive. The join reads only `oxygen`,
+    `helium` and `gas_number`, which both shapes carry and mean the same thing by.
 
     **`gas_number` is dive-scoped, and that is the ruling this implements.** The app derives
     gas consumption from the diver's editable cylinders joined to a profile's pressure
@@ -486,24 +486,21 @@ def relabel_gas_numbers[MixtureRow: (DiveMixtureSchema, DiveMixtureRead)](
     agreeing on `(oxygen, helium)` are the same tank; position is the weaker fallback, kept
     because a pair of air cylinders records no distinguishing mix at all; and a cylinder the
     dive's list does not have is a real one the second computer saw, appended with the next
-    free label rather than dropped.
+    free label rather than dropped. **A matched row with no label takes the next free one**
+    where the incoming cylinder has a label to map: the reader labels only a cylinder a
+    channel points at, so a dive logged from one FIT has none, and the second computer's
+    channel would otherwise name a label no cylinder of the dive carries.
 
     Pure and DB-free, beside `fill_mixture_fields` and `merge_mixture_fields` below - and
     deliberately neither of them. Those two join a *second reading of the same recording* to
     the dive's rows by position and ask what may be written into them; this one joins a
-    *different computer's* cylinder list to the dive's by mix, and writes nothing at all -
-    its answer is a renumbering. It also always answers, where both of those can refuse.
+    *different computer's* cylinder list to the dive's by mix, and its answer is a
+    renumbering plus the labels and cylinders the dive gains. It also always answers, where
+    both of those can refuse.
     """
     remaining = list(stored)
-    mapping: dict[int, int] = {}
-    unmatched: list[MixtureRow] = []
-
-    def claim(row: DiveMixtureRead, incoming: MixtureRow) -> None:
-        remaining.remove(row)
-        if incoming.gas_number is not None and row.gas_number is not None:
-            mapping[incoming.gas_number] = row.gas_number
-
-    by_position: list[MixtureRow] = []
+    pairs: list[tuple[DiveMixtureRead, DiveMixtureSchema | DiveMixtureRead]] = []
+    by_position: list[DiveMixtureSchema | DiveMixtureRead] = []
     for incoming in parsed:
         match = next(
             (
@@ -519,25 +516,43 @@ def relabel_gas_numbers[MixtureRow: (DiveMixtureSchema, DiveMixtureRead)](
         if match is None:
             by_position.append(incoming)
             continue
-        claim(match, incoming)
-
+        remaining.remove(match)
+        pairs.append((match, incoming))
+    unmatched: list[DiveMixtureSchema | DiveMixtureRead] = []
     for incoming in by_position:
-        if not remaining:
+        if remaining:
+            pairs.append((remaining.pop(0), incoming))
+        else:
             unmatched.append(incoming)
-            continue
-        claim(remaining[0], incoming)
 
-    taken = {row.gas_number for row in stored if row.gas_number is not None}
-    taken |= set(mapping.values())
-    next_free = max(taken, default=0) + 1
-    appended: list[MixtureRow] = []
+    next_free = max((row.gas_number for row in stored if row.gas_number is not None), default=0) + 1
+    mapping: dict[int, int] = {}
+    labelled: dict[int, int] = {}
+    for row, incoming in pairs:
+        if incoming.gas_number is None:
+            continue
+        label = row.gas_number
+        if label is None:
+            label = labelled[row.id] = next_free
+            next_free += 1
+        mapping[incoming.gas_number] = label
+
+    appended: list[DiveMixtureCreate] = []
     for incoming in unmatched:
         if incoming.gas_number is not None:
             mapping[incoming.gas_number] = next_free
-        appended.append(incoming.model_copy(update={"gas_number": next_free}))
+        cylinder = (
+            as_create(incoming) if isinstance(incoming, DiveMixtureRead) else DiveMixtureCreate(**incoming.model_dump())
+        )
+        appended.append(cylinder.model_copy(update={"gas_number": next_free}))
         next_free += 1
 
-    return mapping, appended
+    if not labelled and not appended:
+        return mapping, None
+    return mapping, [
+        *(as_create(row.model_copy(update={"gas_number": labelled.get(row.id, row.gas_number)})) for row in stored),
+        *appended,
+    ]
 
 
 def apply_gas_mapping(profile: NormalizedProfile | None, mapping: dict[int, int]) -> NormalizedProfile | None:
@@ -1270,8 +1285,9 @@ async def label_cylinders(
     every other recording's stored profile is rewritten through the same map, samples it has
     no bytes for included, so no sibling points at a label the renumbering replaced.
     **A recording past the first is mapped onto the dive's cylinders instead**
-    (`relabel_gas_numbers`), a cylinder the dive's list lacks appended: `gas_number` is
-    dive-scoped, and a second computer numbers its tanks its own way.
+    (`relabel_gas_numbers`), a cylinder the dive's list lacks appended and a matched row with
+    no label given one: `gas_number` is dive-scoped, and a second computer numbers its tanks
+    its own way.
     """
     from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
 
@@ -1280,19 +1296,9 @@ async def label_cylinders(
     stored = await get_mixtures_for_dive(db=db, dive_id=dive_id)
 
     if ordinal != 0:
-        mapping, appended = relabel_gas_numbers(mixtures, stored)
-        if appended:
-            await replace_mixtures_for_dive(
-                db=db,
-                dive_id=dive_id,
-                mixtures=[
-                    *(as_create(row) for row in stored),
-                    # `appended` is the reader's own shape, not a stored row - its `role`/
-                    # `usage` are enums already, so it needs no `as_create`.
-                    *(DiveMixtureCreate(**row.model_dump()) for row in appended),
-                ],
-                commit=False,
-            )
+        mapping, cylinders = relabel_gas_numbers(mixtures, stored)
+        if cylinders is not None:
+            await replace_mixtures_for_dive(db=db, dive_id=dive_id, mixtures=cylinders, commit=False)
         return apply_gas_mapping(profile, mapping)
 
     renumbering = renumber_onto_labels(mixtures, stored)

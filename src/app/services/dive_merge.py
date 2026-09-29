@@ -40,7 +40,6 @@ from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
 from ..models.dive_species import DiveSpecies
 from ..schemas.dive import DiveReadInternal
-from ..schemas.dive_mixture import as_create
 from ..schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND
 from .dive_files import apply_gas_mapping, relabel_gas_numbers
 from .dive_profiles import (
@@ -225,7 +224,7 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     # there would be no telling them apart afterwards.
     survivor_mixtures = await get_mixtures_for_dive(db=db, dive_id=survivor.id)
     absorbed_mixtures = await get_mixtures_for_dive(db=db, dive_id=absorbed.id)
-    mapping, appended = relabel_gas_numbers(absorbed_mixtures, survivor_mixtures)
+    mapping, cylinders = relabel_gas_numbers(absorbed_mixtures, survivor_mixtures)
 
     primary_survivor, primary_absorbed = survivor_recordings[0], absorbed_recordings[0]
     folded = _folds(primary_survivor, primary_absorbed)
@@ -242,16 +241,8 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     duration, max_depth = dive_figures(spans)
     _refuse_a_depth_the_dive_contradicts(survivor, max_depth)
 
-    if appended:
-        await replace_mixtures_for_dive(
-            db=db,
-            dive_id=survivor.id,
-            mixtures=[
-                *(as_create(row) for row in survivor_mixtures),
-                *(as_create(row) for row in appended),
-            ],
-            commit=False,
-        )
+    if cylinders is not None:
+        await replace_mixtures_for_dive(db=db, dive_id=survivor.id, mixtures=cylinders, commit=False)
 
     if fold is not None:
         await _write_fold(db, fold, dive_id=survivor.id)

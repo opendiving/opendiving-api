@@ -62,7 +62,7 @@ from ...models.trip_part import TripPart
 from ...models.user import User
 from ...schemas.certification import CertificationSide
 from ...schemas.dive import DiveMode, Salinity
-from ...schemas.dive_mixture import DiveMixtureCreate, as_create
+from ...schemas.dive_mixture import DiveMixtureCreate
 from ...schemas.logbook_import import ImportNote, ImportNoteCode
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice
 from ..blob_store import new_key
@@ -622,24 +622,14 @@ class _Writer:
         stored_mixtures = await get_mixtures_for_dive(db=self._db, dive_id=match.dive_id)
         planned = match.recording
         if planned.profile is not None and match.mixtures:
-            mapping, appended = relabel_gas_numbers(
+            mapping, cylinders = relabel_gas_numbers(
                 [DiveMixtureSchema(**row) for row in match.mixtures], stored_mixtures
             )
             remapped = apply_gas_mapping(planned.profile.profile, mapping)
             if remapped is not None:
                 planned = replace(planned, profile=replace(planned.profile, profile=remapped))
-            if appended:
-                await replace_mixtures_for_dive(
-                    db=self._db,
-                    dive_id=match.dive_id,
-                    mixtures=[
-                        *(as_create(row) for row in stored_mixtures),
-                        # `appended` is the document's own shape, not a stored row - its `role`/
-                        # `usage` are enums already, so it needs no `as_create`.
-                        *(DiveMixtureCreate(**row.model_dump()) for row in appended),
-                    ],
-                    commit=False,
-                )
+            if cylinders is not None:
+                await replace_mixtures_for_dive(db=self._db, dive_id=match.dive_id, mixtures=cylinders, commit=False)
         record = PlannedRecord(action=Action.CREATE, source_uuid=match.source_uuid, uuid=match.source_uuid)
         await self._write_recording(record, match.dive_id, planned, ordinal=ordinal)
 

@@ -671,7 +671,6 @@ class TestWhatElseMoves:
         profile = await _profile(async_db, appended.id)
         assert [series["gas_number"] for series in profile.data["pressure"]] == [7]
 
-
     @pytest.mark.asyncio
     async def test_a_channel_matching_an_unlabelled_cylinder_names_it_after_the_move(
         self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User

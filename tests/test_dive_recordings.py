@@ -440,12 +440,13 @@ class TestRelabellingASecondComputersCylinders:
     def test_a_labelled_row_and_an_appended_cylinder_never_share_a_label(self) -> None:
         """One counter for both: a labelled row and an appended cylinder never share one."""
         mapping, cylinders = relabel_gas_numbers(
-            self._parsed((0, 21.0, 0.0), (1, 99.0, 0.0)), self._stored((None, 21.0, 0.0), (0, 32.0, 0.0))
+            self._parsed((0, 21.0, 0.0), (1, 32.0, 0.0), (2, 99.0, 0.0)),
+            self._stored((None, 21.0, 0.0), (0, 32.0, 0.0)),
         )
 
         assert cylinders is not None
         assert [(row.oxygen, row.gas_number) for row in cylinders] == [(21.0, 1), (32.0, 0), (99.0, 2)]
-        assert mapping == {0: 1, 1: 2}
+        assert mapping == {0: 1, 1: 0, 2: 2}
 
     def test_a_row_nothing_points_at_stays_unlabelled(self) -> None:
         """No incoming label, no channel to name the row: the dive's list is left alone."""
