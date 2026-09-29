@@ -58,6 +58,9 @@ class TestFkErrorDetail:
             == "Altitude must be between -450 and 6500 meters."
         )
 
+    def test_rating_range(self):
+        assert _fk_error_detail(_integrity_error("ck_dive_rating_range")) == "Rating must be between 1 and 5."
+
     def test_avg_depth_within_max(self):
         """The backstop for the one route into this constraint `validate_depth_pair`
         cannot cover: a concurrent edit between `patch_dive`'s merged check and its

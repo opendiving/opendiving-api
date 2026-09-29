@@ -529,8 +529,9 @@ invalidates that user's dive caches".
 
 `crud_dives.with_gear_item` mirrors `at_dive_site`: one
 `id IN (SELECT dive_id FROM dive_gear_item WHERE gear_item_id = ...)` condition that
-`get_dives_page` applies, rather than a separate round trip to resolve matching dive ids. It backs the gear detail page's "Dives with this
-Gear" list, which makes the `dive_count` statistic clickable rather than a bare number.
+`get_dives_page` applies, rather than a separate round trip to resolve matching dive ids. It backs
+the gear detail page's "Dives with this Gear" list, which makes the `dive_count` statistic clickable
+rather than a bare number.
 
 ## `GearItem.type` is a closed vocabulary, but has no DB `CHECK` constraint
 
@@ -2198,8 +2199,8 @@ contact and the policy number (no elements; `<membership memberid>` is not a pol
 (`<owner>` has no image element, and its one route to an image, `<notes><link>` to `<mediadata>`,
 carries no role); a dive's tags, waves, weather and boat name.
 
-Lossy, on the `divejson` package writer's tables: `type` goes out as `<apparatus>`, `semi_closed`
-as `rebreather`, which reads back `closed_circuit`, and `freedive` and `snorkel` not at all;
+Lossy, on the `divejson` package writer's tables: `type` goes out as `<apparatus>`, `semi_closed` as
+`rebreather`, which reads back `closed_circuit`, and `freedive` and `snorkel` not at all;
 `entry_type` as `<platform>`, a plain `boat` and a `pool` not at all, since UDDF's boats are each a
 kind of boat. The rating is doubled onto `<ratingvalue>`'s 1-10.
 
@@ -3288,11 +3289,11 @@ not re-read `env_file`; `docker compose up -d --force-recreate api` does.
 `docker-compose.yml` and `.github/workflows/tests.yml` both pin `postgres:18` and move together, so
 CI tests what ships. 18 because a major upgrade is a self-hoster's most painful operation and 18
 defers it longest. One thing anchors it: `ux_tag_user_id_name_folded` is on `casefold()` under the
-built-in `pg_unicode_fast` collation, both new in 18 - an earlier major cannot build the index. Nothing
-else does: no PostGIS (marine polygons are GeoJSON in `services/marine_areas.py`), no pgvector, no
-extensions; `LargeBinary` columns are plain `bytea`;
-`asyncpg 0.31.0` tests against 18; PG18's incompatibilities (COPY `\.`, VACUUM inheritance,
-AFTER-trigger roles, FTS collation) touch nothing here.
+built-in `pg_unicode_fast` collation, both new in 18 - an earlier major cannot build the index.
+Nothing else does: no PostGIS (marine polygons are GeoJSON in `services/marine_areas.py`), no
+pgvector, no extensions; `LargeBinary` columns are plain `bytea`; `asyncpg 0.31.0` tests against 18;
+PG18's incompatibilities (COPY `\.`, VACUUM inheritance, AFTER-trigger roles, FTS collation) touch
+nothing here.
 
 The mount is `postgres-data:/var/lib/postgresql`: the 18 image's `VOLUME` is one level up and
 `PGDATA` is `/var/lib/postgresql/18/docker`, so `pg_upgrade --link` can hold both clusters in one
@@ -4898,8 +4899,8 @@ newest. Fixed on the query side, since dateless-last is the list's purpose: `_LI
 `crud/crud_certifications.py` is `certified_on.desc().nulls_last(), uuid.desc()`, the shape of
 `_INFO_ORDER` in `crud_gear_service_schedules`, and `get_certifications_page` is a hand-written
 `select()` returning `get_multi`'s `{"data": [...], "total_count": n}` shape. `search_multi` in
-`core/utils/search.py` and `get_dives_page` in `crud/crud_dives.py`, whose `sort=rating` is the
-same `NULLS LAST`, are the other lists that outgrew `get_multi`.
+`core/utils/search.py` and `get_dives_page` in `crud/crud_dives.py`, whose `sort=rating` is the same
+`NULLS LAST`, are the other lists that outgrew `get_multi`.
 
 `get_multi` cannot express null placement — `SortProcessor` has no such parameter — so avoid
 `sort_columns` on a nullable column. `gear_service.py` sorts `next_due_on` ascending, where Postgres

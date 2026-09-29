@@ -37,6 +37,7 @@ from src.app.models.dive_person import DivePerson
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_species import DiveSpecies
+from src.app.models.dive_tag import DiveTag
 from src.app.models.user import User
 from src.app.schemas.dive import DiveMergeRequest
 from src.app.services import blob_store
@@ -50,6 +51,7 @@ from tests.helpers.generators import (
     create_gear_item,
     create_person,
     create_species,
+    create_tag,
     create_user,
 )
 
@@ -583,6 +585,33 @@ class TestWhatElseMoves:
             )
         ).all()
         assert [(row.person_id, row.role) for row in rows] == [(buddy.id, "buddy"), (guide.id, "guide")]
+
+    @pytest.mark.asyncio
+    async def test_the_other_dives_tags_arrive_and_its_rating_does_not(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """Tags are links, so they move as people do, a tag both halves carry kept once; a
+        rating is a value the diver typed on the surviving dive, which stands - its own, or
+        none."""
+        first, second = await _two_halves(async_db, db, diver)
+        night, wreck = create_tag(db, diver), create_tag(db, diver)
+        second.rating = 5
+        db.add_all(
+            [
+                DiveTag(dive_id=first.id, tag_id=night.id, position=0),
+                DiveTag(dive_id=second.id, tag_id=wreck.id, position=0),
+                DiveTag(dive_id=second.id, tag_id=night.id, position=1),
+            ]
+        )
+        db.commit()
+
+        await _merge(async_db, diver, first, second)
+
+        rows = (
+            await async_db.execute(select(DiveTag.tag_id).where(DiveTag.dive_id == first.id).order_by(DiveTag.position))
+        ).scalars()
+        assert list(rows) == [night.id, wreck.id]
+        assert (await async_db.execute(select(Dive.rating).where(Dive.id == first.id))).scalar_one() is None
 
     @pytest.mark.asyncio
     async def test_the_other_dives_notes_arrive_under_a_heading(

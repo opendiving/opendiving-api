@@ -43,12 +43,14 @@ from src.app.models.dive_file import DiveFile
 from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.dive_person import DivePerson
 from src.app.models.dive_site import DiveSite
+from src.app.models.dive_tag import DiveTag
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
 from src.app.models.person import Person
+from src.app.models.tag import Tag
 from src.app.models.trip import Trip
 from src.app.models.trip_part import TripPart
 from src.app.models.trip_person import TripPerson
@@ -69,6 +71,7 @@ from tests.helpers.generators import (
     create_gear_service_schedule,
     create_gear_set,
     create_person,
+    create_tag,
     create_trip,
     create_user,
 )
@@ -135,6 +138,7 @@ class TestDeletingAUserTakesEverythingWithIt:
         create_contact(db, diver)
         # A person with a row in each join table, which only these cascades reach.
         person = create_person(db, diver)
+        tag = create_tag(db, diver)
         item = create_gear_item(db, diver)
         schedule = create_gear_service_schedule(db, diver, item)
         create_gear_service_record(db, diver, item, schedule=schedule)
@@ -150,6 +154,7 @@ class TestDeletingAUserTakesEverythingWithIt:
                 DivePerson(dive_id=dive.id, person_id=person.id, role="buddy"),
                 TripPerson(trip_id=trip.id, person_id=person.id),
                 CoursePerson(course_id=course.id, person_id=person.id, role="instructor"),
+                DiveTag(dive_id=dive.id, tag_id=tag.id),
                 UserSession(
                     user_id=diver.id,
                     expires_at=datetime.now(UTC) + timedelta(days=7),
@@ -232,6 +237,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             GearServiceSchedule,
             GearSet,
             Person,
+            Tag,
             Trip,
             UserDiveStats,
             UserSession,
@@ -243,7 +249,16 @@ class TestDeletingAUserTakesEverythingWithIt:
         raising, so counting only the tables above would pass while they stayed."""
         second_order = {
             model: int(db.execute(select(func.count()).select_from(model)).scalar_one())
-            for model in (CertificationFile, CoursePerson, DiveDiveSite, DivePerson, GearSetItem, TripPart, TripPerson)
+            for model in (
+                CertificationFile,
+                CoursePerson,
+                DiveDiveSite,
+                DivePerson,
+                DiveTag,
+                GearSetItem,
+                TripPart,
+                TripPerson,
+            )
         }
 
         db.execute(text('DELETE FROM "user" WHERE id = :id'), {"id": populated_diver.id})

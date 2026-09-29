@@ -211,7 +211,8 @@ class ImportStoredFile(_ReadModel):
 class ImportDiver(_ReadModel):
     """Whose logbook the document is. Its identity and settings are read and reported, and
     never applied; its check-in details and its portrait are offered in the preview and
-    written as the diver confirms them - see `DECISIONS.md`. Every member is optional
+    written as the diver confirms them - see `DECISIONS.md`. The tag list this app's writer
+    puts under its key is read, so a tag on no dive comes back. Every member is optional
     because §6.1 makes them so: a converter whose source records nothing about an owner
     omits the whole object rather than minting identity for a person."""
 
