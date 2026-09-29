@@ -129,6 +129,13 @@ because the row is gone. The index and the check must agree — a predicate on o
 refuses names the other accepts. A new named, user-owned entity mirrors this pattern; add the
 predicate to both halves only if it is genuinely soft-deletable.
 
+`Tag.name` departs on purpose: `ux_tag_user_id_name_folded` is on
+`casefold(name COLLATE pg_unicode_fast)`, and `tag_name_exists` and `tag_ids_by_name` compare on
+that expression, because DiveJSON's §3 rule 8 is Unicode full case folding, which `lower()` is not
+(`Großes Riff` and `GROSSES RIFF` are one tag). The model spells it as Postgres reflects it,
+`name::text COLLATE`, since `alembic check` strips a cast through the collation and compares equal
+only when both sides carry one.
+
 ## `trips.py`/`dive_sites.py` caching mirrors `dives.py`
 
 `trips.py` and `dive_sites.py` each instantiate one `OwnedResourceCache`
@@ -520,9 +527,9 @@ invalidates that user's dive caches".
 
 ## `GET /dives` takes a `gear_item_uuid` filter alongside `dive_site_uuid`
 
-`crud_dives`' `custom_filters` has a `with_gear_item` entry mirroring `at_dive_site`: one
-`id IN (SELECT dive_id FROM dive_gear_item WHERE gear_item_id = ...)` condition rather than a
-separate round trip to resolve matching dive ids. It backs the gear detail page's "Dives with this
+`crud_dives.with_gear_item` mirrors `at_dive_site`: one
+`id IN (SELECT dive_id FROM dive_gear_item WHERE gear_item_id = ...)` condition that
+`get_dives_page` applies, rather than a separate round trip to resolve matching dive ids. It backs the gear detail page's "Dives with this
 Gear" list, which makes the `dive_count` statistic clickable rather than a bare number.
 
 ## `GearItem.type` is a closed vocabulary, but has no DB `CHECK` constraint
@@ -2189,7 +2196,12 @@ mixed-rank taxonomy mapped from the WoRMS `phylum`/`class_name` strings `models/
 through — a mapping this repo would get quietly wrong; `species.csv` carries them); the emergency
 contact and the policy number (no elements; `<membership memberid>` is not a policy); the portrait
 (`<owner>` has no image element, and its one route to an image, `<notes><link>` to `<mediadata>`,
-carries no role).
+carries no role); a dive's tags, waves, weather and boat name.
+
+Lossy, on the `divejson` package writer's tables: `type` goes out as `<apparatus>`, `semi_closed`
+as `rebreather`, which reads back `closed_circuit`, and `freedive` and `snorkel` not at all;
+`entry_type` as `<platform>`, a plain `boat` and a `pool` not at all, since UDDF's boats are each a
+kind of boat. The rating is doubled onto `<ratingvalue>`'s 1-10.
 
 Allowed: `po2_limit` maps to `<mix><maximumpo2>`, so `_MixKey` includes it;
 `informationbeforedive/link` is `maxOccurs="unbounded"`, so every site goes out in visit order.
@@ -3275,8 +3287,10 @@ not re-read `env_file`; `docker compose up -d --force-recreate api` does.
 
 `docker-compose.yml` and `.github/workflows/tests.yml` both pin `postgres:18` and move together, so
 CI tests what ships. 18 because a major upgrade is a self-hoster's most painful operation and 18
-defers it longest. Nothing anchors a version: no PostGIS (marine polygons are GeoJSON in
-`services/marine_areas.py`), no pgvector, no extensions; `LargeBinary` columns are plain `bytea`;
+defers it longest. One thing anchors it: `ux_tag_user_id_name_folded` is on `casefold()` under the
+built-in `pg_unicode_fast` collation, both new in 18 - an earlier major cannot build the index. Nothing
+else does: no PostGIS (marine polygons are GeoJSON in `services/marine_areas.py`), no pgvector, no
+extensions; `LargeBinary` columns are plain `bytea`;
 `asyncpg 0.31.0` tests against 18; PG18's incompatibilities (COPY `\.`, VACUUM inheritance,
 AFTER-trigger roles, FTS collation) touch nothing here.
 
@@ -4884,7 +4898,8 @@ newest. Fixed on the query side, since dateless-last is the list's purpose: `_LI
 `crud/crud_certifications.py` is `certified_on.desc().nulls_last(), uuid.desc()`, the shape of
 `_INFO_ORDER` in `crud_gear_service_schedules`, and `get_certifications_page` is a hand-written
 `select()` returning `get_multi`'s `{"data": [...], "total_count": n}` shape. `search_multi` in
-`core/utils/search.py` is the other list that outgrew `get_multi`.
+`core/utils/search.py` and `get_dives_page` in `crud/crud_dives.py`, whose `sort=rating` is the
+same `NULLS LAST`, are the other lists that outgrew `get_multi`.
 
 `get_multi` cannot express null placement — `SortProcessor` has no such parameter — so avoid
 `sort_columns` on a nullable column. `gear_service.py` sorts `next_due_on` ascending, where Postgres

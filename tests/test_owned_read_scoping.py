@@ -49,7 +49,7 @@ from src.app.crud.crud_gear_set_items import (
 )
 from src.app.crud.crud_trips import get_trip_uuids_by_ids
 from src.app.models.user import User
-from src.app.schemas.dive import DiveReadInternal
+from src.app.schemas.dive import DiveListSort, DiveReadInternal
 from tests.conftest import db_available
 from tests.helpers.generators import create_dive, create_gear_item, create_gear_set, create_trip
 
@@ -140,7 +140,7 @@ class TestTheDiveReadsScopeThatLookup:
 
         with (
             patch(
-                "src.app.api.v1.dives.crud_dives.get_multi",
+                "src.app.api.v1.dives.get_dives_page",
                 AsyncMock(return_value={"data": rows, "total_count": len(rows)}),
             ),
             patch("src.app.api.v1.dives.get_trip_uuids_by_ids", lookup),
@@ -160,6 +160,9 @@ class TestTheDiveReadsScopeThatLookup:
                 gear_item_id=None,
                 species_id=None,
                 person_id=None,
+                tag_id=None,
+                dive_type=None,
+                sort=DiveListSort.DATE,
             )
 
         assert lookup.await_args is not None

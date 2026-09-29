@@ -94,6 +94,12 @@ def create_person(
     )
 
 
+def create_tag(db: Session, user: models.User, *, name: str | None = None) -> models.Tag:
+    """A tag of this user's, named uniquely because `ux_tag_user_id_name_folded` would refuse
+    a second run's row of the same name."""
+    return _persist(db, models.Tag(user_id=user.id, name=name or f"night {uuid7().hex[-8:]}"))
+
+
 def create_trip(db: Session, user: models.User) -> models.Trip:
     """A trip with one dated part, which is the shape the migration gives every trip that
     had no place - and the shape every caller here was getting when a trip held its own

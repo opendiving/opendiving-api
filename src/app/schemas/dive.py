@@ -3,7 +3,7 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, ClassVar, Literal, Self
 
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, model_validator
 
 from ..core.schemas import (
     NOTES_MAX_LENGTH,
@@ -18,6 +18,7 @@ from .dive_profile import DiveProfileInfo
 from .gear_item import GearItemInfo
 from .location import Latitude, LocationRead, Longitude
 from .person import PeopleRead, PeopleUpdate, PeopleWrite
+from .tag import TagsUpdate, TagsWrite
 
 _START_TIME_EXAMPLE = "2021-04-04T10:04:47.910+02:00"
 _LOCAL_START_TIME_EXAMPLE = "2021-04-04T10:04:47.910"
@@ -94,6 +95,67 @@ class WaterType(StrEnum):
     BRACKISH = "brackish"
 
 
+class DiveType(StrEnum):
+    """What kind of dive it was - the diver's own statement, DiveJSON §6.2's `type`.
+
+    Never derived from a recording's `DiveMode`, nor the reverse: a backup computer run in
+    gauge mode was on an open-circuit dive. `snorkel` is the outing, not the tube. On
+    `WaterType`'s terms otherwise: picker order, no `OTHER`, no DB `CHECK`.
+    """
+
+    OPEN_CIRCUIT = "open_circuit"
+    CLOSED_CIRCUIT = "closed_circuit"
+    SEMI_CLOSED = "semi_closed"
+    FREEDIVE = "freedive"
+    SNORKEL = "snorkel"
+    SURFACE_SUPPLIED = "surface_supplied"
+
+
+class Current(StrEnum):
+    """How strong the current was, on `WaterType`'s terms."""
+
+    NONE = "none"
+    LIGHT = "light"
+    MODERATE = "moderate"
+    STRONG = "strong"
+    EXTREME = "extreme"
+
+
+class Waves(StrEnum):
+    """What the surface was like - a quarry has waves too, where a sea state would not."""
+
+    CALM = "calm"
+    SLIGHT = "slight"
+    MODERATE = "moderate"
+    ROUGH = "rough"
+
+
+class Weather(StrEnum):
+    """What the sky was doing, on `WaterType`'s terms."""
+
+    CLEAR = "clear"
+    PARTLY_CLOUDY = "partly_cloudy"
+    OVERCAST = "overcast"
+    RAIN = "rain"
+    STORM = "storm"
+    SNOW = "snow"
+    FOG = "fog"
+
+
+class EntryType(StrEnum):
+    """Where the diver got in. `pier` covers a jetty, a dock, a pontoon and a harbour wall;
+    the technique - a giant stride, a back roll - is a tag."""
+
+    SHORE = "shore"
+    BOAT = "boat"
+    PIER = "pier"
+    POOL = "pool"
+
+
+# Stored trimmed and never blank, the person name's shape: DiveJSON's 1-255.
+BoatName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
+
+
 class Salinity(StrEnum):
     """The water density one **device** divided pressure by to show a depth (spec §6.4a).
 
@@ -120,9 +182,8 @@ class DiveMode(StrEnum):
     **It lives on the recording rather than on the dive**, which is what makes it a mode and
     not a genre. A backup computer run in gauge mode beside a primary on open circuit is
     ordinary practice and the dive was not a gauge dive; two computers give two answers, and
-    the recording is the row that can hold both. A dive-level mode is the diver's own
-    statement about the dive and nothing in this app writes one - it arrives with freediving
-    as a product, not here.
+    the recording is the row that can hold both. The diver's own statement of the dive's kind
+    is `DiveType`, on the dive, and neither is ever derived from the other.
 
     No `OTHER`, and no default: `None` means the file did not record one, and a reader must
     never read that as open circuit however a source format's documentation glosses an
@@ -193,6 +254,23 @@ class DiveBase(BaseModel):
         int | None,
         Field(default=None, examples=[372], description="Elevation of the water surface, in meters above sea level"),
     ]
+    # The diver's classification and conditions, on the same terms as the two above.
+    # `rating` has no Pydantic bound either: `ck_dive_rating_range` is the bound.
+    type: Annotated[
+        DiveType | None,
+        Field(default=None, examples=[DiveType.OPEN_CIRCUIT], description="What kind of dive it was"),
+    ]
+    rating: Annotated[int | None, Field(default=None, examples=[4], description="The diver's rating, 1 to 5")]
+    air_temperature: Annotated[
+        float | None, Field(default=None, examples=[24.0], description="Air temperature at the surface, in °C")
+    ]
+    current: Annotated[Current | None, Field(default=None, examples=[Current.LIGHT])]
+    waves: Annotated[Waves | None, Field(default=None, examples=[Waves.CALM])]
+    weather: Annotated[Weather | None, Field(default=None, examples=[Weather.CLEAR])]
+    entry_type: Annotated[
+        EntryType | None, Field(default=None, examples=[EntryType.BOAT], description="Where the diver got in")
+    ]
+    boat_name: Annotated[BoatName | None, Field(default=None, examples=["Legend"], description="The boat's name")]
 
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
@@ -412,9 +490,14 @@ class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
     `uuid`.
     """
 
-    # Overrides `DiveBase.water_type`, which stays `WaterType` for the writes that base
+    # Overrides `DiveBase`'s vocabularies, which stay enums for the writes that base
     # validates. See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
     water_type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    type: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
+    current: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
+    waves: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
+    weather: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
+    entry_type: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
 
     user_uuid: uuid_pkg.UUID
     trip_uuid: Annotated[
@@ -451,6 +534,11 @@ class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
     """
 
     water_type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    type: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
+    current: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
+    waves: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
+    weather: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
+    entry_type: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
     start_time: datetime  # the column, never the public spelling
 
     id: int
@@ -838,6 +926,10 @@ class DiveReadWithMixtures(DiveRead):
     # had - never a summary of the person: a client resolves names from `GET /people`, so
     # renaming a person reaches no cached dive.
     people: PeopleRead
+    # Here for `sightings`' reason. Names rather than references, unlike `people`, so a client
+    # renders chips without a second list per dive page - which is why a tag's rename and
+    # delete drop the diver's dive caches.
+    tags: Annotated[list[str], Field(default_factory=list, description="The dive's tags, in the diver's order")]
     # **`source_file` and `profile` are gone**, and `recordings` replaces both. A dive had
     # at most one of each while a dive had at most one record; it now has an ordered list of
     # recordings, each of which carries its own files and its own profile summary. A client
@@ -867,6 +959,14 @@ class DiveReadWithMixtures(DiveRead):
             description="Surface-normalized gas consumption, or null when the dive doesn't record enough to derive it",
         ),
     ]
+
+
+class DiveListSort(StrEnum):
+    """The dive list's orders: `date` newest first, the default; `rating` highest first, every
+    unrated dive after every rated one, ties newest first."""
+
+    DATE = "date"
+    RATING = "rating"
 
 
 class DiveMergeRequest(BaseModel):
@@ -912,7 +1012,8 @@ class DiveMergeResult(BaseModel):
         uuid_pkg.UUID,
         Field(
             description="The dive that was merged away. It is soft-deleted and **not recoverable through the API**: "
-            "its recordings, files, cylinders, sites, gear, species, people and notes are now the surviving dive's."
+            "its recordings, files, cylinders, sites, gear, species, people, tags and notes are now the surviving "
+            "dive's."
         ),
     ]
     folded: Annotated[
@@ -1108,6 +1209,7 @@ class DiveCreateRequest(DiveCreate):
     ]
     sightings: Sightings
     people: PeopleWrite
+    tags: TagsWrite
 
 
 class DiveUpdate(RejectsExplicitNulls):
@@ -1147,6 +1249,14 @@ class DiveUpdate(RejectsExplicitNulls):
     altitude: Annotated[
         int | None, Field(default=None, description="Elevation of the water surface, in meters above sea level")
     ]
+    type: Annotated[DiveType | None, Field(default=None, description="What kind of dive it was")]
+    rating: Annotated[int | None, Field(default=None, description="The diver's rating, 1 to 5")]
+    air_temperature: Annotated[float | None, Field(default=None, description="Air temperature at the surface, in °C")]
+    current: Annotated[Current | None, Field(default=None)]
+    waves: Annotated[Waves | None, Field(default=None)]
+    weather: Annotated[Weather | None, Field(default=None)]
+    entry_type: Annotated[EntryType | None, Field(default=None, description="Where the diver got in")]
+    boat_name: Annotated[BoatName | None, Field(default=None, description="The boat's name")]
     trip_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the trip this dive belongs to")
     ]
@@ -1177,8 +1287,8 @@ class DiveUpdateRequest(DiveUpdate):
     """Request body for updating a dive, including replacing its gas mixtures, dive site(s)
     and gear.
 
-    If `mixtures`/`dive_site_uuids`/`gear_item_uuids`/`sightings`/`people` is omitted,
-    the existing ones are left untouched. If provided (even as an empty list), the existing
+    If `mixtures`/`dive_site_uuids`/`gear_item_uuids`/`sightings`/`people`/`tags` is
+    omitted, the existing ones are left untouched. If provided (even as an empty list), the existing
     ones are replaced with the given list.
     """
 
@@ -1193,6 +1303,7 @@ class DiveUpdateRequest(DiveUpdate):
     ]
     sightings: SightingsUpdate
     people: PeopleUpdate
+    tags: TagsUpdate
 
 
 class DiveUpdateInternal(BaseModel):
@@ -1212,6 +1323,14 @@ class DiveUpdateInternal(BaseModel):
     altitude: Annotated[
         int | None, Field(default=None, description="Elevation of the water surface, in meters above sea level")
     ]
+    type: DiveType | None = None
+    rating: int | None = None
+    air_temperature: float | None = None
+    current: Current | None = None
+    waves: Waves | None = None
+    weather: Weather | None = None
+    entry_type: EntryType | None = None
+    boat_name: str | None = None
     trip_id: Annotated[int | None, Field(default=None, description="Internal id of the trip this dive belongs to")]
     course_id: Annotated[
         int | None, Field(default=None, description="Internal id of the training course this dive was on")

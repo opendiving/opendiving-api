@@ -33,6 +33,7 @@ from src.app.models.course import Course
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
 from src.app.models.person import Person
+from src.app.models.tag import Tag
 from src.app.models.trip import Trip
 
 
@@ -204,6 +205,7 @@ PAGINATED_LIST_ROUTES: dict[str, tuple[str, ...]] = {
     "gear_sets.py": ("read_gear_sets",),
     "invitations.py": ("read_invitations",),
     "people.py": ("read_people",),
+    "tags.py": ("read_tags",),
     "trips.py": ("read_trips",),
     "users.py": ("read_species_life_list",),
 }
@@ -318,6 +320,7 @@ class TestPageSizeCaps:
         (Course, COURSE_SEARCH_COLUMNS),
         (Contact, CONTACT_SEARCH_COLUMNS),
         (GearItem, GEAR_ITEM_SEARCH_COLUMNS),
+        (Tag, ("name",)),
     ],
 )
 def test_the_model_columns_the_search_reads_actually_exist(model: Any, columns: tuple[str, ...]) -> None:

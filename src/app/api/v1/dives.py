@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from sqlalchemy import ColumnElement
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
@@ -48,14 +49,25 @@ from ...crud.crud_dive_species import (
     get_species_for_dive,
     replace_species_for_dive,
 )
-from ...crud.crud_dives import crud_dives
+from ...crud.crud_dives import (
+    at_dive_site,
+    crud_dives,
+    get_dives_page,
+    showing_species,
+    with_gear_item,
+    with_person,
+    with_tag,
+)
 from ...crud.crud_gear_items import resolve_gear_item_ids_for_user
 from ...crud.crud_people import get_people_for_dives, replace_people_for_dive, resolve_person_ids_for_user
 from ...crud.crud_species import resolve_species_ids
+from ...crud.crud_tags import get_tags_for_dives, replace_tags_for_dive, resolve_tag_id_for_user, resolve_tag_ids
 from ...crud.crud_trips import get_trip_uuids_by_ids, resolve_trip_id_for_user
+from ...models.dive import Dive
 from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
+    DiveListSort,
     DiveMergeRequest,
     DiveMergeResult,
     DiveNeighbors,
@@ -68,6 +80,7 @@ from ...schemas.dive import (
     DiveRenumberResult,
     DiveSiteInfo,
     DiveStartTime,
+    DiveType,
     DiveUpdateRequest,
     RecordingRead,
     RecordingUpdateRequest,
@@ -80,6 +93,7 @@ from ...schemas.dive_profile import RecordingProfileRead
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
 from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
+from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
 from ...services.dive_files import (
@@ -138,6 +152,7 @@ _DIVE_CONSTRAINT_MESSAGES = {
     "ck_dive_avg_depth_positive": "Average depth must be positive.",
     "ck_dive_weight_non_negative": "Weight must be zero or positive.",
     "ck_dive_altitude_range": "Altitude must be between -450 and 6500 meters.",
+    "ck_dive_rating_range": "Rating must be between 1 and 5.",
     # Unreachable through the form - these columns are written only by the import path
     # (see DECISIONS.md) - but a constraint with no message here is worse than a raw 500:
     # both write paths already wrap `IntegrityError`, so an unmapped constraint falls
@@ -192,7 +207,7 @@ async def _resolve_sightings(db: AsyncSession, sightings: list[SightingWrite]) -
 def _fk_error_detail(exc: IntegrityError) -> str:
     """Translate a dive `IntegrityError` into a message worth showing a diver.
 
-    Covers both foreign keys (a trip/course/site/gear item/species/person that vanished
+    Covers both foreign keys (a trip/course/site/gear item/species/person/tag that vanished
     between validation and insert) and the domain `CheckConstraint`s. Constraint violations surface from the DB
     layer, not Pydantic, so without this the caller would get a raw 500 instead of a
     sentence naming the field.
@@ -212,6 +227,8 @@ def _fk_error_detail(exc: IntegrityError) -> str:
         return "Species not found."
     if "person_id_fkey" in msg:
         return PERSON_NOT_FOUND
+    if "tag_id_fkey" in msg:
+        return TAG_NOT_FOUND
     for constraint, detail in _DIVE_CONSTRAINT_MESSAGES.items():
         if constraint in msg:
             return detail
@@ -400,6 +417,7 @@ def _to_public_dive_with_mixtures(
     mixtures: list[DiveMixtureRead],
     sightings: list[SightingRead],
     people: list[PersonReferenceRead],
+    tags: list[str],
     recordings: list[RecordingRead] | None = None,
     attribution: ProfileGasAttribution | None = None,
 ) -> DiveReadWithMixtures:
@@ -427,6 +445,7 @@ def _to_public_dive_with_mixtures(
         mixtures=mixtures,
         sightings=sightings,
         people=people,
+        tags=tags,
         recordings=recordings or [],
         # Both callers of this function (creating a dive, and the cached single-dive
         # read) go through here, so gas use is derived in exactly one place. Safe to
@@ -592,8 +611,8 @@ async def write_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    """Log a dive, together with its gas mixtures, dive sites, gear, sightings and people in one
-    request.
+    """Log a dive, together with its gas mixtures, dive sites, gear, sightings, people and tags
+    in one request.
 
     Every referenced trip, training course, contact, dive site, gear item and person must
     belong to the caller: one that doesn't - or doesn't exist - is a 422 naming which, not a
@@ -602,7 +621,9 @@ async def write_dive(
     nobody, so there is no ownership to fail. Dive sites keep the order given; index 0 is the
     primary site, and sightings keep the order they were spotted in, each with an optional
     count and note - a species named twice is a 422 naming it. `people` keeps the diver's
-    order, each with the role the person had; one named twice keeps the first.
+    order, each with the role the person had; one named twice keeps the first. `tags` are
+    names in the diver's order: each is trimmed and is the diver's tag it matches once both
+    are case-folded, or a new one, and two that fold to one keep the first spelling.
     Values the DB's domain constraints reject (a non-positive duration, a mixture over 100%)
     also come back as 422 with the offending field named.
     """
@@ -638,6 +659,8 @@ async def write_dive(
 
     sightings = await _resolve_sightings(db, dive.sightings)
     people = await resolve_people_references(db, dive.people, user_id=current_user["id"])
+    # Created in this transaction, so a dive that fails to write leaves no new tag behind.
+    tag_ids = await resolve_tag_ids(db, user_id=current_user["id"], names=dive.tags)
 
     dive_internal_dict = dive.model_dump(
         exclude={
@@ -646,6 +669,7 @@ async def write_dive(
             "gear_item_uuids",
             "sightings",
             "people",
+            "tags",
             "trip_uuid",
             "course_uuid",
             "contact_uuid",
@@ -695,6 +719,12 @@ async def write_dive(
         except IntegrityError as e:
             await db.rollback()
             raise UnprocessableEntityException(_fk_error_detail(e)) from e
+    if tag_ids:
+        try:
+            await replace_tags_for_dive(db=db, dive_id=created_dive.id, tag_ids=tag_ids)
+        except IntegrityError as e:
+            await db.rollback()
+            raise UnprocessableEntityException(_fk_error_detail(e)) from e
     await recalculate_dive_stats(db=db, user_id=current_user["id"])
     await recalculate_gear_dive_counts(db=db, user_id=current_user["id"])
     await invalidate_dive_caches(current_user["id"])
@@ -710,6 +740,7 @@ async def write_dive(
     gear_items = await get_gear_items_for_dive(db=db, dive_id=created_dive.id)
     stored_sightings = await get_species_for_dive(db=db, dive_id=created_dive.id)
     stored_people = (await get_people_for_dives(db, [created_dive.id]))[created_dive.id] if people else []
+    stored_tags = (await get_tags_for_dives(db, [created_dive.id]))[created_dive.id] if tag_ids else []
     return _to_public_dive_with_mixtures(
         cast(dict[str, Any], dive_read_internal),
         user_uuid=current_user["uuid"],
@@ -721,6 +752,7 @@ async def write_dive(
         mixtures=mixtures,
         sightings=stored_sightings,
         people=stored_people,
+        tags=stored_tags,
     )
 
 
@@ -731,7 +763,7 @@ async def write_dive(
     key_prefix=(
         "user_{user_id}_dives:page_{page}:items_per_page:{items_per_page}"
         ":trip_{trip_id}:course_{course_id}:site_{dive_site_id}:gear_{gear_item_id}:species_{species_id}"
-        ":person_{person_id}"
+        ":person_{person_id}:tag_{tag_id}:type_{dive_type}:sort_{sort}"
     ),
     resource_id_name="user_id",
     expiration=60,
@@ -749,6 +781,9 @@ async def _cached_read_dives(
     gear_item_id: int | None,
     species_id: int | None,
     person_id: int | None,
+    tag_id: int | None,
+    dive_type: DiveType | None,
+    sort: DiveListSort,
 ) -> dict:
     """Fetches (and caches) a user's paginated dive list.
 
@@ -759,33 +794,34 @@ async def _cached_read_dives(
     Keyed and filtered by internal integer ids (rather than the caller-supplied uuids)
     since those are already known/resolved by the time this is called.
     """
-    filters: dict[str, Any] = {"user_id": user_id, "is_deleted": False}
+    conditions: list[ColumnElement[bool]] = []
     if trip_id is not None:
-        filters["trip_id"] = trip_id
+        conditions.append(Dive.trip_id == trip_id)
     if course_id is not None:
-        filters["course_id"] = course_id
+        conditions.append(Dive.course_id == course_id)
     if dive_site_id is not None:
-        # Match dives that include this site among their (possibly several) dive sites,
-        # via a single `IN (subquery)` condition rather than resolving matching dive ids
-        # in a separate round trip.
-        filters["id__at_dive_site"] = dive_site_id
+        # A dive that includes this site among its (possibly several) dive sites.
+        conditions.append(at_dive_site(dive_site_id))
     if gear_item_id is not None:
-        # Same shape as the dive site filter above: match dives that used this item.
-        filters["id__with_gear_item"] = gear_item_id
+        conditions.append(with_gear_item(gear_item_id))
     if species_id is not None:
-        # Same shape again: match dives that recorded this species.
-        filters["id__showing_species"] = species_id
+        conditions.append(showing_species(species_id))
     if person_id is not None:
-        # And again: the dives whose `people` name this person - the rows `dive_count` counts.
-        filters["id__with_person"] = person_id
+        # The dives whose `people` name this person - the rows its `dive_count` counts.
+        conditions.append(with_person(person_id))
+    if tag_id is not None:
+        # And the tag's, likewise.
+        conditions.append(with_tag(tag_id))
+    if dive_type is not None:
+        conditions.append(Dive.type == dive_type.value)
 
-    dives_data = await crud_dives.get_multi(
-        db=db,
+    dives_data = await get_dives_page(
+        db,
+        user_id=user_id,
         offset=compute_offset(page, items_per_page),
         limit=items_per_page,
-        sort_columns="start_time",
-        sort_orders="desc",
-        **filters,
+        conditions=conditions,
+        sort=sort,
     )
 
     # Enrich each dive with its dive site(s), gear and trip/course/contact uuids via batched
@@ -831,16 +867,29 @@ async def read_dives(
     gear_item_uuid: uuid_pkg.UUID | None = None,
     species_uuid: uuid_pkg.UUID | None = None,
     person_uuid: uuid_pkg.UUID | None = None,
+    tag_uuid: uuid_pkg.UUID | None = None,
+    dive_type: Annotated[DiveType | None, Query(alias="type", description="Only dives of this kind")] = None,
+    sort: Annotated[
+        DiveListSort,
+        Query(
+            description="`date`, newest first; or `rating`, highest first, every unrated dive after every rated "
+            "one and ties newest first"
+        ),
+    ] = DiveListSort.DATE,
 ) -> dict:
-    """List the caller's dives, newest first, each with its trip, course, sites and gear.
+    """List the caller's dives, each with its trip, course, sites and gear - newest first, or
+    by rating.
 
-    The `trip_uuid`, `course_uuid`, `dive_site_uuid`, `gear_item_uuid`, `species_uuid` and
-    `person_uuid` filters are combinable, and one
-    naming something that doesn't exist or isn't the caller's returns an empty page rather
-    than an error - it reveals nothing about whether that resource exists. `dive_site_uuid`
-    matches any dive that *includes* the site, since a dive can span several, and
-    `species_uuid` any dive that recorded that species, and `person_uuid` any dive whose
-    `people` name that person. Out-of-range pagination is clamped, not rejected.
+    The `trip_uuid`, `course_uuid`, `dive_site_uuid`, `gear_item_uuid`, `species_uuid`,
+    `person_uuid`, `tag_uuid` and `type` filters are combinable, and a uuid naming something
+    that doesn't exist or isn't the caller's returns an empty page rather than an error - it
+    reveals nothing about whether that resource exists. `dive_site_uuid` matches any dive that
+    *includes* the site, since a dive can span several, and `species_uuid` any dive that
+    recorded that species, `person_uuid` any dive whose `people` name that person and
+    `tag_uuid` any dive carrying that tag. `type` is an exact match on the stored value, and
+    one outside the vocabulary is a 422 rather than an empty page: a uuid names a resource
+    whose existence must stay unprobeable, while `type` names a member of a closed set the
+    client already has. Out-of-range pagination is clamped, not rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
@@ -885,6 +934,10 @@ async def read_dives(
         person_map = await resolve_person_ids_for_user(db, [person_uuid], current_user["id"])
         person_id = (person_map or {}).get(person_uuid, -1)
 
+    tag_id: int | None = None
+    if tag_uuid is not None:
+        tag_id = await resolve_tag_id_for_user(db, tag_uuid=tag_uuid, user_id=current_user["id"]) or -1
+
     return await _cached_read_dives(
         request,
         user_id=current_user["id"],
@@ -898,6 +951,9 @@ async def read_dives(
         gear_item_id=gear_item_id,
         species_id=species_id,
         person_id=person_id,
+        tag_id=tag_id,
+        dive_type=dive_type,
+        sort=sort,
     )
 
 
@@ -1042,6 +1098,7 @@ async def _cached_read_dive(
     gear_items = await get_gear_items_for_dive(db=db, dive_id=db_dive["id"])
     sightings = await get_species_for_dive(db=db, dive_id=db_dive["id"])
     people = (await get_people_for_dives(db, [db_dive["id"]]))[db_dive["id"]]
+    tags = (await get_tags_for_dives(db, [db_dive["id"]]))[db_dive["id"]]
     # Written batched though only ever called with one id - see `get_recordings_for_dives`.
     # This is three queries rather than the two `source_file` and `profile` used to cost, and
     # the third is what a dive with two computers needs: its recordings, their files and
@@ -1070,6 +1127,7 @@ async def _cached_read_dive(
         mixtures=mixtures,
         sightings=sightings,
         people=people,
+        tags=tags,
         recordings=recordings,
         attribution=attribution,
     )
@@ -1082,7 +1140,7 @@ async def read_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveReadWithMixtures:
-    """Return a single dive with its mixtures, sites, gear, sightings, people and recordings.
+    """Return a single dive with its mixtures, sites, gear, sightings, people, tags and recordings.
 
     404 when no such dive exists - and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable.
@@ -1166,8 +1224,8 @@ async def patch_dive(
 
     404 unless the caller owns it, exactly as for a dive that doesn't exist. The
     list-valued fields - `mixtures`, `dive_site_uuids`, `gear_item_uuids`, `sightings`,
-    `people` - are replaced wholesale when present rather than merged, so sending a shorter list
-    removes the difference and omitting the key entirely leaves it alone. Passing `null` for
+    `people`, `tags` - are replaced wholesale when present rather than merged, so sending a
+    shorter list removes the difference and omitting the key entirely leaves it alone. Passing `null` for
     `trip_uuid` detaches the dive from its trip, which is distinct from omitting the key.
     Passing `null` for `course_uuid` detaches it from its training course the same way, and
     `null` for `contact_uuid` from its contact.
@@ -1194,6 +1252,7 @@ async def patch_dive(
             "gear_item_uuids",
             "sightings",
             "people",
+            "tags",
             "trip_uuid",
             "course_uuid",
             "contact_uuid",
@@ -1253,6 +1312,8 @@ async def patch_dive(
 
     people = None if values.people is None else await resolve_people_references(db, values.people, user_id=owner_id)
 
+    tag_ids = None if values.tags is None else await resolve_tag_ids(db, user_id=owner_id, names=values.tags)
+
     if update_data:
         try:
             await crud_dives.update(db=db, object=update_data, uuid=uuid)
@@ -1297,6 +1358,13 @@ async def patch_dive(
             await db.rollback()
             raise UnprocessableEntityException(_fk_error_detail(e)) from e
 
+    if tag_ids is not None:
+        try:
+            await replace_tags_for_dive(db=db, dive_id=dive_id, tag_ids=tag_ids)
+        except IntegrityError as e:
+            await db.rollback()
+            raise UnprocessableEntityException(_fk_error_detail(e)) from e
+
     if (
         update_data
         or values.mixtures is not None
@@ -1304,6 +1372,7 @@ async def patch_dive(
         or gear_item_ids is not None
         or sightings is not None
         or people is not None
+        or tag_ids is not None
     ):
         await recalculate_dive_stats(db=db, user_id=owner_id)
         await recalculate_gear_dive_counts(db=db, user_id=owner_id)
@@ -1364,9 +1433,9 @@ async def merge_two_dives(
 
     **The earlier dive survives**, by the same clock rule the match gates use: by instant
     where both dives record a UTC offset, by wall clock where either does not. The other
-    dive's recordings, files, cylinders, sites, gear, species, people and notes move onto it
-    and the dive itself is soft-deleted; its uuid stops resolving and nothing here can be
-    undone.
+    dive's recordings, files, cylinders, sites, gear, species, people, tags and notes move
+    onto it and the dive itself is soft-deleted; its uuid stops resolving and nothing here can
+    be undone.
 
     **What happens to the recordings depends on whether one computer or two recorded the
     dive.** The same computer's two records fold into a single recording: the later record's

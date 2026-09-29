@@ -48,7 +48,7 @@ from src.app.models.person import Person
 from src.app.models.user import User
 from src.app.schemas.certification import CertificationCreate, CertificationUpdateRequest
 from src.app.schemas.course import CourseCreate, CourseUpdateRequest
-from src.app.schemas.dive import DiveCreateRequest, DiveUpdateRequest
+from src.app.schemas.dive import DiveCreateRequest, DiveListSort, DiveUpdateRequest
 from src.app.schemas.person import (
     PersonCreate,
     PersonReadInternal,
@@ -466,6 +466,9 @@ class TestTheDatabase:
             gear_item_id=None,
             species_id=None,
             person_id=person_id,
+            tag_id=None,
+            dive_type=None,
+            sort=DiveListSort.DATE,
         )
 
         assert [row["uuid"] for row in page["data"]] == [named_uuid]

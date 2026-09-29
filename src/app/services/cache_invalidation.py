@@ -14,10 +14,13 @@ A contact is the same shape again, five hosts wide: a dive, a course, a certific
 a service record and a trip part carry its uuid. A person is four: a dive, a trip and a
 course list it, and a certification names it as its instructor.
 
-These helpers live here rather than in the route modules so `dives.py`,
-`gear_items.py`, `dive_sites.py`, `courses.py`, `contacts.py` and `people.py` can all reach
-them without importing each other (which would be circular - `dives.py` already invalidates
-gear caches, and gear now has to invalidate dive caches).
+A tag is one host wide and carries more than a uuid: a dive read lists its tags by name, so
+renaming or deleting one drops the diver's dive caches.
+
+These helpers live here rather than in the route modules so `dives.py`, `gear_items.py`,
+`dive_sites.py`, `courses.py`, `contacts.py`, `people.py` and `tags.py` can all reach them
+without importing each other (which would be circular - `dives.py` already invalidates gear
+caches, and gear now has to invalidate dive caches).
 
 Both work by pattern, which is only possible because every affected cache key is
 user-scoped. See `read_dive`/`_cached_read_dives` and `gear_items.py` for the key

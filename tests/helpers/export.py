@@ -29,6 +29,7 @@ from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.person import Person
 from src.app.models.species import Species
+from src.app.models.tag import Tag
 from src.app.models.trip import Trip
 from src.app.models.user import User
 from src.app.models.user_picture import UserPicture
@@ -81,6 +82,9 @@ UUIDS = {
             "person-sam",
             "person-lina",
             "linked-account",
+            "tag-night",
+            "tag-wreck",
+            "tag-drift",
         )
     )
 }
@@ -235,6 +239,8 @@ def build_bundle(
     person_ids_by_dive: dict[int, list[tuple[int, str | None]]] | None = None,
     person_ids_by_trip: dict[int, list[tuple[int, str | None]]] | None = None,
     person_ids_by_course: dict[int, list[tuple[int, str | None]]] | None = None,
+    tags: list[Tag] | None = None,
+    tag_ids_by_dive: dict[int, list[int]] | None = None,
 ) -> ExportBundle:
     """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive".
 
@@ -289,6 +295,8 @@ def build_bundle(
         person_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(person_ids_by_dive or {})},
         person_ids_by_trip={**{trip.id: [] for trip in (trips or [])}, **(person_ids_by_trip or {})},
         person_ids_by_course={**{course.id: [] for course in (courses or [])}, **(person_ids_by_course or {})},
+        tags=tags or [],
+        tag_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(tag_ids_by_dive or {})},
     )
 
 
@@ -527,6 +535,15 @@ def full_bundle() -> ExportBundle:
         # that tells a `is not None` guard apart from a truthiness one, in the writers
         # that have to emit it and in the CSV cell that has to show it.
         altitude=0,
+        type="open_circuit",
+        rating=4,
+        air_temperature=31.5,
+        current="strong",
+        waves="slight",
+        weather="partly_cloudy",
+        # A boat, which UDDF's `<platform>` has no plain word for.
+        entry_type="boat",
+        boat_name="Blue Horizon",
         trip_id=1,
         course_id=1,
         contact_id=1,
@@ -545,6 +562,9 @@ def full_bundle() -> ExportBundle:
         UUIDS["dive-trimix"],
         max_depth=52.0,
         avg_depth=30.0,
+        # Semi-closed goes out to UDDF as `rebreather`, and a shore entry as `beach-shore`.
+        type="semi_closed",
+        entry_type="shore",
         trip_id=1,
         notes="Deco 20 min",
         exit_latitude=27.731500,
@@ -592,6 +612,12 @@ def full_bundle() -> ExportBundle:
         2,
     )
     lina = _with_id(Person(user_id=1, name="Lina", uuid=UUIDS["person-lina"], created_at=CREATED_AT), 3)
+
+    # Three tags, by name as `load_export_bundle` orders them. `drift` is on no dive, which is
+    # the tag only the Tags list, `tags.csv` and the diver's extension still carry.
+    night = _with_id(Tag(user_id=1, name="night", uuid=UUIDS["tag-night"], created_at=CREATED_AT), 1)
+    wreck = _with_id(Tag(user_id=1, name="wreck", uuid=UUIDS["tag-wreck"], created_at=CREATED_AT), 2)
+    drift = _with_id(Tag(user_id=1, name="drift", uuid=UUIDS["tag-drift"], created_at=CREATED_AT), 3)
 
     return build_bundle(
         dives=[air, trimix, bare],
@@ -721,6 +747,9 @@ def full_bundle() -> ExportBundle:
         person_ids_by_dive={1: [(2, "buddy"), (1, "guide")], 2: [(3, None)]},
         person_ids_by_trip={1: [(3, "companion")]},
         person_ids_by_course={1: [(1, "instructor"), (2, "student")]},
+        tags=[drift, night, wreck],
+        # Not in name order on the air dive: the diver's own order is what travels.
+        tag_ids_by_dive={1: [2, 1], 2: [1]},
     )
 
 

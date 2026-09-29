@@ -115,8 +115,8 @@ async def export_divejson(
     DiveJSON is the open dive-log interchange format this project maintains
     (<https://divejson.org>) and this app is its reference implementation, so this file is
     lossless where UDDF is not: it carries the dives with their full sample profiles,
-    cylinders, sites, trips, training courses, contacts, the people the diver was with,
-    marine-life sightings, gear and its service history, c-card records and the check-in
+    cylinders, sites, trips, training courses, contacts, the people the diver was with, their
+    tags, marine-life sightings, gear and its service history, c-card records and the check-in
     details and portrait a dive shop asks for -
     everything the account holds except the binaries themselves, which the file references
     by digest, the profile picture, which it does not name, and an emergency contact with no
@@ -151,7 +151,8 @@ async def export_uddf(
     the format has no slot for (gear sets, service history, c-cards, training courses, a
     contact's roles, a trip's people and every role but buddy and guide, a person's link to
     an account, per-cylinder role and usage, the deco ceiling, the emergency contact, the
-    insurance policy number, the portrait).
+    insurance policy number, the portrait, a dive's tags, waves, weather and boat name, and the
+    kinds of dive and of entry UDDF has no word for).
     For a lossless structured copy, use `/export/divejson`; for one that carries the
     stored files as well, `/export/archive`.
     """
@@ -174,7 +175,7 @@ async def export_csv(
 
     One row per dive with the related records flattened into readable cells - the file to
     open in Excel, Numbers or a notebook. The normalized set (cylinders, trips, courses,
-    sites, gear, service history, certifications, contacts, people) ships inside
+    sites, gear, service history, certifications, contacts, people, tags) ships inside
     `/export/archive`.
     Deliberately lossy: `/export/divejson` is the one that holds everything.
     """

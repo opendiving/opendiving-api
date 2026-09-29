@@ -44,6 +44,7 @@ from ...crud.crud_people import (
     replace_people_for_dive,
     replace_people_for_trip,
 )
+from ...crud.crud_tags import replace_tags_for_dive, tag_ids_by_name
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
 from ...models.contact import Contact
@@ -147,6 +148,8 @@ class _Writer:
         # the ones it merely hung a new service record on. The second kind is what a
         # "recalculate what I created" reading misses; see `_recalculate`.
         self._schedule_ids: list[int] = []
+        # Tag name -> row id, for every name the plan's dives and tag list carry.
+        self._tag_ids: dict[str, int] = {}
 
     # ------------------------------------------------------------------ helpers
 
@@ -273,6 +276,7 @@ class _Writer:
         await self._write_schedules()
         await self._write_service_records()
         await self._write_certifications()
+        await self._write_tags()
         await self._write_dives()
         # After the dives, deliberately: every match named a dive that predates this import,
         # and writing them last keeps that true of the order as well as of the plan.
@@ -434,6 +438,14 @@ class _Writer:
                     )
                 )
 
+    async def _write_tags(self) -> None:
+        """Every tag the dives and the tag list name, the ones the caller has matched by the
+        unique index's own fold and the rest created."""
+        names = [*self._plan.tags]
+        for record in self._plan.writable("dives"):
+            names.extend(record.children.get("tags") or [])
+        self._tag_ids = await tag_ids_by_name(self._db, user_id=self._user_id, names=list(dict.fromkeys(names)))
+
     async def _write_dives(self) -> None:
         for record in self._plan.writable("dives"):
             if record.action is Action.RESTORE and record.row_id is not None:
@@ -471,6 +483,9 @@ class _Writer:
                 db=self._db, dive_id=dive_id, sightings=record.children.get("sightings") or [], commit=False
             )
             await replace_people_for_dive(self._db, dive_id, self._people(record), commit=False)
+            await replace_tags_for_dive(
+                self._db, dive_id, [self._tag_ids[name] for name in record.children.get("tags") or []], commit=False
+            )
             for recording in record.children.get("recordings") or []:
                 await self._write_recording(record, dive_id, recording)
 

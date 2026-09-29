@@ -35,11 +35,12 @@ class DefaultPreset(NamedTuple):
 # rather than trusting the typing here.
 DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
     DefaultPreset(
-        # Keeps the required three plus dive site, maximum depth and notes: where, how deep,
-        # and what it was like - a holiday diver's whole logbook entry. Trip, course, contact
-        # and people are hidden because each asks about a record the diver has to have
-        # created first, and bottom temperature because reading one off a computer is the point at
-        # which this stops being the shortest form the app can offer. The six per-cylinder keys only matter
+        # Keeps the required three plus dive site, maximum depth, rating, tags and notes: where,
+        # how deep, and what it was like - a holiday diver's whole logbook entry. Trip, course,
+        # contact and people are hidden because each asks about a record the diver has to have
+        # created first, bottom temperature because reading one off a computer is the point at
+        # which this stops being the shortest form the app can offer, and the dive's type and
+        # its conditions for the same reason. The six per-cylinder keys only matter
         # once Gas Mixtures is shown again, and they are hidden so that showing it gives a
         # plain tank card rather than a technical one - helium among them, since a holiday
         # diver's cylinder holds air or nitrox and the answer is always zero.
@@ -49,11 +50,18 @@ DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
             DiveFormField.COURSE_UUID,
             DiveFormField.CONTACT_UUID,
             DiveFormField.PEOPLE,
+            DiveFormField.TYPE,
             DiveFormField.AVG_DEPTH,
             DiveFormField.BOTTOM_TEMPERATURE,
+            DiveFormField.AIR_TEMPERATURE,
             DiveFormField.VISIBILITY,
             DiveFormField.WATER_TYPE,
             DiveFormField.ALTITUDE,
+            DiveFormField.CURRENT,
+            DiveFormField.WAVES,
+            DiveFormField.WEATHER,
+            DiveFormField.ENTRY_TYPE,
+            DiveFormField.BOAT_NAME,
             DiveFormField.MIXTURES,
             DiveFormField.GEAR_ITEM_UUIDS,
             DiveFormField.WEIGHT,

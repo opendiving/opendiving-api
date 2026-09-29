@@ -40,7 +40,17 @@ from ...models.user import User
 from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.contact import ContactRole, address_from_row
 from ...schemas.course import CourseStatus
-from ...schemas.dive import DecoAlgorithm, DiveMode, Salinity, WaterType
+from ...schemas.dive import (
+    Current,
+    DecoAlgorithm,
+    DiveMode,
+    DiveType,
+    EntryType,
+    Salinity,
+    WaterType,
+    Waves,
+    Weather,
+)
 from ...schemas.dive_mixture import DiveMixtureRead, GasRole, TankUsage
 from ...schemas.export import (
     DIVEJSON_FORMAT,
@@ -139,9 +149,9 @@ def _speakable(value: str | None, vocabulary: type[StrEnum]) -> bool:
       `certification.agency`) - the record is uninterpretable and is omitted, which is the
       writer's side of the rule the reader already follows (spec §5.6, and
       `logbook_import/planner.py::_agency`, which skips for that reason).
-    - OPTIONAL (`gear_item.type`, `dive.water_type`, `dive_recording.mode`/`salinity`,
-      `dive_mixture.role`/`usage`, `course.agency`/`status`) - `_sayable` below drops the
-      *field* and keeps the record.
+    - OPTIONAL (`gear_item.type`, `dive.water_type` and the dive's other vocabularies,
+      `dive_recording.mode`/`salinity`, `dive_mixture.role`/`usage`, `course.agency`/`status`)
+      - `_sayable` below drops the *field* and keeps the record.
       A diver's cylinder must not vanish from their export over how its category is spelt,
       and neither must their course.
 
@@ -390,6 +400,9 @@ def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
                     {"name": preset.name, "hidden_fields": list(preset.hidden_fields)}
                     for preset in bundle.dive_form_presets
                 ],
+                # Every tag by name, so one on no live dive is in the document too - it is in
+                # the account, and the Tags card lists it.
+                "tags": [tag.name for tag in bundle.tags],
             }
         },
     )
@@ -571,6 +584,15 @@ def _dive(
         weight=dive.weight,
         water_type=_sayable(dive.water_type, WaterType),
         altitude=dive.altitude,
+        type=_sayable(dive.type, DiveType),
+        rating=dive.rating,
+        tags=[tag.name for tag in bundle.tags_for(dive)],
+        air_temperature=dive.air_temperature,
+        current=_sayable(dive.current, Current),
+        waves=_sayable(dive.waves, Waves),
+        weather=_sayable(dive.weather, Weather),
+        entry_type=_sayable(dive.entry_type, EntryType),
+        boat_name=dive.boat_name,
         entry_position=_position(dive.entry_latitude, dive.entry_longitude),
         exit_position=_position(dive.exit_latitude, dive.exit_longitude),
         trip_uuid=None if trip is None else trip.uuid,

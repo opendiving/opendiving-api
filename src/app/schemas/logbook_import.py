@@ -49,7 +49,7 @@ from ..core.utils.datetime_offset import full_date_is_a_date
 from .certification import CertificationAgency
 from .contact import ADDRESS_POSTCODE_MAX, CONTACT_EMAIL_MAX, CONTACT_WEBSITE_MAX, ContactRole
 from .course import CourseStatus
-from .dive import DecoAlgorithm, DiveMode, Salinity, WaterType
+from .dive import Current, DecoAlgorithm, DiveMode, DiveType, EntryType, Salinity, WaterType, Waves, Weather
 from .dive_mixture import GasRole, TankUsage
 from .dive_profile import ProfileEventType
 from .gear_service import ServiceKind
@@ -386,6 +386,16 @@ class ImportDive(_ReadModel):
     weight: float | None = None
     water_type: Annotated[WaterType | None, _unknown_is_absent(WaterType), Field(default=None)]
     altitude: int | None = None
+    type: Annotated[DiveType | None, _unknown_is_absent(DiveType), Field(default=None)]
+    rating: int | None = None
+    # Read as written: the planner trims each, and drops what the app cannot hold.
+    tags: Annotated[list[str], Field(default_factory=list), _Collection]
+    air_temperature: float | None = None
+    current: Annotated[Current | None, _unknown_is_absent(Current), Field(default=None)]
+    waves: Annotated[Waves | None, _unknown_is_absent(Waves), Field(default=None)]
+    weather: Annotated[Weather | None, _unknown_is_absent(Weather), Field(default=None)]
+    entry_type: Annotated[EntryType | None, _unknown_is_absent(EntryType), Field(default=None)]
+    boat_name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     entry_position: ImportPosition | None = None
     exit_position: ImportPosition | None = None
     trip_uuid: uuid_pkg.UUID | None = None
@@ -717,6 +727,9 @@ class ImportNoteCode(StrEnum):
     # A person was linked (apply), or would be (preview), to the account on this instance its
     # entry names - the sentence names that account's current username.
     ACCOUNT_LINKED = "account_linked"
+    # The tags the import adds to the caller's list, named in one note. Tags are members of a
+    # dive rather than a collection, so no collection report counts them.
+    TAGS_CREATED = "tags_created"
 
 
 class ImportNote(BaseModel):

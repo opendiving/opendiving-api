@@ -61,18 +61,27 @@ class DiveFormField(StrEnum):
     # Immediately after the contact, and it has to stay there for the same reason.
     PEOPLE = "people"
     DIVE_SITE_UUIDS = "dive_site_uuids"
+    TYPE = "type"
     MAX_DEPTH = "max_depth"
     AVG_DEPTH = "avg_depth"
     BOTTOM_TEMPERATURE = "bottom_temperature"
+    AIR_TEMPERATURE = "air_temperature"
     VISIBILITY = "visibility"
     WATER_TYPE = "water_type"
     ALTITUDE = "altitude"
+    CURRENT = "current"
+    WAVES = "waves"
+    WEATHER = "weather"
+    ENTRY_TYPE = "entry_type"
+    BOAT_NAME = "boat_name"
     MIXTURES = "mixtures"
     GEAR_ITEM_UUIDS = "gear_item_uuids"
     WEIGHT = "weight"
     # Where `species_uuids` stood, and it has to stay there: revision `c47b308253a3` renamed
     # that member to this one in place in every stored set.
     SIGHTINGS = "sightings"
+    RATING = "rating"
+    TAGS = "tags"
     NOTES = "notes"
 
     MIXTURE_PO2_LIMIT = "mixture.po2_limit"

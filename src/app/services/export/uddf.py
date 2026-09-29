@@ -76,6 +76,12 @@ reading the XSD, and each is exported in `logbook.divejson`/CSV instead:
   `<trippart>` links only a dive base and UDDF has no course, so every person still goes
   out as a `<buddy>` and those references do not; on a dive, `instructor`, `student`,
   `companion` and no role at all go out as the plain link a reader takes for `buddy`.
+- **A dive's tags, waves, weather and boat name.** No element for any of them. And three
+  vocabularies UDDF only partly speaks: `<apparatus>` has no freedive, no snorkel outing and
+  no `other`, and one `rebreather` for both circuits, so a semi-closed dive reads back as
+  closed; `<platform>` has no pool, and a plain boat would have to be named small, charter or
+  live-aboard; `<current>` has one step more than ours, which this never writes. A value UDDF
+  cannot say is left out.
 
 Output is deterministic: fixed element order, fixed id derivation, and mixes sorted by
 their fractions rather than by encounter. Golden-file tests depend on that, and so does
@@ -95,6 +101,7 @@ from collections import Counter
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,7 +112,7 @@ from ...models.contact import Contact
 from ...models.dive import Dive
 from ...models.gear_item import GearItem
 from ...models.person import Person
-from ...schemas.dive import DiveMode
+from ...schemas.dive import Current, DiveMode, DiveType, EntryType
 from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.dive_profile import (
     CNS_SCALE,
@@ -225,6 +232,36 @@ _DIVE_MODE_TYPE: dict[DiveMode, str | None] = {
     DiveMode.FREEDIVE: "apnoe",
 }
 
+# The dive's `type`, `entry_type` and `current` in UDDF's words - the `divejson` package's
+# writer's tables, value for value. `None` is a value UDDF cannot say: `<apparatus>` has no
+# freedive, no snorkel outing and no `other`, and each of `<platform>`'s boats is a kind of
+# boat - small, charter, live-aboard, a barge - so a plain `boat` would name one the diver
+# never did; it has no pool either. `semi_closed` goes out as `rebreather`, UDDF's one word for
+# both circuits, which a reader takes back as `closed_circuit`. Explicit `None`s, as
+# `_DIVE_MODE_TYPE`'s, so the asserts below cover every value.
+_APPARATUS: dict[DiveType, str | None] = {
+    DiveType.OPEN_CIRCUIT: "open-scuba",
+    DiveType.CLOSED_CIRCUIT: "rebreather",
+    DiveType.SEMI_CLOSED: "rebreather",
+    DiveType.FREEDIVE: None,
+    DiveType.SNORKEL: None,
+    DiveType.SURFACE_SUPPLIED: "surface-supplied",
+}
+_PLATFORM: dict[EntryType, str | None] = {
+    EntryType.SHORE: "beach-shore",
+    EntryType.BOAT: None,
+    EntryType.PIER: "pier",
+    EntryType.POOL: None,
+}
+# Six steps against five: `very-mild-current` is the one this never writes.
+_CURRENT: dict[Current, str | None] = {
+    Current.NONE: "no-current",
+    Current.LIGHT: "mild-current",
+    Current.MODERATE: "moderate-current",
+    Current.STRONG: "hard-current",
+    Current.EXTREME: "very-hard-current",
+}
+
 # `_EQUIPMENT_ELEMENT` is looked up unguarded, so a `GearType` added without a home here
 # would be a `KeyError` at export time rather than a mis-categorized item - and the one
 # place it would surface is a diver's download. Asserted at import, where it is a startup
@@ -234,6 +271,9 @@ assert set(_EQUIPMENT_ELEMENT.values()) <= set(_EQUIPMENT_ORDER), "equipmentType
 # The same guard for the same reason, and the `None` above is why it can be an equality: a
 # mode with no UDDF value is answered here rather than absent from here.
 assert set(_DIVE_MODE_TYPE) == set(DiveMode), "every DiveMode needs an answer, including 'no UDDF value'"
+assert set(_APPARATUS) == set(DiveType), "every DiveType needs an answer, including 'no UDDF value'"
+assert set(_PLATFORM) == set(EntryType), "every EntryType needs an answer, including 'no UDDF value'"
+assert set(_CURRENT) == set(Current), "every Current needs an answer"
 
 
 def _num(value: float) -> str:
@@ -270,6 +310,15 @@ def _sub(parent: ET.Element, tag: str, text: str | None = None, **attrs: str) ->
     if text is not None:
         element.text = _xml_safe(text)
     return element
+
+
+def _enumerated[T: StrEnum](parent: ET.Element, tag: str, value: str | None, table: dict[T, str | None]) -> None:
+    """A stored vocabulary value in UDDF's word for it, or nothing - for a value UDDF has no
+    word for, and for one outside our own vocabulary, which the column has no `CHECK` to
+    stop."""
+    word = next((uddf for ours, uddf in table.items() if ours == value), None)
+    if word is not None:
+        _sub(parent, tag, word)
 
 
 def _optional(parent: ET.Element, tag: str, value: float | None) -> None:
@@ -1092,6 +1141,7 @@ def _dive_element(
     # The bare date on a date-only dive - the module docstring's one departure from the XSD.
     start = combine_dive_start_time(dive.start_time, dive.utc_offset_minutes, dive.start_date_only)
     _sub(before, "datetime", start.isoformat())
+    _optional(before, "airtemperature", None if dive.air_temperature is None else dive.air_temperature + KELVIN_OFFSET)
     # Between `<datetime>` and `<equipmentused>`, because `informationbeforediveType` is an
     # `xs:sequence` and that is where `altitude` sits in it. Water type has no counterpart
     # here at all - 3.2.2's `density` elements are site-level and deco-planner input, never
@@ -1104,6 +1154,8 @@ def _dive_element(
         _optional(used, "leadquantity", dive.weight)
         for item in gear:
             _sub(used, "link", ref=_uddf_id("gear", item.uuid))
+    _enumerated(before, "apparatus", dive.type, _APPARATUS)
+    _enumerated(before, "platform", dive.entry_type, _PLATFORM)
 
     trip = bundle.trip_for(dive)
     if trip is not None:
@@ -1153,8 +1205,12 @@ def _dive_element(
     greatest = dive.max_depth if dive.max_depth is not None else sampled
     _sub(after, "greatestdepth", _num(greatest if greatest is not None else 0.0))
     _optional(after, "visibility", dive.visibility)
+    _enumerated(after, "current", dive.current, _CURRENT)
     if dive.notes:
         _sub(_sub(after, "notes"), "para", dive.notes)
+    if dive.rating is not None:
+        # Doubled onto `ratingvalueType`'s 1 to 10, which a reader halves back exactly.
+        _sub(_sub(after, "rating"), "ratingvalue", str(2 * dive.rating))
     _sub(after, "diveduration", _num(dive.duration))
     _optional(after, "averagedepth", dive.avg_depth)
     return element

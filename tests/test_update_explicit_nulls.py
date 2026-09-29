@@ -47,6 +47,7 @@ from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.person import Person
+from src.app.models.tag import Tag
 from src.app.models.trip import Trip
 from src.app.models.user import User
 from src.app.models.webauthn_credential import WebauthnCredential
@@ -61,6 +62,7 @@ from src.app.schemas.gear_service import GearServiceRecordUpdate, GearServiceSch
 from src.app.schemas.gear_set import GearSetUpdate
 from src.app.schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
 from src.app.schemas.person import PersonUpdate
+from src.app.schemas.tag import TagUpdate
 from src.app.schemas.trip import TripUpdate
 from src.app.schemas.user import UserAdminUpdate, UserUpdate
 from src.app.schemas.webauthn_credential import WebauthnCredentialUpdate
@@ -81,6 +83,7 @@ SCHEMAS_AND_TABLES: list[tuple[type[RejectsExplicitNulls], Any]] = [
     (CourseUpdate, Course),
     (ContactUpdate, Contact),
     (PersonUpdate, Person),
+    (TagUpdate, Tag),
     (GearServiceScheduleUpdate, GearServiceSchedule),
     (GearServiceRecordUpdate, GearServiceRecord),
     (UserUpdate, User),

@@ -23,7 +23,9 @@ else; what is here is the source, and the notes for working on it.
 ## What it does
 
 - **Dive log API** — dives with gas mixtures (O₂/He, pressures), multiple ordered dive sites per
-  dive, trips, weights, water type, altitude, and notes. Soft deletes throughout.
+  dive, trips, weights, water type, altitude, the kind of dive, a rating, tags, the air
+  temperature, current, waves and weather, the entry type and the boat, and notes. Soft deletes
+  throughout.
 - **Technical diving** — per-cylinder ppO₂ limits and gas roles, each computer's CNS/OTU and surface
   pressure persisted from imports, and per-tank gas consumption derived from recorded gas switches
   on multi-tank dives.

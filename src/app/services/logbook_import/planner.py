@@ -60,6 +60,7 @@ from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.gear_set import GearSet
 from ...models.person import Person
 from ...models.species import Species
+from ...models.tag import Tag
 from ...models.trip import Trip
 from ...models.user import User
 from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, CertificationAgency, CertificationSide
@@ -76,6 +77,7 @@ from ...schemas.logbook_import import (
     ImportContact,
     ImportCourse,
     ImportDive,
+    ImportDiver,
     ImportDiveSite,
     ImportFileReport,
     ImportGearItem,
@@ -95,6 +97,7 @@ from ...schemas.logbook_import import (
     ImportTrip,
 )
 from ...schemas.person import PersonRole
+from ...schemas.tag import TAG_NAME_MAX, tag_key, trim_tag
 from ...schemas.user import CHECK_IN_FIELDS
 from ...schemas.user_picture import PictureCrop
 from .. import blob_store
@@ -411,6 +414,9 @@ class ImportPlan:
     # The archive's portrait, beside the check-in details and never counted among the files:
     # those are the logbook's, and the report's file counts say so.
     portrait: PlannedPortrait | None = None
+    # The diver's tag list from this app's extension, trimmed: the writer makes a row of each
+    # name no dive carries, as it does of every dive's tags, so the vocabulary survives.
+    tags: list[str] = field(default_factory=list)
 
     async def portrait_offer(self) -> ImportPortraitOffer | None:
         """The preview's portrait fields, the archive's drawn small enough to travel inline."""
@@ -482,6 +488,7 @@ _DIVE_BOUNDS: tuple[Bound, ...] = (
     Bound("visibility", lambda value: 0 <= value <= INT32_MAX, "visibility must be a non-negative number of metres"),
     Bound("weight", lambda value: value >= 0, "ballast cannot be negative"),
     Bound("altitude", lambda value: -450 <= value <= 6500, "altitude must be between -450 and 6500 metres"),
+    Bound("rating", lambda value: 1 <= value <= 5, "a rating must be between 1 and 5"),
 )
 
 # A sighting's count, from `models/dive_species.py`, with the column's width as its ceiling:
@@ -599,6 +606,12 @@ class _Planner:
         # Read on the first link the preview meets, so an import that links nobody never asks.
         self._claim_links = claim_links
         self._link_budget: int | None = None
+        # The caller's tags by `tag_key`, the names of this document's diver's tag list, and
+        # the tags this import makes - by key, each its first spelling. Filled by
+        # `_plan_dives` and `_plan_tag_list`.
+        self._tag_index: dict[str, int] = {}
+        self._tag_list: list[str] = []
+        self._new_tags: dict[str, str] = {}
 
     # ------------------------------------------------------------------ notes
 
@@ -1039,6 +1052,8 @@ class _Planner:
         await self._plan_service_records()
         await self._plan_certifications()
         await self._plan_dives()
+        self._plan_tag_list()
+        self._note_new_tags()
         return ImportPlan(
             is_archive=self._loaded.is_archive,
             records=self._records,
@@ -1052,6 +1067,7 @@ class _Planner:
             check_in_details=self._check_in_details,
             check_in_values=self._check_in_values,
             portrait=self._portrait,
+            tags=self._tag_list,
         )
 
     async def _plan_diver(self) -> None:
@@ -1060,7 +1076,7 @@ class _Planner:
         diver = self._document.diver
         if diver is None:
             return
-        if diver.name or diver.username or diver.email or diver.extensions:
+        if diver.name or diver.username or diver.email or _carries_settings(diver.extensions):
             self._note(
                 ImportNoteCode.DIVER_NOT_APPLIED,
                 "The document's own name, email and settings are not applied: this account keeps its own.",
@@ -1994,6 +2010,8 @@ class _Planner:
 
     async def _plan_dives(self) -> None:
         existing = await self._rows_by_uuid(Dive, [dive.uuid for dive in self._document.dives])
+        tags = await self._db.execute(select(Tag.name, Tag.id).where(Tag.user_id == self._user_id))
+        self._tag_index = {tag_key(row.name): row.id for row in tags}
         self._claimed_digests = set(
             (await self._db.execute(select(DiveFile.sha256).where(DiveFile.user_id == self._user_id))).scalars()
         )
@@ -2231,6 +2249,15 @@ class _Planner:
             "weight": bounded.get("weight"),
             "water_type": None if dive.water_type is None else dive.water_type.value,
             "altitude": bounded.get("altitude"),
+            "type": None if dive.type is None else dive.type.value,
+            "rating": bounded.get("rating"),
+            "air_temperature": dive.air_temperature if finite(dive.air_temperature) else None,
+            "current": None if dive.current is None else dive.current.value,
+            "waves": None if dive.waves is None else dive.waves.value,
+            "weather": None if dive.weather is None else dive.weather.value,
+            "entry_type": None if dive.entry_type is None else dive.entry_type.value,
+            # Stored trimmed and never blank, as a dive write's `BoatName` stores it.
+            "boat_name": (dive.boat_name or "").strip() or None,
             "entry_latitude": entry[0],
             "entry_longitude": entry[1],
             "exit_latitude": exit_[0],
@@ -2269,10 +2296,54 @@ class _Planner:
             "gear_uuids": self._reference_list(collection, dive.uuid, "gear", dive.gear_uuids),
             "sightings": self._plan_sightings(dive),
             "people": self._person_references(collection, dive.uuid, dive.people),
+            "tags": self._tag_names(dive.tags, collection=collection, record_uuid=dive.uuid),
             "mixtures": mixtures,
             "recordings": recordings,
         }
         return record
+
+    def _tag_names(
+        self, names: Sequence[str], *, collection: str | None = None, record_uuid: uuid_pkg.UUID | None = None
+    ) -> list[str]:
+        """Tags as a dive write stores them: each trimmed, a blank one dropped, one longer than
+        the column dropped and noted, and two that fold to one kept once, at the first -
+        what the read model would refuse is restated here, since the import validates no
+        schema of its own. Each the caller lacks is one this import makes."""
+        kept: dict[str, str] = {}
+        for raw in names:
+            name = trim_tag(raw)
+            if not name:
+                continue
+            if len(name) > TAG_NAME_MAX:
+                self._note(
+                    ImportNoteCode.VALUE_DROPPED,
+                    f"A tag longer than {TAG_NAME_MAX} characters, this app's limit, was dropped",
+                    collection=collection,
+                    uuid=record_uuid,
+                )
+                continue
+            key = tag_key(name)
+            kept.setdefault(key, name)
+            if key not in self._tag_index:
+                self._new_tags.setdefault(key, name)
+        return list(kept.values())
+
+    def _plan_tag_list(self) -> None:
+        """The diver's whole tag list, from this app's extension - the one value the import
+        reads from that block, so a tag on no dive survives a round trip. Only strings count:
+        §5.5 lets anything sit under the key."""
+        diver = self._document.diver
+        listed = None if diver is None else _producer_entry(diver, "tags")
+        if isinstance(listed, list):
+            self._tag_list = self._tag_names([name for name in listed if isinstance(name, str)])
+
+    def _note_new_tags(self) -> None:
+        """Name the tags the import makes, in one note. Not a report line: a tag is a member of
+        a dive, not a collection the document carries - but a preview says what it creates."""
+        if not self._new_tags:
+            return
+        names = ", ".join(f'"{name}"' for name in self._new_tags.values())
+        self._note(ImportNoteCode.TAGS_CREATED, f"This import adds these tags to your list: {names}.")
 
     def _plan_sightings(self, dive: ImportDive) -> list[StoredSighting]:
         """A dive's sightings, each naming its catalog row, with the count bounded and the
@@ -2614,7 +2685,16 @@ def _carried_crop(stored: ImportStoredFile) -> PictureCrop | None:
         return None
 
 
-def _producer_entry(record: ImportStoredFile | ImportPerson, member: str) -> Any:
+def _carries_settings(extensions: dict[str, Any] | None) -> bool:
+    """Whether a diver's `extensions` hold anything but this app's tag list, which the import
+    reads - the settings `DIVER_NOT_APPLIED` says it does not apply."""
+    for key, entry in (extensions or {}).items():
+        if key != DIVEJSON_PRODUCER_KEY or not isinstance(entry, dict) or set(entry) - {"tags"}:
+            return True
+    return False
+
+
+def _producer_entry(record: ImportStoredFile | ImportPerson | ImportDiver, member: str) -> Any:
     """One value out of this producer's extension entry (spec §5.5).
 
     Defensive about the shape all the way down: `extensions` is typed as "any JSON value

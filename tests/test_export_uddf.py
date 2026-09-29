@@ -694,8 +694,65 @@ class TestDiveContent:
         before = _dive(_tree(document), 0).find(f"{UDDF}informationbeforedive")
         assert _text(before, f"{UDDF}altitude") == "0"
         tags = [child.tag for child in before]
-        assert tags.index(f"{UDDF}altitude") == tags.index(f"{UDDF}datetime") + 1
+        # Straight after `<airtemperature>`, which the air dive records and which the
+        # sequence puts between the two.
+        assert tags.index(f"{UDDF}airtemperature") == tags.index(f"{UDDF}datetime") + 1
+        assert tags.index(f"{UDDF}altitude") == tags.index(f"{UDDF}airtemperature") + 1
         assert tags.index(f"{UDDF}altitude") < tags.index(f"{UDDF}equipmentused")
+
+    @pytest.mark.asyncio
+    async def test_the_classification_and_conditions_land_where_the_sequence_puts_them(self, schema, monkeypatch):
+        """Kelvin for the air, UDDF's words for the kind of dive, the entry and the current,
+        and the rating doubled onto its 1 to 10 - each at its place in the sequence, which is
+        what the schema pass checks."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        schema.validate(document)
+        air, trimix = _dive(_tree(document), 0), _dive(_tree(document), 1)
+        before = air.find(f"{UDDF}informationbeforedive")
+        after = air.find(f"{UDDF}informationafterdive")
+
+        assert _text(before, f"{UDDF}airtemperature") == "304.65"
+        assert _text(before, f"{UDDF}apparatus") == "open-scuba"
+        assert _text(after, f"{UDDF}current") == "hard-current"
+        assert _text(after, f"{UDDF}rating/{UDDF}ratingvalue") == "8"
+        tags = [child.tag for child in before]
+        assert tags.index(f"{UDDF}equipmentused") < tags.index(f"{UDDF}apparatus") < tags.index(f"{UDDF}tripmembership")
+        # One word for both circuits, and the beach for a shore entry.
+        assert _text(trimix, f"{UDDF}informationbeforedive/{UDDF}apparatus") == "rebreather"
+        assert _text(trimix, f"{UDDF}informationbeforedive/{UDDF}platform") == "beach-shore"
+
+    @pytest.mark.asyncio
+    async def test_what_uddf_has_no_word_for_is_left_out(self, schema, monkeypatch):
+        """A freedive, a plain boat and a pool have no UDDF value, and neither does a stored
+        value outside our own vocabulary - the column has no `CHECK`."""
+        bundle = build_bundle(
+            dives=[
+                make_dive(1, UUIDS["dive-air"], type="freedive", entry_type="boat", current="whirlpool"),
+                make_dive(2, UUIDS["dive-trimix"], type="snorkel", entry_type="pool"),
+            ]
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        for index in (0, 1):
+            dive = _dive(_tree(document), index)
+            assert dive.find(f"{UDDF}informationbeforedive/{UDDF}apparatus") is None
+            assert dive.find(f"{UDDF}informationbeforedive/{UDDF}platform") is None
+            assert dive.find(f"{UDDF}informationafterdive/{UDDF}current") is None
+
+    @pytest.mark.asyncio
+    async def test_a_round_trip_reads_back_what_uddf_holds_of_them(self, monkeypatch):
+        """Through `divejson`'s UDDF reader, whose tables these writes mirror: the air dive's
+        type, rating, current and air temperature come back as written and its boat entry
+        does not; the semi-closed dive reads back closed, UDDF's one word for both."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+
+        dives = divejson.convert(document, format="uddf").document["dives"]
+
+        air, trimix = dives[0], dives[1]
+        assert (air["type"], air["rating"], air["current"]) == ("open_circuit", 4, "strong")
+        assert air["air_temperature"] == pytest.approx(31.5)
+        assert "entry_type" not in air
+        assert (trimix["type"], trimix["entry_type"]) == ("closed_circuit", "shore")
 
     @pytest.mark.asyncio
     async def test_a_dive_that_records_no_altitude_gets_no_element(self, monkeypatch):

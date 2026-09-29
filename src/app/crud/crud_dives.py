@@ -1,7 +1,9 @@
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 from fastcrud import FastCRUD
-from sqlalchemy import select, update
+from sqlalchemy import ColumnElement, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.dive import Dive
@@ -9,42 +11,81 @@ from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_gear_item import DiveGearItem
 from ..models.dive_person import DivePerson
 from ..models.dive_species import DiveSpecies
-from ..schemas.dive import DiveCreateInternal, DiveDelete, DiveReadInternal, DiveUpdate, DiveUpdateInternal
+from ..models.dive_tag import DiveTag
+from ..schemas.dive import (
+    DiveCreateInternal,
+    DiveDelete,
+    DiveListSort,
+    DiveReadInternal,
+    DiveUpdate,
+    DiveUpdateInternal,
+)
 
 CRUDDive = FastCRUD[Dive, DiveCreateInternal, DiveUpdate, DiveUpdateInternal, DiveDelete, DiveReadInternal]
+crud_dives = CRUDDive(Dive)
 
-# Lets callers filter dives by dive site, gear item, species or person (e.g.
-# `id__at_dive_site=some_id`, `id__with_gear_item=some_id`, `id__showing_species=some_id`,
-# `id__with_person=some_id`) with a single `IN (subquery)` condition instead of resolving
-# matching dive ids in a separate round trip.
+
+# The list's filters by dive site, gear item, species, person or tag, each a single
+# `id IN (subquery)` condition rather than a separate round trip to resolve matching dive ids.
 #
 # None of the subqueries scopes by owner, and that is safe rather than an omission: the
-# `user_id` filter on the outer query is what bounds the result, and each of these only narrows
-# it further. `showing_species` could not scope by owner in any case - the catalog is global
-# and `species` has no `user_id` - which is exactly why it needs no migration either: it reads
-# `dive_species.species_id`, already indexed, and the model comment says it was indexed for
-# this.
-crud_dives = CRUDDive(
-    Dive,
-    custom_filters={
-        "at_dive_site": lambda column: (
-            lambda dive_site_id: column.in_(
-                select(DiveDiveSite.dive_id).where(DiveDiveSite.dive_site_id == dive_site_id)
-            )
-        ),
-        "with_gear_item": lambda column: (
-            lambda gear_item_id: column.in_(
-                select(DiveGearItem.dive_id).where(DiveGearItem.gear_item_id == gear_item_id)
-            )
-        ),
-        "showing_species": lambda column: (
-            lambda species_id: column.in_(select(DiveSpecies.dive_id).where(DiveSpecies.species_id == species_id))
-        ),
-        "with_person": lambda column: (
-            lambda person_id: column.in_(select(DivePerson.dive_id).where(DivePerson.person_id == person_id))
-        ),
-    },
-)
+# `user_id` condition `get_dives_page` always applies is what bounds the result, and each of
+# these only narrows it further. `showing_species` could not scope by owner in any case - the
+# catalog is global and `species` has no `user_id` - which is exactly why it needs no migration
+# either: it reads `dive_species.species_id`, already indexed, and the model comment says it was
+# indexed for this.
+def at_dive_site(dive_site_id: int) -> ColumnElement[bool]:
+    return Dive.id.in_(select(DiveDiveSite.dive_id).where(DiveDiveSite.dive_site_id == dive_site_id))
+
+
+def with_gear_item(gear_item_id: int) -> ColumnElement[bool]:
+    return Dive.id.in_(select(DiveGearItem.dive_id).where(DiveGearItem.gear_item_id == gear_item_id))
+
+
+def showing_species(species_id: int) -> ColumnElement[bool]:
+    return Dive.id.in_(select(DiveSpecies.dive_id).where(DiveSpecies.species_id == species_id))
+
+
+def with_person(person_id: int) -> ColumnElement[bool]:
+    return Dive.id.in_(select(DivePerson.dive_id).where(DivePerson.person_id == person_id))
+
+
+def with_tag(tag_id: int) -> ColumnElement[bool]:
+    return Dive.id.in_(select(DiveTag.dive_id).where(DiveTag.tag_id == tag_id))
+
+
+# The list's orders. `date` is `ix_dive_user_id_start_time`'s own. `rating` spells `NULLS LAST`
+# out, which `get_multi` cannot: Postgres puts nulls first on a bare `DESC`, and an unrated dive
+# above every rated one is the wrong answer - see *"The certification list spells out `NULLS
+# LAST`, because `get_multi` cannot"* in DECISIONS.md. A rating sort over one diver's dives is
+# a small scan, so it has no index.
+_LIST_ORDERS: dict[DiveListSort, tuple[ColumnElement[Any], ...]] = {
+    DiveListSort.DATE: (Dive.start_time.desc(),),
+    DiveListSort.RATING: (Dive.rating.desc().nulls_last(), Dive.start_time.desc()),
+}
+
+
+async def get_dives_page(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    offset: int,
+    limit: int,
+    conditions: Sequence[ColumnElement[bool]] = (),
+    sort: DiveListSort = DiveListSort.DATE,
+) -> dict[str, Any]:
+    """One page of a diver's live dives, in `get_multi`'s `{"data": [...], "total_count": n}`
+    shape - rows as plain dicts of every column, so the caller reads the internal ids it
+    batches its lookups by. Hand-written for `_LIST_ORDERS`, as `get_certifications_page` is.
+    """
+    where = (Dive.user_id == user_id, Dive.is_deleted.is_(False), *conditions)
+    total_count = await db.scalar(select(func.count()).select_from(Dive).where(*where))
+    rows = (
+        await db.execute(
+            select(*Dive.__table__.columns).where(*where).order_by(*_LIST_ORDERS[sort]).offset(offset).limit(limit)
+        )
+    ).mappings()
+    return {"data": [dict(row) for row in rows], "total_count": total_count or 0}
 
 
 async def reassign_dives_to_trip(db: AsyncSession, *, user_id: int, from_trip_id: int, to_trip_id: int) -> int:
