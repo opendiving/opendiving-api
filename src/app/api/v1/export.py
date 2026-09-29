@@ -115,9 +115,9 @@ async def export_divejson(
     DiveJSON is the open dive-log interchange format this project maintains
     (<https://divejson.org>) and this app is its reference implementation, so this file is
     lossless where UDDF is not: it carries the dives with their full sample profiles,
-    cylinders, sites, trips, training courses, contacts, the people the diver was with, their
-    tags, marine-life sightings, gear and its service history, c-card records and the check-in
-    details and portrait a dive shop asks for -
+    cylinders, sites, trips, training courses, contacts, the people the diver was with, the
+    diver's tags, marine-life sightings, gear and its service history, c-card records and the
+    check-in details and portrait a dive shop asks for -
     everything the account holds except the binaries themselves, which the file references
     by digest, the profile picture, which it does not name, and an emergency contact with no
     name or an insurance with no provider, which the format cannot carry until the contact
