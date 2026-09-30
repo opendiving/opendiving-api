@@ -150,10 +150,7 @@ invalidates the item key on any non-GET call, and call `invalidate_list(owner_id
 the owner is known only after the fetch and cannot be expressed via `to_invalidate_extra`. `patch_*`
 skips the list when `update_data` is empty. The factory covers only read/cache/invalidate; route
 bodies stay per resource. `dives.py` keeps `_cached_read_dives`/`_cached_read_dive`, since its reads
-add filters, related uuids and mixtures. `trips.py` hand-writes both reads, the single one under
-`user_{user_id}_trip` as `courses.py` does: a trip read counts its dives, sites and species, so a
-dive write drops every trip read of its owner with `invalidate_trip_caches`, never naming the trips
-it moved. New simple owned resources use `OwnedResourceCache`.
+add filters, related uuids and mixtures. New simple owned resources use `OwnedResourceCache`.
 
 ## The dive form's pickers search server-side via `search=`, never fetching whole tables
 

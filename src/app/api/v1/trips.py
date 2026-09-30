@@ -225,7 +225,7 @@ async def _cached_read_trips(
 
     The kwarg names are load-bearing: `user_id`, `page`, `items_per_page` and `search`
     fill the placeholders in the key prefix this borrows from `_trip_cache`, which is
-    what keeps the keys byte-identical to the ones `invalidate_list` sweeps.
+    what keeps the keys inside the list pattern `invalidate_trip_caches` sweeps.
     """
     trips_data = await get_trips_page(
         db=db,

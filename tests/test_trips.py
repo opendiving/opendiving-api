@@ -610,7 +610,7 @@ class TestReadPath:
 
         # Byte-identical to what `OwnedResourceCache.read_list` wrote before the trips
         # reads were hand-rolled, and inside the `user_{id}_trips:*` pattern
-        # `invalidate_list` sweeps after every create, update and delete.
+        # `invalidate_trip_caches` sweeps after every trip write and every dive write.
         (key,) = redis.written
         assert key == namespaced(f"user_{USER_ID}_trips:page_2:items_per_page:10:search:moalboal:{USER_ID}")
         assert fnmatch(key, across_builds(f"user_{USER_ID}_trips:*"))
