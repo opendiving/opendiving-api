@@ -837,9 +837,9 @@ class ConversionNoteGroup(BaseModel):
         list[str],
         Field(
             default_factory=list,
-            description="Up to three paths into the source document, e.g. `dive/0/tankdata/1`, each prefixed by "
-            "the name of the file it is in where the import converted a zip's members or several files",
-            examples=[["dive/0", "dive/3"]],
+            description="Up to three paths into the source files, each under the name of the file it is in, e.g. "
+            "`dives.uddf/dive/0/tankdata/1`",
+            examples=[["dives.uddf/dive/0", "dives.uddf/dive/3"]],
         ),
     ]
 

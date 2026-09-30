@@ -1002,6 +1002,58 @@ class TestTheReadTransactionIsReleasedBeforeTheBody:
         assert order[:2] == ["release", "read"]
 
 
+class TestWhatOneImportWalks:
+    """Counted over the whole request off the zips' directories, before a file is opened: a
+    bound per zip would be multiplied by every zip one request can carry."""
+
+    @staticmethod
+    def _zips(count: int) -> list[tuple[str, tuple[str, Any, str]]]:
+        return [
+            (
+                "file",
+                (
+                    f"{n}.zip",
+                    io.BytesIO(_zip({f"{n}-a.uddf": _uddf(f"{n}-a"), f"{n}-b.uddf": _uddf(f"{n}-b")})),
+                    "application/zip",
+                ),
+            )
+            for n in range(count)
+        ]
+
+    def test_files_over_the_count_across_several_zips_are_413(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        opened: list[str] = []
+        head = zipfile.ZipFile.open
+
+        def record(self: Any, name: Any, *args: Any, **kwargs: Any) -> Any:
+            opened.append(str(name))
+            return head(self, name, *args, **kwargs)
+
+        files = self._zips(2)
+        monkeypatch.setattr(reader, "MAX_ARCHIVE_MEMBERS", 5)
+        monkeypatch.setattr(zipfile.ZipFile, "open", record)
+
+        response = client.post(PREVIEW_PATH, files=files)
+
+        assert response.status_code == 413
+        assert "at most 5 are read in one import" in response.json()["detail"]
+        assert opened == [], "refused off the listings"
+
+    def test_zips_that_together_expand_past_the_bound_are_413(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        one = zipfile.ZipFile(io.BytesIO(self._zips(1)[0][1][1].getvalue()))
+        declared = sum(info.file_size for info in one.infolist())
+        monkeypatch.setattr(reader, "MAX_ARCHIVE_EXTRACTED_SIZE", declared + 1)
+
+        assert client.post(PREVIEW_PATH, files=self._zips(1)).status_code == 200
+        response = client.post(PREVIEW_PATH, files=self._zips(2))
+
+        assert response.status_code == 413
+        assert "expand to more than" in response.json()["detail"]
+
+
 class TestTheTokenCoversTheBatch:
     FILES = [("a.uddf", _uddf("dive-1")), ("b.ssrf", SSRF)]
 

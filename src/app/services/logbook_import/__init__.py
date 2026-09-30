@@ -5,7 +5,7 @@ module that knows about the containers, one that knows what the records mean, on
 touches the database - with a fourth that runs an import of several files as those files
 imported one at a time. The route layer sees a handful of functions and no internals.
 
-Five stages, in this order, and the order is the design:
+Four stages, in this order, and the order is the design:
 
 1. `parts.read_import_request` streams the request's `file` parts onto spools, after the
    caller is authenticated, under one bound on the memory they hold.

@@ -106,20 +106,22 @@ MAX_DOCUMENT_SIZE = 100 * 1024 * 1024  # 100 MB
 # binaries are what dominate it.
 MAX_ARCHIVE_SIZE = 500 * 1024 * 1024  # 500 MB
 
-# What a zip's members may sum to *uncompressed*, checked against the central directory
-# before a single byte is inflated. Zip compresses text a thousand to one, so the transfer
-# cap above bounds nothing on its own: without this a 5 MB upload could ask for gigabytes of
-# temp file. Twice the archive cap leaves room for an honest logbook whose documents deflate
-# well while refusing anything shaped like a bomb.
+# What every zip of one import may sum to *uncompressed*, checked against the central
+# directories before a single byte is inflated. Zip compresses text a thousand to one, so the
+# transfer cap above bounds nothing on its own: without this a 5 MB upload could ask for
+# gigabytes of temp file, and a request of many zips that many times over. Twice the archive
+# cap leaves room for an honest logbook whose documents deflate well while refusing anything
+# shaped like a bomb.
 MAX_ARCHIVE_EXTRACTED_SIZE = 2 * MAX_ARCHIVE_SIZE
 
-# The most files one zip may hold. This bounds the *walk* rather than the bytes: to decide a
-# member's format its head has to be inflated - a FIT's magic sits eight bytes into the
-# member, so no listing can answer it - and a zip of half a million tiny files is a lot of
-# work inside one request even when it fits under the planning bound. Deliberately not a
-# promise about how many dives go in one import: `MAX_DOCUMENT_SIZE` over the batch is what a
-# real dive-computer export meets first, and at 30 KB a FIT file that is a few thousand of
-# them. The count itself is refused off the directory listing, before anything is opened.
+# The most files one import reads - its parts and every file its zips hold, together. This
+# bounds the *walk* rather than the bytes: to decide a file's format its head has to be
+# inflated - a FIT's magic sits eight bytes into the member, so no listing can answer it - and
+# every file is hashed and reported, so half a million tiny files is a lot of work inside one
+# request even when they fit under the planning bound. Deliberately not a promise about how
+# many dives go in one import: `MAX_DOCUMENT_SIZE` over the batch is what a real dive-computer
+# export meets first, and at 30 KB a FIT file that is a few thousand of them. The count is
+# refused off the directory listings, before any file is opened.
 MAX_ARCHIVE_MEMBERS = 5000
 
 # Zip's local file header. Sniffed rather than trusting the filename or the client's
@@ -1007,8 +1009,8 @@ def _classify(row: BatchRow, head: bytes, source: Source) -> None:
         row.refusal = _unrecognized()
 
 
-def _open_zip(archive: zipfile.ZipFile, zip_row: BatchRow) -> list[BatchRow]:
-    """A zip's files as rows of their own, one level deep and behind the zip's own guards."""
+def _listed(archive: zipfile.ZipFile, zip_row: BatchRow) -> list[zipfile.ZipInfo]:
+    """A zip's files, off its directory: what is not a folder, packaging or empty."""
     infos = [
         info for info in archive.infolist() if not info.is_dir() and not _hidden(info.filename) and info.file_size > 0
     ]
@@ -1016,14 +1018,12 @@ def _open_zip(archive: zipfile.ZipFile, zip_row: BatchRow) -> list[BatchRow]:
         zip_row.refusal = UnsupportedImportError(
             "This zip holds no files to convert - only folders, or the files a computer adds beside them."
         )
-        return []
-    if len(infos) > MAX_ARCHIVE_MEMBERS:
-        zip_row.refusal = ImportTooLargeError(
-            f"This zip holds {len(infos)} files, and at most {MAX_ARCHIVE_MEMBERS} are read from one zip. Split it "
-            "and import the parts."
-        )
-        return []
-    zip_row.opened = len(infos)
+    zip_row.opened = len(infos) or None
+    return infos
+
+
+def _open_zip(archive: zipfile.ZipFile, zip_row: BatchRow, infos: list[zipfile.ZipInfo]) -> list[BatchRow]:
+    """A zip's listed files as rows of their own, one level deep, each head read to classify it."""
     rows = []
     for info in infos:
         row = BatchRow(part=zip_row.part, name=info.filename, size=info.file_size, sha256="", _info=info, _zip=zip_row)
@@ -1089,6 +1089,8 @@ def _survey(parts: Sequence[ImportPart]) -> LoadedBatch:
     before any file is read whole, so an import too large to plan costs no conversion.
     """
     batch = LoadedBatch()
+    zips: list[tuple[zipfile.ZipFile, BatchRow, list[zipfile.ZipInfo]]] = []
+    walked = expands = 0
     try:
         for part in parts:
             if part.refusal is not None or part.spool is None:
@@ -1106,6 +1108,7 @@ def _survey(parts: Sequence[ImportPart]) -> LoadedBatch:
             spool.seek(0)
             row = BatchRow(part=part.index, name=part.filename, size=part.size, sha256=part.sha256)
             batch.rows.append(row)
+            walked += 1
             if not head.startswith(_ZIP_MAGIC):
                 _classify(row, head, partial(_rewound, spool))
                 continue
@@ -1117,10 +1120,26 @@ def _survey(parts: Sequence[ImportPart]) -> LoadedBatch:
                 continue
             batch._containers.append(archive)
             row._archive = archive
+            expands += sum(info.file_size for info in archive.infolist())
             if _holds(archive, DIVEJSON_NAME):
                 row.kind, row.format = FileKind.ARCHIVE, "archive"
             else:
-                batch.rows.extend(_open_zip(archive, row))
+                infos = _listed(archive, row)
+                walked += len(infos)
+                zips.append((archive, row, infos))
+
+        if walked > MAX_ARCHIVE_MEMBERS:
+            raise ImportTooLargeError(
+                f"This import holds {walked} files, zips' included, and at most {MAX_ARCHIVE_MEMBERS} are read in one "
+                "import. Split it and import the parts."
+            )
+        if expands > MAX_ARCHIVE_EXTRACTED_SIZE:
+            raise ImportTooLargeError(
+                f"This import's zips expand to more than {MAX_ARCHIVE_EXTRACTED_SIZE // (1024 * 1024)} MB and were not "
+                "opened. Split it and import the parts."
+            )
+        for archive, row, infos in zips:
+            batch.rows.extend(_open_zip(archive, row, infos))
 
         planned = _planned_size(batch)
         if planned > MAX_DOCUMENT_SIZE:
