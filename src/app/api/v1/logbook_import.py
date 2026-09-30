@@ -50,7 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
 from ...core.config import settings
-from ...core.db.database import async_get_db
+from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import BadRequestException, UnprocessableEntityException
 from ...core.security import create_logbook_import_token, verify_logbook_import_token
 from ...core.utils.rate_limit import enforce_rate_limit
@@ -183,7 +183,12 @@ def _missing(field: str) -> RequestValidationError:
 
 
 async def _read(request: Request, fields: tuple[str, ...] = ()) -> ImportRequest:
-    """Read the body, translating the part reader's refusals into their status codes."""
+    """Read the body, translating the part reader's refusals into their status codes.
+
+    The caller releases the read transaction the session's authentication opened first: the
+    body arrives at the client's pace, up to half a gigabyte, and a connection held idle
+    across it is the pool exhaustion `release_read_transaction` exists to prevent.
+    """
     try:
         body = await read_import_request(request, fields=fields)
     except ImportTooLargeError as exc:
@@ -306,6 +311,7 @@ async def preview_logbook_import(
     of them would get on its own.
     """
     await _enforce_import_limit(current_user["id"])
+    await release_read_transaction(db)
     with await _read(request) as body, await _load(body.parts) as batch:
         report = await import_batch(db, user_id=current_user["id"], batch=batch, apply=False)
         return ImportPreview(
@@ -361,6 +367,7 @@ async def apply_logbook_import(
     A set of files that differs from the preview's, by bytes or by name, is a 422.
     """
     await _enforce_import_limit(current_user["id"])
+    await release_read_transaction(db)
     with await _read(request, _APPLY_FIELDS) as body:
         token = body.fields.get("token")
         if token is None:

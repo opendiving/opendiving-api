@@ -19,6 +19,7 @@ Here the caller is authenticated before a byte is read, and while the body strea
 has the trade this sits inside.
 """
 
+import codecs
 import hashlib
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
@@ -101,6 +102,17 @@ def batch_digest(parts: Sequence[ImportPart]) -> str:
     for part in sorted(parts, key=lambda one: (one.filename, one.sha256)):
         hasher.update(f"{part.filename}\x00{part.sha256}\n".encode())
     return hasher.hexdigest()
+
+
+def _codec(name: str) -> str:
+    """The request's charset where Python knows it, and Latin-1 where it does not - the
+    framework's own fallback, which names every byte, so a bogus charset reads rather than
+    fails."""
+    try:
+        codecs.lookup(name)
+    except LookupError:
+        return "latin-1"
+    return name
 
 
 def _mb(size: int) -> int:
@@ -293,7 +305,7 @@ async def read_import_request(request: Request, *, fields: Collection[str] = ())
     body = _BodyReader(fields)
     charset = params.get(b"charset")
     if charset:
-        body._charset = charset.decode("latin-1")
+        body._charset = _codec(charset.decode("latin-1"))
     parser = MultipartParser(
         boundary,
         {

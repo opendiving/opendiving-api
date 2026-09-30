@@ -193,6 +193,10 @@ MAX_NOTES = 500
 # stopped being how that query works when recordings arrived. The guard is on the *profile's*
 # provenance now, so the constant and the rule that reads it belong together.
 
+# How many digests one `IN` asks after: an archive can name thousands of files, and a
+# statement's bind parameters are bounded.
+_DIGESTS_PER_QUERY = 1000
+
 _LATITUDE_LIMIT = 90.0
 _LONGITUDE_LIMIT = 180.0
 
@@ -594,11 +598,12 @@ class _Planner:
         self._species_row_by_uuid: dict[uuid_pkg.UUID, int] = {}
         # The document's species records by uuid, once `_plan_species` has made each unique.
         self._species_by_uuid: dict[uuid_pkg.UUID, ImportSpecies] = {}
-        # Digests this account already stores, against the recording that holds each, plus
-        # the ones this import is about to add, against none yet. `ux_dive_file_user_id_sha256`
-        # is per user, so a second recording carrying identical bytes cannot have a row of its
-        # own - and one row names one `recording_id`, so it cannot serve two either. The file
-        # is skipped and reported; the dive is not.
+        # Of the digests this file could store, those the account already holds, against the
+        # recording that holds each, plus the ones this file is about to add, against none
+        # yet. `ux_dive_file_user_id_sha256` is per user, so a second recording carrying
+        # identical bytes cannot have a row of its own - and one row names one
+        # `recording_id`, so it cannot serve two either. The file is skipped and reported; the
+        # dive is not.
         self._claimed_digests: dict[str, int | None] = {}
         # Incoming recordings that belong to dives this account already has - see
         # `PlannedRecordingMatch`. Filled by `_plan_dives`, walked by the writer.
@@ -2032,15 +2037,38 @@ class _Planner:
         existing = await self._rows_by_uuid(Dive, [dive.uuid for dive in self._document.dives])
         tags = await self._db.execute(select(Tag.name, Tag.id).where(Tag.user_id == self._user_id))
         self._tag_index = {tag_key(row.name): row.id for row in tags}
-        self._claimed_digests = {
-            row.sha256: row.recording_id
-            for row in await self._db.execute(
-                select(DiveFile.sha256, DiveFile.recording_id).where(DiveFile.user_id == self._user_id)
-            )
-        }
+        self._claimed_digests = await self._stored_digests()
         for dive in self._document.dives:
             self._claim_document_uuid("dives", dive)
             self._records["dives"][dive.uuid] = await self._plan_dive(dive, existing)
+
+    async def _stored_digests(self) -> dict[str, int | None]:
+        """Which of the digests this file could store the account holds already, and where.
+
+        The kept file's own and an archive's members' - asked by digest rather than read for
+        the whole account, because an import of many files asks once per file, against a
+        logbook each earlier file has just grown.
+        """
+        wanted = [] if self._loaded.kept is None else [self._loaded.kept.sha256]
+        if self._loaded.is_archive:
+            wanted.extend(
+                stored.sha256
+                for dive in self._document.dives
+                for recording in dive.recordings
+                for stored in recording.source_files
+                if stored is not None and stored.sha256 is not None
+            )
+        held: dict[str, int | None] = {}
+        unique = sorted(set(wanted))
+        for start in range(0, len(unique), _DIGESTS_PER_QUERY):
+            rows = await self._db.execute(
+                select(DiveFile.sha256, DiveFile.recording_id).where(
+                    DiveFile.user_id == self._user_id,
+                    DiveFile.sha256.in_(unique[start : start + _DIGESTS_PER_QUERY]),
+                )
+            )
+            held.update({row.sha256: row.recording_id for row in rows})
+        return held
 
     async def _load_candidates(self, around: datetime) -> list[RecordingCandidate]:
         """This account's recordings near one incoming start.

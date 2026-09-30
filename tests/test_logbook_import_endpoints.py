@@ -961,6 +961,17 @@ class TestManyFiles:
         assert rows["small.divejson"]["format"] == "divejson"
 
 
+class TestABodyTheReaderMustNotFailOn:
+    def test_a_charset_python_does_not_know_reads_as_the_framework_reads_it(
+        self, signed_in: Any, client: TestClient
+    ) -> None:
+        body, content_type = multipart([("logbook.divejson", MINIMAL)])
+
+        response = client.post(PREVIEW_PATH, content=body, headers={"content-type": f"{content_type}; charset=bogus"})
+
+        assert response.status_code == 200
+
+
 class TestTheTokenCoversTheBatch:
     FILES = [("a.uddf", _uddf("dive-1")), ("b.ssrf", SSRF)]
 

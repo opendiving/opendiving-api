@@ -5780,44 +5780,34 @@ column's; move all of them together.
 
 ## Importing a logbook is the one client-supplied profile
 
-`/dive/parse` neither returns nor accepts samples, which would make stored samples client-supplied.
-Logbook import accepts a document's, into the caller's own account only, through the same
-`derive_gas_attribution` → `downsample` sequence as a dive-computer file. Authority, not provenance:
-the profile lands in the importer's own logbook and is never claimed to be extracted from bytes this
-instance holds. `parser_key` is `divejson_import` where the import stored no file, the restored
-file's key on the archive path. A file the import keeps as itself is not this case: its recording is
-derived from its files, as the dive form's is.
+`/dive/parse` neither returns nor accepts samples. Logbook import accepts a document's, into the
+caller's own account only, through the `derive_gas_attribution` → `downsample` sequence a file's
+take. Authority, not provenance: the profile is never claimed to be extracted from bytes this
+instance holds. `parser_key` is `divejson_import` where no file was stored, the restored file's key
+on the archive path; a file the import keeps is derived from its files, as the form's is.
 
 `source_sha256` is the dive's file digest (`should_extract` and the backfill query select on it):
 the restored file's on the archive path, the payload's where no file was stored. A restored
 profile's NULL `reader_version` has the backfill re-derive it.
 
 The profile's `duration` is the document's (§6.4 allows it past the last sample; it is the
-gas-coverage denominator) via a `store_profile` override, clamped up if below its samples.
-
-Samples are shaped by `shape_recording` (`services/recording_shape.py`), as a stored file's are.
+gas-coverage denominator), clamped up if below its samples. Samples are shaped by `shape_recording`,
+as a stored file's are.
 
 ## A bare document creates no file rows, and the files it names come back only with the archive
 
 A bare document carries `source_file` and certification-file metadata without bytes (`archive_path`
-absent, spec §6.7), and a file row here claims bytes exist (`BlobMissingError`, `storage_key`
-`NOT NULL`). So the bare path imports the dives and reports the files as not contained, never a 422.
+absent, spec §6.7), and a file row claims bytes exist (`BlobMissingError`, `storage_key`
+`NOT NULL`). So the bare path reports the files as not contained, never a 422.
 
-The import writes every object it stores before the commit of the transaction that references it, as
-`store_recording_file` and `store_certification_file` do, so a failure leaves only an orphan for
-`sweep_orphaned_files.py`; no compensating unlink (see *"Orphans are the only failure product, and
-there is a script for them"*). The objects wait until the whole import has fitted the storage limit
-(`services/logbook_import/staging.py`), each row recording its object's ceiling until the write
-reports its size.
+Every object the import stores is written before the commit that references it, so a failure leaves
+only an orphan for `sweep_orphaned_files.py`; no compensating unlink (see *"Orphans are the only
+failure product, and there is a script for them"*). The objects wait until the import has fitted the
+storage limit (`logbook_import/staging.py`).
 
-Each restored member is verified against the manifest digest before writing; a mismatch skips and
-reports it.
-
-Content types are not the document's: a card image's is sniffed as `store_certification_file` does,
-and the portrait's as an upload's; a dive file's comes from `FORMAT_CONTENT_TYPES`
-(`services/dive_reader.py`) via its format id (see `create_dive_file_token`).
-
-A stored file's uuid is not preserved; nothing resolves a file by it, and
+Each restored member is verified against the manifest digest; a mismatch skips and reports it.
+Content types are not the document's: a card image's is sniffed, a dive file's comes from
+`FORMAT_CONTENT_TYPES` via its format id. A stored file's uuid is not preserved;
 `ux_dive_file_user_id_sha256` enforces identity.
 
 ## Species import by AphiaID, resolved before the transaction opens, and never created from the document
@@ -5894,39 +5884,33 @@ certification's requiredness is what governs it.
 
 ## Logbook import spools its upload and still parses the document whole
 
-The routes read their own multipart body, after the session and the rate limit, into one
-`SpooledTemporaryFile` per file part; the parts held in memory together never pass one
-`SPOOL_THRESHOLD`, a part that would roll onto disk first. The framework's form reader reads the
-body before any dependency, holds every part up to 1 MiB in memory and bounds no total; a custom
-route class swapping it underneath still reads before the dependencies.
+The routes read their own multipart body, after the session and the rate limit, one
+`SpooledTemporaryFile` per file part, the parts in memory together never past one `SPOOL_THRESHOLD`
+(`services/logbook_import/parts.py` says why the framework's form reader cannot).
 
 Parsing still materializes every document, so `MAX_DOCUMENT_SIZE` over what one import plans is the
 memory ceiling; a streaming parser, an arq job or a preview-token-keyed spool are unbuilt.
 
 Zip bombs are refused before a byte inflates: declared sizes must sum under
-`MAX_ARCHIVE_EXTRACTED_SIZE`, members are checked by declared size, `zipfile` verifies the CRC, and
-`archive_path` is a member name, never a path.
+`MAX_ARCHIVE_EXTRACTED_SIZE`, `zipfile` verifies the CRC, and `archive_path` is a member name, never
+a path.
 
 `archive.read(...)` raises `RuntimeError` (password-protected), `BadZipFile` (CRC mismatch) and
-`NotImplementedError` (unsupported compression), untranslated by the route, so it is caught as well
-as `zipfile.ZipFile(...)`: the `logbook.divejson` member failing is a 422 naming the password case;
-a blob member failing has `read_member` return `None` for skip-and-report.
+`NotImplementedError` (unsupported compression), so it is caught: the `logbook.divejson` member
+failing is a 422 naming the password case; a blob member failing has `read_member` return `None`.
 
-Both endpoints rate-limit per user on their own budget, not the export's: twenty, one import being
-two calls.
+Both endpoints rate-limit per user on their own budget: twenty, one import being two calls.
 
 ## Logbook import reads whatever the converter reads, and the routes are `/import/logbook/*`
 
 `POST /import/logbook/preview` and `POST /import/logbook` accept any number of `file` parts, each a
 DiveJSON document, any format in `divejson.read_formats()`, or a `.zip` of those; labels are
-`services/dive_reader.py`'s `FORMAT_LABELS` (see *"A version bump can add a reader, and only a test
-notices"*).
+`FORMAT_LABELS` (see *"A version bump can add a reader, and only a test notices"*).
 
-`divejson.sniff` decides each file on `divejson.SNIFF_BYTES`. A zip (`PK\x03\x04`) without
-`logbook.divejson` is opened one level deep and its files join the batch; the declared sizes of
-every file a reader claims, every document and the archive's own sum under `MAX_DOCUMENT_SIZE`
-before anything converts, since every converted document is held until planning. Conversion and
-parsing run in `run_in_threadpool`.
+`divejson.sniff` decides each file on `divejson.SNIFF_BYTES`. A zip without `logbook.divejson` is
+opened one level deep; every document and every file a reader claims sum, by declared size, under
+`MAX_DOCUMENT_SIZE` before anything converts, each converted document being held until planning.
+Conversion and parsing run in `run_in_threadpool`.
 
 A head starting `{` keeps the 422 "not valid JSON"; other unclaimed bytes are 415. The token covers
 each uploaded file's name and digest and apply converts again, deterministic except `exported_at`,
@@ -6183,17 +6167,16 @@ bogus stored reading.
 ## A version bump can add a reader, and only a test notices
 
 The accepted import set is `divejson.read_formats()`, computed per call and never written out as a
-list. Every guard on both sides of the seam tolerates an unknown format: `formats_this_build_reads`
-falls back to the raw id, so a reader the pin gains is accepted while the sentence describing what
-the API reads renders a bare id like `suunto_xml` and the web picker's own extension list greys it
-out. No CI job, route test or exception sees that.
+list. Every guard tolerates an unknown format: `formats_this_build_reads` falls back to the raw id,
+so a reader the pin gains is accepted while the API's sentence renders a bare id like `suunto_xml`
+and the web picker greys it out. No CI job, route test or exception sees that.
 
-So `FORMAT_LABELS`, `FORMAT_CONTENT_TYPES` and `FORMAT_KINDS` (`services/dive_reader.py`) are tables
-\- a format's label, its content type, and whether its file is a logbook's or one computer's - and
-`test_every_read_format_has_a_label` and its siblings fail the build when the pin outgrows any. The
-mirror case is checked too: a label for a format the library has dropped is a format this build
-advertises and refuses. The prose that spells the set out — `README.md`, `api/v1/logbook_import.py`,
-`schemas/logbook_import.py` — cannot be derived, so the test's message names those files.
+So `FORMAT_LABELS`, `FORMAT_CONTENT_TYPES` and `FORMAT_KINDS` (`services/dive_reader.py`) - label,
+content type, and whether a file is a logbook's or one computer's - are tables, and
+`test_every_read_format_has_a_label` and its siblings fail the build when the pin outgrows any, or a
+row outlives its format. The prose that spells the set out — `README.md`,
+`api/v1/logbook_import.py`, `schemas/logbook_import.py` — cannot be derived, so the test's message
+names those files.
 
 ## Merging two dives keeps the gap and synthesises nothing
 
