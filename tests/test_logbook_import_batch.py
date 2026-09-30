@@ -1189,7 +1189,7 @@ class TestAGuessedPairFillsNothing:
     it."""
 
     @staticmethod
-    def _perdix_dive(db: Session, *mixes: dict[str, float]) -> tuple[User, Dive]:
+    def _perdix_dive(db: Session, *mixes: dict[str, Any]) -> tuple[User, Dive]:
         diver = create_user(db)
         dive = create_dive(db, diver)
         recording = create_dive_recording(db, diver, dive)

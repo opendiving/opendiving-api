@@ -1440,9 +1440,10 @@ async def merge_two_dives(
 
     **The earlier dive survives**, by the same clock rule the match gates use: by instant
     where both dives record a UTC offset, by wall clock where either does not. The other
-    dive's recordings, files, cylinders, sites, gear, species, people, tags and notes move
-    onto it and the dive itself is soft-deleted; its uuid stops resolving and nothing here can
-    be undone.
+    dive's recordings, files, sites, gear, species, people, tags and notes move onto it, and
+    its cylinders fill the blanks of the ones the two dives share and join the list where this
+    one lacks them; the dive itself is soft-deleted, its uuid stops resolving and nothing here
+    can be undone.
 
     **What happens to the recordings depends on whether one computer or two recorded the
     dive.** The same computer's two records fold into a single recording: the later record's
@@ -1539,7 +1540,9 @@ async def write_dive_recording(
     and start match one of this dive's existing recordings is a second export of that same
     record (the same computer's JSON and FIT, say) and fills its blanks without overwriting
     anything; anything else is a second computer and gets a recording of its own, appended
-    after the last.
+    after the last. Either way the recording's cylinders may fill blank members of the dive's
+    cylinders they pair with, and never overwrite one. The file that creates the dive's first
+    recording fills none: the form has already saved its cylinders.
 
     The same bytes twice is a no-op returning the recording they are already in. Bytes
     already stored against *another* dive of this account are a 409 naming it: the realistic

@@ -1455,10 +1455,10 @@ async def backfill_profiles(
     files either part had.
 
     **What it stores goes through the re-derivation**, called as a repeat upload calls it -
-    `fresh` and `joined` both false, because it re-reads bytes the recording already has: it
-    fills readouts and fixes and never clears them, rewrites the recording's gate figures from
-    its samples, and runs the cylinder labelling for a primary and a later recording alike, so
-    a dive stored under a previous reader's labels comes out on this one's. Each recording in
+    `REREAD`, because it re-reads bytes the recording already has: it fills readouts and fixes
+    and never clears them, fills no cylinder, rewrites the recording's gate figures from its
+    samples, and runs the cylinder labelling for a primary and a later recording alike, so a
+    dive stored under a previous reader's labels comes out on this one's. Each recording in
     a savepoint of its own, so one the database refuses costs only itself.
 
     A one-shot script drives this, not an arq job: the API-side queue plumbing was

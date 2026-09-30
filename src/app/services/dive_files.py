@@ -17,10 +17,12 @@ entry and exit fixes).
 thing it applies to - the device columns, the two match figures, the recording's start, its
 readouts, the dive's tech scalars, the profile's channels and the dive's cylinders. Derive them from
 `git grep -n "def fill_" -- src/app/services` rather than from a count here, which is what
-stops the list going stale; read it as a superset, since the cylinder one is implemented by
-two pure helpers that match the same grep and are not themselves things the rule applies to.
-Each takes every value from the *first* file that recorded it. The rejected alternative is
-"the later file wins", which silently loses a value a diver corrected between two uploads.
+stops the list going stale; read it as a superset, since `fill_from_pair` matches the same grep
+and is the cylinder rule's pure half rather than a thing the rule applies to. Each takes every
+value from the *first* file that recorded it - and the dive's cylinders, which every recording
+shares, take a blank member from whichever recording pairs with them at an arrival. The
+rejected alternative is "the later file wins", which silently loses a value a diver corrected
+between two uploads.
 """
 
 import hashlib
@@ -435,7 +437,7 @@ async def store_tech_scalars(
     number nothing can re-derive. Used where the recording's whole set of files has just
     been read and the dive had nothing on it to lose: the file that *created* a primary
     recording, and every re-derivation after a deletion or a promotion. Not a primary
-    recording's first file as such - see `rederive_recording` on what `fresh` means.
+    recording's first file as such - see `rederive_recording` on what `CREATED` means.
 
     `commit=False` by default for the same reason as `store_profile`: the attach path writes
     the file, the profile and these in one transaction, so a dive can never end up
@@ -642,7 +644,7 @@ def relabel_gas_numbers(
     changes: dict[int, dict[str, float | int]] = {}
     for pair in pairs:
         row, incoming = pair.row, pair.incoming
-        change: dict[str, float | int] = {**(fill_from_pair(pair, trust_position=False) if fill else {})}
+        change: dict[str, float | int] = dict(fill_from_pair(pair, trust_position=False)) if fill else {}
         if incoming.gas_number is not None:
             label = row.gas_number
             if label is None:
@@ -1849,10 +1851,11 @@ async def backfill_tech_fields(
     **It walks every recording** for what is the recording's own - its readouts, its device
     and its settings - and is the recovery for recordings stored before the readouts moved
     there: the migration copied the dive's onto the primary alone, reading no file, so every
-    other recording's stay NULL until this runs. **The dive's fixes and the mixture fields
-    stay the primary's**, since a second computer's positions and cylinder labels are its own;
-    see `merge_mixture_fields` for why a dive whose cylinders have been edited is skipped
-    rather than reconciled.
+    other recording's stay NULL until this runs. **The dive's fixes and the mixture fields it
+    writes stay the primary's**: a second computer's positions are its own, and its cylinder
+    list meets the dive's only through the labelling's pairs, never position for position; see
+    `merge_mixture_fields` for why a dive whose cylinders have been edited is skipped rather
+    than reconciled.
     """
     # Imported here rather than at module scope, matching `backfill_profiles`: the crud
     # module is not otherwise part of this module's dependency surface, and keeping the
