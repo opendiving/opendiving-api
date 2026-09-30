@@ -1,32 +1,46 @@
-"""Forward and reverse geocoding against a Nominatim-compatible provider.
+"""Place search against Photon, and reverse geocoding against a Nominatim-compatible provider.
 
 This is the API's first outbound HTTP call, and it exists as a server-side proxy rather
 than a browser fetch for two reasons: `GEOCODER_API_KEY` stays off the client, and the web
 app's strict-nonce CSP needs no new `connect-src` host.
 
-Modelled on `services.email_service`: a third-party dependency that is *optional*. Set
-`GEOCODER_URL` to an empty string, or take the provider away, and every function here logs
-and returns nothing rather than raising - a diver typing a site name into the form must not
-be blocked because a geocoder is down. That is also why the return types are "no result"
-shapes (`None`, `[]`) instead of exceptions.
+**Two providers, one per question.** Naming the spot behind a pin asks Nominatim's
+`/reverse` at `GEOCODER_URL`; a typed search asks Photon's `/api` at `GEOCODER_SEARCH_URL`.
+Nominatim matches whole words only - "phi phi" never reaches Ko Phi Phi Don - and its usage
+policy forbids search-as-you-type, which is what Photon is built for, over the same
+OpenStreetMap data. The two wire formats share nothing, so each has its own request and
+normalizer (`_request` and `_normalize`, `_search_photon` and `_normalize_photon`); what they
+share is what is provider-neutral - the deadline, the byte cap, the User-Agent (`_fetch`),
+the cache and the per-user limit.
 
-The one thing here that does *not* need the provider is the offshore fallback: a pin the
-provider has no row for is answered from vendored sea polygons (`services.marine_areas`),
-because Nominatim does not consult them and open water is where a lot of diving happens.
-See `_offshore`.
+Modelled on `services.email_service`: a third-party dependency that is *optional*. Set
+`GEOCODER_URL` to an empty string, or take a provider away, and every function here logs and
+returns nothing rather than raising - a diver typing a site name into the form must not be
+blocked because a geocoder is down. That is also why the return types are "no result" shapes
+(`None`, `[]`) instead of exceptions. `GEOCODER_URL=""` switches search off too - disabled
+means disabled, and an upgrade must not switch a disabled feature back on - and
+`GEOCODER_SEARCH_URL=""` switches off search alone. Pointing `GEOCODER_URL` at a Nominatim of
+one's own is not a switch: searches still go to `GEOCODER_SEARCH_URL`, public Photon by
+default.
+
+The one thing here that does *not* need a provider is the offshore fallback: a pin Nominatim
+has no row for is answered from vendored sea polygons (`services.marine_areas`), because
+Nominatim does not consult them and open water is where a lot of diving happens. See
+`_offshore`.
 
 **Nominatim's usage policy is load-bearing, not paperwork.** It caps callers at one request
 a second, requires that results be cached, and bars applications whose primary purpose is
-geocoding. A dive log that geocodes when a site is created fits comfortably, but only with
-all three of the things this module does: an identifying `User-Agent`
-(`GEOCODER_USER_AGENT`), Redis caching of every answer, and throttling of the outbound call
-through `enforce_rate_limit`.
+geocoding. Photon's public instance asks for use "within a reasonable limit" and throttles or
+bans beyond it. Both are met by the same three things: an identifying `User-Agent`
+(`GEOCODER_USER_AGENT`), Redis caching of every answer, and throttling of each provider's
+outbound calls through `enforce_rate_limit`.
 """
 
 import hashlib
 import json
 import logging
 import re
+from collections.abc import Iterator
 from itertools import islice
 from typing import Any, NamedTuple
 
@@ -51,7 +65,7 @@ _TIMEOUT = httpx.Timeout(5.0)
 
 # The bounds that actually hold, because `_TIMEOUT` is per socket read: a host that answers
 # slowly enough, or endlessly enough, is bounded by these two and by nothing else. Both are
-# far above any honest Nominatim answer - five geocoding results are a few kilobytes.
+# far above any honest answer from either provider - a search's rows are a few kilobytes.
 #
 # Note for anyone sizing a client-side timeout against this: the worst case for the whole
 # handler is this plus `_MAX_PROVIDER_WAIT_SECONDS`, which is spent before the deadline
@@ -61,11 +75,51 @@ _MAX_RESPONSE_BYTES = 512 * 1024
 
 _SEARCH_RESULT_LIMIT = 5
 
-# How long a request will wait for the instance's provider cap to free up before giving up
-# and answering "no suggestion". Capped independently of the configured window so that
-# raising that window (a self-hoster throttling their own Nominatim more gently) can never
-# turn into a request held open for a minute.
+# How many rows a search asks Photon for. More than it returns, because Photon sends one OSM
+# object more than once in one answer, and the rows `_is_place` refuses are not replaced -
+# asking for exactly `_SEARCH_RESULT_LIMIT` would hand back fewer places than Photon had.
+# Photon's own default, well under the 50 it clamps to.
+_SEARCH_ROWS_REQUESTED = 15
+
+# Every Photon layer but `house` and `street`, sent as repeated `layer` parameters. A shop, a
+# station or a restaurant sits in `house`, and asking Photon not to send them keeps them from
+# taking the rows above - `dahab` otherwise answers the town and fourteen shops, cafés and
+# restaurants. `_is_place` still judges every row, so a host that ignores the filter costs
+# rows, not correctness.
+_SEARCH_LAYERS = ("city", "county", "country", "district", "locality", "other", "state")
+
+# What a search result may be: a place or a natural feature - towns, villages, islands, reefs,
+# bays, peaks, regions, parks - judged by the row's main OSM tag. An allow-list, because the
+# layers `_SEARCH_LAYERS` keeps still carry land use and the rest of OSM, and there is no end
+# to listing what is *not* a place. A park is a `boundary` or a nature reserve: marine parks
+# are mapped as either, often both.
+_PLACE_OSM_KEYS = frozenset({"place", "natural", "boundary"})
+_PLACE_OSM_TAGS = frozenset({("leisure", "nature_reserve")})
+
+# The languages Photon's public instance answers in; anything else is a 400. `en` stands in
+# for the rest rather than `default`, which is the local script - the thing
+# `GEOCODER_LANGUAGE` exists to avoid - and ranks shops above towns besides.
+_SEARCH_LANGUAGES = frozenset({"de", "en", "fr"})
+_FALLBACK_SEARCH_LANGUAGE = "en"
+
+# A Photon row's address parts, finest first. Street and house number are left out: a place
+# has neither, and a postcode is not a part of where a place is.
+_PHOTON_ADDRESS_KEYS = ("locality", "district", "city", "county", "state", "country")
+
+# Photon's `osm_type`, spelled the way the dive-site catalog spells an OSM identity
+# (`scripts/build_dive_site_catalog.py`), so a client compares the two by string.
+_OSM_TYPES = {"N": "node", "W": "way", "R": "relation"}
+
+# How long a request will wait for a provider's cap to free up before giving up and answering
+# "no suggestion". Capped independently of the configured window so that raising that window
+# (a self-hoster throttling their own Nominatim more gently) can never turn into a request
+# held open for a minute.
 _MAX_PROVIDER_WAIT_SECONDS = 1.0
+
+# One counter each, so a pin's reverse lookup and a search keystroke never contend for one
+# slot. Named for the wire format, which is what fixes the provider behind each setting.
+_PROVIDER_NOMINATIM = "nominatim"
+_PROVIDER_PHOTON = "photon"
 
 # ~110 m. Reverse lookups are rounded to this before both the cache key and the outbound
 # query, so every pin inside one cell shares one answer - which is the point, since the
@@ -83,10 +137,10 @@ _MISS_TTL_SECONDS = 60 * 60
 # hold `GeocodeResult`s, not raw provider payloads - re-normalizing on every hit is wasted
 # work - so a change to the normalizer has to invalidate them, and a new key prefix does
 # that without a flush.
-_CACHE_VERSION = "v3"
+_CACHE_VERSION = "v4"
 
 # Mirror `schemas.geocoding.GeocodeResult`'s bounds. Applied by truncating here rather than
-# by letting an over-long provider string raise a ValidationError inside `_normalize`, which
+# by letting an over-long provider string raise a ValidationError inside a normalizer, which
 # would turn one verbose row into a failed lookup. `_LOCATION_MAX_LENGTH` is the width of a
 # place's `name` column (`schemas.location.LOCATION_NAME_MAX`), which is where that field is
 # headed; `_DISPLAY_NAME_MAX_LENGTH` is `full_name`'s.
@@ -94,12 +148,19 @@ _LOCATION_MAX_LENGTH = 255
 _DISPLAY_NAME_MAX_LENGTH = 512
 _NAME_MAX_LENGTH = 255
 _ATTRIBUTION_MAX_LENGTH = 255
+_COUNTRY_MAX_LENGTH = 255
+_REGION_MAX_LENGTH = 255
+
+# Bounds an OSM id so its `source_id` always fits `GeocodeResult.source_id`'s 64 characters:
+# JSON integers are unbounded, and OSM's are 64-bit.
+_OSM_ID_LIMIT = 2**63
 
 # Bound on a provider string quoted into a log line - see `_log_safe`.
 _LOGGED_VALUE_MAX_LENGTH = 200
 
-# Used when the provider sends no `licence` of its own. The default provider is OSM-backed,
-# and attribution is a condition of using the data - never let a result go out without one.
+# Used when the provider sends no `licence` of its own, which Photon never does. Both
+# providers serve OpenStreetMap data, and attribution is a condition of using it - never let
+# a result go out without one.
 #
 # Written already folded, in the shape `_linked_attribution` produces, so the credit looks
 # the same whether it came from the provider or from here - which of the two answered is not
@@ -137,17 +198,19 @@ _PLACE_KEYS = ("city", "town", "village", "hamlet", "municipality", "suburb", "c
 _REGION_KEYS = ("state", "province", "region", "county")
 
 
-def _cache_key(kind: str, discriminator: str) -> str:
+def _cache_key(kind: str, provider_url: str, language: str, discriminator: str) -> str:
     """Geocoding cache keys are deliberately **not** user-scoped, unlike every other key in
     this app.
 
-    The configured language *and provider* are part of the key, for the same reason: both
+    The language asked for *and the provider* are part of the key, for the same reason: both
     change the answer, so entries written under one must not be served after an operator
-    changes it. The provider matters most for `attribution`, which is read from whatever
-    answered and is a licence condition of that data - without this, a month of cached rows
-    would keep crediting OpenStreetMap for results now coming from somewhere else. Swapping
-    `GEOCODER_URL` is a `.env` edit, so it cannot rely on `_CACHE_VERSION`, which is a code
-    change.
+    changes it. For a pin the provider matters most for `attribution`, which is read from
+    whatever answered and is a licence condition of that data - without this, a month of
+    cached rows would keep crediting OpenStreetMap for results now coming from somewhere
+    else. Swapping `GEOCODER_URL` or `GEOCODER_SEARCH_URL` is a `.env` edit, so it cannot rely
+    on `_CACHE_VERSION`, which is a code change. Each lookup is keyed by its own provider only:
+    a search key that also hashed `GEOCODER_URL` would re-ask Photon for everything whenever
+    an operator repointed their Nominatim.
 
     "What is at 28.572, 34.537" has the same answer for everybody, and the whole reason the
     provider's terms tolerate this feature is that one lookup serves every user who ever
@@ -157,8 +220,8 @@ def _cache_key(kind: str, discriminator: str) -> str:
     `services.cache_invalidation` sweeps by pattern, so nothing here is ever collateral
     damage of a mutation elsewhere - and nothing here needs invalidating, only expiring.
     """
-    provider = hashlib.sha256(settings.GEOCODER_URL.encode()).hexdigest()[:8]
-    return f"geocode:{_CACHE_VERSION}:{provider}:{settings.GEOCODER_LANGUAGE}:{kind}:{discriminator}"
+    provider = hashlib.sha256(provider_url.encode()).hexdigest()[:8]
+    return f"geocode:{_CACHE_VERSION}:{provider}:{language}:{kind}:{discriminator}"
 
 
 async def _cached(key: str) -> list[GeocodeResult] | None:
@@ -203,7 +266,7 @@ async def _store(key: str, results: list[GeocodeResult]) -> None:
 def _log_safe(value: Any) -> str:
     """Make a provider-supplied string safe to hand to `logger`.
 
-    It is the only such string that reaches a log rather than going through `_normalize`'s
+    It is the only such string that reaches a log rather than going through a normalizer's
     truncation, and it arrives from a body bounded at half a megabyte. Newlines are
     collapsed first: a log line is one line, and a value that can contain `\\n` can forge
     entries around itself in anything that parses the file afterwards.
@@ -211,15 +274,16 @@ def _log_safe(value: Any) -> str:
     return " ".join(str(value).split())[:_LOGGED_VALUE_MAX_LENGTH]
 
 
-async def _claim_provider_slot() -> bool:
-    """Take one slot against the instance-wide provider cap, or report that there is none.
+async def _claim_provider_slot(provider: str) -> bool:
+    """Take one slot against the instance-wide cap for `provider`, or report that there is none.
 
     A boolean rather than the exception `enforce_rate_limit` raises, because here being over
-    the cap is an ordinary branch to wait on - not an error to propagate.
+    the cap is an ordinary branch to wait on - not an error to propagate. Both providers share
+    the one configured limit, each on its own counter.
     """
     try:
         await enforce_rate_limit(
-            "geocode:provider",
+            f"geocode:provider:{provider}",
             settings.GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS,
             settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS,
         )
@@ -228,12 +292,14 @@ async def _claim_provider_slot() -> bool:
     return True
 
 
-async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """Ask the provider, returning its rows - or `None` when we could not ask at all.
+async def _fetch(provider: str, base_url: str, path: str, params: dict[str, Any]) -> Any | None:
+    """Ask a provider, returning its parsed JSON body - or `None` when we could not ask at all.
 
     That distinction is the one thing this function exists to preserve. "The provider
     answered, and had nothing" is a fact worth caching; "the provider timed out" is not,
-    and caching it would turn a thirty-second outage into a month of empty answers.
+    and caching it would turn a thirty-second outage into a month of empty answers. So
+    anything but a 200 is "could not ask" - including Photon's public instance, which signals
+    a block with an HTML 404 or a 504 rather than a 429.
 
     Being over the *provider's* cap is one of the ways we "could not ask", not a 429. That
     counter is global - it has to be, since the cap belongs to the instance rather than to
@@ -250,16 +316,65 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
 
     The limiter fails open on a Redis outage, which is the right trade here too: a
     stripped-down instance with no Redis should still geocode.
+
+    Logs name the provider and the path, never the built URL: that carries the diver's typed
+    search, and for Nominatim `GEOCODER_API_KEY`, and logs get collected, shipped and kept.
+    httpx would log the whole URL itself at INFO, which is why `core.setup` pins its logger to
+    WARNING.
     """
+    if not await _claim_provider_slot(provider):
+        await anyio.sleep(min(settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS, _MAX_PROVIDER_WAIT_SECONDS))
+        if not await _claim_provider_slot(provider):
+            logger.warning("Skipping a %s call to %s: this instance is over its provider rate limit.", provider, path)
+            return None
+
+    url = f"{base_url.rstrip('/')}{path}"
+    try:
+        # `_TIMEOUT` bounds each socket read, which is not the same as bounding the call: a
+        # host that dribbles one byte every few seconds never trips it and holds the request
+        # open forever. `fail_after` is the actual deadline; the byte cap below is the
+        # matching bound on how much such a host can make this process buffer.
+        with anyio.fail_after(_DEADLINE_SECONDS):
+            # A client per call, deliberately: the provider caps above hold this to roughly
+            # one request a second per provider, so a pooled connection would sit idle far
+            # longer than any keep-alive, and a module-level client would need lifespan
+            # wiring to be closed. An integration with real throughput should not copy this.
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                headers = {"User-Agent": settings.GEOCODER_USER_AGENT}
+                async with client.stream("GET", url, params=params, headers=headers) as response:
+                    if response.status_code != 200:
+                        logger.warning("The %s geocoder answered %s with %d.", provider, path, response.status_code)
+                        return None
+
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > _MAX_RESPONSE_BYTES:
+                            logger.warning(
+                                "The %s geocoder's answer to %s exceeded %d bytes.", provider, path, _MAX_RESPONSE_BYTES
+                            )
+                            return None
+
+        return json.loads(body)
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        # `InvalidURL` is listed separately because it descends from `Exception` rather than
+        # `HTTPError`, so a merely malformed URL setting - a typo'd port, say - would
+        # otherwise escape as a 500 and break this module's one promise.
+        logger.warning("A %s geocoder request to %s failed (%s).", provider, path, type(exc).__name__)
+        return None
+    except TimeoutError:
+        logger.warning("A %s geocoder request to %s exceeded its %ss deadline.", provider, path, _DEADLINE_SECONDS)
+        return None
+    except ValueError:
+        logger.warning("The %s geocoder's answer to %s was not JSON.", provider, path)
+        return None
+
+
+async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Ask Nominatim, returning its rows - or `None` when we could not ask at all (`_fetch`)."""
     if not settings.GEOCODER_URL:
         logger.warning("GEOCODER_URL is not configured; geocoding is unavailable.")
         return None
-
-    if not await _claim_provider_slot():
-        await anyio.sleep(min(settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS, _MAX_PROVIDER_WAIT_SECONDS))
-        if not await _claim_provider_slot():
-            logger.warning("Skipping a geocoder call to %s: this instance is over its provider rate limit.", path)
-            return None
 
     # `accept-language` is not optional politeness: without it Nominatim answers in the
     # local script, and "دهب, مصر" is not what a diver wants written into their logbook.
@@ -274,45 +389,8 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
         # it something else (Geoapify uses `apiKey`) is a one-word change here.
         query["key"] = settings.GEOCODER_API_KEY
 
-    url = f"{settings.GEOCODER_URL.rstrip('/')}{path}"
-    try:
-        # `_TIMEOUT` bounds each socket read, which is not the same as bounding the call: a
-        # host that dribbles one byte every few seconds never trips it and holds the request
-        # open forever. `fail_after` is the actual deadline; the byte cap below is the
-        # matching bound on how much such a host can make this process buffer.
-        with anyio.fail_after(_DEADLINE_SECONDS):
-            # A client per call, deliberately: the provider cap above holds this to roughly
-            # one request a second, so a pooled connection would sit idle far longer than
-            # any keep-alive, and a module-level client would need lifespan wiring to be
-            # closed. An integration with real throughput should not copy this.
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                headers = {"User-Agent": settings.GEOCODER_USER_AGENT}
-                async with client.stream("GET", url, params=query, headers=headers) as response:
-                    response.raise_for_status()
-
-                    body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        body.extend(chunk)
-                        if len(body) > _MAX_RESPONSE_BYTES:
-                            logger.warning("Geocoder response for %s exceeded %d bytes.", path, _MAX_RESPONSE_BYTES)
-                            return None
-
-        payload = json.loads(body)
-    except (httpx.HTTPError, httpx.InvalidURL) as exc:
-        # `InvalidURL` is listed separately because it descends from `Exception` rather than
-        # `HTTPError`, so a merely malformed `GEOCODER_URL` - a typo'd port, say - would
-        # otherwise escape as a 500 and break this module's one promise.
-        #
-        # `path`, never the built URL: that one carries GEOCODER_API_KEY as a query
-        # parameter, and logs get collected, shipped and kept. httpx would log the whole URL
-        # itself at INFO, which is why `core.setup` pins its logger to WARNING.
-        logger.warning("Geocoder request to %s failed (%s).", path, type(exc).__name__)
-        return None
-    except TimeoutError:
-        logger.warning("Geocoder request to %s exceeded its %ss deadline.", path, _DEADLINE_SECONDS)
-        return None
-    except ValueError:
-        logger.warning("Geocoder response for %s was not JSON.", path)
+    payload = await _fetch(_PROVIDER_NOMINATIM, settings.GEOCODER_URL, path, query)
+    if payload is None:
         return None
 
     if isinstance(payload, dict):
@@ -335,6 +413,44 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
     # all. Same treatment as a body that didn't parse: a failure, not an empty answer, so
     # it is never cached as "no such place".
     logger.warning("Geocoder response for %s was not an object or an array.", path)
+    return None
+
+
+def _search_language() -> str:
+    """The `lang` a search asks Photon in: `GEOCODER_LANGUAGE` where Photon speaks it, else `en`.
+
+    Judged on the primary subtag, so an operator's `de-AT` still searches in German. Sent on
+    every search rather than left to `Accept-Language`, and it is this value, not the setting,
+    that goes into the cache key - two settings that ask in the same language share answers.
+    """
+    primary = re.split(r"[-_,;]", settings.GEOCODER_LANGUAGE.strip().lower(), maxsplit=1)[0]
+    return primary if primary in _SEARCH_LANGUAGES else _FALLBACK_SEARCH_LANGUAGE
+
+
+async def _search_photon(query: str, language: str) -> list[dict[str, Any]] | None:
+    """Ask Photon, returning its features - or `None` when we could not ask at all (`_fetch`).
+
+    Only parameters Photon's `/api` knows go out: it answers anything else with a 400, which
+    is why none of `_request`'s Nominatim parameters, and never `GEOCODER_API_KEY`, are here.
+    """
+    params: dict[str, Any] = {
+        "q": query,
+        "lang": language,
+        "limit": _SEARCH_ROWS_REQUESTED,
+        "layer": list(_SEARCH_LAYERS),
+    }
+    payload = await _fetch(_PROVIDER_PHOTON, settings.GEOCODER_SEARCH_URL, "/api", params)
+    if payload is None:
+        return None
+
+    # Only a GeoJSON FeatureCollection is Photon answering. Anything else - a proxy's JSON
+    # error, a host that is not Photon at all - is a failure rather than "no such place", so
+    # it is never cached as one.
+    if isinstance(payload, dict) and payload.get("type") == "FeatureCollection":
+        features = payload.get("features")
+        if isinstance(features, list):
+            return [feature for feature in features if isinstance(feature, dict)]
+    logger.warning("The photon geocoder's answer to /api was not a GeoJSON FeatureCollection.")
     return None
 
 
@@ -387,7 +503,7 @@ def _first_present(address: dict[str, Any], keys: tuple[str, ...]) -> str | None
 
 
 def _short_location(row: dict[str, Any]) -> str:
-    """Compose the value a diver would have typed themselves.
+    """Compose the value a diver would have typed themselves, for a pin.
 
     Built from the provider's structured `address` rather than by trimming
     `display_name`, so the result barely moves if the provider changes how verbose that
@@ -407,42 +523,12 @@ def _short_location(row: dict[str, Any]) -> str:
     return (", ".join(parts) or _text(row.get("display_name")) or "")[:_LOCATION_MAX_LENGTH]
 
 
-def _bounding_box(row: dict[str, Any]) -> tuple[float, float, float, float] | None:
-    """The row's extent as `(south, north, west, east)`, or `None` for anything unusable.
+def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
+    """A Nominatim row as a result, or `None` for a row this app can do nothing with - no
+    coordinates, or nothing to show a human. Dropping it beats surfacing a blank entry.
 
-    Nominatim sends `boundingbox` as four strings in exactly that order. Everything about
-    the shape is checked rather than assumed, because a box is optional to the caller and a
-    mirror that sends three corners, or numbers as numbers, or nonsense, must cost the
-    result its box and nothing more - a dropped row would lose a place a diver searched for
-    over a detail only a map uses.
-
-    West > east passes: that box crosses the antimeridian, and Nominatim returns those for
-    real places. South > north does not - it is the one ordering that carries no meaning.
-    """
-    box = row.get("boundingbox")
-    if not isinstance(box, list) or len(box) != 4:
-        return None
-
-    try:
-        south, north, west, east = (float(corner) for corner in box)
-    except TypeError, ValueError:
-        return None
-
-    # Chained on purpose: this also rejects a `nan` corner, which compares false against
-    # everything and would otherwise sail through as a number.
-    if not (-90 <= south <= north <= 90 and -180 <= west <= 180 and -180 <= east <= 180):
-        return None
-
-    return south, north, west, east
-
-
-def _normalize(row: dict[str, Any], *, with_bounding_box: bool = False) -> GeocodeResult | None:
-    """`None` for a row this app can do nothing with - no coordinates, or nothing to show a
-    human. Dropping it beats surfacing a blank entry in a picker.
-
-    `with_bounding_box` is off by default because only forward search wants one: a trip
-    location picked from a search list is framed on a map by its extent, while a reverse
-    lookup answers "what is this position called" for a caller already holding the position.
+    Only `/reverse` rows come through here, so the result carries no box: it answers "what is
+    this position called" for a caller already holding the position.
     """
     try:
         latitude = float(row["lat"])
@@ -480,9 +566,8 @@ def _normalize(row: dict[str, Any], *, with_bounding_box: bool = False) -> Geoco
             logger.warning("Geocoder sent a %d-character licence; falling back to the default credit.", len(licence))
             attribution = None
 
-    box = _bounding_box(row) if with_bounding_box else None
-    south, north, west, east = box if box is not None else (None, None, None, None)
-
+    # Every optional field is spelled out, here and below, because mypy cannot see the
+    # schema's defaults through `Annotated[..., Field(default=None)]` (CONTRIBUTING.md).
     return GeocodeResult(
         latitude=latitude,
         longitude=longitude,
@@ -490,11 +575,156 @@ def _normalize(row: dict[str, Any], *, with_bounding_box: bool = False) -> Geoco
         display_name=(_text(row.get("display_name")) or location)[:_DISPLAY_NAME_MAX_LENGTH],
         name=name[:_NAME_MAX_LENGTH] if name else None,
         attribution=attribution or _DEFAULT_ATTRIBUTION,
+        country=None,
+        region=None,
+        source=None,
+        source_id=None,
+        bbox_south=None,
+        bbox_north=None,
+        bbox_west=None,
+        bbox_east=None,
+    )
+
+
+def _is_place(properties: dict[str, Any]) -> bool:
+    key = _text(properties.get("osm_key"))
+    return key in _PLACE_OSM_KEYS or (key, _text(properties.get("osm_value"))) in _PLACE_OSM_TAGS
+
+
+def _osm_identity(properties: dict[str, Any]) -> str | None:
+    """`node/6215139685` - the row's OSM object, or `None` when the row does not say."""
+    osm_type = _OSM_TYPES.get(_text(properties.get("osm_type")) or "")
+    osm_id = properties.get("osm_id")
+    if osm_type is None or isinstance(osm_id, bool) or not isinstance(osm_id, int):
+        return None
+    if not 0 < osm_id < _OSM_ID_LIMIT:
+        return None
+    return f"{osm_type}/{osm_id}"
+
+
+def _photon_extent(extent: Any) -> tuple[float, float, float, float] | None:
+    """A Photon `extent` as `(south, north, west, east)`, or `None` for anything unusable.
+
+    Photon orders it west, north, east, south - neither Nominatim's order nor GeoJSON's.
+    Everything about the shape is checked rather than assumed, because a box is optional to
+    the caller and a host that sends three corners, or strings, or nonsense, must cost the
+    result its box and nothing more - a dropped row would lose a place a diver searched for
+    over a detail only a map uses.
+
+    West > east passes: that box crosses the antimeridian. South > north does not - it is the
+    one ordering that carries no meaning.
+    """
+    if not isinstance(extent, list) or len(extent) != 4:
+        return None
+
+    try:
+        west, north, east, south = (float(corner) for corner in extent)
+    except TypeError, ValueError:
+        return None
+
+    # Chained on purpose: this also rejects a `nan` corner, which compares false against
+    # everything and would otherwise sail through as a number.
+    if not (-90 <= south <= north <= 90 and -180 <= west <= 180 and -180 <= east <= 180):
+        return None
+
+    return south, north, west, east
+
+
+def _without_consecutive_repeats(parts: list[str]) -> list[str]:
+    kept: list[str] = []
+    for part in parts:
+        if not kept or kept[-1].casefold() != part.casefold():
+            kept.append(part)
+    return kept
+
+
+def _normalize_photon(feature: dict[str, Any]) -> GeocodeResult | None:
+    """A Photon feature as a result, named by the place itself - or `None` for one with no
+    usable position or nothing to show a human.
+
+    `location` is what a pick saves as the place's name: the row's own name and its country,
+    "Ko Tao, Thailand" - never the settlement OSM files an island or a peak under, which is
+    what Nominatim's address gives. `display_name` is the whole chain, finest first, and is
+    what tells two same-named places apart in a picker. A row with no name of its own is
+    named by its finest address part.
+    """
+    properties = feature.get("properties")
+    geometry = feature.get("geometry")
+    if not isinstance(properties, dict) or not isinstance(geometry, dict):
+        return None
+
+    # GeoJSON order, `[lon, lat]`, and a third element for altitude is legal.
+    coordinates = geometry.get("coordinates")
+    if not isinstance(coordinates, list) or len(coordinates) < 2:
+        return None
+    try:
+        longitude = float(coordinates[0])
+        latitude = float(coordinates[1])
+    except TypeError, ValueError:
+        return None
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return None
+
+    name = _text(properties.get("name"))
+    address = [part for part in (_text(properties.get(key)) for key in _PHOTON_ADDRESS_KEYS) if part]
+    label = name or (address[0] if address else None)
+    if label is None:
+        return None
+
+    country = _text(properties.get("country"))
+    location = label if country is None or country.casefold() == label.casefold() else f"{label}, {country}"
+    display_name = ", ".join(_without_consecutive_repeats([name, *address] if name else address))
+    region = _text(properties.get("state")) or _text(properties.get("county"))
+    source_id = _osm_identity(properties)
+
+    box = _photon_extent(properties.get("extent"))
+    south, north, west, east = box if box is not None else (None, None, None, None)
+
+    return GeocodeResult(
+        latitude=latitude,
+        longitude=longitude,
+        location=location[:_LOCATION_MAX_LENGTH],
+        display_name=display_name[:_DISPLAY_NAME_MAX_LENGTH],
+        name=name[:_NAME_MAX_LENGTH] if name else None,
+        # Photon sends no licence, and what it serves is OpenStreetMap's. Byte-identical to
+        # the dive-site catalog's OSM credit on purpose: the site form shows both sources
+        # under one credit line that collapses repeats by string.
+        attribution=_DEFAULT_ATTRIBUTION,
+        country=country[:_COUNTRY_MAX_LENGTH] if country else None,
+        region=region[:_REGION_MAX_LENGTH] if region else None,
+        source="osm" if source_id else None,
+        source_id=source_id,
         bbox_south=south,
         bbox_north=north,
         bbox_west=west,
         bbox_east=east,
     )
+
+
+def _places(features: list[dict[str, Any]]) -> Iterator[GeocodeResult]:
+    """The features that are places, each OSM object once, in Photon's order.
+
+    Photon returns one object more than once in a single answer - Ko Tao twice, differing
+    only in an `extra` tag; a marine park once as a `boundary` and once as a
+    `leisure=nature_reserve` - and its `dedupe` parameter only touches roads. So the place
+    filter judges every copy first and the dedupe runs on what survives it: a place whose
+    first copy carries a refused tag still arrives through another. An object is marked seen
+    only once one of its copies has produced a result, for the same reason.
+    """
+    seen: set[str] = set()
+    for feature in features:
+        properties = feature.get("properties")
+        if not isinstance(properties, dict) or not _is_place(properties):
+            continue
+        identity = _osm_identity(properties)
+        if identity is not None and identity in seen:
+            continue
+        result = _normalize_photon(feature)
+        if result is None:
+            continue
+        if identity is not None:
+            seen.add(identity)
+        yield result
 
 
 def _offshore(lat: float, lon: float) -> GeocodeResult | None:
@@ -548,10 +778,13 @@ def _offshore(lat: float, lon: float) -> GeocodeResult | None:
         display_name=name[:_DISPLAY_NAME_MAX_LENGTH],
         name=name[:_NAME_MAX_LENGTH],
         attribution=_MARINE_ATTRIBUTION,
+        country=None,
+        region=None,
+        source=None,
+        source_id=None,
         # A sea's polygon has an extent, but this answer is about the pin rather than the
         # sea: it echoes the position asked about, and framing a map on the whole Red Sea
-        # is not what the caller is looking at. Spelled out because mypy cannot see the
-        # schema's default through `Annotated[..., Field(default=None)]` (CONTRIBUTING.md).
+        # is not what the caller is looking at.
         bbox_south=None,
         bbox_north=None,
         bbox_west=None,
@@ -610,7 +843,7 @@ async def reverse_geocode(latitude: float, longitude: float) -> ReverseGeocode:
     lat = round(latitude, _COORDINATE_PRECISION)
     lon = round(longitude, _COORDINATE_PRECISION)
 
-    key = _cache_key("reverse", f"{lat}:{lon}")
+    key = _cache_key("reverse", settings.GEOCODER_URL, settings.GEOCODER_LANGUAGE, f"{lat}:{lon}")
     cached = await _cached(key)
     if cached is not None:
         return ReverseGeocode(cached[0] if cached else _offshore(lat, lon), asked=True)
@@ -625,12 +858,12 @@ async def reverse_geocode(latitude: float, longitude: float) -> ReverseGeocode:
 
 
 async def search_places(query: str) -> list[GeocodeResult]:
-    """Forward search - "blue hole dahab" - returning at most `_SEARCH_RESULT_LIMIT` places.
+    """Forward search - "ko tao" - returning at most `_SEARCH_RESULT_LIMIT` places.
 
     The query is whitespace-collapsed and lower-cased for the cache key *and* for the
     outbound call, so trivially different spellings of the same search share one cached
-    answer instead of each costing a provider slot. Nominatim matches case-insensitively,
-    so nothing is lost by asking in lower case.
+    answer instead of each costing a provider slot. Photon matches case-insensitively, so
+    nothing is lost by asking in lower case.
 
     The key holds a digest of that text rather than the text itself. Unlike every other key
     in this app the discriminator here is free-form input - up to 200 characters of
@@ -638,30 +871,39 @@ async def search_places(query: str) -> list[GeocodeResult]:
     the caller entirely. It costs the ability to read the query out of `redis-cli --scan`,
     which is a fair trade for the same reason the coordinate keys are rounded: these are a
     cache, not a log of what people searched for.
+
+    Either switch is read before the cache, not only on the way to the provider: the key
+    carries `GEOCODER_SEARCH_URL`'s hash but not `GEOCODER_URL`'s, so an answer cached before
+    an operator emptied `GEOCODER_URL` would otherwise still be served.
     """
     normalized = " ".join(query.split()).lower()
     if not normalized:
         return []
 
-    key = _cache_key("search", hashlib.sha256(normalized.encode()).hexdigest()[:32])
+    if not settings.GEOCODER_URL or not settings.GEOCODER_SEARCH_URL:
+        logger.warning("GEOCODER_URL or GEOCODER_SEARCH_URL is not configured; place search is unavailable.")
+        return []
+
+    language = _search_language()
+    digest = hashlib.sha256(normalized.encode()).hexdigest()[:32]
+    key = _cache_key("search", settings.GEOCODER_SEARCH_URL, language, digest)
     cached = await _cached(key)
     if cached is not None:
         return cached
 
-    rows = await _request("/search", {"q": normalized, "limit": _SEARCH_RESULT_LIMIT})
-    if rows is None:
+    features = await _search_photon(normalized, language)
+    if features is None:
         return []
 
-    # Bounded here, not only asked for via `limit`: a mirror that caps differently, or
-    # ignores the parameter, would otherwise have every row it sent normalized, cached for a
-    # month and returned. The bound on the response belongs to this app.
+    # Bounded here, not only by what was asked for: a host that caps differently, or ignores
+    # `limit`, would otherwise have every row it sent normalized, cached for a month and
+    # returned. The bound on the response belongs to this app.
     #
-    # Lazily, and counting only the rows that *survive* normalization. Slicing the raw rows
-    # first is cheaper to read but silently shrinks the answer - five unusable leading rows
-    # would empty a search that had fifteen good ones behind them - while normalizing all of
-    # them first makes 50,000 junk rows cost 50,000 normalizations. `islice` over a generator
-    # is both: it stops at five successes and never touches the rest.
-    candidates = (_normalize(row, with_bounding_box=True) for row in rows)
-    results = list(islice((result for result in candidates if result is not None), _SEARCH_RESULT_LIMIT))
+    # Lazily, and counting only the rows that *survive*. Slicing the raw rows first is cheaper
+    # to read but silently shrinks the answer - five unusable leading rows would empty a
+    # search that had ten good ones behind them - while normalizing all of them first makes
+    # 50,000 junk rows cost 50,000 normalizations. `islice` over a generator is both: it stops
+    # at five successes and never touches the rest.
+    results = list(islice(_places(features), _SEARCH_RESULT_LIMIT))
     await _store(key, results)
     return results

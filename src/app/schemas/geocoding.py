@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -6,16 +6,19 @@ from pydantic import BaseModel, Field
 class GeocodeResult(BaseModel):
     """One place, normalized away from whichever provider answered.
 
-    The shape is deliberately provider-neutral so `GEOCODER_URL` can point somewhere else
-    without the web and iOS clients noticing (see `services.geocoding_service`).
+    The shape is deliberately provider-neutral: a search is answered by Photon and a pin by
+    Nominatim (see `services.geocoding_service`), and the web and iOS clients read both the
+    same way.
 
     `location` and `display_name` are both here because they answer different questions,
-    and both are stored now. `location` is short, composed from the provider's structured
-    address, and becomes a place's `name` - divers write "Dahab, Egypt", not a seven-part
-    postal address. `display_name` is the provider's full label, which becomes `full_name`
-    and is what makes two otherwise identical entries in a search picker distinguishable.
-    Neither member is renamed by that: these are the geocoder's own wire names, and the
-    place object's are `schemas.location`'s.
+    and both are stored now. `location` is short and becomes a place's `name` - divers write
+    "Ko Tao, Thailand", not a five-part address. A search result's is the place's own name
+    and its country; a pin's is the settlement it falls in and its country. `display_name`
+    is the full label, which becomes `full_name` and is what makes two otherwise identical
+    entries in a search picker distinguishable: the place's name and every address part above
+    it for a search result, Nominatim's own label for a pin. Neither member is renamed by
+    that: these are the geocoder's own wire names, and the place object's are
+    `schemas.location`'s.
     """
 
     latitude: Annotated[float, Field(ge=-90, le=90, examples=[28.5717])]
@@ -47,6 +50,17 @@ class GeocodeResult(BaseModel):
             examples=["[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"],
         ),
     ]
+    # Where a search result sits, for a picker to tell two same-named places apart: the same
+    # role under the same names as on `DiveSiteSuggestion`, though not the same vocabulary -
+    # these come from OpenStreetMap, the catalog's from Natural Earth. `region` is the finer
+    # of the two. Each is null on every reverse answer, and wherever OSM records none.
+    country: Annotated[str | None, Field(default=None, max_length=255, examples=["Egypt"])]
+    region: Annotated[str | None, Field(default=None, max_length=255, examples=["South Sinai Governorate"])]
+    # The OSM object a search result is, spelled as the dive-site catalog spells it, so a
+    # client can drop a geocoder row that repeats a catalog row by comparing both fields.
+    # Null on every reverse answer.
+    source: Annotated[Literal["osm"] | None, Field(default=None, examples=["osm"])]
+    source_id: Annotated[str | None, Field(default=None, max_length=64, examples=["node/27043265"])]
     # The place's extent, when the provider sends one. Four named floats rather than a
     # nested object or a list, because that is how a place stores them
     # (`schemas.location.LocationInput`) and a client that picks a result writes it
