@@ -155,18 +155,18 @@ add filters, related uuids and mixtures. New simple owned resources use `OwnedRe
 ## The dive form's pickers search server-side via `search=`, never fetching whole tables
 
 `GET /dive-sites`, `GET /trips` and `GET /gear-items` take `search=`, a case-insensitive substring
-match, with `items_per_page` capped at 100 (`MAX_DIVE_SITES_PER_PAGE`, `MAX_TRIPS_PER_PAGE`,
-`MAX_GEAR_ITEMS_PER_PAGE`). Sites match `name` and both of the locality's text columns
-(`DIVE_SITE_SEARCH_COLUMNS`), trips their own name and both of their parts'; gear matches `name` and
-`brand`, not `type` — `type` is a closed vocabulary with its own filter, and "reg" would match every
-regulator. `core/utils/search.py` builds the `select()` by hand: FastCRUD's `__ilike` filters AND
-together and `__or` groups operators on one column, not columns. It selects
-`model.__table__.columns`, so rows are dicts like the unsearched path. `escape_like()` escapes `\`,
-`%`, `_` in that order, paired with `.ilike(pattern, escape="\\")`. `search` is appended to the list
-cache key after `user_{id}_{resource}:page_{n}:items_per_page:{n}`, so the `user_{id}_{resource}:*`
-wildcard still purges it; routes lowercase and strip the term first. A resource without
-`search_columns` passes no `search` kwarg, or `@cache` would `KeyError`. Gear calls
-`search_clause`/`search_multi` directly, not through `OwnedResourceCache`.
+match, with `items_per_page` capped at 100 by `clamp_pagination` (`DEFAULT_MAX_ITEMS_PER_PAGE`).
+Sites match `name` and both of the locality's text columns (`DIVE_SITE_SEARCH_COLUMNS`), trips their
+own name and both of their parts'; gear matches `name` and `brand`, not `type` — `type` is a closed
+vocabulary with its own filter, and "reg" would match every regulator. `core/utils/search.py` builds
+the `select()` by hand: FastCRUD's `__ilike` filters AND together and `__or` groups operators on one
+column, not columns. It selects `model.__table__.columns`, so rows are dicts like the unsearched
+path. `escape_like()` escapes `\`, `%`, `_` in that order, paired with
+`.ilike(pattern, escape="\\")`. `search` is appended to the list cache key after
+`user_{id}_{resource}:page_{n}:items_per_page:{n}`, so the `user_{id}_{resource}:*` wildcard still
+purges it; routes lowercase and strip the term first. A resource without `search_columns` passes no
+`search` kwarg, or `@cache` would `KeyError`. Gear calls `search_clause`/`search_multi` directly,
+not through `OwnedResourceCache`.
 
 ## Resource routes are flat, `/...` + explicit ids, never `/{username}/...`
 
@@ -5347,17 +5347,18 @@ With a position, distance is the ranking, not a tie-break. Without one: exact na
 substring, then name; full ties keep file order, since `CatalogSite` is not orderable. Half a
 position is a 422, mirroring `WholeCoordinatePair`.
 
-## Dive-site catalog: The selection rules are floors, and scuba attributes decide over `leisure`
+## Dive-site catalog: The selection rules are floors, and only `divespot=yes` rescues an indoor feature
 
 The generator takes every feature carrying `sport=scuba_diving` or `scuba_diving:divespot=yes`, then
 drops businesses and indoor facilities; both exclusion sets are floors, re-derived from the tag
 distributions before a refresh.
 
 `leisure=pitch` and `leisure=water_park` are not noise: `pitch` is the Dutch convention in Zeeland
-(35 of 43 named features carry scuba attributes). Scuba attributes decide, not the `leisure` value;
-`scuba_diving:divespot=yes` rescues an otherwise-excluded feature, and only `=yes` does.
-`amenity=scuba_diving` is not in the business set. OSM's `;` multi-values are split, so
-`amenity=restaurant;dive_centre` is a dive centre.
+(35 of 43 named features carry scuba attributes), so neither is in the indoor set.
+`scuba_diving:divespot=yes` rescues a feature the indoor rule would drop, and only `=yes` does; no
+other scuba attribute is consulted, and nothing rescues a business. `amenity=scuba_diving` is not in
+the business set. OSM's `;` multi-values are split, so `amenity=restaurant;dive_centre` is a dive
+centre.
 
 Overpass is queried with `out center;`, never bare `out;`: a way or relation has no position of its
 own.
