@@ -203,12 +203,6 @@ def _values(tags: dict[str, str], key: str) -> list[str]:
     return [value.strip() for value in raw.split(";")] if raw else []
 
 
-def _has_scuba_attributes(tags: dict[str, str]) -> bool:
-    """Whether the feature is described as somewhere you dive rather than merely tagged with
-    the sport - `scuba_diving:maxdepth`, `scuba_diving:entry`, `scuba_diving:divespot`."""
-    return any(key.startswith("scuba_diving:") for key in tags)
-
-
 def _is_business(tags: dict[str, str]) -> bool:
     return (
         any(value in _BUSINESS_AMENITIES for value in _values(tags, "amenity"))

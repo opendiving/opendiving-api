@@ -133,8 +133,7 @@ class OwnedResourceCache[InternalT, PublicT]:
             opt out of search entirely, in which case `read_list` takes no `search` argument
             and the cache key is unchanged.
         list_expiration: int
-            TTL (seconds) for the list cache. The single-item cache has no expiration, matching
-            the existing `dive_site_cache`/`dive_cache` behavior.
+            TTL (seconds) for the list cache. The single-item cache takes `@cache`'s default.
         """
         # Public, unlike its siblings: `tests/test_cache_utils.py` reads it off the real
         # dive-site and trip caches to check that `cache_invalidation`'s hard-coded names
