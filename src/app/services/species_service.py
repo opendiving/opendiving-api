@@ -290,9 +290,9 @@ _QID_MAX_LENGTH = 32
 _LANGUAGE_CODE_MAX_LENGTH = 3
 
 # How long a request will wait on a provider's cap before giving up on that provider. Unlike
-# the geocoder, which waits a beat because it has one provider and no other answer, a search
-# here has two more sources - so a saturated provider drops out immediately rather than
-# holding the whole fan-out open.
+# the geocoder, which waits a beat because each of its lookups has one provider and no other
+# answer, a search here has two more sources - so a saturated provider drops out immediately
+# rather than holding the whole fan-out open.
 _PROVIDER_WORMS = "worms"
 _PROVIDER_WIKIDATA = "wikidata"
 _PROVIDER_COMMONS = "commons"

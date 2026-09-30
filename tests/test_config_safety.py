@@ -400,6 +400,7 @@ class TestRegistrationSettings:
             "INVITE_REQUEST_RATE_LIMIT_PER_EMAIL",
             "INVITE_REQUEST_RATE_LIMIT_PER_IP",
             "JOIN_CHANNELS",
+            "GEOCODER_SEARCH_URL",
         ):
             assert name in template, name
 
@@ -409,6 +410,21 @@ class TestRegistrationSettings:
         assert '# REGISTRATION_MODE="open"' in template
         assert "# PROJECT_OPERATED=true" in template
         assert "# JOIN_CHANNELS=" in template
+
+
+class TestGeocoderDefaults:
+    def test_pins_ask_public_nominatim_and_searches_public_photon(self, tmp_path, monkeypatch):
+        """Both keyless public instances, so an instance that configures nothing geocodes
+        with no third-party account."""
+        monkeypatch.delenv("GEOCODER_URL", raising=False)
+        monkeypatch.delenv("GEOCODER_SEARCH_URL", raising=False)
+
+        loaded = _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings
+
+        assert (loaded.GEOCODER_URL, loaded.GEOCODER_SEARCH_URL) == (
+            "https://nominatim.openstreetmap.org",
+            "https://photon.komoot.io",
+        )
 
 
 class TestJoinChannels:

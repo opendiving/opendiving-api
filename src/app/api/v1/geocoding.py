@@ -1,13 +1,13 @@
 """Geocoding, proxied through this API rather than called from the browser.
 
-Two endpoints over one provider (see `services.geocoding_service`), both authenticated and
-both rate limited per caller. Neither is a resource in the sense the rest of `api/v1` uses
-the word - there is nothing stored and nothing owned - so there is no uuid, no ownership
-check, and no `@cache` decorator: the service caches in Redis under a global,
-deliberately *not* user-scoped key, because the answer is a fact about the world rather
-than about the caller.
+Two endpoints over two providers - Nominatim names a pin, Photon answers a search (see
+`services.geocoding_service`) - both authenticated and both rate limited per caller.
+Neither is a resource in the sense the rest of `api/v1` uses the word - there is nothing
+stored and nothing owned - so there is no uuid, no ownership check, and no `@cache`
+decorator: the service caches in Redis under a global, deliberately *not* user-scoped key,
+because the answer is a fact about the world rather than about the caller.
 
-Both degrade to "no result" rather than an error when the provider is unreachable. A diver
+Both degrade to "no result" rather than an error when their provider is unreachable. A diver
 filling in a dive site can always type the location themselves, and a 502 here would make a
 form look broken over an optional convenience.
 
@@ -33,9 +33,9 @@ router = APIRouter(tags=["geocoding"])
 async def _enforce_geocode_limit(user_id: int) -> None:
     """Per-user budget, shared by both endpoints, and the only thing here that can 429.
 
-    Distinct from the provider's own one-per-second cap enforced inside the service: that
-    one bounds what this instance does to a third party and *degrades* when it is hit,
-    since it is global and one diver's search must not reject another's. This one bounds
+    Distinct from the one-per-second cap on each provider enforced inside the service: those
+    bound what this instance does to a third party and *degrade* when they are hit, since
+    they are global and one diver's search must not reject another's. This one bounds
     what a single account can make this instance do, so rejecting the account that spent it
     is exactly right.
     """
@@ -90,11 +90,17 @@ async def read_geocode_search(
     current_user: Annotated[dict, Depends(get_current_user)],
     q: Annotated[str, Query(min_length=2, max_length=200, description="Free-text place search.")],
 ) -> list[GeocodeResult]:
-    """Find places by name - "blue hole dahab" is how a diver looks for a site.
+    """Find places by name - "ko tao" is how a diver looks for where a site is.
+
+    Only places and natural features come back - towns, islands, reefs, peaks, regions,
+    parks - never a street, an address or a shop, and each place once. Each is named by the
+    place itself and its country ("Ko Tao, Thailand"), and carries its `region` and
+    `country` so two same-named places can be told apart, and its OSM identity in `source`
+    and `source_id`.
 
     Returns an empty list rather than an error for both "nothing matched" and "the provider
-    is unavailable"; from the form's point of view those are the same thing, and the diver
-    types the site in by hand either way.
+    is unavailable or switched off"; from the form's point of view those are the same thing,
+    and the diver types the site in by hand either way.
     """
     await _enforce_geocode_limit(current_user["id"])
     return await search_places(q)

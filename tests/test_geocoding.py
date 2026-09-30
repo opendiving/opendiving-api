@@ -2,9 +2,13 @@
 underneath them (`services/geocoding_service.py`).
 
 Three things here are compliance assertions rather than conveniences, and each is what
-keeps this instance inside Nominatim's usage policy: every answer is cached, a second
-identical lookup never reaches the provider, and the outbound call carries the configured
-`User-Agent` and is counted against a per-second cap.
+keeps this instance inside its providers' terms: every answer is cached, a second identical
+lookup never reaches the provider, and the outbound call carries the configured `User-Agent`
+and is counted against a per-second cap.
+
+A pin is answered by Nominatim and a search by Photon, whose wire formats share nothing, so
+each has fixtures of its own: `REVERSE_PAYLOAD` is a Nominatim `/reverse` object, `_feature`
+and `_photon` build what Photon's `/api` answers.
 
 The fourth theme is degradation. A provider that times out, returns garbage or is switched
 off must produce "no result", never a 5xx - a diver can always type the location in.
@@ -16,6 +20,7 @@ from collections.abc import Callable, Generator
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import anyio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -131,12 +136,12 @@ class _Provider:
     nothing leaves the machine.
     """
 
-    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+    def __init__(self, handler: Callable[[httpx.Request], Any]) -> None:
         self.requests: list[httpx.Request] = []
         self._handler = handler
         self._patcher: Any = None
 
-    def _record(self, request: httpx.Request) -> httpx.Response:
+    def _record(self, request: httpx.Request) -> Any:
         self.requests.append(request)
         return self._handler(request)
 
@@ -162,6 +167,152 @@ def _transport(handler: Callable[[httpx.Request], httpx.Response]) -> _Provider:
 def _responds(payload: Any, status_code: int = 200) -> _Provider:
     """A provider that answers every request with `payload`."""
     return _Provider(lambda request: httpx.Response(status_code, json=payload))
+
+
+def _providers(search: Any, reverse: Any = REVERSE_PAYLOAD) -> _Provider:
+    """Both providers behind one transport, told apart by the path each is asked on."""
+    return _Provider(lambda request: httpx.Response(200, json=search if request.url.path == "/api" else reverse))
+
+
+def _search(client: TestClient, query: str) -> Any:
+    return client.get("/api/v1/geocode/search", params={"q": query})
+
+
+# Photon's documented `/api` parameters. It answers any other with a 400, so a search may send
+# no name outside this set.
+PHOTON_API_PARAMETERS = frozenset(
+    {
+        "q",
+        "countrycode",
+        "lang",
+        "limit",
+        "debug",
+        "dedupe",
+        "geometry",
+        "osm_tag",
+        "layer",
+        "include",
+        "exclude",
+        "lat",
+        "lon",
+        "location_bias_scale",
+        "zoom",
+        "bbox",
+        "suggest_addresses",
+    }
+)
+
+
+def _feature(
+    name: str | None,
+    *,
+    osm: tuple[str, int] = ("N", 1),
+    tag: tuple[str, str] = ("place", "town"),
+    layer: str = "city",
+    position: tuple[float, float] = (34.5146, 28.4964),
+    **properties: Any,
+) -> dict[str, Any]:
+    """One Photon feature, shaped as its public instance answers: a GeoJSON point in
+    `[lon, lat]` order, the OSM identity split over `osm_type` and `osm_id`, the main tag over
+    `osm_key` and `osm_value`, the layer in `type`, and the address flat beside the name."""
+    return {
+        "type": "Feature",
+        "properties": {
+            "osm_type": osm[0],
+            "osm_id": osm[1],
+            "osm_key": tag[0],
+            "osm_value": tag[1],
+            "type": layer,
+            **({} if name is None else {"name": name}),
+            **properties,
+        },
+        "geometry": {"type": "Point", "coordinates": list(position)},
+    }
+
+
+def _photon(*features: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "FeatureCollection", "features": list(features)}
+
+
+# Real rows, as the public instance answered them.
+KO_TAO = _feature(
+    "Ko Tao",
+    osm=("W", 23897168),
+    tag=("place", "island"),
+    layer="other",
+    position=(99.8395362, 10.0921822),
+    district="Ko Tao Subdistrict",
+    city="Ko Pha-ngan",
+    state="Surat Thani Province",
+    country="Thailand",
+    countrycode="TH",
+    extent=[99.8150957, 10.1262155, 99.8558193, 10.0580454],
+)
+# Photon's second copy of the same island in the same answer, differing only in `extra`.
+KO_TAO_AGAIN = {**KO_TAO, "properties": {**KO_TAO["properties"], "extra": {"admin_level": "15"}}}
+MOALBOAL_CEBU = _feature(
+    "Moalboal",
+    osm=("N", 198527169),
+    position=(123.3921896, 9.9372185),
+    state="Cebu",
+    country="Philippines",
+    postcode="6032",
+    countrycode="PH",
+)
+MOALBOAL_ZAMBOANGA = _feature(
+    "Moalboal",
+    osm=("N", 12208488375),
+    tag=("place", "village"),
+    position=(122.8747794, 7.3177423),
+    state="Zamboanga Sibugay",
+    country="Philippines",
+    countrycode="PH",
+)
+OBAN = _feature(
+    "Oban",
+    osm=("N", 26238533),
+    position=(-5.4723731, 56.4120166),
+    county="Argyll and Bute",
+    state="Scotland",
+    country="United Kingdom",
+    postcode="PA34 4AT",
+    countrycode="GB",
+)
+OBAN_STATION = _feature(
+    "Oban",
+    osm=("N", 6749038720),
+    tag=("railway", "station"),
+    layer="house",
+    position=(-5.4745782, 56.4122069),
+    street="Railway Pier",
+    district="Town Centre",
+    city="Oban",
+    county="Argyll and Bute",
+    state="Scotland",
+    country="United Kingdom",
+    countrycode="GB",
+)
+MONAD_SHOAL = _feature(
+    "Monad Shoal",
+    osm=("N", 6215139685),
+    tag=("natural", "reef"),
+    layer="other",
+    position=(124.1947241, 11.3133913),
+    state="Cebu",
+    country="Philippines",
+    countrycode="PH",
+)
+TUBBATAHA = _feature(
+    "Tubbataha Reefs Natural Park",
+    osm=("W", 280149159),
+    tag=("leisure", "nature_reserve"),
+    layer="other",
+    position=(119.9093689, 8.9240556),
+    state="Palawan",
+    country="Philippines",
+    countrycode="PH",
+    extent=[119.7594354, 9.1064285, 120.06022, 8.6755899],
+)
 
 
 class TestReverseRoute:
@@ -226,6 +377,24 @@ class TestReverseRoute:
 
     def test_requires_authentication(self, anonymous_client: TestClient):
         assert anonymous_client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2}).status_code == 401
+
+    def test_takes_a_mirror_that_answers_with_an_array(self, client: TestClient, no_redis: None):
+        """Nominatim answers `/reverse` with one object; a compatible mirror that wraps it in
+        an array is read the same way, first row first."""
+        with _responds([REVERSE_PAYLOAD, {**REVERSE_PAYLOAD, "name": "Canyon"}]):
+            body = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372}).json()
+
+        assert body["name"] == "Blue Hole"
+
+    def test_carries_none_of_the_search_fields(self, client: TestClient, no_redis: None):
+        """`country`, `region`, `source` and `source_id` describe a search result; a pin's
+        answer names a position and is otherwise what it always was."""
+        with _responds(REVERSE_PAYLOAD):
+            body = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372}).json()
+
+        assert {field: body[field] for field in ("country", "region", "source", "source_id")} == dict.fromkeys(
+            ("country", "region", "source", "source_id")
+        )
 
 
 class TestCouldNotAsk:
@@ -383,35 +552,47 @@ class TestOffshoreFallback:
 
 class TestSearchRoute:
     def test_returns_the_matches(self, client: TestClient, no_redis: None):
-        with _responds([REVERSE_PAYLOAD, {**REVERSE_PAYLOAD, "name": "Blue Hole Canyon"}]):
-            response = client.get("/api/v1/geocode/search", params={"q": "blue hole dahab"})
+        with _responds(_photon(MOALBOAL_CEBU, MOALBOAL_ZAMBOANGA)):
+            response = _search(client, "moalboal")
 
         assert response.status_code == 200
-        assert [row["name"] for row in response.json()] == ["Blue Hole", "Blue Hole Canyon"]
+        assert [row["display_name"] for row in response.json()] == [
+            "Moalboal, Cebu, Philippines",
+            "Moalboal, Zamboanga Sibugay, Philippines",
+        ]
 
     def test_returns_an_empty_list_when_nothing_matches(self, client: TestClient, no_redis: None):
-        with _responds([]):
-            response = client.get("/api/v1/geocode/search", params={"q": "nowhere at all"})
+        with _responds(_photon()):
+            response = _search(client, "nowhere at all")
 
         assert response.status_code == 200
         assert response.json() == []
 
     def test_bounds_the_number_of_results_itself(self, client: TestClient, no_redis: None):
-        """`limit` is asked for, not relied on: a mirror that caps differently would
-        otherwise have every row it sent normalized, cached for a month and returned."""
-        with _responds([REVERSE_PAYLOAD] * 20):
-            response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
+        """`limit` is asked for, not relied on: a host that caps differently would otherwise
+        have every row it sent normalized, cached for a month and returned."""
+        places = [_feature(f"Place {osm_id}", osm=("N", osm_id)) for osm_id in range(1, 21)]
+        with _responds(_photon(*places)):
+            response = _search(client, "place")
 
         assert len(response.json()) == geocoding_service._SEARCH_RESULT_LIMIT
 
     def test_counts_usable_rows_towards_the_bound_not_raw_ones(self, client: TestClient, no_redis: None):
         """Unusable leading rows must not eat the budget - a search with five junk rows in
         front of fifteen good ones is not an empty search."""
-        junk = [{"display_name": "no coordinates here"}] * 5
-        with _responds([*junk, *([REVERSE_PAYLOAD] * 15)]):
-            response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
+        junk = [_feature(None, osm=("N", osm_id)) for osm_id in range(1, 6)]
+        places = [_feature(f"Place {osm_id}", osm=("N", osm_id)) for osm_id in range(6, 21)]
+        with _responds(_photon(*junk, *places)):
+            response = _search(client, "place")
 
-        assert len(response.json()) == geocoding_service._SEARCH_RESULT_LIMIT
+        assert [row["name"] for row in response.json()] == [f"Place {osm_id}" for osm_id in range(6, 11)]
+
+    def test_a_query_of_only_whitespace_asks_nothing(self, client: TestClient, no_redis: None):
+        with _responds(_photon(KO_TAO)) as patched:
+            response = _search(client, "   ")
+
+        assert response.json() == []
+        assert patched.requests == []
 
     def test_rejects_a_one_character_query(self, client: TestClient, no_redis: None):
         with _responds([]) as patched:
@@ -425,51 +606,55 @@ class TestSearchRoute:
 
 
 class TestBoundingBox:
-    """Nominatim sends a search result's extent as `boundingbox`, four strings ordered
-    south, north, west, east. It rides through to the client as four named floats so a
-    trip location can store it 1:1 and a map can frame the place it describes.
+    """Photon sends a search result's extent as `extent`, four numbers ordered west, north,
+    east, south - neither Nominatim's order nor GeoJSON's. It rides through to the client as
+    four named floats so a trip location can store it 1:1 and a map can frame the place it
+    describes.
 
     The theme is that a box is a nicety: nothing here may cost a result. A row whose box
     is missing, short, unparseable or impossible keeps its name and coordinates and
     simply arrives without one.
     """
 
+    # Nominatim's shape, which only the reverse test below still sends.
     BOX = {"boundingbox": ["9.89", "9.98", "123.35", "123.44"]}
+    EXTENT: dict[str, Any] = {"extent": [123.35, 9.98, 123.44, 9.89]}
 
-    def _corners(self, row: dict, client: TestClient) -> tuple:
-        with _responds([{**REVERSE_PAYLOAD, **row}]):
-            body = client.get("/api/v1/geocode/search", params={"q": "moalboal"}).json()
+    def _corners(self, extent: dict, client: TestClient) -> tuple:
+        with _responds(_photon(_feature("Moalboal", **extent))):
+            body = _search(client, "moalboal").json()
 
         assert len(body) == 1, "the row must survive whatever its box looked like"
         return tuple(body[0][f"bbox_{corner}"] for corner in ("south", "north", "west", "east"))
 
     def test_a_search_result_carries_the_extent(self, client: TestClient, no_redis: None):
-        assert self._corners(self.BOX, client) == (9.89, 9.98, 123.35, 123.44)
+        assert self._corners(self.EXTENT, client) == (9.89, 9.98, 123.35, 123.44)
 
     def test_a_box_that_crosses_the_antimeridian_is_kept_as_sent(self, client: TestClient, no_redis: None):
         """West > east is what an antimeridian-crossing box looks like, and swapping the
         pair to "fix" it would frame the map on the whole planet instead of on Fiji."""
-        box = {"boundingbox": ["-18.3", "-16.1", "177.0", "-179.8"]}
+        extent = {"extent": [177.0, -16.1, -179.8, -18.3]}
 
-        assert self._corners(box, client) == (-18.3, -16.1, 177.0, -179.8)
+        assert self._corners(extent, client) == (-18.3, -16.1, 177.0, -179.8)
 
     @pytest.mark.parametrize(
-        "box",
+        "extent",
         [
             {},
-            {"boundingbox": ["9.89", "9.98", "123.35"]},
-            {"boundingbox": ["9.89", "9.98", "123.35", "east"]},
-            {"boundingbox": "9.89,9.98,123.35,123.44"},
-            {"boundingbox": ["9.98", "9.89", "123.35", "123.44"]},
-            {"boundingbox": ["9.89", "9.98", "123.35", "1234.4"]},
-            {"boundingbox": ["nan", "nan", "nan", "nan"]},
+            {"extent": [123.35, 9.98, 123.44]},
+            {"extent": [123.35, 9.98, "east", 9.89]},
+            {"extent": "123.35,9.98,123.44,9.89"},
+            {"extent": [123.35, 9.89, 123.44, 9.98]},
+            {"extent": [123.35, 9.98, 1234.4, 9.89]},
+            {"extent": ["nan", "nan", "nan", "nan"]},
+            {"extent": [None, 9.98, 123.44, 9.89]},
         ],
     )
-    def test_a_box_it_cannot_use_costs_the_row_nothing(self, client: TestClient, no_redis: None, box: dict):
+    def test_a_box_it_cannot_use_costs_the_row_nothing(self, client: TestClient, no_redis: None, extent: dict):
         """South > north is the one ordering that carries no meaning, `nan` compares false
-        against every bound it would have to satisfy, and a mirror is free to send the
-        field in a shape of its own - none of which is a reason to drop the place."""
-        assert self._corners(box, client) == (None, None, None, None)
+        against every bound it would have to satisfy, and a host is free to send the field
+        in a shape of its own - none of which is a reason to drop the place."""
+        assert self._corners(extent, client) == (None, None, None, None)
 
     def test_a_reverse_answer_has_no_extent(self, client: TestClient, no_redis: None):
         """A pin's answer is a name for a position the caller is already holding, so
@@ -486,8 +671,8 @@ class TestBoundingBox:
         field existed would hand back boxless results well into next month. The version
         segment in the key is what retires them, and it only works if it is *in* the key.
         """
-        with _responds([{**REVERSE_PAYLOAD, **self.BOX}]):
-            client.get("/api/v1/geocode/search", params={"q": "moalboal"})
+        with _responds(_photon(_feature("Moalboal", **self.EXTENT))):
+            _search(client, "moalboal")
 
         (key,) = fake_redis.store
         assert f":{geocoding_service._CACHE_VERSION}:" in key
@@ -635,11 +820,13 @@ class TestDegradation:
 
     def test_a_body_that_is_neither_object_nor_array_is_a_failure(self, client: TestClient, fake_redis: FakeRedis):
         """Valid JSON that isn't a Nominatim shape means a proxy or the wrong host answered,
-        not "no such place" - so it must not be cached as one."""
+        not "no such place" - so it must not be cached as one, nor answered as a nameless
+        position."""
         with _responds("service unavailable"):
-            response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
+            response = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
 
-        assert response.json() == []
+        assert response.status_code == 200
+        assert response.json() is None
         assert fake_redis.store == {}
 
     def test_truncates_provider_strings_rather_than_dropping_the_row(self, client: TestClient, no_redis: None):
@@ -689,10 +876,11 @@ class TestDegradation:
         assert patched.requests == []
 
     def test_drops_rows_the_provider_sent_without_coordinates(self, client: TestClient, no_redis: None):
-        with _responds([{"display_name": "Somewhere"}, REVERSE_PAYLOAD]):
-            response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
+        nowhere = {**MONAD_SHOAL, "geometry": {"type": "Point", "coordinates": []}}
+        with _responds(_photon(nowhere, MOALBOAL_CEBU)):
+            response = _search(client, "dahab")
 
-        assert [row["name"] for row in response.json()] == ["Blue Hole"]
+        assert [row["name"] for row in response.json()] == ["Moalboal"]
 
 
 class TestCaching:
@@ -716,9 +904,9 @@ class TestCaching:
         """A miss is far more likely to be provider weirdness than a fact about the world,
         so it must not be pinned for a month - but it must still be cached, or a retrying
         client re-asks on every keystroke."""
-        with _responds([]) as patched:
-            client.get("/api/v1/geocode/search", params={"q": "nowhere"})
-            client.get("/api/v1/geocode/search", params={"q": "nowhere"})
+        with _responds(_photon()) as patched:
+            _search(client, "nowhere")
+            _search(client, "nowhere")
 
         assert len(patched.requests) == 1
         (key,) = fake_redis.expiries
@@ -782,7 +970,7 @@ class TestThrottling:
             client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
 
         assert provider_limit.await_count == 1
-        assert [call.args[0] for call in provider_limit.await_args_list] == ["geocode:provider"]
+        assert [call.args[0] for call in provider_limit.await_args_list] == ["geocode:provider:nominatim"]
 
     def test_the_per_user_limit_is_keyed_by_user(self, client: TestClient, no_redis: None):
         with (
@@ -829,15 +1017,15 @@ class TestThrottling:
         common collision - two type-ahead queries in the same second - into a slow right
         answer rather than a confidently wrong one."""
         with (
-            _responds([REVERSE_PAYLOAD]) as provider,
+            _responds(_photon(MOALBOAL_CEBU)) as provider,
             patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock) as slept,
             patch("src.app.services.geocoding_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = [RateLimitException("Too many requests."), None]
 
-            response = client.get("/api/v1/geocode/search", params={"q": "dahab"})
+            response = _search(client, "moalboal")
 
-        assert [row["name"] for row in response.json()] == ["Blue Hole"]
+        assert [row["name"] for row in response.json()] == ["Moalboal"]
         assert len(provider.requests) == 1
         slept.assert_awaited_once()
 
@@ -856,6 +1044,28 @@ class TestThrottling:
             client.get("/api/v1/geocode/search", params={"q": "dahab"})
 
         assert [call.args[0] for call in slept.await_args_list] == [1.0]
+
+    def test_each_provider_has_its_own_slot(self, client: TestClient, no_redis: None):
+        """A pin's reverse lookup and a search keystroke in the same second both go out: the
+        cap is per provider, so neither waits on - or is skipped for - the other."""
+        spent: dict[str, int] = {}
+
+        async def one_a_window(key: str, max_requests: int, window_seconds: int) -> None:
+            spent[key] = spent.get(key, 0) + 1
+            if spent[key] > max_requests:
+                raise RateLimitException("Too many requests.")
+
+        with (
+            _providers(search=_photon(MOALBOAL_CEBU)) as provider,
+            patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock) as slept,
+            patch("src.app.services.geocoding_service.enforce_rate_limit", side_effect=one_a_window),
+        ):
+            client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
+            _search(client, "moalboal")
+
+        assert [request.url.path for request in provider.requests] == ["/reverse", "/api"]
+        assert spent == {"geocode:provider:nominatim": 1, "geocode:provider:photon": 1}
+        slept.assert_not_awaited()
 
 
 class TestAttribution:
@@ -1014,3 +1224,418 @@ class TestShortLocation:
     )
     def test_drops_unusable_rows(self, row: dict):
         assert geocoding_service._normalize(row) is None
+
+
+class TestSearchProviderContract:
+    """What a search sends to Photon. Its `/api` answers a parameter it does not know with a
+    400, so what goes out is asserted against its documented set rather than for presence."""
+
+    def _sent(self, client: TestClient) -> httpx.Request:
+        with _responds(_photon()) as provider:
+            _search(client, "ko tao")
+
+        (request,) = provider.requests
+        return request
+
+    def test_asks_photons_api_at_the_search_url(self, client: TestClient, no_redis: None, monkeypatch: Any):
+        monkeypatch.setattr(settings, "GEOCODER_SEARCH_URL", "https://photon.example/")
+
+        request = self._sent(client)
+
+        assert (request.url.host, request.url.path) == ("photon.example", "/api")
+
+    def test_sends_only_parameters_photon_accepts(self, client: TestClient, no_redis: None, monkeypatch: Any):
+        """With a key configured, since `GEOCODER_API_KEY` is the Nominatim parameter that
+        would do the most harm arriving somewhere it was never meant for."""
+        monkeypatch.setattr(settings, "GEOCODER_API_KEY", "secret-key")
+
+        request = self._sent(client)
+
+        assert set(request.url.params.keys()) <= PHOTON_API_PARAMETERS
+        assert set(request.url.params.keys()) == {"q", "lang", "limit", "layer"}
+        assert "secret-key" not in str(request.url)
+
+    def test_asks_for_more_rows_than_it_returns(self, client: TestClient, no_redis: None):
+        """Duplicates and refused rows are not replaced, so asking for exactly five would
+        hand back fewer places than Photon had."""
+        assert int(self._sent(client).url.params["limit"]) > geocoding_service._SEARCH_RESULT_LIMIT
+
+    def test_asks_photon_to_leave_out_streets_and_addresses(self, client: TestClient, no_redis: None):
+        layers = self._sent(client).url.params.get_list("layer")
+
+        assert layers
+        assert not {"house", "street"} & set(layers)
+
+    def test_sends_the_configured_user_agent(self, client: TestClient, no_redis: None):
+        assert self._sent(client).headers["user-agent"] == settings.GEOCODER_USER_AGENT
+
+    @pytest.mark.parametrize(
+        ("configured", "sent"),
+        [("en", "en"), ("de", "de"), ("fr", "fr"), ("DE", "de"), ("de-AT", "de"), ("es", "en"), ("pt-BR", "en")],
+    )
+    def test_always_asks_in_a_language_photon_speaks(
+        self, client: TestClient, no_redis: None, monkeypatch: Any, configured: str, sent: str
+    ):
+        """Photon's public instance answers `lang=es` with a 400. English rather than
+        `default`, which is the local script `GEOCODER_LANGUAGE` exists to avoid."""
+        monkeypatch.setattr(settings, "GEOCODER_LANGUAGE", configured)
+
+        assert self._sent(client).url.params["lang"] == sent
+
+    def test_a_search_provider_change_does_not_serve_the_old_answer(
+        self, client: TestClient, fake_redis: FakeRedis, monkeypatch: Any
+    ):
+        """Swapping `GEOCODER_SEARCH_URL` is a `.env` edit, which `_CACHE_VERSION` cannot
+        catch."""
+        with _responds(_photon(KO_TAO)) as provider:
+            _search(client, "ko tao")
+            monkeypatch.setattr(settings, "GEOCODER_SEARCH_URL", "https://photon.example")
+            _search(client, "ko tao")
+
+        assert len(provider.requests) == 2
+
+    def test_repointing_the_reverse_provider_keeps_the_search_answers(
+        self, client: TestClient, fake_redis: FakeRedis, monkeypatch: Any
+    ):
+        with _responds(_photon(KO_TAO)) as provider:
+            _search(client, "ko tao")
+            monkeypatch.setattr(settings, "GEOCODER_URL", "https://geocoder.example")
+            _search(client, "ko tao")
+
+        assert len(provider.requests) == 1
+
+    def test_the_key_carries_the_language_sent_not_the_setting(
+        self, client: TestClient, fake_redis: FakeRedis, monkeypatch: Any
+    ):
+        """Two settings Photon does not speak both ask in English, so they share an answer;
+        one it does speak asks again."""
+        with _responds(_photon(KO_TAO)) as provider:
+            for language in ("es", "it", "de"):
+                monkeypatch.setattr(settings, "GEOCODER_LANGUAGE", language)
+                _search(client, "ko tao")
+
+        assert [request.url.params["lang"] for request in provider.requests] == ["en", "de"]
+
+
+class TestOnlyPlacesComeBack:
+    """A search result is a place or a natural feature - towns, islands, reefs, peaks,
+    regions, parks - and each OSM object at most once."""
+
+    def test_streets_stations_shops_and_land_use_never_reach_a_result(self, client: TestClient, no_redis: None):
+        """Judged on every row, whatever layer it arrived in: a host that ignored the layer
+        filter would send the street and the station too."""
+        refused = [
+            OBAN_STATION,
+            _feature("Tubbataha", osm=("W", 1373579202), tag=("highway", "residential"), layer="street"),
+            _feature("Dahab", osm=("N", 13288846996), tag=("shop", "shoes"), layer="house"),
+            _feature("Moalboal Wharf", osm=("R", 19020941), tag=("landuse", "commercial"), layer="locality"),
+            _feature("Moalboal Municipal Hall", osm=("W", 432380298), tag=("amenity", "townhall"), layer="other"),
+            _feature("Blue Hole", osm=("N", 2), tag=("tourism", "attraction"), layer="other"),
+        ]
+        places = [
+            OBAN,
+            MONAD_SHOAL,
+            TUBBATAHA,
+            _feature("Khao Lak", osm=("N", 13806253556), tag=("natural", "peak"), layer="other", country="Thailand"),
+            _feature("Ko Tao Subdistrict", osm=("R", 20698577), tag=("boundary", "administrative"), layer="district"),
+        ]
+        interleaved = [row for pair in zip(refused, places, strict=False) for row in pair] + refused[len(places) :]
+
+        with _responds(_photon(*interleaved)):
+            body = _search(client, "anything").json()
+
+        assert [row["source_id"] for row in body] == [
+            "node/26238533",
+            "node/6215139685",
+            "way/280149159",
+            "node/13806253556",
+            "relation/20698577",
+        ]
+
+    def test_one_osm_object_is_one_result(self, client: TestClient, no_redis: None):
+        with _responds(_photon(KO_TAO, KO_TAO_AGAIN)):
+            body = _search(client, "ko tao").json()
+
+        assert [row["source_id"] for row in body] == ["way/23897168"]
+
+    def test_a_duplicate_does_not_cost_a_result_slot(self, client: TestClient, no_redis: None):
+        others = [_feature(f"Ko Tao {osm_id}", osm=("W", osm_id)) for osm_id in range(1, 6)]
+        with _responds(_photon(KO_TAO, KO_TAO_AGAIN, *others)):
+            body = _search(client, "ko tao").json()
+
+        assert [row["source_id"] for row in body] == ["way/23897168", "way/1", "way/2", "way/3", "way/4"]
+
+    def test_the_filter_judges_each_copy_before_the_dedupe(self, client: TestClient, no_redis: None):
+        """Photon's copies of one object can differ in main tag - Tubbataha arrives as both
+        `leisure=nature_reserve` and `boundary=national_park` - so a first copy the filter
+        refuses must not stand in for the object and hide the copy it keeps."""
+        refused_copy = {**TUBBATAHA, "properties": {**TUBBATAHA["properties"], "osm_key": "tourism"}}
+        kept_copy = {
+            **TUBBATAHA,
+            "properties": {**TUBBATAHA["properties"], "osm_key": "boundary", "osm_value": "national_park"},
+        }
+
+        with _responds(_photon(refused_copy, kept_copy)):
+            body = _search(client, "tubbataha").json()
+
+        assert [row["source_id"] for row in body] == ["way/280149159"]
+
+    def test_an_unusable_copy_does_not_hide_a_usable_one(self, client: TestClient, no_redis: None):
+        nowhere = {**KO_TAO, "geometry": {"type": "Point", "coordinates": ["far", "away"]}}
+
+        with _responds(_photon(nowhere, KO_TAO_AGAIN)):
+            body = _search(client, "ko tao").json()
+
+        assert [row["latitude"] for row in body] == [10.0921822]
+
+    def test_rows_that_do_not_say_what_they_are_are_kept_undeduplicated(self, client: TestClient, no_redis: None):
+        anonymous = _feature("Reef", tag=("natural", "reef"), osm_type=None, osm_id=None)
+
+        with _responds(_photon(anonymous, anonymous)):
+            body = _search(client, "reef").json()
+
+        assert [(row["source"], row["source_id"]) for row in body] == [(None, None), (None, None)]
+
+
+class TestSearchNames:
+    """A search result is named by the place itself - "Ko Tao, Thailand", never the district
+    OSM files the island under - and carries where it sits as fields of its own."""
+
+    def test_names_a_place_by_itself_and_its_country(self, client: TestClient, no_redis: None):
+        with _responds(_photon(KO_TAO)):
+            (row,) = _search(client, "ko tao").json()
+
+        assert row == {
+            "latitude": 10.0921822,
+            "longitude": 99.8395362,
+            "location": "Ko Tao, Thailand",
+            "display_name": "Ko Tao, Ko Tao Subdistrict, Ko Pha-ngan, Surat Thani Province, Thailand",
+            "name": "Ko Tao",
+            "attribution": geocoding_service._DEFAULT_ATTRIBUTION,
+            "country": "Thailand",
+            "region": "Surat Thani Province",
+            "source": "osm",
+            "source_id": "way/23897168",
+            "bbox_south": 10.0580454,
+            "bbox_north": 10.1262155,
+            "bbox_west": 99.8150957,
+            "bbox_east": 99.8558193,
+        }
+
+    def test_a_postcode_is_no_part_of_the_label(self):
+        result = geocoding_service._normalize_photon(OBAN)
+
+        assert result is not None
+        assert result.display_name == "Oban, Argyll and Bute, Scotland, United Kingdom"
+        assert result.region == "Scotland"
+
+    def test_the_region_is_the_county_where_there_is_no_state(self):
+        mabul = _feature("Mabul Island", county="Semporna", country="Malaysia")
+
+        result = geocoding_service._normalize_photon(mabul)
+
+        assert result is not None
+        assert (result.location, result.region) == ("Mabul Island, Malaysia", "Semporna")
+
+    def test_a_country_is_not_repeated(self):
+        philippines = _feature("Philippines", tag=("place", "country"), layer="country", country="Philippines")
+
+        result = geocoding_service._normalize_photon(philippines)
+
+        assert result is not None
+        assert (result.location, result.display_name, result.country, result.region) == (
+            "Philippines",
+            "Philippines",
+            "Philippines",
+            None,
+        )
+
+    def test_consecutive_repeats_leave_the_full_label(self):
+        berlin = _feature("Berlin", state="Berlin", country="Germany")
+
+        result = geocoding_service._normalize_photon(berlin)
+
+        assert result is not None
+        assert (result.location, result.display_name) == ("Berlin, Germany", "Berlin, Germany")
+
+    def test_a_row_with_no_country_is_its_name_alone(self):
+        reef = _feature("Tubbataha North Reef", tag=("natural", "reef"), layer="other")
+
+        result = geocoding_service._normalize_photon(reef)
+
+        assert result is not None
+        assert (result.location, result.display_name, result.country) == (
+            "Tubbataha North Reef",
+            "Tubbataha North Reef",
+            None,
+        )
+
+    def test_a_row_with_no_name_is_named_by_its_finest_address_part(self):
+        nameless = _feature(None, city="Moalboal", state="Cebu", country="Philippines")
+
+        result = geocoding_service._normalize_photon(nameless)
+
+        assert result is not None
+        assert (result.name, result.location, result.display_name) == (
+            None,
+            "Moalboal, Philippines",
+            "Moalboal, Cebu, Philippines",
+        )
+
+    @pytest.mark.parametrize(("osm_type", "spelled"), [("N", "node"), ("W", "way"), ("R", "relation")])
+    def test_the_osm_identity_is_spelled_as_the_catalog_spells_it(self, osm_type: str, spelled: str):
+        result = geocoding_service._normalize_photon(_feature("Monad Shoal", osm=(osm_type, 6215139685)))
+
+        assert result is not None
+        assert (result.source, result.source_id) == ("osm", f"{spelled}/6215139685")
+
+    @pytest.mark.parametrize(
+        "identity",
+        [
+            {"osm_type": "X", "osm_id": 1},
+            {"osm_type": ["N"], "osm_id": 1},
+            {"osm_type": "N", "osm_id": "6215139685"},
+            {"osm_type": "N", "osm_id": True},
+            {"osm_type": "N", "osm_id": 0},
+            {"osm_type": "N", "osm_id": 10**70},
+        ],
+    )
+    def test_an_identity_it_cannot_read_costs_the_row_nothing_but_its_source(self, identity: dict):
+        result = geocoding_service._normalize_photon(_feature("Monad Shoal", **identity))
+
+        assert result is not None
+        assert (result.location, result.source, result.source_id) == ("Monad Shoal", None, None)
+
+    def test_every_label_is_bounded(self):
+        verbose = _feature("n" * 400, district="d" * 400, state="s" * 400, country="c" * 400)
+
+        result = geocoding_service._normalize_photon(verbose)
+
+        assert result is not None
+        assert (len(result.name or ""), len(result.location), len(result.display_name)) == (255, 255, 512)
+        assert (len(result.country or ""), len(result.region or "")) == (255, 255)
+
+    @pytest.mark.parametrize(
+        "geometry",
+        [
+            None,
+            {"type": "Point"},
+            {"type": "Point", "coordinates": [34.5]},
+            {"type": "Point", "coordinates": [34.5, 95.0]},
+            {"type": "Point", "coordinates": ["east", "north"]},
+            {"type": "Polygon", "coordinates": [[[34.5, 28.5], [34.6, 28.5], [34.6, 28.6], [34.5, 28.5]]]},
+        ],
+    )
+    def test_drops_a_row_with_no_usable_position(self, geometry: Any):
+        assert geocoding_service._normalize_photon({**MONAD_SHOAL, "geometry": geometry}) is None
+
+    def test_drops_a_row_with_nothing_to_show(self):
+        assert geocoding_service._normalize_photon(_feature(None)) is None
+
+
+class TestSearchSwitches:
+    """`GEOCODER_URL=""` switches geocoding off, search included; `GEOCODER_SEARCH_URL=""`
+    switches off search alone. Neither asks anyone, caches anything, or serves an answer
+    cached before the switch was thrown."""
+
+    def test_an_empty_search_url_asks_nothing(self, client: TestClient, fake_redis: FakeRedis, monkeypatch: Any):
+        monkeypatch.setattr(settings, "GEOCODER_SEARCH_URL", "")
+
+        with _providers(search=_photon(KO_TAO)) as provider:
+            response = _search(client, "ko tao")
+
+        assert response.status_code == 200
+        assert response.json() == []
+        assert provider.requests == []
+        assert fake_redis.store == {}
+
+    def test_an_empty_search_url_still_names_pins(self, client: TestClient, no_redis: None, monkeypatch: Any):
+        monkeypatch.setattr(settings, "GEOCODER_SEARCH_URL", "")
+
+        with _providers(search=_photon(KO_TAO)) as provider:
+            body = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372}).json()
+
+        assert body["location"] == "Dahab, Egypt"
+        assert [request.url.path for request in provider.requests] == ["/reverse"]
+
+    @pytest.mark.parametrize("switch", ["GEOCODER_URL", "GEOCODER_SEARCH_URL"])
+    def test_a_switch_thrown_after_an_answer_was_cached_serves_nothing(
+        self, client: TestClient, fake_redis: FakeRedis, monkeypatch: Any, switch: str
+    ):
+        """The search key carries `GEOCODER_SEARCH_URL`'s hash and not `GEOCODER_URL`'s, so
+        this is what proves the switch is read before the cache rather than only on the way
+        to the provider."""
+        with _providers(search=_photon(KO_TAO)) as provider:
+            first = _search(client, "ko tao")
+            monkeypatch.setattr(settings, switch, "")
+            second = _search(client, "ko tao")
+
+        assert [row["name"] for row in first.json()] == ["Ko Tao"]
+        assert second.json() == []
+        assert len(provider.requests) == 1
+
+
+def _refused_connection(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("connection refused", request=request)
+
+
+def _timed_out(request: httpx.Request) -> httpx.Response:
+    raise httpx.ReadTimeout("too slow", request=request)
+
+
+def _oversized(request: httpx.Request) -> httpx.Response:
+    padding = "x" * 1000
+    return httpx.Response(200, json=_photon(*(_feature(padding, osm=("N", n)) for n in range(1, 1000))))
+
+
+class TestSearchCouldNotAsk:
+    """Only a 200 whose body is a GeoJSON FeatureCollection is Photon answering. Everything
+    else - including the HTML 404, the 504 and the refused connection its public instance
+    uses to signal a block, where another service would send a 429 - is "could not ask":
+    an empty answer, nothing cached, and one log line that never carries the search."""
+
+    @pytest.mark.parametrize(
+        "handler",
+        [
+            pytest.param(lambda request: httpx.Response(400, json={"message": "unknown parameter"}), id="400"),
+            pytest.param(lambda request: httpx.Response(404, text="<html>404 Not Found</html>"), id="html-404"),
+            pytest.param(lambda request: httpx.Response(504, text="<html>504 Gateway Time-out</html>"), id="504"),
+            pytest.param(lambda request: httpx.Response(201, json=_photon(KO_TAO)), id="201"),
+            pytest.param(_refused_connection, id="refused"),
+            pytest.param(_timed_out, id="timeout"),
+            pytest.param(_oversized, id="oversized"),
+            pytest.param(lambda request: httpx.Response(200, text="<html>maintenance</html>"), id="html-200"),
+            pytest.param(lambda request: httpx.Response(200, json=[KO_TAO]), id="bare-list"),
+            pytest.param(lambda request: httpx.Response(200, json=KO_TAO), id="one-feature"),
+            pytest.param(lambda request: httpx.Response(200, json={"type": "FeatureCollection"}), id="no-features"),
+            pytest.param(
+                lambda request: httpx.Response(200, json={"type": "FeatureCollection", "features": {}}),
+                id="features-not-a-list",
+            ),
+        ],
+    )
+    def test_answers_nothing_caches_nothing_and_logs_once(
+        self, client: TestClient, fake_redis: FakeRedis, caplog: Any, handler: Callable[[httpx.Request], httpx.Response]
+    ):
+        with caplog.at_level(logging.WARNING), _transport(handler):
+            response = _search(client, "Secret   Reef")
+
+        assert response.status_code == 200
+        assert response.json() == []
+        assert fake_redis.store == {}
+        assert len([record for record in caplog.records if record.name == geocoding_service.logger.name]) == 1
+        assert "secret" not in caplog.text.casefold()
+
+    def test_a_host_that_misses_the_deadline(self, client: TestClient, fake_redis: FakeRedis, monkeypatch: Any):
+        """The per-read timeout never trips on a host that dribbles bytes; the deadline does."""
+        monkeypatch.setattr(geocoding_service, "_DEADLINE_SECONDS", 0.01)
+
+        async def dribbling(request: httpx.Request) -> httpx.Response:
+            await anyio.sleep(1)
+            return httpx.Response(200, json=_photon(KO_TAO))
+
+        with _Provider(dribbling):
+            response = _search(client, "ko tao")
+
+        assert response.json() == []
+        assert fake_redis.store == {}

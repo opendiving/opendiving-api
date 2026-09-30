@@ -52,7 +52,7 @@ class TestEnforceRateLimit:
         """`incr` and `expire` are two round trips, so a Redis blip between them leaves a
         key that counts up forever and never expires - and from then on this limit rejects
         every request until someone deletes the key by hand. The lowest-limit callers are
-        the most exposed: `geocode:provider` is 1 request per 1 second.
+        the most exposed: each `geocode:provider:*` counter is 1 request per 1 second.
         """
         with patch("src.app.core.utils.rate_limit.cache") as mock_cache:
             mock_cache.client.incr = AsyncMock(return_value=4)
