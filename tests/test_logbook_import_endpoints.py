@@ -17,6 +17,7 @@ and a token for other bytes - are indistinguishable from a successful import if 
 check is dropped.
 """
 
+import hashlib
 import io
 import json
 import threading
@@ -49,8 +50,9 @@ from src.app.schemas.logbook_import import (
 )
 from src.app.services.logbook_import import batch as batch_module
 from src.app.services.logbook_import import batch_digest, reader
+from src.app.services.logbook_import import parts as import_parts
 from src.app.services.logbook_import.writer import WrittenImport
-from tests.helpers.import_parts import part_of
+from tests.helpers.import_parts import import_request, multipart, part_of
 
 PREVIEW_PATH = "/api/v1/import/logbook/preview"
 APPLY_PATH = "/api/v1/import/logbook"
@@ -880,3 +882,177 @@ class TestApply:
         assert "invalidate_trip_caches" in called
         assert "invalidate_contact_caches" in called
         assert len(called) == 7
+
+
+class TestManyFiles:
+    """The request: `file` once per file, read by the route itself under its own bounds."""
+
+    def test_several_files_are_one_import_with_a_row_each(self, signed_in: Any, client: TestClient) -> None:
+        response = client.post(
+            PREVIEW_PATH,
+            files=[
+                ("file", ("a.uddf", io.BytesIO(_uddf("dive-1")), "application/octet-stream")),
+                ("file", ("b.ssrf", io.BytesIO(SSRF), "application/octet-stream")),
+                ("file", ("notes.csv", io.BytesIO(NOT_A_LOGBOOK), "text/csv")),
+            ],
+        )
+
+        assert response.status_code == 200
+        rows = {row["name"]: row for row in response.json()["members"]}
+        assert {name: row["part"] for name, row in rows.items()} == {"a.uddf": 0, "b.ssrf": 1, "notes.csv": 2}
+        assert rows["notes.csv"]["refusal"] and rows["a.uddf"]["refusal"] is None
+        assert (rows["a.uddf"]["kept"], rows["b.ssrf"]["kept"]) == (True, True)
+
+    def test_a_request_with_no_file_is_the_missing_field(self, signed_in: Any, client: TestClient) -> None:
+        response = client.post(PREVIEW_PATH, data={"something": "else"})
+
+        assert response.status_code == 422
+        assert [error["loc"] for error in response.json()["detail"]] == [["body", "file"]]
+
+    def test_an_apply_with_no_token_is_the_missing_field(self, signed_in: Any, client: TestClient) -> None:
+        response = client.post(APPLY_PATH, files=_files())
+
+        assert response.status_code == 422
+        assert [error["loc"] for error in response.json()["detail"]] == [["body", "token"]]
+
+    def test_more_files_than_one_import_carries_is_413(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(import_parts, "MAX_PARTS", 2)
+        files = [("file", (f"{n}.divejson", io.BytesIO(MINIMAL), "application/json")) for n in range(3)]
+
+        response = client.post(PREVIEW_PATH, files=files)
+
+        assert response.status_code == 413
+        assert "Zip them" in response.json()["detail"]
+
+    def test_a_request_past_what_one_import_carries_is_413(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """Every part counts as it streams, refused ones included."""
+        monkeypatch.setattr(reader, "MAX_ARCHIVE_SIZE", len(MINIMAL) + 10)
+        files = [("file", (f"{n}.divejson", io.BytesIO(MINIMAL), "application/json")) for n in range(2)]
+
+        response = client.post(PREVIEW_PATH, files=files)
+
+        assert response.status_code == 413
+        assert "Import it in parts" in response.json()["detail"]
+
+    def test_a_file_past_a_document_s_size_is_a_refused_row_and_the_rest_reads(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", len(MINIMAL))
+        big = MINIMAL[:-1] + b" " * 64 + b"}"
+        files = [
+            ("file", ("small.divejson", io.BytesIO(MINIMAL), "application/json")),
+            ("file", ("big.divejson", io.BytesIO(big), "application/json")),
+        ]
+
+        response = client.post(PREVIEW_PATH, files=files)
+
+        assert response.status_code == 200
+        rows = {row["name"]: row for row in response.json()["members"]}
+        assert rows["big.divejson"]["refusal"] and "may be up to" in rows["big.divejson"]["refusal"]
+        assert rows["big.divejson"]["byte_size"] == len(big)
+        assert rows["big.divejson"]["sha256"] == hashlib.sha256(big).hexdigest()
+        assert rows["small.divejson"]["format"] == "divejson"
+
+
+class TestTheTokenCoversTheBatch:
+    FILES = [("a.uddf", _uddf("dive-1")), ("b.ssrf", SSRF)]
+
+    @staticmethod
+    def _multipart(files: list[tuple[str, bytes]]) -> list[tuple[str, tuple[str, Any, str]]]:
+        return [("file", (name, io.BytesIO(data), "application/octet-stream")) for name, data in files]
+
+    def _previewed(self, client: TestClient) -> str:
+        return client.post(PREVIEW_PATH, files=self._multipart(self.FILES)).json()["token"]
+
+    def test_the_same_files_in_another_order_import(self, signed_in: Any, client: TestClient) -> None:
+        token = self._previewed(client)
+
+        response = client.post(APPLY_PATH, files=self._multipart(self.FILES[::-1]), data={"token": token})
+
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize(
+        "sent",
+        [FILES[:1], [*FILES, ("c.uddf", _uddf("dive-3"))], [("renamed.uddf", _uddf("dive-1")), FILES[1]]],
+        ids=["a file fewer", "a file more", "a file renamed"],
+    )
+    def test_a_set_that_differs_is_refused(
+        self, signed_in: Any, client: TestClient, sent: list[tuple[str, bytes]]
+    ) -> None:
+        token = self._previewed(client)
+
+        response = client.post(APPLY_PATH, files=self._multipart(sent), data={"token": token})
+
+        assert response.status_code == 422
+        assert "previewed" in response.json()["detail"]
+
+
+class TestTheBodyIsReadAfterTheCaller:
+    @pytest.mark.asyncio
+    async def test_a_request_with_no_session_is_refused_without_its_body_being_read(self, import_app: Any) -> None:
+        body, content_type = multipart([("big.zip", b"x" * 1024)])
+        received: list[Any] = []
+        sent: list[dict[str, Any]] = []
+
+        async def receive() -> dict[str, Any]:
+            received.append(True)
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": PREVIEW_PATH,
+            "raw_path": PREVIEW_PATH.encode(),
+            "root_path": "",
+            "query_string": b"",
+            "headers": [(b"content-type", content_type.encode()), (b"host", b"testserver")],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        }
+
+        await import_app(scope, receive, send)
+
+        assert next(message for message in sent if message["type"] == "http.response.start")["status"] == 401
+        assert received == []
+
+
+class TestWhatARequestHolds:
+    @pytest.mark.asyncio
+    async def test_the_parts_in_memory_never_pass_one_spool_threshold(self, monkeypatch: Any) -> None:
+        """However many parts, the bytes held in memory stay under one threshold: a part that
+        would take them past it rolls onto disk first."""
+        monkeypatch.setattr(import_parts, "SPOOL_THRESHOLD", 100)
+        files = [(f"{n}.bin", bytes([n]) * 60) for n in range(4)]
+
+        with await import_parts.read_import_request(import_request(files)) as body:
+            in_memory = [part for part in body.parts if part.spool is not None and not part.spool._rolled]  # type: ignore[attr-defined]
+            assert sum(part.size for part in in_memory) <= 100
+            assert [part.size for part in body.parts] == [60] * 4
+            for part, (_, data) in zip(body.parts, files, strict=True):
+                assert part.spool is not None and part.spool.read() == data
+                assert part.sha256 == hashlib.sha256(data).hexdigest()
+
+
+class TestTheDocument:
+    def test_both_bodies_are_described(self, import_app: Any) -> None:
+        document = import_app.openapi()
+        preview = document["paths"][PREVIEW_PATH]["post"]["requestBody"]["content"]["multipart/form-data"]["schema"]
+        apply = document["paths"][APPLY_PATH]["post"]["requestBody"]["content"]["multipart/form-data"]["schema"]
+
+        assert preview["properties"]["file"]["type"] == "array"
+        assert preview["required"] == ["file"]
+        assert set(apply["properties"]) == {"file", "token", "check_in_details", "portrait"}
+        assert apply["required"] == ["file", "token"]
+        submission = apply["properties"]["check_in_details"]["anyOf"][0]["contentSchema"]
+        assert "$ref" not in json.dumps(submission)
+        assert set(submission["properties"]) == {"born_on", "phone", "emergency_contact", "insurance"}

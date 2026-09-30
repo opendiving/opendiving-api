@@ -4473,7 +4473,8 @@ class TestTheAgencyVocabulary:
 
 
 class TestTheFormatLabelTable:
-    """`FORMAT_LABELS` and `FORMAT_CONTENT_TYPES` name every id `divejson.read_formats()` returns.
+    """`FORMAT_LABELS`, `FORMAT_CONTENT_TYPES` and `FORMAT_KINDS` name every id
+    `divejson.read_formats()` returns.
 
     The one guard in this repository that can see a **new reader** arrive. Everything else
     on both sides of the seam is written to tolerate an unknown format - the accepted set is
@@ -4506,12 +4507,22 @@ class TestTheFormatLabelTable:
             "`FORMAT_CONTENT_TYPES` in `services/dive_reader.py`."
         )
 
+    def test_every_read_format_is_a_logbook_s_or_a_computer_s(self) -> None:
+        """Whether its files are a diver's logbook or one computer's recording, which decides
+        where an import reads them and so whose dive a second computer's recording joins."""
+        unsorted = [fmt for fmt in divejson.read_formats() if fmt not in dive_reader.FORMAT_KINDS]
+
+        assert not unsorted, (
+            f"`divejson` reads a format this build does not say is a logbook's or a computer's: {unsorted}. Add it "
+            "to `FORMAT_KINDS` in `services/dive_reader.py`."
+        )
+
     def test_no_label_outlives_its_format(self) -> None:
         """The mirror, and it is not symmetry for its own sake: a label for a format the
         library has dropped is a format this build advertises and refuses."""
         stale = [
             fmt
-            for table in (dive_reader.FORMAT_LABELS, dive_reader.FORMAT_CONTENT_TYPES)
+            for table in (dive_reader.FORMAT_LABELS, dive_reader.FORMAT_CONTENT_TYPES, dive_reader.FORMAT_KINDS)
             for fmt in table
             if fmt not in divejson.read_formats()
         ]
