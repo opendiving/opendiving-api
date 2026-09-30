@@ -12,6 +12,7 @@ Suunto app JSON `tests/helpers/dive_files.py` writes for a second computer.
 
 import hashlib
 import io
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -34,9 +35,14 @@ from src.app.models.user import User
 from src.app.schemas.dive_mixture import DiveMixtureCreate
 from src.app.services import blob_store
 from src.app.services.dive_files import StoredRecordingFile, delete_dive_file, store_recording_file
-from src.app.services.dive_profiles import READER_VERSION, backfill_profiles, get_profile_version
+from src.app.services.dive_profiles import (
+    READER_VERSION,
+    backfill_profiles,
+    get_gas_attribution_for_dives,
+    get_profile_version,
+)
 from src.app.services.dive_reader import read_prefill
-from src.app.services.dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS
+from src.app.services.dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS, make_primary
 from src.app.services.logbook_import import plan_import, write_import
 from tests.conftest import db_available
 from tests.helpers.dive_files import suunto_json
@@ -328,6 +334,31 @@ class TestEveryPathThatStoresAnExtractionLabels:
 
         assert [label for _, label in await _cylinders(async_db, dive)] == [0]
         assert _pressure_labels(await _profile(async_db, stored.recording_id)) == [0]
+
+
+class TestASecondComputersAttributionIsMappedWithItsChannels:
+    @pytest.mark.asyncio
+    async def test_its_time_on_gas_names_the_dives_cylinder_once_it_is_promoted(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """`gas_attribution` is keyed by `gas_number` as the channels are, and a promotion
+        rewrites neither, so the second computer's own `0` would become the dive's figure -
+        naming the 21 % tank for time breathed off the 49 %."""
+        switching = json.loads(SECOND_COMPUTER)
+        switching["DeviceLog"]["Samples"][0]["Events"] = [{"GasSwitch": {"GasNumber": 1}}]
+        primary = _fixture("suunto-d5.json")
+        await _save_the_form(async_db, dive, primary)
+        await _attach(async_db, diver, dive, primary)
+        second = await _attach(async_db, diver, dive, json.dumps(switching).encode())
+        profile = await _profile(async_db, second.recording_id)
+        assert _pressure_labels(profile) == _switch_labels(profile) == [1]
+        assert [entry["gas_number"] for entry in profile.gas_attribution or []] == [1]
+
+        await make_primary(async_db, recording_id=second.recording_id, dive_id=dive.id)
+        await async_db.commit()
+
+        attribution = await get_gas_attribution_for_dives(async_db, dive_ids=[dive.id])
+        assert [entry.gas_number for entry in attribution[dive.id].entries] == [1]
 
 
 class TestTheBackfillRelabels:
