@@ -944,15 +944,15 @@ class TestDiveSiteGeography:
     async def test_the_element_carries_the_localitys_name_and_loses_the_rest_of_the_place(self, schema, monkeypatch):
         """`geographyType` has one text slot and `divejson-py` reads it back into
         `location.name`, so the name is what goes in it: a document round-tripping through
-        that reader comes back with the place it went out with. The fuller name, the
-        locality's own centre and its box have no slot at all - and the coordinates that
-        *are* written are the site's pin, which is the confusion §6.10 forbids.
+        that reader comes back with the place it went out with. The locality's own centre
+        and its box have no slot at all - and the coordinates that *are* written are the
+        site's pin, which is the confusion §6.10 forbids.
         """
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         schema.validate(document)
         geography = self._site(_tree(document), 0).find(f"{UDDF}geography")
 
-        assert "Ras Muhammad National Park" not in ET.tostring(geography, encoding="unicode")
+        assert _text(geography, f"{UDDF}location") == "Ras Mohammed, Egypt"
         # 27.7333/34.25 is the locality's centre; 27.7278/34.2564 is the site's own pin.
         assert (_text(geography, f"{UDDF}latitude"), _text(geography, f"{UDDF}longitude")) == ("27.7278", "34.2564")
 

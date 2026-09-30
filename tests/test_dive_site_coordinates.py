@@ -306,7 +306,6 @@ def _expected_locality() -> LocationRead:
     """The place `TestTheSummaryLoaders._row` carries, nested as a read returns it."""
     return LocationRead(
         name="Dahab, Egypt",
-        full_name="Dahab, South Sinai, Egypt",
         latitude=28.4949,
         longitude=34.5136,
         bbox_south=28.4,
@@ -349,7 +348,6 @@ class TestTheSummaryLoaders:
             # above: the two are different facts, and a loader that fed one from the other
             # would pass every assertion here if they agreed.
             "location_name": "Dahab, Egypt",
-            "location_full_name": "Dahab, South Sinai, Egypt",
             "location_latitude": 28.4949,
             "location_longitude": 34.5136,
             "location_bbox_south": 28.4,
@@ -393,7 +391,7 @@ class TestTheSummaryLoaders:
         left alone. `location`, `latitude` and `longitude` all default, so a new field
         alongside them reads back absent rather than raising anywhere.
 
-        The locality is one field over eight columns, so the two sets are compared with it
+        The locality is one field over several columns, so the two sets are compared with it
         expanded - which is also what catches a column of the place going missing from the
         tuple while the schema goes on promising the whole object.
         """

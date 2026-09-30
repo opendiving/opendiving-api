@@ -83,7 +83,6 @@ from .user import (
 _NAME_MAX = 255
 _LABEL_MAX = 120
 _SHORT_MAX = 64
-_FULL_NAME_MAX = 512
 _QID_MAX = 32
 _SHA256_LENGTH = 64
 # §6.4b's own bounds on a device's members, and the widths of `dive_recording`'s columns.
@@ -436,7 +435,6 @@ class ImportLocation(_ReadModel):
     """
 
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    full_name: Annotated[str | None, Field(default=None, max_length=_FULL_NAME_MAX)]
     position: ImportPosition | None = None
     bbox: ImportBoundingBox | None = None
 

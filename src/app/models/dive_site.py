@@ -1,4 +1,4 @@
-from sqlalchemy import Float, ForeignKey, Index, String, Text, func
+from sqlalchemy import Column, Float, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -23,7 +23,6 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
     # not take the second for the first. `location_name` is what says whether there is a
     # locality at all.
     location_name: Mapped[str | None] = mapped_column(String(255), default=None)
-    location_full_name: Mapped[str | None] = mapped_column(String(512), default=None)
     location_latitude: Mapped[float | None] = mapped_column(Float, default=None)
     location_longitude: Mapped[float | None] = mapped_column(Float, default=None)
     location_bbox_south: Mapped[float | None] = mapped_column(Float, default=None)
@@ -31,10 +30,15 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
     location_bbox_west: Mapped[float | None] = mapped_column(Float, default=None)
     location_bbox_east: Mapped[float | None] = mapped_column(Float, default=None)
 
+    __mapper_args__ = {"exclude_properties": ["location_full_name"]}
+
     @declared_attr.directive
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
+            # Unmapped, and dropped a deploy later: DECISIONS.md, "A column the serving build
+            # maps is dropped a deploy after it is unmapped".
+            Column("location_full_name", String(512), nullable=True),
             # Case-insensitive uniqueness per user on (name, locality name). COALESCE maps
             # a NULL locality to '' so two sites with the same name and no locality are
             # also considered duplicates. The key is the locality's *name* and none of its

@@ -80,7 +80,8 @@ class CatalogSite:
 
     `country_code` never leaves this module. It is the stable key the file is built on; what
     a client gets is the English display name. Writing `EG` into a place's `name`, whose own
-    schema example is `Dahab, Egypt`, is the mistake it exists to make impossible.
+    schema example is `Dahab, South Sinai, Egypt`, is the mistake it exists to make
+    impossible.
     """
 
     name: str

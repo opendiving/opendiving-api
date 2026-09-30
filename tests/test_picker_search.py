@@ -4,16 +4,18 @@
 `core/utils/owned_resource_cache.py`).
 
 Like the other suites here these cover the pure-logic pieces - the `LIKE` escaping, the
-shape of the search `WHERE` clause, and the cache keys - rather than the endpoints on
-top of a live Postgres/Redis, which are exercised by hand (see DECISIONS.md).
+shape of the search `WHERE` clause and of what it selects, and the cache keys - rather than
+the endpoints on top of a live Postgres/Redis, which are exercised by hand (see
+DECISIONS.md).
 """
 
 import ast
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import ColumnElement, inspect, select
 from sqlalchemy.dialects import postgresql
 
 from src.app.api.v1.contacts import _contact_cache
@@ -23,7 +25,7 @@ from src.app.api.v1.gear_items import GEAR_ITEM_SEARCH_COLUMNS
 from src.app.api.v1.trips import _trip_cache
 from src.app.core.utils.owned_resource_cache import OwnedResourceCache
 from src.app.core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE, clamp_pagination
-from src.app.core.utils.search import escape_like, search_clause
+from src.app.core.utils.search import escape_like, search_clause, search_multi
 from src.app.crud.crud_contacts import CONTACT_SEARCH_COLUMNS
 from src.app.crud.crud_courses import COURSE_SEARCH_COLUMNS
 from src.app.crud.crud_gear_items import crud_gear_items
@@ -128,8 +130,7 @@ class TestOwnedResourceSearchConditions:
         assert (
             "dive_site.user_id = 42 "
             "AND (dive_site.name ILIKE '%dahab%' ESCAPE '\\\\' "
-            "OR dive_site.location_name ILIKE '%dahab%' ESCAPE '\\\\' "
-            "OR dive_site.location_full_name ILIKE '%dahab%' ESCAPE '\\\\')" in sql
+            "OR dive_site.location_name ILIKE '%dahab%' ESCAPE '\\\\')" in sql
         )
 
     def test_trips_are_scoped_the_same_way(self) -> None:
@@ -139,6 +140,46 @@ class TestOwnedResourceSearchConditions:
         # The ownership scope is the only one left - both models are hard-deleted, so
         # there is no liveness clause for the OR to leak past.
         assert "is_deleted" not in sql
+
+
+class TestTheSearchedListSelectsTheMappersColumns:
+    """`search_multi` builds its own `select()`, so what it names is what the table has to
+    hold on the day it runs. A column kept on the table after it leaves the mapper is one the
+    next deploy drops, and a statement over the table's columns would then fail every
+    uncached search until that deploy's build was serving."""
+
+    @staticmethod
+    async def _statement(model: Any) -> Any:
+        """The `select()` `search_multi` hands to the session, captured rather than run."""
+        result = MagicMock()
+        result.mappings.return_value.all.return_value = []
+        db = MagicMock()
+        db.scalar = AsyncMock(return_value=0)
+        db.execute = AsyncMock(return_value=result)
+        await search_multi(db=db, model=model, conditions=(), sort_column="name", sort_order="asc", offset=0, limit=10)
+        return db.execute.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_a_column_the_mapper_excludes_is_not_selected(self) -> None:
+        statement = await self._statement(DiveSite)
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+
+        assert "location_full_name" in DiveSite.__table__.c
+        assert "location_full_name" not in sql
+        assert {column.key for column in statement.selected_columns} == {
+            column.key for column in inspect(DiveSite).columns
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model", [GearItem, Contact])
+    async def test_a_table_the_mapper_covers_is_selected_whole(self, model: Any) -> None:
+        """The other two models `search_multi` serves map every column, so for them the
+        mapper's set is the table's and nothing they return moves."""
+        statement = await self._statement(model)
+
+        assert {column.key for column in statement.selected_columns} == {
+            column.key for column in model.__table__.columns
+        }
 
 
 class TestListCacheKeys:

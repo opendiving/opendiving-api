@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls
 from .location import (
-    LOCATION_FULL_NAME_MAX,
     LOCATION_NAME_MAX,
     Latitude,
     LocationInput,
@@ -21,7 +20,7 @@ class DiveSiteBase(BaseModel):
 
     The locality is split out because the wire nests it and the table does not: a
     `DiveSiteRead` carries one `location` object, while `DiveSiteReadInternal` mirrors the
-    eight `location_*` columns behind it so FastCRUD can select them by name.
+    `location_*` columns behind it so FastCRUD can select them by name.
     """
 
     name: Annotated[str, Field(min_length=1, max_length=255, examples=["Blue Hole"])]
@@ -45,7 +44,6 @@ class DiveSiteLocationColumns(BaseModel):
     """
 
     location_name: Annotated[str | None, Field(default=None, max_length=LOCATION_NAME_MAX)]
-    location_full_name: Annotated[str | None, Field(default=None, max_length=LOCATION_FULL_NAME_MAX)]
     location_latitude: Latitude
     location_longitude: Longitude
     location_bbox_south: Annotated[float | None, Field(default=None, ge=-90, le=90)]
@@ -180,8 +178,8 @@ class DiveSiteSuggestion(BaseModel):
 
     **There is no country code here, and that is deliberate.** The catalog carries one
     internally as its stable key, but the field a client writes this into is a place's own
-    `name`, an ordinary text input whose example is `Dahab, Egypt`; putting `EG` on the wire
-    invites it into a Location field or a menu hint, which is wrong on both.
+    `name`, an ordinary text input whose example is `Dahab, South Sinai, Egypt`; putting `EG`
+    on the wire invites it into a Location field or a menu hint, which is wrong on both.
 
     **There is no distance either**, for a reason that is a decision rather than an omission.
     The endpoint ranks by distance when it is given a position, but the web client already

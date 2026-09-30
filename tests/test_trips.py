@@ -93,7 +93,6 @@ USER_UUID = uuid7()
 
 MOALBOAL = {
     "name": "Moalboal, Philippines",
-    "full_name": "Moalboal, Cebu, Philippines",
     "latitude": 9.94,
     "longitude": 123.39,
     "bbox_south": 9.89,
@@ -155,7 +154,7 @@ class TestLocationInput:
         blocks the diver from recording where they went."""
         location = LocationInput.model_validate({"name": "Uncle Bert's house reef"})
 
-        assert (location.latitude, location.longitude, location.full_name) == (None, None, None)
+        assert (location.latitude, location.longitude) == (None, None)
 
     @pytest.mark.parametrize(
         ("body", "message"),
@@ -179,11 +178,13 @@ class TestLocationInput:
 
         assert (location.bbox_west, location.bbox_east) == (179.9, -179.9)
 
-    def test_refuses_a_field_the_api_does_not_have(self) -> None:
+    @pytest.mark.parametrize("extra", [{"osm_id": 12345}, {"full_name": "Moalboal, Cebu, Philippines"}])
+    def test_refuses_a_field_the_api_does_not_have(self, extra: dict[str, Any]) -> None:
         """`extra="forbid"`, so a client sending the geocoder's raw row is told rather
-        than having the half it does not recognize dropped on the floor."""
+        than having the half it does not recognize dropped on the floor. A place has one
+        name, so a second one is refused the same way."""
         with pytest.raises(ValidationError, match="extra_forbidden"):
-            LocationInput.model_validate({**MOALBOAL, "osm_id": 12345})
+            LocationInput.model_validate({**MOALBOAL, **extra})
 
 
 class TestTripPartInput:
@@ -667,8 +668,6 @@ class TestSearchConditions:
         assert "trip.name ILIKE '%moalboal%'" in sql
         assert "EXISTS" in sql
         assert "trip_part.name ILIKE '%moalboal%'" in sql
-        # The fuller name too, so "cebu" finds a trip whose places stop at the country.
-        assert "trip_part.full_name ILIKE '%moalboal%'" in sql
 
     def test_the_exists_is_correlated_to_the_trip_being_matched(self) -> None:
         """Without the correlation every trip matches as soon as *any* trip in the table
@@ -692,7 +691,7 @@ class TestSearchConditions:
 
         # The rendered literal doubles each backslash; what matters is that the `%` the
         # diver typed arrives escaped rather than as a live wildcard, under an `ESCAPE`.
-        assert sql.count(f"'%50{'\\' * 2}%%' ESCAPE") == 3
+        assert sql.count(f"'%50{'\\' * 2}%%' ESCAPE") == 2
 
 
 @pytest.fixture
@@ -918,11 +917,7 @@ class TestSearchAgainstPostgres:
         await replace_parts_for_trip(
             db=async_db,
             trip_id=went.id,
-            parts=[
-                TripPartInput(
-                    location=LocationInput(name=f"Moalboal {tag}", full_name=f"Moalboal, Cebu, Philippines {tag}")
-                )
-            ],
+            parts=[TripPartInput(location=LocationInput(name=f"Moalboal {tag}, Cebu, Philippines"))],
         )
         return went.name, stayed.name
 
@@ -936,16 +931,17 @@ class TestSearchAgainstPostgres:
         assert await self._matching_names(async_db, diver.id, f"moalboal {tag}") == [went]
 
     @pytest.mark.asyncio
-    async def test_the_fuller_name_matches_too(
+    async def test_a_region_in_the_name_matches(
         self, async_db: AsyncSession, diver: User, _seeded: tuple[str, str]
     ) -> None:
-        """ "philippines" has to find a trip whose places are all named after towns - the
-        member nothing renders is still the one a diver may remember.
+        """A picked place is named through its region, so the region a diver remembers
+        finds the trip by its part's name - "cebu, philippines" rather than "cebu", which
+        the trip's own name holds too. The diver is this test's own, so the term needs no
+        tag to keep other rows out.
         """
         went, _ = _seeded
-        tag = went.rsplit(" ", 1)[-1]
 
-        assert await self._matching_names(async_db, diver.id, f"philippines {tag}") == [went]
+        assert await self._matching_names(async_db, diver.id, "cebu, philippines") == [went]
 
     @pytest.mark.asyncio
     async def test_another_divers_trips_are_never_matched(

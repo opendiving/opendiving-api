@@ -156,17 +156,17 @@ add filters, related uuids and mixtures. New simple owned resources use `OwnedRe
 
 `GET /dive-sites`, `GET /trips` and `GET /gear-items` take `search=`, a case-insensitive substring
 match, with `items_per_page` capped at 100 by `clamp_pagination` (`DEFAULT_MAX_ITEMS_PER_PAGE`).
-Sites match `name` and both of the locality's text columns (`DIVE_SITE_SEARCH_COLUMNS`), trips their
-own name and both of their parts'; gear matches `name` and `brand`, not `type` — `type` is a closed
-vocabulary with its own filter, and "reg" would match every regulator. `core/utils/search.py` builds
-the `select()` by hand: FastCRUD's `__ilike` filters AND together and `__or` groups operators on one
-column, not columns. It selects `model.__table__.columns`, so rows are dicts like the unsearched
-path. `escape_like()` escapes `\`, `%`, `_` in that order, paired with
-`.ilike(pattern, escape="\\")`. `search` is appended to the list cache key after
-`user_{id}_{resource}:page_{n}:items_per_page:{n}`, so the `user_{id}_{resource}:*` wildcard still
-purges it; routes lowercase and strip the term first. A resource without `search_columns` passes no
-`search` kwarg, or `@cache` would `KeyError`. Gear calls `search_clause`/`search_multi` directly,
-not through `OwnedResourceCache`.
+Sites match `name` and the locality's name (`DIVE_SITE_SEARCH_COLUMNS`), trips their own name and
+their parts'; gear matches `name` and `brand`, not `type` — `type` is a closed vocabulary with its
+own filter, and "reg" would match every regulator. `core/utils/search.py` builds the `select()` by
+hand: FastCRUD's `__ilike` filters AND together and `__or` groups operators on one column, not
+columns. It selects the mapper's columns, as `get_multi` does, so rows are dicts like the unsearched
+path and a column kept on the table after leaving the mapper is never read. `escape_like()` escapes
+`\`, `%`, `_` in that order, paired with `.ilike(pattern, escape="\\")`. `search` is appended to the
+list cache key after `user_{id}_{resource}:page_{n}:items_per_page:{n}`, so the
+`user_{id}_{resource}:*` wildcard still purges it; routes lowercase and strip the term first. A
+resource without `search_columns` passes no `search` kwarg, or `@cache` would `KeyError`. Gear calls
+`search_clause`/`search_multi` directly, not through `OwnedResourceCache`.
 
 ## Resource routes are flat, `/...` + explicit ids, never `/{username}/...`
 
@@ -6744,14 +6744,14 @@ query plan says otherwise should add it and say so.
 ## A place is one object, stored flat, and the index keys on its name
 
 A dive site's locality and a trip part's place are one thing — DiveJSON §6.9's Location: `name` (the
-place as a person writes it, "Dahab, Egypt"), `full_name` (the fullest form a lookup returned), a
-centre and a box. `schemas/location.py` holds the one validator both hosts use. Storage is flat,
-bare on `trip_part` and under `location_` on `dive_site`, because a site carries its own pin as well
-and the two positions must not read alike. `ux_dive_site_user_id_name_location_lower` keys on
-`location_name` alone: a place is identified by what it is called, so two sites in "Dahab, Egypt"
-collide whether or not a geocoder filled a centre in for one of them. *Rejected:* a nested JSON
-column, which no functional index and no `ilike` picker search can reach; and keying on the name
-plus a rounded position, which collapses to the name for almost every row.
+place as a person writes it, "Dahab, South Sinai, Egypt"), a centre and a box. `schemas/location.py`
+holds the one validator both hosts use. Storage is flat, bare on `trip_part` and under `location_`
+on `dive_site`, because a site carries its own pin as well and the two positions must not read
+alike. `ux_dive_site_user_id_name_location_lower` keys on `location_name` alone: a place is
+identified by what it is called, so two sites in "Dahab, Egypt" collide whether or not a geocoder
+filled a centre in for one of them. *Rejected:* a nested JSON column, which no functional index and
+no `ilike` picker search can reach; and keying on the name plus a rounded position, which collapses
+to the name for almost every row.
 
 ## The dive-site location contract changes without a write shim
 

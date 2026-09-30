@@ -3,10 +3,10 @@
 The member used to be a string. It is now `schemas/location.py`'s object on both hosts, so
 what needs pinning here is the half a schema cannot state on its own:
 
-- **What reaches the columns.** The wire nests one `location`; the table holds eight
+- **What reaches the columns.** The wire nests one `location`; the table holds it in
   prefixed columns beside the site's own pin. A write that only mapped the name would drop
-  a picked locality's fuller name, its centre and its box on every edit of an existing
-  site, and the migration behind it has no rollback.
+  a picked locality's centre and its box on every edit of an existing site, and the
+  migration behind it has no rollback.
 - **That a write replaces the place whole.** It is a value object with no identity, so
   there is nothing to merge a partial one into - and clearing it has to stay possible,
   because that is how a site entered with the wrong place is corrected.
@@ -48,10 +48,9 @@ from tests.conftest import db_available
 
 USER_UUID = uuid7()
 
-# A place a geocoder answered for in full: both names, its own centre, its own box.
+# A place a geocoder answered for in full: its name, its own centre, its own box.
 DAHAB = {
     "name": "Dahab, Egypt",
-    "full_name": "Dahab, South Sinai Governorate, Egypt",
     "latitude": 28.4949,
     "longitude": 34.5136,
     "bbox_south": 28.44,
@@ -65,7 +64,7 @@ BLUE_HOLE = (28.5717, 34.5372)
 
 
 def _columns() -> dict[str, Any]:
-    """`DAHAB` as the eight columns behind it."""
+    """`DAHAB` as the columns behind it."""
     return {f"{DIVE_SITE_LOCATION_PREFIX}{field}": DAHAB[field] for field in LOCATION_FIELDS}
 
 
@@ -82,7 +81,7 @@ class TestWhatTheWireCarries:
         site = DiveSiteCreate.model_validate({"name": "Blue Hole", "location": {"name": "Uncle Bert's reef"}})
 
         assert site.location is not None
-        assert (site.location.full_name, site.location.latitude, site.location.bbox_south) == (None, None, None)
+        assert (site.location.latitude, site.location.bbox_south) == (None, None)
 
     def test_a_site_with_no_place_omits_the_member(self) -> None:
         assert DiveSiteCreate.model_validate({"name": "Blue Hole"}).location is None
@@ -328,7 +327,6 @@ class TestUniquenessAgainstPostgres:
                 name=name,
                 notes="",
                 location_name="Dahab, Egypt",
-                location_full_name="Dahab, South Sinai Governorate, Egypt",
                 location_latitude=28.4949,
                 location_longitude=34.5136,
                 location_bbox_south=28.44,

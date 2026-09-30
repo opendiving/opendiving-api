@@ -448,9 +448,8 @@ class ExportLocation(BaseModel):
     with the point because it is what the geocoder said the place *covers*, and a reader
     redrawing the map wants the region rather than a pin in the middle of a country.
 
-    `name` is the place as a person writes it, and the only name written: the geocoder names
-    a place through its region, so the fuller form the format also allows would say nothing
-    a reader uses.
+    `name` is the place as a person writes it, and a place's only name: the geocoder names a
+    place through its region, so a second, fuller form would say nothing a reader uses.
     """
 
     name: str

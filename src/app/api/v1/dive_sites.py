@@ -40,14 +40,12 @@ router = APIRouter(tags=["dive-sites"])
 # What `GET /dive-sites?search=` matches against. A diver with hundreds of logged sites
 # can't usefully scroll them, so the dive form's picker narrows the list server-side as you
 # type. The locality is searched alongside the name because that's how people remember
-# sites they haven't dived in a while ("that wall in Dahab") - see DECISIONS.md. Both of
-# its text members are in: the fuller one is never rendered, but a diver typing the
-# governorate they remember should still reach the site.
+# sites they haven't dived in a while ("that wall in Dahab") - see DECISIONS.md.
 #
 # Named rather than inlined, on `COURSE_SEARCH_COLUMNS`' precedent: `test_picker_search.py`
 # asserts these columns exist on the model, and a second spelling of the tuple is a second
 # thing to keep true.
-DIVE_SITE_SEARCH_COLUMNS = ("name", "location_name", "location_full_name")
+DIVE_SITE_SEARCH_COLUMNS = ("name", "location_name")
 
 
 async def _get_owned_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
@@ -107,9 +105,9 @@ async def write_dive_site(
     name in a different place is allowed; a genuine repeat is a 422. `latitude` and
     `longitude` are one value: send both or neither, since half a pair is a 422 as well.
 
-    `location` is the whole place - the name it is known by, the fuller form a lookup
-    returned, the locality's own centre and its extent - and every member but the name is
-    optional, so a locality the diver typed is a name and nothing else. Its position is the
+    `location` is the whole place - the name it is known by, the locality's own centre and
+    its extent - and every member but the name is optional, so a locality the diver typed
+    is a name and nothing else. Its position is the
     *place's*, never the site's: filling it from the site's own pin would claim the town
     sits exactly where the marker was dropped.
     """
