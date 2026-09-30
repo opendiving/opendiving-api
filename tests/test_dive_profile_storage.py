@@ -11,7 +11,8 @@ is a list of objects rather than an integer, so the round trip is worth a test o
 `backfill_profiles`' candidate selection is here for the neighbouring reason: the criterion
 lives in a `WHERE` clause, so a mocked session could only assert the SQL that was written
 rather than the rows it comes back with - which is exactly the difference that let the
-digest term go missing.
+digest term go missing. So is the choice of which recording's `depth_silhouette` a list row
+carries, which is a `DISTINCT ON` ordered by ordinal.
 
 Same skip-if-unreachable guard and same write-real-rows-and-leave-them convention as
 `test_dive_check_constraints.py`; see the note there.
@@ -26,18 +27,22 @@ from sqlalchemy.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+from src.app.api.v1 import dives as dives_module
 from src.app.models.dive import Dive
 from src.app.models.dive_file import DiveFile
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
-from src.app.schemas.dive_profile import GasAttribution
+from src.app.schemas.dive import DiveListSort
+from src.app.schemas.dive_profile import DepthSilhouette, GasAttribution
 from src.app.services.dive_profiles import (
     READER_VERSION,
     NormalizedProfile,
     ProfileSeries,
     backfill_profiles,
+    get_depth_silhouettes_for_dives,
     get_gas_attribution_for_dives,
+    replace_profile_samples,
     store_profile,
 )
 from tests.conftest import db_available
@@ -250,3 +255,117 @@ class TestTheBackfillSeesAReaderThatMoved:
             selected.append((await backfill_profiles(async_db, dry_run=True)).failed - current)
 
         assert selected == [1, 1]
+
+
+async def _store(async_db: AsyncSession, recording: DiveRecording, profile: NormalizedProfile) -> None:
+    await store_profile(
+        async_db,
+        recording_id=recording.id,
+        dive_id=recording.dive_id,
+        profile=profile,
+        source_sha256="d" * 64,
+        parser_key="suunto_json",
+        reader_version=READER_VERSION,
+        commit=True,
+    )
+
+
+def _second_recording(db: Session, dive: Dive, ordinal: int) -> DiveRecording:
+    row = DiveRecording(dive_id=dive.id, user_id=dive.user_id, ordinal=ordinal, start_time=dive.start_time)
+    db.add(row)
+    db.commit()
+    return row
+
+
+class TestTheDepthSilhouette:
+    @pytest.mark.asyncio
+    async def test_what_is_stored_is_what_the_list_reads(
+        self, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        await _store(async_db, recording, NormalizedProfile(depth=ProfileSeries(t=[0, 3200], v=[0, 3200])))
+
+        silhouettes = await get_depth_silhouettes_for_dives(async_db, dive_ids=[dive.id])
+
+        # A straight descent, one reading at each end: every slice between them is the line.
+        assert silhouettes[dive.id] == DepthSilhouette(span=3200, values=[round(i * 3200 / 63) for i in range(64)])
+
+    @pytest.mark.asyncio
+    async def test_it_is_the_first_recording_by_ordinal_that_has_a_profile(
+        self, db: Session, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        """The recording the dive page charts, which a primary with no samples is not."""
+        second, third = _second_recording(db, dive, 1), _second_recording(db, dive, 2)
+        await _store(async_db, third, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 900])))
+        await _store(async_db, second, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 1800])))
+
+        before = await get_depth_silhouettes_for_dives(async_db, dive_ids=[dive.id])
+        await _store(async_db, recording, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 2700])))
+        after = await get_depth_silhouettes_for_dives(async_db, dive_ids=[dive.id])
+
+        assert max(before[dive.id].values) == 1800
+        assert max(after[dive.id].values) == 2700
+
+    @pytest.mark.asyncio
+    async def test_a_charted_profile_with_no_depth_curve_has_none(
+        self, db: Session, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        """No falling through to a later recording's: the card draws what the dive page does."""
+        await _store(async_db, recording, NormalizedProfile(temperature=ProfileSeries(t=[0, 100], v=[219, 218])))
+        await _store(
+            async_db, _second_recording(db, dive, 1), NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 900]))
+        )
+
+        db.rollback()  # end the fixture's transaction, so this read sees the writes above
+        stored = db.execute(
+            select(DiveProfile.depth_silhouette).where(DiveProfile.recording_id == recording.id)
+        ).scalar_one()
+
+        assert stored is None
+        assert await get_depth_silhouettes_for_dives(async_db, dive_ids=[dive.id]) == {}
+
+    @pytest.mark.asyncio
+    async def test_a_rewrite_of_the_samples_rewrites_it(
+        self, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        await _store(async_db, recording, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 900])))
+
+        await replace_profile_samples(
+            async_db, recording_id=recording.id, profile=NormalizedProfile(depth=ProfileSeries(t=[0, 200], v=[0, 1500]))
+        )
+        await async_db.commit()
+        silhouettes = await get_depth_silhouettes_for_dives(async_db, dive_ids=[dive.id])
+
+        assert (silhouettes[dive.id].span, max(silhouettes[dive.id].values)) == (200, 1500)
+
+    @pytest.mark.asyncio
+    async def test_the_dive_list_serves_it_on_each_row(
+        self, db: Session, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        owner = db.get(User, dive.user_id)
+        assert owner is not None
+        hand_logged = Dive(user_id=owner.id, dive_number=2, start_time=datetime.now(UTC), duration=1800, notes="")
+        db.add(hand_logged)
+        db.commit()
+        await _store(async_db, recording, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 900])))
+
+        page = await dives_module._cached_read_dives.__wrapped__(  # type: ignore[attr-defined]
+            request=None,
+            user_id=owner.id,
+            user_uuid=owner.uuid,
+            db=async_db,
+            page=1,
+            items_per_page=10,
+            trip_id=None,
+            course_id=None,
+            dive_site_id=None,
+            gear_item_id=None,
+            species_id=None,
+            person_id=None,
+            tag_id=None,
+            dive_type=None,
+            sort=DiveListSort.DATE,
+        )
+        rows = {row["uuid"]: row["depth_silhouette"] for row in page["data"]}
+
+        assert rows[hand_logged.uuid] is None
+        assert rows[dive.uuid] is not None and max(rows[dive.uuid]["values"]) == 900

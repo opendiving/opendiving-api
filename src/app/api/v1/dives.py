@@ -67,13 +67,13 @@ from ...models.dive import Dive
 from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
+    DiveListItem,
     DiveListSort,
     DiveMergeRequest,
     DiveMergeResult,
     DiveNeighbors,
     DiveNumberingSummary,
     DiveNumberSuggestion,
-    DiveRead,
     DiveReadInternal,
     DiveReadWithMixtures,
     DiveRenumberRequest,
@@ -89,7 +89,7 @@ from ...schemas.dive import (
     validate_depth_pair,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
-from ...schemas.dive_profile import RecordingProfileRead
+from ...schemas.dive_profile import DepthSilhouette, RecordingProfileRead
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
 from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
@@ -117,6 +117,7 @@ from ...services.dive_neighbors import find_dive_neighbors
 from ...services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
 from ...services.dive_profiles import (
     ProfileGasAttribution,
+    get_depth_silhouettes_for_dives,
     get_gas_attribution_for_dives,
     get_profile_version,
     load_profile,
@@ -390,11 +391,12 @@ def _to_public_dive(
     contact_uuid: uuid_pkg.UUID | None,
     dive_sites: list[DiveSiteInfo],
     gear_items: list[GearItemInfo],
-) -> DiveRead:
-    """Convert an internal dive representation (integer FKs) into its public shape
+    depth_silhouette: DepthSilhouette | None,
+) -> DiveListItem:
+    """Convert an internal dive representation (integer FKs) into its public list-row shape
     (owning user, trip, training course and contact referenced by `uuid`)."""
     data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
-    return DiveRead(
+    return DiveListItem(
         **{k: v for k, v in data.items() if k not in _INTERNAL_KEYS},
         user_uuid=user_uuid,
         trip_uuid=trip_uuid,
@@ -402,6 +404,7 @@ def _to_public_dive(
         contact_uuid=contact_uuid,
         dive_sites=dive_sites,
         gear_items=gear_items,
+        depth_silhouette=depth_silhouette,
     )
 
 
@@ -826,8 +829,8 @@ async def _cached_read_dives(
         sort=sort,
     )
 
-    # Enrich each dive with its dive site(s), gear and trip/course/contact uuids via batched
-    # lookups.
+    # Enrich each dive with its dive site(s), gear, trip/course/contact uuids and depth
+    # silhouette via batched lookups.
     dive_ids = [d["id"] for d in dives_data["data"]]
     sites_by_dive = await get_dive_sites_for_dives(db=db, dive_ids=dive_ids)
     gear_by_dive = await get_gear_items_for_dives(db=db, dive_ids=dive_ids)
@@ -838,6 +841,7 @@ async def _cached_read_dives(
     contact_uuid_by_id = await get_contact_uuids_by_ids(
         db=db, contact_ids=[d["contact_id"] for d in dives_data["data"]], user_id=user_id
     )
+    silhouette_by_dive = await get_depth_silhouettes_for_dives(db, dive_ids=dive_ids)
 
     dives_data["data"] = [
         _to_public_dive(
@@ -848,6 +852,7 @@ async def _cached_read_dives(
             contact_uuid=contact_uuid_by_id.get(dive["contact_id"]),
             dive_sites=sites_by_dive.get(dive["id"], []),
             gear_items=gear_by_dive.get(dive["id"], []),
+            depth_silhouette=silhouette_by_dive.get(dive["id"]),
         ).model_dump()
         for dive in dives_data["data"]
     ]
@@ -856,7 +861,7 @@ async def _cached_read_dives(
     return response
 
 
-@router.get("/dives", response_model=PaginatedListResponse[DiveRead])
+@router.get("/dives", response_model=PaginatedListResponse[DiveListItem])
 async def read_dives(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -879,8 +884,8 @@ async def read_dives(
         ),
     ] = DiveListSort.DATE,
 ) -> dict:
-    """List the caller's dives, each with its trip, course, sites and gear - newest first, or
-    by rating.
+    """List the caller's dives, each with its trip, course, sites, gear and depth silhouette -
+    newest first, or by rating.
 
     The `trip_uuid`, `course_uuid`, `dive_site_uuid`, `gear_item_uuid`, `species_uuid`,
     `person_uuid`, `tag_uuid` and `type` filters are combinable, and a uuid naming something
