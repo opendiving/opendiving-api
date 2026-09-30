@@ -4,14 +4,12 @@ before any of it, read the way that writer meant it (`reader.read_as_written`).
 """
 
 import copy
-import io
 import json
 import uuid as uuid_pkg
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from fastapi import UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -22,10 +20,11 @@ from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.schemas.logbook_import import ImportNoteCode
-from src.app.services.logbook_import import load_import, plan_import, write_import
+from src.app.services.logbook_import import plan_import, write_import
 from src.app.services.logbook_import.reader import read_as_written
 from tests.conftest import db_available
 from tests.helpers.generators import create_user
+from tests.helpers.import_parts import load_one
 
 _DIVE_UUID = "019f0000-0000-7000-8000-00000000d1e0"
 
@@ -204,12 +203,8 @@ class TestReadAsWritten:
 pytestmark_db = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 
-def _upload(data: bytes, filename: str = "logbook.divejson") -> UploadFile:
-    return UploadFile(file=io.BytesIO(data), filename=filename, size=len(data))
-
-
 async def _apply(db: AsyncSession, user_id: int, data: bytes, filename: str = "logbook.divejson") -> Any:
-    with await load_import(_upload(data, filename)) as loaded:
+    with await load_one(data, filename) as loaded:
         plan = await plan_import(db, user_id=user_id, loaded=loaded, resolution_ran=True)
         await write_import(db, user_id=user_id, loaded=loaded, plan=plan)
         await db.commit()

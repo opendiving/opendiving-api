@@ -690,9 +690,11 @@ def _convert_file(source: Source, *, digest: str, name: str, claimed: str, size:
     except (UnsupportedImportError, MalformedImportError) as exc:
         logger.exception("A converted document did not survive this app's own envelope check")
         raise MalformedImportError(_CONVERTER_BUG) from exc
-    if not document.dives:
+    if _records_nothing(document):
         # A run the same watch recorded, say: the reader reads the file and finds no dive in
-        # it, and a file that brings nothing is one the diver should hear about by name.
+        # it, and a file that brings nothing is one the diver should hear about by name. A
+        # logbook with no dive that still names its diver or holds other records - this app's
+        # own UDDF export of an account with no dives - imports what it holds.
         raise MalformedImportError("This file records no dive, so there is nothing in it to import.")
 
     fmt = _converted_from(conversion.document, claimed) or claimed
@@ -703,6 +705,9 @@ def _convert_file(source: Source, *, digest: str, name: str, claimed: str, size:
         conversion=_renamed(conversion, digest, name),
         source_format=fmt,
     )
+    if not document.dives:
+        # A logbook of other records alone: no dive to keep the file on.
+        return loaded
     if len(document.dives) > 1:
         loaded.not_kept = ImportMemberNotKept.SEVERAL_DIVES
     elif len(document.dives[0].recordings) > 1:
@@ -728,6 +733,11 @@ def _convert_file(source: Source, *, digest: str, name: str, claimed: str, size:
         )
         loaded._read_kept = lambda: _read_all(source)
     return loaded
+
+
+def _records_nothing(document: ImportDocument) -> bool:
+    """No dive, no other record and no diver: what a converted activity that is not a dive is."""
+    return document.diver is None and not any(value for _, value in document if isinstance(value, list))
 
 
 def _named(exc: Exception, digest: str, name: str) -> str:

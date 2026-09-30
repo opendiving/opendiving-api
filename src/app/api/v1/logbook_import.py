@@ -308,7 +308,6 @@ async def preview_logbook_import(
     await _enforce_import_limit(current_user["id"])
     with await _read(request) as body, await _load(body.parts) as batch:
         report = await import_batch(db, user_id=current_user["id"], batch=batch, apply=False)
-        portrait = report.portrait_plan
         return ImportPreview(
             format=report.first.format,
             version=report.first.version,
@@ -316,7 +315,7 @@ async def preview_logbook_import(
             archive=report.archive,
             token=create_logbook_import_token(user_uuid=current_user["uuid"], sha256=batch_digest(body.parts)),
             check_in_details=report.check_in_details,
-            portrait=None if portrait is None else await portrait.portrait_offer(),
+            portrait=report.portrait,
             **_report(report),
         )
 

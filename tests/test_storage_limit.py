@@ -50,6 +50,7 @@ from src.app.services.dive_files import KEY_KIND as DIVE_FILE_KIND
 from src.app.services.dive_files import store_recording_file
 from src.app.services.export import load_export_bundle
 from src.app.services.export.archive import DIVEJSON_NAME, write_archive
+from src.app.services.logbook_import import batch_digest
 from src.app.services.storage_usage import format_size, get_storage_usage
 from src.app.services.user_pictures import (
     AVATAR_FRAME,
@@ -61,6 +62,7 @@ from src.app.services.user_pictures import (
 from tests.conftest import db_available
 from tests.helpers.generators import create_certification, create_dive, create_species, create_user
 from tests.helpers.images import phone_jpeg, plain_png
+from tests.helpers.import_parts import import_request, part_of
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -160,22 +162,25 @@ async def _archive_of(async_db: AsyncSession, user: User) -> bytes:
         buffer.close()
 
 
-async def _preview(async_db: AsyncSession, user: User, archive: bytes) -> Any:
+async def _preview(async_db: AsyncSession, user: User, archive: bytes, filename: str = "logbook.zip") -> Any:
     return await import_routes.preview_logbook_import(
-        current_user=_caller(user), db=async_db, file=_upload(archive, "logbook.zip")
+        request=import_request([(filename, archive)]), current_user=_caller(user), db=async_db
     )
 
 
 async def _apply(
-    async_db: AsyncSession, user: User, archive: bytes, portrait: ImportPortraitChoice | None = None
+    async_db: AsyncSession,
+    user: User,
+    archive: bytes,
+    portrait: ImportPortraitChoice | None = None,
+    filename: str = "logbook.zip",
 ) -> Any:
+    token = create_logbook_import_token(user_uuid=user.uuid, sha256=batch_digest([part_of(archive, filename)]))
+    fields: dict[str, Any] = {"token": token}
+    if portrait is not None:
+        fields["portrait"] = portrait.model_dump()
     return await import_routes.apply_logbook_import(
-        current_user=_caller(user),
-        db=async_db,
-        file=_upload(archive, "logbook.zip"),
-        token=create_logbook_import_token(user_uuid=user.uuid, sha256=hashlib.sha256(archive).hexdigest()),
-        check_in_details=None,
-        portrait=portrait,
+        request=import_request([(filename, archive)], fields), current_user=_caller(user), db=async_db
     )
 
 

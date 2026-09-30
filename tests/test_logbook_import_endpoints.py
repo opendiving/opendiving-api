@@ -17,7 +17,6 @@ and a token for other bytes - are indistinguishable from a successful import if 
 check is dropped.
 """
 
-import hashlib
 import io
 import json
 import threading
@@ -48,7 +47,10 @@ from src.app.schemas.logbook_import import (
     ImportInsuranceDetail,
     ImportPortraitOffer,
 )
-from src.app.services.logbook_import import reader
+from src.app.services.logbook_import import batch as batch_module
+from src.app.services.logbook_import import batch_digest, reader
+from src.app.services.logbook_import.writer import WrittenImport
+from tests.helpers.import_parts import part_of
 
 PREVIEW_PATH = "/api/v1/import/logbook/preview"
 APPLY_PATH = "/api/v1/import/logbook"
@@ -161,10 +163,12 @@ def signed_in(import_app: Any, monkeypatch: Any) -> Any:
             files_restored=0,
             files_not_contained=0,
             files_skipped=0,
+            kept=loaded.kept is not None,
+            not_kept=loaded.not_kept,
         )
 
-    async def fake_write(db: Any, **kwargs: Any) -> None:
-        return None
+    async def fake_write(db: Any, **kwargs: Any) -> WrittenImport:
+        return WrittenImport(dive_ids={}, match_files=[])
 
     async def fake_resolve(db: Any, **kwargs: Any) -> frozenset[int]:
         return frozenset()
@@ -173,8 +177,11 @@ def signed_in(import_app: Any, monkeypatch: Any) -> Any:
         return None
 
     monkeypatch.setattr(import_route, "enforce_rate_limit", no_limit)
-    monkeypatch.setattr(import_route, "plan_import", fake_plan)
-    monkeypatch.setattr(import_route, "write_import", fake_write)
+    # A file kept as itself is checked against the storage limit, which reads the database
+    # stubbed out here; `test_storage_limit.py` has the limit against a real one.
+    monkeypatch.setattr(settings, "STORAGE_LIMIT_MB", None)
+    monkeypatch.setattr(batch_module, "plan_import", fake_plan)
+    monkeypatch.setattr(batch_module, "write_import", fake_write)
     monkeypatch.setattr(import_route, "resolve_catalog_gaps", fake_resolve)
     for name in (
         "invalidate_dive_caches",
@@ -223,7 +230,7 @@ class TestPreview:
     def test_it_carries_the_planner_s_check_in_section(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
-        stub = import_route.plan_import
+        stub = batch_module.plan_import
 
         async def plan_with_a_section(db: Any, **kwargs: Any) -> Any:
             plan = await stub(db, **kwargs)
@@ -236,7 +243,7 @@ class TestPreview:
             ]
             return plan
 
-        monkeypatch.setattr(import_route, "plan_import", plan_with_a_section)
+        monkeypatch.setattr(batch_module, "plan_import", plan_with_a_section)
 
         body = client.post(PREVIEW_PATH, files=_files()).json()
 
@@ -332,31 +339,30 @@ class TestTheFormatsItAccepts:
         assert response.status_code == 200
         assert response.json()["conversion"]["format"] == "uddf"
 
-    def test_a_zip_of_one_format_is_one_logbook(self, signed_in: Any, client: TestClient) -> None:
-        """A watch writes one file per dive, so an account export is a zip of them. Two
-        uploads per import against a rate limit of twenty an hour would otherwise cap a
-        diver at ten dives an hour."""
+    def test_a_zip_is_opened_and_each_of_its_files_read(self, signed_in: Any, client: TestClient) -> None:
+        """A watch writes one file per dive, so an account export is a zip of them. Its files
+        join the import as files of their own, each read alone and each a row."""
         payload = _zip({"dive-1.uddf": _uddf("dive-1"), "dive-2.uddf": _uddf("dive-2", "2026-04-18T09:30:00")})
         response = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip"))
 
         assert response.status_code == 200
         body = response.json()
         assert body["conversion"]["format"] == "uddf"
-        # Not the app's own export archive: the converter emits no stored files at all, so
-        # nothing in this upload could put a binary back.
+        assert [row["name"] for row in body["members"]] == ["dive-1.uddf", "dive-2.uddf", "watch-export.zip"]
+        # Not the app's own export archive, which is the one container that restores the
+        # files its document names.
         assert body["archive"] is False
 
     def test_a_zip_of_files_no_reader_claims_is_415_naming_the_formats(
         self, signed_in: Any, client: TestClient
     ) -> None:
+        """Every file of the zip is a row refused on its own, so the import answers as the
+        first of them would alone."""
         payload = _zip({"a.txt": NOT_A_LOGBOOK, "b.txt": NOT_A_LOGBOOK})
         response = client.post(PREVIEW_PATH, files=_files(payload, "notes.zip"))
 
         assert response.status_code == 415
-        # The converter's own sentence for this case carries the registry's names, so this
-        # is the one 415 whose list is spelled in format ids rather than in labels.
-        detail = response.json()["detail"]
-        assert all(fmt in detail for fmt in divejson.read_formats())
+        assert reader.formats_this_build_reads() in response.json()["detail"]
 
     def test_a_zip_holding_only_packaging_is_415(self, signed_in: Any, client: TestClient) -> None:
         """A folder zipped on a Mac with nothing in it: a directory entry and the `__MACOSX`
@@ -379,13 +385,20 @@ class TestTheFormatsItAccepts:
         assert response.status_code == 415
         assert "not a logbook this app can read" in response.json()["detail"]
 
-    def test_a_zip_mixing_two_formats_is_415(self, signed_in: Any, client: TestClient) -> None:
-        """An archive is one logbook, so its files have to be one format - otherwise the
-        positional identities of two readers' records would share one document."""
+    def test_a_zip_mixing_two_formats_is_opened_and_each_file_read(self, signed_in: Any, client: TestClient) -> None:
+        """A zip is opened and its files join the import one by one, so two formats in one zip
+        are two files read by two readers - the package's own rule, that an archive is one
+        logbook of one format, is never asked."""
         response = client.post(PREVIEW_PATH, files=_files(_zip({"a.uddf": _uddf(), "b.ssrf": SSRF}), "mixed.zip"))
 
-        assert response.status_code == 415
-        assert "one format" in response.json()["detail"]
+        assert response.status_code == 200
+        body = response.json()
+        rows = {row["name"]: row for row in body["members"]}
+        assert rows["mixed.zip"]["format"] == "zip" and rows["mixed.zip"]["opened"] == 2
+        assert (rows["a.uddf"]["format"], rows["b.ssrf"]["format"]) == ("uddf", "ssrf")
+        zip_index = body["members"].index(rows["mixed.zip"])
+        assert rows["a.uddf"]["container"] == rows["b.ssrf"]["container"] == zip_index
+        assert body["conversion"]["format"] == "mixed"
 
     def test_a_file_no_reader_claims_is_415_naming_the_formats(self, signed_in: Any, client: TestClient) -> None:
         """A 415 rather than the 422 it used to get. "This DiveJSON document is not valid
@@ -477,36 +490,32 @@ class TestTheFormatsItAccepts:
 
     def test_the_size_it_reports_is_rounded_up(self, signed_in: Any, client: TestClient, monkeypatch: Any) -> None:
         """Floored, an archive a byte over the cap reports the cap back at itself - "holds
-        100 MB, and at most 100 MB are converted" - which reads as a refusal for no reason.
-        `_spool_upload` already rounds its own figure up."""
+        100 MB, and at most 100 MB are converted" - which reads as a refusal for no reason."""
         monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", 1024 * 1024)
-        payload = _zip({"dive-1.uddf": _uddf(), "pad.uddf": b"x" * (1024 * 1024)})
+        payload = _zip({"dive-1.uddf": _uddf(), "pad.uddf": _uddf("dive-2") + b" " * (1024 * 1024)})
 
         detail = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip")).json()["detail"]
 
         assert "holds 2 MB" in detail
         assert "at most 1 MB" in detail
 
-    def test_the_sum_is_checked_before_a_member_is_read(
+    def test_the_sum_is_checked_before_a_file_is_converted(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
-        """Off the directory, so a member that could not be inflated at all is still refused
-        by size rather than by failing to read."""
+        """Off the zip's directory and each file's head, so an import too large to plan costs
+        no conversion: every file is read whole only once the batch is known to fit."""
         payload = _zip({"dive-1.uddf": _uddf("dive-1"), "dive-2.uddf": _uddf("dive-2")})
-        read_calls: list[str] = []
-        opened = zipfile.ZipFile.open
+        converted: list[Any] = []
 
-        def record(self: Any, name: Any, *args: Any, **kwargs: Any) -> Any:
-            read_calls.append(str(name))
-            return opened(self, name, *args, **kwargs)
+        def record(wrapper: Any) -> Any:
+            converted.append(wrapper)
+            raise AssertionError("converted before the batch was bounded")
 
-        # Patched only now: `_zip` writes through the same method, so patching any earlier
-        # records the test building its own fixture.
         monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", 100)
-        monkeypatch.setattr(zipfile.ZipFile, "open", record)
+        monkeypatch.setattr(reader, "_convert", record)
 
         assert client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip")).status_code == 413
-        assert read_calls == []
+        assert converted == []
 
 
 class TestWhereTheConversionRuns:
@@ -518,26 +527,26 @@ class TestWhereTheConversionRuns:
         times over. Inline in an `async def` one upload stalls every other request on the
         worker.
 
-        Asserted against the thread the *rest* of `load_import` runs on rather than against
-        the main thread: `TestClient` drives the app from a portal thread of its own, so
-        "not the main thread" would pass even with the hop removed.
+        Asserted against the thread the import's report is assembled on - the event loop's -
+        rather than against the main thread: `TestClient` drives the app from a portal thread
+        of its own, so "not the main thread" would pass even with the hop removed.
         """
-        digest, convert = reader._digest, reader._convert
+        report, convert = batch_module.conversion_report, reader._convert
         seen: dict[str, str] = {}
 
-        def record_spool(buffer: Any) -> Any:
-            seen["spool"] = threading.current_thread().name
-            return digest(buffer)
+        def record_report(loaded: Any) -> Any:
+            seen["loop"] = threading.current_thread().name
+            return report(loaded)
 
-        def record_convert(buffer: Any, *, source_format: str | None) -> Any:
+        def record_convert(wrapper: Any) -> Any:
             seen["convert"] = threading.current_thread().name
-            return convert(buffer, source_format=source_format)
+            return convert(wrapper)
 
-        monkeypatch.setattr(reader, "_digest", record_spool)
+        monkeypatch.setattr(batch_module, "conversion_report", record_report)
         monkeypatch.setattr(reader, "_convert", record_convert)
 
         assert client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).status_code == 200
-        assert seen["convert"] != seen["spool"]
+        assert seen["convert"] != seen["loop"]
 
 
 class TestWhenTheConversionFails:
@@ -562,7 +571,7 @@ class TestWhenTheConversionFails:
         """`SourceTooLargeError` is not the container's alone: the FIT reader raises it for
         one file past a hundred thousand messages, and there is nothing to split there."""
 
-        def refuse(buffer: Any, *, source_format: str | None) -> Any:
+        def refuse(wrapper: Any) -> Any:
             raise divejson.SourceTooLargeError("this FIT file holds more than 100,000 messages")
 
         monkeypatch.setattr(reader, "_convert", refuse)
@@ -592,7 +601,7 @@ class TestWhenTheConversionFails:
         """A bug in the converter rather than anything wrong with the file, so the message
         says so and the traceback goes to the log where somebody can act on it."""
 
-        def refuse(buffer: Any, *, source_format: str | None) -> Any:
+        def refuse(wrapper: Any) -> Any:
             raise divejson.NonConformingOutputError(
                 [divejson.Issue("$", "something the writer should not have emitted")]
             )
@@ -609,7 +618,7 @@ class TestWhenTheConversionFails:
         """The second backstop: the library validated its output against the format and this
         app's own envelope still refused it. Also not a 500."""
 
-        def wrong_shape(buffer: Any, *, source_format: str | None) -> Any:
+        def wrong_shape(wrapper: Any) -> Any:
             return divejson.Conversion({"format": "uddf", "version": "3.2.2"}, ())
 
         monkeypatch.setattr(reader, "_convert", wrong_shape)
@@ -645,8 +654,8 @@ class TestTheConversionReport:
         """
         convert = reader._convert
 
-        def with_an_unknown_kind(buffer: Any, *, source_format: str | None) -> Any:
-            conversion = convert(buffer, source_format=source_format)
+        def with_an_unknown_kind(wrapper: Any) -> Any:
+            conversion = convert(wrapper)
             invented = divejson.Note("dive/0", "a kind this build has never seen", "time-shifted")  # type: ignore[arg-type]
             return divejson.Conversion(conversion.document, (*conversion.notes, invented))
 
@@ -664,8 +673,8 @@ class TestTheConversionReport:
         live on the grouping - which is also why these are not another `ImportNoteCode`."""
         convert = reader._convert
 
-        def with_extra_findings(buffer: Any, *, source_format: str | None) -> Any:
-            conversion = convert(buffer, source_format=source_format)
+        def with_extra_findings(wrapper: Any) -> Any:
+            conversion = convert(wrapper)
             extra = tuple(divejson.Note("dive/0", f"finding {n}", "dropped") for n in range(2))
             return divejson.Conversion(conversion.document, (*conversion.notes, *extra))
 
@@ -681,10 +690,12 @@ class TestTheConversionReport:
 
 
 class TestApply:
-    def _token(self, payload: bytes = MINIMAL, user_uuid: uuid_pkg.UUID | None = None) -> str:
+    def _token(
+        self, payload: bytes = MINIMAL, user_uuid: uuid_pkg.UUID | None = None, filename: str = "logbook.divejson"
+    ) -> str:
         return create_logbook_import_token(
             user_uuid=user_uuid if user_uuid is not None else CURRENT_USER_UUID,
-            sha256=hashlib.sha256(payload).hexdigest(),
+            sha256=batch_digest([part_of(payload, filename)]),
         )
 
     def test_a_previewed_file_imports(self, signed_in: Any, client: TestClient) -> None:
@@ -700,7 +711,9 @@ class TestApply:
         names the file a diver picked - and apply converts again rather than replaying a
         stored result. The block is on the result as well as the preview because the result
         panel is what stays on screen."""
-        response = client.post(APPLY_PATH, files=_files(SSRF, "logbook.ssrf"), data={"token": self._token(SSRF)})
+        response = client.post(
+            APPLY_PATH, files=_files(SSRF, "logbook.ssrf"), data={"token": self._token(SSRF, filename="logbook.ssrf")}
+        )
 
         assert response.status_code == 200
         assert response.json()["conversion"]["format"] == "ssrf"
@@ -726,13 +739,13 @@ class TestApply:
     def _planned_check_in(self, monkeypatch: Any, argument: str = "check_in") -> list[Any]:
         """Wraps the stubbed planner to record the submission the route hands it."""
         seen: list[Any] = []
-        stub = import_route.plan_import
+        stub = batch_module.plan_import
 
         async def recording_plan(db: Any, **kwargs: Any) -> Any:
             seen.append(kwargs.get(argument))
             return await stub(db, **kwargs)
 
-        monkeypatch.setattr(import_route, "plan_import", recording_plan)
+        monkeypatch.setattr(batch_module, "plan_import", recording_plan)
         return seen
 
     def test_the_portrait_choice_reaches_the_planner(

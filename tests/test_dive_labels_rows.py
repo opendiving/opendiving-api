@@ -37,10 +37,11 @@ from src.app.services.dive_files import StoredRecordingFile, delete_dive_file, s
 from src.app.services.dive_profiles import READER_VERSION, backfill_profiles, get_profile_version
 from src.app.services.dive_reader import read_prefill
 from src.app.services.dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS
-from src.app.services.logbook_import import load_import, plan_import, write_import
+from src.app.services.logbook_import import plan_import, write_import
 from tests.conftest import db_available
 from tests.helpers.dive_files import suunto_json
 from tests.helpers.generators import create_dive, create_user
+from tests.helpers.import_parts import load_one
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -171,7 +172,7 @@ class TestTheDoorDoesNotMatter:
 
     @staticmethod
     async def _import(db: AsyncSession, diver: User, content: bytes, name: str) -> None:
-        with await load_import(UploadFile(file=io.BytesIO(content), filename=name, size=len(content))) as loaded:
+        with await load_one(content, name) as loaded:
             plan = await plan_import(db, user_id=diver.id, loaded=loaded, resolution_ran=True)
             await write_import(db, user_id=diver.id, loaded=loaded, plan=plan)
             await db.commit()

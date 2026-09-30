@@ -45,6 +45,7 @@ from ...schemas.logbook_import import (
     ImportNote,
     ImportNoteCode,
     ImportPortraitChoice,
+    ImportPortraitOffer,
     ImportSpecies,
 )
 from ..dive_recordings import DEVICE_COLUMNS
@@ -239,8 +240,8 @@ class BatchReport:
     members: list[ImportMemberReport]
     dives: list[ImportDiveReport]
     check_in_details: list[ImportCheckInDetail]
-    # The plan carrying the archive's portrait, for the preview's offer.
-    portrait_plan: ImportPlan | None
+    # The archive's portrait beside the account's, on a preview.
+    portrait: ImportPortraitOffer | None
     first: ImportDocument
     archive: bool
 
@@ -316,8 +317,14 @@ async def import_batch(
     an archive carries a portrait. The apply spends the limit on linking people as it links
     them; the preview reads it.
     """
-    limit = storage_limit_bytes()
-    used = None if limit is None else (await get_storage_usage(db, user_id=user_id)).used_bytes
+    # What the account holds before the batch writes a row, which is the figure the limit is
+    # checked against: only an archive and a file kept as itself can store anything.
+    stores = any(loaded.is_archive or loaded.kept is not None for loaded in batch.documents)
+    used = (
+        (await get_storage_usage(db, user_id=user_id)).used_bytes
+        if stores and storage_limit_bytes() is not None
+        else None
+    )
     staged = StagedFiles()
     written_dives: set[int] = set()
     dives = _Dives()
@@ -360,13 +367,21 @@ async def import_batch(
             members=_members(batch, plans),
             dives=await dives.reports(db),
             check_in_details=_check_in_details(plans),
-            portrait_plan=next((plan for plan in plans if plan.portrait is not None), None),
+            portrait=None if apply else await _portrait_offer(plans),
             first=documents[0].document,
             archive=any(loaded.is_archive for loaded in documents),
         )
     finally:
         if not apply:
             await db.rollback()
+
+
+async def _portrait_offer(plans: Sequence[ImportPlan]) -> ImportPortraitOffer | None:
+    """The archive's portrait, as the preview offers it - only an archive carries one."""
+    for plan in plans:
+        if (offer := await plan.portrait_offer()) is not None:
+            return offer
+    return None
 
 
 def _members(batch: LoadedBatch, plans: Sequence[ImportPlan]) -> list[ImportMemberReport]:

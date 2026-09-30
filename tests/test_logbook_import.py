@@ -91,7 +91,6 @@ from src.app.services.export.paths import plan_archive_paths
 from src.app.services.logbook_import import (
     ImportTooLargeError,
     UnsupportedImportError,
-    load_import,
     parse_document,
     plan_import,
     write_import,
@@ -125,6 +124,7 @@ from tests.helpers.generators import (
     create_user,
 )
 from tests.helpers.images import gif, phone_jpeg
+from tests.helpers.import_parts import load_one
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="Postgres is not reachable")
 
@@ -165,7 +165,7 @@ async def _patch_start_time(
 
 
 async def _preview(db: AsyncSession, user_id: int, data: bytes, filename: str = "logbook.divejson") -> Any:
-    with await load_import(_upload(data, filename)) as loaded:
+    with await load_one(data, filename) as loaded:
         return await plan_import(db, user_id=user_id, loaded=loaded)
 
 
@@ -183,7 +183,7 @@ async def _apply(
     species in these tests is either already in the catalog or meant to be reported as
     unresolvable. `resolution_ran=True` is what tells the planner to say so.
     """
-    with await load_import(_upload(data, filename)) as loaded:
+    with await load_one(data, filename) as loaded:
         plan = await plan_import(
             db,
             user_id=user_id,
@@ -261,7 +261,7 @@ async def _convert_and_plan(
 ) -> tuple[dict, Any]:
     """One conversion, stamped with a chosen `exported_at`, plus the plan it produces."""
     monkeypatch.setattr(import_reader, "_conversion_moment", lambda: moment)
-    with await load_import(_upload(data, "demo-account.uddf")) as loaded:
+    with await load_one(data, "demo-account.uddf") as loaded:
         assert loaded.conversion is not None
         return loaded.conversion.document, await plan_import(db, user_id=user_id, loaded=loaded)
 
@@ -1723,13 +1723,13 @@ class TestTheReaderRefusesOnlyWhatItMust:
     @pytest.mark.asyncio
     async def test_a_foreign_json_document_is_unsupported(self) -> None:
         with pytest.raises(UnsupportedImportError):
-            await load_import(_upload(b'{"format": "uddf", "version": "3.2.2"}'))
+            await load_one(b'{"format": "uddf", "version": "3.2.2"}')
 
     @pytest.mark.asyncio
     async def test_a_later_major_version_is_unsupported(self) -> None:
         raw = b'{"format": "divejson", "version": "2.0", "exported_at": "2026-01-01T00:00:00Z"}'
         with pytest.raises(UnsupportedImportError):
-            await load_import(_upload(raw))
+            await load_one(raw)
 
     @pytest.mark.asyncio
     async def test_a_later_minor_version_is_read(self, seeded: Any) -> None:
@@ -1741,7 +1741,7 @@ class TestTheReaderRefusesOnlyWhatItMust:
         parsed["dives"][0]["moon_phase"] = "waxing"
         parsed["extensions"] = {"com.example.divekit": {"mood": "great"}}
 
-        with await load_import(_upload(json.dumps(parsed).encode())) as loaded:
+        with await load_one(json.dumps(parsed).encode()) as loaded:
             assert loaded.document.version == "1.9"
             assert loaded.document.extensions == {"com.example.divekit": {"mood": "great"}}
 
@@ -1749,7 +1749,7 @@ class TestTheReaderRefusesOnlyWhatItMust:
     async def test_a_duplicate_member_is_refused(self) -> None:
         raw = b'{"format": "divejson", "version": "1.0", "exported_at": "2026-01-01T00:00:00Z", "exported_at": "x"}'
         with pytest.raises(DuplicateMemberError):
-            await load_import(_upload(raw))
+            await load_one(raw)
 
     @pytest.mark.asyncio
     async def test_members_out_of_order_are_still_read(self) -> None:
@@ -1757,16 +1757,16 @@ class TestTheReaderRefusesOnlyWhatItMust:
         enforced. A reader refusing an otherwise readable logbook over the order two
         members were written in would be doing the thing this feature exists to end."""
         raw = b'{"exported_at": "2026-01-01T00:00:00Z", "format": "divejson", "version": "1.0"}'
-        with await load_import(_upload(raw)) as loaded:
+        with await load_one(raw) as loaded:
             assert loaded.document.format == "divejson"
 
     @pytest.mark.asyncio
     async def test_a_document_past_the_cap_is_refused(self, monkeypatch: Any) -> None:
         from src.app.services.logbook_import import reader
 
-        monkeypatch.setattr(reader, "MAX_ARCHIVE_SIZE", 32)
+        monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", 32)
         with pytest.raises(ImportTooLargeError):
-            await load_import(_upload(b'{"format": "divejson", "version": "1.0"}' + b" " * 64))
+            await load_one(b'{"format": "divejson", "version": "1.0"}' + b" " * 64)
 
     @pytest.mark.asyncio
     async def test_an_archive_with_no_logbook_member_is_unsupported(self) -> None:
@@ -1774,12 +1774,12 @@ class TestTheReaderRefusesOnlyWhatItMust:
         with zipfile.ZipFile(buffer, "w") as archive:
             archive.writestr("readme.txt", "not a logbook")
         with pytest.raises(UnsupportedImportError):
-            await load_import(_upload(buffer.getvalue(), "logbook.zip"))
+            await load_one(buffer.getvalue(), "logbook.zip")
 
     @pytest.mark.asyncio
     async def test_a_broken_document_is_malformed(self) -> None:
         with pytest.raises(MalformedImportError):
-            await load_import(_upload(b'{"format": "divejson", "version": "1.0", "dives": "not a list"}'))
+            await load_one(b'{"format": "divejson", "version": "1.0", "dives": "not a list"}')
 
 
 class TestADocumentWrittenBeforeAPlaceWasAnObject:
@@ -1806,7 +1806,7 @@ class TestADocumentWrittenBeforeAPlaceWasAnObject:
     @pytest.mark.asyncio
     async def test_a_string_location_is_refused_with_its_cause_and_its_remedy(self) -> None:
         with pytest.raises(MalformedImportError) as caught:
-            await load_import(_upload(self._with_site_location("Dahab, Egypt")))
+            await load_one(self._with_site_location("Dahab, Egypt"))
 
         message = str(caught.value)
         assert "before a dive site's location became a structured place" in message
@@ -1818,9 +1818,7 @@ class TestADocumentWrittenBeforeAPlaceWasAnObject:
     async def test_the_object_form_is_read(self) -> None:
         """The other half of the claim: the refusal is about the old spelling and not about
         sites in general."""
-        loaded = await load_import(_upload(self._with_site_location({"name": "Dahab, Egypt"})))
-
-        with loaded:
+        with await load_one(self._with_site_location({"name": "Dahab, Egypt"})) as loaded:
             assert loaded.document.sites[0].location is not None
             assert loaded.document.sites[0].location.name == "Dahab, Egypt"
 
@@ -1842,9 +1840,7 @@ class TestADocumentWrittenBeforeAPlaceWasAnObject:
                 }
             ],
         }
-        loaded = await load_import(_upload(json.dumps(document).encode()))
-
-        with loaded:
+        with await load_one(json.dumps(document).encode()) as loaded:
             place = loaded.document.trips[0].parts[0].location
             assert place is not None
             assert (place.name, place.full_name) == ("Dahab", None)
@@ -3101,7 +3097,7 @@ class TestNothingInventedNothingFatal:
     @pytest.mark.asyncio
     async def test_a_null_where_a_collection_belongs_reads_as_empty(self) -> None:
         raw = b'{"format": "divejson", "version": "1.0", "exported_at": "2026-01-01T00:00:00Z", "dives": null}'
-        with await load_import(_upload(raw)) as loaded:
+        with await load_one(raw) as loaded:
             assert loaded.document.dives == []
 
 
@@ -3836,7 +3832,7 @@ class TestThePortrait:
         archive = await _archive(async_db, source.id)
         seen = await _portrait_row(async_db, destination.id)
 
-        with await load_import(_upload(archive, "logbook.zip")) as loaded:
+        with await load_one(archive, "logbook.zip") as loaded:
             plan = await plan_import(
                 async_db,
                 user_id=destination.id,
@@ -4047,7 +4043,7 @@ class TestAnArchiveThatWillNotInflate:
         archive = self._encrypt_flags(_zip_of(document, {}))
 
         with pytest.raises(MalformedImportError) as caught:
-            await load_import(_upload(archive, "logbook.zip"))
+            await load_one(archive, "logbook.zip")
 
         assert "password-protected" in str(caught.value)
 
@@ -4059,7 +4055,7 @@ class TestAnArchiveThatWillNotInflate:
             archive.writestr(DIVEJSON_NAME, document)
 
         with pytest.raises(MalformedImportError):
-            await load_import(_upload(self._break_crc(buffer.getvalue(), b'{"format"'), "logbook.zip"))
+            await load_one(self._break_crc(buffer.getvalue(), b'{"format"'), "logbook.zip")
 
     @pytest.mark.asyncio
     async def test_a_corrupt_blob_member_skips_the_file_and_keeps_the_dive(
