@@ -1197,8 +1197,9 @@ index.
 every re-derivation: a row takes the label of the file cylinder it matches by mix then order; a row
 the file does not match keeps its label unless a matched row claims it, and is then cleared. A
 sibling recording's channels and markers follow with `replace_profile_samples`, a cleared label
-moving to a fresh unused one. A later recording's cylinders map onto the dive's by the same join.
-`merge_mixture_fields` never writes a label.
+moving to a fresh unused one. A later recording's cylinders map onto the dive's by the same join,
+which at an arrival also fills the rows' blanks, and a later cylinder carrying nothing is not
+appended. `merge_mixture_fields` never writes a label.
 
 `ck_dive_mixture_gas_number_non_negative` is `>= 0`: labels start at 0.
 
@@ -1830,6 +1831,10 @@ never submit. Zod `min(0)` is rejected: it stores a cylinder breathed from 0 bar
 The guard is on the schema, not in a reader: the fact is about the field, not the format. `<= 0`
 also covers a negative gauge.
 
+The import of a converted file bands its cylinders the same way (`_plan_cylinders`), silently: a
+Shearwater UDDF writes 0 bar for every tank slot no transmitter read, and a stored 0 reads as set to
+every later fill. A DiveJSON document keeps an end of 0, which §6.3 admits as an out-of-gas ascent.
+
 ## A cylinder pressure is a bounded field, and every layer that writes one says so
 
 A `start_pressure` of 0 must never reach the database. `DiveMixtureSchema` nulls a parsed 0, but
@@ -1949,8 +1954,8 @@ flagging existing pairs `parallel`: no file says which two-cylinder dives were p
 wholesale, so a stored `id` names no parsed cylinder. Postgres does not owe insertion order after
 `backfill_tech_fields`'s `UPDATE` moves a tuple, so `crud_dive_mixtures.get_mixtures_for_dive` and
 `get_mixtures_for_dives` carry `.order_by(DiveMixture.id)`, which `replace_mixtures_for_dive` makes
-the import's position. `TestStoredMixturesAreReadInSavedOrder` pins it; `fill_mixture_fields` shares
-it.
+the import's position. `TestStoredMixturesAreReadInSavedOrder` pins it; `pair_cylinders`' positional
+fallback shares it.
 
 The `(oxygen, helium)` check is no backstop: a parsed `None` is not a mismatch, and a Suunto Ocean
 export with no `Gases` block leaves every fraction `None`, so a swap would put one cylinder's
@@ -6154,14 +6159,12 @@ Everything a file says about a recording comes from the first file that recorded
 `fill_dive_mixtures`; `git grep -n "def fill_" -- src/app/services` is the list. Rejected: later
 wins, losing corrections. Profiles fill by channel, never by sample. Fills are a `COALESCE` per
 column except `fill_start`, whose two columns hold one value (filling a NULL `utc_offset_minutes`
-also converts the stored wall clock to an instant), and `fill_dive_mixtures`, whose join is
-positional. Gate figures are the exception: every re-derivation rewrites them
-(`store_gate_figures`). The dive's scalars are the primary recording's. `fill_mixture_fields` writes
-`FILLABLE_MIXTURE_FIELDS` only where the stored row has none, sharing `merge_mixture_fields`' join;
-neither writes a label. `_fill_is_storable` drops per row a fill the `CHECK`s would refuse.
-`rederive_recording` requires `fresh` (this upload created the recording, so scalars write outright)
-and `joined` (new bytes on an existing recording; only that fills cylinders); `_repeat_upload` and
-`delete_dive_file` pass `joined=False`.
+also converts the stored wall clock to an instant), and the dive's cylinders, which fill by the
+labelling's pairs (*A dive's cylinders fill from whichever recording pairs with them*). Gate figures
+are the exception: every re-derivation rewrites them (`store_gate_figures`). The dive's scalars are
+the primary recording's. `rederive_recording` requires a `RecordingChange`: `CREATED` and `REMOVED`
+write readouts and scalars outright, `JOINED` and `REREAD` fill them; `_repeat_upload` and the
+backfill pass `REREAD`, `delete_dive_file` `REMOVED`.
 
 ## A profile has one of three provenances, and a recording need not have a file
 
@@ -6205,25 +6208,27 @@ markers all stay. Provenance is `merge`, so `should_extract` never re-extracts; 
 `duration`, `max_depth` and `dive_figures` recompute, `None` meaning leave alone; `start_time` and
 the fixes stay, `refresh_tech_scalars` uncalled; the absorbed record's readouts fill the survivor's
 blanks. An `avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write.
-`relabel_gas_numbers` precedes the join, keeping `usage`; moved profiles use
-`replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
-within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
+`relabel_gas_numbers` precedes the join, keeping `usage` and filling the survivor's blank cylinder
+members from the absorbed rows it pairs, as an arrival does, an empty absorbed row not appended;
+moved profiles use `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions
+stay, notes append within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not
+reused.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
 `_fill_recording` in the import writer writes two things that belong to the dive, not the matched
-recording: the entry and exit fixes (`fill_tech_scalars`) and cylinders (`fill_dive_mixtures`). Both
-are the primary recording's — the dive's columns come from its primary, and a second computer's
-cylinder labelling is its own numbering — and `rederive_recording` already returns before both for
-`ordinal != 0`. The readouts are the matched recording's own and are filled above that line.
+recording, when the second reading brings no file: the entry and exit fixes (`fill_tech_scalars`)
+and the blanks of the cylinders (`fill_dive_mixtures`). Both go through the primary recording alone:
+the dive's fixes come from its primary, and no check can tell a file-less second reading from a
+logbook re-imported over a value the diver cleared, so the refill it risks is confined to the
+primary. A reading that brings its file joins the recording and fills through `rederive_recording`
+on any ordinal. The readouts are the matched recording's own either way.
 
 So `PlannedRecordingMatch` carries `ordinal`: `None` on an `attach`, where no stored recording is
-named and the writer computes the slot with `next_ordinal`, and the writer returns before both
-writes for anything but ordinal 0. Otherwise a Suunto export imported as a second reading of a
-secondary recording credits the primary with the Suunto's numbers; `fill_mixture_fields`'
-`(oxygen, helium)` join guards cylinders only by accident, the fixes not at all. Required, not
-defaulted, as `PlannedRecordingMatch.mixtures` is: an empty default can leave a whole path
-unreachable unnoticed.
+named and the writer computes the slot with `next_ordinal`, and the file-less branch returns before
+both writes for anything but ordinal 0. Otherwise a Suunto document imported as a second reading of
+a secondary recording writes its positions as the dive's. Required, not defaulted, as
+`PlannedRecordingMatch.mixtures` is: an empty default can leave a whole path unreachable unnoticed.
 
 ## The profile's provenance is published as a closed enum, not as `parser_key`
 
@@ -6257,7 +6262,7 @@ supplied.
 So it takes a required `touched_primary`; `False` is a no-op. The answer cannot be read inside,
 `renumber_ordinals` having closed the gap: `delete_dive_file` uses the ordinal it reads before the
 deleting branch, `erase_dive_recording` asks `primary_recording_ids` before `delete_recording`, a
-promotion answers `True`. Required, not defaulted, like `rederive_recording`'s `fresh` and `joined`.
+promotion answers `True`. Required, not defaulted, like `rederive_recording`'s `change`.
 
 Rejected: filling instead of clearing when the primary has no files
 (`test_the_last_file_takes_its_recording_and_the_dives_readings` pins the last file taking the
@@ -6902,3 +6907,16 @@ one-member zip named by its digest, so a record with no id takes its identity fr
 of one dive and one computer's record is kept, its recording derived from its files as the form's
 is. Rejected: folding pairs in the documents before planning, a second writer; pairing by basename,
 true of the Suunto app alone.
+
+## A dive's cylinders fill from whichever recording pairs with them
+
+A blank member of a dive's cylinder takes the value of the cylinder a recording's labelling pairs
+with it (`pair_cylinders`: mix, then order), whichever recording that is. The list is the dive's,
+shared by every recording, and a blank credits no one. Rejected: only the primary fills, which
+leaves a second computer's pressures off a dive another file created.
+
+It fills at an arrival only - a recording past the first created, new bytes joining any recording, a
+merge - so a value the diver cleared survives a repeat, a deletion and a backfill. A pair made by
+position from a recording past the first is a guess, and fills only a row recording nothing it
+contradicts, or the last row meeting the last cylinder. Pressures fill as a pair. A recording past
+the first appends no cylinder carrying nothing.

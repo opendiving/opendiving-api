@@ -662,6 +662,47 @@ class TestWhatElseMoves:
         assert [(row.oxygen, row.gas_number) for row in rows] == [(21.0, 0), (50.0, 1)]
 
     @pytest.mark.asyncio
+    async def test_the_other_dives_tank_fills_this_ones_blanks_and_an_empty_one_is_not_appended(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """The other dive goes, so a tank the two agree on by mix would lose the values only
+        that dive recorded; and a row carrying nothing is no tank either dive saw."""
+        first, second = await _two_halves(async_db, db, diver)
+        db.add_all(
+            [
+                DiveMixture(dive_id=first.id, gas_number=0, oxygen=21.0, helium=0.0),
+                DiveMixture(
+                    dive_id=second.id,
+                    gas_number=0,
+                    oxygen=21.0,
+                    helium=0.0,
+                    volume=12.0,
+                    start_pressure=200.0,
+                    end_pressure=50.0,
+                ),
+                DiveMixture(dive_id=second.id, gas_number=None),
+            ]
+        )
+        db.commit()
+
+        await _merge(async_db, diver, first, second)
+
+        rows = (
+            await async_db.execute(
+                select(
+                    DiveMixture.oxygen,
+                    DiveMixture.volume,
+                    DiveMixture.start_pressure,
+                    DiveMixture.end_pressure,
+                    DiveMixture.gas_number,
+                )
+                .where(DiveMixture.dive_id == first.id)
+                .order_by(DiveMixture.id)
+            )
+        ).all()
+        assert [tuple(row) for row in rows] == [(21.0, 12.0, 200.0, 50.0, 0)]
+
+    @pytest.mark.asyncio
     async def test_a_second_computers_pressure_channels_are_relabelled_as_they_move(
         self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
     ) -> None:

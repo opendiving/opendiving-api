@@ -345,7 +345,8 @@ class TestSameDiveLoose:
 
 class TestRelabellingASecondComputersCylinders:
     """`gas_number` is dive-scoped, so a second computer's labels are mapped onto the dive's
-    own list: by mix first, then by order, unmatched appended with the next free label.
+    own list: by mix first, then by order, unmatched appended with the next free label. What
+    the pairs fill at an arrival is `test_dive_files.py`'s; these ask nothing to fill.
 
     The second value is the dive's whole cylinder list to write, or `None` where the dive's
     rows stand as they are."""
@@ -383,7 +384,7 @@ class TestRelabellingASecondComputersCylinders:
         the other way round. Attributing the second computer's pressures by position would
         put its deco readings on the back gas."""
         mapping, cylinders = relabel_gas_numbers(
-            self._parsed((1, 50.0, 0.0), (2, 21.0, 35.0)), self._stored((1, 21.0, 35.0), (2, 50.0, 0.0))
+            self._parsed((1, 50.0, 0.0), (2, 21.0, 35.0)), self._stored((1, 21.0, 35.0), (2, 50.0, 0.0)), fill=False
         )
 
         assert mapping == {1: 2, 2: 1}
@@ -393,7 +394,7 @@ class TestRelabellingASecondComputersCylinders:
         """A pair of air cylinders records no distinguishing fraction at all, which is what a
         2026 Suunto Ocean's reconstructed cylinders look like."""
         mapping, cylinders = relabel_gas_numbers(
-            self._parsed((0, None, None), (1, None, None)), self._stored((3, None, None), (4, None, None))
+            self._parsed((0, None, None), (1, None, None)), self._stored((3, None, None), (4, None, None)), fill=False
         )
 
         assert mapping == {0: 3, 1: 4}
@@ -403,7 +404,7 @@ class TestRelabellingASecondComputersCylinders:
         """A real tank the second computer saw. Dropping it would lose a cylinder from the
         dive; reusing a label would attribute two tanks' pressures to one."""
         mapping, cylinders = relabel_gas_numbers(
-            self._parsed((1, 21.0, 0.0), (2, 99.0, 0.0)), self._stored((1, 21.0, 0.0))
+            self._parsed((1, 21.0, 0.0), (2, 99.0, 0.0)), self._stored((1, 21.0, 0.0)), fill=False
         )
 
         assert mapping == {1: 1, 2: 2}
@@ -412,7 +413,7 @@ class TestRelabellingASecondComputersCylinders:
 
     def test_the_primary_recordings_own_labels_map_to_themselves(self) -> None:
         """The identity case, and the reason an empty map leaves a profile alone."""
-        mapping, cylinders = relabel_gas_numbers(self._parsed((1, 32.0, 0.0)), self._stored((1, 32.0, 0.0)))
+        mapping, cylinders = relabel_gas_numbers(self._parsed((1, 32.0, 0.0)), self._stored((1, 32.0, 0.0)), fill=False)
 
         assert mapping == {1: 1}
         assert cylinders is None
@@ -421,7 +422,9 @@ class TestRelabellingASecondComputersCylinders:
         """A dive logged from a FIT alone: the reader labels no cylinder where no channel
         points at one. A second computer's pressure channel matching that row has to name it,
         or it names a label no cylinder of the dive carries."""
-        mapping, cylinders = relabel_gas_numbers(self._parsed((0, 49.0, 0.0)), self._stored((None, 49.0, 0.0)))
+        mapping, cylinders = relabel_gas_numbers(
+            self._parsed((0, 49.0, 0.0)), self._stored((None, 49.0, 0.0)), fill=False
+        )
 
         assert cylinders is not None
         assert [row.gas_number for row in cylinders] == [1]
@@ -430,7 +433,7 @@ class TestRelabellingASecondComputersCylinders:
     def test_two_cylinders_never_collapse_onto_one_label(self) -> None:
         """The unlabelled row's label must not be the one its neighbour already carries."""
         mapping, cylinders = relabel_gas_numbers(
-            self._parsed((0, 21.0, 0.0), (1, 49.0, 0.0)), self._stored((None, 21.0, 0.0), (0, 49.0, 0.0))
+            self._parsed((0, 21.0, 0.0), (1, 49.0, 0.0)), self._stored((None, 21.0, 0.0), (0, 49.0, 0.0)), fill=False
         )
 
         assert cylinders is not None
@@ -442,6 +445,7 @@ class TestRelabellingASecondComputersCylinders:
         mapping, cylinders = relabel_gas_numbers(
             self._parsed((0, 21.0, 0.0), (1, 32.0, 0.0), (2, 99.0, 0.0)),
             self._stored((None, 21.0, 0.0), (0, 32.0, 0.0)),
+            fill=False,
         )
 
         assert cylinders is not None
@@ -450,7 +454,9 @@ class TestRelabellingASecondComputersCylinders:
 
     def test_a_row_nothing_points_at_stays_unlabelled(self) -> None:
         """No incoming label, no channel to name the row: the dive's list is left alone."""
-        mapping, cylinders = relabel_gas_numbers(self._parsed((None, 49.0, 0.0)), self._stored((None, 49.0, 0.0)))
+        mapping, cylinders = relabel_gas_numbers(
+            self._parsed((None, 49.0, 0.0)), self._stored((None, 49.0, 0.0)), fill=False
+        )
 
         assert mapping == {}
         assert cylinders is None

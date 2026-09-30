@@ -881,8 +881,9 @@ class FileKind(IntEnum):
     The full-export archive first, then DiveJSON documents, then logbooks, then one
     computer's files, so that where a logbook and a computer's file describe one dive the
     computer's recording joins the logbook's dive rather than the other way round - a record
-    attached to a dive brings none of its own dive's values, and a logbook's number, notes
-    and sites are the diver's. Zips and what nothing reads sort after them, for the rows.
+    attached to a dive brings none of its own dive's values beyond the blank cylinder members
+    it fills, and a logbook's number, notes and sites are the diver's. Zips and what nothing
+    reads sort after them, for the rows.
     """
 
     ARCHIVE = 0

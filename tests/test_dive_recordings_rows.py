@@ -305,8 +305,8 @@ class TestWhereAFileLands:
 class TestFillingTheDivesCylinders:
     """The cylinder half of the fill rule, against the rows a diver actually owns.
 
-    Here rather than beside the pure `fill_mixture_fields` tests because the interesting part
-    is the join: the parsed cylinders come off the recording's files, the stored ones off the
+    Here rather than beside the pure `fill_from_pair` tests because the interesting part is
+    the pairing: the parsed cylinders come off the recording's files, the stored ones off the
     dive, and only a real `UPDATE` shows that the blanks moved and the rest did not.
     """
 
@@ -359,14 +359,14 @@ class TestFillingTheDivesCylinders:
         assert cylinder.gas_number == 0
 
     @pytest.mark.asyncio
-    async def test_the_upload_that_creates_a_recording_fills_nothing(
+    async def test_the_upload_that_creates_the_primary_fills_nothing(
         self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
     ) -> None:
-        """Nothing arrived on a recording that already existed, because there wasn't one:
-        this dive has no recording yet, so the upload makes it, and the dive's cylinders came
-        off the form this very parse pre-filled. A fill would only put back a blank the diver
-        had just cleared. **Not "a recording's first file"** - two tests below are that and
-        one of them fills."""
+        """This dive has no recording yet, so the upload makes its primary, and the dive's
+        cylinders came off the form this very parse pre-filled. A fill would only put back a
+        blank the diver had just cleared. **Not "a recording's first file"** - two tests
+        below are that and one of them fills, and a recording past the first that an upload
+        creates fills too."""
         self._seed_cylinder(db, dive, gas_number=0, start_pressure=200.0)
 
         await _attach(async_db, diver, dive, _export(cylinder={"Oxygen": 0.33}), filename="ocean.json")
@@ -397,14 +397,14 @@ class TestFillingTheDivesCylinders:
     async def test_the_first_file_of_an_imported_recording_does_fill(
         self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
     ) -> None:
-        """**`fresh` is "this upload created the recording", not "it had no files"**, and this
-        is where the two answers differ.
+        """**`CREATED` is "this upload created the recording", not "it had no files"**, and
+        this is where the two answers differ.
 
         A logbook import of a document creates a recording with samples, no device and no
         bytes. When the diver later attaches the export it was converted from, that is the
         recording's *first* file and still a second reading of a record the dive already
-        describes - so it fills. A `fresh` that keyed on the file count would take the
-        outright branch here and the cylinder would keep its blank.
+        describes - it `JOINED` the recording, so it fills. Keyed on the file count it would
+        count as the file that created the primary, and the cylinder would keep its blank.
         """
         recording = create_dive_recording(db, diver, dive)
         await async_db.execute(

@@ -222,10 +222,12 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     # **Before anything is written**, because the labels the absorbed half's pressure
     # channels are stored under have to be rewritten as those channels move - and in the
     # folded case they are rewritten *into* the surviving recording's own samples, where
-    # there would be no telling them apart afterwards.
+    # there would be no telling them apart afterwards. A merge is an arrival: the absorbed
+    # dive goes, so a cylinder it pairs fills the survivor's blanks rather than taking the
+    # values only it recorded with it.
     survivor_mixtures = await get_mixtures_for_dive(db=db, dive_id=survivor.id)
     absorbed_mixtures = await get_mixtures_for_dive(db=db, dive_id=absorbed.id)
-    mapping, cylinders = relabel_gas_numbers(absorbed_mixtures, survivor_mixtures)
+    mapping, cylinders = relabel_gas_numbers(absorbed_mixtures, survivor_mixtures, fill=True)
 
     primary_survivor, primary_absorbed = survivor_recordings[0], absorbed_recordings[0]
     folded = _folds(primary_survivor, primary_absorbed)
