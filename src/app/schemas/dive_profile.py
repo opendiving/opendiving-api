@@ -216,7 +216,8 @@ class DepthSilhouette(BaseModel):
         list[int],
         Field(
             description=f"Integer centimeters (scale {DEPTH_SCALE}): value `i` is the deepest reading in the `i`th of "
-            "`len(values)` equal slices of `span`, so the deepest value is the recording's maximum depth"
+            "`len(values)` equal slices of `span`, or the straight line between its neighbours for a slice no reading "
+            "falls in, so the deepest value is the recording's maximum depth"
         ),
     ]
 
