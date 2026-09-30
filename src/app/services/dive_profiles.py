@@ -40,6 +40,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from itertools import pairwise
 from typing import Any, Literal, cast
 
 import divejson
@@ -61,6 +62,7 @@ from ..schemas.dive_profile import (
     PROFILE_CHANNEL_ORDER,
     SINGLE_SERIES_CHANNELS,
     TEMPERATURE_SCALE,
+    DepthOutline,
     DiveProfileEvent,
     DiveProfileInfo,
     DiveProfilePressureSeries,
@@ -146,6 +148,10 @@ def provenance_of(parser_key: str) -> ProfileProvenance:
 # 3 933 temperature samples on one dive, which is already past this; depth (395) never
 # reaches it. See `downsample` for why the cap is enforced by min/max bucketing.
 MAX_POINTS_PER_CHANNEL = 1200
+
+# Slices in a `GET /dives` row's `depth_outline`. A dive card draws it about 350 CSS px wide, so
+# this is a point every five or six pixels.
+DEPTH_OUTLINE_POINTS = 64
 
 # Events are capped by count and **not** by the bucketing below: min/max over a bucket is
 # meaningless for a marker, and a chart that showed "some of the gas switches" would be
@@ -684,6 +690,40 @@ def downsample(
     )
 
 
+def derive_depth_outline(depth: ProfileSeries | None, points: int = DEPTH_OUTLINE_POINTS) -> DepthOutline | None:
+    """The depth channel at a dive card's resolution: the deepest reading in each of `points`
+    equal slices of its span, so the outline reaches the recording's maximum depth.
+
+    Sliced on time rather than on index, as `_downsample_series` buckets. A slice no reading
+    falls in - a sampling interval longer than a slice, or a sensor dropout - takes the
+    straight line between its neighbours. The first and last slices always hold a reading,
+    so every empty one has a neighbour on each side.
+
+    Taken from the stored series rather than the file's, so it is a function of `data` alone
+    and every profile has one, whatever it was read or imported from.
+    """
+    if depth is None or len(depth.t) < 2 or depth.t[-1] <= depth.t[0]:
+        return None
+    start, span = depth.t[0], depth.t[-1] - depth.t[0]
+
+    deepest: dict[int, int] = {}
+    for moment, centimeters in zip(depth.t, depth.v, strict=True):
+        index = min((moment - start) * points // span, points - 1)
+        deepest[index] = max(centimeters, deepest.get(index, centimeters))
+
+    values: list[int] = []
+    for left, right in pairwise(sorted(deepest)):
+        low, high = deepest[left], deepest[right]
+        values.extend(low + round((high - low) * (index - left) / (right - left)) for index in range(left, right))
+    values.append(deepest[points - 1])
+    return DepthOutline(span=span, values=values)
+
+
+def _depth_outline_column(profile: NormalizedProfile) -> dict[str, Any] | None:
+    outline = derive_depth_outline(profile.depth)
+    return None if outline is None else outline.model_dump()
+
+
 def attribute_and_cap(normalized: NormalizedProfile | None) -> NormalizedProfile | None:
     """The pipeline's last two steps, run once over a recording's shaped samples.
 
@@ -1077,6 +1117,7 @@ async def store_profile(
             # A list rather than `None` when there is nothing to attribute, for the same
             # reason `event_count` is a count rather than `None`: this extractor looked.
             gas_attribution=[entry.model_dump() for entry in profile.gas_attribution],
+            depth_outline=_depth_outline_column(profile),
             data=profile.to_data(),
             # Spelled out rather than left to `PublicUUIDMixin`'s `default_factory`: that
             # is a dataclass-level default applied when the ORM constructs an instance,
@@ -1149,6 +1190,7 @@ async def replace_profile_samples(db: AsyncSession, *, recording_id: int, profil
             event_count=len(attributed.events),
             **summary_extremes(attributed),
             gas_attribution=[entry.model_dump() for entry in attributed.gas_attribution],
+            depth_outline=_depth_outline_column(attributed),
             data=attributed.to_data(),
             uuid=uuid7(),
         )
@@ -1424,6 +1466,39 @@ async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]
             continue
         attribution[row.dive_id] = ProfileGasAttribution(duration=row.duration, entries=entries)
     return attribution
+
+
+async def get_depth_outlines_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, DepthOutline]:
+    """Several dives' `depth_outline` in one query, for `GET /dives`.
+
+    **The first recording by ordinal that has a profile**, which is the one the dive page
+    charts - not the primary's alone, which may be a recording with no samples. A dive whose
+    charted profile has no depth curve is absent, as is one with no profile at all.
+
+    Reads the one column and never `data`: this runs on every page of the hottest list in the
+    app. An entry that no longer validates is dropped with a warning, for the reason
+    `get_gas_attribution_for_dives` drops one.
+    """
+    if not dive_ids:
+        return {}
+
+    stmt = (
+        select(DiveProfile.dive_id, DiveProfile.depth_outline)
+        .join(DiveRecording, DiveRecording.id == DiveProfile.recording_id)
+        .where(DiveProfile.dive_id.in_(set(dive_ids)))
+        .order_by(DiveProfile.dive_id, DiveRecording.ordinal)
+        .distinct(DiveProfile.dive_id)
+    )
+
+    outlines: dict[int, DepthOutline] = {}
+    for row in await db.execute(stmt):
+        if row.depth_outline is None:
+            continue
+        try:
+            outlines[row.dive_id] = DepthOutline.model_validate(row.depth_outline)
+        except ValidationError:
+            logger.warning("Ignoring an unreadable depth outline stored for dive %s", row.dive_id, exc_info=True)
+    return outlines
 
 
 # How many files are processed between commits. Small enough that an interrupted run

@@ -15,7 +15,8 @@ from posting a parse back, and why the answer does not rest on who produced the 
 
 One shape here is not a wire shape: `GasAttribution` is what a summary *column* holds. It
 lives here rather than in the service because it is read back out of JSONB and wants
-validating on the way in, which is what the models in this package are for.
+validating on the way in, which is what the models in this package are for. `DepthOutline`
+is both.
 """
 
 import uuid as uuid_pkg
@@ -197,6 +198,28 @@ class GasAttribution(BaseModel):
     # In the same centimeters as the depth channel, and for the same reason: it is a depth,
     # and it is a mean of depth samples.
     mean_depth_cm: int
+
+
+class DepthOutline(BaseModel):
+    """A recording's depth curve at a dive card's resolution, on each `GET /dives` row.
+
+    Also the shape of `dive_profile.depth_outline`, validated on the way back out of JSONB as
+    `GasAttribution` is. Evenly spaced rather than timed, so the values and the span are the
+    whole of it.
+    """
+
+    span: Annotated[
+        int,
+        Field(gt=0, description="Milliseconds from the recording's first depth reading to its last"),
+    ]
+    values: Annotated[
+        list[int],
+        Field(
+            description=f"Integer centimeters (scale {DEPTH_SCALE}): value `i` is the deepest reading in the `i`th of "
+            "`len(values)` equal slices of `span`, or the straight line between its neighbours for a slice no reading "
+            "falls in, so the deepest value is the recording's maximum depth"
+        ),
+    ]
 
 
 class DiveProfileSeries(BaseModel):
