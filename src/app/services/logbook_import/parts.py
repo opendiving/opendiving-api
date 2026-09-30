@@ -10,10 +10,10 @@ Here the caller is authenticated before a byte is read, and while the body strea
 - the bytes of every part held in memory together never pass one `SPOOL_THRESHOLD` - a part
   that would take the total past it rolls onto disk first;
 - the request stops at `MAX_ARCHIVE_SIZE` over every part, and at `MAX_PARTS` file parts,
-  each a 413 that says what to do;
-- a part past its own bound - `MAX_ARCHIVE_SIZE` for a zip, `MAX_DOCUMENT_SIZE` for
-  anything else, the figures one upload has always had - stops being kept and becomes a
-  refused row, while its digest is still taken, since the token covers every part sent.
+  each a 413 that says what to do - and a zip is bounded by that total alone;
+- any other part past `MAX_DOCUMENT_SIZE`, the figure one document upload has always had,
+  stops being kept and becomes a refused row, while its digest is still taken, since the
+  token covers every part sent.
 
 `DECISIONS.md`, *"Logbook import spools its upload and still parses the document whole"*,
 has the trade this sits inside.

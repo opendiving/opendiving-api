@@ -6169,12 +6169,11 @@ and `joined` (new bytes on an existing recording; only that fills cylinders); `_
 `dive_profile.parser_key` is one of three: a format id (re-readable from files by the reader),
 `divejson_import` or `merge` (written by `POST /dives/merge`). The last two are
 `UNREPRODUCIBLE_PROVENANCES`; clients see the narrower `ProfileProvenance`. A recording with no
-files is first-class: logbook import stores no bytes for a bare document or for a converted file it
-does not keep - a logbook of several dives, a file past the size cap - and it is deleted only
-through the recording route. `should_extract` refuses an unreproducible profile, and both backfills
-select on the profile's provenance, not a file's. A recording survives its last file only when no
-file can re-yield its profile. `source_sha256` is the file's digest for one file, and the SHA-256
-over digests in attach order for more, so single-file rows keep their ETag. `backfill_tech_fields`
+files is first-class: logbook import stores none for a bare document or a file it does not keep, and
+only the recording route deletes it. `should_extract` refuses an unreproducible profile; both
+backfills select on the profile's provenance. A recording survives its last file only when no file
+can re-yield its profile. `source_sha256` is the file's digest for one file, and the SHA-256 over
+digests in attach order for more, so single-file rows keep their ETag. `backfill_tech_fields`
 overwrites a scalar only with a value a stored file yields, since an import can fill `cns_end` from
 a document alone. Rejected: a per-scalar provenance column; the cost: the backfill cannot null a
 bogus stored reading.
