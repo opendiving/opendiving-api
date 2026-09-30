@@ -48,6 +48,69 @@ REVERSE_PAYLOAD = {
     "address": {"suburb": "Blue Hole", "city": "Dahab", "state": "South Sinai", "country": "Egypt"},
 }
 
+# Real `/reverse` answers from the public instance, `accept-language=en`, for a pin in each
+# place - trimmed to the members the normalizer reads, with every address key as sent.
+DAHAB_PIN = {
+    "lat": "28.5010896",
+    "lon": "34.5140055",
+    "name": "",
+    "display_name": "Assalah, Dahab, South Sinai, 45214, Egypt",
+    "licence": "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright",
+    "address": {
+        "suburb": "Assalah",
+        "city": "Dahab",
+        "state": "South Sinai",
+        "ISO3166-2-lvl4": "EG-JS",
+        "postcode": "45214",
+        "country": "Egypt",
+        "country_code": "eg",
+    },
+}
+CANGGU_PIN = {
+    "lat": "-8.6480075",
+    "lon": "115.1390033",
+    "name": "Isha Natural, Purity",
+    "display_name": (
+        "Isha Natural, Purity, Jalan Pantai Batu Bolong, Canggu, North Kuta, Badung, Bali, 80363, Indonesia"
+    ),
+    "licence": "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright",
+    "address": {
+        "shop": "Isha Natural, Purity",
+        "road": "Jalan Pantai Batu Bolong",
+        "village": "Canggu",
+        "town": "North Kuta",
+        "region": "Badung",
+        "state": "Bali",
+        "ISO3166-2-lvl4": "ID-BA",
+        "postcode": "80363",
+        "country": "Indonesia",
+        "country_code": "id",
+    },
+}
+# No `city` and no `state`: Nominatim files the island under its district and sends the
+# region as `province`, which its own list of address labels does not name.
+KO_TAO_PIN = {
+    "lat": "10.0949553",
+    "lon": "99.8391703",
+    "name": "",
+    "display_name": (
+        "Ban Hat Sai Ri, Ko Tao Subdistrict, Koh Tao Subdistrict Municipality, Ko Pha-ngan District, "
+        "Surat Thani Province, 84360, Thailand"
+    ),
+    "licence": "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright",
+    "address": {
+        "quarter": "Ban Hat Sai Ri",
+        "suburb": "Ko Tao Subdistrict",
+        "city_district": "Koh Tao Subdistrict Municipality",
+        "town": "Ko Pha-ngan District",
+        "province": "Surat Thani Province",
+        "ISO3166-2-lvl4": "TH-84",
+        "postcode": "84360",
+        "country": "Thailand",
+        "country_code": "th",
+    },
+}
+
 
 @pytest.fixture(scope="module")
 def geocode_app() -> Any:
@@ -322,10 +385,10 @@ class TestReverseRoute:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["location"] == "Dahab, Egypt"
-        assert body["display_name"] == "Blue Hole, Dahab, South Sinai, Egypt"
+        assert body["location"] == "Dahab, South Sinai, Egypt"
         assert body["name"] == "Blue Hole"
         assert body["attribution"] == "[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"
+        assert "display_name" not in body
 
     def test_answers_204_when_the_point_resolves_to_nothing(self, client: TestClient, no_redis: None):
         """Nominatim's "unable to geocode" shape is an answer, not a failure - and having no
@@ -386,15 +449,35 @@ class TestReverseRoute:
 
         assert body["name"] == "Blue Hole"
 
-    def test_carries_none_of_the_search_fields(self, client: TestClient, no_redis: None):
-        """`country`, `region`, `source` and `source_id` describe a search result; a pin's
-        answer names a position and is otherwise what it always was."""
+    def test_carries_where_it_sits_and_not_what_it_is(self, client: TestClient, no_redis: None):
+        """A pin's answer carries the region and country its name was composed from, the way
+        a search result does, so a client reads one shape from both routes. `source` and
+        `source_id` say which OSM object a search result is, and stay unset on a pin."""
         with _responds(REVERSE_PAYLOAD):
             body = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372}).json()
 
-        assert {field: body[field] for field in ("country", "region", "source", "source_id")} == dict.fromkeys(
-            ("country", "region", "source", "source_id")
-        )
+        assert {field: body[field] for field in ("country", "region", "source", "source_id")} == {
+            "country": "Egypt",
+            "region": "South Sinai",
+            "source": None,
+            "source_id": None,
+        }
+
+    @pytest.mark.parametrize(
+        ("address", "region", "country"),
+        [
+            ({"city": "Dahab", "country": "Egypt"}, None, "Egypt"),
+            ({"city": "Dahab", "state": "South Sinai"}, "South Sinai", None),
+            ({}, None, None),
+        ],
+    )
+    def test_carries_null_for_what_the_address_lacks(
+        self, client: TestClient, no_redis: None, address: dict, region: str | None, country: str | None
+    ):
+        with _responds({**REVERSE_PAYLOAD, "address": address}):
+            body = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372}).json()
+
+        assert (body["region"], body["country"]) == (region, country)
 
 
 class TestCouldNotAsk:
@@ -457,9 +540,11 @@ class TestOffshoreFallback:
             body = client.get("/api/v1/geocode/reverse", params={"lat": 27.0, "lon": 35.0}).json()
 
         assert body["location"] == "Red Sea"
-        assert body["display_name"] == "Red Sea"
         assert body["name"] == "Red Sea"
         assert "Natural Earth" in body["attribution"]
+        # The water's name alone: a sea has no region or country to name it through.
+        assert (body["region"], body["country"]) == (None, None)
+        assert "display_name" not in body
 
     def test_echoes_the_position_that_was_asked_about(self, client: TestClient, no_redis: None):
         """Not the polygon's centroid, which would move the caller's pin several hundred
@@ -556,10 +641,11 @@ class TestSearchRoute:
             response = _search(client, "moalboal")
 
         assert response.status_code == 200
-        assert [row["display_name"] for row in response.json()] == [
+        assert [row["location"] for row in response.json()] == [
             "Moalboal, Cebu, Philippines",
             "Moalboal, Zamboanga Sibugay, Philippines",
         ]
+        assert not any("display_name" in row for row in response.json())
 
     def test_returns_an_empty_list_when_nothing_matches(self, client: TestClient, no_redis: None):
         with _responds(_photon()):
@@ -695,8 +781,8 @@ class TestProviderContract:
         assert query["lon"] == "34.537"
 
     def test_asks_for_the_configured_language(self, client: TestClient, no_redis: None):
-        """Unasked, Nominatim answers in the local script - and "دهب, مصر" is not what a
-        diver wants written into their logbook."""
+        """Unasked, Nominatim answers in the local script - and "دهب, جنوب سيناء, مصر" is not
+        what a diver wants written into their logbook."""
         with _responds(REVERSE_PAYLOAD) as provider:
             client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2})
 
@@ -830,14 +916,14 @@ class TestDegradation:
         assert fake_redis.store == {}
 
     def test_truncates_provider_strings_rather_than_dropping_the_row(self, client: TestClient, no_redis: None):
-        """An over-long `display_name` would otherwise raise inside the normalizer and turn
+        """An over-long address part would otherwise raise inside the normalizer and turn
         one verbose row into a failed lookup. The licence is the exception - it is replaced
         rather than clipped, see `TestShortLocation`."""
-        with _responds({**REVERSE_PAYLOAD, "display_name": "x" * 2000, "name": "y" * 2000}):
+        verbose = {"city": "c" * 2000, "state": "s" * 2000, "country": "k" * 2000}
+        with _responds({**REVERSE_PAYLOAD, "name": "y" * 2000, "address": verbose}):
             body = client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2}).json()
 
-        assert len(body["display_name"]) == 512
-        assert len(body["name"]) == 255
+        assert [len(body[field]) for field in ("location", "name", "region", "country")] == [255, 255, 255, 255]
 
     def test_survives_an_oversized_body(self, client: TestClient, fake_redis: FakeRedis):
         """The per-read timeout bounds each read, not the response - so the size cap is what
@@ -943,7 +1029,7 @@ class TestCaching:
             response = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
 
         assert response.status_code == 200
-        assert response.json()["location"] == "Dahab, Egypt"
+        assert response.json()["location"] == "Dahab, South Sinai, Egypt"
         assert len(provider.requests) == 1
 
     def test_an_unreadable_cache_entry_is_treated_as_a_miss(self, client: TestClient, fake_redis: FakeRedis):
@@ -955,7 +1041,7 @@ class TestCaching:
             response = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
 
         assert len(patched.requests) == 2
-        assert response.json()["location"] == "Dahab, Egypt"
+        assert response.json()["location"] == "Dahab, South Sinai, Egypt"
 
 
 class TestThrottling:
@@ -1164,21 +1250,74 @@ class TestAttribution:
 
 
 class TestShortLocation:
-    """`location` is what gets persisted as a place's `name`, so it is composed from the
-    structured address rather than trimmed out of `display_name`."""
+    """`location` is what gets persisted as a place's `name`: the settlement a pin falls in,
+    its region and its country, composed from the structured address rather than trimmed
+    out of the provider's `display_name`."""
 
     @pytest.mark.parametrize(
-        "address,expected",
+        ("pin", "expected"),
         [
-            ({"city": "Dahab", "state": "South Sinai", "country": "Egypt"}, "Dahab, Egypt"),
+            pytest.param(DAHAB_PIN, ("Dahab, South Sinai, Egypt", "South Sinai", "Egypt"), id="dahab"),
+            pytest.param(CANGGU_PIN, ("North Kuta, Bali, Indonesia", "Bali", "Indonesia"), id="canggu"),
+            pytest.param(
+                KO_TAO_PIN,
+                ("Ko Pha-ngan District, Surat Thani Province, Thailand", "Surat Thani Province", "Thailand"),
+                id="ko-tao",
+            ),
+        ],
+    )
+    def test_names_a_real_pin_through_its_region(self, pin: dict, expected: tuple):
+        """Canggu's `town` outranks its `village` and its `state` its `region`; Ko Tao's
+        region arrives as `province`. Every provider label carries a postcode, and no name
+        does."""
+        result = geocoding_service._normalize(pin)
+
+        assert result is not None
+        assert (result.location, result.region, result.country) == expected
+
+    @pytest.mark.parametrize(
+        ("address", "expected"),
+        [
             ({"village": "Marsa Shagra", "country": "Egypt"}, "Marsa Shagra, Egypt"),
+            ({"city": "Dahab", "state": "South Sinai"}, "Dahab, South Sinai"),
+            ({"city": "Dahab"}, "Dahab"),
             ({"state": "South Sinai", "country": "Egypt"}, "South Sinai, Egypt"),
             ({"country": "Egypt"}, "Egypt"),
         ],
     )
-    def test_composes_place_and_country(self, address: dict, expected: str):
+    def test_composes_what_the_address_has(self, address: dict, expected: str):
         row = {**REVERSE_PAYLOAD, "address": address}
         result = geocoding_service._normalize(row)
+
+        assert result is not None
+        assert result.location == expected
+
+    @pytest.mark.parametrize(
+        ("address", "expected"),
+        [
+            pytest.param({"state": "Bali", "country": "Indonesia"}, "Bali, Indonesia", id="region-for-the-place"),
+            pytest.param(
+                {"city": "Berlin", "state": "Berlin", "country": "Germany"}, "Berlin, Germany", id="region-is-the-place"
+            ),
+            pytest.param(
+                {"suburb": "Marina Bay", "state": "Singapore", "country": "Singapore"},
+                "Marina Bay, Singapore",
+                id="country-is-the-region",
+            ),
+            pytest.param(
+                {"city": "Singapore", "state": "Central Region", "country": "Singapore"},
+                "Singapore, Central Region",
+                id="country-is-the-place",
+            ),
+            pytest.param(
+                {"city": "Berlin", "state": "BERLIN", "country": "Germany"}, "Berlin, Germany", id="in-another-case"
+            ),
+        ],
+    )
+    def test_a_part_repeating_an_earlier_one_is_dropped(self, address: dict, expected: str):
+        """Whole and case-insensitively, against every earlier part and not only the one
+        beside it."""
+        result = geocoding_service._normalize({**REVERSE_PAYLOAD, "address": address})
 
         assert result is not None
         assert result.location == expected
@@ -1398,18 +1537,18 @@ class TestOnlyPlacesComeBack:
 
 
 class TestSearchNames:
-    """A search result is named by the place itself - "Ko Tao, Thailand", never the district
-    OSM files the island under - and carries where it sits as fields of its own."""
+    """A search result is named by the place itself, its region and its country - "Ko Tao,
+    Surat Thani Province, Thailand", never the district OSM files the island under - and
+    carries where it sits as fields of its own as well."""
 
-    def test_names_a_place_by_itself_and_its_country(self, client: TestClient, no_redis: None):
+    def test_names_a_place_by_itself_its_region_and_its_country(self, client: TestClient, no_redis: None):
         with _responds(_photon(KO_TAO)):
             (row,) = _search(client, "ko tao").json()
 
         assert row == {
             "latitude": 10.0921822,
             "longitude": 99.8395362,
-            "location": "Ko Tao, Thailand",
-            "display_name": "Ko Tao, Ko Tao Subdistrict, Ko Pha-ngan, Surat Thani Province, Thailand",
+            "location": "Ko Tao, Surat Thani Province, Thailand",
             "name": "Ko Tao",
             "attribution": geocoding_service._DEFAULT_ATTRIBUTION,
             "country": "Thailand",
@@ -1422,12 +1561,11 @@ class TestSearchNames:
             "bbox_east": 99.8558193,
         }
 
-    def test_a_postcode_is_no_part_of_the_label(self):
+    def test_the_region_is_the_state_and_neither_the_county_nor_the_postcode(self):
         result = geocoding_service._normalize_photon(OBAN)
 
         assert result is not None
-        assert result.display_name == "Oban, Argyll and Bute, Scotland, United Kingdom"
-        assert result.region == "Scotland"
+        assert (result.location, result.region) == ("Oban, Scotland, United Kingdom", "Scotland")
 
     def test_the_region_is_the_county_where_there_is_no_state(self):
         mabul = _feature("Mabul Island", county="Semporna", country="Malaysia")
@@ -1435,7 +1573,7 @@ class TestSearchNames:
         result = geocoding_service._normalize_photon(mabul)
 
         assert result is not None
-        assert (result.location, result.region) == ("Mabul Island, Malaysia", "Semporna")
+        assert (result.location, result.region) == ("Mabul Island, Semporna, Malaysia", "Semporna")
 
     def test_a_country_is_not_repeated(self):
         philippines = _feature("Philippines", tag=("place", "country"), layer="country", country="Philippines")
@@ -1443,32 +1581,52 @@ class TestSearchNames:
         result = geocoding_service._normalize_photon(philippines)
 
         assert result is not None
-        assert (result.location, result.display_name, result.country, result.region) == (
-            "Philippines",
-            "Philippines",
-            "Philippines",
-            None,
-        )
+        assert (result.location, result.country, result.region) == ("Philippines", "Philippines", None)
 
-    def test_consecutive_repeats_leave_the_full_label(self):
-        berlin = _feature("Berlin", state="Berlin", country="Germany")
-
-        result = geocoding_service._normalize_photon(berlin)
+    @pytest.mark.parametrize(
+        ("name", "properties", "expected"),
+        [
+            pytest.param(
+                "Berlin", {"state": "Berlin", "country": "Germany"}, "Berlin, Germany", id="region-is-the-place"
+            ),
+            pytest.param(
+                "Marina Bay",
+                {"state": "Singapore", "country": "Singapore"},
+                "Marina Bay, Singapore",
+                id="country-is-the-region",
+            ),
+            pytest.param(
+                "Singapore",
+                {"state": "Central Region", "country": "Singapore"},
+                "Singapore, Central Region",
+                id="country-is-the-place",
+            ),
+            pytest.param("Berlin", {"state": "BERLIN", "country": "Germany"}, "Berlin, Germany", id="in-another-case"),
+        ],
+    )
+    def test_a_part_repeating_an_earlier_one_is_dropped(self, name: str, properties: dict, expected: str):
+        """Whole and case-insensitively, against every earlier part and not only the one
+        beside it."""
+        result = geocoding_service._normalize_photon(_feature(name, **properties))
 
         assert result is not None
-        assert (result.location, result.display_name) == ("Berlin, Germany", "Berlin, Germany")
+        assert result.location == expected
 
-    def test_a_row_with_no_country_is_its_name_alone(self):
+    def test_a_row_with_no_country_is_its_name_and_region(self):
+        reef = _feature("Tubbataha North Reef", tag=("natural", "reef"), layer="other", state="Palawan")
+
+        result = geocoding_service._normalize_photon(reef)
+
+        assert result is not None
+        assert (result.location, result.region, result.country) == ("Tubbataha North Reef, Palawan", "Palawan", None)
+
+    def test_a_row_with_nothing_above_its_name_is_its_name_alone(self):
         reef = _feature("Tubbataha North Reef", tag=("natural", "reef"), layer="other")
 
         result = geocoding_service._normalize_photon(reef)
 
         assert result is not None
-        assert (result.location, result.display_name, result.country) == (
-            "Tubbataha North Reef",
-            "Tubbataha North Reef",
-            None,
-        )
+        assert (result.location, result.region, result.country) == ("Tubbataha North Reef", None, None)
 
     def test_a_row_with_no_name_is_named_by_its_finest_address_part(self):
         nameless = _feature(None, city="Moalboal", state="Cebu", country="Philippines")
@@ -1476,11 +1634,17 @@ class TestSearchNames:
         result = geocoding_service._normalize_photon(nameless)
 
         assert result is not None
-        assert (result.name, result.location, result.display_name) == (
-            None,
-            "Moalboal, Philippines",
-            "Moalboal, Cebu, Philippines",
-        )
+        assert (result.name, result.location) == (None, "Moalboal, Cebu, Philippines")
+
+    def test_a_row_named_by_its_region_names_it_once(self):
+        """The Photon counterpart of a pin in no settlement: the finest part the row has is
+        its region, which stands in for the name."""
+        nameless = _feature(None, tag=("boundary", "administrative"), state="Bali", country="Indonesia")
+
+        result = geocoding_service._normalize_photon(nameless)
+
+        assert result is not None
+        assert (result.location, result.region) == ("Bali, Indonesia", "Bali")
 
     @pytest.mark.parametrize(("osm_type", "spelled"), [("N", "node"), ("W", "way"), ("R", "relation")])
     def test_the_osm_identity_is_spelled_as_the_catalog_spells_it(self, osm_type: str, spelled: str):
@@ -1512,7 +1676,7 @@ class TestSearchNames:
         result = geocoding_service._normalize_photon(verbose)
 
         assert result is not None
-        assert (len(result.name or ""), len(result.location), len(result.display_name)) == (255, 255, 512)
+        assert (len(result.name or ""), len(result.location)) == (255, 255)
         assert (len(result.country or ""), len(result.region or "")) == (255, 255)
 
     @pytest.mark.parametrize(
@@ -1555,7 +1719,7 @@ class TestSearchSwitches:
         with _providers(search=_photon(KO_TAO)) as provider:
             body = client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372}).json()
 
-        assert body["location"] == "Dahab, Egypt"
+        assert body["location"] == "Dahab, South Sinai, Egypt"
         assert [request.url.path for request in provider.requests] == ["/reverse"]
 
     @pytest.mark.parametrize("switch", ["GEOCODER_URL", "GEOCODER_SEARCH_URL"])

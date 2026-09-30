@@ -424,12 +424,7 @@ def _location(location: LocationRead | None) -> ExportLocation | None:
     if position is not None and all(corner is not None for corner in corners):
         south, north, west, east = corners
         bbox = ExportBoundingBox(south=south, north=north, west=west, east=east)  # type: ignore[arg-type]
-    return ExportLocation(
-        name=location.name,
-        full_name=location.full_name,
-        position=position,
-        bbox=bbox,
-    )
+    return ExportLocation(name=location.name, position=position, bbox=bbox)
 
 
 def _trip_part(part: TripPartRead) -> ExportTripPart:

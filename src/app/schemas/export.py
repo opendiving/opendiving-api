@@ -448,13 +448,12 @@ class ExportLocation(BaseModel):
     with the point because it is what the geocoder said the place *covers*, and a reader
     redrawing the map wants the region rather than a pin in the middle of a country.
 
-    `name` is the place as a person writes it and `full_name` the fullest form the source
-    held; nothing binds the two, and `full_name` is not required to contain `name` or to be
-    longer than it.
+    `name` is the place as a person writes it, and the only name written: the geocoder names
+    a place through its region, so the fuller form the format also allows would say nothing
+    a reader uses.
     """
 
     name: str
-    full_name: str | None = None
     position: ExportPosition | None = None
     bbox: ExportBoundingBox | None = None
 
