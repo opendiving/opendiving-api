@@ -479,13 +479,22 @@ class ContactSettings(BaseSettings):
 
 
 class GeocodingSettings(BaseSettings):
-    # Forward/reverse geocoding for dive sites, proxied server-side (see
-    # `services.geocoding_service`). The wire format is Nominatim's, so `GEOCODER_URL` has
-    # to name a Nominatim-compatible host; the keyless public instance is the default so a
-    # self-hoster gets a working feature with no third-party account. Set it to an empty
-    # string to turn geocoding off entirely - the endpoints then answer "no result" rather
-    # than failing, exactly as they do when the provider is unreachable.
+    # Geocoding for dive sites and trips, proxied server-side (see
+    # `services.geocoding_service`), over two providers with two wire formats. `GEOCODER_URL`
+    # names the spot behind a pin and has to name a Nominatim-compatible host;
+    # `GEOCODER_SEARCH_URL` answers a place typed into a search and has to name a
+    # Photon-compatible one. Both defaults are keyless public instances, so a self-hoster gets
+    # a working feature with no third-party account.
+    #
+    # `GEOCODER_URL=""` turns geocoding off entirely, search included: disabled means
+    # disabled, and an upgrade must not switch it back on. `GEOCODER_SEARCH_URL=""` turns off
+    # search alone. Either way the endpoints answer "no result" rather than failing, exactly
+    # as they do when a provider is unreachable. Neither default follows the other: a
+    # `GEOCODER_URL` naming your own Nominatim still sends searches to public Photon until
+    # `GEOCODER_SEARCH_URL` names a host of yours.
     GEOCODER_URL: str = config("GEOCODER_URL", default="https://nominatim.openstreetmap.org")
+    GEOCODER_SEARCH_URL: str = config("GEOCODER_SEARCH_URL", default="https://photon.komoot.io")
+    # Sent to `GEOCODER_URL` only; Photon takes no key.
     GEOCODER_API_KEY: str | None = config("GEOCODER_API_KEY", default=None)
 
     # Asked for explicitly, because the alternative is not "no preference" - it is the
@@ -493,12 +502,15 @@ class GeocodingSettings(BaseSettings):
     # which then lands in a dive site locality's `name` and is neither readable nor typeable for
     # most of the divers who log that site. One instance-wide value rather than the
     # caller's `Accept-Language`: it is part of the cache key, and per-caller languages
-    # would multiply both the cache and the outbound calls by the number of locales.
+    # would multiply both the cache and the outbound calls by the number of locales. Photon's
+    # public instance answers only `de`, `en` and `fr`, so a search asks in English for any
+    # other value.
     GEOCODER_LANGUAGE: str = config("GEOCODER_LANGUAGE", default="en")
 
     # Nominatim's policy requires a `User-Agent` that identifies the application, and
-    # blocks generic ones. A public deployment that isn't this project's own should say so
-    # here, since the address in it is where the provider's operators will complain.
+    # blocks generic ones; Photon's maintainers give a generic one no guarantees. Sent to
+    # both. A public deployment that isn't this project's own should say so here, since the
+    # address in it is where the providers' operators will complain.
     GEOCODER_USER_AGENT: str = config(
         "GEOCODER_USER_AGENT", default="OpenDiving (+https://github.com/opendiving/opendiving-api)"
     )
@@ -513,10 +525,13 @@ class GeocodingSettings(BaseSettings):
     GEOCODER_RATE_LIMIT_WINDOW_SECONDS: int = config("GEOCODER_RATE_LIMIT_WINDOW_SECONDS", default=3600)
     GEOCODER_RATE_LIMIT_PER_USER: int = config("GEOCODER_RATE_LIMIT_PER_USER", default=600)
 
-    # What the *instance* may spend on the provider, counted across all users and applied
-    # only to calls that actually leave (a cache hit costs nothing). The default is
-    # Nominatim's published cap of one request per second. A self-hoster running their own
-    # Nominatim has no such cap and should raise it rather than throttle themselves.
+    # What the *instance* may spend on each provider, counted across all users and applied
+    # only to calls that actually leave (a cache hit costs nothing). One limit, two counters:
+    # a pin's lookup and a search keystroke never wait on each other. The default is
+    # Nominatim's published cap of one request per second; Photon publishes none, and one a
+    # second is well inside the "reasonable limit" its public instance asks for. Raising it
+    # raises both caps, so a self-hoster running their own Nominatim should raise it only
+    # when `GEOCODER_SEARCH_URL` also names a host they run.
     #
     # Exceeding it is *not* a 429: the counter is global, so raising would mean one diver's
     # search rejecting another's. The call is skipped and logged, and the caller gets the

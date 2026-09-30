@@ -2415,20 +2415,34 @@ mandatory `<location>` and repeating the site's own name there when only coordin
 
 ## Geocoding is a server-side proxy, and Nominatim's terms are three concrete obligations
 
-`GET /api/v1/geocode/reverse` and `/search` proxy the provider so `GEOCODER_API_KEY` never reaches a
-client and the web CSP needs no new `connect-src`. The default `https://nominatim.openstreetmap.org`
-is keyless, honouring its terms: an identifying `GEOCODER_USER_AGENT`, every answer cached, and
-outbound calls throttled through `enforce_rate_limit` at one per second. A miss sends the coordinate
-or search string, never account or token; `GEOCODER_URL=""` disables the feature.
+`GET /api/v1/geocode/reverse` proxies Nominatim at `GEOCODER_URL`, `/search` Photon at
+`GEOCODER_SEARCH_URL`, so `GEOCODER_API_KEY` never reaches a client and the web CSP needs no new
+`connect-src`. Both defaults are keyless, and both get what Nominatim's terms demand: an identifying
+`GEOCODER_USER_AGENT`, every answer cached, outbound calls throttled through `enforce_rate_limit` at
+one per second. A miss sends the coordinate or search string, never account or token.
 
-Keys are `geocode:v1:…` — global, outside the `user_{id}_*` sweep, versioned because the normalized
-`GeocodeResult` is cached; `GEOCODER_LANGUAGE` is instance-wide since it is keyed.
-`geocode:user:{id}` rejects with 429; `geocode:provider` is shared, so exceeding it skips the call
-and returns "no result".
+Keys are `geocode:<version>:<provider hash>:<language>:…` — global, outside the `user_{id}_*` sweep,
+versioned because the normalized `GeocodeResult` is cached; `GEOCODER_LANGUAGE` is instance-wide
+since it is keyed. `geocode:user:{id}` rejects with 429; `geocode:provider:nominatim` and
+`geocode:provider:photon` are global, so exceeding one skips the call and returns "no result".
 
-`_request` returns `[]` for "nothing there" (cached) and `None` for "could not ask" (uncached);
-`unable to geocode` is an answer, any other `{"error": ...}` a failure. Everything else degrades to
-`null`/`[]`; the log names the path, never the URL. `location` is place plus country from `address`.
+`_request` and `_search_photon` return `[]` for "nothing there" (cached) and `None` for "could not
+ask" (uncached); Nominatim's `unable to geocode` is an answer, any other `{"error": ...}` a failure.
+Everything else degrades to `null`/`[]`; the log names the path, never the URL.
+
+## Place search asks Photon, and `GEOCODER_URL=""` still switches it off
+
+`/geocode/search` asks Photon's `/api` at `GEOCODER_SEARCH_URL`, by default komoot's public
+instance: Nominatim matches whole words only — `phi phi` never reaches Ko Phi Phi Don — and its
+usage policy forbids search-as-you-type, which Photon is built for over the same OSM data. Reverse
+stays on Nominatim, whose `unable to geocode` the offshore fallback keys on.
+
+`GEOCODER_URL=""` switches search off too: disabled means disabled, and an upgrade must not switch
+it back on. `GEOCODER_SEARCH_URL=""` switches off search alone. Neither default follows the other,
+so a `GEOCODER_URL` naming an operator's own Nominatim still sends searches to public Photon — a
+breaking change for such an instance. Rejected: two independent switches; search off whenever
+`GEOCODER_URL` is not the stock Nominatim, which makes one default depend on another value; a
+Nominatim search mode beside Photon, two adapters for a configuration nobody runs.
 
 ## A pin in open water is named from polygons in the repo, not from a second provider
 
@@ -2496,17 +2510,17 @@ hand-rolled helpers' kwarg names fill the placeholders.
 ## A bounding box is optional twice over, and west > east is a real box
 
 `GeocodeResult` and `LocationInput` carry `bbox_south/north/west/east` as four named floats, not
-nested, because a client writes a picked search result straight onto a place. Nominatim sends
-`boundingbox` as four strings ordered south, north, west, east; `_bounding_box` checks each
-assumption. A missing, short, unparseable or impossible box leaves all four `None` and keeps the
-result; the box is a nicety. The bounds check is the chain `-90 <= south <= north <= 90`, so a `nan`
-corner is rejected.
+nested, because a client writes a picked search result straight onto a place. Photon sends `extent`
+as four numbers ordered west, north, east, south; `_photon_extent` checks each assumption. A
+missing, short, unparseable or impossible box leaves all four `None` and keeps the result. The
+bounds check is the chain `-90 <= south <= north <= 90`, so a `nan` corner is rejected.
 
 `bbox_west > bbox_east` is valid and never "corrected": it crosses the antimeridian, and swapping
-the pair frames the whole planet. South > north has no such reading and is refused. Only forward
-search gets a box (`_normalize(..., with_bounding_box=True)`), and `LocationInput` refuses a box
-with no coordinates. Cache entries hold normalized `GeocodeResult`s for a month, so adding a field
-means bumping `_CACHE_VERSION`; nothing fails if skipped.
+the pair frames the whole planet. Places saved from Nominatim carry such boxes; Photon sends a
+full-width one instead. South > north has no such reading and is refused. Only forward search gets a
+box, and `LocationInput` refuses a box with no coordinates. Cache entries hold normalized
+`GeocodeResult`s for a month, so adding a field means bumping `_CACHE_VERSION`; nothing fails if
+skipped.
 
 ## The project instructions live in AGENTS.md, and CLAUDE.md is an import
 
@@ -2923,8 +2937,9 @@ is load-bearing: a `NOT NULL` column on a populated table needs a server-side de
 
 `GeocodeResult.attribution` is a wire format: `parseAttribution`
 (`opendiving-web/src/lib/map-tiles.ts`) reads `[label](href)` and degrades to plain text, so a shape
-change ships client-first. The rendered string is the provider's `licence`; `_normalize` falls back
-to `_DEFAULT_ATTRIBUTION` only when it is absent. `_linked_attribution` folds
+change ships client-first. A pin's credit is Nominatim's `licence`, and `_normalize` falls back to
+`_DEFAULT_ATTRIBUTION` only when it is absent; a search result always carries
+`_DEFAULT_ATTRIBUTION`, since Photon sends no licence. `_linked_attribution` folds
 `<text> <trailing-url>` into `[<text>](<url>)` and nothing else: a rule about shape, not
 OpenStreetMap, because `GEOCODER_URL` is an operator setting and a hardcoded credit or
 `GEOCODER_ATTRIBUTION` knob could credit the wrong party. The text is required (`\s+`, never `\s*`):
@@ -5262,10 +5277,10 @@ re-derivable. Rejected: `uap-python`, `user-agents` (dormant), `ua-parser-js` 2.
 
 `GET /api/v1/dive-sites/suggest` answers from `src/app/data/dive_site_catalog.json` — 3,702 records
 extracted from OpenStreetMap and Wikidata by `scripts/build_dive_site_catalog.py` and checked in —
-because the geocoder cannot: Nominatim knows where Dahab is, not where the Blue Hole's north entry
-is. It is `services/marine_areas.py` one size up and copies that reasoning: a vendored,
-licence-stamped extract beats a live dependency, since a self-hoster should not acquire an outbound
-host, an account and a second failure mode for a form suggestion.
+because the geocoder cannot: it knows where Dahab is, not where the Blue Hole's north entry is. It
+is `services/marine_areas.py` one size up and copies that reasoning: a vendored, licence-stamped
+extract beats a live dependency, since a self-hoster should not acquire an outbound host, an account
+and a second failure mode for a form suggestion.
 
 No schema change, by design. A pick copies values into an ordinary per-user `dive_site` row through
 `POST /dive-site`; nothing links to the catalog. That is the opposite of the species catalog because
