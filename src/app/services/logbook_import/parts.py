@@ -19,7 +19,6 @@ Here the caller is authenticated before a byte is read, and while the body strea
 has the trade this sits inside.
 """
 
-import codecs
 import hashlib
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
@@ -104,17 +103,6 @@ def batch_digest(parts: Sequence[ImportPart]) -> str:
     return hasher.hexdigest()
 
 
-def _codec(name: str) -> str:
-    """The request's charset where Python knows it, and Latin-1 where it does not - the
-    framework's own fallback, which names every byte, so a bogus charset reads rather than
-    fails."""
-    try:
-        codecs.lookup(name)
-    except LookupError:
-        return "latin-1"
-    return name
-
-
 def _mb(size: int) -> int:
     """A byte bound in whole megabytes, rounded up so a figure never reads below its bound."""
     return -(-size // (1024 * 1024))
@@ -161,6 +149,15 @@ class _BodyReader:
         self._in_memory = 0
         self._pending: list[tuple[_FilePart, bytes]] = []
 
+    def _decoded(self, data: bytes) -> str:
+        """Text in the request's charset, and Latin-1 where that charset cannot decode text at
+        all - an unknown name, a codec that is not a text encoding - which is the framework's
+        own fallback: Latin-1 names every byte, so a bogus charset reads rather than fails."""
+        try:
+            return data.decode(self._charset, errors="replace")
+        except LookupError, UnicodeError:
+            return data.decode("latin-1")
+
     # ------------------------------------------------------------------ callbacks
 
     def on_part_begin(self) -> None:
@@ -184,13 +181,13 @@ class _BodyReader:
         name = options.get(b"name")
         if name is None:
             raise MalformedRequestError('The Content-Disposition header field "name" must be provided.')
-        field_name = name.decode(self._charset, errors="replace")
+        field_name = self._decoded(name)
         if field_name == FILE_FIELD:
             if len(self.parts) >= MAX_PARTS:
                 raise ImportTooLargeError(
                     f"This import carries more than {MAX_PARTS} files. Zip them and import the zip instead."
                 )
-            filename = options.get(b"filename", b"").decode(self._charset, errors="replace")
+            filename = self._decoded(options.get(b"filename", b""))
             part = _FilePart(index=len(self.parts), filename=filename)
             self.parts.append(part)
             self._current = part
@@ -215,7 +212,7 @@ class _BodyReader:
 
     def on_part_end(self) -> None:
         if isinstance(self._current, _Field):
-            self.fields[self._current.name] = self._current.data.decode(self._charset, errors="replace")
+            self.fields[self._current.name] = self._decoded(bytes(self._current.data))
         self._current = None
 
     # ------------------------------------------------------------------ file parts
@@ -305,7 +302,7 @@ async def read_import_request(request: Request, *, fields: Collection[str] = ())
     body = _BodyReader(fields)
     charset = params.get(b"charset")
     if charset:
-        body._charset = _codec(charset.decode("latin-1"))
+        body._charset = charset.decode("latin-1")
     parser = MultipartParser(
         boundary,
         {

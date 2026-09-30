@@ -981,3 +981,36 @@ class TestOneArchive:
         assert second.format == "archive" and second.refusal is not None and "on its own" in second.refusal
         assert report.archive
         assert len(await _dive_ids(async_db, destination)) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_archived_file_another_recording_holds_is_skipped_with_the_note(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The archive's own files meet the account's the same way a kept file does: the
+        digest is asked after, and a copy is reported rather than refused by the index."""
+        from datetime import UTC, datetime
+
+        from src.app.services.export import load_export_bundle
+        from src.app.services.export.archive import write_archive
+
+        export = _unique_export()
+        source, destination = create_user(db), create_user(db)
+        await _import(async_db, source, [("dive.json", export)])
+        bundle = await load_export_bundle(async_db, user_id=source.id)
+        spool = await write_archive(async_db, bundle, exported_at=datetime.now(UTC))
+        archive = spool.read()
+        spool.close()
+        holder = create_dive(db, destination)
+        await _attach(async_db, destination, holder, export, "dive.json")
+        recording = (
+            await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == holder.id))
+        ).scalar_one()
+        assert recording.start_time is not None
+        recording.start_time = recording.start_time.replace(year=2020)
+        await async_db.commit()
+
+        report = await _import(async_db, destination, [("logbook.zip", archive)])
+
+        assert await _count(async_db, DiveFile, destination) == 1
+        assert report.files.skipped == 1
+        assert ImportNoteCode.FILE_SKIPPED in {note.code for note in report.notes}

@@ -962,14 +962,44 @@ class TestManyFiles:
 
 
 class TestABodyTheReaderMustNotFailOn:
-    def test_a_charset_python_does_not_know_reads_as_the_framework_reads_it(
-        self, signed_in: Any, client: TestClient
+    @pytest.mark.parametrize("charset", ["bogus", "hex", "idna", "undefined", "utf-8"])
+    def test_a_charset_that_cannot_decode_text_reads_as_latin_1(
+        self, signed_in: Any, client: TestClient, charset: str
     ) -> None:
         body, content_type = multipart([("logbook.divejson", MINIMAL)])
 
-        response = client.post(PREVIEW_PATH, content=body, headers={"content-type": f"{content_type}; charset=bogus"})
+        response = client.post(
+            PREVIEW_PATH, content=body, headers={"content-type": f"{content_type}; charset={charset}"}
+        )
 
         assert response.status_code == 200
+        assert [row["name"] for row in response.json()["members"]] == ["logbook.divejson"]
+
+
+class TestTheReadTransactionIsReleasedBeforeTheBody:
+    """Authentication reads through the request's session, and the body then arrives at the
+    client's pace - so a connection left in that read's transaction sits idle for the whole
+    upload, which nothing on screen would ever show."""
+
+    @pytest.mark.parametrize("path", [PREVIEW_PATH, APPLY_PATH])
+    def test_the_release_comes_before_the_first_byte_is_read(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any, path: str
+    ) -> None:
+        order: list[str] = []
+        db = AsyncMock()
+        db.rollback.side_effect = lambda: order.append("release")
+        signed_in.dependency_overrides[async_get_db] = lambda: db
+        read = import_route.read_import_request
+
+        async def reading(request: Any, **kwargs: Any) -> Any:
+            order.append("read")
+            return await read(request, **kwargs)
+
+        monkeypatch.setattr(import_route, "read_import_request", reading)
+
+        client.post(path, files=_files(), data={"token": "x"} if path == APPLY_PATH else None)
+
+        assert order[:2] == ["release", "read"]
 
 
 class TestTheTokenCoversTheBatch:
