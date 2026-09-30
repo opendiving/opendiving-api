@@ -15,8 +15,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import ColumnElement, inspect, select
+from sqlalchemy import Column, ColumnElement, String, select
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.app.api.v1.contacts import _contact_cache
 from src.app.api.v1.courses import _course_cache
@@ -142,6 +143,19 @@ class TestOwnedResourceSearchConditions:
         assert "is_deleted" not in sql
 
 
+class _Unregistered(DeclarativeBase):
+    """Its own metadata, so the model below never joins what the migrations are checked against."""
+
+
+class _PlaceWithAnUnmappedColumn(_Unregistered):
+    __tablename__ = "place_with_an_unmapped_column"
+    __mapper_args__ = {"exclude_properties": ["retired"]}
+    __table_args__ = (Column("retired", String),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+
+
 class TestTheSearchedListSelectsTheMappersColumns:
     """`search_multi` builds its own `select()`, so what it names is what the table has to
     hold on the day it runs. A column kept on the table after it leaves the mapper is one the
@@ -161,20 +175,18 @@ class TestTheSearchedListSelectsTheMappersColumns:
 
     @pytest.mark.asyncio
     async def test_a_column_the_mapper_excludes_is_not_selected(self) -> None:
-        statement = await self._statement(DiveSite)
+        statement = await self._statement(_PlaceWithAnUnmappedColumn)
         sql = str(statement.compile(dialect=postgresql.dialect()))
 
-        assert "location_full_name" in DiveSite.__table__.c
-        assert "location_full_name" not in sql
-        assert {column.key for column in statement.selected_columns} == {
-            column.key for column in inspect(DiveSite).columns
-        }
+        assert "retired" in _PlaceWithAnUnmappedColumn.__table__.c
+        assert "retired" not in sql
+        assert {column.key for column in statement.selected_columns} == {"id", "name"}
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("model", [GearItem, Contact])
+    @pytest.mark.parametrize("model", [DiveSite, GearItem, Contact])
     async def test_a_table_the_mapper_covers_is_selected_whole(self, model: Any) -> None:
-        """The other two models `search_multi` serves map every column, so for them the
-        mapper's set is the table's and nothing they return moves."""
+        """The models `search_multi` serves map every column, so for them the mapper's set is
+        the table's and nothing they return moves."""
         statement = await self._statement(model)
 
         assert {column.key for column in statement.selected_columns} == {
