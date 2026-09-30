@@ -153,7 +153,7 @@ async def _patch_start_time(
     the UPDATE all run for real, because what these two tests claim is about the endpoint.
     `test_dive_start_time.py` pins `split_updated_start_time` on its own.
     """
-    for name in ("invalidate_dive_caches", "invalidate_gear_caches"):
+    for name in ("invalidate_dive_caches", "invalidate_gear_caches", "invalidate_trip_caches"):
         monkeypatch.setattr(dives_module, name, AsyncMock())
     await dives_module.patch_dive(
         request=MagicMock(),

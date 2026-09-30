@@ -225,7 +225,7 @@ def _install_trip(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     monkeypatch.setattr(trips_module, "trip_name_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(trips_module, "replace_parts_for_trip", AsyncMock())
     monkeypatch.setattr(trips_module, "get_parts_for_trip", AsyncMock(return_value=[]))
-    monkeypatch.setattr(trips_module._trip_cache, "invalidate_list", AsyncMock())
+    monkeypatch.setattr(trips_module, "invalidate_trip_caches", AsyncMock())
     monkeypatch.setattr(trips_module.crud_trips, "create", created)
     monkeypatch.setattr(trips_module.crud_trips, "get", AsyncMock(return_value=_internal_trip()))
     return created
@@ -258,7 +258,7 @@ def _install_dive(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         monkeypatch.setattr(dives_module, name, AsyncMock())
     for name in ("replace_species_for_dive", "recalculate_dive_stats", "recalculate_gear_dive_counts"):
         monkeypatch.setattr(dives_module, name, AsyncMock())
-    for name in ("invalidate_dive_caches", "invalidate_gear_caches"):
+    for name in ("invalidate_dive_caches", "invalidate_gear_caches", "invalidate_trip_caches"):
         monkeypatch.setattr(dives_module, name, AsyncMock())
     for name in ("get_mixtures_for_dive", "get_dive_sites_for_dive", "get_gear_items_for_dive", "get_species_for_dive"):
         monkeypatch.setattr(dives_module, name, AsyncMock(return_value=[]))
@@ -434,7 +434,12 @@ class ListRoute:
 _PUBLIC_ROW = {"uuid": str(ROW_UUID), "created_at": CREATED_AT.isoformat()}
 
 LIST_ROUTES = (
-    ListRoute("/trips", trips_module, "_cached_read_trips", _PUBLIC_ROW | {"name": "Cebu 2026"}),
+    ListRoute(
+        "/trips",
+        trips_module,
+        "_cached_read_trips",
+        _PUBLIC_ROW | {"name": "Cebu 2026", "dive_count": 0, "dive_site_count": 0, "species_count": 0},
+    ),
     ListRoute(
         "/courses",
         courses_module,

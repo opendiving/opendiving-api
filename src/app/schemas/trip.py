@@ -71,6 +71,17 @@ class TripRead(TripBase, PublicUUIDSchema):
     # Who came on the trip, which is not a walk of its dives: a companion who never dived is
     # here and on none of them.
     people: PeopleRead
+    dive_count: Annotated[int, Field(examples=[12], description="The owner's live dives assigned to this trip")]
+    dive_site_count: Annotated[
+        int, Field(examples=[5], description="Distinct dive sites named by those dives; a site on several counts once")
+    ]
+    species_count: Annotated[
+        int,
+        Field(
+            examples=[31],
+            description="Distinct species recorded on those dives, counted as `species_seen` counts them",
+        ),
+    ]
     user_uuid: uuid_pkg.UUID
     created_at: datetime
 

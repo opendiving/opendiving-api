@@ -32,7 +32,7 @@ from ...schemas.location import (
     location_columns,
     location_from_row,
 )
-from ...services.cache_invalidation import invalidate_dive_caches
+from ...services.cache_invalidation import invalidate_dive_caches, invalidate_trip_caches
 from ...services.dive_site_catalog import search_sites
 
 router = APIRouter(tags=["dive-sites"])
@@ -320,6 +320,9 @@ async def erase_dive_site(
     await _dive_site_cache.invalidate_list(owner_id)
     # The cascade shortens the site list of every dive logged here, so drop those reads too.
     await invalidate_dive_caches(owner_id)
+    # And the site counts of every trip those dives are on, whichever branch ran: a move can
+    # fold two of a trip's sites into one.
+    await invalidate_trip_caches(owner_id)
 
     return {"message": "Dive site deleted"}
 

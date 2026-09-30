@@ -136,18 +136,16 @@ that expression, because DiveJSON's §3 rule 8 is Unicode full case folding, whi
 `name::text COLLATE`, since `alembic check` strips a cast through the collation and compares equal
 only when both sides carry one.
 
-## `trips.py`/`dive_sites.py` caching mirrors `dives.py`
+## `dive_sites.py` caching mirrors `dives.py`
 
-`trips.py` and `dive_sites.py` each instantiate one `OwnedResourceCache`
-(`core/utils/owned_resource_cache.py`), built on the same Redis-backed `@cache` decorator as
-`dives.py`. `read_list` (`GET /trips`, `GET /dive-sites`) wraps `get_multi` with
+`dive_sites.py` instantiates one `OwnedResourceCache` (`core/utils/owned_resource_cache.py`), built
+on the same Redis-backed `@cache` decorator as `dives.py`. `read_list` (`GET /dive-sites`) wraps
+`get_multi` with
 `@cache(key_prefix="user_{user_id}_...", resource_id_name="user_id", expiration=60)`; `read_item`
-(`GET /trip/{id}`, `GET /dive-site/{id}`) wraps `get` with
-`key_prefix="trip_cache"`/`"dive_site_cache"`. Both are called only after the route's ownership
-check; the factory exposes the cached reads and never the check, so authorization cannot land inside
-a cached function. Every mutation invalidates: `write_trip`/`write_dive_site` call
-`invalidate_list(user_id)` (`delete_keys_by_pattern(f"user_{user_id}_trips:*")`);
-`patch_*`/`erase_*` carry `@cache("trip_cache"/"dive_site_cache", resource_id_name="id")`, which
+(`GET /dive-site/{id}`) wraps `get` with `key_prefix="dive_site_cache"`. Both are called only after
+the route's ownership check; the factory exposes the cached reads and never the check, so
+authorization cannot land inside a cached function. Every mutation invalidates: `write_dive_site`
+calls `invalidate_list(user_id)`; `patch_*`/`erase_*` carry `@cache("dive_site_cache", ...)`, which
 invalidates the item key on any non-GET call, and call `invalidate_list(owner_id)` by hand because
 the owner is known only after the fetch and cannot be expressed via `to_invalidate_extra`. `patch_*`
 skips the list when `update_data` is empty. The factory covers only read/cache/invalidate; route
@@ -510,9 +508,9 @@ owner's next dive mutation.
 
 The single-item gear caches are keyed `user_{user_id}_gear_item:{uuid}` /
 `user_{user_id}_gear_set:{uuid}`, beside the list caches `user_{user_id}_gear_items:page_...` and
-`user_{user_id}_gear_sets:page_...` — unlike `dive_site_cache:{uuid}`/`trip_cache:{uuid}`.
-`invalidate_gear_caches()` (`api/v1/gear_items.py`) is therefore one
-`delete_keys_by_pattern("user_{id}_gear_*")` covering all four.
+`user_{user_id}_gear_sets:page_...` — unlike `dive_site_cache:{uuid}`. `invalidate_gear_caches()`
+(`api/v1/gear_items.py`) is therefore one `delete_keys_by_pattern("user_{id}_gear_*")` covering all
+four.
 
 The user scoping is what makes that possible. A gear set read embeds its items' names/brands, so
 editing an *item* must invalidate *set* reads. A gear item read carries `dive_count`, so any
@@ -6815,14 +6813,13 @@ equal sets are two equal lists; reads widen it to `list[str]`. A set rather than
 because a resort is a dive center with rooms and a scalar could never become a set later.
 *Rejected:* a single `type` with a `resort` member, which files one party two ways.
 
-## Deleting a contact invalidates five cache families and the trips it was stayed at
+## Deleting a contact invalidates five cache families
 
 A dive, a course, a certification, a service record and a trip part carry a contact's uuid, and
-`ON DELETE SET NULL` rewrites all of them, so `erase_contact` drops each family after its own. A
-single trip is cached under `trip_cache:{uuid}` with no user in the key, which no per-user pattern
-reaches, so the uuids of the trips whose parts name the contact are collected before the row goes
-and dropped one by one (`invalidate_trip_items`). A rename reaches no host's cache: reads carry the
-uuid, never a summary.
+`ON DELETE SET NULL` rewrites all of them, so `erase_contact` drops each family after its own. The
+trip family's single reads are keyed under the user like its list, so one per-user sweep reaches the
+trips whose parts named the contact. A rename reaches no host's cache: reads carry the uuid, never a
+summary.
 
 ## Linking a person confirms an account exists, and nothing else
 

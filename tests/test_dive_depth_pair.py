@@ -95,6 +95,7 @@ class TestTheMergedPatch:
         monkeypatch.setattr(dives_module, "recalculate_gear_dive_counts", AsyncMock())
         monkeypatch.setattr(dives_module, "invalidate_dive_caches", AsyncMock())
         monkeypatch.setattr(dives_module, "invalidate_gear_caches", AsyncMock())
+        monkeypatch.setattr(dives_module, "invalidate_trip_caches", AsyncMock())
         return db_dive
 
     async def _patch(self, values: DiveUpdateRequest) -> None:

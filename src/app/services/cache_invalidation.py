@@ -17,6 +17,9 @@ course list it, and a certification names it as its instructor.
 A tag is one host wide and carries more than a uuid: a dive read lists its tags by name, so
 renaming or deleting one drops the diver's dive caches.
 
+A trip runs the other way: its read counts the dives assigned to it and the sites and species
+they name, so a dive write that can move one of those drops the diver's trip caches.
+
 These helpers live here rather than in the route modules so `dives.py`, `gear_items.py`,
 `dive_sites.py`, `courses.py`, `contacts.py`, `people.py` and `tags.py` can all reach them
 without importing each other (which would be circular - `dives.py` already invalidates gear
@@ -26,9 +29,6 @@ Both work by pattern, which is only possible because every affected cache key is
 user-scoped. See `read_dive`/`_cached_read_dives` and `gear_items.py` for the key
 shapes themselves.
 """
-
-import uuid as uuid_pkg
-from collections.abc import Iterable
 
 from ..core.utils.cache import delete_keys_by_pattern
 from ..core.utils.owned_resource_cache import OwnedResourceCache
@@ -94,18 +94,6 @@ async def invalidate_contact_caches(user_id: int) -> None:
     await delete_keys_by_pattern(f"user_{user_id}_contact*")
 
 
-async def invalidate_trip_items(trip_uuids: Iterable[uuid_pkg.UUID]) -> None:
-    """Drop the single-trip reads of these trips.
-
-    `trip_cache:{uuid}` carries no user in its key, so no per-user pattern reaches it; a
-    writer that changes what a trip read says from outside the trip routes - deleting a
-    contact a part names, or a person the trip lists - has to collect the uuids and drop
-    them one by one.
-    """
-    for trip_uuid in trip_uuids:
-        await delete_keys_by_pattern(f"trip_cache:{trip_uuid}")
-
-
 async def invalidate_gear_caches(user_id: int) -> None:
     """Drop every cached gear read for a user.
 
@@ -122,11 +110,10 @@ async def invalidate_gear_caches(user_id: int) -> None:
 
 
 # The two list caches that live *inside* their routers as `OwnedResourceCache` instances
-# (`api/v1/dive_sites.py::_dive_site_cache`, `api/v1/trips.py::_trip_cache`) rather than
-# behind a helper here, because until logbook import there was no writer outside those two
-# routers - each mutation route calls its own `invalidate_list` and that was the whole
-# story. An import fills both collections from a service, which has no business importing
-# a route module, so the key shape is shared instead of the object: these two go through
+# (`api/v1/dive_sites.py::_dive_site_cache`, `api/v1/trips.py::_trip_cache`). Their writers
+# outside those routers - an import filling both collections from a service, every dive
+# route changing a trip's counts - have no business importing a route module, so the key
+# shape is shared instead of the object: these two go through
 # `OwnedResourceCache.list_cache_pattern`, the same function `invalidate_list` uses, and
 # `tests/test_cache_utils.py` checks the resource names still match the real caches'.
 #
@@ -139,5 +126,12 @@ async def invalidate_dive_site_caches(user_id: int) -> None:
 
 
 async def invalidate_trip_caches(user_id: int) -> None:
-    """Drop every cached trip list page for a user."""
+    """Drop every cached trip read for a user: the list pages and the single trips
+    (`user_{id}_trip:{uuid}`).
+
+    Two patterns, as for dives: the list's is the shared shape above, and the item key is
+    user-scoped so that a write which cannot name the trips it moved - a dive going from one
+    trip to another, a dive site deleted out from under several - still reaches them all.
+    """
     await delete_keys_by_pattern(OwnedResourceCache.list_cache_pattern("trips", user_id))
+    await delete_keys_by_pattern(f"user_{user_id}_trip:*")
