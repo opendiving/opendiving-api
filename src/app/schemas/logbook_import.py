@@ -803,7 +803,7 @@ class ImportFileReport(BaseModel):
 
 
 class ConversionConverter(BaseModel):
-    """What converted the upload, so a report can be attributed to a version of it."""
+    """What converted the files, so a report can be attributed to a version of it."""
 
     name: Annotated[str, Field(examples=["divejson"])]
     version: Annotated[str, Field(examples=["0.3.0"])]
@@ -1269,7 +1269,7 @@ class ImportPreview(ImportReport):
         ImportPortraitOffer | None,
         Field(
             default=None,
-            description="The archive's portrait, offered beside the account's. `null` when the upload carries none "
+            description="The archive's portrait, offered beside the account's. `null` when the import carries none "
             "it can offer - `notes` say why - or carries the account's own, framed the same.",
         ),
     ]

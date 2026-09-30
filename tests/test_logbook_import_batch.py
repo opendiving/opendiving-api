@@ -677,6 +677,7 @@ class TestTheFilesKept:
         recording = (
             await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == holder.id))
         ).scalar_one()
+        assert recording.start_time is not None
         recording.start_time = recording.start_time.replace(year=2020)
         await async_db.commit()
 
@@ -903,3 +904,50 @@ class TestTheDiveRows:
         [row] = report.dives
         assert (row.outcome, row.uuid, row.max_depth) == (ImportDiveOutcome.SKIPPED, None, 12.5)
         assert row.reason is not None and "start time" in row.reason
+
+
+class TestAFolderAfterItsFitFiles:
+    @pytest.mark.asyncio
+    async def test_the_fit_links_and_the_json_adds_its_file(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The FIT files imported one day and the whole folder dropped the next: each dive
+        gains its JSON, reached through the gates onto the recording its FIT made."""
+        diver = create_user(db)
+        await _import(async_db, diver, PAIR[:1])
+
+        report = await _import(async_db, diver, PAIR)
+
+        [dive] = await _logbook(async_db, diver)
+        assert [parser_key for _, parser_key, _ in dive["recordings"][0]["files"]] == ["fit", "suunto_json"]
+        [row] = report.dives
+        assert (row.outcome, row.files_added, row.recordings_added, row.members) == (
+            ImportDiveOutcome.UPDATED,
+            1,
+            0,
+            [0, 1],
+        )
+
+
+class TestOneArchive:
+    @pytest.mark.asyncio
+    async def test_a_second_archive_is_a_refused_row(self, volume: Any, async_db: AsyncSession, db: Session) -> None:
+        from datetime import UTC, datetime
+
+        from src.app.services.export import load_export_bundle
+        from src.app.services.export.archive import write_archive
+
+        source, destination = create_user(db), create_user(db)
+        await _import(async_db, source, [("dive.json", _unique_export())])
+        bundle = await load_export_bundle(async_db, user_id=source.id)
+        spool = await write_archive(async_db, bundle, exported_at=datetime.now(UTC))
+        archive = spool.read()
+        spool.close()
+
+        report = await _import(async_db, destination, [("a.zip", archive), ("b.zip", archive)])
+
+        first, second = (next(row for row in report.members if row.name == name) for name in ("a.zip", "b.zip"))
+        assert (first.format, first.refusal) == ("archive", None)
+        assert second.format == "archive" and second.refusal is not None and "on its own" in second.refusal
+        assert report.archive
+        assert len(await _dive_ids(async_db, destination)) == 1

@@ -376,6 +376,12 @@ class TestTheFormatsItAccepts:
         assert response.status_code == 415
         assert "no files to convert" in response.json()["detail"]
 
+    def test_a_zip_that_cannot_be_opened_is_422(self, signed_in: Any, client: TestClient) -> None:
+        response = client.post(PREVIEW_PATH, files=_files(b"PK\x03\x04 and then nothing a zip has", "broken.zip"))
+
+        assert response.status_code == 422
+        assert "could not be opened" in response.json()["detail"]
+
     def test_a_zip_with_no_members_at_all_is_not_even_a_zip(self, signed_in: Any, client: TestClient) -> None:
         """`PK\x03\x04` is the *local file header*, so an archive with no members does not
         carry it - and neither this module's sniff nor the library's claims one. The answer
@@ -963,7 +969,8 @@ class TestTheTokenCoversTheBatch:
         return [("file", (name, io.BytesIO(data), "application/octet-stream")) for name, data in files]
 
     def _previewed(self, client: TestClient) -> str:
-        return client.post(PREVIEW_PATH, files=self._multipart(self.FILES)).json()["token"]
+        token: str = client.post(PREVIEW_PATH, files=self._multipart(self.FILES)).json()["token"]
+        return token
 
     def test_the_same_files_in_another_order_import(self, signed_in: Any, client: TestClient) -> None:
         token = self._previewed(client)
