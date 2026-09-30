@@ -564,6 +564,36 @@ class TestTheDoorDoesNotMatter:
         assert report.members[0].kept
 
 
+class TestAFileWhoseDiveHasNoRecording:
+    @pytest.mark.asyncio
+    async def test_a_recording_is_created_to_hold_it_as_the_form_creates_one(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """A logbook's dive with no computer behind it: the file is kept all the same, on a
+        recording stating nothing but the start the dive states."""
+        logged = b"""<?xml version="1.0" encoding="UTF-8"?>
+<uddf xmlns="http://www.streit.cc/uddf/3.2/" version="3.2.2">
+  <generator><name>a logbook</name></generator>
+  <profiledata><repetitiongroup id="rg"><dive id="logged-by-hand">
+    <informationbeforedive><datetime>2026-04-17T09:30:00</datetime></informationbeforedive>
+    <informationafterdive><greatestdepth>18.2</greatestdepth><diveduration>2400</diveduration></informationafterdive>
+  </dive></repetitiongroup></profiledata>
+</uddf>
+"""
+        files = [("logged.uddf", logged)]
+        imported, form = create_user(db), create_user(db)
+
+        report = await _import(async_db, imported, files)
+        on_the_form = await _on_the_form(async_db, db, form, files)
+
+        [dive_id] = await _dive_ids(async_db, imported)
+        [recording] = (await _dive(async_db, dive_id))["recordings"]
+        assert [recording] == (await _dive(async_db, on_the_form.id))["recordings"]
+        assert recording["columns"]["device_model"] is None and recording["columns"]["start_time"] is not None
+        assert recording["profile"] is None
+        assert report.members[0].kept
+
+
 class TestReproducible:
     @pytest.mark.asyncio
     async def test_a_forced_backfill_rewrites_no_profile_an_import_wrote(
