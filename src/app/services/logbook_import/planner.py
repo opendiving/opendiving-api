@@ -907,7 +907,7 @@ class _Planner:
         centre_label: str,
         prefix: str = "",
     ) -> dict[str, Any]:
-        """A Location object as its eight columns, for either host (spec §6.9).
+        """A Location object as its columns, for either host (spec §6.9).
 
         One reader, because the format defines one object: a trip part and a dive site's
         locality land in differently named columns and mean exactly the same thing, so a
@@ -935,7 +935,6 @@ class _Planner:
         latitude, longitude = self._position(collection, record_uuid, location.position, centre_label)
         place |= {
             f"{prefix}name": location.name,
-            f"{prefix}full_name": location.full_name,
             f"{prefix}latitude": latitude,
             f"{prefix}longitude": longitude,
         }

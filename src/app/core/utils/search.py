@@ -11,7 +11,7 @@ term against *either* a name or a location/brand can't be written that way.
 
 from typing import Any
 
-from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy import ColumnElement, func, inspect, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 LIKE_ESCAPE_CHAR = "\\"
@@ -48,16 +48,17 @@ async def search_multi(
     """The search-filtered counterpart to `crud.get_multi`, returning the same
     `{"data": [...], "total_count": n}` shape it does.
 
-    Rows come back as plain dicts of every table column - matching `get_multi` called
+    Rows come back as plain dicts of every mapped column - matching `get_multi` called
     without a `schema_to_select`, so callers can hand them to the same public-shape
     conversion either way (and gear can still read the internal `id` it needs to batch
-    its service-schedule lookup).
+    its service-schedule lookup). The mapper's rather than the table's, because a column
+    kept on the table after it leaves the mapper is one the next deploy drops.
     """
     total_count = await db.scalar(select(func.count()).select_from(model).where(*conditions))
 
     order_by = getattr(model, sort_column)
     statement = (
-        select(*model.__table__.columns)
+        select(*inspect(model).columns)
         .where(*conditions)
         .order_by(order_by.desc() if sort_order == "desc" else order_by.asc())
         .offset(offset)

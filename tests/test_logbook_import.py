@@ -1823,10 +1823,10 @@ class TestADocumentWrittenBeforeAPlaceWasAnObject:
             assert loaded.document.sites[0].location.name == "Dahab, Egypt"
 
     @pytest.mark.asyncio
-    async def test_a_trip_parts_old_label_is_ignored_rather_than_refused(self) -> None:
-        """`display_name` left the place object too, but a member a reader does not know is
-        ignored (§5.6) rather than fatal - so a pre-change document fails on its sites and
-        would otherwise have imported its trips with the fuller names dropped.
+    async def test_a_places_retired_names_are_ignored_rather_than_refused(self) -> None:
+        """`display_name` left the place object, and then `full_name`, but a member a reader
+        does not know is ignored (§5.6) rather than fatal - so a part written before either
+        change imports as the place its `name` says.
         """
         document = {
             "format": "divejson",
@@ -1836,14 +1836,19 @@ class TestADocumentWrittenBeforeAPlaceWasAnObject:
                 {
                     "uuid": str(uuid7()),
                     "name": "Red Sea",
-                    "parts": [{"location": {"name": "Dahab", "display_name": "Dahab, South Sinai, Egypt"}}],
+                    "parts": [
+                        {"location": {"name": "Dahab", "display_name": "Dahab, South Sinai, Egypt"}},
+                        {"location": {"name": "Nuweiba", "full_name": "Nuweiba, South Sinai, Egypt"}},
+                    ],
                 }
             ],
         }
         with await load_one(json.dumps(document).encode()) as loaded:
-            place = loaded.document.trips[0].parts[0].location
-            assert place is not None
-            assert (place.name, place.full_name) == ("Dahab", None)
+            places = [part.location for part in loaded.document.trips[0].parts]
+            assert [None if place is None else place.model_dump() for place in places] == [
+                {"name": "Dahab", "position": None, "bbox": None},
+                {"name": "Nuweiba", "position": None, "bbox": None},
+            ]
 
 
 class TestTheOldSpellingsAreUndefinedMembers:
@@ -1929,7 +1934,6 @@ class TestADiveSitesLocalityArrivesWhole:
                 document,
                 {
                     "name": "Dahab, Egypt",
-                    "full_name": "Dahab, South Sinai Governorate, Egypt",
                     "position": {"latitude": 28.4949, "longitude": 34.5136},
                     "bbox": {"south": 28.44, "north": 28.54, "west": 34.46, "east": 34.56},
                 },
@@ -1937,10 +1941,7 @@ class TestADiveSitesLocalityArrivesWhole:
         )
 
         site = await self._site_of(async_db, destination.id)
-        assert (site.location_name, site.location_full_name) == (
-            "Dahab, Egypt",
-            "Dahab, South Sinai Governorate, Egypt",
-        )
+        assert site.location_name == "Dahab, Egypt"
         assert (site.location_latitude, site.location_longitude) == (28.4949, 34.5136)
         assert (site.location_bbox_south, site.location_bbox_north) == (28.44, 28.54)
         # The site's own pin, which the locality's centre must not have overwritten.
@@ -1980,7 +1981,7 @@ class TestADiveSitesLocalityArrivesWhole:
 
         site = await self._site_of(async_db, destination.id)
         assert site.location_name == "Uncle Bert's reef"
-        assert (site.location_full_name, site.location_latitude, site.location_bbox_west) == (None, None, None)
+        assert (site.location_latitude, site.location_bbox_west) == (None, None)
 
 
 class TestATripArrivesAsItsParts:
@@ -2026,13 +2027,15 @@ class TestATripArrivesAsItsParts:
                         },
                     },
                     {"starts_on": "2026-06-05", "ends_on": "2026-06-08"},
-                    {"location": {"name": "Dahab, Egypt", "full_name": "Dahab, South Sinai, Egypt"}},
+                    {"location": {"name": "Dahab, Egypt"}},
                 ],
             ),
         )
 
         parts = await self._parts_of(async_db, destination.id)
         assert [part.position for part in parts] == [0, 1, 2]
+        # Two parts may name one place: a trip that goes back to Dahab is the shape a
+        # sequence of parts exists to record, and nothing here dedupes them.
         assert [part.name for part in parts] == ["Dahab", None, "Dahab, Egypt"]
         assert [(part.start_date, part.end_date) for part in parts] == [
             (date(2026, 6, 1), date(2026, 6, 5)),
@@ -2040,9 +2043,6 @@ class TestATripArrivesAsItsParts:
             (None, None),
         ]
         assert (parts[0].latitude, parts[0].bbox_south, parts[0].bbox_east) == (28.5, 28.4, 34.6)
-        # Two parts may name one place: a trip that goes back to Dahab is the shape a
-        # sequence of parts exists to record, and nothing here dedupes them.
-        assert (parts[2].name, parts[2].full_name) == ("Dahab, Egypt", "Dahab, South Sinai, Egypt")
 
     @pytest.mark.asyncio
     async def test_a_box_the_geocoder_could_not_have_produced_leaves_the_place_standing(
@@ -2126,12 +2126,18 @@ class TestATripArrivesAsItsParts:
             destination.id,
             self._with_parts(
                 document,
-                [{"starts_on": "2026-06-01", "ends_on": "2026-06-05", "location": {"full_name": "Somewhere"}}],
+                [
+                    {
+                        "starts_on": "2026-06-01",
+                        "ends_on": "2026-06-05",
+                        "location": {"position": {"latitude": 28.5, "longitude": 34.5}},
+                    }
+                ],
             ),
         )
 
         part = (await self._parts_of(async_db, destination.id))[0]
-        assert (part.name, part.full_name) == (None, None)
+        assert (part.name, part.latitude) == (None, None)
         assert (part.start_date, part.end_date) == (date(2026, 6, 1), date(2026, 6, 5))
         assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
 

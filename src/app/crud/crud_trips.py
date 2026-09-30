@@ -61,12 +61,7 @@ def search_conditions(user_id: int, term: str) -> tuple[ColumnElement[bool], ...
             select(TripPart.id)
             .where(
                 TripPart.trip_id == Trip.id,
-                or_(
-                    TripPart.name.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
-                    # The fuller name too, so "philippines" finds a trip whose parts are
-                    # all named after towns and whose names stop at the country.
-                    TripPart.full_name.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
-                ),
+                TripPart.name.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
             )
             .exists(),
         ),

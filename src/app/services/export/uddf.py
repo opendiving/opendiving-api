@@ -704,11 +704,11 @@ def _divesite_element(bundle: ExportBundle, guides: dict[tuple[int, int], str]) 
             # that has only coordinates repeats its name there, since dropping the
             # position to stay silent about the locality would lose the more useful half.
             #
-            # The locality's **name**, not its fuller form: `divejson-py` reads this element
-            # back into `location.name`, so a document round-tripping through it comes back
-            # with the place it went out with. The fuller name, the locality's own centre
-            # and its box have no slot in `geographyType` at all and are lost here - the
-            # `<latitude>`/`<longitude>` below are the *site's* pin.
+            # The locality's name: `divejson-py` reads this element back into
+            # `location.name`, so a document round-tripping through it comes back with the
+            # place it went out with. The locality's own centre and its box have no slot in
+            # `geographyType` at all and are lost here - the `<latitude>`/`<longitude>` below
+            # are the *site's* pin.
             geography = _sub(element, "geography")
             _sub(geography, "location", site.location_name or site.name)
             if position is not None:

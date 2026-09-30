@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import Date, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import Column, Date, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -51,11 +51,9 @@ class TripPart(Base):
     end_date: Mapped[date | None] = mapped_column(Date, default=None)
     # Nullable, unlike the column this table replaces: a part with no place has no name,
     # and naming it after the trip would invent a place the diver never picked. `name` is
-    # the place as a person writes it and `full_name` the fullest form the lookup returned
-    # - the same pair a dive site's locality carries, under the same names
+    # the place as a person writes it, the same member a dive site's locality carries
     # (`schemas/location.py`).
     name: Mapped[str | None] = mapped_column(String(255), default=None)
-    full_name: Mapped[str | None] = mapped_column(String(512), default=None)
     latitude: Mapped[float | None] = mapped_column(Float, default=None)
     longitude: Mapped[float | None] = mapped_column(Float, default=None)
     bbox_south: Mapped[float | None] = mapped_column(Float, default=None)
@@ -69,4 +67,11 @@ class TripPart(Base):
         ForeignKey("contact.id", ondelete="SET NULL"), default=None, index=True
     )
 
-    __table_args__ = (Index("ix_trip_part_trip_id_position", "trip_id", "position"),)
+    __mapper_args__ = {"exclude_properties": ["full_name"]}
+
+    __table_args__ = (
+        # Unmapped, and dropped a deploy later: DECISIONS.md, "A column the serving build maps
+        # is dropped a deploy after it is unmapped".
+        Column("full_name", String(512), nullable=True),
+        Index("ix_trip_part_trip_id_position", "trip_id", "position"),
+    )

@@ -1,17 +1,14 @@
 """A place, as the geocoder described it when the diver picked it - or as they typed it.
 
-One object with one pair of names, hosted by a dive site and by a part of a trip alike
-(DiveJSON §6.9). It lives in its own module because both hosts reference it and neither
-owns it: putting it in either one would make the other import a sibling resource's schema
-for a shape that is not about that resource at all.
+One object, hosted by a dive site and by a part of a trip alike (DiveJSON §6.9). It lives
+in its own module because both hosts reference it and neither owns it: putting it in either
+one would make the other import a sibling resource's schema for a shape that is not about
+that resource at all.
 
-**Two names, and only the short one is ever rendered.** `name` is the place as a person
-writes it - the name alone (`"Moalboal"`), or the name with its country
-(`"Dahab, Egypt"`). `full_name` is a fuller written form a lookup returned
-(`"Dahab, South Sinai Governorate, Egypt"`): the site and trip searches match it, nothing
-on screen reads it, and the export writes `name` alone. Nothing binds the two: a lookup
-asked about a local name often answers with the district around it, so
-`"Sipadan Island Park"` may carry `"Sabah, Malaysia"` - shorter, and not containing it.
+**A place has one name.** `name` is the place as a person writes it - the name alone
+(`"Moalboal"`), or extended outward through its region to its country (`"Dahab, South
+Sinai, Egypt"`), which is how the geocoder names a pick. It is what the site and trip
+searches match, so a region finds a place only where its name carries one.
 
 **A place is a value object with no identity**, so a write replaces the stored one
 wholesale rather than merging into it, and clearing it is an explicit null. It is
@@ -29,9 +26,8 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-# §6.9's own bounds, and the widths of the columns behind them.
+# §6.9's own bound, and the width of the column behind it.
 LOCATION_NAME_MAX = 255
-LOCATION_FULL_NAME_MAX = 512
 
 Latitude = Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[27.8506])]
 Longitude = Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[34.3136])]
@@ -46,7 +42,6 @@ BBOX_ORDER_MESSAGE = "bbox_south must be less than or equal to bbox_north"
 #: bare - so one tuple drives the mapping in both directions.
 LOCATION_FIELDS = (
     "name",
-    "full_name",
     "latitude",
     "longitude",
     "bbox_south",
@@ -102,11 +97,7 @@ class LocationInput(WholeCoordinatePair):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: Annotated[str, Field(min_length=1, max_length=LOCATION_NAME_MAX, examples=["Dahab, Egypt"])]
-    full_name: Annotated[
-        str | None,
-        Field(default=None, max_length=LOCATION_FULL_NAME_MAX, examples=["Dahab, South Sinai Governorate, Egypt"]),
-    ]
+    name: Annotated[str, Field(min_length=1, max_length=LOCATION_NAME_MAX, examples=["Dahab, South Sinai, Egypt"])]
     bbox_south: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.89])]
     bbox_north: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.98])]
     bbox_west: Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[123.35])]
@@ -134,7 +125,6 @@ class LocationRead(BaseModel):
     """
 
     name: str
-    full_name: str | None = None
     latitude: float | None = None
     longitude: float | None = None
     bbox_south: float | None = None
@@ -146,7 +136,7 @@ class LocationRead(BaseModel):
 def location_columns(location: LocationInput | None, prefix: str = "") -> dict[str, Any]:
     """A place spread across its host's columns, every one of them named.
 
-    All eight are always present, as `None` where there is no place, because a partial
+    Every one is always present, as `None` where there is no place, because a partial
     mapping would leave a cleared locality's stale centre and box behind on an update -
     a place is replaced whole, and half of one is the old place wearing a new name.
     """

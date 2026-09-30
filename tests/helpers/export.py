@@ -326,7 +326,6 @@ def full_bundle() -> ExportBundle:
         # *locality's* and are deliberately a different point from the pin above - a writer
         # that filled either from the other would go unnoticed if they agreed.
         location_name="Ras Mohammed, Egypt",
-        location_full_name="Ras Muhammad National Park, South Sinai, Egypt",
         location_latitude=27.7333,
         location_longitude=34.2500,
         location_bbox_south=27.68,
@@ -398,7 +397,6 @@ def full_bundle() -> ExportBundle:
             end_date=date(2026, 6, 2),
             location=LocationRead(
                 name="Sharm el-Sheikh, Egypt",
-                full_name="Sharm el-Sheikh, South Sinai, Egypt",
                 latitude=27.9158,
                 longitude=34.3300,
                 bbox_south=27.8,
