@@ -80,6 +80,7 @@ from ...schemas.logbook_import import (
     ImportCollectionReport,
     ImportContact,
     ImportCourse,
+    ImportCylinder,
     ImportDive,
     ImportDiver,
     ImportDiveSite,
@@ -325,24 +326,22 @@ class PlannedRecordingMatch:
     recording_id: int | None
     recording: PlannedRecording
     # **The matched recording's position on its dive, and it decides what the writer may
-    # touch beyond the recording itself.** A fill writes the dive's entry and exit fixes and
-    # fills its cylinders, and both of those are the *primary* recording's to write - the
-    # dive's columns come from its primary, and a second computer's cylinder labelling is its
-    # own. The attach path has enforced that since recordings arrived
-    # (`rederive_recording` returns before both for `ordinal != 0`); this side could not,
-    # having no ordinal to hand, so it wrote them for whichever recording matched. `None`
-    # on an `attach`, where no stored recording is named and the writer computes the slot.
+    # touch beyond the recording itself.** A fill that brings no file writes the dive's entry
+    # and exit fixes and fills its cylinders only through the *primary* recording: the dive's
+    # columns come from its primary, and nothing tells a second reading without a file from a
+    # logbook re-imported over a value the diver cleared. `None` on an `attach`, where no
+    # stored recording is named and the writer computes the slot.
     ordinal: int | None
     # The incoming *dive's* values, carried for a `fill` only: a match that writes no dive
     # row can still supply readings the existing dive has none of. Ignored on `attach`, where
     # the recording is a second computer's and the dive's figures are the primary's.
     dive_values: dict[str, Any] = field(default_factory=dict)
-    # The incoming dive's cylinders, carried on **both** kinds and read differently by each:
-    # on a `fill` they are what `fill_dive_mixtures` writes into the stored dive's blank
-    # cylinder members, and on an `attach` they are the labelling this second computer's
-    # `gas_number`s are mapped *from* onto the dive's own list. Defaulting to empty rather than
-    # being required is what let the attach case ship without them once, with the whole
-    # relabelling unreachable.
+    # The incoming dive's cylinders, carried on **both** kinds. On a `fill` without the file
+    # they are what `fill_dive_mixtures` writes into the primary's paired rows' blanks; on an
+    # `attach` without it they are the list this second computer's `gas_number`s are mapped
+    # *from* onto the dive's own, and the values its paired rows' blanks take. Defaulting to
+    # empty rather than being required is what let the attach case ship without them once,
+    # with the whole relabelling unreachable.
     mixtures: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -532,6 +531,15 @@ _MIXTURE_BOUNDS: tuple[Bound, ...] = (
         f"a gas number must be between 0 and {INT32_MAX}",
     ),
 )
+
+
+def _unpressurized(cylinder: ImportCylinder) -> list[str]:
+    """The pressures a converted file writes as an absent-marker: 0 bar or below."""
+    return [
+        name
+        for name in ("start_pressure", "end_pressure")
+        if (value := getattr(cylinder, name)) is not None and finite(value) and value <= 0
+    ]
 
 
 def _key(*parts: str | None) -> tuple[str, ...]:
@@ -2123,9 +2131,9 @@ class _Planner:
         The dive's own *values* ride along on a `fill` only, so a match can still supply
         readings the stored dive has none of; on an `attach` they are dropped, the recording
         being a second computer's and the dive's figures the primary recording's. Its
-        **cylinders** ride along on both, and for two different jobs: on a fill they are what
-        `fill_dive_mixtures` writes into the blanks of the dive's own rows, and on an attach
-        they are what the second computer's `gas_number`s are mapped *from*.
+        **cylinders** ride along on both: on either they fill the blanks of the dive's rows
+        they pair with, and on an attach they are also what the second computer's
+        `gas_number`s are mapped *from*.
         """
         remaining: list[PlannedRecording] = []
         taken = 0
@@ -2191,13 +2199,13 @@ class _Planner:
                         # No stored recording to have a position: the writer appends this one
                         # and computes the slot with `next_ordinal`.
                         ordinal=None,
-                        # **Carried on an attach as well as on a fill**, and for a different
-                        # job: not to fill the dive's cylinders but to *read* the incoming
-                        # dive's, so the writer can map this second computer's `gas_number`s
-                        # onto the ones the dive already has. Without them the mapping has
-                        # nothing to map from and the recording's pressure channels land
-                        # naming another computer's tanks - the misattribution
-                        # `relabel_gas_numbers` exists to prevent.
+                        # **Carried on an attach as well as on a fill**, and with one more
+                        # job: the writer maps this second computer's `gas_number`s from them
+                        # onto the ones the dive already has, as well as filling the blanks of
+                        # the rows they pair with. Without them the mapping has nothing to map
+                        # from and the recording's pressure channels land naming another
+                        # computer's tanks - the misattribution `relabel_gas_numbers` exists
+                        # to prevent.
                         mixtures=mixtures,
                     )
                 )
@@ -2473,9 +2481,18 @@ class _Planner:
         done - an oxygen and a helium summing past 100 cannot both be right and neither
         says which is wrong, so both go and the row stays. Nothing in here skips a cylinder
         any more.
+
+        **A converted file's pressure at or below 0 bar is absent**, as the dive form reads the
+        same file (`DiveMixtureSchema._drop_unpressurized`): a Shearwater UDDF writes 0 bar for
+        every tank slot its transmitters never read, and stored as an end pressure that 0 would
+        read as set to every later fill. Dropped without a note, since it is an absent-marker
+        rather than a value. A DiveJSON document keeps the bounds a diver's own record takes,
+        where an end pressure of 0 is an out-of-gas ascent (spec §6.3).
         """
+        converted = self._loaded.conversion is not None
         rows: list[dict[str, Any]] = []
-        for index, cylinder in enumerate(dive.cylinders):
+        for index, source in enumerate(dive.cylinders):
+            cylinder = source.model_copy(update=dict.fromkeys(_unpressurized(source), None)) if converted else source
             bounded = self._bounded("dives", dive.uuid, cylinder, _MIXTURE_BOUNDS)
             volume = bounded.get("volume")
             oxygen = bounded.get("oxygen")

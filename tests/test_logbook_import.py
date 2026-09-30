@@ -2953,6 +2953,23 @@ class TestNothingInventedNothingFatal:
         assert stored.volume == parsed["dives"][0]["cylinders"][0]["volume"]
 
     @pytest.mark.asyncio
+    async def test_a_documents_end_pressure_of_zero_is_stored_as_zero(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """§6.3: an out-of-gas ascent is a recorded fact in a diver's own record. Only a
+        converted file's 0 is read as the absent-marker it is there."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["cylinders"][0]["end_pressure"] = 0.0
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        stored = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalars().one()
+        assert (stored.start_pressure, stored.end_pressure) == (200.0, 0.0)
+
+    @pytest.mark.asyncio
     async def test_a_course_with_no_agency_imports_as_one(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
@@ -4641,21 +4658,99 @@ class TestTheImportGates:
         assert cylinder.gas_number == 0
 
     @pytest.mark.asyncio
+    async def test_a_fill_pairs_the_primarys_cylinders_whatever_else_the_dive_holds(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """A second computer appended a cylinder of its own, so the dive holds two rows and the
+        document one: the pairing still finds the primary's row, where a count that had to
+        match filled nothing."""
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        db.add_all(
+            [
+                DiveMixture(dive_id=dive.id, gas_number=0, start_pressure=207.34, end_pressure=47.47),
+                DiveMixture(dive_id=dive.id, gas_number=1, oxygen=50.0, helium=0.0, start_pressure=200.0),
+            ]
+        )
+        db.commit()
+        document = self._document(
+            {
+                "device": {"brand": "suunto", "model": "Suunto Ocean"},
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {"duration": 3_473_000, "depth": {"times": [0, 3_473_000], "values": [0, 1904]}},
+            },
+            cylinders=[{"gas_number": 1, "oxygen": 33.0, "helium": 0.0}],
+        )
+
+        await _apply(async_db, user.id, document)
+
+        rows = (
+            await async_db.execute(
+                select(DiveMixture.oxygen, DiveMixture.start_pressure, DiveMixture.gas_number)
+                .where(DiveMixture.dive_id == dive.id)
+                .order_by(DiveMixture.id)
+            )
+        ).all()
+        assert [tuple(row) for row in rows] == [(33.0, 207.34, 0), (50.0, 200.0, 1)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("samples", [True, False], ids=["with samples", "without"])
+    async def test_an_attached_documents_cylinders_fill_the_dives_blanks_and_append_the_rest(
+        self, db: Session, async_db: AsyncSession, samples: bool
+    ) -> None:
+        """A second computer's record that brings no file pairs, fills and appends as a file's
+        does, whether or not it carries a profile: its matching tank's pressures fill the
+        dive's blank ones, and the deco bottle the dive lacked arrives with its own."""
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        db.add(DiveMixture(dive_id=dive.id, gas_number=0, oxygen=32.0, helium=0.0))
+        recording: dict[str, Any] = {
+            "device": {"brand": "Shearwater Research, Inc", "model": "Perdix 3", "serial": "D9772626"},
+            # Within the gate's one-minute floor, which is all a record with no span gets.
+            "started_at": "2026-09-08T15:18:08+03:00",
+        }
+        if samples:
+            recording["profile"] = {"duration": 2_940_000, "depth": {"times": [0, 2_940_000], "values": [0, 1900]}}
+        else:
+            # A record with no samples has no figures for the strict gate to compare, which
+            # admits it only against one that carries none either.
+            stored = (
+                await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == dive.id))
+            ).scalar_one()
+            stored.duration = stored.max_depth = None
+        await async_db.commit()
+        db.commit()
+        document = self._document(
+            recording,
+            cylinders=[
+                {"gas_number": 1, "oxygen": 32.0, "helium": 0.0, "start_pressure": 200.0, "end_pressure": 60.0},
+                {"gas_number": 2, "oxygen": 50.0, "helium": 0.0, "start_pressure": 190.0, "end_pressure": 100.0},
+            ],
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert ImportNoteCode.RECORDING_ATTACHED in _codes(plan)
+        rows = (
+            await async_db.execute(
+                select(DiveMixture.oxygen, DiveMixture.start_pressure, DiveMixture.end_pressure, DiveMixture.gas_number)
+                .where(DiveMixture.dive_id == dive.id)
+                .order_by(DiveMixture.id)
+            )
+        ).all()
+        assert [tuple(row) for row in rows] == [(32.0, 200.0, 60.0, 0), (50.0, 190.0, 100.0, 1)]
+
+    @pytest.mark.asyncio
     async def test_a_fill_onto_a_secondary_recording_writes_nothing_of_the_dives(
         self, db: Session, async_db: AsyncSession
     ) -> None:
-        """**The dive's own figures are the primary recording's, and a fill can match either.**
+        """**A second reading that brings no file writes the dive through the primary alone.**
 
         A technical diver wearing two computers logs the dive from the Shearwater and then
-        imports the Suunto's export: that document is a second reading of the *secondary*
-        recording, and it fills that recording's blanks like any other. What it must not do
-        is write the dive's oxygen-exposure readings or fill its cylinders - those are one
-        machine's arithmetic and one machine's labelling, and attributing them to the dive
-        would credit the Shearwater's record with the Suunto's numbers.
-
-        The attach route has drawn that line since recordings arrived (`rederive_recording`
-        returns before both for `ordinal != 0`). This side could not until the match carried
-        an ordinal, so it wrote them for whichever recording the gate happened to pick.
+        imports the Suunto's export as a document: a second reading of the *secondary*
+        recording, which fills that recording's blanks like any other. Its readouts are that
+        machine's own. The dive's fixes are the primary's to give. And its cylinders fill
+        nothing here, though a recording past the first does fill them when it is created or
+        gains bytes: nothing tells this reading apart from a logbook re-imported over a value
+        the diver cleared, so the refill stays where it always was.
         """
         user, dive = self._seed(db, device_brand="Shearwater", device_serial="D9772626")
         secondary = create_dive_recording(db, user, dive, ordinal=1)

@@ -47,17 +47,19 @@ from src.app.services.dive_files import (
     TECH_SCALAR_FIELDS,
     InvalidDiveFileTokenError,
     LoadedDiveFile,
+    RecordingChange,
     RecordingExtraction,
     _admit,
     _ExistingRow,
     backfill_tech_fields,
     extract_file,
     extract_recording,
-    fill_mixture_fields,
     join_file_mixtures,
     merge_mixture_fields,
+    primary_fills,
     reconcile,
     rederive_recording,
+    relabel_gas_numbers,
     renumber_onto_labels,
     store_recording_file,
 )
@@ -624,14 +626,16 @@ class TestMixtureFieldMerge:
         assert [(mixture_id, values["po2_limit"]) for mixture_id, values in reversed_order] == [(12, 1.4), (11, 1.6)]
 
 
-class TestMixtureFieldFill:
-    """`fill_mixture_fields` decides what a second reading of one recording may *add*.
+class TestWhatAPairFills:
+    """`fill_from_pair` decides what one pair's incoming cylinder may *add* to the dive's row,
+    over the pairs `pair_cylinders` makes - the labelling's own, so a pressure channel's
+    cylinder and the row its values land in are one row.
 
-    The other half of the pair, and the difference is the whole reason there are two: the
-    backfill above asks whether it may write over stored cylinders, this asks what it may put
-    into the blanks of cylinders that already exist. The corpus case is a Suunto Ocean JSON
-    whose one cylinder carries pressures and no gas fraction, meeting the same computer's FIT
-    which carries `oxygen` 33 and no pressures.
+    The other half of `merge_mixture_fields` above, and the difference is the whole reason
+    there are two: the backfill asks whether it may write over stored cylinders, this asks
+    what it may put into their blanks. The corpus case is a Suunto Ocean JSON whose cylinder
+    carries pressures and no gas fraction, meeting the same computer's FIT, which carries
+    `oxygen` 33 and no pressures.
     """
 
     @staticmethod
@@ -653,83 +657,218 @@ class TestMixtureFieldFill:
         defaults: dict[str, object] = {"id": mixture_id, "gas_number": 0}
         return DiveMixtureRead(**(defaults | overrides))  # type: ignore[arg-type]
 
+    @classmethod
+    def _one(cls, row: DiveMixtureRead, incoming: DiveMixtureSchema) -> dict[str, float]:
+        """What a primary's one pair fills, its position trusted."""
+        return primary_fills([incoming], [row]).get(row.id, {})
+
     def test_a_blank_member_fills_and_a_recorded_one_does_not(self) -> None:
         """The corpus pair, as one call. `oxygen` lands because the row has none; the
         pressures do not, because it has them - and they differ, which is what makes this an
         assertion about the rule rather than about two equal numbers."""
-        parsed = [self._parsed(oxygen=33.0, helium=0.0, start_pressure=210.0, end_pressure=50.0, volume=11.1)]
-        stored = [self._stored(11, start_pressure=207.34, end_pressure=47.47)]
+        incoming = self._parsed(oxygen=33.0, helium=0.0, start_pressure=210.0, end_pressure=50.0, volume=11.1)
+        row = self._stored(11, start_pressure=207.34, end_pressure=47.47)
 
-        assert fill_mixture_fields(parsed, stored) == [{"oxygen": 33.0, "helium": 0.0, "volume": 11.1}]
+        assert self._one(row, incoming) == {"oxygen": 33.0, "helium": 0.0, "volume": 11.1}
 
     def test_the_three_members_it_never_writes(self) -> None:
         """`po2_limit` and `role` are the diver's plan rather than the tank's contents, and
-        `gas_number` is the join key the stored profile's pressure channels are already
-        attributed under - a second file's own labelling would rename the cylinder those
-        curves hang off. All three are blank on the stored row here and stay blank."""
-        parsed = [self._parsed(po2_limit=1.4, role=GasRole.DECO, gas_number=1)]
-        stored = [self._stored(11, gas_number=None)]
+        `gas_number` is the labelling's alone. All three are blank on the row and stay so."""
+        assert self._one(self._stored(11, gas_number=None), self._parsed(po2_limit=1.4, role=GasRole.DECO)) == {}
 
-        assert fill_mixture_fields(parsed, stored) == [{}]
+    def test_the_pressures_fill_as_a_pair_into_a_row_carrying_neither(self) -> None:
+        assert self._one(self._stored(11), self._parsed(start_pressure=212.81, end_pressure=83.59)) == {
+            "start_pressure": 212.81,
+            "end_pressure": 83.59,
+        }
+        assert self._one(self._stored(11), self._parsed(start_pressure=212.81)) == {"start_pressure": 212.81}
 
-    def test_one_answer_per_stored_row_in_order(self) -> None:
-        """The result indexes alongside `stored`, so a row with nothing to add is an empty
-        dict rather than an absence - which is what lets the caller zip the two."""
-        parsed = [self._parsed(), self._parsed(oxygen=50.0, gas_number=2)]
-        stored = [self._stored(11), self._stored(12)]
+    def test_a_row_carrying_either_pressure_takes_neither(self) -> None:
+        """A start from one source beside an end from another is a drain nobody measured."""
+        incoming = self._parsed(start_pressure=212.81, end_pressure=83.59)
 
-        assert fill_mixture_fields(parsed, stored) == [{}, {"oxygen": 50.0}]
+        assert self._one(self._stored(11, start_pressure=200.0), incoming) == {}
+        assert self._one(self._stored(11, end_pressure=50.0), incoming) == {}
 
-    def test_refuses_when_the_counts_disagree(self) -> None:
-        assert fill_mixture_fields([self._parsed()], [self._stored(11), self._stored(12)]) is None
-        assert fill_mixture_fields([], []) is None
-        assert fill_mixture_fields([self._parsed()], []) is None
+    def test_a_stored_end_of_zero_with_no_start_takes_no_pressure(self) -> None:
+        """The row a converted import stored before the zero band reached it. A start of 212
+        beside it would be a 212 -> 0 drain `compute_gas_use` reads as gas breathed, and
+        reading the 0 as blank would overwrite a stored value. Its mix still fills."""
+        row = self._stored(11, end_pressure=0.0)
 
-    def test_refuses_when_a_fraction_both_sides_recorded_disagrees(self) -> None:
-        """A different gas in that position is a different cylinder, and the positional join
-        has nothing else to go on."""
-        parsed = [self._parsed(oxygen=50.0, volume=11.1)]
-        stored = [self._stored(11, oxygen=32.0)]
+        assert self._one(row, self._parsed(oxygen=21.0, start_pressure=212.81, end_pressure=83.59)) == {"oxygen": 21.0}
 
-        assert fill_mixture_fields(parsed, stored) is None
+    def test_a_cylinder_carrying_an_end_and_no_start_fills_no_pressure(self) -> None:
+        assert self._one(self._stored(11), self._parsed(end_pressure=83.59)) == {}
+
+    def test_a_pair_whose_fractions_disagree_fills_nothing(self) -> None:
+        """A different gas in that position is a different cylinder."""
+        assert self._one(self._stored(11, oxygen=32.0), self._parsed(oxygen=50.0, volume=11.1)) == {}
 
     def test_a_fraction_only_one_side_recorded_is_not_a_disagreement(self) -> None:
-        """Which is the case this function exists for: the stored row's `oxygen` being null
-        is precisely why there is something to fill."""
-        parsed = [self._parsed(oxygen=33.0)]
-        stored = [self._stored(11, oxygen=None, helium=0.0)]
+        """Which is the case the fill exists for: the row's `oxygen` being null is precisely
+        why there is something to fill."""
+        assert self._one(self._stored(11, helium=0.0), self._parsed(oxygen=33.0)) == {"oxygen": 33.0}
 
-        assert fill_mixture_fields(parsed, stored) == [{"oxygen": 33.0}]
-
-    def test_a_fill_the_table_would_reject_is_dropped(self) -> None:
-        """`end_pressure <= start_pressure` and `oxygen + helium <= 100` are pair
-        constraints, so filling one half against a stored other half can compose a row the
-        database refuses - and `CHECK` is not deferrable, so it would arrive as an
-        `IntegrityError` mid-attach rather than anywhere either caller could recover.
-        """
-        pressures = fill_mixture_fields([self._parsed(end_pressure=220.0)], [self._stored(11, start_pressure=200.0)])
-        fractions = fill_mixture_fields([self._parsed(helium=60.0)], [self._stored(11, oxygen=50.0)])
-
-        assert pressures == [{}]
-        assert fractions == [{}]
+    def test_a_fill_the_table_would_reject_leaves_the_row_whole(self) -> None:
+        """`oxygen + helium <= 100` is a pair constraint, so filling one half against a stored
+        other half can compose a row the database refuses - and `CHECK` is not deferrable, so
+        it would arrive as an `IntegrityError` mid-attach. The volume beside it goes too."""
+        assert self._one(self._stored(11, oxygen=50.0), self._parsed(helium=60.0, volume=11.1)) == {}
 
     def test_a_rejected_fill_costs_only_its_own_row(self) -> None:
-        """Per row, unlike `merge_mixture_fields`' all-or-nothing refusal, and the difference
-        is that nothing here is being overwritten: a filled cylinder beside an unfilled one is
-        two rows each carrying what it always did."""
-        parsed = [self._parsed(end_pressure=220.0), self._parsed(oxygen=33.0, gas_number=2)]
-        stored = [self._stored(11, start_pressure=200.0), self._stored(12)]
+        stored = [self._stored(11, oxygen=50.0), self._stored(12)]
+        parsed = [self._parsed(oxygen=50.0, helium=60.0), self._parsed(oxygen=33.0, gas_number=2)]
 
-        assert fill_mixture_fields(parsed, stored) == [{}, {"oxygen": 33.0}]
+        assert primary_fills(parsed, stored) == {12: {"oxygen": 33.0}}
 
-    def test_a_stored_row_with_nothing_at_all_takes_the_whole_cylinder(self) -> None:
-        """The bound checks are on the *result*, not on the fill, so a row that fills every
-        member is admitted as long as the cylinder it composes is one the table would take."""
-        parsed = [self._parsed(oxygen=33.0, helium=0.0, volume=11.1, start_pressure=207.34, end_pressure=47.47)]
-
-        assert fill_mixture_fields(parsed, [self._stored(11)]) == [
-            {"oxygen": 33.0, "helium": 0.0, "volume": 11.1, "start_pressure": 207.34, "end_pressure": 47.47}
+    def test_the_pairs_are_by_mix_first_whatever_the_order(self) -> None:
+        """Where the counts matched, today's positional join would have put each tank's
+        pressures on the other's row."""
+        stored = [self._stored(11, oxygen=21.0), self._stored(12, oxygen=50.0)]
+        parsed = [
+            self._parsed(oxygen=50.0, start_pressure=200.0, end_pressure=150.0),
+            self._parsed(oxygen=21.0, start_pressure=210.0, end_pressure=60.0),
         ]
+
+        assert primary_fills(parsed, stored) == {
+            11: {"start_pressure": 210.0, "end_pressure": 60.0},
+            12: {"start_pressure": 200.0, "end_pressure": 150.0},
+        }
+
+    def test_the_primary_fills_its_own_row_whatever_else_the_dive_holds(self) -> None:
+        """A dive whose primary has one cylinder and a second recording that appended a real
+        one: the counts differ, which is where the equal-count rule filled nothing."""
+        stored = [self._stored(11, oxygen=21.0, helium=0.0), self._stored(12, oxygen=50.0, start_pressure=200.0)]
+        parsed = [self._parsed(oxygen=21.0, helium=0.0, start_pressure=212.81, end_pressure=83.59)]
+
+        assert primary_fills(parsed, stored) == {11: {"start_pressure": 212.81, "end_pressure": 83.59}}
+
+    def test_the_primarys_position_pairs_fill(self) -> None:
+        """Its rows came from its own file, so a pair by position is its own tank."""
+        stored = [self._stored(11, oxygen=21.0), self._stored(12, oxygen=50.0)]
+        parsed = [self._parsed(start_pressure=210.0), self._parsed(start_pressure=200.0)]
+
+        assert primary_fills(parsed, stored) == {11: {"start_pressure": 210.0}, 12: {"start_pressure": 200.0}}
+
+
+class TestAGuessIsNotAFill:
+    """A recording past the first fills the rows its pairs name, and a pair made by position
+    is a guess a later arrival can re-pair by mix - so it fills only where it cannot be wrong:
+    the row records nothing the incoming cylinder does not record with the same value, or it
+    is the only row left unpaired meeting the only cylinder left.
+    """
+
+    _parsed = staticmethod(TestWhatAPairFills._parsed)
+    _stored = staticmethod(TestWhatAPairFills._stored)
+
+    @staticmethod
+    def _values(cylinders: list | None) -> list[tuple[float | None, ...]]:
+        assert cylinders is not None
+        return [(row.oxygen, row.start_pressure, row.end_pressure) for row in cylinders]
+
+    def test_a_watchs_tank_pressures_arriving_before_their_mixes_fill_nothing(self) -> None:
+        """A two-gas Perdix's rows, and a watch whose JSON records its two tanks' pressures
+        and no mix. Paired by position, the deco bottle's drain could land on the back gas."""
+        stored = [self._stored(11, gas_number=None, oxygen=21.0), self._stored(12, gas_number=None, oxygen=50.0)]
+        parsed = [
+            self._parsed(gas_number=0, start_pressure=200.0, end_pressure=150.0),
+            self._parsed(gas_number=1, start_pressure=210.0, end_pressure=60.0),
+        ]
+
+        _, cylinders = relabel_gas_numbers(parsed, stored, fill=True)
+
+        assert self._values(cylinders) == [(21.0, None, None), (50.0, None, None)]
+
+    def test_the_file_naming_their_mixes_then_fills_each_row_with_its_own_tank(self) -> None:
+        stored = [self._stored(11, gas_number=1, oxygen=21.0), self._stored(12, gas_number=2, oxygen=50.0)]
+        parsed = [
+            self._parsed(gas_number=0, oxygen=50.0, start_pressure=200.0, end_pressure=150.0),
+            self._parsed(gas_number=1, oxygen=21.0, start_pressure=210.0, end_pressure=60.0),
+        ]
+
+        mapping, cylinders = relabel_gas_numbers(parsed, stored, fill=True)
+
+        assert self._values(cylinders) == [(21.0, 210.0, 60.0), (50.0, 200.0, 150.0)]
+        assert mapping == {0: 2, 1: 1}
+
+    def test_rows_carrying_the_primarys_pressures_and_no_mix_take_no_guessed_mix(self) -> None:
+        stored = [
+            self._stored(11, start_pressure=200.0, end_pressure=50.0),
+            self._stored(12, start_pressure=180.0, end_pressure=60.0),
+        ]
+        parsed = [self._parsed(gas_number=None, oxygen=21.0), self._parsed(gas_number=None, oxygen=50.0)]
+
+        assert relabel_gas_numbers(parsed, stored, fill=True) == ({}, None)
+
+    def test_the_only_row_left_meeting_the_only_cylinder_left_fills(self) -> None:
+        """Nothing is left for a later mix to pair it with instead."""
+        stored = [self._stored(11, oxygen=21.0, helium=0.0)]
+        parsed = [self._parsed(gas_number=0, start_pressure=212.81, end_pressure=83.59)]
+
+        _, cylinders = relabel_gas_numbers(parsed, stored, fill=True)
+
+        assert self._values(cylinders) == [(21.0, 212.81, 83.59)]
+
+    def test_a_blank_row_takes_a_guess_since_there_is_nothing_to_contradict(self) -> None:
+        """The UDDF-first dive: six empty tank slots, and the watch's JSON pairs the first."""
+        stored = [self._stored(index, gas_number=None) for index in range(11, 17)]
+        parsed = [self._parsed(gas_number=0, start_pressure=212.81, end_pressure=83.59)]
+
+        mapping, cylinders = relabel_gas_numbers(parsed, stored, fill=True)
+
+        assert self._values(cylinders) == [(None, 212.81, 83.59), *[(None, None, None)] * 5]
+        assert cylinders is not None and cylinders[0].gas_number == 1
+        assert mapping == {0: 1}
+
+    def test_a_row_the_same_recording_filled_earlier_takes_the_rest(self) -> None:
+        """The watch's JSON picked before its FIT: the FIT's arrival re-derives the recording
+        from both files, so its cylinder records the pressures the JSON wrote, and the row
+        holding them is no contradiction of it."""
+        stored = [
+            self._stored(11, gas_number=1, start_pressure=212.81, end_pressure=83.59),
+            *(self._stored(index, gas_number=None) for index in range(12, 17)),
+        ]
+        parsed = [self._parsed(gas_number=0, oxygen=21.0, helium=0.0, start_pressure=212.81, end_pressure=83.59)]
+
+        _, cylinders = relabel_gas_numbers(parsed, stored, fill=True)
+
+        assert self._values(cylinders)[0] == (21.0, 212.81, 83.59)
+
+    def test_a_stored_end_of_zero_among_several_rows_takes_no_guessed_mix(self) -> None:
+        """Rows a converted import stored before the zero band reached it: the 0 is a member
+        the incoming cylinder does not record, so a guess cannot fill past it."""
+        stored = [
+            self._stored(11, gas_number=None, end_pressure=0.0),
+            self._stored(12, gas_number=None, end_pressure=0.0),
+        ]
+        parsed = [self._parsed(gas_number=None, oxygen=33.0, helium=0.0)]
+
+        assert relabel_gas_numbers(parsed, stored, fill=True) == ({}, None)
+
+    def test_nothing_fills_where_nothing_arrived(self) -> None:
+        stored = [self._stored(11, oxygen=21.0, helium=0.0)]
+        parsed = [self._parsed(gas_number=0, oxygen=21.0, helium=0.0, start_pressure=212.81)]
+
+        assert relabel_gas_numbers(parsed, stored, fill=False) == ({0: 0}, None)
+
+    def test_a_cylinder_carrying_nothing_is_never_appended(self) -> None:
+        """Shearwater Cloud's unlinked tank slots. It still takes its place in the positional
+        pairing, filling nothing where it pairs."""
+        stored = [self._stored(11, gas_number=None, oxygen=21.0, helium=0.0)]
+        parsed = [self._parsed(gas_number=None) for _ in range(6)]
+
+        assert relabel_gas_numbers(parsed, stored, fill=True) == ({}, None)
+
+    def test_a_cylinder_carrying_a_label_alone_is_appended(self) -> None:
+        """A channel names it, so the dive needs a row for the channel to name."""
+        stored = [self._stored(11, gas_number=None, oxygen=21.0, helium=0.0)]
+        parsed = [self._parsed(gas_number=None, oxygen=21.0, helium=0.0), self._parsed(gas_number=3)]
+
+        mapping, cylinders = relabel_gas_numbers(parsed, stored, fill=True)
+
+        assert cylinders is not None and [row.gas_number for row in cylinders] == [None, 1]
+        assert mapping == {3: 1}
 
 
 class TestARecordingsCylindersJoinMemberByMember:
@@ -744,7 +883,7 @@ class TestARecordingsCylindersJoinMemberByMember:
 
     @staticmethod
     def _mix(**overrides: object) -> DiveMixtureSchema:
-        return TestMixtureFieldFill._parsed(**overrides)
+        return TestWhatAPairFills._parsed(**overrides)
 
     def test_each_member_comes_from_the_first_file_that_recorded_it(self) -> None:
         earlier = [self._mix(gas_number=0, start_pressure=207.34, end_pressure=47.47)]
@@ -827,9 +966,7 @@ class TestRenumberingOntoTheReadersLabels:
 
     @staticmethod
     def _read(oxygen: float | None, gas_number: int | None) -> DiveMixtureSchema:
-        return TestMixtureFieldFill._parsed(
-            oxygen=oxygen, helium=None if oxygen is None else 0.0, gas_number=gas_number
-        )
+        return TestWhatAPairFills._parsed(oxygen=oxygen, helium=None if oxygen is None else 0.0, gas_number=gas_number)
 
     def test_rows_already_on_the_readers_labels_are_left_alone(self) -> None:
         stored = [self._stored(11, 21.0, 0), self._stored(12, 49.0, 1)]
@@ -1160,7 +1297,7 @@ class TestScalarsAreWrittenAtAttach:
     that split is what the tests below are about. A recording with nothing yet has nothing to
     lose by a write that clears what the files no longer yield; a recording gaining a file it
     did not begin with has earlier readings and must not overwrite them. The condition is
-    `rederive_recording`'s `fresh`, which is *not* "the recording had no files" - see its
+    `rederive_recording`'s `change`, which is *not* "the recording had no files" - see its
     docstring for the case where the two differ.
     """
 
@@ -1183,15 +1320,13 @@ class TestScalarsAreWrittenAtAttach:
         ]
 
     @staticmethod
-    async def _rederive(
-        files: list[LoadedDiveFile], monkeypatch, *, fresh: bool, ordinal: int = 0, joined: bool = False
-    ) -> dict:
+    async def _rederive(files: list[LoadedDiveFile], monkeypatch, *, change: RecordingChange, ordinal: int = 0) -> dict:
         """Run the re-derivation over `files` and report which writes it chose and with what.
 
         Captured at the seams rather than by inspecting the emitted `UPDATE`: the decision
         under test is *what the attach decided to write*. `readouts` is the recording's write
-        and `dive` the dive's, each under `outright` or `fill`; the cylinder fill is captured
-        under `cylinders`.
+        and `dive` the dive's, each under `outright` or `fill`; whether the labelling was told
+        to fill the dive's cylinders is captured under `cylinders`.
         """
         chosen: dict = {}
 
@@ -1207,14 +1342,16 @@ class TestScalarsAreWrittenAtAttach:
         async def fill(db, *, dive_id, scalars):
             chosen["dive fill"] = {name: scalars.get(name) for name in TECH_SCALAR_FIELDS}
 
-        async def cylinders(db, *, dive_id, parsed):
-            chosen["cylinders"] = list(parsed)
+        async def labelling(db, *, dive_id, recording_id, ordinal, mixtures, profile, fill):
+            if fill:
+                chosen["cylinders"] = list(mixtures)
+            return profile
 
         monkeypatch.setattr("src.app.services.dive_recordings.store_readouts", readouts_outright)
         monkeypatch.setattr("src.app.services.dive_recordings.fill_readouts", readouts_fill)
         monkeypatch.setattr("src.app.services.dive_files.store_tech_scalars", outright)
         monkeypatch.setattr("src.app.services.dive_files.fill_tech_scalars", fill)
-        monkeypatch.setattr("src.app.services.dive_files.fill_dive_mixtures", cylinders)
+        monkeypatch.setattr("src.app.services.dive_files.label_cylinders", labelling)
         monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
         monkeypatch.setattr("src.app.services.dive_files.delete_profile_for_recording", AsyncMock())
 
@@ -1223,8 +1360,7 @@ class TestScalarsAreWrittenAtAttach:
             recording_id=1,
             dive_id=7,
             ordinal=ordinal,
-            fresh=fresh,
-            joined=joined,
+            change=change,
             files=files,
             extraction=extract_recording(files, start_time=None, utc_offset_minutes=None),
         )
@@ -1232,7 +1368,7 @@ class TestScalarsAreWrittenAtAttach:
 
     @pytest.mark.asyncio
     async def test_an_export_that_records_exposure_writes_it_onto_the_recording(self, monkeypatch) -> None:
-        chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, fresh=True)
+        chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=RecordingChange.CREATED)
 
         assert chosen["readouts outright"] == {
             "cns_start": None,
@@ -1245,7 +1381,7 @@ class TestScalarsAreWrittenAtAttach:
 
     @pytest.mark.asyncio
     async def test_an_export_that_records_none_clears_what_was_there(self, monkeypatch) -> None:
-        """Unconditional on the `fresh` branch, unlike the profile write beside it: leaving a
+        """Unconditional on the outright branch, unlike the profile write beside it: leaving a
         previous export's CNS on a recording whose files have changed would attribute a
         reading to bytes it didn't come from."""
         empty = (
@@ -1253,7 +1389,7 @@ class TestScalarsAreWrittenAtAttach:
             "<StartTime>2026-06-03T12:15:00</StartTime></Dive>"
         ).encode()
 
-        chosen = await self._rederive(self._files(empty), monkeypatch, fresh=True)
+        chosen = await self._rederive(self._files(empty), monkeypatch, change=RecordingChange.REMOVED)
 
         assert chosen["readouts outright"] == dict.fromkeys(READOUT_FIELDS)
         assert chosen["dive outright"] == dict.fromkeys(TECH_SCALAR_FIELDS)
@@ -1268,7 +1404,9 @@ class TestScalarsAreWrittenAtAttach:
             "<StartTime>2026-06-03T12:15:00</StartTime></Dive>"
         ).encode()
 
-        chosen = await self._rederive(self._files(empty, self.XML_WITH_EXPOSURE), monkeypatch, fresh=False, joined=True)
+        chosen = await self._rederive(
+            self._files(empty, self.XML_WITH_EXPOSURE), monkeypatch, change=RecordingChange.JOINED
+        )
 
         assert "readouts outright" not in chosen
         assert "dive outright" not in chosen
@@ -1279,24 +1417,50 @@ class TestScalarsAreWrittenAtAttach:
 
     @pytest.mark.asyncio
     async def test_re_reading_the_same_files_fills_the_scalars_and_not_the_cylinders(self, monkeypatch) -> None:
-        """**The two questions `fresh` and `joined` answer are different**, and this is where
-        they part company: `_repeat_upload` re-reads bytes the recording already had, so a
-        re-parse yielding less must not clear the readings (`fresh=False`) - but nothing
-        arrived that could put a value into a cylinder (`joined=False`)."""
-        chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, fresh=False, joined=False)
+        """A repeat upload and the backfill re-read bytes the recording already had: a
+        re-parse yielding less must not clear the readings, and nothing arrived that could
+        put a value into a cylinder - filling there puts back one the diver cleared."""
+        chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=RecordingChange.REREAD)
 
         assert "readouts fill" in chosen
         assert "dive fill" in chosen
         assert "cylinders" not in chosen
 
     @pytest.mark.asyncio
-    async def test_a_secondary_recording_writes_its_own_readouts_and_nothing_of_the_dives(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        ("change", "ordinal", "fills"),
+        [
+            (RecordingChange.CREATED, 0, False),
+            (RecordingChange.CREATED, 1, True),
+            (RecordingChange.JOINED, 0, True),
+            (RecordingChange.JOINED, 1, True),
+            (RecordingChange.REREAD, 1, False),
+            (RecordingChange.REMOVED, 0, False),
+            (RecordingChange.REMOVED, 1, False),
+        ],
+    )
+    async def test_the_dives_cylinders_fill_at_an_arrival_and_at_nothing_else(
+        self, monkeypatch, change: RecordingChange, ordinal: int, fills: bool
+    ) -> None:
+        """New bytes joining any recording, or a recording past the first created. Not the
+        file that creates the primary: the dive's cylinders are the ones the form saved from
+        it, a blank among them one the diver may have cleared."""
+        chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=change, ordinal=ordinal)
+
+        assert ("cylinders" in chosen) is fills
+
+    @pytest.mark.asyncio
+    async def test_a_secondary_recording_writes_its_own_readouts_and_none_of_the_dives_figures(
+        self, monkeypatch
+    ) -> None:
         """A second computer's CNS clock is its own device's arithmetic, so it lands on its
         own recording - and its positions never reach the dive, whose fixes are the
         *primary* recording's and nothing else's."""
-        chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, fresh=True, ordinal=1)
+        chosen = await self._rederive(
+            self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=RecordingChange.CREATED, ordinal=1
+        )
 
-        assert chosen.keys() == {"readouts outright"}
+        assert chosen.keys() == {"readouts outright", "cylinders"}
         assert chosen["readouts outright"]["cns_end"] == 20.0
 
     @pytest.mark.asyncio

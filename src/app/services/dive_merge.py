@@ -225,7 +225,7 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     # there would be no telling them apart afterwards.
     survivor_mixtures = await get_mixtures_for_dive(db=db, dive_id=survivor.id)
     absorbed_mixtures = await get_mixtures_for_dive(db=db, dive_id=absorbed.id)
-    mapping, cylinders = relabel_gas_numbers(absorbed_mixtures, survivor_mixtures)
+    mapping, cylinders = relabel_gas_numbers(absorbed_mixtures, survivor_mixtures, fill=True)
 
     primary_survivor, primary_absorbed = survivor_recordings[0], absorbed_recordings[0]
     folded = _folds(primary_survivor, primary_absorbed)

@@ -71,13 +71,14 @@ from ...models.user import User
 from ...schemas.certification import CertificationSide
 from ...schemas.dive import DiveMode, Salinity
 from ...schemas.dive_mixture import DiveMixtureCreate
-from ...schemas.logbook_import import ImportNote, ImportNoteCode
+from ...schemas.logbook_import import ImportMemberNotKept, ImportNote, ImportNoteCode
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice
 from ..certification_files import KEY_KIND as CERTIFICATION_KEY_KIND
 from ..certification_files import UnsupportedCardFileError, sniff_content_type
 from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
 from ..dive_files import (
     TECH_SCALAR_FIELDS,
+    RecordingChange,
     apply_gas_mapping,
     delete_files_for_dive,
     extract_recording,
@@ -602,7 +603,7 @@ class _Writer:
             dive_id=dive_id,
             ordinal=position,
             origin=(planned.start_time, planned.utc_offset_minutes),
-            fresh=True,
+            change=RecordingChange.CREATED,
         ):
             return recording_id
 
@@ -630,16 +631,16 @@ class _Writer:
         dive_id: int,
         ordinal: int,
         origin: tuple[datetime | None, int | None],
-        fresh: bool,
+        change: RecordingChange,
     ) -> bool:
         """Store the imported file on a recording and derive the recording from its files, as
         `store_recording_file` does. Returns whether the file was stored.
 
         `origin` is the recording's stored start before the file arrived, which the form's
-        attach places each file's samples against; `fresh` is its answer for a recording the
-        file creates, and a recording that already existed is joined, not fresh. The files a
-        recording already holds are read in attach order - this import's own from the files
-        it holds, the account's from the store - and none of this import's is converted twice.
+        attach places each file's samples against; `change` is `CREATED` for a recording the
+        file creates and `JOINED` for one that already existed. The files a recording already
+        holds are read in attach order - this import's own from the files it holds, the
+        account's from the store - and none of this import's is converted twice.
         """
         stored = await self._store_blob(
             planned, kind=DIVE_FILE_KEY_KIND, collection="dives", record_uuid=record_uuid, sniff=False
@@ -659,8 +660,7 @@ class _Writer:
             recording_id=recording_id,
             dive_id=dive_id,
             ordinal=ordinal,
-            fresh=fresh,
-            joined=not fresh,
+            change=change,
             files=files,
             extraction=extraction,
         )
@@ -732,18 +732,20 @@ class _Writer:
         A **fill** writes no recording row. It fills the stored recording's blanks - its
         device columns, its settings, its readouts, its start, the two figures the gates
         compare - and, where that recording had no samples at all, its profile. The stored
-        dive's own blanks fill too, from the primary recording alone: its positions, and the
-        members its cylinders have none of, where those cylinders still demonstrably describe
-        the document's. Nothing is ever overwritten, which is the whole rule: the diver may
-        have corrected any of it, and a fill that won an argument with an edit would be the
-        silent loss this repository already refuses on the backfill path. A fill that brings
-        the imported file itself is the one exception, and it is the form's: the recording is
-        derived from its files, a second file of one recording filling and never overwriting.
+        dive's own blanks fill too: its positions from the primary recording alone, and the
+        blank members of its cylinders from the rows the labelling pairs - through the primary
+        alone where the fill brings no file. Nothing is ever overwritten, which is the whole
+        rule: the diver may have corrected any of it, and a fill that won an argument with an
+        edit would be the silent loss this repository already refuses on the backfill path. A
+        fill that brings the imported file itself is the one exception, and it is the form's:
+        the recording is derived from its files, a second file of one recording filling and
+        never overwriting, and the dive's cylinders filling on any ordinal.
 
         An **attach** appends a recording to that dive, after its last. It touches none of
         the dive's own figures - those are the primary recording's - and it maps its
         cylinder labels onto the dive's own list, because `gas_number` is dive-scoped and a
-        second computer numbers its tanks its own way.
+        second computer numbers its tanks its own way, filling the blanks of the rows it pairs
+        with: the cylinders are the dive's, not the primary recording's.
         """
         for match in self._plan.recording_matches:
             if match.kind == "attach":
@@ -752,19 +754,24 @@ class _Writer:
                 self._match_files.append(await self._fill_recording(match))
 
     async def _attach_recording(self, match: PlannedRecordingMatch) -> int:
-        """Append the match's recording to its dive. Returns how many files it stored."""
+        """Append the match's recording to its dive. Returns how many files it stored.
+
+        An arrival, so the dive's blank cylinders fill from the ones it pairs with. A
+        recording holding the imported file is labelled and filled by the re-derivation, as
+        the form's attach does it, and doing it here too would map it twice; one without
+        pairs, fills and appends on the same terms, with samples or without.
+        """
         ordinal = await next_ordinal(self._db, dive_id=match.dive_id)
         stored_mixtures = await get_mixtures_for_dive(db=self._db, dive_id=match.dive_id)
         planned = match.recording
-        # A recording holding the imported file is labelled by the re-derivation, as the
-        # form's attach labels one; relabelling it here too would map it twice.
-        if planned.kept is None and planned.profile is not None and match.mixtures:
+        if planned.kept is None and match.mixtures:
             mapping, cylinders = relabel_gas_numbers(
-                [DiveMixtureSchema(**row) for row in match.mixtures], stored_mixtures
+                [DiveMixtureSchema(**row) for row in match.mixtures], stored_mixtures, fill=True
             )
-            remapped = apply_gas_mapping(planned.profile.profile, mapping)
-            if remapped is not None:
-                planned = replace(planned, profile=replace(planned.profile, profile=remapped))
+            if planned.profile is not None:
+                remapped = apply_gas_mapping(planned.profile.profile, mapping)
+                if remapped is not None:
+                    planned = replace(planned, profile=replace(planned.profile, profile=remapped))
             if cylinders is not None:
                 await replace_mixtures_for_dive(db=self._db, dive_id=match.dive_id, mixtures=cylinders, commit=False)
         record = PlannedRecord(action=Action.CREATE, source_uuid=match.source_uuid, uuid=match.source_uuid)
@@ -843,7 +850,7 @@ class _Writer:
             dive_id=match.dive_id,
             ordinal=match.ordinal or 0,
             origin=origin,
-            fresh=False,
+            change=RecordingChange.JOINED,
         ):
             return len(digests) + 1
 
@@ -872,10 +879,12 @@ class _Writer:
                 duration=planned.profile.duration,
             )
 
-        # **Everything below this line is the dive's rather than the recording's, and only
-        # the primary recording may write it** - `rederive_recording`'s rule on the attach
-        # path. A secondary recording is a second computer's account of the same dive: its
-        # positions are its own, and its cylinder labelling is its own numbering.
+        # **Everything below this line is the dive's rather than the recording's, and a second
+        # reading that brings no file writes it through the primary recording alone.** Its
+        # positions are the primary's to give the dive. Its cylinders fill the dive's blanks
+        # only here because nothing tells this reading apart from a logbook re-imported over a
+        # value the diver cleared: a recording past the first fills when it is created and
+        # when it gains bytes the arrival reads, and nowhere else.
         if match.ordinal != 0:
             return len(digests)
 
@@ -888,15 +897,14 @@ class _Writer:
             dive_id=match.dive_id,
             scalars={name: match.dive_values.get(name) for name in TECH_SCALAR_FIELDS},
         )
-        # The cylinders fill on the same terms as the readings above and through the same
-        # function the attach route uses: this document is a second reading of a record the
-        # logbook already holds, so its `oxygen` lands in a cylinder that has none and never
-        # over one that has. Not `merge_mixture_fields` - that is the backfill's question
-        # (may these values be written *over* these rows?), and it would overwrite the ppO2
-        # limit and the role a diver may have set since.
-        await fill_dive_mixtures(
-            self._db, dive_id=match.dive_id, parsed=[DiveMixtureSchema(**row) for row in match.mixtures]
-        )
+        # Bytes the account already stores are a repeat, as a repeat upload is on the form,
+        # and a repeat fills no cylinder: it would put back a value the diver cleared. Not
+        # `merge_mixture_fields` either - that is the backfill's question (may these values be
+        # written *over* these rows?), and it would overwrite the ppO2 limit and the role.
+        if self._plan.not_kept is not ImportMemberNotKept.ALREADY_STORED:
+            await fill_dive_mixtures(
+                self._db, dive_id=match.dive_id, parsed=[DiveMixtureSchema(**row) for row in match.mixtures]
+            )
         return len(digests)
 
     def _stale_schedule(self, schedule_id: int | None) -> None:

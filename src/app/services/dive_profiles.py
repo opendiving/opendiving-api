@@ -1468,7 +1468,7 @@ async def backfill_profiles(
     """
     # Imported here rather than at module scope: `dive_files` imports *this* module for
     # the extraction hooks in `store_recording_file`, so a top-level import would be circular.
-    from .dive_files import extract_recording, load_recording_files, rederive_recording
+    from .dive_files import RecordingChange, extract_recording, load_recording_files, rederive_recording
 
     stmt = (
         select(
@@ -1583,8 +1583,7 @@ async def backfill_profiles(
                     recording_id=row.recording_id,
                     dive_id=row.dive_id,
                     ordinal=row.ordinal,
-                    fresh=False,
-                    joined=False,
+                    change=RecordingChange.REREAD,
                     files=files,
                     extraction=extraction,
                 )

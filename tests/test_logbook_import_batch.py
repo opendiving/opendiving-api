@@ -18,15 +18,17 @@ import uuid as uuid_pkg
 import zipfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import divejson
 import pytest
 from fastapi import UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, undefer
 
+from src.app.api.v1 import dives as dives_module
+from src.app.api.v1.dives import erase_dive_recording, patch_dive_recording
 from src.app.core.security import create_dive_file_token
 from src.app.crud.crud_dive_mixtures import replace_mixtures_for_dive
 from src.app.models.dive import Dive
@@ -35,17 +37,18 @@ from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
+from src.app.schemas.dive import RecordingUpdateRequest
 from src.app.schemas.dive_mixture import DiveMixtureCreate
 from src.app.schemas.logbook_import import ImportDiveOutcome, ImportMemberNotKept, ImportNoteCode
 from src.app.services import blob_store
-from src.app.services.dive_files import store_recording_file
+from src.app.services.dive_files import FILLABLE_MIXTURE_FIELDS, delete_dive_file, store_recording_file
 from src.app.services.dive_profiles import backfill_profiles
 from src.app.services.dive_reader import read_prefill
 from src.app.services.dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS
 from src.app.services.logbook_import import BatchReport, import_batch, load_import
 from tests.conftest import db_available
 from tests.helpers.dive_files import suunto_json
-from tests.helpers.generators import create_dive, create_user
+from tests.helpers.generators import create_dive, create_dive_recording, create_user
 from tests.helpers.import_parts import parts_of
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
@@ -66,6 +69,9 @@ RECORDING_COLUMNS = (
     "utc_offset_minutes",
     "ordinal",
 )
+
+# What a dive's cylinder is, for the door: every member a fill can write, and its label.
+CYLINDER_COLUMNS = (*FILLABLE_MIXTURE_FIELDS, "gas_number")
 
 
 def _fixture(name: str) -> bytes:
@@ -93,16 +99,32 @@ def _unique_export(start: str = "2026-09-10T09:30:00.000+03:00") -> bytes:
     )
 
 
-def _perdix_uddf(*, number: int = 8, start: str = "2026-09-08T15:17:50") -> bytes:
+def _perdix_uddf(
+    *,
+    number: int = 8,
+    start: str = "2026-09-08T15:17:50",
+    mixes: tuple[tuple[str, float], ...] = (("ean33", 0.33),),
+    tanks: tuple[tuple[str | None, int, int], ...] = (("ean33", 20000000, 6000000),),
+    switch: str | None = None,
+) -> bytes:
     """A Perdix 3's own UDDF of the Ocean pair's dive - a second computer on the same wrist.
 
-    Its dive states the diver's number, notes and site, as a logbook's does, and one
-    cylinder of the Ocean's 33 % mix; its samples span the Ocean's hour to within a minute,
-    so the strict gate calls the two computers' records one dive.
+    Its dive states the diver's number, notes and site, as a logbook's does, and by default
+    one cylinder of the Ocean's 33 % mix; its samples span the Ocean's hour to within a
+    minute, so the strict gate calls the two computers' records one dive. `tanks` are
+    `(the mix it links, begin, end in pascal)`, and `switch` names a mix in the first
+    sample's `<switchmix>`.
     """
     waypoints = "".join(
-        f"<waypoint><depth>{depth}</depth><divetime>{time}</divetime></waypoint>"
+        f"<waypoint><depth>{depth}</depth><divetime>{time}</divetime>"
+        f"{f'<switchmix ref="{switch}"/>' if switch is not None and time == 0 else ''}</waypoint>"
         for time, depth in ((0, 0.0), (600, 18.6), (1800, 12.0), (3400, 5.0), (3440, 0.0))
+    )
+    gases = "".join(f'<mix id="{mix}"><name>{mix}</name><o2>{o2}</o2><he>0</he></mix>' for mix, o2 in mixes)
+    tankdata = "".join(
+        f"<tankdata>{'' if mix is None else f'<link ref="{mix}"/>'}"
+        f"<tankpressurebegin>{begin}</tankpressurebegin><tankpressureend>{end}</tankpressureend></tankdata>"
+        for mix, begin, end in tanks
     )
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <uddf xmlns="http://www.streit.cc/uddf/3.2/" version="3.2.3">
@@ -113,7 +135,7 @@ def _perdix_uddf(*, number: int = 8, start: str = "2026-09-08T15:17:50") -> byte
       <model>Perdix 3</model><serialnumber>D9772626</serialnumber></divecomputer>
   </equipment></owner></diver>
   <divesite><site id="site-1"><name>Porvoo Wall</name></site></divesite>
-  <gasdefinitions><mix id="ean33"><name>EAN33</name><o2>0.33</o2><he>0</he></mix></gasdefinitions>
+  <gasdefinitions>{gases}</gasdefinitions>
   <profiledata><repetitiongroup id="rg-1">
     <dive id="perdix-dive-8">
       <informationbeforedive>
@@ -122,8 +144,7 @@ def _perdix_uddf(*, number: int = 8, start: str = "2026-09-08T15:17:50") -> byte
         <datetime>{start}</datetime>
         <equipmentused><link ref="dc1"/></equipmentused>
       </informationbeforedive>
-      <tankdata><link ref="ean33"/>
-        <tankpressurebegin>20000000</tankpressurebegin><tankpressureend>6000000</tankpressureend></tankdata>
+      {tankdata}
       <samples>{waypoints}</samples>
       <informationafterdive>
         <greatestdepth>18.6</greatestdepth><diveduration>3440</diveduration>
@@ -133,6 +154,13 @@ def _perdix_uddf(*, number: int = 8, start: str = "2026-09-08T15:17:50") -> byte
   </repetitiongroup></profiledata>
 </uddf>
 """.encode()
+
+
+# The Perdix as Shearwater Cloud Desktop writes it: one mix, named only by a `<switchmix>`, and
+# six `<tankdata>` slots of 0 bar begin and end linked to no mix - two custom tanks and four
+# transmitters switched off. The reader attaches the mix to nothing, so the dive this file
+# creates has six cylinders carrying nothing but an end pressure of 0.
+CLOUD_UDDF = _perdix_uddf(mixes=(("OC1:33/00", 0.33),), tanks=((None, 0, 0),) * 6, switch="OC1:33/00")
 
 
 def _zip(members: dict[str, bytes]) -> bytes:
@@ -239,8 +267,8 @@ async def _recording(db: AsyncSession, recording: DiveRecording) -> dict[str, An
 
 
 async def _dive(db: AsyncSession, dive_id: int) -> dict[str, Any]:
-    """A dive as two imports are compared: its figures, its cylinders' labels and mixes, and
-    its recordings - row ids and identifiers aside."""
+    """A dive as two imports are compared: its figures, its cylinders' labels and every member a
+    fill can write, and its recordings - row ids and identifiers aside."""
     dive = (
         await db.execute(select(Dive).where(Dive.id == dive_id).execution_options(populate_existing=True))
     ).scalar_one()
@@ -253,14 +281,14 @@ async def _dive(db: AsyncSession, dive_id: int) -> dict[str, Any]:
         )
     ).scalars()
     cylinders = await db.execute(
-        select(DiveMixture.oxygen, DiveMixture.gas_number, DiveMixture.start_pressure)
+        select(*(getattr(DiveMixture, name) for name in CYLINDER_COLUMNS))
         .where(DiveMixture.dive_id == dive_id)
         .order_by(DiveMixture.id)
     )
     return {
         "dive": (dive.dive_number, dive.start_time, dive.utc_offset_minutes, dive.duration, dive.max_depth),
         "fixes": (dive.entry_latitude, dive.entry_longitude, dive.exit_latitude, dive.exit_longitude),
-        "cylinders": [tuple(row) for row in cylinders],
+        "cylinders": [dict(row._mapping) for row in cylinders],
         "recordings": [await _recording(db, recording) for recording in list(recordings)],
     }
 
@@ -292,7 +320,7 @@ class TestThePair:
         assert recording["columns"]["device_name"] == "Porvoo"
         assert recording["profile"]["parser_key"] == "fit"
         assert recording["profile"]["data"]["pressure"], "the JSON's pressure channel joins the FIT's"
-        assert [label for _, label, _ in dive["cylinders"]] == [0]
+        assert [row["gas_number"] for row in dive["cylinders"]] == [0]
         assert [series["gas_number"] for series in recording["profile"]["data"]["pressure"]] == [0]
         assert dive["dive"][0] == 0, "no dive number is invented"
 
@@ -521,7 +549,7 @@ class TestTheDoorDoesNotMatter:
     @staticmethod
     async def _recordings_and_labels(db: AsyncSession, dive_id: int) -> tuple[Any, Any]:
         dive = await _dive(db, dive_id)
-        return dive["recordings"], [label for _, label, _ in dive["cylinders"]]
+        return dive["recordings"], [row["gas_number"] for row in dive["cylinders"]]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -596,16 +624,18 @@ class TestAFileWhoseDiveHasNoRecording:
 
 class TestReproducible:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("perdix", [_perdix_uddf(), CLOUD_UDDF], ids=["linked tank", "Shearwater Cloud slots"])
     async def test_a_forced_backfill_rewrites_no_profile_an_import_wrote(
-        self, volume: Any, async_db: AsyncSession, db: Session
+        self, volume: Any, async_db: AsyncSession, db: Session, perdix: bytes
     ) -> None:
         """A pair, a second computer beside a one-dive UDDF, and a two-cylinder pair: every
-        profile the import stored is what the re-derivation stores from the same files."""
+        profile the import stored is what the re-derivation stores from the same files, and
+        every cylinder member the import filled is one it leaves alone."""
         diver = create_user(db)
         await _import(
             async_db,
             diver,
-            [("perdix.uddf", _perdix_uddf()), *PAIR, ("two-tank.fit", TWO_TANK_FIT), ("two-tank.json", TWO_TANK_JSON)],
+            [("perdix.uddf", perdix), *PAIR, ("two-tank.fit", TWO_TANK_FIT), ("two-tank.json", TWO_TANK_JSON)],
         )
         before = await _logbook(async_db, diver)
 
@@ -635,7 +665,7 @@ class TestTwoComputers:
         assert dive["dive"][0] == 8
         stored = (await async_db.execute(select(Dive).where(Dive.id == dive_id))).scalar_one()
         assert stored.notes == "Along the wall."
-        labels = {label for _, label, _ in dive["cylinders"]}
+        labels = {row["gas_number"] for row in dive["cylinders"]}
         assert {series["gas_number"] for series in ocean["profile"]["data"]["pressure"]} <= labels
         [row] = report.dives
         assert (row.outcome, row.members) == (ImportDiveOutcome.CREATED, [0, 1, 2])
@@ -1014,3 +1044,320 @@ class TestOneArchive:
         assert await _count(async_db, DiveFile, destination) == 1
         assert report.files.skipped == 1
         assert ImportNoteCode.FILE_SKIPPED in {note.code for note in report.notes}
+
+
+# The Ocean pair's one tank as the dive stores it once both files have arrived: the FIT's mix
+# and the JSON's pressures.
+OCEAN_CYLINDER = {"oxygen": 33.0, "helium": 0.0, "volume": None, "start_pressure": 207.34, "end_pressure": 44.03}
+EMPTY_CYLINDER = dict.fromkeys(CYLINDER_COLUMNS)
+
+
+def _ocean_channels(dive: dict[str, Any]) -> list[int]:
+    """The labels the Ocean recording's pressure channels name."""
+    [ocean] = [recording for recording in dive["recordings"] if recording["columns"]["device_model"] == "Suunto Ocean"]
+    return [series["gas_number"] for series in ocean["profile"]["data"]["pressure"]]
+
+
+async def _first_cylinder(db: AsyncSession, dive_id: int) -> DiveMixture:
+    return (
+        await db.execute(
+            select(DiveMixture)
+            .where(DiveMixture.dive_id == dive_id)
+            .order_by(DiveMixture.id)
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+
+class TestASecondComputersCylinderValuesFillTheDive:
+    """A dive two computers recorded: the Perdix's Shearwater Cloud UDDF, whose six tank slots
+    carry nothing, and the Ocean's FIT and JSON, which carry its one tank's mix and pressures
+    between them. Whichever file creates the dive, the other computer's values fill the blank
+    cylinder they pair with, and nothing that carries nothing is appended."""
+
+    FILES = [("perdix.uddf", CLOUD_UDDF), *PAIR]
+
+    @pytest.mark.asyncio
+    async def test_uddf_first_the_first_slot_takes_the_ocean_tank_in_one_batch_and_on_two_days(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        together, apart = create_user(db), create_user(db)
+
+        await _import(async_db, together, self.FILES)
+        await _import(async_db, apart, self.FILES[:1])
+        await _import(async_db, apart, self.FILES[1:])
+
+        [dive] = await _logbook(async_db, together)
+        first, *rest = dive["cylinders"]
+        assert first == OCEAN_CYLINDER | {"gas_number": 1}
+        assert _ocean_channels(dive) == [1], "the label the Ocean's pressure channel names"
+        assert rest == [EMPTY_CYLINDER] * 5, "no end pressure of 0 among them"
+        assert await _logbook(async_db, apart) == [dive]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "then",
+        [[FILES[:1], FILES[2:]], [FILES]],
+        ids=["the Perdix then the JSON", "then the folder"],
+    )
+    async def test_fit_first_the_dive_keeps_one_cylinder_carrying_both_files_values(
+        self, volume: Any, async_db: AsyncSession, db: Session, then: list[list[tuple[str, bytes]]]
+    ) -> None:
+        """The Perdix's slots pair with the FIT's row or carry nothing, so none is appended;
+        the JSON then joins the primary, whose row it fills where the dive's cylinder count
+        is no longer its own."""
+        diver = create_user(db)
+
+        await _import(async_db, diver, PAIR[:1])
+        for files in then:
+            await _import(async_db, diver, files)
+
+        [dive] = await _logbook(async_db, diver)
+        assert dive["cylinders"] == [OCEAN_CYLINDER | {"gas_number": 0}]
+        assert _ocean_channels(dive) == [0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fit_first", [True, False], ids=["FIT first", "JSON first"])
+    async def test_the_form_fills_what_the_import_fills(
+        self, volume: Any, async_db: AsyncSession, db: Session, fit_first: bool
+    ) -> None:
+        """The Perdix saved on the form and the pair attached to it, in either file order. The
+        JSON picked before its FIT fills an empty slot's pressures, and the FIT then fills its
+        mix: its arrival re-derives the recording from both files, so the row it pairs with
+        holds nothing the recording does not."""
+        files = [("perdix.uddf", CLOUD_UDDF), *(PAIR if fit_first else PAIR[::-1])]
+        imported, form = create_user(db), create_user(db)
+
+        await _one_at_a_time(async_db, imported, files)
+        on_the_form = await _on_the_form(async_db, db, form, files)
+
+        [dive_id] = await _dive_ids(async_db, imported)
+        cylinders = (await _dive(async_db, dive_id))["cylinders"]
+        assert cylinders == (await _dive(async_db, on_the_form.id))["cylinders"]
+        assert cylinders == [OCEAN_CYLINDER | {"gas_number": 1}, *[EMPTY_CYLINDER] * 5]
+
+    @pytest.mark.asyncio
+    async def test_a_file_joining_the_primary_fills_its_row_beside_one_another_computer_appended(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The primary has one cylinder and a second computer appended a real one: the file
+        joining the primary pairs by mix, where an equal count was the only way to fill."""
+        diver = create_user(db)
+        perdix = _perdix_uddf(
+            mixes=(("ean33", 0.33), ("ean50", 0.5)), tanks=(("ean33", 0, 0), ("ean50", 20000000, 15000000))
+        )
+
+        await _import(async_db, diver, PAIR[:1])
+        await _import(async_db, diver, [("perdix.uddf", perdix)])
+        await _import(async_db, diver, PAIR[1:])
+
+        [dive] = await _logbook(async_db, diver)
+        assert dive["cylinders"] == [
+            OCEAN_CYLINDER | {"gas_number": 0},
+            {"oxygen": 50.0, "helium": 0.0, "volume": None, "start_pressure": 200.0, "end_pressure": 150.0}
+            | {"gas_number": 1},
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tank", "stored"),
+        [((None, 0, 0), (None, None)), (("ean33", 20000000, 0), (200.0, None))],
+        ids=["an empty slot", "a tank read down to zero"],
+    )
+    async def test_a_converted_files_zero_pressure_is_stored_absent(
+        self,
+        volume: Any,
+        async_db: AsyncSession,
+        db: Session,
+        tank: tuple[str | None, int, int],
+        stored: tuple[float | None, float | None],
+    ) -> None:
+        """As the dive form reads the same file, so a later fill does not read the 0 as set."""
+        diver = create_user(db)
+
+        await _import(async_db, diver, [("perdix.uddf", _perdix_uddf(tanks=(tank,)))])
+
+        [dive_id] = await _dive_ids(async_db, diver)
+        cylinder = await _first_cylinder(async_db, dive_id)
+        assert (cylinder.start_pressure, cylinder.end_pressure) == stored
+
+
+class TestAGuessedPairFillsNothing:
+    """A second computer's cylinders paired with the dive's rows by position are a guess its
+    own later file can re-pair by mix, so a guess fills only a row with nothing to contradict
+    it."""
+
+    @staticmethod
+    def _perdix_dive(db: Session, *mixes: dict[str, float]) -> tuple[User, Dive]:
+        diver = create_user(db)
+        dive = create_dive(db, diver)
+        recording = create_dive_recording(db, diver, dive)
+        recording.device_serial = "D9772626"
+        db.add_all([DiveMixture(dive_id=dive.id, **mix) for mix in mixes])
+        db.commit()
+        return diver, dive
+
+    @staticmethod
+    async def _values(db: AsyncSession, dive: Dive) -> list[tuple[float | None, ...]]:
+        rows = await db.execute(
+            select(DiveMixture.oxygen, DiveMixture.start_pressure, DiveMixture.end_pressure)
+            .where(DiveMixture.dive_id == dive.id)
+            .order_by(DiveMixture.id)
+        )
+        return [tuple(row) for row in rows]
+
+    @pytest.mark.asyncio
+    async def test_a_watchs_pressures_wait_for_the_file_that_names_their_mixes(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """A two-gas Perdix's rows, and a watch whose JSON records its tanks' pressures and no
+        mix, arriving first: by position its back gas's drain could land on either row."""
+        diver, dive = self._perdix_dive(db, {"oxygen": 21.0, "helium": 0.0}, {"oxygen": 54.0, "helium": 0.0})
+
+        await _attach(async_db, diver, dive, TWO_TANK_JSON, "two-tank.json")
+        assert await self._values(async_db, dive) == [(21.0, None, None), (54.0, None, None)]
+
+        await _attach(async_db, diver, dive, TWO_TANK_FIT, "two-tank.fit")
+        assert await self._values(async_db, dive) == [(21.0, 211.62, 127.16), (54.0, None, None)]
+
+    @pytest.mark.asyncio
+    async def test_rows_carrying_the_primarys_pressures_take_no_guessed_mix(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver, dive = self._perdix_dive(
+            db, {"start_pressure": 200.0, "end_pressure": 50.0}, {"start_pressure": 180.0, "end_pressure": 60.0}
+        )
+
+        await _attach(async_db, diver, dive, TWO_TANK_FIT, "two-tank.fit")
+
+        assert await self._values(async_db, dive) == [(None, 200.0, 50.0), (None, 180.0, 60.0)]
+
+
+class TestAFillNeverOverwrites:
+    @staticmethod
+    def _one_cylinder(db: Session, **columns: Any) -> tuple[User, Dive]:
+        diver = create_user(db)
+        dive = create_dive(db, diver)
+        create_dive_recording(db, diver, dive)
+        db.add(DiveMixture(dive_id=dive.id, **columns))
+        db.commit()
+        return diver, dive
+
+    @pytest.mark.asyncio
+    async def test_a_row_carrying_a_start_takes_neither_pressure_while_its_mix_fills(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The diver typed a start of 200; the JSON's 207.34 and 44.03 would make a drain of
+        two sources."""
+        diver, dive = self._one_cylinder(db, start_pressure=200.0)
+
+        for name, content in PAIR:
+            await _attach(async_db, diver, dive, content, name)
+
+        cylinder = await _first_cylinder(async_db, dive.id)
+        assert (cylinder.oxygen, cylinder.helium, cylinder.start_pressure, cylinder.end_pressure) == (
+            33.0,
+            0.0,
+            200.0,
+            None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_row_stored_with_an_end_of_zero_takes_its_mix_and_no_pressure(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """What a converted import stored before the zero band reached it: the one row meets
+        the one cylinder, so its mix fills, and the 0 stays."""
+        diver, dive = self._one_cylinder(db, end_pressure=0.0)
+
+        for name, content in PAIR:
+            await _attach(async_db, diver, dive, content, name)
+
+        cylinder = await _first_cylinder(async_db, dive.id)
+        assert (cylinder.oxygen, cylinder.start_pressure, cylinder.end_pressure) == (33.0, None, 0.0)
+
+
+class TestAClearedValueStaysCleared:
+    """The fill runs at an arrival and at nothing else, so a member the diver cleared after it
+    stays cleared through everything that re-reads bytes the dive already holds."""
+
+    FILES = TestASecondComputersCylinderValuesFillTheDive.FILES
+
+    @staticmethod
+    async def _file_id(db: AsyncSession, dive: Dive, parser_key: str) -> int:
+        return int(
+            (
+                await db.execute(
+                    select(DiveFile.id).where(DiveFile.dive_id == dive.id, DiveFile.parser_key == parser_key)
+                )
+            ).scalar_one()
+        )
+
+    @staticmethod
+    async def _recording(db: AsyncSession, dive: Dive, ordinal: int) -> DiveRecording:
+        return (
+            await db.execute(
+                select(DiveRecording).where(DiveRecording.dive_id == dive.id, DiveRecording.ordinal == ordinal)
+            )
+        ).scalar_one()
+
+    @classmethod
+    async def _act(cls, action: str, db: AsyncSession, diver: User, dive: Dive) -> None:
+        caller = {"id": diver.id, "uuid": diver.uuid, "is_superuser": False}
+        if action == "the JSON again":
+            await _attach(db, diver, dive, OCEAN_JSON, "dive.json")
+        elif action == "the FIT again":
+            await _attach(db, diver, dive, OCEAN_FIT, "dive.fit")
+        elif action == "the same files imported again":
+            await _import(db, diver, cls.FILES)
+        elif action == "a file deleted":
+            await delete_dive_file(db, file_id=await cls._file_id(db, dive, "fit"))
+        elif action == "a recording deleted":
+            primary = await cls._recording(db, dive, 0)
+            await erase_dive_recording(request=Mock(), uuid=dive.uuid, rid=primary.uuid, current_user=caller, db=db)
+        elif action == "a recording promoted":
+            second = await cls._recording(db, dive, 1)
+            await patch_dive_recording(
+                request=Mock(),
+                uuid=dive.uuid,
+                rid=second.uuid,
+                values=RecordingUpdateRequest(primary=True),
+                current_user=caller,
+                db=db,
+            )
+        else:
+            await backfill_profiles(db, force=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "the JSON again",
+            "the FIT again",
+            "the same files imported again",
+            "a file deleted",
+            "a recording deleted",
+            "a recording promoted",
+            "a forced backfill",
+        ],
+    )
+    async def test_nothing_but_an_arrival_fills_it_again(
+        self, volume: Any, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch, action: str
+    ) -> None:
+        monkeypatch.setattr(dives_module, "invalidate_dive_caches", AsyncMock())
+        diver = create_user(db)
+        await _import(async_db, diver, self.FILES)
+        [dive_id] = await _dive_ids(async_db, diver)
+        filled = await _first_cylinder(async_db, dive_id)
+        assert (filled.start_pressure, filled.end_pressure) == (207.34, 44.03)
+        await async_db.execute(
+            update(DiveMixture).where(DiveMixture.id == filled.id).values(start_pressure=None, end_pressure=None)
+        )
+        await async_db.commit()
+        dive = (await async_db.execute(select(Dive).where(Dive.id == dive_id))).scalar_one()
+
+        await self._act(action, async_db, diver, dive)
+
+        cylinder = await _first_cylinder(async_db, dive_id)
+        assert (cylinder.oxygen, cylinder.start_pressure, cylinder.end_pressure) == (33.0, None, None)
