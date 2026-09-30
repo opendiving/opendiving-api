@@ -1349,7 +1349,7 @@ async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int, touched_primar
     this a no-op, and that is the whole of the guard: an outright rewrite is only ever owed
     where the primary's identity or its files just moved. Run against a dive whose primary was
     untouched it is not a slow no-op but a loss - on a **file-less** primary, the shape a
-    converted logbook import creates, the extraction is empty and every field is written
+    logbook import creates from a document, the extraction is empty and every field is written
     `None`, clearing figures a document supplied that nothing on this instance can re-derive;
     and on a primary that *has* files, clearing any field the document supplied and the files
     do not yield. Either way the recording the diver actually deleted had no bearing on them.
@@ -1616,7 +1616,7 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
         existing = await get_existing_profile(db, recording_id=row.recording_id)
         if existing is not None and not existing.is_reproducible:
             # Samples nothing here can produce again. The recording stays, file-less, which
-            # is the same first-class shape a converted logbook import creates.
+            # is the same first-class shape a logbook import creates from a document.
             pass
         else:
             await dive_recordings.delete_recording(db, recording_id=row.recording_id, dive_id=row.dive_id, commit=False)
@@ -1863,7 +1863,7 @@ async def backfill_tech_fields(
             failed += 1
             continue
         if not files:
-            # A recording with nothing to re-read - a converted logbook import's. Not a
+            # A recording with nothing to re-read - one a logbook import made from a document. Not a
             # failure and not an update: there is no file, so there is nothing this script
             # can say about it that is not already stored.
             continue

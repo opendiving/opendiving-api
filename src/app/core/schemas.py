@@ -192,10 +192,12 @@ class LogbookImportTokenData(BaseModel):
     `POST /import/logbook/preview` and presented again by `POST /import/logbook`.
 
     The same shape and the same modest claim as `DiveFileTokenData` above, minus the
-    parser: this server read *these exact bytes* for *this user* and showed them a report
-    of what importing them would do. It carries no authority - apply re-plans the whole
-    document from scratch inside its own transaction - so what it actually buys is that
-    the report a diver approved describes the file they then applied.
+    parser: this server read *these exact files* for *this user* and showed them a report
+    of what importing them would do. `sha256` is the digest over every file's name and
+    digest (`batch_digest`), so the claim covers the set a diver picked. It carries no
+    authority - apply re-plans every document from scratch inside its own transaction - so
+    what it actually buys is that the report a diver approved describes the files they then
+    applied.
     """
 
     user_uuid: str

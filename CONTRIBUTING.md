@@ -247,11 +247,12 @@ what a sample file needs; a real export from a computer nobody on either project
 ingredient.
 
 What a new format owes this repository, once a `divejson` release carries it and the pin moves, is
-two table rows in `src/app/services/dive_reader.py`: the label a diver reads it by (`FORMAT_LABELS`)
-and the content type a stored file of it is served back as (`FORMAT_CONTENT_TYPES`).
-`test_every_read_format_has_a_label` and its content-type sibling fail the build until both are
-there. The format id is written to `dive_file.parser_key` on every stored file and is part of the
-data model.
+three table rows in `src/app/services/dive_reader.py`: the label a diver reads it by
+(`FORMAT_LABELS`), the content type a stored file of it is served back as (`FORMAT_CONTENT_TYPES`),
+and whether its file is a diver's logbook or one computer's recording (`FORMAT_KINDS`), which
+decides where an import of several files reads it. `test_every_read_format_has_a_label` and its
+siblings fail the build until all three are there. The format id is written to
+`dive_file.parser_key` on every stored file and is part of the data model.
 
 A release that moves the pin moves the reader version every stored profile records, so the profiles
 are behind until the backfill re-reads them from their stored files - valid meanwhile, and served as

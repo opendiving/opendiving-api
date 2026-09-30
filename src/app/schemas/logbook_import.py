@@ -1,10 +1,10 @@
 """The shapes logbook import reads and reports - a DiveJSON document seen from the
 *reader* side, and the report that says what importing one would do.
 
-A converted upload - a UDDF file, a `.ssrf`, a FIT, a Suunto app or DM5 XML export, a zip
-of any one of them - arrives here as a DiveJSON document like any other, because the converter's
-output is one. Nothing below the reader learns an upload was converted; the only trace is
-`ImportReport.conversion`, which is what the conversion could not carry.
+A converted file - a UDDF file, a `.ssrf`, a FIT, a Suunto app or DM5 XML export, each file
+of a zip of them - arrives here as a DiveJSON document like any other, because the converter's
+output is one. What the report says of the conversion is `ImportReport.conversion`, what the
+conversion could not carry, and each file's row in `ImportReport.members`.
 
 **This is not `schemas/export.py` inverted, and the differences are the whole point.**
 That module is the writer's declaration: it emits exactly what DiveJSON 1.0 defines and a
@@ -766,10 +766,12 @@ class ImportNote(BaseModel):
 class ImportCollectionReport(BaseModel):
     """What would happen (preview) or did happen (apply) to one envelope collection.
 
-    The four counts are disjoint and sum to the number of records the document carries in
-    this collection - and for `contacts` and `people`, the records made of the training
-    centers and the instructors an export written before either existed names on its courses
-    and certifications, which it carries as strings rather than records. `restored` is its
+    The four counts are disjoint and sum to the number of records the import's documents
+    carry in this collection - and for `contacts` and `people`, the records made of the
+    training centers and the instructors an export written before either existed names on its
+    courses and certifications, which it carries as strings rather than records. Each file's
+    records are counted as an import of that file alone would count them, after the files
+    before it. `restored` is its
     own figure and never hides inside `created` or `skipped`: un-deleting is the one thing
     this feature does that no other surface in the app can, and a diver restoring a backup
     is entitled to see it counted.

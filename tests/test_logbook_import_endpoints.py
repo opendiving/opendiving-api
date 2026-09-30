@@ -469,9 +469,6 @@ class TestTheFormatsItAccepts:
         response = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip"))
 
         assert response.status_code == 413
-        # The converter's own sentence, which names the bound that fired - the api's wrapper
-        # deliberately restates none of them, so that no message can claim a cause that
-        # cannot be one.
         assert "at most 1" in response.json()["detail"]
 
     def test_a_zip_whose_members_sum_past_the_document_cap_is_413(
@@ -709,9 +706,9 @@ class TestApply:
     def test_a_converted_file_imports_and_the_result_carries_the_conversion(
         self, signed_in: Any, client: TestClient
     ) -> None:
-        """The token is minted over the *uploaded* bytes, not the converted document, so it
-        names the file a diver picked - and apply converts again rather than replaying a
-        stored result. The block is on the result as well as the preview because the result
+        """The token is minted over the *uploaded* files, not the converted document, so it
+        names what a diver picked - and apply converts again rather than replaying a stored
+        result. The block is on the result as well as the preview because the result
         panel is what stays on screen."""
         response = client.post(
             APPLY_PATH, files=_files(SSRF, "logbook.ssrf"), data={"token": self._token(SSRF, filename="logbook.ssrf")}

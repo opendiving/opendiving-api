@@ -5781,31 +5781,34 @@ column's; move all of them together.
 ## Importing a logbook is the one client-supplied profile
 
 `/dive/parse` neither returns nor accepts samples, which would make stored samples client-supplied.
-Logbook import accepts them, into the caller's own account only, through the same
+Logbook import accepts a document's, into the caller's own account only, through the same
 `derive_gas_attribution` → `downsample` sequence as a dive-computer file. Authority, not provenance:
 the profile lands in the importer's own logbook and is never claimed to be extracted from bytes this
-instance holds. `parser_key` is `divejson_import` on a bare import, the restored file's key on the
-archive path.
+instance holds. `parser_key` is `divejson_import` where the import stored no file, the restored
+file's key on the archive path. A file the import keeps as itself is not this case: its recording is
+derived from its files, as the dive form's is.
 
 `source_sha256` is the dive's file digest (`should_extract` and the backfill query select on it):
-the restored file's on the archive path, the payload's on the bare path. A restored profile's NULL
-`reader_version` has the backfill re-derive it.
+the restored file's on the archive path, the payload's where no file was stored. A restored
+profile's NULL `reader_version` has the backfill re-derive it.
 
 The profile's `duration` is the document's (§6.4 allows it past the last sample; it is the
 gas-coverage denominator) via a `store_profile` override, clamped up if below its samples.
 
 Samples are shaped by `shape_recording` (`services/recording_shape.py`), as a stored file's are.
 
-## A bare document creates no file rows, and only the archive restores bytes
+## A bare document creates no file rows, and the files it names come back only with the archive
 
 A bare document carries `source_file` and certification-file metadata without bytes (`archive_path`
 absent, spec §6.7), and a file row here claims bytes exist (`BlobMissingError`, `storage_key`
 `NOT NULL`). So the bare path imports the dives and reports the files as not contained, never a 422.
 
-The archive path writes the blob before the transaction that references it, as
+The import writes every object it stores before the commit of the transaction that references it, as
 `store_recording_file` and `store_certification_file` do, so a failure leaves only an orphan for
 `sweep_orphaned_files.py`; no compensating unlink (see *"Orphans are the only failure product, and
-there is a script for them"*).
+there is a script for them"*). The objects wait until the whole import has fitted the storage limit
+(`services/logbook_import/staging.py`), each row recording its object's ceiling until the write
+reports its size.
 
 Each restored member is verified against the manifest digest before writing; a mismatch skips and
 reports it.
@@ -5891,11 +5894,14 @@ certification's requiredness is what governs it.
 
 ## Logbook import spools its upload and still parses the document whole
 
-The upload is read in bounded chunks into a `SpooledTemporaryFile` (`SPOOL_THRESHOLD`);
-`read_upload_within_limit` returns `bytes` and is sized for uploads two orders of magnitude smaller.
+The routes read their own multipart body, after the session and the rate limit, into one
+`SpooledTemporaryFile` per file part; the parts held in memory together never pass one
+`SPOOL_THRESHOLD`, a part that would roll onto disk first. The framework's form reader reads the
+body before any dependency, holds every part up to 1 MiB in memory and bounds no total; a custom
+route class swapping it underneath still reads before the dependencies.
 
-Parsing still materializes the whole document, so the document cap is the memory ceiling; a
-streaming parser, an arq job or a preview-token-keyed spool are unbuilt.
+Parsing still materializes every document, so `MAX_DOCUMENT_SIZE` over what one import plans is the
+memory ceiling; a streaming parser, an arq job or a preview-token-keyed spool are unbuilt.
 
 Zip bombs are refused before a byte inflates: declared sizes must sum under
 `MAX_ARCHIVE_EXTRACTED_SIZE`, members are checked by declared size, `zipfile` verifies the CRC, and
@@ -5911,21 +5917,20 @@ two calls.
 
 ## Logbook import reads whatever the converter reads, and the routes are `/import/logbook/*`
 
-`POST /import/logbook/preview` and `POST /import/logbook` accept a DiveJSON document, any format in
-`divejson.read_formats()`, or a `.zip` of those; labels are `services/dive_reader.py`'s
-`FORMAT_LABELS` (see *"A version bump can add a reader, and only a test notices"*).
+`POST /import/logbook/preview` and `POST /import/logbook` accept any number of `file` parts, each a
+DiveJSON document, any format in `divejson.read_formats()`, or a `.zip` of those; labels are
+`services/dive_reader.py`'s `FORMAT_LABELS` (see *"A version bump can add a reader, and only a test
+notices"*).
 
-`divejson.sniff` runs once on `divejson.SNIFF_BYTES`. Rewind the spool before `registry.convert`: it
-sniffs from the current position and honours `max_members`/`max_member_size` only on its
-`format=None` branch. Conversion runs in `run_in_threadpool`; `json.loads` does not.
-
-A zip (`PK\x03\x04`) without `logbook.divejson` goes to the converter whole, and
-`_refuse_oversized_source` bounds the members' declared sum by `MAX_DOCUMENT_SIZE`: every converted
-member is held until merge.
+`divejson.sniff` decides each file on `divejson.SNIFF_BYTES`. A zip (`PK\x03\x04`) without
+`logbook.divejson` is opened one level deep and its files join the batch; the declared sizes of
+every file a reader claims, every document and the archive's own sum under `MAX_DOCUMENT_SIZE`
+before anything converts, since every converted document is held until planning. Conversion and
+parsing run in `run_in_threadpool`.
 
 A head starting `{` keeps the 422 "not valid JSON"; other unclaimed bytes are 415. The token covers
-the uploaded bytes and apply converts again, deterministic except `exported_at`, passed in UTC via
-`_conversion_moment`.
+each uploaded file's name and digest and apply converts again, deterministic except `exported_at`,
+passed in UTC via `_conversion_moment`.
 
 `ImportReport.conversion` (`Conversion.grouped()`, capped by
 `MAX_CONVERSION_GROUPS`/`MAX_CONVERSION_WHERES`) keeps `groups[].kind` an opaque string, never
@@ -6165,14 +6170,15 @@ and `joined` (new bytes on an existing recording; only that fills cylinders); `_
 `dive_profile.parser_key` is one of three: a format id (re-readable from files by the reader),
 `divejson_import` or `merge` (written by `POST /dives/merge`). The last two are
 `UNREPRODUCIBLE_PROVENANCES`; clients see the narrower `ProfileProvenance`. A recording with no
-files is first-class: logbook import stores no bytes for a converted or bare document, and it is
-deleted only through the recording route. `should_extract` refuses an unreproducible profile, and
-both backfills select on the profile's provenance, not a file's. A recording survives its last file
-only when no file can re-yield its profile. `source_sha256` is the file's digest for one file, and
-the SHA-256 over digests in attach order for more, so single-file rows keep their ETag.
-`backfill_tech_fields` overwrites a scalar only with a value a stored file yields, since an import
-can fill `cns_end` from a document alone. Rejected: a per-scalar provenance column; the cost: the
-backfill cannot null a bogus stored reading.
+files is first-class: logbook import stores no bytes for a bare document or for a converted file it
+does not keep - a logbook of several dives, a file past the size cap - and it is deleted only
+through the recording route. `should_extract` refuses an unreproducible profile, and both backfills
+select on the profile's provenance, not a file's. A recording survives its last file only when no
+file can re-yield its profile. `source_sha256` is the file's digest for one file, and the SHA-256
+over digests in attach order for more, so single-file rows keep their ETag. `backfill_tech_fields`
+overwrites a scalar only with a value a stored file yields, since an import can fill `cns_end` from
+a document alone. Rejected: a per-scalar provenance column; the cost: the backfill cannot null a
+bogus stored reading.
 
 ## A version bump can add a reader, and only a test notices
 
@@ -6182,10 +6188,11 @@ falls back to the raw id, so a reader the pin gains is accepted while the senten
 the API reads renders a bare id like `suunto_xml` and the web picker's own extension list greys it
 out. No CI job, route test or exception sees that.
 
-So `FORMAT_LABELS` and `FORMAT_CONTENT_TYPES` (`services/dive_reader.py`) are tables, and
-`test_every_read_format_has_a_label` fails the build when the pin outgrows either. The mirror case
-is checked too: a label for a format the library has dropped is a format this build advertises and
-refuses. The prose that spells the set out — `README.md`, `api/v1/logbook_import.py`,
+So `FORMAT_LABELS`, `FORMAT_CONTENT_TYPES` and `FORMAT_KINDS` (`services/dive_reader.py`) are tables
+\- a format's label, its content type, and whether its file is a logbook's or one computer's - and
+`test_every_read_format_has_a_label` and its siblings fail the build when the pin outgrows any. The
+mirror case is checked too: a label for a format the library has dropped is a format this build
+advertises and refuses. The prose that spells the set out — `README.md`, `api/v1/logbook_import.py`,
 `schemas/logbook_import.py` — cannot be derived, so the test's message names those files.
 
 ## Merging two dives keeps the gap and synthesises nothing
@@ -6889,3 +6896,14 @@ profile stale, and nothing re-derives it on deploy: the backfill does when the o
 until then the row is served as the previous reader made it, which is still a valid profile.
 Rejected: re-deriving in a migration, which has neither the blob store nor the reader. A `fitdecode`
 bump moves no reader version, so it needs `--force --parser-key fit`.
+
+## An import is its files imported one at a time
+
+An import of many files writes what each would write imported alone, in one order - archive,
+documents, logbooks, one computer's files, by name - in one transaction. A file is planned against
+what the files before it wrote, so the gates pair a computer's two exports, or two computers, as
+across two days. The preview runs the same pass and rolls it back. Each file converts alone as a
+one-member zip named by its digest, so a record with no id takes its identity from the bytes. A file
+of one dive and one computer's record is kept, its recording derived from its files as the form's
+is. Rejected: folding pairs in the documents before planning, a second writer; pairing by basename,
+true of the Suunto app alone.

@@ -23,7 +23,7 @@ extracted.
 **A recording whose profile no file can re-yield is never a candidate**, `--force` included:
 a document supplied those samples (`divejson_import`) or a merge produced them (`merge`), and
 nothing here can derive them a second time. A recording that holds no files at all - what a
-converted logbook import creates - is reported as skipped rather than as a failure.
+logbook import creates from a document - is reported as skipped rather than as a failure.
 """
 
 import argparse

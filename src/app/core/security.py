@@ -695,9 +695,10 @@ def verify_dive_file_token(token: str) -> DiveFileTokenData | None:
 def create_logbook_import_token(*, user_uuid: uuid_pkg.UUID, sha256: str) -> str:
     """Mints the receipt `POST /import/logbook/preview` hands back with its report.
 
-    Binds two things: who was shown the report, and exactly which bytes it was a report
-    *about*. `POST /import/logbook` re-hashes the body it receives and refuses a mismatch,
-    so the file a diver approves is the file that gets imported - the shape
+    Binds two things: who was shown the report, and exactly which files it was a report
+    *about* - `sha256` is the digest over every file's name and digest (`batch_digest`).
+    `POST /import/logbook` hashes the files it receives the same way and refuses a mismatch,
+    so the files a diver approves are the files that get imported - the shape
     `create_dive_file_token` already uses for the parse-then-attach pair, minus its
     `parser_key`, which has no counterpart here.
 

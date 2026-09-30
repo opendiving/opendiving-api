@@ -31,11 +31,12 @@ else; what is here is the source, and the notes for working on it.
   on multi-tank dives.
 - **Dive-computer files on the dive form** — upload one file of one dive, in any format logbook
   import reads, to `POST /dive/parse` and get the dive back to pre-fill a form; the same reader, the
-  `divejson` package, reads both doors. A file of several dives, or of one dive two computers
-  recorded, goes through logbook import instead. Attach the file to the dive afterwards and the
-  **per-sample profile** (depth, temperature, tank pressure, deco ceiling, **the computer's own
-  no-decompression clock, time to surface, ppO₂, CNS clock and both gradient factors**, dive events)
-  is extracted server-side and served with ETag caching.
+  `divejson` package, reads both doors, and a file either door keeps gives the same recording. A
+  file of several dives, or of one dive two computers recorded, goes through logbook import instead.
+  Attach the file to the dive afterwards and the **per-sample profile** (depth, temperature, tank
+  pressure, deco ceiling, **the computer's own no-decompression clock, time to surface, ppO₂, CNS
+  clock and both gradient factors**, dive events) is extracted server-side and served with ETag
+  caching.
 - **Recordings** — a dive holds what recorded it, in order, and each of those holds its own files
   and its own profile. So a diver on two computers keeps both accounts of the dive, the same
   computer exported twice fills one record rather than making two, and every device the file named —
@@ -94,14 +95,16 @@ else; what is here is the source, and the notes for working on it.
 - **[DiveJSON](https://divejson.org)** — the open dive-log interchange format this project
   maintains, and this is its reference implementation: a lossless structured copy of the whole
   logbook, where UDDF measurably loses trips, gear, weights and UTC offsets.
-- **Logbook import** — put a whole logbook into an account, in two phases: a preview that reports
-  exactly what would be created, linked to something you already have, restored from your deleted
-  records or skipped, and then an apply that writes the lot in one transaction. A DiveJSON document
-  or a full-export archive goes in as it is; a UDDF file, a Subsurface `.ssrf`, a FIT file, a Suunto
-  app export, a Suunto DM5 XML export, or a `.zip` whose files are all one of those is converted on
-  the way in by the [`divejson`](https://pypi.org/project/divejson/) package, and the report says
-  what the conversion could not carry. Restore a backup, migrate between instances, or bring a
-  logbook across from whatever you were keeping it in.
+- **Logbook import** — put any number of files into an account at once, in any mix of the formats it
+  reads, in two phases: a preview that reports exactly what would be created, linked to something
+  you already have, restored from your deleted records or skipped, file by file and dive by dive,
+  and then an apply that writes the lot in one transaction. A DiveJSON document or a full-export
+  archive goes in as it is; a UDDF file, a Subsurface `.ssrf`, a FIT file, a Suunto app export, a
+  Suunto DM5 XML export, or a `.zip` of any of those is converted on the way in by the
+  [`divejson`](https://pypi.org/project/divejson/) package, and the report says what the conversion
+  could not carry. A file that is one dive is kept on the dive it becomes, and one recording
+  exported twice - a Suunto's FIT beside its JSON - is one recording with both files. Restore a
+  backup, migrate between instances, or bring a logbook across from whatever you were keeping it in.
 - **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
   and passkeys, with automatic account linking, short-lived access tokens, and httpOnly refresh
   cookies. The sign-in email carries a magic link *and* a six-digit code, so reading your mail on a
@@ -270,14 +273,14 @@ And a whole logbook, in and out:
 curl -OJ http://localhost:8000/api/v1/export/divejson -H "Authorization: Bearer $TOKEN"
 
 # Back in, in two phases. The preview writes nothing and reports what it would do;
-# the token it returns says which bytes that report was about. The file can be any
-# format the converter reads - `dives.uddf`, `logbook.ssrf`, `garmin-export.zip` -
-# and `conversion` in the report then says what the conversion could not carry.
+# the token it returns says which files that report was about. Send `file` once per
+# file, in any format the converter reads - `dives.uddf`, `Dive.fit` beside `Dive.json`,
+# `garmin-export.zip` - and `conversion` in the report says what it could not carry.
 curl -X POST http://localhost:8000/api/v1/import/logbook/preview \
-  -H "Authorization: Bearer $TOKEN" -F "file=@logbook.divejson"
+  -H "Authorization: Bearer $TOKEN" -F "file=@Dive.fit" -F "file=@Dive.json"
 
 curl -X POST http://localhost:8000/api/v1/import/logbook \
-  -H "Authorization: Bearer $TOKEN" -F "file=@logbook.divejson" -F "token=$PREVIEW_TOKEN"
+  -H "Authorization: Bearer $TOKEN" -F "file=@Dive.fit" -F "file=@Dive.json" -F "token=$PREVIEW_TOKEN"
 ```
 
 ## Development notes

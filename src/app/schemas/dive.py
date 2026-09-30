@@ -665,8 +665,8 @@ class RecordingRead(RecordingReadouts):
     `files` is in attach order, and there may legitimately be more than one: the same
     computer exported as JSON and again as FIT is one record of one dive in two spellings,
     each filling what the other left blank. `profile` may be present with `files` empty -
-    that is what a recording logbook import created from a converted document is, and it is
-    first-class rather than degenerate.
+    that is what logbook import creates from a document, or from a file it does not keep,
+    and it is first-class rather than degenerate.
     """
 
     uuid: uuid_pkg.UUID

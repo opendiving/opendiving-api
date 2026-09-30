@@ -754,9 +754,9 @@ async def fill_gate_figures(
 ) -> None:
     """Fill the two match figures where the recording has none. Same fill-only rule.
 
-    The import's, for a document's recording matching one this account holds: it stores no
-    samples over the ones that recording has, so it has no samples of its own to rewrite the
-    figures from.
+    The import's, for a document's recording matching one this account holds and bringing no
+    file: it stores no samples over the ones that recording has, so it has no samples of its
+    own to rewrite the figures from. One that brings a file re-derives them from its files.
     """
     values: dict[str, object] = {}
     if duration is not None:

@@ -1764,9 +1764,9 @@ async def erase_dive_recording(
 ) -> dict[str, str]:
     """Delete a whole recording - its files, its samples and what was derived from them.
 
-    The only way to remove a recording that holds no files, which is what a converted logbook
-    import creates and what a merge can leave behind: there is no file whose deletion would
-    take it.
+    The only way to remove a recording that holds no files, which is what logbook import
+    creates from a document or from a file it does not keep, and what a merge can leave
+    behind: there is no file whose deletion would take it.
 
     Removing the primary recording promotes the next one, and the dive's entry and exit fixes
     are re-derived from whatever becomes primary. Removing a **secondary** one leaves them
