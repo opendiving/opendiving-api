@@ -174,7 +174,7 @@ async def _import_recording(
     otu_end: float,
     start: datetime | None = None,
 ) -> Any:
-    """A converted logbook import, as `services/logbook_import/writer.py` leaves it: the
+    """A logbook import of a document, as `services/logbook_import/writer.py` leaves it: the
     document's figures on a primary recording that holds samples and no bytes. Nothing on
     this instance can re-derive either number."""
     recording = create_dive_recording(sync_db, diver, dive, ordinal=0)
@@ -400,8 +400,8 @@ class TestFillingTheDivesCylinders:
         """**`fresh` is "this upload created the recording", not "it had no files"**, and this
         is where the two answers differ.
 
-        A converted logbook import creates a recording with samples, no device and no bytes.
-        When the diver later attaches the export it was converted from, that is the
+        A logbook import of a document creates a recording with samples, no device and no
+        bytes. When the diver later attaches the export it was converted from, that is the
         recording's *first* file and still a second reading of a record the dive already
         describes - so it fills. A `fresh` that keyed on the file count would take the
         outright branch here and the cylinder would keep its blank.
@@ -784,8 +784,8 @@ class TestDeletingASecondComputersFile:
     async def test_a_file_less_primarys_document_figures_survive_it(
         self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
     ) -> None:
-        """The shape a converted logbook import creates: a primary holding samples and no
-        bytes, with the document's figures on it. Nothing on this instance can produce either
+        """The shape a logbook import creates from a document: a primary holding samples and
+        no bytes, with the document's figures on it. Nothing on this instance can produce either
         number again, so deleting the second computer's export must leave them.
         """
         imported = await _import_recording(async_db, db, diver, dive, cns_end=12.5, otu_end=31.0)
@@ -986,8 +986,8 @@ class TestTheDiveRead:
     async def test_a_recording_with_no_files_is_first_class(
         self, async_db: AsyncSession, db: Session, diver: User, dive: Dive
     ) -> None:
-        """What logbook import creates from a converted document, and what every UDDF and
-        `.ssrf` dive in the app looks like: a device, a start, samples and no bytes."""
+        """What logbook import creates from a document, and what every dive of a logbook of
+        several dives looks like: a device, a start, samples and no bytes."""
         recording = create_dive_recording(db, diver, dive)
         await async_db.execute(
             update(DiveRecording)
@@ -1010,7 +1010,7 @@ class TestTheDiveRead:
     ) -> None:
         """The dive read's only means of telling them apart, and the reason the member exists.
         Both carry samples and an empty `files`, and the sentence a client shows differs:
-        *no file kept: imported through the converter* against *merged from two recordings*.
+        samples an import took from a document against samples a merge put together.
         """
         imported = create_dive_recording(db, diver, dive, ordinal=0)
         merged = create_dive_recording(db, diver, dive, ordinal=1)

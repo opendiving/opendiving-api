@@ -1,43 +1,42 @@
-"""Getting an upload as far as a parsed DiveJSON document, and no further.
+"""Getting an import's files as far as parsed DiveJSON documents, and no further.
 
-Four shapes arrive here and one comes out: a bare `.divejson` document; the archive
-`GET /export/archive` produces, whose `logbook.divejson` member is the same document with
-the stored binaries beside it; a logbook in any format the `divejson` converter reads; and
-a zip whose members are all one of those formats, which is one logbook. Everything
-downstream works on `ImportDocument` plus a way to fetch the archive's binaries, so both
-the container and the conversion are this module's problem alone.
+An import is a batch of files, each classified by its bytes and never by its name: the
+archive `GET /export/archive` produces, whose `logbook.divejson` member is the app's own
+document with the stored binaries beside it; a bare DiveJSON document; a file in any format
+the `divejson` converter reads; a zip of any of those; or something nothing here reads.
+Everything downstream works on one `ImportDocument` per file plus a way to fetch the bytes
+a file brings, so the containers and the conversion are this module's problem alone.
 
-**The converter is consulted once, on a bounded head, before the JSON parse.** Not at the
-refusal sites further down: an `.ssrf` or a UDDF upload is valid UTF-8 that is not JSON and
-would die in `parse_document` before any of them was reached, told that a file which never
-claimed to be DiveJSON is a broken DiveJSON document. So `load_import` reads
-`divejson.SNIFF_BYTES` off the spool and asks `divejson.sniff` - which takes *bytes* and
-reads nothing itself - right after the zip decision. A named format is converted; `None`
-means nothing claimed the bytes, and the DiveJSON path below is untouched for anything that
-parses as JSON.
+**A zip that is not a full-export archive is opened, one level deep**, and its files join
+the batch beside the request's own, so a zipped account export and a dropped folder are the
+same batch. The `PK\\x03\\x04` sniff and `_open_archive`'s declared-size guard are what keep
+a zip bomb off the disk; a zip inside a zip, and a second full-export archive, are refused
+rows saying to import them on their own.
 
-**A zip is this module's to recognise and the library's to read.** The `PK\\x03\\x04` sniff
-and `_open_archive`'s declared-size guard stay here, because they are what keeps a zip bomb
-off the disk; a container carrying `logbook.divejson` is the app's own export, and one
-without goes to the converter whole, under this module's own caps.
+**Each file converts alone, as an archive of one member named by the file's SHA-256.** The
+package scopes the identity of a record its source gave no id by the archive member it came
+from, so a dive-computer file's dive - which never carries one - takes its identity from the
+bytes: the same whenever the same bytes come again, under any name or in any folder, and
+different for different bytes under one name. A record that carries its own id keeps the
+identity that id gives it. `DECISIONS.md`, *"An import is its files imported one at a time"*,
+has the rest.
 
-**Spooled, never buffered, and converted in a thread.** The upload is read in bounded chunks
-into a `SpooledTemporaryFile` - the export path's own pattern, in the other direction -
-because half a gigabyte resident per in-flight request is what `SPOOL_THRESHOLD` exists to
-avoid. Conversion then goes through `run_in_threadpool`, as `POST /dive/parse` does with the
-same decoders and for the same reason.
+**A file a reader claims and cannot convert is a row, not a refusal of the import.** The
+package refuses a mixed or partly unreadable archive because a call with no per-file answer
+cannot say which file failed; a batch has a row per file, and the most common stray - a run
+the same watch recorded - is one a reader claims before refusing it. An import in which no
+file reads answers as its first refused file would on its own.
 
-`MAX_DOCUMENT_SIZE` is the memory ceiling on every path, and each one reaches it
-differently: a bare document is parsed whole, a named format hands the converter
-`stream.read()`, and a zip of dive-computer files has the *sum* of its declared member sizes
-checked against it before anything is read, because every member of one of those is
-converted and every result is held until they merge. A logbook large enough to matter wants
-a streaming parser or an arq job. `DECISIONS.md`, *"Logbook import spools its upload and
-still parses the document whole"*, carries the trade.
+**Converted in a thread**, as `POST /dive/parse` reads, with the same decoders and for the
+same reason: *"Uploaded files are parsed in a thread, not on the event loop"* in
+`DECISIONS.md`.
 
-The caps are new constants rather than a reuse of any existing upload limit: the largest
-one this app has is the 10 MB card scan, and a logbook with a thousand sampled dives is
-two orders of magnitude past it.
+`MAX_DOCUMENT_SIZE` is the memory ceiling on every path, and it bounds the batch rather than
+one file: every document and every file a reader claims - a zip's by its declared sizes, and
+the archive's own document - are summed against it before anything converts, because every
+converted document is held until the import is planned. A logbook large enough to matter
+wants a streaming parser or an arq job. `DECISIONS.md`, *"Logbook import spools its upload
+and still parses the document whole"*, carries the trade.
 """
 
 import codecs
@@ -45,18 +44,23 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import tempfile
 import zipfile
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import IO, Any, BinaryIO, cast
+from enum import IntEnum
+from functools import partial
+from typing import IO, TYPE_CHECKING, Any, BinaryIO, cast
 
 import divejson
 from divejson import Conversion, ConverterError, NonConformingOutputError, SourceTooLargeError, UnsupportedSourceError
-from fastapi import UploadFile
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
+from ...core.utils.uploads import safe_filename
 from ...schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ...schemas.export import (
     DIVEJSON_FORMAT,
@@ -70,10 +74,15 @@ from ...schemas.logbook_import import (
     ConversionNoteGroup,
     ConversionReport,
     ImportDocument,
+    ImportMemberNotKept,
     ImportNoteCode,
 )
-from ..dive_reader import formats_this_build_reads
-from ..export.archive import DIVEJSON_NAME, SPOOL_THRESHOLD
+from ..dive_files import MAX_DIVE_FILE_SIZE, FileExtraction, extraction_of
+from ..dive_reader import ReadDive, formats_this_build_reads, is_logbook_format
+from ..export.archive import DIVEJSON_NAME
+
+if TYPE_CHECKING:
+    from .parts import ImportPart
 
 logger = logging.getLogger(__name__)
 
@@ -87,36 +96,33 @@ logger = logging.getLogger(__name__)
 # wrong answer to every one of them.
 _MEMBER_READ_FAILURES = (RuntimeError, zipfile.BadZipFile, NotImplementedError, OSError)
 
-# A bare document. Generous against the reference implementation's own output - the demo
-# logbook is kilobytes and a thousand sampled dives is tens of megabytes - and the number
-# that actually bounds this endpoint's memory, since the parse holds the document whole.
+# A document, and what one import plans in all. Generous against the reference
+# implementation's own output - the demo logbook is kilobytes and a thousand sampled dives
+# is tens of megabytes - and the number that actually bounds this endpoint's memory, since
+# every document is parsed whole and held until the import is planned.
 MAX_DOCUMENT_SIZE = 100 * 1024 * 1024  # 100 MB
 
-# An archive, which carries every dive-computer file and c-card scan besides. Five times
-# the document cap because the binaries are what dominate it.
+# A zip part, and a whole request. Five times the document cap because an archive's
+# binaries are what dominate it.
 MAX_ARCHIVE_SIZE = 500 * 1024 * 1024  # 500 MB
 
-# What the archive's members may sum to *uncompressed*, checked against the central
-# directory before a single byte is inflated. Zip compresses text a thousand to one, so
-# the transfer cap above bounds nothing on its own: without this a 5 MB upload could ask
-# for gigabytes of temp file. Twice the archive cap leaves room for an honest logbook
-# whose documents deflate well while refusing anything shaped like a bomb.
+# What every zip of one import may sum to *uncompressed*, checked against the central
+# directories before a single byte is inflated. Zip compresses text a thousand to one, so the
+# transfer cap above bounds nothing on its own: without this a 5 MB upload could ask for
+# gigabytes of temp file, and a request of many zips that many times over. Twice the archive
+# cap leaves room for an honest logbook whose documents deflate well while refusing anything
+# shaped like a bomb.
 MAX_ARCHIVE_EXTRACTED_SIZE = 2 * MAX_ARCHIVE_SIZE
 
-# The most files a zip of one source format may hold. This bounds the *walk* rather than the
-# bytes: to decide a member's format the library has to open it and inflate a `SNIFF_BYTES`
-# head - a FIT's magic sits eight bytes into the member, so no listing can answer it - and
-# it does that once per member before converting any of them. An archive of half a million
-# tiny files is a lot of work inside one request even when it fits under the size bound
-# below. Deliberately not a promise about how many dives go in one upload:
-# `_refuse_oversized_source` is what a real dive-computer export meets first, and at 30 KB a
-# FIT file that is a few thousand of them. The count itself is refused off the directory
-# listing, before anything is opened.
-#
-# What one such member may declare is `MAX_DOCUMENT_SIZE` rather than a fourth number: a
-# member *is* a logbook document in some other format, materialized whole by whichever
-# reader claims it, exactly as a bare document is.
-MAX_ARCHIVE_MEMBERS = 5000
+# The most files one import reads - its parts and every file its zips hold, together. This
+# bounds the *walk* rather than the bytes: to decide a file's format its head has to be
+# inflated - a FIT's magic sits eight bytes into the member, so no listing can answer it - and
+# every file is hashed and reported, so half a million tiny files is a lot of work inside one
+# request even when they fit under the planning bound. Deliberately not a promise about how
+# many dives go in one import: `MAX_DOCUMENT_SIZE` over the batch is what a real dive-computer
+# export meets first, and at 30 KB a FIT file that is a few thousand of them. The count is
+# refused off the directory listings, before any file is opened.
+MAX_IMPORT_FILES = 5000
 
 # Zip's local file header. Sniffed rather than trusting the filename or the client's
 # content type, on the same principle as `certification_files.sniff_content_type`: the
@@ -144,12 +150,12 @@ class UnsupportedImportError(Exception):
 
 
 class MalformedImportError(Exception):
-    """A reader claimed the upload and could not read it - a 422."""
+    """A reader claimed the file and could not read it - a 422."""
 
 
 class ImportTooLargeError(Exception):
-    """The upload is past its cap - a 413, matching `read_upload_within_limit`'s answer
-    everywhere else in the app."""
+    """A file or the whole import is past its cap - a 413, matching
+    `read_upload_within_limit`'s answer everywhere else in the app."""
 
 
 class DuplicateMemberError(MalformedImportError):
@@ -159,6 +165,10 @@ class DuplicateMemberError(MalformedImportError):
     last value silently, and a document whose reader and writer disagree about which of two
     `max_depth` members is real is not something to guess at.
     """
+
+
+# A refusal of one file, which is also what the import answers when no file of it reads.
+type Refusal = UnsupportedImportError | MalformedImportError | ImportTooLargeError
 
 
 def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -181,23 +191,40 @@ def parse_document(text: str | bytes) -> Any:
     return json.loads(text, object_pairs_hook=_reject_duplicate_members)
 
 
+@dataclass(frozen=True, slots=True)
+class KeptFile:
+    """A file that is one recording's file, and what keeping it on that recording needs.
+
+    The rule the dive form applies to a file it is handed: a file converting to one dive
+    carrying at most one computer's record of it, whatever its format. `key` is the name the
+    loaded import serves the bytes under, beside an archive's members; `extraction` is what
+    the file yields read through the one reader, taken off the conversion the import already
+    ran rather than off a second one.
+    """
+
+    key: str
+    sha256: str
+    filename: str
+    format: str
+    size: int
+    extraction: FileExtraction
+
+
 @dataclass(slots=True)
 class LoadedImport:
-    """A parsed document plus, on the archive path, the container its binaries live in.
+    """One file of an import as a parsed document, plus the bytes it brings.
 
-    Holds an open temp file and possibly an open `ZipFile`, so it is a context manager and
-    the caller must use it as one. The spool deletes itself on close, exactly as the
-    export path's does.
+    Owns nothing: the spools and containers it reads from belong to the `LoadedBatch` it is
+    part of, which closes them.
 
     `conversion` and `source_format` are the converter's, and both are `None` for a native
-    DiveJSON upload. Nothing below this module reads either: the converted document enters
-    the planner through `ImportDocument` like any other, so neither the planner nor the
-    writer ever learns the logbook was not written by this app. They are here because the
-    *report* is a route concern and the route has nothing else to build it from.
+    DiveJSON document or archive. Nothing below this module reads either: the converted
+    document enters the planner through `ImportDocument` like any other. They are here
+    because the *report* is a route concern and the route has nothing else to build it from.
 
-    `is_archive` stays "this upload carries the stored binaries", which a converted zip does
-    not - the converter emits no `files` at all - so it is `False` there even though the
-    upload was a container.
+    `is_archive` says this file is the full-export archive, whose container carries the
+    stored binaries its document names. `kept` is the file itself where it is one
+    recording's file, and `not_kept` says why a file read into dives is not.
     """
 
     document: ImportDocument
@@ -205,34 +232,28 @@ class LoadedImport:
     is_archive: bool
     conversion: Conversion | None
     source_format: str | None
-    _spool: IO[bytes]
-    _archive: zipfile.ZipFile | None
+    _archive: zipfile.ZipFile | None = None
     # What `read_as_written` read the way a pre-change writer meant it, for the report.
     read_as_written: list[ReaderNote] = field(default_factory=list)
-
-    def __enter__(self) -> LoadedImport:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
-
-    def close(self) -> None:
-        if self._archive is not None:
-            self._archive.close()
-        self._spool.close()
+    kept: KeptFile | None = None
+    not_kept: ImportMemberNotKept | None = None
+    _read_kept: Callable[[], bytes] | None = None
 
     def member_size(self, path: str) -> int | None:
-        """The declared uncompressed size of one member, or `None` when it is not there.
+        """The size of one file this import can store, or `None` when it is not there.
 
-        `path` is a document-supplied string and is used as a **zip member name and
-        nothing else** - no filesystem call takes it, so a `../../.bashrc` in it addresses
-        a member that does not exist rather than a path outside anything.
+        An archive's member by its declared uncompressed size, or the kept file under its
+        key. `path` is a document-supplied string and is used as a **zip member name and
+        nothing else** - no filesystem call takes it, so a `../../.bashrc` in it addresses a
+        member that does not exist rather than a path outside anything.
 
         Split from `read_member` so the *preview* can say which files would restore without
-        inflating a byte of any of them, and so "not in this archive" and "too big to
-        store" stay two different answers to the diver. It comes out of the central
-        directory, so it is a dictionary lookup.
+        inflating a byte of any of them, and so "not in this archive" and "too big to store"
+        stay two different answers to the diver. It comes out of the central directory, so
+        it is a dictionary lookup.
         """
+        if self.kept is not None and path == self.kept.key:
+            return self.kept.size
         if self._archive is None:
             return None
         try:
@@ -241,20 +262,27 @@ class LoadedImport:
             return None
 
     def read_member(self, path: str) -> bytes | None:
-        """One binary out of the container, or `None` when it cannot be had.
+        """One file's bytes - an archive's member or the kept file - or `None` when they
+        cannot be had.
 
         Unbounded on purpose: every caller has already been through `member_size` and
-        refused anything over its own cap, and `_open_archive` refused the whole container
-        if its declared sizes summed past `MAX_ARCHIVE_EXTRACTED_SIZE`. `zipfile` verifies
-        the CRC on the way out, which is what makes those declared sizes worth trusting;
-        the digest the caller then checks against the manifest is the end-to-end guarantee.
+        refused anything over its own cap, and a container was refused whole if its declared
+        sizes summed past `MAX_ARCHIVE_EXTRACTED_SIZE`. `zipfile` verifies the CRC on the way
+        out, which is what makes those declared sizes worth trusting; the digest the caller
+        then checks is the end-to-end guarantee.
 
-        **A member that will not inflate is `None` rather than an exception**, because the
+        **A file that will not inflate is `None` rather than an exception**, because the
         caller is the writer and it already has the right answer for a file it cannot have:
         skip it, report it, and leave the dive. Letting the failure out would abort a
         half-written import over one corrupt c-card scan, which is the opposite trade from
         every other file decision here.
         """
+        if self.kept is not None and path == self.kept.key and self._read_kept is not None:
+            try:
+                return self._read_kept()
+            except _MEMBER_READ_FAILURES:
+                logger.warning("A file could not be read back during an import", exc_info=True)
+                return None
         if self._archive is None:
             return None
         try:
@@ -266,119 +294,6 @@ class LoadedImport:
         except _MEMBER_READ_FAILURES:
             logger.warning("An archive member could not be read during an import", exc_info=True)
             return None
-
-
-async def _spool_upload(upload: UploadFile, max_size: int) -> IO[bytes]:
-    """Drain an upload into a spooled temp file, refusing it past `max_size`.
-
-    `read_upload_within_limit` is the wrong tool at these sizes - it returns `bytes`, and
-    the whole point here is that half a gigabyte never becomes a Python object.
-    """
-    buffer: IO[bytes] = tempfile.SpooledTemporaryFile(max_size=SPOOL_THRESHOLD)
-    total = 0
-    try:
-        while chunk := await upload.read(_READ_CHUNK_SIZE):
-            total += len(chunk)
-            if total > max_size:
-                limit_mb = -(-max_size // (1024 * 1024))
-                raise ImportTooLargeError(f"File too large. Maximum allowed size is {limit_mb} MB.")
-            buffer.write(chunk)
-    except BaseException:
-        buffer.close()
-        raise
-    buffer.seek(0)
-    return buffer
-
-
-def _digest(buffer: IO[bytes]) -> str:
-    """The upload's own sha256, which is what the preview token is minted over.
-
-    Read back off the spool in chunks rather than hashed on the way in, so the hash and the
-    stored bytes cannot disagree: whatever `apply` is handed is hashed the same way.
-    """
-    hasher = hashlib.sha256()
-    buffer.seek(0)
-    for chunk in iter(lambda: buffer.read(_READ_CHUNK_SIZE), b""):
-        hasher.update(chunk)
-    buffer.seek(0)
-    return hasher.hexdigest()
-
-
-def _logbook_member(archive: zipfile.ZipFile) -> zipfile.ZipInfo | None:
-    """The archive's `logbook.divejson`, or `None` when it has none.
-
-    `None` is not a refusal any more: a zip without one is a zip of dive-computer files,
-    which the converter reads as one logbook. It used to be the first of this module's five
-    415s.
-    """
-    try:
-        return archive.getinfo(DIVEJSON_NAME)
-    except KeyError:
-        return None
-
-
-def _document_bytes(buffer: IO[bytes], archive: zipfile.ZipFile | None, info: zipfile.ZipInfo | None) -> bytes:
-    if archive is None or info is None:
-        return buffer.read()
-    if info.file_size > MAX_DOCUMENT_SIZE:
-        raise ImportTooLargeError(
-            f"The {DIVEJSON_NAME} inside this archive is larger than the {MAX_DOCUMENT_SIZE // (1024 * 1024)} MB limit."
-        )
-    try:
-        return archive.read(info)
-    except _MEMBER_READ_FAILURES as exc:
-        # A 422 rather than a 415: this *is* an archive of the shape this app produces, and
-        # the logbook inside it cannot be read. The message names the two causes a diver can
-        # do something about, because "could not be read" on its own sends nobody anywhere.
-        raise MalformedImportError(
-            f"The {DIVEJSON_NAME} inside this archive could not be read. If the archive is password-protected, "
-            "extract it first and import the document on its own; otherwise the file is damaged."
-        ) from exc
-
-
-def _refuse_oversized_source(archive: zipfile.ZipFile) -> None:
-    """The whole conversion's memory ceiling, off the central directory before anything runs.
-
-    `MAX_ARCHIVE_EXTRACTED_SIZE` is not this bound and never was: it guards the *export
-    archive*, whose members are written to the file store one at a time and whose only
-    resident object is the `logbook.divejson` under `MAX_DOCUMENT_SIZE`. A zip of
-    dive-computer files is the opposite shape - every member is converted and every member's
-    result is held until the merge - so without this the ceiling would be the 1 GB the
-    zip-bomb guard admits, ten times the number this module's own docstring calls the
-    ceiling, and reached by an upload well under `MAX_ARCHIVE_SIZE` because XML deflates
-    about ten to one. `max_member_size` bounds one member and `MAX_ARCHIVE_MEMBERS` bounds
-    the count; neither bounds the sum, which is the thing that ends up in memory.
-
-    `MAX_DOCUMENT_SIZE` rather than a fourth number, for the same reason a member gets it:
-    whatever shape a logbook arrives in, at most a document's worth of source becomes one
-    in-memory logbook. Every entry counts, including the directory entries and the `__MACOSX`
-    tree the converter skips - a bound slightly stricter than the set actually read is the
-    safe direction, and matching the library's member filter here would be a second copy of
-    a rule that lives there.
-    """
-    declared = sum(info.file_size for info in archive.infolist())
-    if declared > MAX_DOCUMENT_SIZE:
-        # Rounded *up*, as `_spool_upload` rounds its own: floored, an archive one byte over
-        # the cap reports the cap back at itself and reads as a refusal for no reason.
-        raise ImportTooLargeError(
-            f"This archive holds {-(-declared // (1024 * 1024))} MB of logbooks uncompressed, and at most "
-            f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB are converted in one import. Split it and import the parts."
-        )
-
-
-def _open_archive(buffer: IO[bytes]) -> zipfile.ZipFile:
-    try:
-        archive = zipfile.ZipFile(buffer)
-    except (zipfile.BadZipFile, OSError, EOFError) as exc:
-        raise MalformedImportError("This looks like a zip archive but could not be opened.") from exc
-
-    declared = sum(info.file_size for info in archive.infolist())
-    if declared > MAX_ARCHIVE_EXTRACTED_SIZE:
-        archive.close()
-        raise ImportTooLargeError(
-            f"This archive expands to more than {MAX_ARCHIVE_EXTRACTED_SIZE // (1024 * 1024)} MB and was not opened."
-        )
-    return archive
 
 
 def _validate_envelope(raw: Any) -> ImportDocument:
@@ -666,52 +581,11 @@ def _conversion_moment() -> datetime:
     return datetime.now(UTC)
 
 
-def _convert(buffer: IO[bytes], *, source_format: str | None) -> Conversion:
-    """Hand the spool to the converter, rewound, with the caps on the branch that reads them.
-
-    **The rewind is not optional.** `registry.convert` reads its own sniff head from the
-    stream's *current* position and seeks back only on the `format=None` branch, so a spool
-    left where this module's own sniff put it would feed the archive walker bytes 8192
-    onward - which sniffs `None` and turns a perfectly good zip into a 415 - and would hand
-    a named reader its file minus the first 8 KB.
-
-    **The caps go with `format=None` and nowhere else.** As shipped, a named format converts
-    `stream.read()` from the current position and never consults `max_members` or
-    `max_member_size`; passing them there would look like a guard and be inert. On the branch
-    that does read them, `max_member_size` is belt to `_refuse_oversized_source`'s braces -
-    the sum is already bounded by the same number, so no single member can exceed it - and it
-    stays because a bound inside the library is the one that still holds if this module ever
-    hands over a container it did not open itself.
-
-    `exported_at` is passed rather than defaulted because the library's default is *now, in
-    the local zone*, and this is the one value in a converted document that is not a
-    function of the source. Preview and apply convert the same bytes minutes apart and must
-    plan identically, so nothing downstream reads it - `divejson.compared` drops it, and the
-    planner never looks.
-    """
-    buffer.seek(0)
-    exported_at = _conversion_moment()
-    # `convert` is annotated `BinaryIO`, which differs from the `IO[bytes]` this module
-    # spools into only in what `__enter__` returns - and `convert` never enters it. It reads
-    # and seeks, both of which a `SpooledTemporaryFile` does.
-    stream = cast(BinaryIO, buffer)
-    if source_format is not None:
-        return divejson.convert(stream, format=source_format, exported_at=exported_at)
-    return divejson.convert(
-        stream,
-        exported_at=exported_at,
-        max_members=MAX_ARCHIVE_MEMBERS,
-        max_member_size=MAX_DOCUMENT_SIZE,
-    )
-
-
 def _converted_from(document: Any, fallback: str | None) -> str | None:
     """Which format the converted document says it came from.
 
-    On the archive path this is the only place the answer exists: the api decided "zip" and
-    the library decided which reader every member named. `converting.md`'s *Provenance*
-    block is where it records that, and a member the merge dropped leaves the fallback -
-    what this module sniffed - which is `None` for an archive and honest either way.
+    `converting.md`'s *Provenance* block is where the library records which reader read a
+    file, and a document that carries none leaves the fallback - what this module sniffed.
     """
     if not isinstance(document, dict):
         return fallback
@@ -727,66 +601,214 @@ _CONVERTER_BUG = (
 )
 
 
-async def _convert_source(
-    buffer: IO[bytes], *, source_format: str | None
-) -> tuple[ImportDocument, Conversion, str | None]:
-    """Convert the spool and take the result through `_validate_envelope` like any upload.
+def _one_member_archive(source: IO[bytes], name: str) -> IO[bytes]:
+    """`source`'s bytes as the only member of a zip, the member called `name`.
 
-    **In a thread, never on the event loop.** Reading a FIT file is the same pure-Python
-    decode `POST /dive/parse` hands to `run_in_threadpool` at about two seconds a megabyte,
-    and a zip of them is that many times over - inline in an `async def` one upload stalls
-    every other request on the worker, `/health/ready` included. `DECISIONS.md`, *"Uploaded
-    files are parsed in a thread, not on the event loop"*, is the rule and this is the same
-    work.
-
-    Every refusal below is the converter's, translated into this module's three so the route
-    keeps one taxonomy. The last arm is the one that matters: a `ConverterError` this build
-    has never seen still lands as a 422 rather than escaping as a 500, and the registry may
-    grow one at any pin bump.
+    Stored rather than deflated - the converter reads it back at once - and on disk rather
+    than in memory, the converter being about to hold the member whole itself.
     """
+    wrapper = tempfile.TemporaryFile()
     try:
-        conversion = await run_in_threadpool(_convert, buffer, source_format=source_format)
-    except SourceTooLargeError as exc:
-        # The converter's own sentence again, and for the same reason as the 415 below: it
-        # names which of its bounds fired, and restating them here would let this message
-        # claim a cause that cannot be one. `max_member_size` is the case in point - the sum
-        # check upstream already bounds it, so a per-member refusal is unreachable, and a
-        # message asserting it would send a diver looking for one huge file.
-        #
-        # **And this is not an archive-only refusal**, which the container framing hid: an
-        # adapter sets caps of its own on the work one already-bounded file may ask for - the
-        # FIT reader refuses past a hundred thousand messages - and that reaches here on the
-        # named-format path, where there is no container and nothing to split. `source_format`
-        # is exactly the difference, so the advice goes with the branch that can act on it.
-        if source_format is None:
+        with zipfile.ZipFile(wrapper, "w", zipfile.ZIP_STORED) as archive, archive.open(name, "w") as member:
+            shutil.copyfileobj(source, member, _READ_CHUNK_SIZE)
+    except BaseException:
+        wrapper.close()
+        raise
+    wrapper.seek(0)
+    return wrapper
+
+
+def _convert(wrapper: IO[bytes]) -> Conversion:
+    """Convert a one-member archive, with this module's caps on it.
+
+    `exported_at` is passed rather than defaulted because the library's default is *now, in
+    the local zone*, and this is the one value in a converted document that is not a function
+    of the source. Preview and apply convert the same bytes minutes apart and must plan
+    identically, so nothing downstream reads it - `divejson.compared` drops it, and the
+    planner never looks.
+    """
+    # `convert` is annotated `BinaryIO`, which differs from the `IO[bytes]` spooled here only
+    # in what `__enter__` returns - and `convert` never enters it.
+    return divejson.convert(
+        cast(BinaryIO, wrapper),
+        exported_at=_conversion_moment(),
+        max_members=1,
+        max_member_size=MAX_DOCUMENT_SIZE,
+    )
+
+
+def _renamed(conversion: Conversion, digest: str, name: str) -> Conversion:
+    """The conversion with each finding's path under the file's name rather than its digest.
+
+    The package prefixes a member's paths with the member's name, which for an import's file
+    is its digest; a diver reading the report knows the file by what they called it.
+    """
+    prefix = f"{digest}/"
+    notes = tuple(
+        divejson.Note(f"{name}/{note.where[len(prefix) :]}", note.message, note.kind)
+        if note.where.startswith(prefix)
+        else note
+        for note in conversion.notes
+    )
+    return Conversion(conversion.document, notes)
+
+
+def _convert_file(source: Source, *, digest: str, name: str, claimed: str, size: int) -> LoadedImport:
+    """One file a reader claims, converted alone and read as one recording's file where it is one.
+
+    Pure CPU and file reads, so the caller runs it in a thread. Every refusal below is the
+    converter's, translated into this module's three so the route keeps one taxonomy; the
+    last arms are the ones that matter, a `ConverterError` this build has never seen and
+    anything the package's decoders let out landing as a 422 rather than a 500 - the
+    registry may grow one at any pin bump, and the decoders read bytes a stranger supplied.
+    """
+    with source() as stream, _one_member_archive(stream, digest) as wrapper:
+        try:
+            conversion = _convert(wrapper)
+        except SourceTooLargeError as exc:
+            # The converter's own sentence: it names which of its bounds fired - the FIT
+            # reader refuses past a hundred thousand messages - and restating them here would
+            # let this message claim a cause that cannot be one.
             raise ImportTooLargeError(
-                f"This archive is past what one import reads - {exc}. Split it and import the parts."
+                f"This file is past what one import reads - {_named(exc, digest, name)}."
             ) from exc
-        raise ImportTooLargeError(f"This file is past what one import reads - {exc}.") from exc
-    except UnsupportedSourceError as exc:
-        # The converter's own sentence, prefixed rather than replaced. It reaches here for
-        # three container cases - an empty archive, a member no reader claims, an archive
-        # mixing two formats - and the api cannot tell them apart from the exception type,
-        # while each of the three says something more useful than a list of formats would.
-        # The one that *wants* the list carries the registry's own names already, which is
-        # why this deliberately does not append `formats_this_build_reads()`: the same list
-        # twice, spelled two ways, is worse than the library's spelling of it once.
-        raise UnsupportedImportError(f"This archive is not one logbook this app can read - {exc}.") from exc
-    except NonConformingOutputError as exc:
-        # A converter bug, not a diver's file: the library validates its own output and this
-        # is it saying no. Logged with a traceback because nobody else will see it, and 422
-        # rather than 500 because the registry backstop is that this endpoint does not 500.
-        logger.exception("The converter produced a non-conforming document during a logbook import")
-        raise MalformedImportError(_CONVERTER_BUG) from exc
-    except ConverterError as exc:
-        raise MalformedImportError(f"This logbook could not be converted: {exc}.") from exc
+        except UnsupportedSourceError as exc:
+            raise UnsupportedImportError(
+                f"This file is not one this app can read - {_named(exc, digest, name)}."
+            ) from exc
+        except NonConformingOutputError as exc:
+            # A converter bug, not a diver's file: the library validates its own output and
+            # this is it saying no. Logged with a traceback because nobody else will see it.
+            logger.exception("The converter produced a non-conforming document during a logbook import")
+            raise MalformedImportError(_CONVERTER_BUG) from exc
+        except ConverterError as exc:
+            raise MalformedImportError(f"This file could not be converted: {_named(exc, digest, name)}.") from exc
+        except Exception as exc:
+            logger.exception("Unexpected error converting a %s file during a logbook import", claimed)
+            raise MalformedImportError(f"This file could not be converted: {str(exc) or type(exc).__name__}.") from exc
 
     try:
         document = _validate_envelope(conversion.document)
     except (UnsupportedImportError, MalformedImportError) as exc:
         logger.exception("A converted document did not survive this app's own envelope check")
         raise MalformedImportError(_CONVERTER_BUG) from exc
-    return document, conversion, _converted_from(conversion.document, source_format)
+    if _records_nothing(document):
+        # A run the same watch recorded, say: the reader reads the file and finds no dive in
+        # it, and a file that brings nothing is one the diver should hear about by name. A
+        # logbook with no dive that still names its diver or holds other records - this app's
+        # own UDDF export of an account with no dives - imports what it holds.
+        raise MalformedImportError("This file records no dive, so there is nothing in it to import.")
+
+    fmt = _converted_from(conversion.document, claimed) or claimed
+    loaded = LoadedImport(
+        document=document,
+        digest=digest,
+        is_archive=False,
+        conversion=_renamed(conversion, digest, name),
+        source_format=fmt,
+    )
+    if not document.dives:
+        # A logbook of other records alone: no dive to keep the file on.
+        return loaded
+    if len(document.dives) > 1:
+        loaded.not_kept = ImportMemberNotKept.SEVERAL_DIVES
+    elif len(document.dives[0].recordings) > 1:
+        loaded.not_kept = ImportMemberNotKept.SEVERAL_RECORDINGS
+    elif size > MAX_DIVE_FILE_SIZE:
+        loaded.not_kept = ImportMemberNotKept.TOO_LARGE
+    else:
+        dive = document.dives[0]
+        raw = conversion.document["dives"][0].get("started_at")
+        read = ReadDive(
+            format=claimed,
+            dive=dive,
+            recording=dive.recordings[0] if dive.recordings else None,
+            started_at=raw if isinstance(raw, str) else None,
+        )
+        loaded.kept = KeptFile(
+            key=digest,
+            sha256=digest,
+            filename=safe_filename(name, default="dive-file"),
+            format=claimed,
+            size=size,
+            extraction=extraction_of(read),
+        )
+        loaded._read_kept = lambda: _read_all(source)
+    return loaded
+
+
+def _records_nothing(document: ImportDocument) -> bool:
+    """No dive, no other record and no diver: what a converted activity that is not a dive is."""
+    return document.diver is None and not any(value for _, value in document if isinstance(value, list))
+
+
+def _named(exc: Exception, digest: str, name: str) -> str:
+    """The converter's sentence, with the file's name where it names the digest."""
+    return str(exc).replace(digest, name)
+
+
+def _read_all(source: Source) -> bytes:
+    with source() as stream:
+        return stream.read()
+
+
+def _load_document(read: Callable[[], bytes], *, digest: str) -> LoadedImport:
+    """A bare DiveJSON document: parsed, read as its writer meant it, and validated."""
+    raw_bytes = read()
+    try:
+        raw = parse_document(raw_bytes)
+    except DuplicateMemberError:
+        raise
+    except UnicodeDecodeError as exc:
+        raise MalformedImportError("This logbook document is not valid JSON: it is not UTF-8 text.") from exc
+    except json.JSONDecodeError as exc:
+        raise MalformedImportError(f"This logbook document is not valid JSON: {exc.msg} at line {exc.lineno}.") from exc
+    notes = read_as_written(raw) if isinstance(raw, dict) else []
+    return LoadedImport(
+        document=_validate_envelope(raw),
+        digest=digest,
+        is_archive=False,
+        conversion=None,
+        source_format=None,
+        read_as_written=notes,
+    )
+
+
+def _load_archive(archive: zipfile.ZipFile, *, digest: str) -> LoadedImport:
+    """The full-export archive: its document, and the container its files are read from."""
+    info = archive.getinfo(DIVEJSON_NAME)
+    if info.file_size > MAX_DOCUMENT_SIZE:
+        raise ImportTooLargeError(
+            f"The {DIVEJSON_NAME} inside this archive is larger than the {MAX_DOCUMENT_SIZE // (1024 * 1024)} MB limit."
+        )
+    try:
+        raw_bytes = archive.read(info)
+    except _MEMBER_READ_FAILURES as exc:
+        # A 422 rather than a 415: this *is* an archive of the shape this app produces, and
+        # the logbook inside it cannot be read. The message names the two causes a diver can
+        # do something about, because "could not be read" on its own sends nobody anywhere.
+        raise MalformedImportError(
+            f"The {DIVEJSON_NAME} inside this archive could not be read. If the archive is password-protected, "
+            "extract it first and import the document on its own; otherwise the file is damaged."
+        ) from exc
+    try:
+        raw = parse_document(raw_bytes)
+    except DuplicateMemberError:
+        raise
+    except UnicodeDecodeError as exc:
+        raise MalformedImportError("This logbook document is not valid JSON: it is not UTF-8 text.") from exc
+    except json.JSONDecodeError as exc:
+        raise MalformedImportError(f"This logbook document is not valid JSON: {exc.msg} at line {exc.lineno}.") from exc
+    notes = read_as_written(raw) if isinstance(raw, dict) else []
+    return LoadedImport(
+        document=_validate_envelope(raw),
+        digest=digest,
+        is_archive=True,
+        conversion=None,
+        source_format=None,
+        _archive=archive,
+        read_as_written=notes,
+    )
 
 
 # How many distinct `(kind, message)` pairs a report carries. The converter's own note list
@@ -810,18 +832,27 @@ _CONVERTER_NAME = "divejson"
 _UNKNOWN_SOURCE_FORMAT = "unknown"
 
 
-def conversion_report(loaded: LoadedImport) -> ConversionReport | None:
-    """What the conversion could not carry, or `None` for a native DiveJSON upload.
+# What `ConversionReport.format` says of an import whose converted files were not all one
+# format.
+MIXED_FORMATS = "mixed"
 
-    Built here rather than in the browser so preview and result render one shape from one
-    grouping, and built from `Conversion.grouped()` rather than by regrouping the notes,
-    because the library's grouping is the one the CLI prints and two of them would drift.
+
+def conversion_report(loaded: Sequence[LoadedImport]) -> ConversionReport | None:
+    """What converting an import's files could not carry, or `None` when none was converted.
+
+    One report over every converted file: its format is theirs where they share one and
+    `mixed` where they do not, and its groups are the union of theirs, grouped by the
+    library's own `grouped` - the one the CLI prints - over their findings in the import's
+    order. Built here rather than in the browser so preview and result render one shape.
     """
-    if loaded.conversion is None:
+    converted = [one for one in loaded if one.conversion is not None]
+    if not converted:
         return None
-    groups = loaded.conversion.grouped()
+    formats = {one.source_format or _UNKNOWN_SOURCE_FORMAT for one in converted}
+    notes = tuple(note for one in converted if one.conversion is not None for note in one.conversion.notes)
+    groups = Conversion({}, notes).grouped()
     return ConversionReport(
-        format=loaded.source_format or _UNKNOWN_SOURCE_FORMAT,
+        format=formats.pop() if len(formats) == 1 else MIXED_FORMATS,
         converter=ConversionConverter(name=_CONVERTER_NAME, version=divejson.__version__),
         groups=[
             ConversionNoteGroup(
@@ -836,104 +867,348 @@ def conversion_report(loaded: LoadedImport) -> ConversionReport | None:
     )
 
 
-async def load_import(upload: UploadFile) -> LoadedImport:
-    """Read an upload into a parsed document, converting it first where it needs it.
+# ------------------------------------------------------------------ the batch
 
-    The caller owns the result and must close it - `with load_import(...) as loaded` -
-    which is what deletes the spool and, on the archive path, releases the container.
+# Where a way of reading a file's bytes from the start comes from: a part's spool, rewound,
+# or a zip's member, opened afresh.
+Source = Callable[[], AbstractContextManager[IO[bytes]]]
+
+
+class FileKind(IntEnum):
+    """What a file of the batch is, by its bytes - and, by value, the order the import reads
+    the kinds in.
+
+    The full-export archive first, then DiveJSON documents, then logbooks, then one
+    computer's files, so that where a logbook and a computer's file describe one dive the
+    computer's recording joins the logbook's dive rather than the other way round - a record
+    attached to a dive brings none of its own dive's values, and a logbook's number, notes
+    and sites are the diver's. Zips and what nothing reads sort after them, for the rows.
     """
-    buffer = await _spool_upload(upload, MAX_ARCHIVE_SIZE)
-    archive: zipfile.ZipFile | None = None
+
+    ARCHIVE = 0
+    DOCUMENT = 1
+    LOGBOOK = 2
+    COMPUTER = 3
+    ZIP = 4
+    UNREAD = 5
+
+
+@dataclass(slots=True, kw_only=True)
+class BatchRow:
+    """One file of the batch: a part of the request, or a file a zip among them held.
+
+    `loaded` is set for a file that reads and `refusal` for one that does not. `container`
+    is the row index of the zip a member came out of, and `opened` a zip's own count of the
+    files it opened into.
+    """
+
+    part: int
+    name: str
+    size: int
+    sha256: str
+    kind: FileKind = FileKind.UNREAD
+    format: str | None = None
+    container: int | None = None
+    opened: int | None = None
+    loaded: LoadedImport | None = None
+    refusal: Refusal | None = None
+    _source: Source | None = None
+    _archive: zipfile.ZipFile | None = None
+    _info: zipfile.ZipInfo | None = None
+    _zip: BatchRow | None = None
+
+
+@dataclass(slots=True)
+class LoadedBatch:
+    """Every file of an import, in the one order the import reads them in.
+
+    That order is the batch's: by kind (`FileKind`), then by name, ties broken by digest. A
+    browser's folder walk is not sorted, so nothing may depend on the order files arrive in.
+    Holds the containers it opened, so it is a context manager and the caller uses it as one;
+    the request's spools are the request's to close.
+    """
+
+    rows: list[BatchRow] = field(default_factory=list)
+    _containers: list[zipfile.ZipFile] = field(default_factory=list)
+
+    def __enter__(self) -> LoadedBatch:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        for container in self._containers:
+            container.close()
+
+    @property
+    def read(self) -> list[BatchRow]:
+        """The rows that read into a document, in the batch's order."""
+        return [row for row in self.rows if row.loaded is not None]
+
+    @property
+    def documents(self) -> list[LoadedImport]:
+        return [row.loaded for row in self.rows if row.loaded is not None]
+
+
+@contextmanager
+def _rewound(spool: IO[bytes]) -> Iterator[IO[bytes]]:
+    """A part's spool from its start, left open: the request owns it."""
+    spool.seek(0)
+    yield spool
+
+
+def _hidden(name: str) -> bool:
+    """Packaging rather than a file: a dot-file, or anything under a `__MACOSX/` shadow tree -
+    the rule the package applies to an archive's members, so a folder dropped from a Mac and
+    the same folder zipped carry the same files."""
+    parts = name.replace("\\", "/").split("/")
+    return "__MACOSX" in parts or parts[-1].startswith(".")
+
+
+def _open_archive(buffer: IO[bytes]) -> zipfile.ZipFile:
     try:
-        digest = _digest(buffer)
-        head = buffer.read(divejson.SNIFF_BYTES)
-        buffer.seek(0)
+        archive = zipfile.ZipFile(buffer)
+    except (zipfile.BadZipFile, OSError, EOFError) as exc:
+        raise MalformedImportError("This looks like a zip archive but could not be opened.") from exc
 
-        logbook: zipfile.ZipInfo | None = None
-        if head.startswith(_ZIP_MAGIC):
-            # Opened here, and by this module's guard, before the converter is given the
-            # same spool: `_open_archive` is what refuses a zip bomb off the central
-            # directory, and the library's per-member caps are a second bound rather than a
-            # replacement for it.
-            archive = _open_archive(buffer)
-            logbook = _logbook_member(archive)
-            if logbook is None:
-                # Not this app's export archive: a zip of dive-computer files, which is one
-                # logbook. The container is the library's to walk - a FIT's magic sits eight
-                # bytes into the *member*, so no bounded head of the zip could decide it here.
-                _refuse_oversized_source(archive)
-                archive.close()
-                archive = None
-                document, conversion, source_format = await _convert_source(buffer, source_format=None)
-                return LoadedImport(
-                    document=document,
-                    digest=digest,
-                    is_archive=False,
-                    conversion=conversion,
-                    source_format=source_format,
-                    _spool=buffer,
-                    _archive=None,
-                )
-        elif buffer.seek(0, 2) > MAX_DOCUMENT_SIZE:
-            # The upload was admitted against the archive cap because nothing said which
-            # shape it was until now. Anything but a container gets the smaller one.
-            raise ImportTooLargeError(
-                f"A logbook document may be up to {MAX_DOCUMENT_SIZE // (1024 * 1024)} MB. "
-                "Import the full-export archive if you are restoring a whole account with its files."
-            )
-        buffer.seek(0)
-
-        if archive is None:
-            # `sniff` also answers `zip`, which is a container marker rather than a reader
-            # anyone can ask for - and this branch is the one where the bytes were not a
-            # zip anyway. Asking `read_formats()` rather than excluding that one value is
-            # what keeps this true when the registry grows another container.
-            claimed = divejson.sniff(head)
-            if claimed is not None and claimed in divejson.read_formats():
-                document, conversion, source_format = await _convert_source(buffer, source_format=claimed)
-                return LoadedImport(
-                    document=document,
-                    digest=digest,
-                    is_archive=False,
-                    conversion=conversion,
-                    source_format=source_format,
-                    _spool=buffer,
-                    _archive=None,
-                )
-            buffer.seek(0)
-
-        raw_bytes = _document_bytes(buffer, archive, logbook)
-        try:
-            raw = parse_document(raw_bytes)
-        except DuplicateMemberError:
-            raise
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            # Nothing claimed these bytes and they are not JSON. A head that opens `{` is a
-            # file that claimed to be a document, so it keeps the 422 it has always had;
-            # anything else - a `.txt`, a CSV, a photo - never claimed to be one, and being
-            # told it is a broken DiveJSON document is the wrong sentence. Read off the
-            # *document's* head rather than the upload's, which on the archive path is the
-            # zip's; an archive that carries a `logbook.divejson` claimed to be this app's
-            # export whatever is inside it, so that path keeps the 422 unconditionally.
-            if archive is None and not _claims_to_be_json(raw_bytes[: divejson.SNIFF_BYTES]):
-                raise _unrecognized() from exc
-            if isinstance(exc, UnicodeDecodeError):
-                raise MalformedImportError("This logbook document is not valid JSON: it is not UTF-8 text.") from exc
-            raise MalformedImportError(f"This logbook document is not valid JSON: {exc.msg} at line {exc.lineno}.")
-
-        read = read_as_written(raw) if isinstance(raw, dict) else []
-        return LoadedImport(
-            document=_validate_envelope(raw),
-            digest=digest,
-            is_archive=archive is not None,
-            conversion=None,
-            source_format=None,
-            _spool=buffer,
-            _archive=archive,
-            read_as_written=read,
+    declared = sum(info.file_size for info in archive.infolist())
+    if declared > MAX_ARCHIVE_EXTRACTED_SIZE:
+        archive.close()
+        raise ImportTooLargeError(
+            f"This archive expands to more than {MAX_ARCHIVE_EXTRACTED_SIZE // (1024 * 1024)} MB and was not opened."
         )
+    return archive
+
+
+def _holds(archive: zipfile.ZipFile, name: str) -> bool:
+    try:
+        archive.getinfo(name)
+    except KeyError:
+        return False
+    return True
+
+
+def _classify(row: BatchRow, head: bytes, source: Source) -> None:
+    """Decide a file's kind off a bounded head of it, the way `divejson.sniff` decides a format.
+
+    A file that opens `{` and no reader claims is a DiveJSON document, so a truncated export
+    of this app's own - much the commonest real failure - is told its document is broken
+    rather than that the app does not recognise its own format.
+    """
+    claimed = divejson.sniff(head)
+    if claimed is not None and claimed in divejson.read_formats():
+        row.kind = FileKind.LOGBOOK if is_logbook_format(claimed) else FileKind.COMPUTER
+        row.format = claimed
+        row._source = source
+    elif _claims_to_be_json(head):
+        row.kind = FileKind.DOCUMENT
+        row.format = "divejson"
+        row._source = source
+    else:
+        row.refusal = _unrecognized()
+
+
+def _listed(archive: zipfile.ZipFile, zip_row: BatchRow) -> list[zipfile.ZipInfo]:
+    """A zip's files, off its directory: what is not a folder, packaging or empty."""
+    infos = [
+        info for info in archive.infolist() if not info.is_dir() and not _hidden(info.filename) and info.file_size > 0
+    ]
+    if not infos:
+        zip_row.refusal = UnsupportedImportError(
+            "This zip holds no files to convert - only folders, or the files a computer adds beside them."
+        )
+    zip_row.opened = len(infos) or None
+    return infos
+
+
+def _open_zip(archive: zipfile.ZipFile, zip_row: BatchRow, infos: list[zipfile.ZipInfo]) -> list[BatchRow]:
+    """A zip's listed files as rows of their own, one level deep, each head read to classify it."""
+    rows = []
+    for info in infos:
+        row = BatchRow(part=zip_row.part, name=info.filename, size=info.file_size, sha256="", _info=info, _zip=zip_row)
+        row._archive = archive
+        try:
+            with archive.open(info) as member:
+                head = member.read(divejson.SNIFF_BYTES)
+        except _MEMBER_READ_FAILURES:
+            row.refusal = _unreadable_member()
+            rows.append(row)
+            continue
+        if head.startswith(_ZIP_MAGIC):
+            row.kind = FileKind.ZIP
+            row.format = "zip"
+            row.refusal = UnsupportedImportError(
+                "This is a zip inside a zip, which is not opened. Import it on its own."
+            )
+        else:
+            _classify(row, head, partial(archive.open, info))
+        rows.append(row)
+    return rows
+
+
+def _unreadable_member() -> MalformedImportError:
+    return MalformedImportError(
+        "This file could not be read out of its zip. If the zip is password-protected, extract it first and import "
+        "the files on their own; otherwise the zip is damaged."
+    )
+
+
+def _digest_member(row: BatchRow) -> None:
+    """A zip member's own SHA-256, read off the member in chunks."""
+    assert row._archive is not None and row._info is not None
+    hasher = hashlib.sha256()
+    try:
+        with row._archive.open(row._info) as member:
+            for chunk in iter(lambda: member.read(_READ_CHUNK_SIZE), b""):
+                hasher.update(chunk)
+    except _MEMBER_READ_FAILURES:
+        row.refusal = row.refusal or _unreadable_member()
+        row._source = None
+    row.sha256 = hasher.hexdigest()
+
+
+def _planned_size(batch: LoadedBatch) -> int:
+    """What the batch would parse into memory: every file a reader claims or that claims to
+    be a document, a zip's by its declared sizes, and the archive's own document."""
+    total = 0
+    for row in batch.rows:
+        if row.refusal is not None:
+            continue
+        if row.kind in (FileKind.DOCUMENT, FileKind.LOGBOOK, FileKind.COMPUTER):
+            total += row.size
+        elif row.kind is FileKind.ARCHIVE and row._archive is not None:
+            total += row._archive.getinfo(DIVEJSON_NAME).file_size
+    return total
+
+
+def _survey(parts: Sequence[ImportPart]) -> LoadedBatch:
+    """Classify every part and every file a zip holds, bound the batch, and order it.
+
+    Reads heads, directories and digests, and converts nothing: the planning bound is checked
+    before any file is read whole, so an import too large to plan costs no conversion.
+    """
+    batch = LoadedBatch()
+    zips: list[tuple[zipfile.ZipFile, BatchRow, list[zipfile.ZipInfo]]] = []
+    walked = expands = 0
+    try:
+        for part in parts:
+            if part.refusal is not None or part.spool is None:
+                batch.rows.append(
+                    BatchRow(
+                        part=part.index, name=part.filename, size=part.size, sha256=part.sha256, refusal=part.refusal
+                    )
+                )
+                continue
+            if part.size == 0 or _hidden(part.filename):
+                continue
+            spool = part.spool
+            spool.seek(0)
+            head = spool.read(divejson.SNIFF_BYTES)
+            spool.seek(0)
+            row = BatchRow(part=part.index, name=part.filename, size=part.size, sha256=part.sha256)
+            batch.rows.append(row)
+            walked += 1
+            if not head.startswith(_ZIP_MAGIC):
+                _classify(row, head, partial(_rewound, spool))
+                continue
+            row.kind, row.format = FileKind.ZIP, "zip"
+            try:
+                archive = _open_archive(spool)
+            except (MalformedImportError, ImportTooLargeError) as exc:
+                row.refusal = exc
+                continue
+            batch._containers.append(archive)
+            row._archive = archive
+            expands += sum(info.file_size for info in archive.infolist())
+            if _holds(archive, DIVEJSON_NAME):
+                row.kind, row.format = FileKind.ARCHIVE, "archive"
+            else:
+                infos = _listed(archive, row)
+                walked += len(infos)
+                zips.append((archive, row, infos))
+
+        if walked > MAX_IMPORT_FILES:
+            raise ImportTooLargeError(
+                f"This import holds {walked} files, zips' included, and at most {MAX_IMPORT_FILES} are read in one "
+                "import. Split it and import the parts."
+            )
+        if expands > MAX_ARCHIVE_EXTRACTED_SIZE:
+            raise ImportTooLargeError(
+                f"This import's zips expand to more than {MAX_ARCHIVE_EXTRACTED_SIZE // (1024 * 1024)} MB and were not "
+                "opened. Split it and import the parts."
+            )
+        for archive, row, infos in zips:
+            batch.rows.extend(_open_zip(archive, row, infos))
+
+        planned = _planned_size(batch)
+        if planned > MAX_DOCUMENT_SIZE:
+            # Rounded *up*: floored, a batch one byte over the cap reports the cap back at
+            # itself and reads as a refusal for no reason.
+            raise ImportTooLargeError(
+                f"This import holds {-(-planned // (1024 * 1024))} MB of logbooks uncompressed, and at most "
+                f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB are converted in one import. Split it and import the parts."
+            )
+
+        for row in batch.rows:
+            if row._info is not None:
+                _digest_member(row)
+        batch.rows.sort(key=lambda row: (row.kind, row.name, row.sha256))
+        index_of = {id(row): index for index, row in enumerate(batch.rows)}
+        for row in batch.rows:
+            if row._zip is not None:
+                row.container = index_of[id(row._zip)]
+        return batch
     except BaseException:
-        if archive is not None:
-            archive.close()
-        buffer.close()
+        batch.close()
+        raise
+
+
+async def _load(row: BatchRow, *, archive_read: bool) -> LoadedImport:
+    """One classified file as a document: parsed, or converted, in a thread."""
+    if row.kind is FileKind.ARCHIVE:
+        if archive_read:
+            raise UnsupportedImportError(
+                "This is a second full-export archive, and one import restores one. Import it on its own."
+            )
+        assert row._archive is not None
+        return await run_in_threadpool(_load_archive, row._archive, digest=row.sha256)
+    source = row._source
+    assert source is not None
+    if row.kind is FileKind.DOCUMENT:
+        return await run_in_threadpool(_load_document, lambda: _read_all(source), digest=row.sha256)
+    assert row.format is not None
+    return await run_in_threadpool(
+        _convert_file, source, digest=row.sha256, name=row.name, claimed=row.format, size=row.size
+    )
+
+
+async def load_import(parts: Sequence[ImportPart]) -> LoadedBatch:
+    """Read a request's parts into one document per file, in the batch's order.
+
+    A file that does not read is a row with its refusal and stops nothing else. An import in
+    which no file reads raises what its first refused file would raise on its own - so a
+    request of one file answers as that file always has - and one whose every part was
+    packaging or empty is a file nothing here reads.
+
+    The caller owns the result and must close it - `with await load_import(...) as batch` -
+    which releases the containers it opened.
+    """
+    batch = await run_in_threadpool(_survey, parts)
+    try:
+        archive_read = False
+        for row in batch.rows:
+            if row.refusal is not None or row.kind in (FileKind.ZIP, FileKind.UNREAD):
+                continue
+            try:
+                row.loaded = await _load(row, archive_read=archive_read)
+            except (UnsupportedImportError, MalformedImportError, ImportTooLargeError) as exc:
+                row.refusal = exc
+                continue
+            archive_read = archive_read or row.kind is FileKind.ARCHIVE
+        if not batch.read:
+            raise next((row.refusal for row in batch.rows if row.refusal is not None), None) or _unrecognized()
+        return batch
+    except BaseException:
+        batch.close()
         raise

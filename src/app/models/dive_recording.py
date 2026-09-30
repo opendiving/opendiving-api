@@ -17,11 +17,12 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     down mid-water. A recording is the row that makes all three representable - the
     plural unit between the dive and the files, matching DiveJSON's own §6.4a.
 
-    **A recording need not have a file.** Logbook import stores no bytes for a converted or
-    a bare document (see *"A bare document creates no file rows"* in `DECISIONS.md`), so a
-    recording it creates carries a device, a start and a profile and nothing else. That is
-    first-class rather than degenerate: it is how every UDDF and `.ssrf` dive in the app
-    arrives, and both backfills are written to leave it alone. Nor need it have a device or
+    **A recording need not have a file.** Logbook import stores no bytes for a bare document
+    (see *"A bare document creates no file rows"* in `DECISIONS.md`), nor for a converted file
+    it does not keep - a logbook of several dives, a file past the size cap - so a recording
+    it creates from one carries a device, a start and a profile and nothing else. That is
+    first-class rather than degenerate: it is how a logbook's dives arrive, and both backfills
+    are written to leave it alone. Nor need it have a device or
     samples: a recording of readouts alone - a dive-level `cns_end` a logbook carried, with
     no computer named - is one (spec §3 rule 4).
 

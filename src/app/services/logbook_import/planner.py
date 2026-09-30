@@ -26,13 +26,17 @@ Four rules run through everything below, and each is the format's rather than th
   the column cannot hold absent and no default honestly means "not recorded", the *record*
   is skipped and reported rather than filled in.
 - **Nothing is fatal.** A value the database would refuse is dropped and reported, a record
-  that cannot be built is skipped and reported, and the import carries on. The only refusals
-  of a whole upload live in `reader.py`.
+  that cannot be built is skipped and reported, and the import carries on. What refuses a
+  file lives in `reader.py`, and what refuses a whole import there, in `parts.py` and in the
+  batch's storage check (`batch.py`).
+
+A plan is one file's. An import of several plans each in turn against the logbook as the
+files before it left it, which is what `batch.py` owns.
 """
 
 import hashlib
 import uuid as uuid_pkg
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -85,6 +89,7 @@ from ...schemas.logbook_import import (
     ImportGearServiceSchedule,
     ImportGearSet,
     ImportLocation,
+    ImportMemberNotKept,
     ImportNote,
     ImportNoteCode,
     ImportPerson,
@@ -100,10 +105,7 @@ from ...schemas.person import PersonRole
 from ...schemas.tag import TAG_NAME_MAX, tag_key, trim_tag
 from ...schemas.user import CHECK_IN_FIELDS
 from ...schemas.user_picture import PictureCrop
-from .. import blob_store
-from ..certification_files import KEY_KIND as CERTIFICATION_KEY_KIND
 from ..certification_files import MAX_CARD_FILE_SIZE
-from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
 from ..dive_files import MAX_DIVE_FILE_SIZE
 from ..dive_profiles import (
     IMPORT_PARSER_KEY,
@@ -122,7 +124,6 @@ from ..dive_recordings import (
 )
 from ..person_links import Account, accounts_by_uuid, claim_link_slot, link_budget_remaining
 from ..recording_shape import INT32_MAX, Bound, Drop, bounded, finite, gate_figures, shape_recording
-from ..storage_usage import ensure_room
 from ..user_pictures import (
     MAX_PICTURE_UPLOAD_SIZE,
     PORTRAIT_FRAME,
@@ -191,6 +192,10 @@ MAX_NOTES = 500
 # is never a backfill candidate, because `backfill_profiles` selects from `dive_file`" - which
 # stopped being how that query works when recordings arrived. The guard is on the *profile's*
 # provenance now, so the constant and the rule that reads it belong together.
+
+# How many digests one `IN` asks after: an archive can name thousands of files, and a
+# statement's bind parameters are bounded.
+_DIGESTS_PER_QUERY = 1000
 
 _LATITUDE_LIMIT = 90.0
 _LONGITUDE_LIMIT = 180.0
@@ -292,6 +297,10 @@ class PlannedRecording:
     max_depth: float | None = None
     profile: PlannedProfile | None = None
     files: list[PlannedFile] = field(default_factory=list)
+    # The imported file itself, where it is this recording's file: stored, and the recording
+    # derived from its files as the dive form derives one, where `files` - an archive's -
+    # keep the document's profile.
+    kept: PlannedFile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,8 +407,9 @@ class ImportPlan:
     records: dict[str, dict[uuid_pkg.UUID, PlannedRecord]]
     # Incoming recordings that belong to dives the caller already has. Held beside the
     # records rather than inside them because they are not records of any collection: no dive
-    # is created for them, and the writer walks this list after the dives so that a match
-    # against a dive *this same import* created is impossible by construction.
+    # is created for them. A match never names a dive of its own file, whose dives are planned
+    # against the logbook as it stood; in an import of several files it may name one an
+    # earlier file wrote, and the writer walks this list after the dives either way.
     recording_matches: list[PlannedRecordingMatch]
     notes: list[ImportNote]
     notes_dropped: int
@@ -417,6 +427,10 @@ class ImportPlan:
     # The diver's tag list from this app's extension, trimmed: the writer makes a row of each
     # name no dive carries, as it does of every dive's tags, so the vocabulary survives.
     tags: list[str] = field(default_factory=list)
+    # Whether the imported file itself is stored on the dive it becomes, and why not where
+    # it is one recording's file and is not. See `LoadedImport.kept`.
+    kept: bool = False
+    not_kept: ImportMemberNotKept | None = None
 
     async def portrait_offer(self) -> ImportPortraitOffer | None:
         """The preview's portrait fields, the archive's drawn small enough to travel inline."""
@@ -551,11 +565,18 @@ class _Planner:
         check_in: ImportCheckInSubmission | None = None,
         portrait: ImportPortraitChoice | None = None,
         claim_links: bool = False,
+        batch_dive_ids: frozenset[int] = frozenset(),
     ) -> None:
         self._db = db
         self._user_id = user_id
         self._loaded = loaded
         self._document = loaded.document
+        # The dives earlier files of the same import wrote. A recording matched to one of
+        # them raises no note: the logbook does not "already have" a recording the diver
+        # dropped a moment ago, and that dive's own row names every file it came from.
+        self._batch_dive_ids = batch_dive_ids
+        self._kept = False
+        self._not_kept: ImportMemberNotKept | None = loaded.not_kept
         # `resolution_ran` is what makes preview and apply tell the truth about species
         # without telling two different stories: before the pre-pass an unknown AphiaID is
         # something this import *will* look up, after it an unknown one is something WoRMS
@@ -577,11 +598,13 @@ class _Planner:
         self._species_row_by_uuid: dict[uuid_pkg.UUID, int] = {}
         # The document's species records by uuid, once `_plan_species` has made each unique.
         self._species_by_uuid: dict[uuid_pkg.UUID, ImportSpecies] = {}
-        # Digests this account already stores, plus the ones this import is about to add.
-        # `ux_dive_file_user_id_sha256` is per user, so a second recording carrying identical
-        # bytes cannot have a row of its own - and one row names one `recording_id`, so it
-        # cannot serve two either. The file is skipped and reported; the dive is not.
-        self._claimed_digests: set[str] = set()
+        # Of the digests this file could store, those the account already holds, against the
+        # recording that holds each, plus the ones this file is about to add, against none
+        # yet. `ux_dive_file_user_id_sha256` is per user, so a second recording carrying
+        # identical bytes cannot have a row of its own - and one row names one
+        # `recording_id`, so it cannot serve two either. The file is skipped and reported; the
+        # dive is not.
+        self._claimed_digests: dict[str, int | None] = {}
         # Incoming recordings that belong to dives this account already has - see
         # `PlannedRecordingMatch`. Filled by `_plan_dives`, walked by the writer.
         self._recording_matches: list[PlannedRecordingMatch] = []
@@ -1068,6 +1091,8 @@ class _Planner:
             check_in_values=self._check_in_values,
             portrait=self._portrait,
             tags=self._tag_list,
+            kept=self._kept,
+            not_kept=self._not_kept,
         )
 
     async def _plan_diver(self) -> None:
@@ -2012,12 +2037,38 @@ class _Planner:
         existing = await self._rows_by_uuid(Dive, [dive.uuid for dive in self._document.dives])
         tags = await self._db.execute(select(Tag.name, Tag.id).where(Tag.user_id == self._user_id))
         self._tag_index = {tag_key(row.name): row.id for row in tags}
-        self._claimed_digests = set(
-            (await self._db.execute(select(DiveFile.sha256).where(DiveFile.user_id == self._user_id))).scalars()
-        )
+        self._claimed_digests = await self._stored_digests()
         for dive in self._document.dives:
             self._claim_document_uuid("dives", dive)
             self._records["dives"][dive.uuid] = await self._plan_dive(dive, existing)
+
+    async def _stored_digests(self) -> dict[str, int | None]:
+        """Which of the digests this file could store the account holds already, and where.
+
+        The kept file's own and an archive's members' - asked by digest rather than read for
+        the whole account, because an import of many files asks once per file, against a
+        logbook each earlier file has just grown.
+        """
+        wanted = [] if self._loaded.kept is None else [self._loaded.kept.sha256]
+        if self._loaded.is_archive:
+            wanted.extend(
+                stored.sha256
+                for dive in self._document.dives
+                for recording in dive.recordings
+                for stored in recording.source_files
+                if stored is not None and stored.sha256 is not None
+            )
+        held: dict[str, int | None] = {}
+        unique = sorted(set(wanted))
+        for start in range(0, len(unique), _DIGESTS_PER_QUERY):
+            rows = await self._db.execute(
+                select(DiveFile.sha256, DiveFile.recording_id).where(
+                    DiveFile.user_id == self._user_id,
+                    DiveFile.sha256.in_(unique[start : start + _DIGESTS_PER_QUERY]),
+                )
+            )
+            held.update({row.sha256: row.recording_id for row in rows})
+        return held
 
     async def _load_candidates(self, around: datetime) -> list[RecordingCandidate]:
         """This account's recordings near one incoming start.
@@ -2113,14 +2164,15 @@ class _Planner:
                         mixtures=mixtures,
                     )
                 )
-                self._note(
-                    ImportNoteCode.RECORDING_FILLED,
-                    "A recording of this dive is one your logbook already has - the same device, the same start - "
-                    "so it filled in what that record was missing rather than being added again. Dive "
-                    f"{filled.dive_number} kept everything it already recorded.",
-                    collection="dives",
-                    uuid=dive.uuid,
-                )
+                if filled.dive_id not in self._batch_dive_ids:
+                    self._note(
+                        ImportNoteCode.RECORDING_FILLED,
+                        "A recording of this dive is one your logbook already has - the same device, the same start - "
+                        "so it filled in what that record was missing rather than being added again. Dive "
+                        f"{filled.dive_number} kept everything it already recorded.",
+                        collection="dives",
+                        uuid=dive.uuid,
+                    )
                 taken += 1
                 continue
 
@@ -2149,13 +2201,14 @@ class _Planner:
                         mixtures=mixtures,
                     )
                 )
-                self._note(
-                    ImportNoteCode.RECORDING_ATTACHED,
-                    "A different computer recorded a dive your logbook already has, so this recording was added to "
-                    f"dive {attached.dive_number} rather than a second dive being created for it.",
-                    collection="dives",
-                    uuid=dive.uuid,
-                )
+                if attached.dive_id not in self._batch_dive_ids:
+                    self._note(
+                        ImportNoteCode.RECORDING_ATTACHED,
+                        "A different computer recorded a dive your logbook already has, so this recording was added "
+                        f"to dive {attached.dive_number} rather than a second dive being created for it.",
+                        collection="dives",
+                        uuid=dive.uuid,
+                    )
                 taken += 1
                 continue
 
@@ -2165,11 +2218,13 @@ class _Planner:
     async def _plan_dive(self, dive: ImportDive, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
         collection = "dives"
         if dive.started_at is None:
+            self._not_writing_the_file()
             return self._skip(collection, dive.uuid, "A dive needs a start time, and this one has none.")
 
         record = self._resolve(collection, dive.uuid, existing)
         if record.action not in (Action.CREATE, Action.RESTORE):
             self._count_uncontained_files(dive)
+            self._not_writing_the_file()
             return record
 
         bounded = self._bounded(collection, dive.uuid, dive, _DIVE_BOUNDS)
@@ -2192,6 +2247,7 @@ class _Planner:
                 uuid=dive.uuid,
             )
         if duration is None or duration <= 0:
+            self._not_writing_the_file()
             return self._skip(
                 collection,
                 dive.uuid,
@@ -2266,15 +2322,16 @@ class _Planner:
         }
         mixtures = self._plan_cylinders(dive)
 
-        # **The gates run before a dive is created, and only for a uuid this instance has
-        # never seen.** A `RESTORE` is the caller's own deleted dive coming back under its
-        # own identity, and a `LINK` is a dive they already have - matching either against
-        # the logbook would be asking whether a dive is itself. `CREATE` covers both the
-        # genuinely new dive and the remapped one, and the remapped case is where this
-        # matters most: another account's export carries uuids that mean nothing here, so
-        # uuid matching has nothing to work with and the device and the clock are all there
-        # is.
+        # **The gates run before a dive is created, and only for a uuid the caller does not
+        # hold.** A `RESTORE` is the caller's own deleted dive coming back under its own
+        # identity, and a `LINK` is a dive they already have - matching either against the
+        # logbook would be asking whether a dive is itself. `CREATE` covers the genuinely new
+        # dive, the remapped one and one whose identity the file's own bytes gave it, and the
+        # remapped case is where this matters most: another account's export carries uuids
+        # that mean nothing here, so uuid matching has nothing to work with and the device and
+        # the clock are all there is.
         if record.action is Action.CREATE:
+            already = len(self._recording_matches)
             recordings, matched = await self._match_recordings(dive, recordings, record.values, mixtures)
             if matched and not recordings:
                 # Every recording of this dive is now on a dive the caller already has, so
@@ -2286,7 +2343,9 @@ class _Planner:
                 # recording was *dropped* for describing nothing still has everything else
                 # the document says about it, and skipping it would lose a real dive over an
                 # unusable object inside it.
+                self._keep_on_match(already)
                 return PlannedRecord(action=Action.SKIP, source_uuid=dive.uuid, uuid=record.uuid)
+        recordings = self._keep_on_dive(dive, recordings)
 
         record.children = {
             "trip_uuid": self._reference(collection, dive.uuid, "trips", dive.trip_uuid),
@@ -2520,6 +2579,85 @@ class _Planner:
 
     # ------------------------------------------------------------------ files
 
+    def _kept_file(self, *, reaches: int | None) -> PlannedFile | None:
+        """The imported file as the file of the recording it reaches, or `None` where it is
+        not stored - the rule the dive form applies to a file it is handed.
+
+        `reaches` is the stored recording a match names, or `None` for a recording this
+        import creates. A file whose bytes the recording it reaches already holds is a repeat
+        and adds nothing, without a note; one whose bytes another recording of the account
+        holds is skipped with the note an archive's file gets, since a file belongs to one
+        recording.
+        """
+        kept = self._loaded.kept
+        if kept is None:
+            return None
+        if kept.sha256 in self._claimed_digests:
+            self._not_kept = ImportMemberNotKept.ALREADY_STORED
+            if reaches is None or self._claimed_digests[kept.sha256] != reaches:
+                self._note(
+                    ImportNoteCode.FILE_SKIPPED,
+                    "You already store an identical dive-computer file against another recording, and a file belongs "
+                    "to one recording, so this one was not kept.",
+                    collection="dives",
+                    uuid=self._document.dives[0].uuid,
+                )
+            return None
+        self._claimed_digests[kept.sha256] = None
+        self._kept, self._not_kept = True, None
+        return PlannedFile(
+            archive_path=kept.key,
+            sha256=kept.sha256,
+            original_filename=kept.filename,
+            content_type=content_type_of(kept.format),
+            parser_key=kept.format,
+        )
+
+    def _keep_on_match(self, already: int) -> None:
+        """The imported file on the recording its dive's one recording matched."""
+        if self._loaded.kept is None:
+            return
+        for index in range(already, len(self._recording_matches)):
+            match = self._recording_matches[index]
+            planned = self._kept_file(reaches=match.recording_id)
+            if planned is not None:
+                self._recording_matches[index] = replace(match, recording=replace(match.recording, kept=planned))
+
+    def _keep_on_dive(self, dive: ImportDive, recordings: list[PlannedRecording]) -> list[PlannedRecording]:
+        """The imported file on the recording of the dive this import writes.
+
+        Where the document gives the dive no recording - a logbook entry with no computer
+        behind it - one is created to hold the file, stating nothing but the start the file
+        is read from, as the dive form's attach creates one.
+        """
+        kept = self._loaded.kept
+        if kept is None:
+            return recordings
+        planned = self._kept_file(reaches=None)
+        if planned is None:
+            return recordings
+        if recordings:
+            return [replace(recordings[0], kept=planned), *recordings[1:]]
+        start = kept.extraction.start
+        return [
+            PlannedRecording(
+                ordinal=0,
+                start_time=None if start is None else start[0],
+                utc_offset_minutes=None if start is None else start[1],
+                kept=planned,
+            )
+        ]
+
+    def _not_writing_the_file(self) -> None:
+        """The imported file's dive is linked or skipped, so the file is not stored."""
+        kept = self._loaded.kept
+        if kept is not None:
+            self._not_kept = (
+                ImportMemberNotKept.ALREADY_STORED
+                if kept.sha256 in self._claimed_digests
+                else ImportMemberNotKept.NOT_WRITTEN
+            )
+
     def _count_uncontained_files(self, dive: ImportDive) -> None:
         """Count the binaries of a dive the import is not writing.
 
@@ -2606,7 +2744,7 @@ class _Planner:
             )
             return None
 
-        self._claimed_digests.add(stored.sha256)
+        self._claimed_digests[stored.sha256] = None
         self._files_restored += 1
         # The format the document says read the file, when this build's reader reads it: a
         # backfill can then re-read the restored file, and the content type comes from this
@@ -2733,13 +2871,15 @@ async def plan_import(
     check_in: ImportCheckInSubmission | None = None,
     portrait: ImportPortraitChoice | None = None,
     claim_links: bool = False,
+    batch_dive_ids: frozenset[int] = frozenset(),
 ) -> ImportPlan:
     """Plan an import of `loaded` into `user_id`'s logbook. Writes nothing to the database.
 
     `check_in` and `portrait` are what the diver confirmed in the preview; the apply passes
     them and the preview, which has nothing submitted yet, does not. `claim_links` is the
     apply's too: it spends the link limit for each person it links, where the preview only
-    reads what is left of it.
+    reads what is left of it. `batch_dive_ids` are the dives the files before this one in the
+    same import wrote.
     """
     planner = _Planner(
         db,
@@ -2750,28 +2890,12 @@ async def plan_import(
         check_in=check_in,
         portrait=portrait,
         claim_links=claim_links,
+        batch_dive_ids=batch_dive_ids,
     )
     return await planner.plan()
 
 
-def _stored_files(plan: ImportPlan) -> Iterator[tuple[str, PlannedFile]]:
-    """Every file the writer would store, with the kind it goes under: the dive-computer
-    files of the dives it writes and of the recordings it matched to dives already here, and
-    the card images of the certifications it writes."""
-    for record in plan.writable("dives"):
-        for recording in record.children.get("recordings") or []:
-            for planned in recording.files:
-                yield DIVE_FILE_KEY_KIND, planned
-    for match in plan.recording_matches:
-        for planned in match.recording.files:
-            yield DIVE_FILE_KEY_KIND, planned
-    for record in plan.writable("certifications"):
-        for side in CertificationSide:
-            if (planned := record.children.get(side.value)) is not None:
-                yield CERTIFICATION_KEY_KIND, planned
-
-
-def _portrait_change(plan: ImportPlan) -> tuple[int, int]:
+def portrait_change(plan: ImportPlan) -> tuple[int, int]:
     """What taking the archive's portrait adds and retires, as `(incoming, retired)`.
 
     Nothing unless the plan takes it, so a preview - which has no choice yet - measures the
@@ -2787,38 +2911,6 @@ def _portrait_change(plan: ImportPlan) -> tuple[int, int]:
         return len(picture.rendition), held.rendition_byte_size or 0
     retired = 0 if held is None else (held.original_byte_size or 0) + (held.rendition_byte_size or 0)
     return len(picture.original) + len(picture.rendition), retired
-
-
-async def ensure_room_for_import(db: AsyncSession, *, user_id: int, plan: ImportPlan, loaded: LoadedImport) -> None:
-    """Refuse an import whose files would take `user_id` past the storage limit, whole.
-
-    The preview and the apply both call this on their own plan, so an archive that does not
-    fit is refused before the diver approves anything, and a `take` of the portrait that
-    tips it over is refused at the apply. Members whose digest the account already stores
-    were never planned, so they add nothing.
-
-    Exact rather than estimated, so an archive that fits once compressed is not refused on
-    its raw size: each dive-computer file is read and measured the way `blob_store.put`
-    would store it. That costs a compression per file, so it is done only when the members'
-    declared sizes, at zstd's worst case, would not fit on their own.
-    """
-    files = list(_stored_files(plan))
-    portrait_incoming, retired = _portrait_change(plan)
-    ceiling = portrait_incoming + sum(
-        blob_store.stored_size_ceiling(kind, loaded.member_size(planned.archive_path) or 0) for kind, planned in files
-    )
-
-    async def measure() -> int:
-        incoming = portrait_incoming
-        for kind, planned in files:
-            data = loaded.read_member(planned.archive_path)
-            # A member the writer would skip - unreadable, or not the bytes its digest names -
-            # stores nothing.
-            if data is not None and hashlib.sha256(data).hexdigest() == planned.sha256:
-                incoming += await blob_store.stored_size(kind, data)
-        return incoming
-
-    await ensure_room(db, user_id=user_id, incoming=ceiling, retired=retired, exact=measure)
 
 
 def unresolved_aphia_ids(document_species: Iterable[ImportSpecies]) -> list[int]:

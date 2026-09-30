@@ -48,7 +48,11 @@ from src.app.schemas.logbook_import import (
     ImportInsuranceDetail,
     ImportPortraitOffer,
 )
-from src.app.services.logbook_import import reader
+from src.app.services.logbook_import import batch as batch_module
+from src.app.services.logbook_import import batch_digest, reader
+from src.app.services.logbook_import import parts as import_parts
+from src.app.services.logbook_import.writer import WrittenImport
+from tests.helpers.import_parts import import_request, multipart, part_of
 
 PREVIEW_PATH = "/api/v1/import/logbook/preview"
 APPLY_PATH = "/api/v1/import/logbook"
@@ -161,10 +165,12 @@ def signed_in(import_app: Any, monkeypatch: Any) -> Any:
             files_restored=0,
             files_not_contained=0,
             files_skipped=0,
+            kept=loaded.kept is not None,
+            not_kept=loaded.not_kept,
         )
 
-    async def fake_write(db: Any, **kwargs: Any) -> None:
-        return None
+    async def fake_write(db: Any, **kwargs: Any) -> WrittenImport:
+        return WrittenImport(dive_ids={}, match_files=[])
 
     async def fake_resolve(db: Any, **kwargs: Any) -> frozenset[int]:
         return frozenset()
@@ -173,8 +179,11 @@ def signed_in(import_app: Any, monkeypatch: Any) -> Any:
         return None
 
     monkeypatch.setattr(import_route, "enforce_rate_limit", no_limit)
-    monkeypatch.setattr(import_route, "plan_import", fake_plan)
-    monkeypatch.setattr(import_route, "write_import", fake_write)
+    # A file kept as itself is checked against the storage limit, which reads the database
+    # stubbed out here; `test_storage_limit.py` has the limit against a real one.
+    monkeypatch.setattr(settings, "STORAGE_LIMIT_MB", None)
+    monkeypatch.setattr(batch_module, "plan_import", fake_plan)
+    monkeypatch.setattr(batch_module, "write_import", fake_write)
     monkeypatch.setattr(import_route, "resolve_catalog_gaps", fake_resolve)
     for name in (
         "invalidate_dive_caches",
@@ -223,7 +232,7 @@ class TestPreview:
     def test_it_carries_the_planner_s_check_in_section(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
-        stub = import_route.plan_import
+        stub = batch_module.plan_import
 
         async def plan_with_a_section(db: Any, **kwargs: Any) -> Any:
             plan = await stub(db, **kwargs)
@@ -236,7 +245,7 @@ class TestPreview:
             ]
             return plan
 
-        monkeypatch.setattr(import_route, "plan_import", plan_with_a_section)
+        monkeypatch.setattr(batch_module, "plan_import", plan_with_a_section)
 
         body = client.post(PREVIEW_PATH, files=_files()).json()
 
@@ -332,31 +341,30 @@ class TestTheFormatsItAccepts:
         assert response.status_code == 200
         assert response.json()["conversion"]["format"] == "uddf"
 
-    def test_a_zip_of_one_format_is_one_logbook(self, signed_in: Any, client: TestClient) -> None:
-        """A watch writes one file per dive, so an account export is a zip of them. Two
-        uploads per import against a rate limit of twenty an hour would otherwise cap a
-        diver at ten dives an hour."""
+    def test_a_zip_is_opened_and_each_of_its_files_read(self, signed_in: Any, client: TestClient) -> None:
+        """A watch writes one file per dive, so an account export is a zip of them. Its files
+        join the import as files of their own, each read alone and each a row."""
         payload = _zip({"dive-1.uddf": _uddf("dive-1"), "dive-2.uddf": _uddf("dive-2", "2026-04-18T09:30:00")})
         response = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip"))
 
         assert response.status_code == 200
         body = response.json()
         assert body["conversion"]["format"] == "uddf"
-        # Not the app's own export archive: the converter emits no stored files at all, so
-        # nothing in this upload could put a binary back.
+        assert [row["name"] for row in body["members"]] == ["dive-1.uddf", "dive-2.uddf", "watch-export.zip"]
+        # Not the app's own export archive, which is the one container that restores the
+        # files its document names.
         assert body["archive"] is False
 
     def test_a_zip_of_files_no_reader_claims_is_415_naming_the_formats(
         self, signed_in: Any, client: TestClient
     ) -> None:
+        """Every file of the zip is a row refused on its own, so the import answers as the
+        first of them would alone."""
         payload = _zip({"a.txt": NOT_A_LOGBOOK, "b.txt": NOT_A_LOGBOOK})
         response = client.post(PREVIEW_PATH, files=_files(payload, "notes.zip"))
 
         assert response.status_code == 415
-        # The converter's own sentence for this case carries the registry's names, so this
-        # is the one 415 whose list is spelled in format ids rather than in labels.
-        detail = response.json()["detail"]
-        assert all(fmt in detail for fmt in divejson.read_formats())
+        assert reader.formats_this_build_reads() in response.json()["detail"]
 
     def test_a_zip_holding_only_packaging_is_415(self, signed_in: Any, client: TestClient) -> None:
         """A folder zipped on a Mac with nothing in it: a directory entry and the `__MACOSX`
@@ -367,6 +375,12 @@ class TestTheFormatsItAccepts:
 
         assert response.status_code == 415
         assert "no files to convert" in response.json()["detail"]
+
+    def test_a_zip_that_cannot_be_opened_is_422(self, signed_in: Any, client: TestClient) -> None:
+        response = client.post(PREVIEW_PATH, files=_files(b"PK\x03\x04 and then nothing a zip has", "broken.zip"))
+
+        assert response.status_code == 422
+        assert "could not be opened" in response.json()["detail"]
 
     def test_a_zip_with_no_members_at_all_is_not_even_a_zip(self, signed_in: Any, client: TestClient) -> None:
         """`PK\x03\x04` is the *local file header*, so an archive with no members does not
@@ -379,13 +393,20 @@ class TestTheFormatsItAccepts:
         assert response.status_code == 415
         assert "not a logbook this app can read" in response.json()["detail"]
 
-    def test_a_zip_mixing_two_formats_is_415(self, signed_in: Any, client: TestClient) -> None:
-        """An archive is one logbook, so its files have to be one format - otherwise the
-        positional identities of two readers' records would share one document."""
+    def test_a_zip_mixing_two_formats_is_opened_and_each_file_read(self, signed_in: Any, client: TestClient) -> None:
+        """A zip is opened and its files join the import one by one, so two formats in one zip
+        are two files read by two readers - the package's own rule, that an archive is one
+        logbook of one format, is never asked."""
         response = client.post(PREVIEW_PATH, files=_files(_zip({"a.uddf": _uddf(), "b.ssrf": SSRF}), "mixed.zip"))
 
-        assert response.status_code == 415
-        assert "one format" in response.json()["detail"]
+        assert response.status_code == 200
+        body = response.json()
+        rows = {row["name"]: row for row in body["members"]}
+        assert rows["mixed.zip"]["format"] == "zip" and rows["mixed.zip"]["opened"] == 2
+        assert (rows["a.uddf"]["format"], rows["b.ssrf"]["format"]) == ("uddf", "ssrf")
+        zip_index = body["members"].index(rows["mixed.zip"])
+        assert rows["a.uddf"]["container"] == rows["b.ssrf"]["container"] == zip_index
+        assert body["conversion"]["format"] == "mixed"
 
     def test_a_file_no_reader_claims_is_415_naming_the_formats(self, signed_in: Any, client: TestClient) -> None:
         """A 415 rather than the 422 it used to get. "This DiveJSON document is not valid
@@ -449,14 +470,11 @@ class TestTheFormatsItAccepts:
     ) -> None:
         """Refused off the central directory, before a member is inflated: the count is
         known from the listing alone."""
-        monkeypatch.setattr(reader, "MAX_ARCHIVE_MEMBERS", 1)
+        monkeypatch.setattr(reader, "MAX_IMPORT_FILES", 1)
         payload = _zip({"dive-1.uddf": _uddf("dive-1"), "dive-2.uddf": _uddf("dive-2")})
         response = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip"))
 
         assert response.status_code == 413
-        # The converter's own sentence, which names the bound that fired - the api's wrapper
-        # deliberately restates none of them, so that no message can claim a cause that
-        # cannot be one.
         assert "at most 1" in response.json()["detail"]
 
     def test_a_zip_whose_members_sum_past_the_document_cap_is_413(
@@ -477,36 +495,32 @@ class TestTheFormatsItAccepts:
 
     def test_the_size_it_reports_is_rounded_up(self, signed_in: Any, client: TestClient, monkeypatch: Any) -> None:
         """Floored, an archive a byte over the cap reports the cap back at itself - "holds
-        100 MB, and at most 100 MB are converted" - which reads as a refusal for no reason.
-        `_spool_upload` already rounds its own figure up."""
+        100 MB, and at most 100 MB are converted" - which reads as a refusal for no reason."""
         monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", 1024 * 1024)
-        payload = _zip({"dive-1.uddf": _uddf(), "pad.uddf": b"x" * (1024 * 1024)})
+        payload = _zip({"dive-1.uddf": _uddf(), "pad.uddf": _uddf("dive-2") + b" " * (1024 * 1024)})
 
         detail = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip")).json()["detail"]
 
         assert "holds 2 MB" in detail
         assert "at most 1 MB" in detail
 
-    def test_the_sum_is_checked_before_a_member_is_read(
+    def test_the_sum_is_checked_before_a_file_is_converted(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
-        """Off the directory, so a member that could not be inflated at all is still refused
-        by size rather than by failing to read."""
+        """Off the zip's directory and each file's head, so an import too large to plan costs
+        no conversion: every file is read whole only once the batch is known to fit."""
         payload = _zip({"dive-1.uddf": _uddf("dive-1"), "dive-2.uddf": _uddf("dive-2")})
-        read_calls: list[str] = []
-        opened = zipfile.ZipFile.open
+        converted: list[Any] = []
 
-        def record(self: Any, name: Any, *args: Any, **kwargs: Any) -> Any:
-            read_calls.append(str(name))
-            return opened(self, name, *args, **kwargs)
+        def record(wrapper: Any) -> Any:
+            converted.append(wrapper)
+            raise AssertionError("converted before the batch was bounded")
 
-        # Patched only now: `_zip` writes through the same method, so patching any earlier
-        # records the test building its own fixture.
         monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", 100)
-        monkeypatch.setattr(zipfile.ZipFile, "open", record)
+        monkeypatch.setattr(reader, "_convert", record)
 
         assert client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip")).status_code == 413
-        assert read_calls == []
+        assert converted == []
 
 
 class TestWhereTheConversionRuns:
@@ -518,26 +532,26 @@ class TestWhereTheConversionRuns:
         times over. Inline in an `async def` one upload stalls every other request on the
         worker.
 
-        Asserted against the thread the *rest* of `load_import` runs on rather than against
-        the main thread: `TestClient` drives the app from a portal thread of its own, so
-        "not the main thread" would pass even with the hop removed.
+        Asserted against the thread the import's report is assembled on - the event loop's -
+        rather than against the main thread: `TestClient` drives the app from a portal thread
+        of its own, so "not the main thread" would pass even with the hop removed.
         """
-        digest, convert = reader._digest, reader._convert
+        report, convert = batch_module.conversion_report, reader._convert
         seen: dict[str, str] = {}
 
-        def record_spool(buffer: Any) -> Any:
-            seen["spool"] = threading.current_thread().name
-            return digest(buffer)
+        def record_report(loaded: Any) -> Any:
+            seen["loop"] = threading.current_thread().name
+            return report(loaded)
 
-        def record_convert(buffer: Any, *, source_format: str | None) -> Any:
+        def record_convert(wrapper: Any) -> Any:
             seen["convert"] = threading.current_thread().name
-            return convert(buffer, source_format=source_format)
+            return convert(wrapper)
 
-        monkeypatch.setattr(reader, "_digest", record_spool)
+        monkeypatch.setattr(batch_module, "conversion_report", record_report)
         monkeypatch.setattr(reader, "_convert", record_convert)
 
         assert client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).status_code == 200
-        assert seen["convert"] != seen["spool"]
+        assert seen["convert"] != seen["loop"]
 
 
 class TestWhenTheConversionFails:
@@ -562,7 +576,7 @@ class TestWhenTheConversionFails:
         """`SourceTooLargeError` is not the container's alone: the FIT reader raises it for
         one file past a hundred thousand messages, and there is nothing to split there."""
 
-        def refuse(buffer: Any, *, source_format: str | None) -> Any:
+        def refuse(wrapper: Any) -> Any:
             raise divejson.SourceTooLargeError("this FIT file holds more than 100,000 messages")
 
         monkeypatch.setattr(reader, "_convert", refuse)
@@ -592,7 +606,7 @@ class TestWhenTheConversionFails:
         """A bug in the converter rather than anything wrong with the file, so the message
         says so and the traceback goes to the log where somebody can act on it."""
 
-        def refuse(buffer: Any, *, source_format: str | None) -> Any:
+        def refuse(wrapper: Any) -> Any:
             raise divejson.NonConformingOutputError(
                 [divejson.Issue("$", "something the writer should not have emitted")]
             )
@@ -609,7 +623,7 @@ class TestWhenTheConversionFails:
         """The second backstop: the library validated its output against the format and this
         app's own envelope still refused it. Also not a 500."""
 
-        def wrong_shape(buffer: Any, *, source_format: str | None) -> Any:
+        def wrong_shape(wrapper: Any) -> Any:
             return divejson.Conversion({"format": "uddf", "version": "3.2.2"}, ())
 
         monkeypatch.setattr(reader, "_convert", wrong_shape)
@@ -645,8 +659,8 @@ class TestTheConversionReport:
         """
         convert = reader._convert
 
-        def with_an_unknown_kind(buffer: Any, *, source_format: str | None) -> Any:
-            conversion = convert(buffer, source_format=source_format)
+        def with_an_unknown_kind(wrapper: Any) -> Any:
+            conversion = convert(wrapper)
             invented = divejson.Note("dive/0", "a kind this build has never seen", "time-shifted")  # type: ignore[arg-type]
             return divejson.Conversion(conversion.document, (*conversion.notes, invented))
 
@@ -664,8 +678,8 @@ class TestTheConversionReport:
         live on the grouping - which is also why these are not another `ImportNoteCode`."""
         convert = reader._convert
 
-        def with_extra_findings(buffer: Any, *, source_format: str | None) -> Any:
-            conversion = convert(buffer, source_format=source_format)
+        def with_extra_findings(wrapper: Any) -> Any:
+            conversion = convert(wrapper)
             extra = tuple(divejson.Note("dive/0", f"finding {n}", "dropped") for n in range(2))
             return divejson.Conversion(conversion.document, (*conversion.notes, *extra))
 
@@ -681,10 +695,12 @@ class TestTheConversionReport:
 
 
 class TestApply:
-    def _token(self, payload: bytes = MINIMAL, user_uuid: uuid_pkg.UUID | None = None) -> str:
+    def _token(
+        self, payload: bytes = MINIMAL, user_uuid: uuid_pkg.UUID | None = None, filename: str = "logbook.divejson"
+    ) -> str:
         return create_logbook_import_token(
             user_uuid=user_uuid if user_uuid is not None else CURRENT_USER_UUID,
-            sha256=hashlib.sha256(payload).hexdigest(),
+            sha256=batch_digest([part_of(payload, filename)]),
         )
 
     def test_a_previewed_file_imports(self, signed_in: Any, client: TestClient) -> None:
@@ -696,11 +712,13 @@ class TestApply:
     def test_a_converted_file_imports_and_the_result_carries_the_conversion(
         self, signed_in: Any, client: TestClient
     ) -> None:
-        """The token is minted over the *uploaded* bytes, not the converted document, so it
-        names the file a diver picked - and apply converts again rather than replaying a
-        stored result. The block is on the result as well as the preview because the result
+        """The token is minted over the *uploaded* files, not the converted document, so it
+        names what a diver picked - and apply converts again rather than replaying a stored
+        result. The block is on the result as well as the preview because the result
         panel is what stays on screen."""
-        response = client.post(APPLY_PATH, files=_files(SSRF, "logbook.ssrf"), data={"token": self._token(SSRF)})
+        response = client.post(
+            APPLY_PATH, files=_files(SSRF, "logbook.ssrf"), data={"token": self._token(SSRF, filename="logbook.ssrf")}
+        )
 
         assert response.status_code == 200
         assert response.json()["conversion"]["format"] == "ssrf"
@@ -726,13 +744,13 @@ class TestApply:
     def _planned_check_in(self, monkeypatch: Any, argument: str = "check_in") -> list[Any]:
         """Wraps the stubbed planner to record the submission the route hands it."""
         seen: list[Any] = []
-        stub = import_route.plan_import
+        stub = batch_module.plan_import
 
         async def recording_plan(db: Any, **kwargs: Any) -> Any:
             seen.append(kwargs.get(argument))
             return await stub(db, **kwargs)
 
-        monkeypatch.setattr(import_route, "plan_import", recording_plan)
+        monkeypatch.setattr(batch_module, "plan_import", recording_plan)
         return seen
 
     def test_the_portrait_choice_reaches_the_planner(
@@ -867,3 +885,271 @@ class TestApply:
         assert "invalidate_trip_caches" in called
         assert "invalidate_contact_caches" in called
         assert len(called) == 7
+
+
+class TestManyFiles:
+    """The request: `file` once per file, read by the route itself under its own bounds."""
+
+    def test_several_files_are_one_import_with_a_row_each(self, signed_in: Any, client: TestClient) -> None:
+        response = client.post(
+            PREVIEW_PATH,
+            files=[
+                ("file", ("a.uddf", io.BytesIO(_uddf("dive-1")), "application/octet-stream")),
+                ("file", ("b.ssrf", io.BytesIO(SSRF), "application/octet-stream")),
+                ("file", ("notes.csv", io.BytesIO(NOT_A_LOGBOOK), "text/csv")),
+            ],
+        )
+
+        assert response.status_code == 200
+        rows = {row["name"]: row for row in response.json()["members"]}
+        assert {name: row["part"] for name, row in rows.items()} == {"a.uddf": 0, "b.ssrf": 1, "notes.csv": 2}
+        assert rows["notes.csv"]["refusal"] and rows["a.uddf"]["refusal"] is None
+        assert (rows["a.uddf"]["kept"], rows["b.ssrf"]["kept"]) == (True, True)
+
+    def test_a_request_with_no_file_is_the_missing_field(self, signed_in: Any, client: TestClient) -> None:
+        response = client.post(PREVIEW_PATH, data={"something": "else"})
+
+        assert response.status_code == 422
+        assert [error["loc"] for error in response.json()["detail"]] == [["body", "file"]]
+
+    def test_an_apply_with_no_token_is_the_missing_field(self, signed_in: Any, client: TestClient) -> None:
+        response = client.post(APPLY_PATH, files=_files())
+
+        assert response.status_code == 422
+        assert [error["loc"] for error in response.json()["detail"]] == [["body", "token"]]
+
+    def test_more_files_than_one_import_carries_is_413(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(import_parts, "MAX_PARTS", 2)
+        files = [("file", (f"{n}.divejson", io.BytesIO(MINIMAL), "application/json")) for n in range(3)]
+
+        response = client.post(PREVIEW_PATH, files=files)
+
+        assert response.status_code == 413
+        assert "Zip them" in response.json()["detail"]
+
+    def test_a_request_past_what_one_import_carries_is_413(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """Every part counts as it streams, refused ones included."""
+        monkeypatch.setattr(reader, "MAX_ARCHIVE_SIZE", len(MINIMAL) + 10)
+        files = [("file", (f"{n}.divejson", io.BytesIO(MINIMAL), "application/json")) for n in range(2)]
+
+        response = client.post(PREVIEW_PATH, files=files)
+
+        assert response.status_code == 413
+        assert "Import it in parts" in response.json()["detail"]
+
+    def test_a_file_past_a_document_s_size_is_a_refused_row_and_the_rest_reads(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", len(MINIMAL))
+        big = MINIMAL[:-1] + b" " * 64 + b"}"
+        files = [
+            ("file", ("small.divejson", io.BytesIO(MINIMAL), "application/json")),
+            ("file", ("big.divejson", io.BytesIO(big), "application/json")),
+        ]
+
+        response = client.post(PREVIEW_PATH, files=files)
+
+        assert response.status_code == 200
+        rows = {row["name"]: row for row in response.json()["members"]}
+        assert rows["big.divejson"]["refusal"] and "may be up to" in rows["big.divejson"]["refusal"]
+        assert rows["big.divejson"]["byte_size"] == len(big)
+        assert rows["big.divejson"]["sha256"] == hashlib.sha256(big).hexdigest()
+        assert rows["small.divejson"]["format"] == "divejson"
+
+
+class TestABodyTheReaderMustNotFailOn:
+    @pytest.mark.parametrize("charset", ["bogus", "hex", "idna", "undefined", "utf-8"])
+    def test_a_charset_that_cannot_decode_text_reads_as_latin_1(
+        self, signed_in: Any, client: TestClient, charset: str
+    ) -> None:
+        body, content_type = multipart([("logbook.divejson", MINIMAL)])
+
+        response = client.post(
+            PREVIEW_PATH, content=body, headers={"content-type": f"{content_type}; charset={charset}"}
+        )
+
+        assert response.status_code == 200
+        assert [row["name"] for row in response.json()["members"]] == ["logbook.divejson"]
+
+
+class TestTheReadTransactionIsReleasedBeforeTheBody:
+    """Authentication reads through the request's session, and the body then arrives at the
+    client's pace - so a connection left in that read's transaction sits idle for the whole
+    upload, which nothing on screen would ever show."""
+
+    @pytest.mark.parametrize("path", [PREVIEW_PATH, APPLY_PATH])
+    def test_the_release_comes_before_the_first_byte_is_read(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any, path: str
+    ) -> None:
+        order: list[str] = []
+        db = AsyncMock()
+        db.rollback.side_effect = lambda: order.append("release")
+        signed_in.dependency_overrides[async_get_db] = lambda: db
+        read = import_route.read_import_request
+
+        async def reading(request: Any, **kwargs: Any) -> Any:
+            order.append("read")
+            return await read(request, **kwargs)
+
+        monkeypatch.setattr(import_route, "read_import_request", reading)
+
+        client.post(path, files=_files(), data={"token": "x"} if path == APPLY_PATH else None)
+
+        assert order[:2] == ["release", "read"]
+
+
+class TestWhatOneImportWalks:
+    """Counted over the whole request off the zips' directories, before a file is opened: a
+    bound per zip would be multiplied by every zip one request can carry."""
+
+    @staticmethod
+    def _zips(count: int) -> list[tuple[str, tuple[str, Any, str]]]:
+        return [
+            (
+                "file",
+                (
+                    f"{n}.zip",
+                    io.BytesIO(_zip({f"{n}-a.uddf": _uddf(f"{n}-a"), f"{n}-b.uddf": _uddf(f"{n}-b")})),
+                    "application/zip",
+                ),
+            )
+            for n in range(count)
+        ]
+
+    def test_files_over_the_count_across_several_zips_are_413(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        opened: list[str] = []
+        head = zipfile.ZipFile.open
+
+        def record(self: Any, name: Any, *args: Any, **kwargs: Any) -> Any:
+            opened.append(str(name))
+            return head(self, name, *args, **kwargs)
+
+        files = self._zips(2)
+        monkeypatch.setattr(reader, "MAX_IMPORT_FILES", 5)
+        monkeypatch.setattr(zipfile.ZipFile, "open", record)
+
+        response = client.post(PREVIEW_PATH, files=files)
+
+        assert response.status_code == 413
+        assert "at most 5 are read in one import" in response.json()["detail"]
+        assert opened == [], "refused off the listings"
+
+    def test_zips_that_together_expand_past_the_bound_are_413(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        one = zipfile.ZipFile(io.BytesIO(self._zips(1)[0][1][1].getvalue()))
+        declared = sum(info.file_size for info in one.infolist())
+        monkeypatch.setattr(reader, "MAX_ARCHIVE_EXTRACTED_SIZE", declared + 1)
+
+        assert client.post(PREVIEW_PATH, files=self._zips(1)).status_code == 200
+        response = client.post(PREVIEW_PATH, files=self._zips(2))
+
+        assert response.status_code == 413
+        assert "expand to more than" in response.json()["detail"]
+
+
+class TestTheTokenCoversTheBatch:
+    FILES = [("a.uddf", _uddf("dive-1")), ("b.ssrf", SSRF)]
+
+    @staticmethod
+    def _multipart(files: list[tuple[str, bytes]]) -> list[tuple[str, tuple[str, Any, str]]]:
+        return [("file", (name, io.BytesIO(data), "application/octet-stream")) for name, data in files]
+
+    def _previewed(self, client: TestClient) -> str:
+        token: str = client.post(PREVIEW_PATH, files=self._multipart(self.FILES)).json()["token"]
+        return token
+
+    def test_the_same_files_in_another_order_import(self, signed_in: Any, client: TestClient) -> None:
+        token = self._previewed(client)
+
+        response = client.post(APPLY_PATH, files=self._multipart(self.FILES[::-1]), data={"token": token})
+
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize(
+        "sent",
+        [FILES[:1], [*FILES, ("c.uddf", _uddf("dive-3"))], [("renamed.uddf", _uddf("dive-1")), FILES[1]]],
+        ids=["a file fewer", "a file more", "a file renamed"],
+    )
+    def test_a_set_that_differs_is_refused(
+        self, signed_in: Any, client: TestClient, sent: list[tuple[str, bytes]]
+    ) -> None:
+        token = self._previewed(client)
+
+        response = client.post(APPLY_PATH, files=self._multipart(sent), data={"token": token})
+
+        assert response.status_code == 422
+        assert "previewed" in response.json()["detail"]
+
+
+class TestTheBodyIsReadAfterTheCaller:
+    @pytest.mark.asyncio
+    async def test_a_request_with_no_session_is_refused_without_its_body_being_read(self, import_app: Any) -> None:
+        body, content_type = multipart([("big.zip", b"x" * 1024)])
+        received: list[Any] = []
+        sent: list[dict[str, Any]] = []
+
+        async def receive() -> dict[str, Any]:
+            received.append(True)
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": PREVIEW_PATH,
+            "raw_path": PREVIEW_PATH.encode(),
+            "root_path": "",
+            "query_string": b"",
+            "headers": [(b"content-type", content_type.encode()), (b"host", b"testserver")],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        }
+
+        await import_app(scope, receive, send)
+
+        assert next(message for message in sent if message["type"] == "http.response.start")["status"] == 401
+        assert received == []
+
+
+class TestWhatARequestHolds:
+    @pytest.mark.asyncio
+    async def test_the_parts_in_memory_never_pass_one_spool_threshold(self, monkeypatch: Any) -> None:
+        """However many parts, the bytes held in memory stay under one threshold: a part that
+        would take them past it rolls onto disk first."""
+        monkeypatch.setattr(import_parts, "SPOOL_THRESHOLD", 100)
+        files = [(f"{n}.bin", bytes([n]) * 60) for n in range(4)]
+
+        with await import_parts.read_import_request(import_request(files)) as body:
+            in_memory = [part for part in body.parts if part.spool is not None and not part.spool._rolled]  # type: ignore[attr-defined]
+            assert sum(part.size for part in in_memory) <= 100
+            assert [part.size for part in body.parts] == [60] * 4
+            for part, (_, data) in zip(body.parts, files, strict=True):
+                assert part.spool is not None and part.spool.read() == data
+                assert part.sha256 == hashlib.sha256(data).hexdigest()
+
+
+class TestTheDocument:
+    def test_both_bodies_are_described(self, import_app: Any) -> None:
+        document = import_app.openapi()
+        preview = document["paths"][PREVIEW_PATH]["post"]["requestBody"]["content"]["multipart/form-data"]["schema"]
+        apply = document["paths"][APPLY_PATH]["post"]["requestBody"]["content"]["multipart/form-data"]["schema"]
+
+        assert preview["properties"]["file"]["type"] == "array"
+        assert preview["required"] == ["file"]
+        assert set(apply["properties"]) == {"file", "token", "check_in_details", "portrait"}
+        assert apply["required"] == ["file", "token"]
+        submission = apply["properties"]["check_in_details"]["anyOf"][0]["contentSchema"]
+        assert "$ref" not in json.dumps(submission)
+        assert set(submission["properties"]) == {"born_on", "phone", "emergency_contact", "insurance"}

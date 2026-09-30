@@ -1541,7 +1541,7 @@ async def backfill_profiles(
             continue
         if not files:
             # A recording with no bytes to re-read. Not a failure: it is what logbook import
-            # creates from a converted document, and its profile - if it has one - was
+            # creates from a document, and its profile - if it has one - was
             # excluded from the candidate query above on provenance.
             skipped += 1
             continue

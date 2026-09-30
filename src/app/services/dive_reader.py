@@ -12,9 +12,10 @@ derived where the file states none, because those are what the form shows. **The
 is shaped by `services/recording_shape.py`, the functions logbook import shapes a document's
 recording with, which is what makes an attached file and an imported one the same recording.
 
-**How a format is named and served back is the application's**, not the package's: the label
-a diver reads and the content type a stored file is downloaded as both live in the tables
-below, keyed by format id. A pin bump that adds a reader owes both, and
+**How a format is named, served back and ordered is the application's**, not the package's:
+the label a diver reads, the content type a stored file is downloaded as, and whether a file
+of the format is a diver's logbook or one computer's recording all live in the tables below,
+keyed by format id. A pin bump that adds a reader owes all three, and
 `test_every_read_format_has_a_label` fails the build until it has them.
 
 Pure CPU and never on the event loop: every caller on a request path hands these to
@@ -72,6 +73,28 @@ FORMAT_CONTENT_TYPES = {
 # file the document does not say how it was read, or one this build no longer reads.
 # `dive_file.content_type` is `String(32)`.
 FALLBACK_CONTENT_TYPE = "application/octet-stream"
+
+# Whether a file of each format is a diver's own logbook, which may hold many dives and
+# states the diver's numbering, notes and sites, or one computer's recording of one dive.
+# An import reads a logbook's files ahead of a computer's, so where the two describe one
+# dive it is the logbook's dive that the computer's recording joins. Kept by the same test
+# as the labels.
+LOGBOOK = "logbook"
+COMPUTER = "computer"
+FORMAT_KINDS = {
+    "uddf": LOGBOOK,
+    "ssrf": LOGBOOK,
+    "fit": COMPUTER,
+    "suunto_json": COMPUTER,
+    "suunto_xml": COMPUTER,
+}
+
+
+def is_logbook_format(fmt: str) -> bool:
+    """Whether `fmt` is a logbook's format rather than one computer's - a format this table
+    has not heard of reads as a computer's, the kind that states the least."""
+    return FORMAT_KINDS.get(fmt) == LOGBOOK
+
 
 _HUNDREDTHS = Decimal("0.01")
 

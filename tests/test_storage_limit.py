@@ -50,6 +50,7 @@ from src.app.services.dive_files import KEY_KIND as DIVE_FILE_KIND
 from src.app.services.dive_files import store_recording_file
 from src.app.services.export import load_export_bundle
 from src.app.services.export.archive import DIVEJSON_NAME, write_archive
+from src.app.services.logbook_import import batch_digest
 from src.app.services.storage_usage import format_size, get_storage_usage
 from src.app.services.user_pictures import (
     AVATAR_FRAME,
@@ -61,6 +62,7 @@ from src.app.services.user_pictures import (
 from tests.conftest import db_available
 from tests.helpers.generators import create_certification, create_dive, create_species, create_user
 from tests.helpers.images import phone_jpeg, plain_png
+from tests.helpers.import_parts import import_request, part_of
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -161,22 +163,41 @@ async def _archive_of(async_db: AsyncSession, user: User) -> bytes:
 
 
 async def _preview(async_db: AsyncSession, user: User, archive: bytes) -> Any:
+    return await _preview_files(async_db, user, [("logbook.zip", archive)])
+
+
+async def _preview_files(async_db: AsyncSession, user: User, files: list[tuple[str, bytes]]) -> Any:
     return await import_routes.preview_logbook_import(
-        current_user=_caller(user), db=async_db, file=_upload(archive, "logbook.zip")
+        request=import_request(files), current_user=_caller(user), db=async_db
     )
 
 
 async def _apply(
     async_db: AsyncSession, user: User, archive: bytes, portrait: ImportPortraitChoice | None = None
 ) -> Any:
+    return await _apply_files(async_db, user, [("logbook.zip", archive)], portrait)
+
+
+async def _apply_files(
+    async_db: AsyncSession,
+    user: User,
+    files: list[tuple[str, bytes]],
+    portrait: ImportPortraitChoice | None = None,
+) -> Any:
+    parts = [part_of(data, name, index) for index, (name, data) in enumerate(files)]
+    fields: dict[str, Any] = {"token": create_logbook_import_token(user_uuid=user.uuid, sha256=batch_digest(parts))}
+    if portrait is not None:
+        fields["portrait"] = portrait.model_dump()
     return await import_routes.apply_logbook_import(
-        current_user=_caller(user),
-        db=async_db,
-        file=_upload(archive, "logbook.zip"),
-        token=create_logbook_import_token(user_uuid=user.uuid, sha256=hashlib.sha256(archive).hexdigest()),
-        check_in_details=None,
-        portrait=portrait,
+        request=import_request(files, fields), current_user=_caller(user), db=async_db
     )
+
+
+# A dive computer's two exports of one dive, which an import keeps on the dive it becomes.
+DIVE_FILES = [
+    (name, (Path(__file__).parent / "fixtures" / "dive_files" / name).read_bytes())
+    for name in ("suunto-ocean-2026.fit", "suunto-ocean-2026.json")
+]
 
 
 # -------------------------------------------------------------------- the sites
@@ -287,7 +308,12 @@ SITES = [
         arrange=_an_archive_with_files,
         write=lambda db, async_db, user, ctx: _apply(async_db, user, ctx["archive"]),
     ),
+    Site("import files", write=lambda db, async_db, user, ctx: _apply_files(async_db, user, DIVE_FILES)),
 ]
+
+
+def _site(name: str) -> Site:
+    return next(site for site in SITES if site.name == name)
 
 
 async def _arranged(site: Site, db: Session, async_db: AsyncSession, user: User) -> dict[str, Any]:
@@ -472,7 +498,7 @@ class TestAnImport:
         self, db: Session, async_db: AsyncSession
     ) -> None:
         archive = (await _an_archive_with_files(db, async_db, create_user(db)))["archive"]
-        growth = await _growth(SITES[-1], db, async_db)
+        growth = await _growth(_site("import"), db, async_db)
         diver = create_user(db)
         _hold(db, diver, LIMIT + 1 - growth)
 
@@ -494,6 +520,33 @@ class TestAnImport:
             )
             == 1
         ), "only the filler's certification"
+
+    @pytest.mark.asyncio
+    async def test_files_kept_as_themselves_are_refused_whole_at_the_preview_and_at_the_apply(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Measured as they would be stored, both of them, before a row or an object of either
+        is written."""
+        growth = await _growth(_site("import files"), db, async_db)
+        diver = create_user(db)
+        _hold(db, diver, LIMIT + 1 - growth)
+        keys = set(blob_store.iter_keys())
+
+        with pytest.raises(HTTPException) as previewed:
+            await _preview_files(async_db, diver, DIVE_FILES)
+        await async_db.rollback()
+        with pytest.raises(HTTPException) as applied:
+            await _apply_files(async_db, diver, DIVE_FILES)
+        await async_db.rollback()
+
+        assert previewed.value.status_code == applied.value.status_code == 413
+        assert growth == sum([await blob_store.stored_size(DIVE_FILE_KIND, data) for _, data in DIVE_FILES]), (
+            "each file counts at the size it is stored at"
+        )
+        for model in (Dive, DiveFile):
+            owned = await async_db.scalar(select(func.count()).select_from(model).where(model.user_id == diver.id))
+            assert owned == 0, model.__tablename__
+        assert set(blob_store.iter_keys()) == keys
 
     @pytest.mark.asyncio
     async def test_the_archive_s_portrait_counts_only_once_it_is_taken(

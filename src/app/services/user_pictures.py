@@ -34,7 +34,7 @@ import hashlib
 import io
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
@@ -674,14 +674,21 @@ async def get_held_picture(db: AsyncSession, *, user_id: int, frame: Frame) -> H
 
 
 async def write_imported_portrait(
-    db: AsyncSession, *, user_id: int, picture: ImportedPicture, filename: str, held: HeldPicture | None
+    db: AsyncSession,
+    *,
+    user_id: int,
+    picture: ImportedPicture,
+    filename: str,
+    held: HeldPicture | None,
+    put: Callable[[str, bytes], Awaitable[int]] = blob_store.put,
 ) -> bool:
     """Make `picture` the account's portrait, over what `held` says the portrait was when the
     import was planned. Returns whether it was written. The avatar is never imported.
 
     **Inside the import's transaction**: no commit, and no `release_read_transaction`, since
     the caller writes a whole logbook and commits once. The files are still put before that
-    commit and the retired ones unlinked after it.
+    commit and the retired ones unlinked after it; `put` is how, which logbook import hands
+    its own so that nothing is written until the whole import has fitted the account.
 
     Where `held` already holds this original - the same digest - only the crop and the
     rendition change, as an adjustment does: the original, its key and the row's uuid stay,
@@ -700,7 +707,7 @@ async def write_imported_portrait(
         "rendition_sha256": rendition_sha256,
         **_crop_columns(picture.crop),
     }
-    put = [rendition_key]
+    written_keys = [rendition_key]
     retired: list[str | None] = []
     if held is not None and held.original_sha256 == picture.original_sha256:
         retired = [held.rendition_storage_key]
@@ -714,11 +721,11 @@ async def write_imported_portrait(
             "original_content_type": picture.original_content_type,
             "original_filename": filename,
         }
-        await blob_store.put(original_key, picture.original)
-        put.append(original_key)
+        await put(original_key, picture.original)
+        written_keys.append(original_key)
         if held is not None:
             retired = [held.original_storage_key, held.rendition_storage_key]
-    values["rendition_byte_size"] = await blob_store.put(rendition_key, picture.rendition)
+    values["rendition_byte_size"] = await put(rendition_key, picture.rendition)
 
     now = datetime.now(UTC)
     if held is None:
@@ -740,7 +747,7 @@ async def write_imported_portrait(
             .returning(UserPicture.id)
         )
     if written.scalar_one_or_none() is None:
-        blob_store.delete_after_commit(db, put)
+        blob_store.delete_after_commit(db, written_keys)
         return False
     blob_store.delete_after_commit(db, [key for key in retired if key])
     return True

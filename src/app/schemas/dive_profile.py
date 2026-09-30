@@ -416,9 +416,9 @@ class DiveProfileInfo(BaseModel):
     # Always present: `dive_profile.parser_key` is NOT NULL, so every stored profile is one
     # of the three. It is here because a file-less recording is first-class rather than
     # degenerate, and the two ways of being file-less are different things a client has to
-    # say differently - "imported through the converter" against "merged from two
-    # recordings". Nothing else in the dive read distinguishes them: `files` is empty for
-    # both.
+    # say differently - samples an import took from a document against samples a merge put
+    # together from two recordings. Nothing else in the dive read distinguishes them:
+    # `files` is empty for both.
     provenance: Annotated[
         ProfileProvenance,
         Field(description="Where these samples came from - see `RecordingProfileRead.provenance`"),

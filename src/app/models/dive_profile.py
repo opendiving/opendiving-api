@@ -16,10 +16,10 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     `schemas/dive_profile.py` holds the scale each is stored in.
 
     Derived from the recording's stored exports (`DiveFile`) on every path but one: the
-    samples are read server-side through `divejson` during `POST /dive/{uuid}/recordings`,
-    which is the only place that has both the bytes and the parse token proving where they
-    came from. That is still the whole reason `/dive/parse` doesn't return a profile - see
-    `services/dive_profiles.py`.
+    samples are read server-side through `divejson` from bytes this server stores, when
+    `POST /dive/{uuid}/recordings` attaches a file or logbook import keeps one - the places
+    that hold both the bytes and this server's own reading of them. That is still the whole
+    reason `/dive/parse` doesn't return a profile - see `services/dive_profiles.py`.
 
     **One row per recording, not per dive.** A diver on two computers has two profiles of
     one dive, drawn from two devices' samples, and neither is a version of the other. The
@@ -27,16 +27,17 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     recording carries a `start_time` of its own: a second computer that entered the water
     223 seconds later has a profile whose zero is 223 seconds after the dive's.
 
-    **The exception is logbook import**, which does write samples the client supplied. It
-    is the one sanctioned path, on the terms `DECISIONS.md` records under *"Importing a
-    logbook is the one client-supplied profile"*: the samples land in the importer's own
-    logbook and nowhere else, through a two-phase preview/apply, with every channel
-    re-validated and re-normalized before it is stored. Deliberately not "the caller's own
-    backup" - that route converts a UDDF file or a `.ssrf` on the way in, so the document
-    may have been written by another application entirely, and the argument is about whose
-    logbook it lands in rather than about who wrote the file. The provenance columns below
-    say which path a row came from - `parser_key` is `divejson_import` on a row that
-    arrived that way, whatever the upload was before it was converted.
+    **The exception is logbook import of a document, or of a file it does not keep**, which
+    does write samples the client supplied. It is the one sanctioned path, on the terms
+    `DECISIONS.md` records under *"Importing a logbook is the one client-supplied profile"*:
+    the samples land in the importer's own logbook and nowhere else, through a two-phase
+    preview/apply, with every channel re-validated and re-normalized before it is stored.
+    Deliberately not "the caller's own backup" - that route converts a UDDF file or a
+    `.ssrf` on the way in, so the document may have been written by another application
+    entirely, and the argument is about whose logbook it lands in rather than about who
+    wrote the file. The provenance columns below say which path a row came from -
+    `parser_key` is `divejson_import` on a row that arrived that way, whatever the file was
+    before it was converted.
 
     One row per dive, with each channel's series in a JSONB `data` payload rather than a
     row per sample: several hundred (Suunto) to several thousand (Ocean, 1 Hz) readings

@@ -1,10 +1,10 @@
 """The shapes logbook import reads and reports - a DiveJSON document seen from the
 *reader* side, and the report that says what importing one would do.
 
-A converted upload - a UDDF file, a `.ssrf`, a FIT, a Suunto app or DM5 XML export, a zip
-of any one of them - arrives here as a DiveJSON document like any other, because the converter's
-output is one. Nothing below the reader learns an upload was converted; the only trace is
-`ImportReport.conversion`, which is what the conversion could not carry.
+A converted file - a UDDF file, a `.ssrf`, a FIT, a Suunto app or DM5 XML export, each file
+of a zip of them - arrives here as a DiveJSON document like any other, because the converter's
+output is one. What the report says of the conversion is `ImportReport.conversion`, what the
+conversion could not carry, and each file's row in `ImportReport.members`.
 
 **This is not `schemas/export.py` inverted, and the differences are the whole point.**
 That module is the writer's declaration: it emits exactly what DiveJSON 1.0 defines and a
@@ -49,7 +49,18 @@ from ..core.utils.datetime_offset import full_date_is_a_date
 from .certification import CertificationAgency
 from .contact import ADDRESS_POSTCODE_MAX, CONTACT_EMAIL_MAX, CONTACT_WEBSITE_MAX, ContactRole
 from .course import CourseStatus
-from .dive import Current, DecoAlgorithm, DiveMode, DiveType, EntryType, Salinity, WaterType, Waves, Weather
+from .dive import (
+    Current,
+    DecoAlgorithm,
+    DiveMode,
+    DiveType,
+    EntryType,
+    RecordingDevice,
+    Salinity,
+    WaterType,
+    Waves,
+    Weather,
+)
 from .dive_mixture import GasRole, TankUsage
 from .dive_profile import ProfileEventType
 from .gear_service import ServiceKind
@@ -755,10 +766,12 @@ class ImportNote(BaseModel):
 class ImportCollectionReport(BaseModel):
     """What would happen (preview) or did happen (apply) to one envelope collection.
 
-    The four counts are disjoint and sum to the number of records the document carries in
-    this collection - and for `contacts` and `people`, the records made of the training
-    centers and the instructors an export written before either existed names on its courses
-    and certifications, which it carries as strings rather than records. `restored` is its
+    The four counts are disjoint and sum to the number of records the import's documents
+    carry in this collection - and for `contacts` and `people`, the records made of the
+    training centers and the instructors an export written before either existed names on its
+    courses and certifications, which it carries as strings rather than records. Each file's
+    records are counted as an import of that file alone would count them, after the files
+    before it. `restored` is its
     own figure and never hides inside `created` or `skipped`: un-deleting is the one thing
     this feature does that no other surface in the app can, and a diver restoring a backup
     is entitled to see it counted.
@@ -772,13 +785,15 @@ class ImportCollectionReport(BaseModel):
 
 
 class ImportFileReport(BaseModel):
-    """The logbook's binaries - dive-computer files and card images - which follow different
-    rules from the records that reference them.
+    """The files a logbook's documents name - dive-computer files and card images - which
+    follow different rules from the records that reference them.
 
     A bare document carries file *metadata* and no bytes, so `restored` is zero and
     `not_contained` is every referenced file - which is not an error, just a smaller
-    restore. Only an archive can put bytes back. The diver's portrait is not among them: it
-    is offered apart, beside the check-in details.
+    restore. Of the files a document names, only an archive puts bytes back. A dive-computer
+    file imported as itself is not counted here: its row in `ImportReport.members` says
+    whether it was kept. The diver's portrait is not among them either: it is offered apart,
+    beside the check-in details.
     """
 
     referenced: Annotated[int, Field(description="Dive-computer files and card images the document names")]
@@ -788,7 +803,7 @@ class ImportFileReport(BaseModel):
 
 
 class ConversionConverter(BaseModel):
-    """What converted the upload, so a report can be attributed to a version of it."""
+    """What converted the files, so a report can be attributed to a version of it."""
 
     name: Annotated[str, Field(examples=["divejson"])]
     version: Annotated[str, Field(examples=["0.3.0"])]
@@ -822,25 +837,34 @@ class ConversionNoteGroup(BaseModel):
         list[str],
         Field(
             default_factory=list,
-            description="Up to three paths into the source document, e.g. `dive/0/tankdata/1`",
-            examples=[["dive/0", "dive/3"]],
+            description="Up to three paths into the source files, each under the name of the file it is in, e.g. "
+            "`dives.uddf/dive/0/tankdata/1`",
+            examples=[["dives.uddf/dive/0", "dives.uddf/dive/3"]],
         ),
     ]
 
 
 class ConversionReport(BaseModel):
-    """What converting a non-DiveJSON upload could not carry. `null` for a native document.
+    """What converting the import's non-DiveJSON files could not carry. `null` when every
+    file was DiveJSON already.
 
-    Grouped here rather than in the browser, and rather than folded into `notes`: one source
-    habit makes one finding per record - eight dives with no UTC offset are eight findings -
-    and the converter's list is unbounded, where `notes` has the planner's 500-note cap. The
-    grouping is where a cap can live at all, which is also why these are not another
-    `ImportNoteCode`: a conversion finding has a source path rather than a uuid and a
-    collection, and none of those codes describes it.
+    One report for the whole import, whatever number of files was converted: the groups are
+    the union over them, and a path names the file it is in. Grouped here rather than in the
+    browser, and rather than folded into `notes`: one source habit makes one finding per
+    record - eight dives with no UTC offset are eight findings - and the converter's list is
+    unbounded, where `notes` has the planner's 500-note cap. The grouping is where a cap can
+    live at all, which is also why these are not another `ImportNoteCode`: a conversion
+    finding has a source path rather than a uuid and a collection, and none of those codes
+    describes it.
     """
 
     format: Annotated[
-        str, Field(description="The format the upload was read as, as the converter names it", examples=["uddf"])
+        str,
+        Field(
+            description="The format the converted files were read as, as the converter names it, or `mixed` when "
+            "they were not all one format",
+            examples=["uddf"],
+        ),
     ]
     converter: ConversionConverter
     groups: Annotated[
@@ -853,6 +877,130 @@ class ConversionReport(BaseModel):
             default=0,
             description="Groups beyond the cap that are not in `groups`. Non-zero means the list above is a prefix.",
         ),
+    ]
+
+
+class ImportMemberNotKept(StrEnum):
+    """Why a file that was read is not kept as a file of the dive it becomes.
+
+    A file is kept when it is one recording's: one dive, carrying at most one computer's
+    record of it. These are the ways a file read into dives is not.
+    """
+
+    # The file holds more than one dive, so it belongs to no one recording.
+    SEVERAL_DIVES = "several_dives"
+    # Its one dive carries more than one computer's record, and a file belongs to one of them.
+    SEVERAL_RECORDINGS = "several_recordings"
+    # Larger than a dive-computer file this app stores; its dive imports all the same.
+    TOO_LARGE = "too_large"
+    # Your account already stores these bytes - on the recording the file reaches, or another.
+    ALREADY_STORED = "already_stored"
+    # Nothing was written for its dive: it is already in your logbook, or it was skipped.
+    NOT_WRITTEN = "not_written"
+
+
+class ImportMemberReport(BaseModel):
+    """One file of the import: a part of the request, or a file a zip among them held.
+
+    `kept` and `not_kept` are about files read into dives. A DiveJSON document, a full-export
+    archive and a zip are never kept as files of their own - an archive restores the files
+    its document names, and a zip's are rows of their own - so they read `false` and `null`.
+    """
+
+    part: Annotated[int, Field(description="The index of the request's `file` part this came from, from 0")]
+    container: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description="For a file a zip held, the index in `members` of that zip's own row; `null` otherwise",
+        ),
+    ]
+    name: Annotated[
+        str, Field(description="The file's name, or its path inside the zip that held it", examples=["dive.fit"])
+    ]
+    byte_size: int
+    sha256: str
+    format: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="What the file was read as: a converter format id, `divejson`, `archive` or `zip`; `null` "
+            "for a file nothing here reads",
+            examples=["fit"],
+        ),
+    ]
+    opened: Annotated[
+        int | None,
+        Field(default=None, description="On a zip's own row, how many files it opened into; `null` on any other"),
+    ]
+    kept: Annotated[bool, Field(description="Whether the file is kept on the dive it becomes, as that dive's file")]
+    not_kept: Annotated[
+        ImportMemberNotKept | None,
+        Field(default=None, description="Why a file read into dives is not kept; `null` when it is, or has no dive"),
+    ]
+    refusal: Annotated[
+        str | None,
+        Field(default=None, description="Why the file was refused, in one sentence; `null` for a file that was read"),
+    ]
+
+
+class ImportDiveOutcome(StrEnum):
+    """What the import does to one dive, as the most that happens to it."""
+
+    CREATED = "created"
+    # A dive of yours that was deleted, brought back under its own identifier.
+    RESTORED = "restored"
+    # Already in your logbook; nothing is written for it.
+    LINKED = "linked"
+    # A dive you have, gaining a file or another computer's recording.
+    UPDATED = "updated"
+    SKIPPED = "skipped"
+
+
+class ImportDiveReport(BaseModel):
+    """One dive the import creates or touches, and the files it came from.
+
+    The result's rows are the dives an import wrote, by the identifiers they carry, so a
+    later action over "the dives this import brought in" has its selection here.
+    """
+
+    uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(
+            default=None,
+            description="The dive's identifier once written - yours for a dive you already have - or `null` for a "
+            "dive the import skips",
+        ),
+    ]
+    outcome: ImportDiveOutcome
+    files_added: Annotated[
+        int, Field(default=0, description="On an `updated` dive, how many files it gains; 0 on any other")
+    ]
+    recordings_added: Annotated[
+        int,
+        Field(default=0, description="On an `updated` dive, how many computers' recordings it gains; 0 on any other"),
+    ]
+    reason: Annotated[
+        str | None, Field(default=None, description="On a `skipped` dive, why, in one sentence; `null` on any other")
+    ]
+    start_time: Annotated[
+        datetime | date | None,
+        Field(
+            default=None,
+            description="When the dive started, as the dive read gives it: with the dive's own UTC offset, naive "
+            "where it records none, a bare date where it states no time",
+        ),
+    ]
+    duration: Annotated[int | None, Field(default=None, description="Seconds")]
+    max_depth: Annotated[float | None, Field(default=None, description="Metres")]
+    device: Annotated[
+        RecordingDevice | None,
+        Field(
+            default=None, description="What recorded the dive: its first recording's device, as the dive read has it"
+        ),
+    ]
+    members: Annotated[
+        list[int], Field(default_factory=list, description="The indexes in `members` of the files the dive came from")
     ]
 
 
@@ -1023,7 +1171,12 @@ class ImportReport(BaseModel):
 
     Deliberately one model rather than two: a preview a diver approved and the result they
     got back are only worth comparing if they are the same shape, and the two are produced
-    by the same planner run against the same document.
+    by the same planner run against the same files.
+
+    An import of several files reports what importing each would, one after another in the
+    import's order: the counts in `collections` are their sums, and `notes` their notes in
+    that order. `members` and `dives` are the report's own rows over the batch, on the
+    preview and on the result alike.
 
     `conversion` is on the report rather than on the preview alone for the same reason: the
     result panel is what stays on screen after an import, and a diver who was told at
@@ -1038,7 +1191,10 @@ class ImportReport(BaseModel):
     files: ImportFileReport
     notes: Annotated[
         list[ImportNote],
-        Field(default_factory=list, description="Every decision worth telling the diver about, in document order"),
+        Field(
+            default_factory=list,
+            description="Every decision worth telling the diver about, in document order and the import's",
+        ),
     ]
     notes_truncated: Annotated[
         int,
@@ -1052,7 +1208,22 @@ class ImportReport(BaseModel):
         ConversionReport | None,
         Field(
             default=None,
-            description="Present when the upload was converted from another format; `null` when it was DiveJSON.",
+            description="Present when any file was converted from another format; `null` when every one was DiveJSON.",
+        ),
+    ]
+    members: Annotated[
+        list[ImportMemberReport],
+        Field(
+            default_factory=list,
+            description="One row per file: each part of the request and each file a zip among them held, in the "
+            "order the import reads them",
+        ),
+    ]
+    dives: Annotated[
+        list[ImportDiveReport],
+        Field(
+            default_factory=list,
+            description="One row per dive the import creates or touches, in the order the import reaches them",
         ),
     ]
 
@@ -1060,10 +1231,10 @@ class ImportReport(BaseModel):
 class ImportPreview(ImportReport):
     """What `POST /import/logbook/preview` returns. Nothing has been written.
 
-    `format`, `version` and `generator` are the *imported document's*, which for a converted
-    upload is the converter's output rather than the file a diver picked - so they read
-    `divejson`, `1.0` and `divejson convert` there. What the diver's file was is
-    `conversion.format`.
+    `format`, `version` and `generator` are the *imported document's* - the first the import
+    reads - which for a converted file is the converter's output rather than the file a diver
+    picked, so they read `divejson`, `1.0` and `divejson convert` there. What the diver's
+    files were is `conversion.format` and each row of `members`.
     """
 
     format: Annotated[str, Field(description="The imported document's own `format` marker", examples=["divejson"])]
@@ -1074,15 +1245,16 @@ class ImportPreview(ImportReport):
     archive: Annotated[
         bool,
         Field(
-            description="Whether this upload was a container carrying the stored files. A zip of dive-computer "
-            "files is not one: it converts to a logbook that references no stored files at all."
+            description="Whether the import carries a full-export archive, the container that restores the stored "
+            "files its logbook names. A zip of dive-computer files is not one: its files are read one by one."
         ),
     ]
     token: Annotated[
         str,
         Field(
-            description="Hand this back to `POST /import/logbook` with the same file. It attests which bytes this "
-            "report describes and nothing else - the import re-reads, re-converts and re-plans from scratch."
+            description="Hand this back to `POST /import/logbook` with the same files under the same names. It "
+            "attests which bytes this report describes and nothing else - the import re-reads, re-converts and "
+            "re-plans from scratch."
         ),
     ]
     check_in_details: Annotated[
@@ -1097,7 +1269,7 @@ class ImportPreview(ImportReport):
         ImportPortraitOffer | None,
         Field(
             default=None,
-            description="The archive's portrait, offered beside the account's. `null` when the upload carries none "
+            description="The archive's portrait, offered beside the account's. `null` when the import carries none "
             "it can offer - `notes` say why - or carries the account's own, framed the same.",
         ),
     ]
