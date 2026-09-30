@@ -486,10 +486,12 @@ class GeocodingSettings(BaseSettings):
     # Photon-compatible one. Both defaults are keyless public instances, so a self-hoster gets
     # a working feature with no third-party account.
     #
-    # `GEOCODER_URL=""` turns geocoding off entirely, search included: an operator who set it
-    # must not start sending searches to a new host by upgrading. `GEOCODER_SEARCH_URL=""`
-    # turns off search alone. Either way the endpoints answer "no result" rather than
-    # failing, exactly as they do when a provider is unreachable.
+    # `GEOCODER_URL=""` turns geocoding off entirely, search included: disabled means
+    # disabled, and an upgrade must not switch it back on. `GEOCODER_SEARCH_URL=""` turns off
+    # search alone. Either way the endpoints answer "no result" rather than failing, exactly
+    # as they do when a provider is unreachable. Neither default follows the other: a
+    # `GEOCODER_URL` naming your own Nominatim still sends searches to public Photon until
+    # `GEOCODER_SEARCH_URL` names a host of yours.
     GEOCODER_URL: str = config("GEOCODER_URL", default="https://nominatim.openstreetmap.org")
     GEOCODER_SEARCH_URL: str = config("GEOCODER_SEARCH_URL", default="https://photon.komoot.io")
     # Sent to `GEOCODER_URL` only; Photon takes no key.

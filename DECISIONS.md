@@ -2433,15 +2433,16 @@ Everything else degrades to `null`/`[]`; the log names the path, never the URL.
 ## Place search asks Photon, and `GEOCODER_URL=""` still switches it off
 
 `/geocode/search` asks Photon's `/api` at `GEOCODER_SEARCH_URL`, by default komoot's public
-instance, because Nominatim matches whole words only — `phi phi` and `mabul` never reach the islands
-— and its usage policy forbids search-as-you-type, which Photon is built for over the same OSM data.
-Reverse stays on Nominatim: it works, and the offshore fallback keys on its `unable to geocode`.
+instance: Nominatim matches whole words only — `phi phi` never reaches Ko Phi Phi Don — and its
+usage policy forbids search-as-you-type, which Photon is built for over the same OSM data. Reverse
+stays on Nominatim, whose `unable to geocode` the offshore fallback keys on.
 
-`GEOCODER_URL=""` switches search off too: it has always meant "disabled means disabled", and an
-instance that set it must not start sending typed searches to komoot by upgrading.
-`GEOCODER_SEARCH_URL=""` switches off search alone. Rejected: two independent switches, and a
-Nominatim search mode kept beside Photon — two adapters for a configuration nobody runs. The public
-instance is a demo server with no availability guarantee; when it fails, search answers `[]`.
+`GEOCODER_URL=""` switches search off too: disabled means disabled, and an upgrade must not switch
+it back on. `GEOCODER_SEARCH_URL=""` switches off search alone. Neither default follows the other,
+so a `GEOCODER_URL` naming an operator's own Nominatim still sends searches to public Photon — a
+breaking change for such an instance. Rejected: two independent switches; search off whenever
+`GEOCODER_URL` is not the stock Nominatim, which makes one default depend on another value; a
+Nominatim search mode beside Photon, two adapters for a configuration nobody runs.
 
 ## A pin in open water is named from polygons in the repo, not from a second provider
 

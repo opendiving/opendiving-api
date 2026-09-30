@@ -17,9 +17,11 @@ Modelled on `services.email_service`: a third-party dependency that is *optional
 `GEOCODER_URL` to an empty string, or take a provider away, and every function here logs and
 returns nothing rather than raising - a diver typing a site name into the form must not be
 blocked because a geocoder is down. That is also why the return types are "no result" shapes
-(`None`, `[]`) instead of exceptions. `GEOCODER_URL=""` switches search off too, because an
-operator who disabled geocoding must not start sending searches to a new host by upgrading;
-`GEOCODER_SEARCH_URL=""` switches off search alone.
+(`None`, `[]`) instead of exceptions. `GEOCODER_URL=""` switches search off too - disabled
+means disabled, and an upgrade must not switch a disabled feature back on - and
+`GEOCODER_SEARCH_URL=""` switches off search alone. Pointing `GEOCODER_URL` at a Nominatim of
+one's own is not a switch: searches still go to `GEOCODER_SEARCH_URL`, public Photon by
+default.
 
 The one thing here that does *not* need a provider is the offshore fallback: a pin Nominatim
 has no row for is answered from vendored sea polygons (`services.marine_areas`), because
