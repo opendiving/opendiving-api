@@ -921,7 +921,6 @@ class TestReferences:
 
         assert site["location"] == {
             "name": "Ras Mohammed, Egypt",
-            "full_name": "Ras Muhammad National Park, South Sinai, Egypt",
             "position": {"latitude": 27.7333, "longitude": 34.25},
             "bbox": {"south": 27.68, "north": 27.83, "west": 34.18, "east": 34.3},
         }
@@ -962,7 +961,8 @@ class TestReferences:
         assert [part.get("starts_on") for part in parts] == ["2026-05-30", "2026-06-02", None]
         assert [part.get("ends_on") for part in parts] == ["2026-06-02", "2026-06-04", "2026-06-06"]
         assert parts[0]["location"]["name"] == "Sharm el-Sheikh, Egypt"
-        assert parts[0]["location"]["full_name"] == "Sharm el-Sheikh, South Sinai, Egypt"
+        # Its stored fuller form is not written: a place is exported by its name alone.
+        assert "full_name" not in parts[0]["location"]
         assert parts[0]["location"]["position"] == {"latitude": 27.9158, "longitude": 34.33}
         assert parts[0]["location"]["bbox"] == {"south": 27.8, "north": 28.0, "west": 34.2, "east": 34.4}
         # The free-text one: a place the geocoder had no answer for is still a place, and

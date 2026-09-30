@@ -10,15 +10,11 @@ class GeocodeResult(BaseModel):
     Nominatim (see `services.geocoding_service`), and the web and iOS clients read both the
     same way.
 
-    `location` and `display_name` are both here because they answer different questions,
-    and both are stored now. `location` is short and becomes a place's `name` - divers write
-    "Ko Tao, Thailand", not a five-part address. A search result's is the place's own name
-    and its country; a pin's is the settlement it falls in and its country. `display_name`
-    is the full label, which becomes `full_name` and is what makes two otherwise identical
-    entries in a search picker distinguishable: the place's name and every address part above
-    it for a search result, Nominatim's own label for a pin. Neither member is renamed by
-    that: these are the geocoder's own wire names, and the place object's are
-    `schemas.location`'s.
+    `location` is what a pick saves as a place's `name`, for a search result and a pin
+    alike: the place, its region and its country, "Ko Tao, Surat Thani Province, Thailand" -
+    as a person would write it if they took the trouble, not a postal address. A search
+    result's place is its own name; a pin's is the settlement it falls in. `location` is the
+    geocoder's own wire name, and the place object's are `schemas.location`'s.
     """
 
     latitude: Annotated[float, Field(ge=-90, le=90, examples=[28.5717])]
@@ -28,8 +24,7 @@ class GeocodeResult(BaseModel):
     # not to be terse. `location`'s bound is the width of a place's `name` column, since
     # that is where it is headed; the others are simply sane ceilings. `services.geocoding_service`
     # truncates to these rather than letting an over-long value raise inside the normalizer.
-    location: Annotated[str, Field(max_length=255, examples=["Dahab, Egypt"])]
-    display_name: Annotated[str, Field(max_length=512, examples=["Blue Hole, Dahab, South Sinai, Egypt"])]
+    location: Annotated[str, Field(max_length=255, examples=["Dahab, South Sinai, Egypt"])]
     # The place's own name, where it has one. Absent for a result that is only an address.
     name: Annotated[str | None, Field(max_length=255, default=None)]
     # Carried per-result rather than in an envelope: attribution is a licence condition of
@@ -50,12 +45,13 @@ class GeocodeResult(BaseModel):
             examples=["[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"],
         ),
     ]
-    # Where a search result sits, for a picker to tell two same-named places apart: the same
-    # role under the same names as on `DiveSiteSuggestion`, though not the same vocabulary -
-    # these come from OpenStreetMap, the catalog's from Natural Earth. `region` is the finer
-    # of the two. Each is null on every reverse answer, and wherever OSM records none.
+    # Where a result sits, as fields of their own for a picker's hint: the same role under the
+    # same names as on `DiveSiteSuggestion`, though not the same vocabulary - these come from
+    # OpenStreetMap, the catalog's from Natural Earth. `region` is the finer of the two. A
+    # pin's answer carries them as a search result does; each is null wherever OSM records
+    # none, and on the offshore answer, which names only the water.
     country: Annotated[str | None, Field(default=None, max_length=255, examples=["Egypt"])]
-    region: Annotated[str | None, Field(default=None, max_length=255, examples=["South Sinai Governorate"])]
+    region: Annotated[str | None, Field(default=None, max_length=255, examples=["South Sinai"])]
     # The OSM object a search result is, spelled as the dive-site catalog spells it, so a
     # client can drop a geocoder row that repeats a catalog row by comparing both fields.
     # Null on every reverse answer.

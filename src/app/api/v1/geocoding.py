@@ -94,9 +94,9 @@ async def read_geocode_search(
 
     Only places and natural features come back - towns, islands, reefs, peaks, regions,
     parks - never a street, an address or a shop, and each place once. Each is named by the
-    place itself and its country ("Ko Tao, Thailand"), and carries its `region` and
-    `country` so two same-named places can be told apart, and its OSM identity in `source`
-    and `source_id`.
+    place itself, its region and its country ("Ko Tao, Surat Thani Province, Thailand"),
+    which is what a pick saves, and carries its `region` and `country` as fields of their own
+    and its OSM identity in `source` and `source_id`.
 
     Returns an empty list rather than an error for both "nothing matched" and "the provider
     is unavailable or switched off"; from the form's point of view those are the same thing,

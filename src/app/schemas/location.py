@@ -7,11 +7,11 @@ for a shape that is not about that resource at all.
 
 **Two names, and only the short one is ever rendered.** `name` is the place as a person
 writes it - the name alone (`"Moalboal"`), or the name with its country
-(`"Dahab, Egypt"`). `full_name` is the fullest written form the lookup returned
-(`"Dahab, South Sinai Governorate, Egypt"`), stored so an export carries what the source
-held and read by nothing on screen. Nothing binds the two: a lookup asked about a local
-name often answers with the district around it, so `"Sipadan Island Park"` may carry
-`"Sabah, Malaysia"` - shorter, and not containing it.
+(`"Dahab, Egypt"`). `full_name` is a fuller written form a lookup returned
+(`"Dahab, South Sinai Governorate, Egypt"`): the site and trip searches match it, nothing
+on screen reads it, and the export writes `name` alone. Nothing binds the two: a lookup
+asked about a local name often answers with the district around it, so
+`"Sipadan Island Park"` may carry `"Sabah, Malaysia"` - shorter, and not containing it.
 
 **A place is a value object with no identity**, so a write replaces the stored one
 wholesale rather than merging into it, and clearing it is an explicit null. It is
