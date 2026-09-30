@@ -32,7 +32,7 @@ from src.app.crud.crud_contacts import (
     resolve_contact_id_for_user,
     resolve_contact_ids_for_user,
 )
-from src.app.crud.crud_trip_parts import get_parts_for_trip, get_trip_uuids_staying_at, replace_parts_for_trip
+from src.app.crud.crud_trip_parts import get_parts_for_trip, replace_parts_for_trip
 from src.app.models.certification import Certification
 from src.app.models.contact import Contact
 from src.app.models.course import Course
@@ -176,14 +176,12 @@ def route_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "create": AsyncMock(return_value=_internal_contact()),
         "update": AsyncMock(),
         "delete": AsyncMock(),
-        "stayed_on": AsyncMock(return_value=[]),
     }
     monkeypatch.setattr(contacts_module, "_get_owned_contact", stubs["owned"])
     monkeypatch.setattr(contacts_module, "contact_name_exists", stubs["exists"])
     monkeypatch.setattr(contacts_module.crud_contacts, "create", stubs["create"])
     monkeypatch.setattr(contacts_module.crud_contacts, "update", stubs["update"])
     monkeypatch.setattr(contacts_module.crud_contacts, "delete", stubs["delete"])
-    monkeypatch.setattr(contacts_module, "get_trip_uuids_staying_at", stubs["stayed_on"])
     for name in (
         "invalidate_contact_caches",
         "invalidate_dive_caches",
@@ -191,7 +189,6 @@ def route_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "invalidate_certification_caches",
         "invalidate_gear_caches",
         "invalidate_trip_caches",
-        "invalidate_trip_items",
     ):
         stubs[name] = AsyncMock()
         monkeypatch.setattr(contacts_module, name, stubs[name])
@@ -302,11 +299,8 @@ class TestTheRoutes:
     async def test_a_delete_drops_every_family_whose_reads_it_changes(
         self, route_collaborators: dict[str, Any]
     ) -> None:
-        """Five hosts read back a null now, and a single trip's key names no user - so the
-        trips a part stayed at are collected before the row goes and dropped one by one."""
-        stayed_on = [uuid7(), uuid7()]
-        route_collaborators["stayed_on"].return_value = stayed_on
-
+        """Five hosts read back a null now. The trip family's sweep reaches the single trips
+        as well as the list, so the trips a part stayed at need no naming."""
         await contacts_module.erase_contact(
             request=MagicMock(), uuid=uuid7(), current_user=_current_user(), db=MagicMock()
         )
@@ -321,7 +315,6 @@ class TestTheRoutes:
             "invalidate_trip_caches",
         ):
             route_collaborators[name].assert_awaited_once_with(USER_ID)
-        route_collaborators["invalidate_trip_items"].assert_awaited_once_with(stayed_on)
 
 
 # ------------------------------------------------------------------ the references
@@ -553,7 +546,7 @@ class TestTheDatabase:
     ) -> None:
         trip = create_trip(db, diver)
         contact = create_contact(db, diver, roles=["accommodation"])
-        trip_id, contact_uuid, contact_id, trip_uuid = trip.id, contact.uuid, contact.id, trip.uuid
+        trip_id, contact_uuid, contact_id = trip.id, contact.uuid, contact.id
 
         await replace_parts_for_trip(
             db=async_db,
@@ -564,7 +557,6 @@ class TestTheDatabase:
 
         first, second = await get_parts_for_trip(async_db, trip_id)
         assert (first.accommodation_uuid, second.accommodation_uuid) == (contact_uuid, None)
-        assert await get_trip_uuids_staying_at(async_db, contact_id) == [trip_uuid]
 
     @pytest.mark.asyncio
     async def test_deleting_a_contact_unlinks_all_five_references(

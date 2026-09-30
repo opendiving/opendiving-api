@@ -6,7 +6,6 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.contact import Contact
-from ..models.trip import Trip
 from ..models.trip_part import TripPart
 from ..schemas.location import LOCATION_FIELDS, location_columns, location_from_row
 from ..schemas.trip import TripPartInput, TripPartRead
@@ -99,15 +98,3 @@ async def replace_parts_for_trip(
         )
     if commit:
         await db.commit()
-
-
-async def get_trip_uuids_staying_at(db: AsyncSession, contact_id: int) -> list[uuid_pkg.UUID]:
-    """The trips with a part whose accommodation is this contact - what deleting the
-    contact has to drop from the single-trip cache, whose key names no user."""
-    result = await db.execute(
-        select(Trip.uuid)
-        .join(TripPart, TripPart.trip_id == Trip.id)
-        .where(TripPart.accommodation_contact_id == contact_id)
-        .distinct()
-    )
-    return list(result.scalars())

@@ -11,7 +11,6 @@ from ..models.course_person import CoursePerson
 from ..models.dive import Dive
 from ..models.dive_person import DivePerson
 from ..models.person import Person
-from ..models.trip import Trip
 from ..models.trip_person import TripPerson
 from ..models.user import User
 from ..schemas.person import (
@@ -221,12 +220,3 @@ async def replace_people_for_course(
     db: AsyncSession, course_id: int, references: Sequence[StoredReference], commit: bool = True
 ) -> None:
     await _replace_people(db, CoursePerson, CoursePerson.course_id, course_id, references, commit)
-
-
-async def get_trip_uuids_with_person(db: AsyncSession, person_id: int) -> list[uuid_pkg.UUID]:
-    """The trips naming this person - what deleting it has to drop from the single-trip
-    cache, whose key names no user."""
-    result = await db.execute(
-        select(Trip.uuid).join(TripPerson, TripPerson.trip_id == Trip.id).where(TripPerson.person_id == person_id)
-    )
-    return list(result.scalars())

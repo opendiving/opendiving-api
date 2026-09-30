@@ -114,7 +114,7 @@ class OwnedResourceCache[InternalT, PublicT]:
         resource_label: str
             Human-readable singular label used in `NotFoundException` messages, e.g. "Trip".
         item_cache_prefix: str
-            Cache key prefix for the single-item cache, e.g. "trip_cache".
+            Cache key prefix for the single-item cache, e.g. "dive_site_cache".
         crud: FastCRUD
             The resource's FastCRUD instance (must support `get_multi`/`get`).
         schema_to_select: type
@@ -125,7 +125,7 @@ class OwnedResourceCache[InternalT, PublicT]:
         sort_columns / sort_orders: str
             Passed through to `crud.get_multi` for the list endpoint. `sort_columns` may be
             omitted only by a resource that opts out of `read_list` entirely and keeps an
-            instance for `list_cache_key_prefix`/`invalidate_list` alone - `trips.py` is
+            instance for `list_cache_key_prefix` alone - `trips.py` is
             the one, its order being an aggregate over another table rather than a column
             of its own. `read_list` then raises rather than sorting by nothing.
         search_columns: tuple[str, ...]
@@ -135,7 +135,7 @@ class OwnedResourceCache[InternalT, PublicT]:
             and the cache key is unchanged.
         list_expiration: int
             TTL (seconds) for the list cache. The single-item cache has no expiration, matching
-            the existing `trip_cache`/`dive_site_cache`/`dive_cache` behavior.
+            the existing `dive_site_cache`/`dive_cache` behavior.
         """
         # Public, unlike its siblings: `tests/test_cache_utils.py` reads it off the real
         # dive-site and trip caches to check that `cache_invalidation`'s hard-coded names

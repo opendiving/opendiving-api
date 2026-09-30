@@ -12,7 +12,6 @@ from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_contacts import CONTACT_SEARCH_COLUMNS, contact_name_exists, crud_contacts
-from ...crud.crud_trip_parts import get_trip_uuids_staying_at
 from ...schemas.contact import (
     ADDRESS_FIELDS,
     CONTACT_ADDRESS_PREFIX,
@@ -31,7 +30,6 @@ from ...services.cache_invalidation import (
     invalidate_dive_caches,
     invalidate_gear_caches,
     invalidate_trip_caches,
-    invalidate_trip_items,
 )
 
 router = APIRouter(tags=["contacts"])
@@ -225,9 +223,6 @@ async def erase_contact(
     """
     db_contact = await _get_owned_contact(db, uuid, current_user)
     owner_id = db_contact.user_id
-    # Before the row goes: afterwards no part names it, and a single trip's cache key
-    # carries no user for a pattern to find.
-    stayed_on = await get_trip_uuids_staying_at(db=db, contact_id=db_contact.id)
 
     await crud_contacts.delete(db=db, uuid=uuid)
 
@@ -239,6 +234,5 @@ async def erase_contact(
     await invalidate_certification_caches(owner_id)
     await invalidate_gear_caches(owner_id)
     await invalidate_trip_caches(owner_id)
-    await invalidate_trip_items(stayed_on)
 
     return {"message": "Contact deleted"}

@@ -23,7 +23,6 @@ from ...crud.crud_people import (
     crud_people,
     get_people_page,
     get_person_read,
-    get_trip_uuids_with_person,
     person_name_exists,
 )
 from ...models.user import User
@@ -39,7 +38,6 @@ from ...services.cache_invalidation import (
     invalidate_course_caches,
     invalidate_dive_caches,
     invalidate_trip_caches,
-    invalidate_trip_items,
 )
 from ...services.person_links import resolve_linked_account, spend_link_attempt
 
@@ -205,15 +203,12 @@ async def erase_person(
     """
     db_person = await _get_owned_person(db, uuid, current_user)
     owner_id = db_person.user_id
-    # Before the row goes: a single trip's cache key carries no user for a pattern to find.
-    trips_on = await get_trip_uuids_with_person(db, db_person.id)
 
     await crud_people.delete(db=db, uuid=uuid)
 
     # Every host read that carried this person's uuid now reads without it.
     await invalidate_dive_caches(owner_id)
     await invalidate_trip_caches(owner_id)
-    await invalidate_trip_items(trips_on)
     await invalidate_course_caches(owner_id)
     await invalidate_certification_caches(owner_id)
 

@@ -1046,8 +1046,8 @@ async def erase_user(
 
     # Hygiene rather than correctness: every read 401s from this instant regardless, and
     # user ids are sequential and never reused, so nothing can be served out of these. The
-    # uuid-keyed `trip_cache:{uuid}` / `dive_site_cache:{uuid}` entries are not swept -
-    # they are not user-scoped, and are unreachable for the same reason.
+    # uuid-keyed `dive_site_cache:{uuid}` entries are not swept - they are not user-scoped,
+    # and are unreachable for the same reason.
     await delete_keys_by_pattern(f"user_{current_user['id']}_*")
 
     if newly_deleted:

@@ -22,18 +22,20 @@ Mostly without a database: the route's collaborators are stubbed and the asserti
 on what it hands them (the `test_dive_update.py` style), and the search clause is asserted
 as compiled SQL like `test_picker_search.py` does for the others.
 
-The last three classes are the exception and run against a live Postgres, for the reason
+The last four classes are the exception and run against a live Postgres, for the reason
 `test_dive_neighbors.py` gives for its own split - what they have to get right is what the
 *database* does, and a mocked session would only assert that we called the calls we called.
 `TestReplaceParts` covers a wholesale replace, which is a `DELETE` plus re-numbered
 inserts; `TestSearchAgainstPostgres` covers the correlated EXISTS, which compiles to the
-same text whether or not it correlates; and `TestListOrdering` covers the correlated
-aggregate the page is sorted by, which no compiled query can be read for. All three skip
-themselves when no database is reachable; see CONTRIBUTING.md for why a run on the host
-needs `POSTGRES_SERVER=localhost` to make them execute.
+same text whether or not it correlates; `TestListOrdering` covers the correlated
+aggregate the page is sorted by, which no compiled query can be read for; and
+`TestTheCounts` covers the distinct counts over a trip's dives, which only rows can get
+wrong. All four skip themselves when no database is reachable; see CONTRIBUTING.md for why
+a run on the host needs `POSTGRES_SERVER=localhost` to make them execute.
 """
 
 import uuid as uuid_pkg
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from fnmatch import fnmatch
 from typing import Any
@@ -49,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+from src.app.api.v1 import dives as dives_module
 from src.app.api.v1 import trips as trips_module
 from src.app.core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
 from src.app.core.schemas import DATE_RANGE_MESSAGE
@@ -56,10 +59,16 @@ from src.app.core.utils import cache as cache_module
 from src.app.core.utils.cache import across_builds, namespaced
 from src.app.crud import crud_trips as crud_trips_module
 from src.app.crud.crud_trip_parts import get_parts_for_trip, replace_parts_for_trip
-from src.app.crud.crud_trips import get_trips_page
+from src.app.crud.crud_trips import NO_DIVES, TripCounts, get_counts_for_trips, get_trips_page
+from src.app.models.dive import Dive
+from src.app.models.dive_dive_site import DiveDiveSite
+from src.app.models.dive_site import DiveSite
+from src.app.models.dive_species import DiveSpecies
+from src.app.models.species import Species
 from src.app.models.trip import Trip
 from src.app.models.trip_part import TripPart
 from src.app.models.user import User
+from src.app.schemas.dive import DiveUpdateRequest
 from src.app.schemas.location import (
     BBOX_MESSAGE,
     BBOX_NEEDS_COORDINATES_MESSAGE,
@@ -77,7 +86,7 @@ from src.app.schemas.trip import (
     TripUpdateRequest,
 )
 from tests.conftest import db_available
-from tests.helpers.generators import create_trip
+from tests.helpers.generators import create_dive, create_dive_site, create_species, create_trip
 
 USER_ID = 1
 USER_UUID = uuid7()
@@ -296,12 +305,7 @@ class _FakeRedis:
 
 @pytest.fixture
 def write_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Stubs everything `write_trip` and `patch_trip` touch, recording the calls.
-
-    `patch_trip` carries a `@cache` decorator that drops `trip_cache:{uuid}` on the way
-    out, so a client has to be in place or every call through it raises before reaching
-    the body.
-    """
+    """Stubs everything `write_trip` and `patch_trip` touch, recording the calls."""
     created = _internal_trip()
     stubs: dict[str, Any] = {
         "created": created,
@@ -310,13 +314,11 @@ def write_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "update": AsyncMock(),
         "replace_parts": AsyncMock(),
         "get_parts": AsyncMock(return_value=[_part("Moalboal")]),
-        "invalidate_list": AsyncMock(),
+        "invalidate_trips": AsyncMock(),
         "name_exists": AsyncMock(return_value=False),
         "owned": AsyncMock(return_value=created),
-        "redis": _FakeRedis(),
     }
 
-    monkeypatch.setattr(cache_module, "client", stubs["redis"])
     monkeypatch.setattr(trips_module.crud_trips, "create", stubs["create"])
     monkeypatch.setattr(trips_module.crud_trips, "get", stubs["get"])
     monkeypatch.setattr(trips_module.crud_trips, "update", stubs["update"])
@@ -324,7 +326,7 @@ def write_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(trips_module, "get_parts_for_trip", stubs["get_parts"])
     monkeypatch.setattr(trips_module, "trip_name_exists", stubs["name_exists"])
     monkeypatch.setattr(trips_module, "_get_owned_trip", stubs["owned"])
-    monkeypatch.setattr(trips_module._trip_cache, "invalidate_list", stubs["invalidate_list"])
+    monkeypatch.setattr(trips_module, "invalidate_trip_caches", stubs["invalidate_trips"])
 
     return stubs
 
@@ -440,13 +442,15 @@ class TestPatchTrip:
         write_collaborators["update"].assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_parts_only_edit_still_invalidates_the_list(self, write_collaborators: dict[str, Any]) -> None:
-        """The branch easiest to get wrong. The decorator on this route drops
-        `trip_cache:{uuid}` only, so without this the trips list would go on showing the
-        old parts for a minute after the edit - and the list is *ordered* by them now."""
+    async def test_a_parts_only_edit_still_invalidates_the_trip_reads(
+        self, write_collaborators: dict[str, Any]
+    ) -> None:
+        """The branch easiest to get wrong: `update_data` is empty, so without this the trip
+        and the trips list would go on showing the old parts - and the list is *ordered* by
+        them now."""
         await _patch({"parts": [{"location": MOALBOAL}]})
 
-        write_collaborators["invalidate_list"].assert_awaited_once_with(USER_ID)
+        write_collaborators["invalidate_trips"].assert_awaited_once_with(USER_ID)
 
     @pytest.mark.asyncio
     async def test_an_edit_that_changes_nothing_touches_nothing(self, write_collaborators: dict[str, Any]) -> None:
@@ -454,7 +458,7 @@ class TestPatchTrip:
 
         write_collaborators["update"].assert_not_awaited()
         write_collaborators["replace_parts"].assert_not_awaited()
-        write_collaborators["invalidate_list"].assert_not_awaited()
+        write_collaborators["invalidate_trips"].assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_reversed_range_on_one_part_is_refused(self) -> None:
@@ -508,6 +512,7 @@ class TestReadPath:
             AsyncMock(return_value={11: [_part("Moalboal"), _part("Bohol")], 12: []}),
         )
         monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
+        monkeypatch.setattr(trips_module, "get_counts_for_trips", AsyncMock(return_value={11: NO_DIVES, 12: NO_DIVES}))
 
         with patch.object(cache_module, "client", _FakeRedis()):
             page = await trips_module._cached_read_trips(
@@ -526,6 +531,37 @@ class TestReadPath:
         ]
         # The internal id the child rows hang off is not part of the public shape.
         assert "id" not in page["data"][0]
+
+    @pytest.mark.asyncio
+    async def test_a_page_carries_each_trips_own_counts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """From one query over the page's trip ids, owner-scoped, never one per trip."""
+        rows = [
+            {**_internal_trip(11, "Cebu 2026").model_dump(), "id": 11, "user_id": USER_ID},
+            {**_internal_trip(12, "Red Sea 2025").model_dump(), "id": 12, "user_id": USER_ID},
+        ]
+        counts = AsyncMock(return_value={11: TripCounts(4, 3, 17), 12: NO_DIVES})
+        monkeypatch.setattr(trips_module, "get_trips_page", AsyncMock(return_value={"data": rows, "total_count": 2}))
+        monkeypatch.setattr(trips_module, "get_parts_for_trips", AsyncMock(return_value={}))
+        monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
+        monkeypatch.setattr(trips_module, "get_counts_for_trips", counts)
+
+        with patch.object(cache_module, "client", _FakeRedis()):
+            page = await trips_module._cached_read_trips(
+                _get_request(),
+                user_id=USER_ID,
+                user_uuid=USER_UUID,
+                db=MagicMock(),
+                page=1,
+                items_per_page=10,
+                search=None,
+            )
+
+        assert [(t["dive_count"], t["dive_site_count"], t["species_count"]) for t in page["data"]] == [
+            (4, 3, 17),
+            (0, 0, 0),
+        ]
+        counts.assert_awaited_once()
+        assert counts.await_args.kwargs == {"trip_ids": [11, 12], "user_id": USER_ID}  # type: ignore[union-attr]
 
     @pytest.mark.asyncio
     async def test_the_search_term_reaches_the_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -580,13 +616,16 @@ class TestReadPath:
         assert fnmatch(key, across_builds(f"user_{USER_ID}_trips:*"))
 
     @pytest.mark.asyncio
-    async def test_a_single_trip_embeds_its_parts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_a_single_trip_embeds_its_parts_and_counts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         trip = _internal_trip()
         monkeypatch.setattr(trips_module.crud_trips, "get", AsyncMock(return_value=trip))
         monkeypatch.setattr(
             trips_module, "get_parts_for_trip", AsyncMock(return_value=[_part("Moalboal"), _part("Bohol")])
         )
         monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
+        monkeypatch.setattr(
+            trips_module, "get_counts_for_trips", AsyncMock(return_value={trip.id: TripCounts(4, 3, 17)})
+        )
         redis = _FakeRedis()
 
         with patch.object(cache_module, "client", redis):
@@ -594,13 +633,16 @@ class TestReadPath:
             # GET the decorator returns the round-tripped JSON, not the `TripRead` the
             # signature promises.
             body: Any = await trips_module._cached_read_trip(
-                _get_request(), uuid=trip.uuid, owner_uuid=USER_UUID, db=MagicMock()
+                _get_request(), user_id=USER_ID, uuid=trip.uuid, owner_uuid=USER_UUID, db=MagicMock()
             )
 
         assert [part["location"]["name"] for part in body["parts"]] == ["Moalboal", "Bohol"]
-        # The same key `patch_trip` and `erase_trip` delete - moving off
-        # `OwnedResourceCache.read_item` had to leave invalidation untouched.
-        assert list(redis.written) == [namespaced(f"trip_cache:{trip.uuid}")]
+        assert (body["dive_count"], body["dive_site_count"], body["species_count"]) == (4, 3, 17)
+        # Under the user, so the sweep every dive write makes reaches it without naming it.
+        (key,) = redis.written
+        assert key == namespaced(f"user_{USER_ID}_trip:{trip.uuid}")
+        assert fnmatch(key, across_builds(f"user_{USER_ID}_trip:*"))
+        assert not fnmatch(key, across_builds(f"user_{USER_ID}_trips:*"))
 
     @pytest.mark.asyncio
     async def test_a_missing_trip_is_a_404(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -608,7 +650,7 @@ class TestReadPath:
 
         with patch.object(cache_module, "client", _FakeRedis()), pytest.raises(NotFoundException):
             await trips_module._cached_read_trip(
-                _get_request(), uuid=uuid_pkg.UUID(int=0), owner_uuid=USER_UUID, db=MagicMock()
+                _get_request(), user_id=USER_ID, uuid=uuid_pkg.UUID(int=0), owner_uuid=USER_UUID, db=MagicMock()
             )
 
 
@@ -913,3 +955,141 @@ class TestSearchAgainstPostgres:
         tag = went.rsplit(" ", 1)[-1]
 
         assert await self._matching_names(async_db, other_diver.id, f"moalboal {tag}") == []
+
+
+def _link(db: Session, dive: Dive, *, sites: Sequence[DiveSite] = (), species: Sequence[Species] = ()) -> None:
+    """Log these sites and sightings on the dive, in the order given."""
+    db.add_all([DiveDiveSite(dive_id=dive.id, dive_site_id=site.id, position=i) for i, site in enumerate(sites)])
+    db.add_all([DiveSpecies(dive_id=dive.id, species_id=seen.id, position=i) for i, seen in enumerate(species)])
+    db.commit()
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestTheCounts:
+    """`get_counts_for_trips` executed rather than stubbed.
+
+    Both join tables fan each dive out to sites x species rows, so every count is only right
+    if it is `DISTINCT` - a trip whose dives share a site or a species reads high otherwise,
+    and only rows can show it.
+    """
+
+    @staticmethod
+    async def _counts(async_db: AsyncSession, diver: User, *trips: Trip) -> list[TripCounts]:
+        by_trip = await get_counts_for_trips(async_db, trip_ids=[trip.id for trip in trips], user_id=diver.id)
+        return [by_trip[trip.id] for trip in trips]
+
+    @pytest.mark.asyncio
+    async def test_dives_across_several_sites_and_species(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        trip = create_trip(db, diver)
+        drift, wall, wreck = (create_dive_site(db, diver) for _ in range(3))
+        turtle, manta, moray = (create_species(db) for _ in range(3))
+        _link(db, create_dive(db, diver, trip=trip), sites=[drift, wall], species=[turtle])
+        _link(db, create_dive(db, diver, trip=trip), sites=[wreck], species=[manta, moray])
+
+        assert await self._counts(async_db, diver, trip) == [TripCounts(2, 3, 3)]
+
+    @pytest.mark.asyncio
+    async def test_a_shared_site_and_a_repeated_species_count_once(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        trip = create_trip(db, diver)
+        drift, wall = create_dive_site(db, diver), create_dive_site(db, diver)
+        turtle, manta = create_species(db), create_species(db)
+        _link(db, create_dive(db, diver, trip=trip), sites=[drift, wall], species=[turtle, manta])
+        _link(db, create_dive(db, diver, trip=trip), sites=[wall], species=[turtle])
+        _link(db, create_dive(db, diver, trip=trip), sites=[wall], species=[turtle, manta])
+
+        assert await self._counts(async_db, diver, trip) == [TripCounts(3, 2, 2)]
+
+    @pytest.mark.asyncio
+    async def test_a_trip_with_no_dives_counts_zero(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        empty, busy = create_trip(db, diver), create_trip(db, diver)
+        _link(db, create_dive(db, diver, trip=busy), sites=[create_dive_site(db, diver)])
+
+        assert await self._counts(async_db, diver, empty, busy) == [NO_DIVES, TripCounts(1, 1, 0)]
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_dive_counts_for_nothing(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        """Its join rows outlive it - the soft delete issues no `DELETE` for them to cascade."""
+        trip = create_trip(db, diver)
+        _link(db, create_dive(db, diver, trip=trip), sites=[create_dive_site(db, diver)])
+        erased = create_dive(db, diver, trip=trip, is_deleted=True)
+        _link(db, erased, sites=[create_dive_site(db, diver)], species=[create_species(db)])
+
+        assert await self._counts(async_db, diver, trip) == [TripCounts(1, 1, 0)]
+
+    @pytest.mark.asyncio
+    async def test_a_dive_moved_between_trips_updates_both_reads(
+        self, db: Session, async_db: AsyncSession, diver: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Through `PATCH /dive` and a cache that serves hits, with both trips' single reads
+        and the list page already cached: the move names only the trip it goes to, and the
+        one it left has to be dropped as well."""
+        left, joined = create_trip(db, diver), create_trip(db, diver)
+        wall = create_dive_site(db, diver)
+        turtle = create_species(db)
+        _link(db, create_dive(db, diver, trip=left), sites=[wall], species=[turtle])
+        moved = create_dive(db, diver, trip=left)
+        _link(db, moved, sites=[wall, create_dive_site(db, diver)], species=[create_species(db)])
+        monkeypatch.setattr(cache_module, "client", _ServingRedis())
+
+        async def reads() -> dict[str, tuple[TripCounts, TripCounts]]:
+            page: Any = await trips_module._cached_read_trips(
+                _get_request(),
+                user_id=diver.id,
+                user_uuid=diver.uuid,
+                db=async_db,
+                page=1,
+                items_per_page=10,
+                search=None,
+            )
+            listed = {trip["uuid"]: trip for trip in page["data"]}
+            result = {}
+            for trip in (left, joined):
+                single: Any = await trips_module._cached_read_trip(
+                    _get_request(), user_id=diver.id, uuid=trip.uuid, owner_uuid=diver.uuid, db=async_db
+                )
+                result[trip.name] = (_counts_of(single), _counts_of(listed[str(trip.uuid)]))
+            return result
+
+        before = await reads()
+        await dives_module.patch_dive(
+            request=MagicMock(),
+            uuid=moved.uuid,
+            values=DiveUpdateRequest.model_validate({"trip_uuid": str(joined.uuid)}),
+            current_user={"id": diver.id, "uuid": diver.uuid},
+            db=async_db,
+        )
+
+        assert before == {left.name: (TripCounts(2, 2, 2),) * 2, joined.name: (NO_DIVES,) * 2}
+        assert await reads() == {left.name: (TripCounts(1, 1, 1),) * 2, joined.name: (TripCounts(1, 2, 1),) * 2}
+
+
+def _counts_of(trip: dict[str, Any]) -> TripCounts:
+    return TripCounts(trip["dive_count"], trip["dive_site_count"], trip["species_count"])
+
+
+class _ServingRedis:
+    """A Redis that keeps what `@cache` writes and serves it back, and sweeps the way the real
+    one does - so a read after a write is stale unless something actually dropped it."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, bytes] = {}
+
+    async def get(self, key: str) -> bytes | None:
+        return self.store.get(key)
+
+    async def set(self, key: str, value: str) -> None:
+        self.store[key] = value.encode()
+
+    async def expire(self, key: str, seconds: int) -> None:
+        return None
+
+    async def delete(self, *keys: str) -> None:
+        for key in keys:
+            self.store.pop(key, None)
+
+    async def scan(self, cursor: int = 0, match: str = "*", count: int | None = None) -> tuple[int, list[str]]:
+        return 0, [key for key in self.store if fnmatch(key, match)]

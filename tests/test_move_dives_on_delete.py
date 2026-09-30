@@ -124,7 +124,7 @@ def trip_route(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "resolve": AsyncMock(return_value=99),
         "reassign": AsyncMock(side_effect=_records(calls, "reassign", 3)),
         "delete": AsyncMock(side_effect=_records(calls, "delete")),
-        "invalidate_list": AsyncMock(),
+        "invalidate_trips": AsyncMock(),
         "invalidate_dives": AsyncMock(),
         "redis": _FakeRedis(),
     }
@@ -134,7 +134,7 @@ def trip_route(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(trips_module, "resolve_trip_id_for_user", stubs["resolve"])
     monkeypatch.setattr(trips_module, "reassign_dives_to_trip", stubs["reassign"])
     monkeypatch.setattr(trips_module.crud_trips, "delete", stubs["delete"])
-    monkeypatch.setattr(trips_module._trip_cache, "invalidate_list", stubs["invalidate_list"])
+    monkeypatch.setattr(trips_module, "invalidate_trip_caches", stubs["invalidate_trips"])
     monkeypatch.setattr(trips_module, "invalidate_dive_caches", stubs["invalidate_dives"])
 
     return stubs
@@ -156,6 +156,7 @@ def dive_site_route(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "delete": AsyncMock(side_effect=_records(calls, "delete")),
         "invalidate_list": AsyncMock(),
         "invalidate_dives": AsyncMock(),
+        "invalidate_trips": AsyncMock(),
         "redis": _FakeRedis(),
     }
 
@@ -166,6 +167,7 @@ def dive_site_route(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "delete", stubs["delete"])
     monkeypatch.setattr(dive_sites_module._dive_site_cache, "invalidate_list", stubs["invalidate_list"])
     monkeypatch.setattr(dive_sites_module, "invalidate_dive_caches", stubs["invalidate_dives"])
+    monkeypatch.setattr(dive_sites_module, "invalidate_trip_caches", stubs["invalidate_trips"])
 
     return stubs
 
@@ -259,6 +261,14 @@ class TestEraseTripWithAReplacement:
         trip_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
 
     @pytest.mark.asyncio
+    async def test_the_replacement_trips_reads_are_dropped(self, trip_route: dict[str, Any]) -> None:
+        """It now counts the dives it took in, and its sites and species - so every trip
+        read of the owner goes, not only the deleted trip's."""
+        await _erase_trip(trip_route, move_dives_to=uuid7())
+
+        trip_route["invalidate_trips"].assert_awaited_once_with(USER_ID)
+
+    @pytest.mark.asyncio
     async def test_a_replacement_that_moved_nothing_still_drops_the_caches(self, trip_route: dict[str, Any]) -> None:
         """Nothing gates the invalidation: the trip is gone from every dive read either
         way, so an empty trip's delete has to drop the caches like any other. This once
@@ -346,6 +356,14 @@ class TestEraseDiveSiteWithoutTheParameter:
 
         dive_site_route["invalidate_dives"].assert_awaited_once_with(USER_ID)
 
+    @pytest.mark.asyncio
+    async def test_the_trip_caches_are_dropped_too(self, dive_site_route: dict[str, Any]) -> None:
+        """A trip read counts the distinct sites its dives name, and the cascade just took
+        this one off all of them."""
+        await _erase_dive_site(dive_site_route)
+
+        dive_site_route["invalidate_trips"].assert_awaited_once_with(USER_ID)
+
 
 class TestEraseDiveSiteWithAReplacement:
     @pytest.mark.asyncio
@@ -360,6 +378,13 @@ class TestEraseDiveSiteWithAReplacement:
 
         kwargs = dive_site_route["replace"].await_args.kwargs
         assert (kwargs["user_id"], kwargs["from_dive_site_id"], kwargs["to_dive_site_id"]) == (USER_ID, 21, 99)
+
+    @pytest.mark.asyncio
+    async def test_the_trip_caches_are_dropped(self, dive_site_route: dict[str, Any]) -> None:
+        """A trip whose dives were logged at both sites now names one where it named two."""
+        await _erase_dive_site(dive_site_route, move_dives_to=dive_site_route["replacement_uuid"])
+
+        dive_site_route["invalidate_trips"].assert_awaited_once_with(USER_ID)
 
     @pytest.mark.asyncio
     async def test_the_response_says_nothing_about_what_moved(self, dive_site_route: dict[str, Any]) -> None:

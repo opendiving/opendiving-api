@@ -183,7 +183,6 @@ def route_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "exists": AsyncMock(return_value=False),
         "update": AsyncMock(),
         "delete": AsyncMock(),
-        "trips_on": AsyncMock(return_value=[]),
         "spend": AsyncMock(),
         "resolve": AsyncMock(return_value=42),
     }
@@ -191,13 +190,11 @@ def route_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(people_module, "person_name_exists", stubs["exists"])
     monkeypatch.setattr(people_module.crud_people, "update", stubs["update"])
     monkeypatch.setattr(people_module.crud_people, "delete", stubs["delete"])
-    monkeypatch.setattr(people_module, "get_trip_uuids_with_person", stubs["trips_on"])
     monkeypatch.setattr(people_module, "spend_link_attempt", stubs["spend"])
     monkeypatch.setattr(people_module, "resolve_linked_account", stubs["resolve"])
     for name in (
         "invalidate_dive_caches",
         "invalidate_trip_caches",
-        "invalidate_trip_items",
         "invalidate_course_caches",
         "invalidate_certification_caches",
     ):
@@ -240,7 +237,6 @@ class TestTheRoutes:
         for name in (
             "invalidate_dive_caches",
             "invalidate_trip_caches",
-            "invalidate_trip_items",
             "invalidate_course_caches",
             "invalidate_certification_caches",
         ):
@@ -263,11 +259,8 @@ class TestTheRoutes:
     async def test_a_delete_drops_every_family_whose_reads_it_changes(
         self, route_collaborators: dict[str, Any]
     ) -> None:
-        """Four hosts read back without it, and a single trip's key names no user - so the
-        trips it was on are collected before the row goes and dropped one by one."""
-        trips_on = [uuid7(), uuid7()]
-        route_collaborators["trips_on"].return_value = trips_on
-
+        """Four hosts read back without it. The trip family's sweep reaches the single trips
+        as well as the list, so the trips it was on need no naming."""
         await people_module.erase_person(
             request=MagicMock(), uuid=uuid7(), current_user=_current_user(), db=MagicMock()
         )
@@ -280,7 +273,6 @@ class TestTheRoutes:
             "invalidate_certification_caches",
         ):
             route_collaborators[name].assert_awaited_once_with(USER_ID)
-        route_collaborators["invalidate_trip_items"].assert_awaited_once_with(trips_on)
 
 
 class TestTheIntegrityMessages:
@@ -655,7 +647,7 @@ class TestTheHostsCarryReferences:
             request=None, user_id=user_id, user_uuid=user_uuid, db=async_db, page=1, items_per_page=10, search=None
         )
         single = await trips_module._cached_read_trip.__wrapped__(  # type: ignore[attr-defined]
-            request=None, uuid=trip_uuid, owner_uuid=user_uuid, db=async_db
+            request=None, user_id=user_id, uuid=trip_uuid, owner_uuid=user_uuid, db=async_db
         )
 
         expected = [{"person_uuid": person_uuid, "role": "companion"}]

@@ -1,17 +1,31 @@
 import uuid as uuid_pkg
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastcrud import FastCRUD
 from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like
+from ..models.dive import Dive
+from ..models.dive_dive_site import DiveDiveSite
+from ..models.dive_species import DiveSpecies
 from ..models.trip import Trip
 from ..models.trip_part import TripPart
 from ..schemas.trip import TripCreateInternal, TripReadInternal, TripUpdate, TripUpdateInternal
 
 CRUDTrip = FastCRUD[Trip, TripCreateInternal, TripUpdate, TripUpdateInternal, TripUpdate, TripReadInternal]
 crud_trips = CRUDTrip(Trip)
+
+
+class TripCounts(NamedTuple):
+    """What a trip read counts over the dives assigned to it - `TripRead`'s three members."""
+
+    dive_count: int
+    dive_site_count: int
+    species_count: int
+
+
+NO_DIVES = TripCounts(dive_count=0, dive_site_count=0, species_count=0)
 
 # A trip's span is not stored, so anything that orders trips by date is a correlated
 # aggregate over the parts. `ix_trip_part_trip_id_position` leads with `trip_id`, so each
@@ -90,6 +104,40 @@ async def get_trips_page(
     ).mappings()
 
     return {"data": [dict(row) for row in rows], "total_count": total_count or 0}
+
+
+async def get_counts_for_trips(db: AsyncSession, *, trip_ids: list[int], user_id: int) -> dict[int, TripCounts]:
+    """The dive, dive-site and species counts of each of these trips, in one grouped query.
+
+    Live dives only: `dive_dive_site` and `dive_species` carry no liveness of their own, and a
+    soft-deleted dive's join rows outlive it. Both joins fan each dive out to sites x species
+    rows, which is why every count is `DISTINCT` - the species one is the same
+    `COUNT(DISTINCT species_id)` `recalculate_dive_stats` writes as `species_seen`.
+
+    Every requested id gets an entry, `NO_DIVES` for a trip no live dive names.
+    """
+    if not trip_ids:
+        return {}
+
+    rows = await db.execute(
+        select(
+            Dive.trip_id,
+            func.count(func.distinct(Dive.id)).label("dive_count"),
+            func.count(func.distinct(DiveDiveSite.dive_site_id)).label("dive_site_count"),
+            func.count(func.distinct(DiveSpecies.species_id)).label("species_count"),
+        )
+        .outerjoin(DiveDiveSite, DiveDiveSite.dive_id == Dive.id)
+        .outerjoin(DiveSpecies, DiveSpecies.dive_id == Dive.id)
+        .where(Dive.trip_id.in_(set(trip_ids)), Dive.user_id == user_id, Dive.is_deleted.is_(False))
+        .group_by(Dive.trip_id)
+    )
+    counted = {
+        row.trip_id: TripCounts(
+            dive_count=row.dive_count, dive_site_count=row.dive_site_count, species_count=row.species_count
+        )
+        for row in rows
+    }
+    return {trip_id: counted.get(trip_id, NO_DIVES) for trip_id in trip_ids}
 
 
 async def resolve_trip_id_for_user(db: AsyncSession, trip_uuid: uuid_pkg.UUID, user_id: int) -> int | None:

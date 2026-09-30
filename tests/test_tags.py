@@ -227,7 +227,7 @@ def _as(user: User) -> dict[str, Any]:
 
 
 def _no_caches(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("invalidate_dive_caches", "invalidate_gear_caches"):
+    for name in ("invalidate_dive_caches", "invalidate_gear_caches", "invalidate_trip_caches"):
         monkeypatch.setattr(dives_module, name, AsyncMock())
 
 

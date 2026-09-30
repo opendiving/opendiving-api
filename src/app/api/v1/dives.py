@@ -94,7 +94,7 @@ from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
 from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
 from ...schemas.tag import TAG_NOT_FOUND
-from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
+from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches, invalidate_trip_caches
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
 from ...services.dive_files import (
     MAX_DIVE_FILE_SIZE,
@@ -730,6 +730,8 @@ async def write_dive(
     await invalidate_dive_caches(current_user["id"])
     # Gear reads carry each item's `dive_count`, which this dive just changed.
     await invalidate_gear_caches(current_user["id"])
+    # Trip reads count their dives and the sites and species on them.
+    await invalidate_trip_caches(current_user["id"])
 
     dive_read_internal = await crud_dives.get(db=db, id=created_dive.id, schema_to_select=DiveReadInternal)
     if dive_read_internal is None:
@@ -1379,6 +1381,9 @@ async def patch_dive(
         await invalidate_dive_caches(owner_id)
         # Gear reads carry each item's `dive_count`, which this edit may have changed.
         await invalidate_gear_caches(owner_id)
+        # Trip reads count their dives, sites and species. A dive moved between trips changes
+        # both, and the old one is named nowhere in this request.
+        await invalidate_trip_caches(owner_id)
 
     return {"message": "Dive updated"}
 
@@ -1413,6 +1418,8 @@ async def erase_dive(
     await invalidate_dive_caches(owner_id)
     # Gear reads carry each item's `dive_count`, which this dive no longer contributes to.
     await invalidate_gear_caches(owner_id)
+    # Nor to its trip's counts.
+    await invalidate_trip_caches(owner_id)
 
     return {"message": "Dive deleted"}
 
@@ -1477,6 +1484,8 @@ async def merge_two_dives(
     await recalculate_gear_dive_counts(db=db, user_id=owner_id)
     await invalidate_dive_caches(owner_id)
     await invalidate_gear_caches(owner_id)
+    # The absorbed dive's trip loses it, and the survivor's gains its sites and species.
+    await invalidate_trip_caches(owner_id)
 
     return DiveMergeResult(
         dive=await _cached_read_dive(
