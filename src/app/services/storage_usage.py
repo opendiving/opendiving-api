@@ -111,6 +111,7 @@ async def ensure_room(
     incoming: int,
     retired: int = 0,
     exact: Callable[[], Awaitable[int]] | None = None,
+    used: int | None = None,
 ) -> None:
     """Refuse a write that would take `user_id` past the storage limit, with a 413.
 
@@ -119,13 +120,16 @@ async def ensure_room(
     when the ceiling alone would refuse: measuring a dive-computer file means compressing it,
     which is not worth doing while even its worst case fits.
 
-    Runs a query, so a caller that releases its read transaction before a blob write calls
-    this first.
+    `used` is what the account held before the write, for a caller whose transaction already
+    carries the write's rows - logbook import, which names its files in rows before it knows
+    whether they fit. Otherwise it is read here, with a query, so a caller that releases its
+    read transaction before a blob write calls this first.
     """
     limit = storage_limit_bytes()
     if limit is None or incoming <= retired:
         return
-    used = (await get_storage_usage(db, user_id=user_id)).used_bytes
+    if used is None:
+        used = (await get_storage_usage(db, user_id=user_id)).used_bytes
     if not _crosses(used=used, limit=limit, incoming=incoming, retired=retired):
         return
     if exact is not None and not _crosses(used=used, limit=limit, incoming=await exact(), retired=retired):

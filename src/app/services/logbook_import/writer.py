@@ -10,12 +10,18 @@ still theirs to replace when the write reached it.
 **Atomicity is in rows, and the blobs sit deliberately outside it.** Nothing here commits;
 the caller does, once, at the end - so a failed, refused or interrupted import writes no
 rows at all, and a retry after a timeout can never half-duplicate a logbook. The files
-volume is written *before* the transaction that references it, which is the ordering
-`store_recording_file` and `store_certification_file` already use for the same reason: every
-database-visible state names bytes that exist, and the only thing a failure can leave is an
-unreferenced file. That is the recorded and accepted orphan case, reclaimed by
-`sweep_orphaned_files.py`; there is no compensating unlink, which is the concurrent-write
-trap `DECISIONS.md` records as having already gone wrong once.
+volume is written *before* that commit, which is the ordering `store_recording_file` and
+`store_certification_file` already use for the same reason: every database-visible state
+names bytes that exist, and the only thing a failure can leave is an unreferenced file.
+That is the recorded and accepted orphan case, reclaimed by `sweep_orphaned_files.py`; there
+is no compensating unlink, which is the concurrent-write trap `DECISIONS.md` records as
+having already gone wrong once. The objects are held back in a `StagedFiles` until the
+whole import has fitted the account (`staging.py`); a caller that hands none gets them
+written at the end of this file's rows.
+
+**A file that is one recording's is stored as the dive form stores it**: its row, then the
+recording derived from all its files through `rederive_recording`, so the recording an
+import creates or fills is the one the form would for the same files in the same order.
 
 The write order is `_RESOLUTION_ORDER`, so every reference resolves to a row that already
 exists.
@@ -24,13 +30,14 @@ exists.
 import hashlib
 import logging
 import uuid as uuid_pkg
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import insert, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 from uuid6 import uuid7
 
 from ...crud.crud_dive_dive_sites import replace_dive_sites_for_dive
@@ -66,8 +73,6 @@ from ...schemas.dive import DiveMode, Salinity
 from ...schemas.dive_mixture import DiveMixtureCreate
 from ...schemas.logbook_import import ImportNote, ImportNoteCode
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice
-from ..blob_store import new_key
-from ..blob_store import put as put_blob
 from ..certification_files import KEY_KIND as CERTIFICATION_KEY_KIND
 from ..certification_files import UnsupportedCardFileError, sniff_content_type
 from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
@@ -75,8 +80,11 @@ from ..dive_files import (
     TECH_SCALAR_FIELDS,
     apply_gas_mapping,
     delete_files_for_dive,
+    extract_recording,
     fill_dive_mixtures,
     fill_tech_scalars,
+    load_recording_files,
+    rederive_recording,
     relabel_gas_numbers,
 )
 from ..dive_profiles import (
@@ -96,6 +104,7 @@ from ..dive_recordings import (
     fill_recording_settings,
     fill_start,
     next_ordinal,
+    recording_start,
 )
 from ..dive_stats import recalculate_dive_stats
 from ..gear_service import recalculate_service_schedule
@@ -113,6 +122,7 @@ from .planner import (
     PlannedRecordingMatch,
 )
 from .reader import LoadedImport
+from .staging import StagedFiles
 
 logger = logging.getLogger(__name__)
 
@@ -129,12 +139,26 @@ class _StoredBlob:
     content_type: str
 
 
+@dataclass(frozen=True, slots=True)
+class WrittenImport:
+    """What one file's write did that its plan could not say: the row each dive it created
+    or restored went into, by the document's uuid, and how many files each recording match
+    stored - aligned with `ImportPlan.recording_matches`."""
+
+    dive_ids: dict[uuid_pkg.UUID, int]
+    match_files: list[int]
+
+
 class _Writer:
-    def __init__(self, db: AsyncSession, *, user_id: int, loaded: LoadedImport, plan: ImportPlan) -> None:
+    def __init__(
+        self, db: AsyncSession, *, user_id: int, loaded: LoadedImport, plan: ImportPlan, staged: StagedFiles
+    ) -> None:
         self._db = db
         self._user_id = user_id
         self._loaded = loaded
         self._plan = plan
+        self._staged = staged
+        self._match_files: list[int] = []
         self._now = datetime.now(UTC)
         # Document uuid -> row id, per collection. Seeded with everything the plan already
         # resolved (links and restores both name a row) and filled in as rows are created.
@@ -155,6 +179,13 @@ class _Writer:
 
     def _id(self, collection: str, source_uuid: uuid_pkg.UUID | None) -> int | None:
         return None if source_uuid is None else self._ids.get((collection, source_uuid))
+
+    def dive_id(self, source_uuid: uuid_pkg.UUID) -> int:
+        return self._ids[("dives", source_uuid)]
+
+    @property
+    def match_files(self) -> list[int]:
+        return list(self._match_files)
 
     def _ids_for(self, collection: str, source_uuids: list[uuid_pkg.UUID]) -> list[int]:
         return [row_id for row_id in (self._id(collection, one) for one in source_uuids) if row_id is not None]
@@ -200,12 +231,14 @@ class _Writer:
     async def _store_blob(
         self, planned: PlannedFile, *, kind: str, collection: str, record_uuid: uuid_pkg.UUID, sniff: bool
     ) -> _StoredBlob | None:
-        """Verify one member of the archive and put it on the volume.
+        """Verify one file the import stores and stage it for the volume.
 
-        **The digest is checked against the document's own manifest entry**, which is what
-        makes a restored file verified end to end rather than merely present: the entry was
-        written from the source instance's stored digest, so a match says the bytes survived
-        the export, the zip and the transfer intact.
+        **The digest is checked against the one the plan names** - an archive's member
+        against the document's own manifest entry, which is what makes a restored file
+        verified end to end rather than merely present: the entry was written from the source
+        instance's stored digest, so a match says the bytes survived the export, the zip and
+        the transfer intact. An imported file is checked against the digest it was read
+        under.
 
         `sniff` is for card images, whose content type is read off the leading bytes exactly
         as `store_certification_file` reads it - a document is no more trustworthy about a
@@ -234,9 +267,12 @@ class _Writer:
 
         # Minted per write and never derived from the row, which is `blob_store.new_key`'s
         # whole rule: a retired key must never be mintable again, or a concurrent write's
-        # post-commit unlink deletes the file another request has just put there.
-        key = new_key(kind, sha256=digest)
-        stored_byte_size = await put_blob(key, data)
+        # post-commit unlink deletes the file another request has just put there. Re-read
+        # when it is written rather than held, so an import's files are not all in memory at
+        # once.
+        key, stored_byte_size = self._staged.stage(
+            kind=kind, sha256=digest, size=len(data), read=self._rereader(planned.archive_path, digest)
+        )
         return _StoredBlob(
             storage_key=key,
             digest=digest,
@@ -244,6 +280,19 @@ class _Writer:
             stored_byte_size=stored_byte_size,
             content_type=content_type,
         )
+
+    def _rereader(self, path: str, digest: str) -> Callable[[], bytes]:
+        """How a staged file's bytes are read again when it is written: checked against the
+        digest they were staged under, since a key names its bytes' digest and a row claims
+        the bytes exist."""
+
+        def read() -> bytes:
+            data = self._loaded.read_member(path)
+            if data is None or hashlib.sha256(data).hexdigest() != digest:
+                raise RuntimeError(f"A file staged for storage under {digest} could not be read back")
+            return data
+
+        return read
 
     def _file_skipped(self, collection: str, record_uuid: uuid_pkg.UUID, reason: str) -> None:
         """Correct the plan's file counts for the one thing planning cannot know.
@@ -278,8 +327,8 @@ class _Writer:
         await self._write_certifications()
         await self._write_tags()
         await self._write_dives()
-        # After the dives, deliberately: every match named a dive that predates this import,
-        # and writing them last keeps that true of the order as well as of the plan.
+        # After the dives, deliberately: no match names a dive of this file's own, and
+        # writing them last keeps that true of the order as well as of the plan.
         await self._write_recording_matches()
         await self._recalculate()
 
@@ -299,6 +348,7 @@ class _Writer:
             picture=portrait.picture,
             filename=portrait.filename,
             held=portrait.held,
+            put=self._staged.put,
         ):
             self._note(
                 ImportNoteCode.CHECK_IN_DETAIL_WRITTEN, "The portrait chosen in the preview was saved to this account."
@@ -494,16 +544,22 @@ class _Writer:
     ) -> int:
         """One recording, its files and its samples, which have to agree with each other.
 
-        `dive_profile.source_sha256`'s documented job is to match what the profile was read
-        out of - `should_extract` and the backfill's candidate query both select on the
-        mismatch - so it splits by path. On the **archive** path it records the restored
+        **A recording holding the imported file itself is the dive form's**: created from the
+        document's reading of the file, then given the file and derived from it by
+        `rederive_recording` - its profile keyed by the file's format, the digest of its files
+        and the reader's version, its labels, gate figures and readouts rewritten - exactly
+        as the form's attach leaves the recording it creates. `_keep` does that.
+
+        Otherwise `dive_profile.source_sha256`'s documented job is to match what the profile
+        was read out of - `should_extract` and the backfill's candidate query both select on
+        the mismatch - so it splits by path. On the **archive** path it records the restored
         files' digest, which is truthful (the source instance extracted precisely this
         profile from precisely those bytes) and leaves files and profile in agreement. The
         profile is still the document's, which no reader of this instance produced, so its
         `reader_version` is NULL - and a restored file this build reads makes the recording a
-        backfill candidate, re-read from its restored bytes on the next run. On the **bare**
-        path there are no file rows - the recording cannot be a candidate - and the column
-        records the imported payload's own digest, purely as provenance.
+        backfill candidate, re-read from its restored bytes on the next run. With **no file**
+        there are no file rows - the recording cannot be a candidate - and the column records
+        the imported payload's own digest, purely as provenance.
 
         That is not the invention rule being bent: §5.4 governs logbook data a writer emits,
         and these columns describe where *this instance's copy* came from, which really is
@@ -514,11 +570,12 @@ class _Writer:
         re-derived here, so nothing later overwrites them with an extraction off files the
         recording does not have.
         """
+        position = planned.ordinal if ordinal is None else ordinal
         recording_id = await create_recording(
             self._db,
             dive_id=dive_id,
             user_id=self._user_id,
-            ordinal=planned.ordinal if ordinal is None else ordinal,
+            ordinal=position,
             mode=None if planned.mode is None else DiveMode(planned.mode),
             salinity=None if planned.salinity is None else Salinity(planned.salinity),
             readouts=planned.readouts,
@@ -538,6 +595,16 @@ class _Writer:
         digests, parser_key = await self._write_recording_files(
             record.source_uuid, recording_id=recording_id, dive_id=dive_id, planned_files=planned.files
         )
+        if planned.kept is not None and await self._keep(
+            planned.kept,
+            record_uuid=record.source_uuid,
+            recording_id=recording_id,
+            dive_id=dive_id,
+            ordinal=position,
+            origin=(planned.start_time, planned.utc_offset_minutes),
+            fresh=True,
+        ):
+            return recording_id
 
         if planned.profile is None:
             return recording_id
@@ -553,6 +620,51 @@ class _Writer:
             duration=planned.profile.duration,
         )
         return recording_id
+
+    async def _keep(
+        self,
+        planned: PlannedFile,
+        *,
+        record_uuid: uuid_pkg.UUID,
+        recording_id: int,
+        dive_id: int,
+        ordinal: int,
+        origin: tuple[datetime | None, int | None],
+        fresh: bool,
+    ) -> bool:
+        """Store the imported file on a recording and derive the recording from its files, as
+        `store_recording_file` does. Returns whether the file was stored.
+
+        `origin` is the recording's stored start before the file arrived, which the form's
+        attach places each file's samples against; `fresh` is its answer for a recording the
+        file creates, and a recording that already existed is joined, not fresh. The files a
+        recording already holds are read in attach order - this import's own from the files
+        it holds, the account's from the store - and none of this import's is converted twice.
+        """
+        stored = await self._store_blob(
+            planned, kind=DIVE_FILE_KEY_KIND, collection="dives", record_uuid=record_uuid, sniff=False
+        )
+        if stored is None:
+            return False
+        await self._insert_dive_file(stored, planned, recording_id=recording_id, dive_id=dive_id)
+        kept = self._loaded.kept
+        if kept is not None:
+            self._staged.extractions[kept.sha256] = kept.extraction
+        files = await load_recording_files(self._db, recording_id=recording_id, held=self._staged.held)
+        extraction = await run_in_threadpool(
+            extract_recording, files, self._staged.extractions, start_time=origin[0], utc_offset_minutes=origin[1]
+        )
+        await rederive_recording(
+            self._db,
+            recording_id=recording_id,
+            dive_id=dive_id,
+            ordinal=ordinal,
+            fresh=fresh,
+            joined=not fresh,
+            files=files,
+            extraction=extraction,
+        )
+        return True
 
     async def _write_recording_files(
         self,
@@ -583,43 +695,50 @@ class _Writer:
             )
             if stored is None:
                 continue
-            await self._db.execute(
-                insert(DiveFile).values(
-                    user_id=self._user_id,
-                    recording_id=recording_id,
-                    dive_id=dive_id,
-                    sha256=stored.digest,
-                    content_type=stored.content_type,
-                    byte_size=stored.byte_size,
-                    stored_byte_size=stored.stored_byte_size,
-                    original_filename=planned_file.original_filename,
-                    parser_key=planned_file.parser_key or IMPORT_PARSER_KEY,
-                    storage_key=stored.storage_key,
-                    uuid=uuid7(),
-                    created_at=self._now,
-                )
-            )
+            await self._insert_dive_file(stored, planned_file, recording_id=recording_id, dive_id=dive_id)
             digests.append(stored.digest)
             parser_key = parser_key or planned_file.parser_key
         return digests, parser_key
+
+    async def _insert_dive_file(
+        self, stored: _StoredBlob, planned: PlannedFile, *, recording_id: int, dive_id: int
+    ) -> None:
+        await self._db.execute(
+            insert(DiveFile).values(
+                user_id=self._user_id,
+                recording_id=recording_id,
+                dive_id=dive_id,
+                sha256=stored.digest,
+                content_type=stored.content_type,
+                byte_size=stored.byte_size,
+                stored_byte_size=stored.stored_byte_size,
+                original_filename=planned.original_filename,
+                parser_key=planned.parser_key or IMPORT_PARSER_KEY,
+                storage_key=stored.storage_key,
+                uuid=uuid7(),
+                created_at=self._now,
+            )
+        )
 
     async def _write_recording_matches(self) -> None:
         """Apply the incoming recordings that belong to dives the caller already has.
 
         **After every dive is written**, which is what stops a match landing on a dive this
-        same import created: the gates ran against the logbook as it was when the plan was
-        made, so every `dive_id` here is a row that predates the import, and walking this list
-        last keeps the write in the same order the plan reasoned in.
+        same file created: the gates ran against the logbook as it was when the plan was
+        made - before this file, and after any file of the same import that came before it -
+        so every `dive_id` here is a row that predates this file, and walking this list last
+        keeps the write in the same order the plan reasoned in.
 
         A **fill** writes no recording row. It fills the stored recording's blanks - its
         device columns, its settings, its readouts, its start, the two figures the gates
         compare - and, where that recording had no samples at all, its profile. The stored
         dive's own blanks fill too, from the primary recording alone: its positions, and the
         members its cylinders have none of, where those cylinders still demonstrably describe
-        the document's. Nothing is ever overwritten,
-        which is the whole rule: the diver may have corrected any of it, and a fill that won
-        an argument with an edit would be the silent loss this repository already refuses on
-        the backfill path.
+        the document's. Nothing is ever overwritten, which is the whole rule: the diver may
+        have corrected any of it, and a fill that won an argument with an edit would be the
+        silent loss this repository already refuses on the backfill path. A fill that brings
+        the imported file itself is the one exception, and it is the form's: the recording is
+        derived from its files, a second file of one recording filling and never overwriting.
 
         An **attach** appends a recording to that dive, after its last. It touches none of
         the dive's own figures - those are the primary recording's - and it maps its
@@ -628,15 +747,18 @@ class _Writer:
         """
         for match in self._plan.recording_matches:
             if match.kind == "attach":
-                await self._attach_recording(match)
+                self._match_files.append(await self._attach_recording(match))
             else:
-                await self._fill_recording(match)
+                self._match_files.append(await self._fill_recording(match))
 
-    async def _attach_recording(self, match: PlannedRecordingMatch) -> None:
+    async def _attach_recording(self, match: PlannedRecordingMatch) -> int:
+        """Append the match's recording to its dive. Returns how many files it stored."""
         ordinal = await next_ordinal(self._db, dive_id=match.dive_id)
         stored_mixtures = await get_mixtures_for_dive(db=self._db, dive_id=match.dive_id)
         planned = match.recording
-        if planned.profile is not None and match.mixtures:
+        # A recording holding the imported file is labelled by the re-derivation, as the
+        # form's attach labels one; relabelling it here too would map it twice.
+        if planned.kept is None and planned.profile is not None and match.mixtures:
             mapping, cylinders = relabel_gas_numbers(
                 [DiveMixtureSchema(**row) for row in match.mixtures], stored_mixtures
             )
@@ -646,12 +768,22 @@ class _Writer:
             if cylinders is not None:
                 await replace_mixtures_for_dive(db=self._db, dive_id=match.dive_id, mixtures=cylinders, commit=False)
         record = PlannedRecord(action=Action.CREATE, source_uuid=match.source_uuid, uuid=match.source_uuid)
-        await self._write_recording(record, match.dive_id, planned, ordinal=ordinal)
+        recording_id = await self._write_recording(record, match.dive_id, planned, ordinal=ordinal)
+        return await self._files_on(recording_id)
 
-    async def _fill_recording(self, match: PlannedRecordingMatch) -> None:
+    async def _files_on(self, recording_id: int) -> int:
+        return int(
+            (await self._db.execute(select(func.count()).where(DiveFile.recording_id == recording_id))).scalar_one()
+        )
+
+    async def _fill_recording(self, match: PlannedRecordingMatch) -> int:
+        """Fill a stored recording from a second reading of it. Returns how many files it stored."""
         planned = match.recording
         if match.recording_id is None:  # pragma: no cover - a `fill` always names one
-            return
+            return 0
+        # Read before `fill_start` can give a start-less recording one: the form's attach
+        # places a joining file against the recording as it was, and so does this.
+        origin = await recording_start(self._db, recording_id=match.recording_id)
 
         await fill_device_fields(
             self._db,
@@ -675,12 +807,6 @@ class _Writer:
             ),
             salinity=None if planned.salinity is None else Salinity(planned.salinity),
         )
-        # The recording's own readouts, on every recording and above the primary-only line
-        # below: they are this device's figures, whichever position it holds on the dive.
-        await fill_readouts(self._db, recording_id=match.recording_id, readouts=planned.readouts)
-        await fill_gate_figures(
-            self._db, recording_id=match.recording_id, duration=planned.duration, max_depth=planned.max_depth
-        )
         await fill_start(
             self._db,
             recording_id=match.recording_id,
@@ -698,15 +824,35 @@ class _Writer:
         #
         # The stored profile is left alone. Its `source_sha256` no longer names what the
         # recording holds, which makes it a `backfill_profiles` candidate - and re-deriving
-        # from the newly arrived bytes is that script's job rather than an import's, an import
-        # being the one path that stores samples it did not extract.
-        await self._write_recording_files(
+        # from the newly arrived bytes is that script's job, an archive's files being written
+        # as the archive describes them.
+        digests, _ = await self._write_recording_files(
             match.source_uuid,
             recording_id=match.recording_id,
             dive_id=match.dive_id,
             planned_files=planned.files,
         )
+        # **The imported file itself joins the recording as a second file joins it on the
+        # dive form**, and everything read off the recording is then derived from its files -
+        # the profile of a file-less recording replaced by the file's, as the form's attach
+        # replaces it.
+        if planned.kept is not None and await self._keep(
+            planned.kept,
+            record_uuid=match.source_uuid,
+            recording_id=match.recording_id,
+            dive_id=match.dive_id,
+            ordinal=match.ordinal or 0,
+            origin=origin,
+            fresh=False,
+        ):
+            return len(digests) + 1
 
+        # The recording's own readouts, on every recording and above the primary-only line
+        # below: they are this device's figures, whichever position it holds on the dive.
+        await fill_readouts(self._db, recording_id=match.recording_id, readouts=planned.readouts)
+        await fill_gate_figures(
+            self._db, recording_id=match.recording_id, duration=planned.duration, max_depth=planned.max_depth
+        )
         if (
             planned.profile is not None
             and await get_existing_profile(self._db, recording_id=match.recording_id) is None
@@ -731,7 +877,7 @@ class _Writer:
         # path. A secondary recording is a second computer's account of the same dive: its
         # positions are its own, and its cylinder labelling is its own numbering.
         if match.ordinal != 0:
-            return
+            return len(digests)
 
         # `dive_values` is `PlannedRecord.values`, which is already keyed by column name -
         # the same dict the dive insert would have taken - so `TECH_SCALAR_FIELDS` indexes it
@@ -751,6 +897,7 @@ class _Writer:
         await fill_dive_mixtures(
             self._db, dive_id=match.dive_id, parsed=[DiveMixtureSchema(**row) for row in match.mixtures]
         )
+        return len(digests)
 
     def _stale_schedule(self, schedule_id: int | None) -> None:
         """Mark one schedule as needing its due dates recomputed. Deduped, order kept."""
@@ -785,6 +932,26 @@ def _payload_digest(planned: PlannedProfile) -> str:
     return profile_payload_digest(planned.profile)
 
 
-async def write_import(db: AsyncSession, *, user_id: int, loaded: LoadedImport, plan: ImportPlan) -> None:
-    """Write everything the plan describes. Does **not** commit - the caller owns that."""
-    await _Writer(db, user_id=user_id, loaded=loaded, plan=plan).write()
+async def write_import(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    loaded: LoadedImport,
+    plan: ImportPlan,
+    staged: StagedFiles | None = None,
+) -> WrittenImport:
+    """Write everything the plan describes. Does **not** commit - the caller owns that.
+
+    `staged` is where an import of several files holds back the objects it stores until the
+    whole import has fitted the account; left out, this file's objects are written before
+    this returns, ahead of the caller's commit.
+    """
+    holding = StagedFiles() if staged is None else staged
+    writer = _Writer(db, user_id=user_id, loaded=loaded, plan=plan, staged=holding)
+    await writer.write()
+    if staged is None:
+        await holding.write(db)
+    return WrittenImport(
+        dive_ids={record.source_uuid: writer.dive_id(record.source_uuid) for record in plan.writable("dives")},
+        match_files=writer.match_files,
+    )

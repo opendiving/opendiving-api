@@ -26,7 +26,7 @@ Each takes every value from the *first* file that recorded it. The rejected alte
 import hashlib
 import logging
 import uuid as uuid_pkg
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Literal
@@ -67,6 +67,7 @@ from .dive_profiles import (
 )
 from .dive_reader import (
     DiveFileReadError,
+    ReadDive,
     UnsupportedDiveFileError,
     content_type_of,
     prefill,
@@ -282,7 +283,15 @@ def extract_file(content: bytes, format: str) -> FileExtraction:
     except Exception:
         logger.exception("Unexpected error reading a %s file", format)
         return _UNREAD
+    return extraction_of(read)
 
+
+def extraction_of(read: ReadDive) -> FileExtraction:
+    """What one file read as one dive yields, from the read rather than the bytes.
+
+    Split from `extract_file` for logbook import, which has already converted the file to
+    plan it and hands that conversion here rather than converting it twice.
+    """
     shaped = shape(read)
     parsed = prefill(read, shaped)
     readouts = {} if shaped is None else shaped.readouts
@@ -776,13 +785,12 @@ async def fill_dive_mixtures(db: AsyncSession, *, dive_id: int, parsed: Sequence
     Shared by the two paths a second reading of one recording arrives on - a file attached to
     a recording that already has one, and a logbook import matching an incoming recording to a
     stored one - so what a fill writes is stated once. **Whether one runs is still each
-    caller's**, and the two answer it differently. `rederive_recording` skips this twice
-    over: for a secondary recording, and - the gate that matters here - unless `joined` says
-    new bytes arrived on a recording that already existed, which is false for a re-upload of
-    files the recording already had and for a deletion. The import writer has no ordinal to
-    hand and calls it for whichever recording matched, as it already does for
-    `fill_tech_scalars`. In the caller's transaction, like every other `fill_`: the file's
-    row, the profile and this land together or not at all.
+    caller's**, and both answer it for the primary recording alone. `rederive_recording` also
+    skips it unless `joined` says new bytes arrived on a recording that already existed,
+    which is false for a re-upload of files the recording already had and for a deletion;
+    the import writer calls it for a match that brings no file, and a match that brings one
+    goes through `rederive_recording` instead. In the caller's transaction, like every other
+    `fill_`: the file's row, the profile and this land together or not at all.
 
     Read-then-write rather than a `COALESCE` per column, unlike `fill_tech_scalars`, because
     the join is positional and the alignment is only visible to Python - the statement would
@@ -1474,17 +1482,25 @@ async def load_dive_file(db: AsyncSession, *, file_id: int) -> LoadedDiveFile | 
     )
 
 
-async def load_recording_files(db: AsyncSession, *, recording_id: int) -> list[LoadedDiveFile]:
+async def load_recording_files(
+    db: AsyncSession, *, recording_id: int, held: Mapping[str, Callable[[], bytes]] | None = None
+) -> list[LoadedDiveFile]:
     """Every file of one recording, in attach order, with its bytes.
 
     **Attach order is `dive_file.id`** - a later upload takes a higher sequence value - and
     it is the whole of what "the first file that recorded it" means. Every caller of
     `extract_recording` gets its input from here so that ordering is stated once.
 
+    `held` reads the bytes of a row whose object is not in the store yet, by storage key:
+    logbook import names every file it stores in rows first and writes the objects once the
+    whole import has fitted the account, so a recording it gives a second file is re-read
+    from the import's own files.
+
     Raises `BlobMissingError` if any of the bytes are gone, on `load_dive_file`'s terms: a
     partial read would silently apply the fill rule to a subset of the files and store the
     result as though it were the whole.
     """
+    held = held or {}
     stmt = (
         select(
             DiveFile.storage_key,
@@ -1498,7 +1514,7 @@ async def load_recording_files(db: AsyncSession, *, recording_id: int) -> list[L
     )
     return [
         LoadedDiveFile(
-            data=await blob_store.get(row.storage_key),
+            data=read() if (read := held.get(row.storage_key)) is not None else await blob_store.get(row.storage_key),
             content_type=row.content_type,
             original_filename=row.original_filename,
             sha256=row.sha256,
