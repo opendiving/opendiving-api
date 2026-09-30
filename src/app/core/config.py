@@ -498,13 +498,13 @@ class GeocodingSettings(BaseSettings):
     GEOCODER_API_KEY: str | None = config("GEOCODER_API_KEY", default=None)
 
     # Asked for explicitly, because the alternative is not "no preference" - it is the
-    # *local* script. Left unset, a reverse lookup of the Blue Hole answers "دهب, مصر",
-    # which then lands in a dive site locality's `name` and is neither readable nor typeable for
-    # most of the divers who log that site. One instance-wide value rather than the
-    # caller's `Accept-Language`: it is part of the cache key, and per-caller languages
-    # would multiply both the cache and the outbound calls by the number of locales. Photon's
-    # public instance answers only `de`, `en` and `fr`, so a search asks in English for any
-    # other value.
+    # *local* script. Left unset, a reverse lookup of the Blue Hole answers
+    # "دهب, جنوب سيناء, مصر", which then lands in a dive site locality's `name` and is neither
+    # readable nor typeable for most of the divers who log that site. One instance-wide value
+    # rather than the caller's `Accept-Language`: it is part of the cache key, and per-caller
+    # languages would multiply both the cache and the outbound calls by the number of locales.
+    # Photon's public instance answers only `de`, `en` and `fr`, so a search asks in English
+    # for any other value.
     GEOCODER_LANGUAGE: str = config("GEOCODER_LANGUAGE", default="en")
 
     # Nominatim's policy requires a `User-Agent` that identifies the application, and

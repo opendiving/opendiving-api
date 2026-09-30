@@ -102,8 +102,9 @@ _PLACE_OSM_TAGS = frozenset({("leisure", "nature_reserve")})
 _SEARCH_LANGUAGES = frozenset({"de", "en", "fr"})
 _FALLBACK_SEARCH_LANGUAGE = "en"
 
-# A Photon row's address parts, finest first. Street and house number are left out: a place
-# has neither, and a postcode is not a part of where a place is.
+# A Photon row's address parts, finest first; the first present names a row that has no name
+# of its own. Street and house number are left out: a place has neither, and a postcode is
+# not a part of where a place is.
 _PHOTON_ADDRESS_KEYS = ("locality", "district", "city", "county", "state", "country")
 
 # Photon's `osm_type`, spelled the way the dive-site catalog spells an OSM identity
@@ -137,15 +138,14 @@ _MISS_TTL_SECONDS = 60 * 60
 # hold `GeocodeResult`s, not raw provider payloads - re-normalizing on every hit is wasted
 # work - so a change to the normalizer has to invalidate them, and a new key prefix does
 # that without a flush.
-_CACHE_VERSION = "v4"
+_CACHE_VERSION = "v5"
 
 # Mirror `schemas.geocoding.GeocodeResult`'s bounds. Applied by truncating here rather than
 # by letting an over-long provider string raise a ValidationError inside a normalizer, which
 # would turn one verbose row into a failed lookup. `_LOCATION_MAX_LENGTH` is the width of a
 # place's `name` column (`schemas.location.LOCATION_NAME_MAX`), which is where that field is
-# headed; `_DISPLAY_NAME_MAX_LENGTH` is `full_name`'s.
+# headed.
 _LOCATION_MAX_LENGTH = 255
-_DISPLAY_NAME_MAX_LENGTH = 512
 _NAME_MAX_LENGTH = 255
 _ATTRIBUTION_MAX_LENGTH = 255
 _COUNTRY_MAX_LENGTH = 255
@@ -195,6 +195,8 @@ _NO_RESULT_ERROR = "unable to geocode"
 # Most specific populated place first: Nominatim fills whichever of these the point falls
 # in, and a diver names the town, not the administrative district it belongs to.
 _PLACE_KEYS = ("city", "town", "village", "hamlet", "municipality", "suburb", "city_district")
+# A pin's region is the first of these present. `province` is not on Nominatim's list of
+# address labels, and it is the one a pin in Thailand is sent.
 _REGION_KEYS = ("state", "province", "region", "county")
 
 
@@ -377,7 +379,8 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
         return None
 
     # `accept-language` is not optional politeness: without it Nominatim answers in the
-    # local script, and "دهب, مصر" is not what a diver wants written into their logbook.
+    # local script, and "دهب, جنوب سيناء, مصر" is not what a diver wants written into their
+    # logbook.
     query: dict[str, Any] = {
         **params,
         "format": "jsonv2",
@@ -502,25 +505,46 @@ def _first_present(address: dict[str, Any], keys: tuple[str, ...]) -> str | None
     return None
 
 
-def _short_location(row: dict[str, Any]) -> str:
-    """Compose the value a diver would have typed themselves, for a pin.
+def _place_name(place: str | None, region: str | None, country: str | None) -> str:
+    """A geocoder result's `location`, for either provider: the place, its region and its
+    country, joined with ", ".
 
-    Built from the provider's structured `address` rather than by trimming
+    A part equal to any earlier one, compared whole and case-insensitively, is left out, and
+    not only where the two are neighbours. So a pin in no settlement, whose region stands in
+    for the place, reads "Bali, Indonesia" rather than "Bali, Bali, Indonesia", and a
+    country's own row names it once.
+    """
+    seen: set[str] = set()
+    parts: list[str] = []
+    for part in (place, region, country):
+        if part is not None and part.casefold() not in seen:
+            seen.add(part.casefold())
+            parts.append(part)
+    return ", ".join(parts)
+
+
+def _short_location(row: dict[str, Any], region: str | None, country: str | None) -> str:
+    """Compose the value a diver would have typed themselves, for a pin: the settlement it
+    falls in, its region and its country, "Dahab, South Sinai, Egypt".
+
+    The region is there because a name cut to the place and its country is often ambiguous,
+    and people write it that way for being quicker to type rather than for being better -
+    prefilled, the region costs the diver nothing. Where the point falls in no named
+    settlement the region stands in for the place.
+
+    Built from the provider's structured `address` rather than by trimming its
     `display_name`, so the result barely moves if the provider changes how verbose that
-    label is. Place plus country ("Dahab, Egypt") is what dive logs actually contain; the
-    region only stands in when the point is too remote to fall inside a named settlement.
+    label is - and that label can carry a postcode, which is no part of a place's name.
 
-    Falls back to the full `display_name` for a row carrying no structured address - a
+    Falls back to the provider's `display_name` for a row carrying no structured address - a
     named bay or reef, where the feature's own name is the best answer available. A point
     in genuinely open ocean gets no row at all, and is answered by `_offshore` instead.
     """
     address = row.get("address")
-    parts: list[str] = []
-    if isinstance(address, dict):
-        place = _first_present(address, _PLACE_KEYS) or _first_present(address, _REGION_KEYS)
-        parts = [part for part in (place, _first_present(address, ("country",))) if part]
+    place = _first_present(address, _PLACE_KEYS) if isinstance(address, dict) else None
+    location = _place_name(place or region, region, country)
 
-    return (", ".join(parts) or _text(row.get("display_name")) or "")[:_LOCATION_MAX_LENGTH]
+    return (location or _text(row.get("display_name")) or "")[:_LOCATION_MAX_LENGTH]
 
 
 def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
@@ -528,7 +552,9 @@ def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
     coordinates, or nothing to show a human. Dropping it beats surfacing a blank entry.
 
     Only `/reverse` rows come through here, so the result carries no box: it answers "what is
-    this position called" for a caller already holding the position.
+    this position called" for a caller already holding the position. It does carry the
+    region and the country its name was composed from, as a search result does, so a client
+    reads one shape from both routes.
     """
     try:
         latitude = float(row["lat"])
@@ -539,7 +565,13 @@ def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
     if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
         return None
 
-    location = _short_location(row)
+    address = row.get("address")
+    region = country = None
+    if isinstance(address, dict):
+        region = _first_present(address, _REGION_KEYS)
+        country = _first_present(address, ("country",))
+
+    location = _short_location(row, region, country)
     if not location:
         return None
 
@@ -572,11 +604,10 @@ def _normalize(row: dict[str, Any]) -> GeocodeResult | None:
         latitude=latitude,
         longitude=longitude,
         location=location,
-        display_name=(_text(row.get("display_name")) or location)[:_DISPLAY_NAME_MAX_LENGTH],
         name=name[:_NAME_MAX_LENGTH] if name else None,
         attribution=attribution or _DEFAULT_ATTRIBUTION,
-        country=None,
-        region=None,
+        country=country[:_COUNTRY_MAX_LENGTH] if country else None,
+        region=region[:_REGION_MAX_LENGTH] if region else None,
         source=None,
         source_id=None,
         bbox_south=None,
@@ -630,23 +661,14 @@ def _photon_extent(extent: Any) -> tuple[float, float, float, float] | None:
     return south, north, west, east
 
 
-def _without_consecutive_repeats(parts: list[str]) -> list[str]:
-    kept: list[str] = []
-    for part in parts:
-        if not kept or kept[-1].casefold() != part.casefold():
-            kept.append(part)
-    return kept
-
-
 def _normalize_photon(feature: dict[str, Any]) -> GeocodeResult | None:
     """A Photon feature as a result, named by the place itself - or `None` for one with no
     usable position or nothing to show a human.
 
-    `location` is what a pick saves as the place's name: the row's own name and its country,
-    "Ko Tao, Thailand" - never the settlement OSM files an island or a peak under, which is
-    what Nominatim's address gives. `display_name` is the whole chain, finest first, and is
-    what tells two same-named places apart in a picker. A row with no name of its own is
-    named by its finest address part.
+    `location` is what a pick saves as the place's name: the row's own name, its region and
+    its country, "Ko Tao, Surat Thani Province, Thailand" - never the settlement OSM files an
+    island or a peak under, which is what Nominatim's address gives. The region is `state`,
+    else `county`. A row with no name of its own is named by its finest address part.
     """
     properties = feature.get("properties")
     geometry = feature.get("geometry")
@@ -672,9 +694,8 @@ def _normalize_photon(feature: dict[str, Any]) -> GeocodeResult | None:
         return None
 
     country = _text(properties.get("country"))
-    location = label if country is None or country.casefold() == label.casefold() else f"{label}, {country}"
-    display_name = ", ".join(_without_consecutive_repeats([name, *address] if name else address))
     region = _text(properties.get("state")) or _text(properties.get("county"))
+    location = _place_name(label, region, country)
     source_id = _osm_identity(properties)
 
     box = _photon_extent(properties.get("extent"))
@@ -684,7 +705,6 @@ def _normalize_photon(feature: dict[str, Any]) -> GeocodeResult | None:
         latitude=latitude,
         longitude=longitude,
         location=location[:_LOCATION_MAX_LENGTH],
-        display_name=display_name[:_DISPLAY_NAME_MAX_LENGTH],
         name=name[:_NAME_MAX_LENGTH] if name else None,
         # Photon sends no licence, and what it serves is OpenStreetMap's. Byte-identical to
         # the dive-site catalog's OSM credit on purpose: the site form shows both sources
@@ -775,7 +795,6 @@ def _offshore(lat: float, lon: float) -> GeocodeResult | None:
         latitude=lat,
         longitude=lon,
         location=name[:_LOCATION_MAX_LENGTH],
-        display_name=name[:_DISPLAY_NAME_MAX_LENGTH],
         name=name[:_NAME_MAX_LENGTH],
         attribution=_MARINE_ATTRIBUTION,
         country=None,

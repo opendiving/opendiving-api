@@ -2459,9 +2459,9 @@ a failed one answers "no sea". `scripts/build_marine_areas.py` stages and `os.re
 `GEOCODER_URL=""` disables it. It runs after the cache, never inside it; the `[]` keeps its hourly
 TTL because the file holds Chesapeake Bay and the Amazon River. Smallest bounding box wins; a hole
 in that match means `None`. Parts are indexed, not features, and the build script refuses other
-meridian-crossing edges. `GeocodeResult` echoes the asked position, names the water in
-`location`/`display_name`/`name`, and attributes "Water body names from Natural Earth". Coverage is
-coarse: `28.57, 34.54` answers `None`.
+meridian-crossing edges. `GeocodeResult` echoes the asked position, names the water in `location`
+and `name`, and attributes "Water body names from Natural Earth". Coverage is coarse: `28.57, 34.54`
+answers `None`.
 
 ## "No name here" is a 204, and "we could not ask" stays a successful `null`
 
