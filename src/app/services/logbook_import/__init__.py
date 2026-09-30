@@ -22,9 +22,9 @@ from .batch import BatchReport, batch_species, import_batch
 from .parts import MAX_PARTS, ImportPart, ImportRequest, MalformedRequestError, batch_digest, read_import_request
 from .planner import ImportPlan, plan_import, unresolved_aphia_ids
 from .reader import (
-    MAX_ARCHIVE_MEMBERS,
     MAX_ARCHIVE_SIZE,
     MAX_DOCUMENT_SIZE,
+    MAX_IMPORT_FILES,
     DuplicateMemberError,
     ImportTooLargeError,
     LoadedBatch,
@@ -40,7 +40,7 @@ from .species import resolve_catalog_gaps
 from .writer import write_import
 
 __all__ = [
-    "MAX_ARCHIVE_MEMBERS",
+    "MAX_IMPORT_FILES",
     "MAX_ARCHIVE_SIZE",
     "MAX_DOCUMENT_SIZE",
     "MAX_PARTS",

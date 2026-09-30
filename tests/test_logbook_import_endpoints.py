@@ -470,7 +470,7 @@ class TestTheFormatsItAccepts:
     ) -> None:
         """Refused off the central directory, before a member is inflated: the count is
         known from the listing alone."""
-        monkeypatch.setattr(reader, "MAX_ARCHIVE_MEMBERS", 1)
+        monkeypatch.setattr(reader, "MAX_IMPORT_FILES", 1)
         payload = _zip({"dive-1.uddf": _uddf("dive-1"), "dive-2.uddf": _uddf("dive-2")})
         response = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip"))
 
@@ -1031,7 +1031,7 @@ class TestWhatOneImportWalks:
             return head(self, name, *args, **kwargs)
 
         files = self._zips(2)
-        monkeypatch.setattr(reader, "MAX_ARCHIVE_MEMBERS", 5)
+        monkeypatch.setattr(reader, "MAX_IMPORT_FILES", 5)
         monkeypatch.setattr(zipfile.ZipFile, "open", record)
 
         response = client.post(PREVIEW_PATH, files=files)

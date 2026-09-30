@@ -122,7 +122,7 @@ MAX_ARCHIVE_EXTRACTED_SIZE = 2 * MAX_ARCHIVE_SIZE
 # many dives go in one import: `MAX_DOCUMENT_SIZE` over the batch is what a real dive-computer
 # export meets first, and at 30 KB a FIT file that is a few thousand of them. The count is
 # refused off the directory listings, before any file is opened.
-MAX_ARCHIVE_MEMBERS = 5000
+MAX_IMPORT_FILES = 5000
 
 # Zip's local file header. Sniffed rather than trusting the filename or the client's
 # content type, on the same principle as `certification_files.sniff_content_type`: the
@@ -1128,9 +1128,9 @@ def _survey(parts: Sequence[ImportPart]) -> LoadedBatch:
                 walked += len(infos)
                 zips.append((archive, row, infos))
 
-        if walked > MAX_ARCHIVE_MEMBERS:
+        if walked > MAX_IMPORT_FILES:
             raise ImportTooLargeError(
-                f"This import holds {walked} files, zips' included, and at most {MAX_ARCHIVE_MEMBERS} are read in one "
+                f"This import holds {walked} files, zips' included, and at most {MAX_IMPORT_FILES} are read in one "
                 "import. Split it and import the parts."
             )
         if expands > MAX_ARCHIVE_EXTRACTED_SIZE:
