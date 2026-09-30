@@ -852,7 +852,7 @@ async def fill_dive_mixtures(db: AsyncSession, *, dive_id: int, parsed: Sequence
     A match that brings its file fills through `rederive_recording` instead. A second reading
     that brings no file fills nothing of a recording past the first: no check can tell a
     document's second reading from a logbook re-imported over a value the diver cleared, so
-    that refill stays where it always was, on the primary.
+    the refill it risks is confined to the primary.
 
     Read-then-write rather than a `COALESCE` per column, unlike `fill_tech_scalars`, because
     the pairing is only visible to Python. There is no race to lose: every caller is inside a

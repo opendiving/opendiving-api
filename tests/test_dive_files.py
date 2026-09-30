@@ -723,8 +723,7 @@ class TestWhatAPairFills:
         assert primary_fills(parsed, stored) == {12: {"oxygen": 33.0}}
 
     def test_the_pairs_are_by_mix_first_whatever_the_order(self) -> None:
-        """Where the counts matched, today's positional join would have put each tank's
-        pressures on the other's row."""
+        """Two tanks listed in the other order: each takes its own pressures, never the other's."""
         stored = [self._stored(11, oxygen=21.0), self._stored(12, oxygen=50.0)]
         parsed = [
             self._parsed(oxygen=50.0, start_pressure=200.0, end_pressure=150.0),
@@ -738,7 +737,7 @@ class TestWhatAPairFills:
 
     def test_the_primary_fills_its_own_row_whatever_else_the_dive_holds(self) -> None:
         """A dive whose primary has one cylinder and a second recording that appended a real
-        one: the counts differ, which is where the equal-count rule filled nothing."""
+        one: the primary's file still fills its own row."""
         stored = [self._stored(11, oxygen=21.0, helium=0.0), self._stored(12, oxygen=50.0, start_pressure=200.0)]
         parsed = [self._parsed(oxygen=21.0, helium=0.0, start_pressure=212.81, end_pressure=83.59)]
 
@@ -1169,8 +1168,8 @@ class TestReExtractionFailureDoesNotFailTheRequest:
 
         **The asymmetry is now structural rather than conditional**, which is the change worth
         pinning: the re-derivation picks `store_tech_scalars` (which clears) or
-        `fill_tech_scalars` (which cannot) on its `fresh` parameter - "this upload created the
-        recording" - so this branch cannot reach the clearing write at all.
+        `fill_tech_scalars` (which cannot) on its `change` - a re-upload into a recording that
+        already had files is a `REREAD` - so this branch cannot reach the clearing write at all.
         """
         writes: list[dict] = []
         cleared: list[dict] = []

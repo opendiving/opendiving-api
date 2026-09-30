@@ -1105,8 +1105,7 @@ class TestASecondComputersCylinderValuesFillTheDive:
         self, volume: Any, async_db: AsyncSession, db: Session, then: list[list[tuple[str, bytes]]]
     ) -> None:
         """The Perdix's slots pair with the FIT's row or carry nothing, so none is appended;
-        the JSON then joins the primary, whose row it fills where the dive's cylinder count
-        is no longer its own."""
+        the JSON then joins the primary and fills its row."""
         diver = create_user(db)
 
         await _import(async_db, diver, PAIR[:1])
@@ -1142,7 +1141,7 @@ class TestASecondComputersCylinderValuesFillTheDive:
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         """The primary has one cylinder and a second computer appended a real one: the file
-        joining the primary pairs by mix, where an equal count was the only way to fill."""
+        joining the primary pairs with its row by mix and fills it."""
         diver = create_user(db)
         perdix = _perdix_uddf(
             mixes=(("ean33", 0.33), ("ean50", 0.5)), tanks=(("ean33", 0, 0), ("ean50", 20000000, 15000000))

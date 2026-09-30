@@ -6220,9 +6220,9 @@ reused.
 recording, when the second reading brings no file: the entry and exit fixes (`fill_tech_scalars`)
 and the blanks of the cylinders (`fill_dive_mixtures`). Both go through the primary recording alone:
 the dive's fixes come from its primary, and no check can tell a file-less second reading from a
-logbook re-imported over a value the diver cleared, so that refill stays where it always was. A
-reading that brings its file joins the recording and fills through `rederive_recording` on any
-ordinal. The readouts are the matched recording's own either way.
+logbook re-imported over a value the diver cleared, so the refill it risks is confined to the
+primary. A reading that brings its file joins the recording and fills through `rederive_recording`
+on any ordinal. The readouts are the matched recording's own either way.
 
 So `PlannedRecordingMatch` carries `ordinal`: `None` on an `attach`, where no stored recording is
 named and the writer computes the slot with `next_ordinal`, and the file-less branch returns before
@@ -6262,7 +6262,7 @@ supplied.
 So it takes a required `touched_primary`; `False` is a no-op. The answer cannot be read inside,
 `renumber_ordinals` having closed the gap: `delete_dive_file` uses the ordinal it reads before the
 deleting branch, `erase_dive_recording` asks `primary_recording_ids` before `delete_recording`, a
-promotion answers `True`. Required, not defaulted, like `rederive_recording`'s `fresh` and `joined`.
+promotion answers `True`. Required, not defaulted, like `rederive_recording`'s `change`.
 
 Rejected: filling instead of clearing when the primary has no files
 (`test_the_last_file_takes_its_recording_and_the_dives_readings` pins the last file taking the

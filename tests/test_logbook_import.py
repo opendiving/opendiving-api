@@ -4662,8 +4662,7 @@ class TestTheImportGates:
         self, db: Session, async_db: AsyncSession
     ) -> None:
         """A second computer appended a cylinder of its own, so the dive holds two rows and the
-        document one: the pairing still finds the primary's row, where a count that had to
-        match filled nothing."""
+        document one: the pairing still finds the primary's row."""
         user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
         db.add_all(
             [
@@ -4750,7 +4749,7 @@ class TestTheImportGates:
         machine's own. The dive's fixes are the primary's to give. And its cylinders fill
         nothing here, though a recording past the first does fill them when it is created or
         gains bytes: nothing tells this reading apart from a logbook re-imported over a value
-        the diver cleared, so the refill stays where it always was.
+        the diver cleared, so the refill it risks is confined to the primary.
         """
         user, dive = self._seed(db, device_brand="Shearwater", device_serial="D9772626")
         secondary = create_dive_recording(db, user, dive, ordinal=1)
