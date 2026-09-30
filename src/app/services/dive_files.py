@@ -567,9 +567,12 @@ def relabel_gas_numbers(
 def apply_gas_mapping(profile: NormalizedProfile | None, mapping: dict[int, int]) -> NormalizedProfile | None:
     """Rewrite a profile's cylinder labels through `relabel_gas_numbers`' map.
 
-    Both places a `gas_number` appears in the stored payload - the pressure channels and the
-    `gas_switch` events - because a map applied to one and not the other would leave a dive
-    whose switches name a tank its pressure curves do not.
+    Every place a `gas_number` appears on the stored row - the pressure channels and the
+    `gas_switch` events in the payload, and the `gas_attribution` summary beside it - because
+    a map applied to one and not the others would leave a dive whose switches, curves and
+    time on gas name different tanks. The attribution is mapped rather than re-derived: it was
+    derived from the full-resolution depth channel before `downsample`, and this may be
+    handed a profile that has already been thinned.
 
     A label the map does not mention is left alone. That is the identity case (a label
     already naming the cylinder it should) and it is also the honest answer for a channel
@@ -587,6 +590,10 @@ def apply_gas_mapping(profile: NormalizedProfile | None, mapping: dict[int, int]
             if event.gas_number is not None
             else event
             for event in profile.events
+        ],
+        gas_attribution=[
+            entry.model_copy(update={"gas_number": mapping.get(entry.gas_number, entry.gas_number)})
+            for entry in profile.gas_attribution
         ],
     )
 
