@@ -1,12 +1,12 @@
-"""a profile carries its depth silhouette
+"""a profile carries its depth outline
 
 Revision ID: 0f941e1c4130
 Revises: e8b670ac5780
 Create Date: 2026-09-30 22:07:43.000000
 
-`dive_profile.depth_silhouette`, filled on every stored row from the depth series in the row's
+`dive_profile.depth_outline`, filled on every stored row from the depth series in the row's
 own `data`. No file is read, so an imported or merged profile gets one too. The derivation is
-a frozen copy of `derive_depth_silhouette` as it stands at this revision, not an import of it:
+a frozen copy of `derive_depth_outline` as it stands at this revision, not an import of it:
 a revision is frozen history. `downgrade()` drops the column.
 """
 
@@ -32,12 +32,12 @@ _BATCH = 200
 _SELECT_DEPTHS = sa.text(
     "SELECT id, data->'depth' AS depth FROM dive_profile WHERE id > :after ORDER BY id LIMIT :limit"
 ).columns(id=sa.Integer, depth=JSONB)
-_UPDATE_SILHOUETTE = sa.text("UPDATE dive_profile SET depth_silhouette = :silhouette WHERE id = :id").bindparams(
-    sa.bindparam("silhouette", type_=JSONB)
+_UPDATE_OUTLINE = sa.text("UPDATE dive_profile SET depth_outline = :outline WHERE id = :id").bindparams(
+    sa.bindparam("outline", type_=JSONB)
 )
 
 
-def silhouette(depth: Any) -> dict[str, Any] | None:
+def outline(depth: Any) -> dict[str, Any] | None:
     """A stored depth series `{"t": [...], "v": [...]}` as `{"span": ..., "values": [...]}`."""
     if not isinstance(depth, dict):
         return None
@@ -64,17 +64,17 @@ def silhouette(depth: Any) -> dict[str, Any] | None:
 def _fill(connection: sa.Connection) -> None:
     after = 0
     while rows := connection.execute(_SELECT_DEPTHS, {"after": after, "limit": _BATCH}).all():
-        updates = [{"id": row.id, "silhouette": shape} for row in rows if (shape := silhouette(row.depth)) is not None]
+        updates = [{"id": row.id, "outline": shape} for row in rows if (shape := outline(row.depth)) is not None]
         if updates:
-            connection.execute(_UPDATE_SILHOUETTE, updates)
+            connection.execute(_UPDATE_OUTLINE, updates)
         after = rows[-1].id
 
 
 def upgrade() -> None:
-    op.add_column("dive_profile", sa.Column("depth_silhouette", JSONB(), nullable=True))
+    op.add_column("dive_profile", sa.Column("depth_outline", JSONB(), nullable=True))
     if not context.is_offline_mode():
         _fill(op.get_bind())
 
 
 def downgrade() -> None:
-    op.drop_column("dive_profile", "depth_silhouette")
+    op.drop_column("dive_profile", "depth_outline")

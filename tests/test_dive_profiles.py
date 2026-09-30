@@ -21,7 +21,7 @@ from src.app.schemas.dive_profile import (
 from src.app.services.dive_files import extract_file
 from src.app.services.dive_profiles import (
     _PROVENANCE_BY_PARSER_KEY,
-    DEPTH_SILHOUETTE_POINTS,
+    DEPTH_OUTLINE_POINTS,
     IMPORT_PARSER_KEY,
     MAX_EVENTS,
     MAX_POINTS_PER_CHANNEL,
@@ -36,7 +36,7 @@ from src.app.services.dive_profiles import (
     ProfilePressureSeries,
     ProfileSeries,
     attribute_and_cap,
-    derive_depth_silhouette,
+    derive_depth_outline,
     derive_gas_attribution,
     downsample,
     fill_channels,
@@ -168,41 +168,41 @@ class TestDownsample:
         assert MAX_EVENTS == 200
 
 
-class TestDeriveDepthSilhouette:
+class TestDeriveDepthOutline:
     def test_each_value_is_the_deepest_reading_in_its_slice_of_time(self):
         # Four 2 s slices of an 8 s span; the last reading lands on the far edge and counts
         # into the last slice rather than a fifth.
         depth = _series([0, 1, 2, 3, 4, 5, 6, 7, 8], [0, 500, 1200, 1000, 1800, 1700, 900, 300, 0])
 
-        silhouette = derive_depth_silhouette(depth, points=4)
+        outline = derive_depth_outline(depth, points=4)
 
-        assert silhouette is not None
-        assert (silhouette.span, silhouette.values) == (8000, [500, 1200, 1800, 900])
+        assert outline is not None
+        assert (outline.span, outline.values) == (8000, [500, 1200, 1800, 900])
 
     def test_an_empty_slice_takes_the_line_between_its_neighbours(self):
         """A 20 s sampling interval on a short dive leaves slices no reading falls in."""
         depth = _series([0, 3, 6], [100, 1300, 100])
 
-        silhouette = derive_depth_silhouette(depth, points=6)
+        outline = derive_depth_outline(depth, points=6)
 
-        assert silhouette is not None
-        assert silhouette.values == [100, 500, 900, 1300, 700, 100]
+        assert outline is not None
+        assert outline.values == [100, 500, 900, 1300, 700, 100]
 
     def test_the_span_runs_from_the_first_reading_not_from_zero(self):
-        silhouette = derive_depth_silhouette(ProfileSeries(t=[160, 10_160, 20_160], v=[139, 372, 632]))
+        outline = derive_depth_outline(ProfileSeries(t=[160, 10_160, 20_160], v=[139, 372, 632]))
 
-        assert silhouette is not None
-        assert silhouette.span == 20_000
+        assert outline is not None
+        assert outline.span == 20_000
 
     def test_a_stored_profile_keeps_its_deepest_reading_and_the_fixed_count(self):
         series = TestDownsample()._sawtooth(9_000)
         stored = downsample(NormalizedProfile(depth=series)).depth
 
-        silhouette = derive_depth_silhouette(stored)
+        outline = derive_depth_outline(stored)
 
-        assert silhouette is not None
-        assert len(silhouette.values) == DEPTH_SILHOUETTE_POINTS
-        assert max(silhouette.values) == max(series.v)
+        assert outline is not None
+        assert len(outline.values) == DEPTH_OUTLINE_POINTS
+        assert max(outline.values) == max(series.v)
 
     @pytest.mark.parametrize(
         "depth",
@@ -210,7 +210,7 @@ class TestDeriveDepthSilhouette:
         ids=["no depth channel", "one reading", "no readings"],
     )
     def test_nothing_to_draw_is_none(self, depth: ProfileSeries | None):
-        assert derive_depth_silhouette(depth) is None
+        assert derive_depth_outline(depth) is None
 
 
 def _switch(t: float, gas_number: int | None) -> ProfileEvent:

@@ -62,7 +62,7 @@ from ..schemas.dive_profile import (
     PROFILE_CHANNEL_ORDER,
     SINGLE_SERIES_CHANNELS,
     TEMPERATURE_SCALE,
-    DepthSilhouette,
+    DepthOutline,
     DiveProfileEvent,
     DiveProfileInfo,
     DiveProfilePressureSeries,
@@ -149,9 +149,9 @@ def provenance_of(parser_key: str) -> ProfileProvenance:
 # reaches it. See `downsample` for why the cap is enforced by min/max bucketing.
 MAX_POINTS_PER_CHANNEL = 1200
 
-# Slices in a `GET /dives` row's `depth_silhouette`. A dive card draws it about 350 CSS px wide, so
+# Slices in a `GET /dives` row's `depth_outline`. A dive card draws it about 350 CSS px wide, so
 # this is a point every five or six pixels.
-DEPTH_SILHOUETTE_POINTS = 64
+DEPTH_OUTLINE_POINTS = 64
 
 # Events are capped by count and **not** by the bucketing below: min/max over a bucket is
 # meaningless for a marker, and a chart that showed "some of the gas switches" would be
@@ -690,11 +690,9 @@ def downsample(
     )
 
 
-def derive_depth_silhouette(
-    depth: ProfileSeries | None, points: int = DEPTH_SILHOUETTE_POINTS
-) -> DepthSilhouette | None:
+def derive_depth_outline(depth: ProfileSeries | None, points: int = DEPTH_OUTLINE_POINTS) -> DepthOutline | None:
     """The depth channel at a dive card's resolution: the deepest reading in each of `points`
-    equal slices of its span, so the silhouette's floor is the recording's maximum depth.
+    equal slices of its span, so the outline reaches the recording's maximum depth.
 
     Sliced on time rather than on index, as `_downsample_series` buckets. A slice no reading
     falls in - a sampling interval longer than a slice, or a sensor dropout - takes the
@@ -718,12 +716,12 @@ def derive_depth_silhouette(
         low, high = deepest[left], deepest[right]
         values.extend(low + round((high - low) * (index - left) / (right - left)) for index in range(left, right))
     values.append(deepest[points - 1])
-    return DepthSilhouette(span=span, values=values)
+    return DepthOutline(span=span, values=values)
 
 
-def _depth_silhouette_column(profile: NormalizedProfile) -> dict[str, Any] | None:
-    silhouette = derive_depth_silhouette(profile.depth)
-    return None if silhouette is None else silhouette.model_dump()
+def _depth_outline_column(profile: NormalizedProfile) -> dict[str, Any] | None:
+    outline = derive_depth_outline(profile.depth)
+    return None if outline is None else outline.model_dump()
 
 
 def attribute_and_cap(normalized: NormalizedProfile | None) -> NormalizedProfile | None:
@@ -1119,7 +1117,7 @@ async def store_profile(
             # A list rather than `None` when there is nothing to attribute, for the same
             # reason `event_count` is a count rather than `None`: this extractor looked.
             gas_attribution=[entry.model_dump() for entry in profile.gas_attribution],
-            depth_silhouette=_depth_silhouette_column(profile),
+            depth_outline=_depth_outline_column(profile),
             data=profile.to_data(),
             # Spelled out rather than left to `PublicUUIDMixin`'s `default_factory`: that
             # is a dataclass-level default applied when the ORM constructs an instance,
@@ -1192,7 +1190,7 @@ async def replace_profile_samples(db: AsyncSession, *, recording_id: int, profil
             event_count=len(attributed.events),
             **summary_extremes(attributed),
             gas_attribution=[entry.model_dump() for entry in attributed.gas_attribution],
-            depth_silhouette=_depth_silhouette_column(attributed),
+            depth_outline=_depth_outline_column(attributed),
             data=attributed.to_data(),
             uuid=uuid7(),
         )
@@ -1470,8 +1468,8 @@ async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]
     return attribution
 
 
-async def get_depth_silhouettes_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, DepthSilhouette]:
-    """Several dives' `depth_silhouette` in one query, for `GET /dives`.
+async def get_depth_outlines_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, DepthOutline]:
+    """Several dives' `depth_outline` in one query, for `GET /dives`.
 
     **The first recording by ordinal that has a profile**, which is the one the dive page
     charts - not the primary's alone, which may be a recording with no samples. A dive whose
@@ -1485,22 +1483,22 @@ async def get_depth_silhouettes_for_dives(db: AsyncSession, *, dive_ids: Sequenc
         return {}
 
     stmt = (
-        select(DiveProfile.dive_id, DiveProfile.depth_silhouette)
+        select(DiveProfile.dive_id, DiveProfile.depth_outline)
         .join(DiveRecording, DiveRecording.id == DiveProfile.recording_id)
         .where(DiveProfile.dive_id.in_(set(dive_ids)))
         .order_by(DiveProfile.dive_id, DiveRecording.ordinal)
         .distinct(DiveProfile.dive_id)
     )
 
-    silhouettes: dict[int, DepthSilhouette] = {}
+    outlines: dict[int, DepthOutline] = {}
     for row in await db.execute(stmt):
-        if row.depth_silhouette is None:
+        if row.depth_outline is None:
             continue
         try:
-            silhouettes[row.dive_id] = DepthSilhouette.model_validate(row.depth_silhouette)
+            outlines[row.dive_id] = DepthOutline.model_validate(row.depth_outline)
         except ValidationError:
-            logger.warning("Ignoring an unreadable depth silhouette stored for dive %s", row.dive_id, exc_info=True)
-    return silhouettes
+            logger.warning("Ignoring an unreadable depth outline stored for dive %s", row.dive_id, exc_info=True)
+    return outlines
 
 
 # How many files are processed between commits. Small enough that an interrupted run

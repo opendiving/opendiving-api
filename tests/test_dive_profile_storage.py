@@ -11,7 +11,7 @@ is a list of objects rather than an integer, so the round trip is worth a test o
 `backfill_profiles`' candidate selection is here for the neighbouring reason: the criterion
 lives in a `WHERE` clause, so a mocked session could only assert the SQL that was written
 rather than the rows it comes back with - which is exactly the difference that let the
-digest term go missing. So is the choice of which recording's `depth_silhouette` a list row
+digest term go missing. So is the choice of which recording's `depth_outline` a list row
 carries, which is a `DISTINCT ON` ordered by ordinal.
 
 Same skip-if-unreachable guard and same write-real-rows-and-leave-them convention as
@@ -34,13 +34,13 @@ from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
 from src.app.schemas.dive import DiveListSort
-from src.app.schemas.dive_profile import DepthSilhouette, GasAttribution
+from src.app.schemas.dive_profile import DepthOutline, GasAttribution
 from src.app.services.dive_profiles import (
     READER_VERSION,
     NormalizedProfile,
     ProfileSeries,
     backfill_profiles,
-    get_depth_silhouettes_for_dives,
+    get_depth_outlines_for_dives,
     get_gas_attribution_for_dives,
     replace_profile_samples,
     store_profile,
@@ -277,17 +277,17 @@ def _second_recording(db: Session, dive: Dive, ordinal: int) -> DiveRecording:
     return row
 
 
-class TestTheDepthSilhouette:
+class TestTheDepthOutline:
     @pytest.mark.asyncio
     async def test_what_is_stored_is_what_the_list_reads(
         self, async_db: AsyncSession, dive: Dive, recording: DiveRecording
     ) -> None:
         await _store(async_db, recording, NormalizedProfile(depth=ProfileSeries(t=[0, 3200], v=[0, 3200])))
 
-        silhouettes = await get_depth_silhouettes_for_dives(async_db, dive_ids=[dive.id])
+        outlines = await get_depth_outlines_for_dives(async_db, dive_ids=[dive.id])
 
         # A straight descent, one reading at each end: every slice between them is the line.
-        assert silhouettes[dive.id] == DepthSilhouette(span=3200, values=[round(i * 3200 / 63) for i in range(64)])
+        assert outlines[dive.id] == DepthOutline(span=3200, values=[round(i * 3200 / 63) for i in range(64)])
 
     @pytest.mark.asyncio
     async def test_it_is_the_first_recording_by_ordinal_that_has_a_profile(
@@ -298,9 +298,9 @@ class TestTheDepthSilhouette:
         await _store(async_db, third, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 900])))
         await _store(async_db, second, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 1800])))
 
-        before = await get_depth_silhouettes_for_dives(async_db, dive_ids=[dive.id])
+        before = await get_depth_outlines_for_dives(async_db, dive_ids=[dive.id])
         await _store(async_db, recording, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 2700])))
-        after = await get_depth_silhouettes_for_dives(async_db, dive_ids=[dive.id])
+        after = await get_depth_outlines_for_dives(async_db, dive_ids=[dive.id])
 
         assert max(before[dive.id].values) == 1800
         assert max(after[dive.id].values) == 2700
@@ -317,11 +317,11 @@ class TestTheDepthSilhouette:
 
         db.rollback()  # end the fixture's transaction, so this read sees the writes above
         stored = db.execute(
-            select(DiveProfile.depth_silhouette).where(DiveProfile.recording_id == recording.id)
+            select(DiveProfile.depth_outline).where(DiveProfile.recording_id == recording.id)
         ).scalar_one()
 
         assert stored is None
-        assert await get_depth_silhouettes_for_dives(async_db, dive_ids=[dive.id]) == {}
+        assert await get_depth_outlines_for_dives(async_db, dive_ids=[dive.id]) == {}
 
     @pytest.mark.asyncio
     async def test_a_rewrite_of_the_samples_rewrites_it(
@@ -333,9 +333,9 @@ class TestTheDepthSilhouette:
             async_db, recording_id=recording.id, profile=NormalizedProfile(depth=ProfileSeries(t=[0, 200], v=[0, 1500]))
         )
         await async_db.commit()
-        silhouettes = await get_depth_silhouettes_for_dives(async_db, dive_ids=[dive.id])
+        outlines = await get_depth_outlines_for_dives(async_db, dive_ids=[dive.id])
 
-        assert (silhouettes[dive.id].span, max(silhouettes[dive.id].values)) == (200, 1500)
+        assert (outlines[dive.id].span, max(outlines[dive.id].values)) == (200, 1500)
 
     @pytest.mark.asyncio
     async def test_the_dive_list_serves_it_on_each_row(
@@ -365,7 +365,7 @@ class TestTheDepthSilhouette:
             dive_type=None,
             sort=DiveListSort.DATE,
         )
-        rows = {row["uuid"]: row["depth_silhouette"] for row in page["data"]}
+        rows = {row["uuid"]: row["depth_outline"] for row in page["data"]}
 
         assert rows[hand_logged.uuid] is None
         assert rows[dive.uuid] is not None and max(rows[dive.uuid]["values"]) == 900

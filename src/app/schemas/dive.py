@@ -14,7 +14,7 @@ from ..core.schemas import (
 )
 from ..core.utils.datetime_offset import full_date_is_a_date, require_utc_offset
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
-from .dive_profile import DepthSilhouette, DiveProfileInfo
+from .dive_profile import DepthOutline, DiveProfileInfo
 from .gear_item import GearItemInfo
 from .location import Latitude, LocationRead, Longitude
 from .person import PeopleRead, PeopleUpdate, PeopleWrite
@@ -530,8 +530,8 @@ class DiveListItem(DiveRead):
     claim the dive has no curve.
     """
 
-    depth_silhouette: Annotated[
-        DepthSilhouette | None,
+    depth_outline: Annotated[
+        DepthOutline | None,
         Field(
             default=None,
             description="The depth curve of the recording the dive page charts, at a dive card's resolution; null "

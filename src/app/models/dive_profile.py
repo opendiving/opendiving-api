@@ -196,13 +196,13 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # found nothing to attribute" - the same distinction `event_count` draws, and the same
     # one a later backfill selects on.
     gas_attribution: Mapped[list | None] = mapped_column(JSONB, default=None)
-    # The depth channel at a dive card's resolution (`schemas/dive_profile.py::DepthSilhouette`),
+    # The depth channel at a dive card's resolution (`schemas/dive_profile.py::DepthOutline`),
     # which `GET /dives` serves on every row. Its own column because that list is the hottest
     # read in the app and must never decode `data`; derived from `data` by every writer of it.
     # On the profile rather than the dive, so which recording's a row shows is settled at read
     # time and nothing re-points it when recordings are reordered, deleted or merged.
     # NULL where there is no depth curve to draw.
-    depth_silhouette: Mapped[dict | None] = mapped_column(JSONB, default=None)
+    depth_outline: Mapped[dict | None] = mapped_column(JSONB, default=None)
     # The `divejson` version whose reader produced these samples from the stored files -
     # `READER_VERSION` in `services/dive_profiles.py`. NULL where no reader of this instance
     # did: a document supplied them, a merge produced them, or the row predates the column,

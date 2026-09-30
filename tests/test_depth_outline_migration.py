@@ -1,5 +1,5 @@
 """Revision `0f941e1c4130` run for real, against a database of its own
-(`tests/helpers/migrations.py`): every stored profile gets its `depth_silhouette` from its own
+(`tests/helpers/migrations.py`): every stored profile gets its `depth_outline` from its own
 `data`, in batches, and the downgrade drops the column.
 
 Automatically skipped if no database is reachable - see `test_dive_check_constraints.py`.
@@ -47,7 +47,7 @@ VALUES (1, 203, repeat('b', 64), 'suunto_json', 8, 2000, 0, CAST(:temperature AS
 
 @pytest.fixture
 def scratch() -> Iterator[tuple[str, Engine]]:
-    with scratch_database("silhouette") as database:
+    with scratch_database("outline") as database:
         yield database
 
 
@@ -62,11 +62,11 @@ def _seed(engine: Engine) -> None:
             connection.execute(text(statement), payloads)
 
 
-def _silhouettes(engine: Engine) -> dict[int, Any]:
+def _outlines(engine: Engine) -> dict[int, Any]:
     with engine.connect() as connection:
         return {
-            row.recording_id: row.depth_silhouette
-            for row in connection.execute(text("SELECT recording_id, depth_silhouette FROM dive_profile"))
+            row.recording_id: row.depth_outline
+            for row in connection.execute(text("SELECT recording_id, depth_outline FROM dive_profile"))
         }
 
 
@@ -78,12 +78,12 @@ class TestTheUpgrade:
 
         migrate(name, "upgrade", _REVISION)
 
-        silhouettes = _silhouettes(engine)
+        outlines = _outlines(engine)
         expected = {"span": 64_000, "values": [second * 10 for second in range(64)]}
         # An imported profile too: it is derived from `data`, which every row has.
-        assert all(silhouettes[recording] == expected for recording in range(1, 203))
+        assert all(outlines[recording] == expected for recording in range(1, 203))
         # A temperature-only profile, a single reading and an empty payload have nothing to draw.
-        assert (silhouettes[203], silhouettes[204], silhouettes[205]) == (None, None, None)
+        assert (outlines[203], outlines[204], outlines[205]) == (None, None, None)
 
 
 class TestTheDowngrade:
@@ -99,4 +99,4 @@ class TestTheDowngrade:
             columns = connection.execute(
                 text("SELECT column_name FROM information_schema.columns WHERE table_name = 'dive_profile'")
             ).scalars()
-            assert "depth_silhouette" not in set(columns)
+            assert "depth_outline" not in set(columns)
