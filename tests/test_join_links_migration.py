@@ -19,9 +19,12 @@ from sqlalchemy import Engine, text
 
 from src.app.core.db.migrations import MIGRATIONS_PATH
 from tests.conftest import db_available
-from tests.helpers.migrations import migrate, scratch_database
+from tests.helpers.migrations import migrate, scratch_database, template_database
 
-pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
+pytestmark = [
+    pytest.mark.skipif(not db_available(), reason="No database connection available"),
+    pytest.mark.xdist_group(__name__),
+]
 
 _REVISION = "e02a39ada562"
 _BELOW = "6849ff025422"
@@ -50,10 +53,15 @@ def _revision() -> Any:
     return module
 
 
+@pytest.fixture(scope="module")
+def below() -> Iterator[str]:
+    with template_database(_BELOW) as template:
+        yield template
+
+
 @pytest.fixture
-def upgraded() -> Iterator[tuple[str, Engine]]:
-    with scratch_database("joinlinks") as (name, engine):
-        migrate(name, "upgrade", _BELOW)
+def upgraded(below: str) -> Iterator[tuple[str, Engine]]:
+    with scratch_database("joinlinks", below) as (name, engine):
         with engine.begin() as connection:
             for user_id, email, created_at in USERS:
                 connection.execute(

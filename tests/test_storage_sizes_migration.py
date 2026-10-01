@@ -23,9 +23,12 @@ from src.app.core import setup
 from src.app.core.config import postgres_uri, settings
 from src.app.services import blob_store
 from tests.conftest import db_available
-from tests.helpers.migrations import migrate, scratch_database
+from tests.helpers.migrations import migrate, scratch_database, template_database
 
-pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
+pytestmark = [
+    pytest.mark.skipif(not db_available(), reason="No database connection available"),
+    pytest.mark.xdist_group(__name__),
+]
 
 _REVISION = "6849ff025422"
 _BELOW = "c47b308253a3"
@@ -52,15 +55,20 @@ VALUES (1, 1, 'avatar', '{RENDITION_KEY}', '{hashlib.sha256(RENDITION).hexdigest
 """
 
 
+@pytest.fixture(scope="module")
+def below() -> Iterator[str]:
+    with template_database(_BELOW) as template:
+        yield template
+
+
 @pytest.fixture
-def scratch() -> Iterator[tuple[str, Engine]]:
-    with scratch_database("storage_sizes") as database:
+def scratch(below: str) -> Iterator[tuple[str, Engine]]:
+    with scratch_database("storage_sizes", below) as database:
         yield database
 
 
 def _upgraded(scratch: tuple[str, Engine]) -> tuple[str, Engine]:
     name, engine = scratch
-    migrate(name, "upgrade", _BELOW)
     with engine.begin() as connection:
         connection.execute(text(SEED))
     migrate(name, "upgrade", _REVISION)

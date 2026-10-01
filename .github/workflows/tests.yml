@@ -101,7 +101,8 @@ jobs:
       # path, every revision in order.
       #
       # This runs against `POSTGRES_DB` (`postgres`); the suite runs against its own
-      # database, `postgres_test`, which `tests/conftest.py` creates and migrates itself.
+      # databases, `postgres_test_gw0` and on, one per xdist worker, which
+      # `tests/conftest.py` creates and migrates itself.
       # The two were the same database until a suite run corrupted a developer's dev
       # database the same way, and the step no longer has to come before the tests to avoid
       # colliding with them. It stays first because a drift failure is cheaper to read than
@@ -112,6 +113,9 @@ jobs:
           uv run alembic upgrade head
           uv run alembic check
 
+      # `--dist loadgroup` keeps each migration module's tests on one worker, so the database
+      # they copy is migrated once (`tests/helpers/migrations.py`).
+      #
       # Teed so the assertion below reads *this* run rather than a second one of its own.
       # `pipefail` is not on by default in an Actions `run:` block (the shell is `bash -e`),
       # and without it the pipeline reports tee's exit status - a failing suite would go
@@ -120,7 +124,7 @@ jobs:
         id: tests
         run: |
           set -o pipefail
-          uv run pytest -rs --cov=src/app --cov-report=term-missing | tee /tmp/pytest.txt
+          uv run pytest -n auto --dist loadgroup -rs --cov=src/app --cov-report=term-missing | tee /tmp/pytest.txt
 
       # The DB-backed tests skip themselves rather than fail when Postgres is
       # unreachable, which is the right behaviour locally but means a broken `services:`

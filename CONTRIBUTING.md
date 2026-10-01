@@ -47,7 +47,7 @@ uv run mdformat --check *.md docs .github tests
 uv run mypy src --config-file pyproject.toml
 uv run mypy tests --config-file pyproject.toml
 uv run mypy scripts --config-file pyproject.toml
-uv run pytest --cov=src/app --cov-report=term-missing
+uv run pytest -n auto --dist loadgroup --cov=src/app --cov-report=term-missing
 ```
 
 If your PR touches `src/app/models/`, add the migration drift check — CI runs it and the suite does
@@ -103,20 +103,21 @@ silent and a green local run looks identical either way, so it is easy to spend 
 believing those tests ran.
 
 **That run does not touch the database the stack serves from.** `tests/conftest.py` appends `_test`
-to whatever `POSTGRES_DB` names — `opendive_test` with the stock `src/.env` — creates it on the same
-server if it isn't there, and brings it up to `head` with the migrations. So the command above needs
-the stack up for its Postgres and nothing more; the dev database keeps its own rows, and the test
-rows accumulate somewhere disposable. Disposing of it is one statement, and the next run rebuilds it
-from empty:
+to whatever `POSTGRES_DB` names — `opendive_test` with the stock `src/.env`, and `opendive_test_gw0`
+and on, one per worker, under `-n` — creates it on the same server if it isn't there, and brings it
+up to `head` with the migrations. So the command above needs the stack up for its Postgres and
+nothing more; the dev database keeps its own rows, and the test rows accumulate somewhere
+disposable. Dropping them is one statement per database, and the next run rebuilds each from empty:
 
 ```bash
-docker compose exec db psql -U postgres -c 'DROP DATABASE opendive_test'
+docker compose exec db psql -U postgres -Atc "SELECT datname FROM pg_database WHERE datname ~ '^opendive_test(_gw[0-9]+)?$'" \
+  | xargs -I{} docker compose exec -T db psql -U postgres -c 'DROP DATABASE "{}"'
 ```
 
-Worth knowing before you go looking: that database is migrated, not `create_all`ed, so a model
+Worth knowing before you go looking: those databases are migrated, not `create_all`ed, so a model
 change you have not yet generated a revision for fails these tests rather than passing them. And a
 database left at a revision from a branch you have since left cannot be upgraded from — the suite
-says so, and names the drop above.
+says so, names the database, and the drop above clears it.
 
 Alternatively use the containerised suite, where `db` resolves and nothing needs overriding — note
 that `docker-compose.test.yml` is an *overlay*, so it has to be passed alongside the base file

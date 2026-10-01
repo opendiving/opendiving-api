@@ -13,9 +13,12 @@ import pytest
 from sqlalchemy import Engine, text
 
 from tests.conftest import db_available
-from tests.helpers.migrations import migrate, scratch_database
+from tests.helpers.migrations import migrate, scratch_database, template_database
 
-pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
+pytestmark = [
+    pytest.mark.skipif(not db_available(), reason="No database connection available"),
+    pytest.mark.xdist_group(__name__),
+]
 
 _REVISION = "0f941e1c4130"
 _BELOW = "e8b670ac5780"
@@ -45,9 +48,15 @@ VALUES (1, 203, repeat('b', 64), 'suunto_json', 8, 2000, 0, CAST(:temperature AS
 """
 
 
+@pytest.fixture(scope="module")
+def below() -> Iterator[str]:
+    with template_database(_BELOW) as template:
+        yield template
+
+
 @pytest.fixture
-def scratch() -> Iterator[tuple[str, Engine]]:
-    with scratch_database("outline") as database:
+def scratch(below: str) -> Iterator[tuple[str, Engine]]:
+    with scratch_database("outline", below) as database:
         yield database
 
 
@@ -73,7 +82,6 @@ def _outlines(engine: Engine) -> dict[int, Any]:
 class TestTheUpgrade:
     def test_every_profile_with_a_depth_curve_gets_one_across_batches(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
 
         migrate(name, "upgrade", _REVISION)
@@ -89,7 +97,6 @@ class TestTheUpgrade:
 class TestTheDowngrade:
     def test_it_drops_the_column(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
         migrate(name, "upgrade", _REVISION)
 

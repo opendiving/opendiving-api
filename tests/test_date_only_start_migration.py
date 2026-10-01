@@ -12,9 +12,12 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import IntegrityError
 
 from tests.conftest import db_available
-from tests.helpers.migrations import alembic, migrate, scratch_database
+from tests.helpers.migrations import alembic, migrate, scratch_database, template_database
 
-pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
+pytestmark = [
+    pytest.mark.skipif(not db_available(), reason="No database connection available"),
+    pytest.mark.xdist_group(__name__),
+]
 
 _REVISION = "ab9a5add4fee"
 _BELOW = "ce09bc7d4c64"
@@ -29,15 +32,20 @@ VALUES (1, 1, 1, '2025-01-01 10:00:00+00', 120, 3000, '', gen_random_uuid(), now
 """
 
 
+@pytest.fixture(scope="module")
+def below() -> Iterator[str]:
+    with template_database(_BELOW) as template:
+        yield template
+
+
 @pytest.fixture
-def scratch() -> Iterator[tuple[str, Engine]]:
-    with scratch_database("date_only") as database:
+def scratch(below: str) -> Iterator[tuple[str, Engine]]:
+    with scratch_database("date_only", below) as database:
         yield database
 
 
 def _upgraded(scratch: tuple[str, Engine]) -> tuple[str, Engine]:
     name, engine = scratch
-    migrate(name, "upgrade", _BELOW)
     with engine.begin() as connection:
         connection.execute(text(SEED))
     migrate(name, "upgrade", _REVISION)

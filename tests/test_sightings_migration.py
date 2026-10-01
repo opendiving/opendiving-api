@@ -18,9 +18,12 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import IntegrityError
 
 from tests.conftest import db_available
-from tests.helpers.migrations import migrate, scratch_database
+from tests.helpers.migrations import migrate, scratch_database, template_database
 
-pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
+pytestmark = [
+    pytest.mark.skipif(not db_available(), reason="No database connection available"),
+    pytest.mark.xdist_group(__name__),
+]
 
 _REVISION = "c47b308253a3"
 _BELOW = "b5dad8793a54"
@@ -45,9 +48,15 @@ INSERT INTO dive_species (dive_id, species_id, position) VALUES (1, 1, 0), (1, 2
 """
 
 
+@pytest.fixture(scope="module")
+def below() -> Iterator[str]:
+    with template_database(_BELOW) as template:
+        yield template
+
+
 @pytest.fixture
-def scratch() -> Iterator[tuple[str, Engine]]:
-    with scratch_database("sightings") as database:
+def scratch(below: str) -> Iterator[tuple[str, Engine]]:
+    with scratch_database("sightings", below) as database:
         yield database
 
 
@@ -80,7 +89,6 @@ def _seed(engine: Engine) -> None:
 
 def _upgraded(scratch: tuple[str, Engine]) -> tuple[str, Engine]:
     name, engine = scratch
-    migrate(name, "upgrade", _BELOW)
     _seed(engine)
     migrate(name, "upgrade", _REVISION)
     return name, engine
@@ -141,7 +149,6 @@ class TestTheUpgrade:
 class TestTheDowngrade:
     def test_the_old_key_comes_back_and_the_columns_go(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
         hidden_before = _hidden_sets(engine)
         migrate(name, "upgrade", _REVISION)
