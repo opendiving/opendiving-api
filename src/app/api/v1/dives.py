@@ -1393,9 +1393,10 @@ async def patch_dive(
         await invalidate_dive_caches(owner_id)
         # Gear reads carry each item's `dive_count`, which this edit may have changed.
         await invalidate_gear_caches(owner_id)
-        # Trip reads count their dives, sites and species. A dive moved between trips changes
-        # both, and the old one is named nowhere in this request - as a site this dive no
-        # longer names is named nowhere, whose summary it just left.
+        # Trip reads count their dives, sites and species and carry the deepest one's depth. A
+        # dive moved between trips changes both, and the old one is named nowhere in this
+        # request - as a site this dive no longer names is named nowhere, whose summary it
+        # just left.
         await invalidate_trip_caches(owner_id)
         await invalidate_dive_site_caches(owner_id)
 

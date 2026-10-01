@@ -18,9 +18,9 @@ A tag is two hosts wide and carries more than a uuid: a dive read and a dive sit
 their tags by name, so renaming or deleting one drops the diver's dive and site caches.
 
 A trip and a dive site run the other way: a trip's read counts the dives assigned to it and
-the sites and species they name, and a site's summarises the dives naming it - how many, the
-latest, the deepest, the species, the rating. So every dive write that can move one of those
-drops the diver's trip caches and site caches together.
+the sites and species they name and carries the deepest of them, and a site's summarises the
+dives naming it - how many, the latest, the deepest, the species, the rating. So every dive
+write that can move one of those drops the diver's trip caches and site caches together.
 
 These helpers live here rather than in the route modules so `dives.py`, `gear_items.py`,
 `dive_sites.py`, `courses.py`, `contacts.py`, `people.py` and `tags.py` can all reach them

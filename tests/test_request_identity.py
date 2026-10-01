@@ -443,7 +443,8 @@ LIST_ROUTES = (
         "/trips",
         trips_module,
         "_cached_read_trips",
-        _PUBLIC_ROW | {"name": "Cebu 2026", "dive_count": 0, "dive_site_count": 0, "species_count": 0},
+        _PUBLIC_ROW
+        | {"name": "Cebu 2026", "dive_count": 0, "dive_site_count": 0, "species_count": 0, "max_depth": None},
     ),
     ListRoute(
         "/courses",
