@@ -116,7 +116,7 @@ from ..dive_profiles import (
     derive_gas_attribution,
     downsample,
 )
-from ..dive_reader import FALLBACK_CONTENT_TYPE, content_type_of, reads
+from ..dive_reader import FALLBACK_CONTENT_TYPE, bottom_temperature, content_type_of, reads, two_places
 from ..dive_recordings import (
     DeviceIdentity,
     RecordingCandidate,
@@ -541,6 +541,10 @@ _MIXTURE_BOUNDS: tuple[Bound, ...] = (
         f"a gas number must be between 0 and {INT32_MAX}",
     ),
 )
+
+
+# The members the dive form rounds to the two places it shows (`dive_reader._mixture`).
+_ROUNDED_CYLINDER_MEMBERS = ("volume", "oxygen", "helium", "start_pressure", "end_pressure", "ppo2_limit")
 
 
 def _unpressurized(cylinder: ImportCylinder) -> list[str]:
@@ -2325,8 +2329,9 @@ class _Planner:
 
         bounded = self._bounded(collection, dive.uuid, dive, _DIVE_BOUNDS)
         recordings = self._plan_recordings(dive)
-        # The primary recording's profile, for the two dive-level jobs a profile still has:
-        # standing in for an unrecorded duration below, and keeping the skip message honest.
+        # The primary recording's profile, for the dive-level jobs a profile still has: standing
+        # in for an unrecorded duration and an unstated bottom temperature below, and keeping the
+        # skip message honest. Capped, which keeps every channel's extremes (`_downsample_series`).
         profile = recordings[0].profile if recordings else None
 
         duration = bounded.get("duration")
@@ -2396,7 +2401,9 @@ class _Planner:
             "notes": self._notes_text("dives", dive.uuid, dive.notes),
             "max_depth": max_depth,
             "avg_depth": avg_depth,
-            "bottom_temperature": dive.bottom_temperature if finite(dive.bottom_temperature) else None,
+            "bottom_temperature": bottom_temperature(
+                dive.bottom_temperature, None if profile is None else profile.profile
+            ),
             "visibility": None if visibility is None else int(visibility),
             "weight": bounded.get("weight"),
             "water_type": None if dive.water_type is None else dive.water_type.value,
@@ -2576,11 +2583,19 @@ class _Planner:
         read as set to every later fill. Dropped without a note, since it is an absent-marker
         rather than a value. A DiveJSON document keeps the bounds a diver's own record takes,
         where an end pressure of 0 is an out-of-gas ascent (spec §6.3).
+
+        **The measured members are first rounded as the dive form rounds them**, so one file
+        stores one cylinder through either door, and a value the rounding takes to 0 meets the
+        bounds and the rule above as the 0 it would be stored as.
         """
         converted = self._loaded.conversion is not None
         rows: list[dict[str, Any]] = []
         for index, source in enumerate(dive.cylinders):
-            cylinder = source.model_copy(update=dict.fromkeys(_unpressurized(source), None)) if converted else source
+            cylinder = source.model_copy(
+                update={name: two_places(getattr(source, name)) for name in _ROUNDED_CYLINDER_MEMBERS}
+            )
+            if converted:
+                cylinder = cylinder.model_copy(update=dict.fromkeys(_unpressurized(cylinder), None))
             bounded = self._bounded("dives", dive.uuid, cylinder, _MIXTURE_BOUNDS)
             volume = bounded.get("volume")
             oxygen = bounded.get("oxygen")
