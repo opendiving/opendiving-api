@@ -5751,8 +5751,10 @@ service `type`) carries an unknown value, which §5.6 reads as absent. A course'
 OPTIONAL and so costs the field rather than the record — see *A course may have no agency, and a
 certification may not*.
 
-Two derivations are allowed: a dive with no `duration` takes its profile's span, reported; one with
-no `number` takes the dive form's suggestion, duplicates being legal (`DiveNumberingSummary`).
+Three derivations are allowed: a dive with no `duration` takes its profile's span, and one with no
+`bottom_temperature` its primary recording's coldest sample, as the dive form does, both reported;
+one with no `number` takes the dive form's suggestion, duplicates being legal
+(`DiveNumberingSummary`).
 
 `visibility` is finer in the format (a number, §6.2) than here (whole metres); a fractional value is
 dropped and reported, not rounded.
