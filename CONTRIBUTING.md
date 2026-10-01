@@ -50,6 +50,9 @@ uv run mypy scripts --config-file pyproject.toml
 uv run pytest
 ```
 
+CI does not measure coverage. For a report locally, add `--cov --cov-report=term-missing` to the
+pytest line; `[tool.coverage.run]` in `pyproject.toml` scopes it to `src/app`.
+
 If your PR touches `src/app/models/`, add the migration drift check — CI runs it and the suite does
 not (see *Things that will bite you* below):
 

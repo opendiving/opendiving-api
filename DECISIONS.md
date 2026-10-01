@@ -4481,7 +4481,8 @@ set-union sweep would notice.
 with a client-side `default=` goes into the INSERT whether or not the script's `data` dict names it.
 A column dropped from the model makes that INSERT an `UndefinedColumn`, which the bare
 `except Exception` in `create_first_user` logs and swallows, so a fresh install comes up with no
-superuser. Nothing else covers the script: it runs from a one-shot compose service.
+superuser. Nothing else covers the script: `--cov` is scoped to `src/app` and it runs from a
+one-shot compose service.
 
 The two `Table` definitions are therefore module-level constants so
 `tests/test_create_first_superuser.py` asserts both directions of drift: every column the copy names
