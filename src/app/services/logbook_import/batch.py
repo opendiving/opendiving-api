@@ -52,7 +52,7 @@ from ...schemas.logbook_import import (
 from ..dive_numbering import assign_suggested_numbers
 from ..dive_recordings import DEVICE_COLUMNS
 from ..storage_usage import ensure_room, get_storage_usage, storage_limit_bytes
-from .planner import COLLECTIONS, MAX_NOTES, Action, ImportPlan, plan_import, portrait_change
+from .planner import COLLECTIONS, Action, ImportPlan, add_note, plan_import, portrait_change
 from .reader import LoadedBatch, LoadedImport, conversion_report
 from .staging import StagedFiles
 from .writer import WrittenImport, write_import
@@ -282,9 +282,12 @@ def _files(plans: Sequence[ImportPlan]) -> ImportFileReport:
 
 def _notes(plans: Sequence[ImportPlan]) -> tuple[list[ImportNote], int]:
     """Every file's notes in the batch's order, under the one cap a report has."""
-    every = [note for plan in plans for note in plan.notes]
+    notes: list[ImportNote] = []
     dropped = sum(plan.notes_dropped for plan in plans)
-    return every[:MAX_NOTES], dropped + max(len(every) - MAX_NOTES, 0)
+    for plan in plans:
+        for note in plan.notes:
+            dropped += add_note(notes, note)
+    return notes, dropped
 
 
 def _check_in_details(plans: Sequence[ImportPlan]) -> list[ImportCheckInDetail]:
