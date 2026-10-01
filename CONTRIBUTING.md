@@ -107,16 +107,17 @@ to whatever `POSTGRES_DB` names — `opendive_test` with the stock `src/.env`, a
 and on, one per worker, under `-n` — creates it on the same server if it isn't there, and brings it
 up to `head` with the migrations. So the command above needs the stack up for its Postgres and
 nothing more; the dev database keeps its own rows, and the test rows accumulate somewhere
-disposable. Disposing of it is one statement, and the next run rebuilds it from empty:
+disposable. Dropping them is one statement per database, and the next run rebuilds each from empty:
 
 ```bash
-docker compose exec db psql -U postgres -c 'DROP DATABASE opendive_test'
+docker compose exec db psql -U postgres -Atc "SELECT datname FROM pg_database WHERE datname ~ '^opendive_test(_gw[0-9]+)?$'" \
+  | xargs -I{} docker compose exec -T db psql -U postgres -c 'DROP DATABASE "{}"'
 ```
 
-Worth knowing before you go looking: that database is migrated, not `create_all`ed, so a model
+Worth knowing before you go looking: those databases are migrated, not `create_all`ed, so a model
 change you have not yet generated a revision for fails these tests rather than passing them. And a
 database left at a revision from a branch you have since left cannot be upgraded from — the suite
-says so, and names the drop above.
+says so, names the database, and the drop above clears it.
 
 Alternatively use the containerised suite, where `db` resolves and nothing needs overriding — note
 that `docker-compose.test.yml` is an *overlay*, so it has to be passed alongside the base file

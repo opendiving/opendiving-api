@@ -101,7 +101,8 @@ jobs:
       # path, every revision in order.
       #
       # This runs against `POSTGRES_DB` (`postgres`); the suite runs against its own
-      # database, `postgres_test`, which `tests/conftest.py` creates and migrates itself.
+      # databases, `postgres_test_gw0` and on, one per xdist worker, which
+      # `tests/conftest.py` creates and migrates itself.
       # The two were the same database until a suite run corrupted a developer's dev
       # database the same way, and the step no longer has to come before the tests to avoid
       # colliding with them. It stays first because a drift failure is cheaper to read than
