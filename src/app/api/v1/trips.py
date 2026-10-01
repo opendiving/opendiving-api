@@ -44,6 +44,7 @@ from ...schemas.trip import (
     TripUpdateRequest,
 )
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_trip_caches
+from ...services.map_pictures import trip_map_picture
 from ...services.person_links import resolve_people_references
 
 router = APIRouter(tags=["trips"])
@@ -191,13 +192,15 @@ async def write_trip(
     stored_parts = await get_parts_for_trip(db=db, trip_id=created_trip.id)
     stored_people = (await get_people_for_trips(db, [created_trip.id]))[created_trip.id] if people else []
     # A dive can only name a trip that already exists, so a new one has none.
-    return _to_public_trip(
+    created = _to_public_trip(
         cast(TripReadInternal, trip_read),
         user_uuid=current_user["uuid"],
         figures=NO_DIVES,
         parts=stored_parts,
         people=stored_people,
     )
+    created.map_picture = trip_map_picture(created.model_dump())
+    return created
 
 
 @cache(
@@ -283,7 +286,7 @@ async def read_trips(
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
-    return await _cached_read_trips(
+    response = await _cached_read_trips(
         request,
         user_id=current_user["id"],
         user_uuid=current_user["uuid"],
@@ -294,12 +297,16 @@ async def read_trips(
         # share one cache entry instead of two identical ones under different keys.
         search=(search or "").strip().lower() or None,
     )
+    # After the cached read, as `read_dives` names its rows' pictures, and for its reason.
+    for trip in response["data"]:
+        trip["map_picture"] = trip_map_picture(trip)
+    return response
 
 
 @cache(key_prefix="user_{user_id}_trip", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def _cached_read_trip(
     request: Request, user_id: int, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
-) -> TripRead:
+) -> dict[str, Any]:
     """Fetches (and caches) a single trip by uuid, with its parts, its people and the figures
     over its dives attached.
 
@@ -314,7 +321,7 @@ async def _cached_read_trip(
     parts = await get_parts_for_trip(db=db, trip_id=db_trip.id)
     people = (await get_people_for_trips(db, [db_trip.id])).get(db_trip.id)
     figures = (await get_figures_for_trips(db, trip_ids=[db_trip.id], user_id=user_id))[db_trip.id]
-    return _to_public_trip(db_trip, user_uuid=owner_uuid, figures=figures, parts=parts, people=people)
+    return _to_public_trip(db_trip, user_uuid=owner_uuid, figures=figures, parts=parts, people=people).model_dump()
 
 
 @router.get("/trip/{uuid}", response_model=TripRead)
@@ -323,7 +330,7 @@ async def read_trip(
     uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-) -> TripRead:
+) -> dict[str, Any]:
     """Return a single trip by its public uuid, with the parts it ran, the people on it and
     the figures over its dives that `GET /trips` carries.
 
@@ -333,9 +340,12 @@ async def read_trip(
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_trip(db, uuid, current_user)
 
-    return await _cached_read_trip(
+    trip = await _cached_read_trip(
         request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
     )
+    # After the cached read, as `read_trips` names its rows' pictures: this one is kept an hour.
+    trip["map_picture"] = trip_map_picture(trip)
+    return trip
 
 
 @router.patch("/trip/{uuid}")

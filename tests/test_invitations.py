@@ -767,15 +767,27 @@ class TestTheConfigRoute:
             assert (await read_instance_config()).join_links is expected
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("renderer", "expected"), [("", False), ("http://map-renderer:3001", True)])
+    async def test_it_reports_whether_map_pictures_are_drawn(self, renderer: str, expected: bool) -> None:
+        with patch.object(settings, "MAP_RENDERER_URL", renderer):
+            assert (await read_instance_config()).map_pictures is expected
+
+    @pytest.mark.asyncio
     async def test_it_carries_nothing_else(self) -> None:
-        """Three fields, and adding another is a decision rather than a convenience: this
-        endpoint is anonymous, so everything on it is public. Dumped in JSON mode because
-        this is the wire shape the web app is written against, name for name."""
-        with _mode(RegistrationMode.INVITE), _operated(False), patch.object(settings, "JOIN_CHANNELS", None):
+        """Adding a field is a decision rather than a convenience: this endpoint is anonymous,
+        so everything on it is public. Dumped in JSON mode because this is the wire shape the
+        web app is written against, name for name."""
+        with (
+            _mode(RegistrationMode.INVITE),
+            _operated(False),
+            patch.object(settings, "JOIN_CHANNELS", None),
+            patch.object(settings, "MAP_RENDERER_URL", ""),
+        ):
             assert (await read_instance_config()).model_dump(mode="json") == {
                 "registration_mode": "invite",
                 "project_operated": False,
                 "join_links": False,
+                "map_pictures": False,
             }
 
 

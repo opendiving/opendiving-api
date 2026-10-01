@@ -36,6 +36,7 @@ from tests.helpers.fake_s3 import select_s3_backend
 from tests.helpers.generators import (
     create_dive,
     create_dive_recording,
+    create_map_picture,
     create_user,
     create_user_picture,
 )
@@ -567,3 +568,22 @@ class TestPurgeDeletedAccountsAgainstPostgres:
 
         assert db.get(User, diver_id) is None
         assert [key for key in keys if blob_store.exists(key)] == [], "a picture outlived the account"
+
+    @pytest.mark.asyncio
+    async def test_its_map_pictures_go_with_the_account(self, db: Session) -> None:
+        """The fourth key source. Drawn by the server, but from the diver's places, so the
+        rows' cascade must not leave their files behind."""
+        diver = create_user(db)
+        keys = [create_map_picture(db, diver, theme=theme).storage_key for theme in ("light", "dark")]
+        for key in keys:
+            await blob_store.put(key, b"a map, notionally")
+
+        self._request_deletion(db, diver, days_ago=settings.ACCOUNT_DELETION_GRACE_DAYS + 1)
+        diver_id = diver.id
+        db.expunge_all()
+
+        await purge_deleted_accounts({})
+        await blob_store._await_pending_removals()
+
+        assert db.get(User, diver_id) is None
+        assert [key for key in keys if blob_store.exists(key)] == [], "a map picture outlived the account"

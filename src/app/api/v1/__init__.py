@@ -19,6 +19,7 @@ from .health import router as health_router
 from .invitations import router as invitations_router
 from .join_channels import router as join_channels_router
 from .logbook_import import router as logbook_import_router
+from .map_pictures import router as map_pictures_router
 from .passkeys import router as passkeys_router
 from .people import router as people_router
 from .sessions import router as sessions_router
@@ -52,6 +53,7 @@ router.include_router(certifications_router)
 router.include_router(checkin_links_router)
 router.include_router(species_router)
 router.include_router(dives_router)
+router.include_router(map_pictures_router)
 router.include_router(dive_form_presets_router)
 router.include_router(support_router)
 router.include_router(export_router)

@@ -6848,8 +6848,8 @@ The codec lives in the key, not in `Content-Encoding`, which R2 acts on - it dec
 gzip-encoded objects on read and documents nothing for zstd; a codec column would leave the sweeper,
 `migrate_blobs.py` and an operator with `ls` unable to tell a frame from a file. Level 9, measured
 on Suunto exports: level 3 leaves 18% more bytes for a fifth of the CPU, level 19 costs sixty times
-the CPU for 13% fewer. Cards, pictures and species photos are JPEG, PNG, PDF or WebP, which zstd
-cannot shrink, so only this kind compresses.
+the CPU for 13% fewer. Cards, pictures, species photos and map pictures are JPEG, PNG, PDF or WebP,
+which zstd cannot shrink, so only this kind compresses.
 
 ## `JOIN_CHANNELS` is the project's switch, and the template says no more than that
 
@@ -6921,3 +6921,23 @@ merge - so a value the diver cleared survives a repeat, a deletion and a backfil
 position from a recording past the first is a guess, and fills only a row recording nothing it
 contradicts, or the last row meeting the last cylinder. Pressures fill as a pair. A recording past
 the first appends no cylinder carrying nothing.
+
+## Map pictures are drawn on first view and named by what they show
+
+A dive or trip card's map is drawn by the map renderer the first time a card asks
+(`api/v1/map_pictures.py`), stored per account and theme under a digest of the record's positional
+fields and the renderer's signature, and served from storage afterwards. Whatever moves a record's
+places names another picture, so nothing invalidates one and existing records need no backfill.
+Rejected: drawing on save. A card's places are written by dive create, update, merge and delete,
+recording attach, delete and promotion, file delete, a site's edit or delete, logbook import, trip
+create, update and delete, the backfill scripts, the admin panel and FK cascades - the last two with
+nothing to hook - and it would be the API's first enqueued job. Rejected too: one store keyed by
+digest alone, where a fast hit tells one account another has a picture of that place.
+
+## Map pictures count against no storage limit and are not exported
+
+They are derived: drawn by the server from places the export already carries, redrawn by any
+instance with a renderer, and not the diver's to see or delete, so `STORAGE_LIMIT_MB` would bill a
+diver for files they cannot manage - species photos' footing. They are still the diver's data: the
+purge's `_collect_stored_file_keys` and the sweeper's `_referenced_keys` read `map_picture`, and the
+worker deletes one unserved for 30 days. Rejected: counting them as picture renditions.

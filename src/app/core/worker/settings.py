@@ -11,6 +11,7 @@ from .functions import (
     purge_expired_invite_requests,
     purge_expired_tokens,
     purge_expired_user_sessions,
+    purge_unserved_map_pictures,
     record_sign_in_totals,
     send_gear_service_digests,
     send_renewal_reminders,
@@ -55,6 +56,10 @@ class WorkerSettings:
         # A restart loop still costs a no-op `DELETE`, since the cutoff is absolute.
         cron(purge_expired_invitations, minute=0, run_at_startup=True),
         cron(purge_expired_invite_requests, minute=0, run_at_startup=True),
+        # Pictures past thirty days unserved join on the same criterion: the cutoff is
+        # absolute, so a restart loop costs a no-op `DELETE`, and a picture deleted is drawn
+        # again by the next card that asks for it.
+        cron(purge_unserved_map_pictures, minute=0, run_at_startup=True),
         # Hourly, so `ACCOUNT_DELETION_GRACE_DAYS=0` behaves the way an operator setting
         # it to zero expects, and at :30 so it doesn't contend with the two sweeps on the
         # hour mark. No `run_at_startup`, and that is the difference that matters: those
