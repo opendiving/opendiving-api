@@ -439,8 +439,9 @@ refuses, a 422 naming a converter bug.
 projected, and samples never cross `/dive/parse` (*"A profile is never read over `/dive/parse`"*).
 
 The prefill rounds a cylinder's pressures, fractions, ppO₂ limit and volume, and the CNS and OTU
-readouts, to two decimals (`_two_places` in `services/dive_reader.py`): the reader passes the file's
-digits (`20714062 Pa -> 207.14062 bar`), and the web renders two. It quantizes via
+readouts, to two decimals (`two_places` in `services/dive_reader.py`), and logbook import rounds a
+cylinder the same way before its bounds: the reader passes the file's digits
+(`20714062 Pa -> 207.14062 bar`), and the web renders two. It quantizes via
 `Decimal(str(value)).quantize(Decimal("0.01"))`, not `round(value, 2)`, which lands `2.675` on
 `2.67`. Depths and temperatures keep the document's precision; a stored recording keeps the reader's
 digits.
@@ -5750,8 +5751,10 @@ service `type`) carries an unknown value, which §5.6 reads as absent. A course'
 OPTIONAL and so costs the field rather than the record — see *A course may have no agency, and a
 certification may not*.
 
-Two derivations are allowed: a dive with no `duration` takes its profile's span, reported; one with
-no `number` takes the dive form's suggestion, duplicates being legal (`DiveNumberingSummary`).
+Three derivations are allowed: a dive with no `duration` takes its profile's span, and one with no
+`bottom_temperature` its primary recording's coldest sample, as the dive form does, both reported;
+one with no `number` takes the dive form's suggestion, duplicates being legal
+(`DiveNumberingSummary`).
 
 `visibility` is finer in the format (a number, §6.2) than here (whole metres); a fractional value is
 dropped and reported, not rounded.

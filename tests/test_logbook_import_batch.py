@@ -1522,3 +1522,113 @@ class TestADiveWithNoNumberIsNumberedAsTheFormWould:
 
         assert [row.outcome for row in report.dives] == [ImportDiveOutcome.RESTORED]
         assert await _numbers(async_db, diver) == [10, 11]
+
+
+def _profiled(**dive: Any) -> dict[str, Any]:
+    """One dive for `_logbook_of`, whose profile reads 26.2, 21.4 and 23.0 degrees."""
+    profile = {
+        "depth": {"times": [0, 60_000, 1_740_000], "values": [0, 1800, 0]},
+        "temperature": {"times": [0, 60_000, 1_740_000], "values": [262, 214, 230]},
+    }
+    return {"started_at": "2026-08-01T10:00:00+02:00", "recordings": [{"profile": profile}], **dive}
+
+
+async def _bottom_temperature(db: AsyncSession, user: User) -> float | None:
+    return (await db.execute(select(Dive.bottom_temperature).where(Dive.user_id == user.id))).scalar_one()
+
+
+def _temperature_notes(report: BatchReport) -> int:
+    return sum("bottom temperature" in note.message for note in report.notes)
+
+
+# What the dive form shows of a cylinder.
+_FORM_CYLINDER_MEMBERS = ("volume", "oxygen", "helium", "start_pressure", "end_pressure", "po2_limit", "gas_number")
+
+
+async def _cylinders(db: AsyncSession, user: User) -> list[dict[str, Any]]:
+    rows = await db.execute(
+        select(*(getattr(DiveMixture, name) for name in _FORM_CYLINDER_MEMBERS))
+        .join(Dive, Dive.id == DiveMixture.dive_id)
+        .where(Dive.user_id == user.id)
+        .order_by(DiveMixture.id)
+    )
+    return [dict(row._mapping) for row in rows]
+
+
+class TestAFileLandsAsTheFormShowsIt:
+    """The dive form's bottom temperature and cylinders for a file are what importing it stores."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("name", "coldest"), [("suunto-ocean-2026.fit", 28.0), ("suunto-d5.json", 18.2)])
+    async def test_an_unstated_bottom_temperature_is_the_coldest_sample(
+        self, volume: Any, async_db: AsyncSession, db: Session, name: str, coldest: float
+    ) -> None:
+        """And says it was taken, as a derived duration is."""
+        diver = create_user(db)
+
+        report = await _import(async_db, diver, [(name, _fixture(name))])
+
+        assert await _bottom_temperature(async_db, diver) == coldest
+        assert read_prefill(_fixture(name))[1].bottom_temperature == coldest
+        assert _temperature_notes(report) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_file_joining_the_dive_another_created_says_nothing(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The JSON's dive is the FIT's, so it writes no temperature to report."""
+        diver = create_user(db)
+
+        report = await _import(async_db, diver, PAIR)
+
+        assert await _bottom_temperature(async_db, diver) == 28.0
+        assert _temperature_notes(report) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_stated_bottom_temperature_wins(self, volume: Any, async_db: AsyncSession, db: Session) -> None:
+        """DM5's XML states 25.0, and its coldest sample is 25.2."""
+        diver = create_user(db)
+
+        report = await _import(async_db, diver, [("dive.xml", _fixture("nitrox-deco.xml"))])
+
+        assert await _bottom_temperature(async_db, diver) == 25.0
+        assert _temperature_notes(report) == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("stated", "stored"), [(None, 21.4), (25.0, 25.0)], ids=["unstated", "stated"])
+    async def test_a_divejson_document_takes_the_same_default(
+        self, volume: Any, async_db: AsyncSession, db: Session, stated: float | None, stored: float
+    ) -> None:
+        diver = create_user(db)
+        document = _logbook_of(_profiled() if stated is None else _profiled(bottom_temperature=stated))
+
+        await _import(async_db, diver, [("logbook.divejson", document)])
+
+        assert await _bottom_temperature(async_db, diver) == stored
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("name", "file"), [("d5.json", "suunto-d5.json"), ("dive.xml", "nitrox-deco.xml")])
+    async def test_cylinders_are_rounded_as_the_form_rounds_them(
+        self, volume: Any, async_db: AsyncSession, db: Session, name: str, file: str
+    ) -> None:
+        """Both files carry the reader's digits - `207.14062`, `144.625` - and the form shows two."""
+        diver = create_user(db)
+
+        await _import(async_db, diver, [(name, _fixture(file))])
+
+        form = [row.model_dump(include=set(_FORM_CYLINDER_MEMBERS)) for row in read_prefill(_fixture(file))[1].mixtures]
+        assert await _cylinders(async_db, diver) == form
+
+    @pytest.mark.asyncio
+    async def test_a_volume_the_rounding_takes_to_zero_is_dropped_and_any_other_is_kept(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """Rounded before the bounds, so the 0 never reaches the volume's `CHECK`; and one past
+        the default decimal context's 28 digits rounds rather than raising."""
+        diver = create_user(db)
+        document = _logbook_of(_profiled(cylinders=[{"volume": 0.004}, {"volume": 1e30}, {"volume": 11.104999}]))
+
+        report = await _import(async_db, diver, [("logbook.divejson", document)])
+
+        assert [row["volume"] for row in await _cylinders(async_db, diver)] == [None, 1e30, 11.1]
+        assert ImportNoteCode.VALUE_DROPPED in {note.code for note in report.notes}
