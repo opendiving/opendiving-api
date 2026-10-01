@@ -27,7 +27,7 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Context, Decimal
 
 import divejson
 from divejson import ConverterError, NonConformingOutputError, SourceTooLargeError
@@ -38,6 +38,7 @@ from ..schemas.dive import DiveMode, Salinity
 from ..schemas.dive_profile import TEMPERATURE_SCALE
 from ..schemas.logbook_import import ImportCylinder, ImportDive, ImportDocument, ImportRecording
 from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
+from .dive_profiles import NormalizedProfile
 from .dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS
 from .recording_shape import Drop, ShapedRecording, recording_start, shape_recording
 
@@ -97,6 +98,9 @@ def is_logbook_format(fmt: str) -> bool:
 
 
 _HUNDREDTHS = Decimal("0.01")
+# Digits enough for any finite float at two places: the default context's 28 signal
+# `InvalidOperation` from 1e26 up, and an imported document may state a cylinder that large.
+_ANY_FLOAT = Context(prec=320)
 
 # A `NonConformingOutputError`, or a converted document this app's own envelope refuses.
 CONVERTER_BUG = (
@@ -252,7 +256,7 @@ def start_of(read: ReadDive, shaped: ShapedRecording | None) -> tuple[datetime, 
     return None if started_at is None else split_local_start_time(started_at)
 
 
-def _two_places(value: float | None) -> float | None:
+def two_places(value: float | None) -> float | None:
     """The app's precision for a number the form shows beside a cylinder or a readout.
 
     A decimal quantize of the value's shortest spelling rather than `round`, which works on the
@@ -261,7 +265,7 @@ def _two_places(value: float | None) -> float | None:
     """
     if value is None or not math.isfinite(value):
         return value
-    return float(Decimal(str(value)).quantize(_HUNDREDTHS))
+    return float(Decimal(str(value)).quantize(_HUNDREDTHS, context=_ANY_FLOAT))
 
 
 def _six_places(value: float | None) -> float | None:
@@ -271,28 +275,31 @@ def _six_places(value: float | None) -> float | None:
 
 def _mixture(cylinder: ImportCylinder) -> DiveMixtureSchema:
     return DiveMixtureSchema(
-        end_pressure=_two_places(cylinder.end_pressure),
+        end_pressure=two_places(cylinder.end_pressure),
         gas_number=cylinder.gas_number,
-        helium=_two_places(cylinder.helium),
-        oxygen=_two_places(cylinder.oxygen),
-        po2_limit=_two_places(cylinder.ppo2_limit),
+        helium=two_places(cylinder.helium),
+        oxygen=two_places(cylinder.oxygen),
+        po2_limit=two_places(cylinder.ppo2_limit),
         role=cylinder.role,
-        start_pressure=_two_places(cylinder.start_pressure),
-        volume=_two_places(cylinder.volume),
+        start_pressure=two_places(cylinder.start_pressure),
+        volume=two_places(cylinder.volume),
     )
 
 
-def _coldest(shaped: ShapedRecording | None) -> float | None:
-    """The coldest reading of the recording's temperature channel, in degrees.
+def bottom_temperature(stated: float | None, profile: NormalizedProfile | None) -> float | None:
+    """A dive's bottom temperature as this app takes it: the one its document states, else the
+    coldest reading of its recording's temperature channel, in degrees.
 
-    The form's default for a bottom temperature the file does not state, which every
-    dive-computer format but DM5's XML leaves unstated. The app's arithmetic rather than the
-    converter's: a format writer deriving it would be making a reading up, and a form default
-    is not a reading.
+    The dive form and logbook import both apply it, so a file lands with one value through
+    either door. Every dive-computer format but DM5's XML leaves the value unstated, and the
+    default is the app's arithmetic rather than the converter's: a format writer deriving it
+    would be making a reading up.
     """
-    if shaped is None or shaped.profile is None or shaped.profile.temperature is None:
+    if stated is not None:
+        return stated
+    if profile is None or profile.temperature is None:
         return None
-    return min(shaped.profile.temperature.v) / TEMPERATURE_SCALE
+    return min(profile.temperature.v) / TEMPERATURE_SCALE
 
 
 def prefill(read: ReadDive, shaped: ShapedRecording | None) -> ParsedDiveSchema:
@@ -316,7 +323,7 @@ def prefill(read: ReadDive, shaped: ShapedRecording | None) -> ParsedDiveSchema:
     entry, exit_ = dive.entry_position, dive.exit_position
     return ParsedDiveSchema(
         avg_depth=dive.avg_depth,
-        bottom_temperature=dive.bottom_temperature if dive.bottom_temperature is not None else _coldest(shaped),
+        bottom_temperature=bottom_temperature(dive.bottom_temperature, None if shaped is None else shaped.profile),
         dive_number=dive.number,
         duration=dive.duration,
         max_depth=dive.max_depth,
@@ -344,10 +351,10 @@ def prefill(read: ReadDive, shaped: ShapedRecording | None) -> ParsedDiveSchema:
         if deco_model
         else None,
         salinity=None if shaped is None or shaped.salinity is None else Salinity(shaped.salinity),
-        cns_start=_two_places(readouts.get("cns_start")),
-        cns_end=_two_places(readouts.get("cns_end")),
-        otu_start=_two_places(readouts.get("otu_start")),
-        otu_end=_two_places(readouts.get("otu_end")),
+        cns_start=two_places(readouts.get("cns_start")),
+        cns_end=two_places(readouts.get("cns_end")),
+        otu_start=two_places(readouts.get("otu_start")),
+        otu_end=two_places(readouts.get("otu_end")),
         surface_pressure_bar=readouts.get("surface_pressure_bar"),
         entry_latitude=None if entry is None else _six_places(entry.latitude),
         entry_longitude=None if entry is None else _six_places(entry.longitude),

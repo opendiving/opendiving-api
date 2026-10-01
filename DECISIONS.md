@@ -440,8 +440,9 @@ loading, `transmitter_id`, a mixture's `type`) is not projected, and samples nev
 `/dive/parse` (*"A profile is never read over `/dive/parse`"*).
 
 The prefill rounds a cylinder's pressures, fractions, ppO₂ limit and volume, and the CNS and OTU
-readouts, to two decimals (`_two_places` in `services/dive_reader.py`): the reader passes the file's
-digits (`20714062 Pa -> 207.14062 bar`), and the web renders two. It quantizes via
+readouts, to two decimals (`two_places` in `services/dive_reader.py`), and logbook import rounds a
+cylinder the same way before its bounds: the reader passes the file's digits
+(`20714062 Pa -> 207.14062 bar`), and the web renders two. It quantizes via
 `Decimal(str(value)).quantize(Decimal("0.01"))`, not `round(value, 2)`, which lands `2.675` on
 `2.67`. Depths and temperatures keep the document's precision; a stored recording keeps the reader's
 digits.
@@ -1367,6 +1368,7 @@ counter: it starts at 1 on a new or factory-reset computer and restarts on the n
 importing it as `dive_number` stamps a #5 onto someone's 300th dive. The reader writes it to the
 recording's device, never to the dive's `number`, so the prefill's `dive_number` is null for every
 dive-computer file and the number comes from `GET /dives/next-number`, derived from the dive's date.
+A logbook import numbers such a dive the same way (`assign_suggested_numbers`).
 
 The counter is kept under its own name: `ParsedDiveSchema.device.dive_number`, stored as
 `dive_recording.device_dive_number`. The two are different quantities.
@@ -5752,8 +5754,10 @@ service `type`) carries an unknown value, which §5.6 reads as absent. A course'
 OPTIONAL and so costs the field rather than the record — see *A course may have no agency, and a
 certification may not*.
 
-Two derivations are allowed and reported: a dive with no `duration` takes its profile's span; one
-with no `number` gets a placeholder, duplicates being legal (`DiveNumberingSummary`).
+Three derivations are allowed: a dive with no `duration` takes its profile's span, and one with no
+`bottom_temperature` its primary recording's coldest sample, as the dive form does, both reported;
+one with no `number` takes the dive form's suggestion, duplicates being legal
+(`DiveNumberingSummary`).
 
 `visibility` is finer in the format (a number, §6.2) than here (whole metres); a fractional value is
 dropped and reported, not rounded.
@@ -6910,8 +6914,9 @@ what the files before it wrote, so the gates pair a computer's two exports, or t
 across two days. The preview runs the same pass and rolls it back. Each file converts alone as a
 one-member zip named by its digest, so a record with no id takes its identity from the bytes. A file
 of one dive and one computer's record is kept, its recording derived from its files as the form's
-is. Rejected: folding pairs in the documents before planning, a second writer; pairing by basename,
-true of the Suunto app alone.
+is. Dive numbers are the exception: given after the last file, in date order across files. Rejected:
+folding pairs in the documents before planning, a second writer; pairing by basename, true of the
+Suunto app alone.
 
 ## A dive's cylinders fill from whichever recording pairs with them
 

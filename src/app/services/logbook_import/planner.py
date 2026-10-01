@@ -116,7 +116,7 @@ from ..dive_profiles import (
     derive_gas_attribution,
     downsample,
 )
-from ..dive_reader import FALLBACK_CONTENT_TYPE, content_type_of, reads
+from ..dive_reader import FALLBACK_CONTENT_TYPE, bottom_temperature, content_type_of, reads, two_places
 from ..dive_recordings import (
     DeviceIdentity,
     RecordingCandidate,
@@ -432,6 +432,9 @@ class ImportPlan:
     # it is one recording's file and is not. See `LoadedImport.kept`.
     kept: bool = False
     not_kept: ImportMemberNotKept | None = None
+    # The dives this file writes - creates or restores - whose document states no number, by
+    # source uuid. Written holding `0`, and numbered by `import_batch` after its last file.
+    unnumbered_dives: list[uuid_pkg.UUID] = field(default_factory=list)
 
     async def portrait_offer(self) -> ImportPortraitOffer | None:
         """The preview's portrait fields, the archive's drawn small enough to travel inline."""
@@ -543,6 +546,10 @@ _MIXTURE_BOUNDS: tuple[Bound, ...] = (
 )
 
 
+# The members the dive form rounds to the two places it shows (`dive_reader._mixture`).
+_ROUNDED_CYLINDER_MEMBERS = ("volume", "oxygen", "helium", "start_pressure", "end_pressure", "ppo2_limit")
+
+
 def _unpressurized(cylinder: ImportCylinder) -> list[str]:
     """The pressures a converted file writes as an absent-marker: 0 bar or below."""
     return [
@@ -646,6 +653,8 @@ class _Planner:
         # Incoming recordings that belong to dives this account already has - see
         # `PlannedRecordingMatch`. Filled by `_plan_dives`, walked by the writer.
         self._recording_matches: list[PlannedRecordingMatch] = []
+        # The dives this file writes with no number of their own - see `ImportPlan`.
+        self._unnumbered_dives: list[uuid_pkg.UUID] = []
         # `None` until asked. See `_has_recordings`.
         self._account_has_recordings: bool | None = None
         # The caller's contacts by name, and the names this document's contacts - and the
@@ -1119,6 +1128,7 @@ class _Planner:
             is_archive=self._loaded.is_archive,
             records=self._records,
             recording_matches=self._recording_matches,
+            unnumbered_dives=self._unnumbered_dives,
             notes=self._notes,
             notes_dropped=self._notes_dropped,
             files_referenced=self._files_referenced,
@@ -2325,8 +2335,9 @@ class _Planner:
 
         bounded = self._bounded(collection, dive.uuid, dive, _DIVE_BOUNDS)
         recordings = self._plan_recordings(dive)
-        # The primary recording's profile, for the two dive-level jobs a profile still has:
-        # standing in for an unrecorded duration below, and keeping the skip message honest.
+        # The primary recording's profile, for the dive-level jobs a profile still has: standing
+        # in for an unrecorded duration and an unstated bottom temperature below, and keeping the
+        # skip message honest. Capped, which keeps every channel's extremes (`_downsample_series`).
         profile = recordings[0].profile if recordings else None
 
         duration = bounded.get("duration")
@@ -2374,21 +2385,27 @@ class _Planner:
             )
             visibility = None
 
+        stated_temperature = dive.bottom_temperature if finite(dive.bottom_temperature) else None
+        temperature = bottom_temperature(stated_temperature, None if profile is None else profile.profile)
+
         entry = self._position(collection, dive.uuid, dive.entry_position, "entry")
         exit_ = self._position(collection, dive.uuid, dive.exit_position, "exit")
         # A bare date is the date-only state (spec §5.2): stored as its day with no clock,
         # never as a midnight somebody would read as the time the dive began.
         start_time, offset_minutes, date_only = split_dive_start_time(dive.started_at)
+        number = bounded.get("number")
         record.values = {
             "user_id": self._user_id,
             # A dive number is the diver's own numbering and `NOT NULL` here. Absent - or
-            # dropped by the bound above - it falls back to the placeholder `0` rather than
-            # the record being dropped: duplicate dive numbers are legal by design (see
-            # `DiveNumberingSummary`, which counts them rather than refusing them), so a
-            # placeholder costs nothing a diver cannot fix, while dropping the dive would
-            # lose everything else it carries. Every unnumbered dive in one document
-            # therefore lands on 0, not on 1, 2, 3.
-            "dive_number": bounded.get("number", 0),
+            # dropped by the bound above - the dive takes the number the dive form would
+            # suggest, given once the whole import is written (`import_batch`), because the
+            # import's unnumbered dives are numbered in date order across all its files and
+            # no one file's plan sees the others. `0` holds the column until then. The
+            # suggestion is given even where another dive holds it: duplicate dive numbers
+            # are legal by design (see `DiveNumberingSummary`, which counts them rather than
+            # refusing them), so a clash costs nothing a diver cannot fix, while dropping the
+            # dive would lose everything else it carries.
+            "dive_number": 0 if number is None else number,
             "start_time": start_time,
             "utc_offset_minutes": offset_minutes,
             "start_date_only": date_only,
@@ -2396,7 +2413,7 @@ class _Planner:
             "notes": self._notes_text("dives", dive.uuid, dive.notes),
             "max_depth": max_depth,
             "avg_depth": avg_depth,
-            "bottom_temperature": dive.bottom_temperature if finite(dive.bottom_temperature) else None,
+            "bottom_temperature": temperature,
             "visibility": None if visibility is None else int(visibility),
             "weight": bounded.get("weight"),
             "water_type": None if dive.water_type is None else dive.water_type.value,
@@ -2441,6 +2458,15 @@ class _Planner:
                 # unusable object inside it.
                 self._keep_on_match(already)
                 return PlannedRecord(action=Action.SKIP, source_uuid=dive.uuid, uuid=record.uuid)
+        if stated_temperature is None and temperature is not None:
+            # The dive form's default, derived and reported as the duration is - here, where the
+            # dive is known to be written, since a match writes no dive's temperature.
+            self._note(
+                ImportNoteCode.VALUE_DROPPED,
+                "This dive records no bottom temperature, so it was taken from the coldest reading of its own profile.",
+                collection=collection,
+                uuid=dive.uuid,
+            )
         recordings = self._keep_on_dive(dive, recordings)
 
         record.children = {
@@ -2455,6 +2481,8 @@ class _Planner:
             "mixtures": mixtures,
             "recordings": recordings,
         }
+        if number is None:
+            self._unnumbered_dives.append(dive.uuid)
         return record
 
     def _tag_names(
@@ -2576,11 +2604,19 @@ class _Planner:
         read as set to every later fill. Dropped without a note, since it is an absent-marker
         rather than a value. A DiveJSON document keeps the bounds a diver's own record takes,
         where an end pressure of 0 is an out-of-gas ascent (spec §6.3).
+
+        **The measured members are first rounded as the dive form rounds them**, so one file
+        stores one cylinder through either door, and a value the rounding takes to 0 meets the
+        bounds and the rule above as the 0 it would be stored as.
         """
         converted = self._loaded.conversion is not None
         rows: list[dict[str, Any]] = []
         for index, source in enumerate(dive.cylinders):
-            cylinder = source.model_copy(update=dict.fromkeys(_unpressurized(source), None)) if converted else source
+            cylinder = source.model_copy(
+                update={name: two_places(getattr(source, name)) for name in _ROUNDED_CYLINDER_MEMBERS}
+            )
+            if converted:
+                cylinder = cylinder.model_copy(update=dict.fromkeys(_unpressurized(cylinder), None))
             bounded = self._bounded("dives", dive.uuid, cylinder, _MIXTURE_BOUNDS)
             volume = bounded.get("volume")
             oxygen = bounded.get("oxygen")
