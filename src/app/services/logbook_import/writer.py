@@ -51,7 +51,7 @@ from ...crud.crud_people import (
     replace_people_for_dive,
     replace_people_for_trip,
 )
-from ...crud.crud_tags import replace_tags_for_dive, tag_ids_by_name
+from ...crud.crud_tags import replace_tags_for_dive, replace_tags_for_dive_site, tag_ids_by_name
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
 from ...models.contact import Contact
@@ -320,13 +320,14 @@ class _Writer:
         await self._write_people()
         await self._write_trips()
         await self._write_courses()
+        # Before the sites, which name tags as the dives do.
+        await self._write_tags()
         await self._write_sites()
         await self._write_gear()
         await self._write_gear_sets()
         await self._write_schedules()
         await self._write_service_records()
         await self._write_certifications()
-        await self._write_tags()
         await self._write_dives()
         # After the dives, deliberately: no match names a dive of this file's own, and
         # writing them last keeps that true of the order as well as of the plan.
@@ -413,7 +414,10 @@ class _Writer:
 
     async def _write_sites(self) -> None:
         for record in self._plan.writable("sites"):
-            await self._write_row("sites", DiveSite, record)
+            site_id = await self._write_row("sites", DiveSite, record)
+            tag_ids = [self._tag_ids[name] for name in record.children.get("tags") or []]
+            if tag_ids:
+                await replace_tags_for_dive_site(self._db, site_id, tag_ids, commit=False)
 
     async def _write_gear(self) -> None:
         for record in self._plan.writable("gear"):
@@ -490,11 +494,12 @@ class _Writer:
                 )
 
     async def _write_tags(self) -> None:
-        """Every tag the dives and the tag list name, the ones the caller has matched by the
-        unique index's own fold and the rest created."""
+        """Every tag the sites, the dives and the tag list name, the ones the caller has
+        matched by the unique index's own fold and the rest created."""
         names = [*self._plan.tags]
-        for record in self._plan.writable("dives"):
-            names.extend(record.children.get("tags") or [])
+        for collection in ("sites", "dives"):
+            for record in self._plan.writable(collection):
+                names.extend(record.children.get("tags") or [])
         self._tag_ids = await tag_ids_by_name(self._db, user_id=self._user_id, names=list(dict.fromkeys(names)))
 
     async def _write_dives(self) -> None:

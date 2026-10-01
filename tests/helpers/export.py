@@ -241,6 +241,7 @@ def build_bundle(
     person_ids_by_course: dict[int, list[tuple[int, str | None]]] | None = None,
     tags: list[Tag] | None = None,
     tag_ids_by_dive: dict[int, list[int]] | None = None,
+    tag_ids_by_site: dict[int, list[int]] | None = None,
 ) -> ExportBundle:
     """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive".
 
@@ -297,6 +298,7 @@ def build_bundle(
         person_ids_by_course={**{course.id: [] for course in (courses or [])}, **(person_ids_by_course or {})},
         tags=tags or [],
         tag_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(tag_ids_by_dive or {})},
+        tag_ids_by_site={**{site.id: [] for site in (dive_sites or [])}, **(tag_ids_by_site or {})},
     )
 
 

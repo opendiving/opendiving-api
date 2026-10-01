@@ -2200,7 +2200,8 @@ mixed-rank taxonomy mapped from the WoRMS `phylum`/`class_name` strings `models/
 through — a mapping this repo would get quietly wrong; `species.csv` carries them); the emergency
 contact and the policy number (no elements; `<membership memberid>` is not a policy); the portrait
 (`<owner>` has no image element, and its one route to an image, `<notes><link>` to `<mediadata>`,
-carries no role); a dive's tags, waves, weather and boat name.
+carries no role); a dive's tags, waves, weather and boat name; a site's tags, external ids, water
+type and entry types.
 
 Lossy, on the `divejson` package writer's tables: `type` goes out as `<apparatus>`, `semi_closed` as
 `rebreather`, which reads back `closed_circuit`, and `freedive` and `snorkel` not at all;
@@ -2208,7 +2209,9 @@ Lossy, on the `divejson` package writer's tables: `type` goes out as `<apparatus
 kind of boat. The rating is doubled onto `<ratingvalue>`'s 1-10.
 
 Allowed: `po2_limit` maps to `<mix><maximumpo2>`, so `_MixKey` includes it;
-`informationbeforedive/link` is `maxOccurs="unbounded"`, so every site goes out in visit order.
+`informationbeforedive/link` is `maxOccurs="unbounded"`, so every site goes out in visit order; a
+site's other names are `<aliasname>`s, its altitude `<geography><altitude>`, and its depth range
+`<sitedata>`'s `<maximumdepth>` and `<minimumdepth>`.
 
 Forced: `<greatestdepth>` is mandatory and `Dive.max_depth` is not — deepest profile sample, then
 `0`; `<tankpressurebegin>` is mandatory in `tankdataType`, so a cylinder without one is skipped, its

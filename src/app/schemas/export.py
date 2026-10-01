@@ -534,18 +534,37 @@ class ExportCourse(PublicUUIDSchema):
     created_at: datetime
 
 
+class ExportExternalId(BaseModel):
+    """A site's entry in a registry outside the logbook (spec §6.10a)."""
+
+    registry: str
+    identifier: str
+
+
 class ExportDiveSite(PublicUUIDSchema):
-    """One dive site (spec §6.10).
+    """One dive site (spec §6.10), its members in the section's order.
 
     **Two positions, and they are different facts.** `position` is the site - the pin a
     diver dropped, the entry point, the wreck. `location.position` is the centre of the
     locality it sits in and `location.bbox` that locality's extent, which is an area rather
     than a point. Neither is ever filled from the other, here or anywhere upstream of here.
+
+    `water_type`, `altitude` and `entry_types` are the place's, and a dive's are the day's:
+    neither is written from the other. A list the site holds nothing in is written as
+    absence, as a contact's empty `roles` is.
     """
 
     name: str
+    other_names: list[str] | None = None
     location: ExportLocation | None = None
     position: ExportPosition | None = None
+    external_ids: list[ExportExternalId] | None = None
+    depth_from: float | None = None
+    depth_to: float | None = None
+    water_type: WaterType | None = None
+    altitude: int | None = None
+    entry_types: list[EntryType] | None = None
+    tags: list[str] | None = None
     notes: str | None = None
     created_at: datetime
 
