@@ -40,11 +40,15 @@ dependencies = [
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
     #
-    # 0.17.0 is the floor because it is the first release whose schema has a dive's `type`,
-    # `rating`, `tags`, `air_temperature`, `current`, `waves`, `weather`, `entry_type` and
-    # `boat_name`, and whose validator refuses a tag repeated once trimmed and case-folded.
-    # Resolved lower, the export of every account fails the conformance check the export tests
-    # run. The floor still carries what 0.16.0's did: a dive's `sightings`, each a species
+    # 0.20.0 is the floor because it is the first release whose `.ssrf` reader carries a site's
+    # pin, its description and notes, and its `<geo>` locality; resolved lower, a Subsurface
+    # site imports with its name alone. The floor still carries what 0.19.0's did: a site's
+    # other names, external ids, depth range, water type, altitude, entry types and tags; what
+    # 0.18.0's did: a location with one name and no `full_name`; what 0.17.0's did: a dive's
+    # `type`, `rating`, `tags`, `air_temperature`, `current`, `waves`, `weather`, `entry_type`
+    # and `boat_name`, and a validator refusing a tag repeated once trimmed and case-folded,
+    # without which the export of every account fails the conformance check the export tests
+    # run; what 0.16.0's did: a dive's `sightings`, each a species
     # reference with an optional count and notes, and a validator refusing one species twice on
     # a dive; what 0.15.0's did: `people`, the person references on a dive, a trip and a
     # course and a certification's `instructor_uuid`, and UDDF and `.ssrf` readers that bring
@@ -61,7 +65,7 @@ dependencies = [
     # `agency`, and the readers spell a dive's number `number`, so a UDDF or `.ssrf` dive
     # `services/logbook_import/reader.py` converts on the request path keeps its own number
     # rather than the placeholder `0`.
-    "divejson>=0.19.0",
+    "divejson>=0.20.0",
     "webauthn>=3.0.0",
     # Decodes and renders the uploaded pictures (`services/user_pictures.py`) and the species
     # photos (`services/species_photos.py`) - the only image processing in the app. 12.0.0 is the first release with official Python 3.14
