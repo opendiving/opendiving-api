@@ -430,13 +430,12 @@ refuses, a 422 naming a converter bug.
 
 ## `ParsedDiveSchema`/`DiveMixtureSchema` carry only fields the backend models support
 
-`ParsedDiveSchema` (`schemas/parsed_dive.py`) is the form's values: what `Dive` persists
-(`avg_depth`, `bottom_temperature`, `dive_number`, `duration`, `max_depth`, `start_time`,
-`mixtures`, the entry and exit fixes) and what lands on the first recording (`device`, `mode`,
-`deco_model`, `salinity`, the CNS, OTU and surface-pressure readouts). `DiveMixtureSchema` carries
-`end_pressure`, `helium`, `oxygen`, `start_pressure`, `volume`, `po2_limit`, `role` and
-`gas_number`. What nothing stores (tissue loading, `transmitter_id`, a mixture's `type`) is not
-projected, and samples never cross `/dive/parse` (*"A profile is never read over `/dive/parse`"*).
+`ParsedDiveSchema` (`schemas/parsed_dive.py`) is the form's values: what a dive persists, from the
+document's dive, and what lands on the first recording (`device`, `mode`, `deco_model`, `salinity`,
+the CNS, OTU and surface-pressure readouts). `DiveMixtureSchema` carries `end_pressure`, `helium`,
+`oxygen`, `start_pressure`, `volume`, `po2_limit`, `role` and `gas_number`. What nothing stores
+(tissue loading, `transmitter_id`, a mixture's `type`) is not projected, and samples never cross
+`/dive/parse` (*"A profile is never read over `/dive/parse`"*).
 
 The prefill rounds a cylinder's pressures, fractions, ppO₂ limit and volume, and the CNS and OTU
 readouts, to two decimals (`two_places` in `services/dive_reader.py`), and logbook import rounds a
@@ -1975,7 +1974,8 @@ becomes
 
 - `ParsedDiveSchema` validators mirror each `CHECK`'s numbers, nulling, not rejecting:
   `surface_pressure_bar` and `po2_limit` two-sided; `cns_start`, `cns_end`, `otu_start`, `otu_end`,
-  `gas_number` at `< 0`; `avg_depth`, `max_depth` at `<= 0`. Scope: bounded and reader-reachable.
+  `gas_number` at `< 0`; `avg_depth`, `max_depth` at `<= 0`. Scope: bounded and reader-reachable,
+  but the dive's own members the form validates (the comment above them on `ParsedDiveSchema`).
   `ck_dive_mixture_oxygen_helium_sum`, `ck_dive_mixture_pressure_order`, `duration`, `volume`,
   `oxygen` and `helium` stay unguarded.
 - The `noop` branch's writes and commit share one `try`/`rollback`, since a `CHECK` raises from
@@ -2917,11 +2917,12 @@ picker; the density a computer was set to, `en13319` among them, is the recordin
 `OTHER` (`NULL` means not recorded) and no `CHECK`, per `GearItem.type`. `altitude` is `Integer`
 metres under `ck_dive_altitude_range` (`-450..6500`), which needs a `_DIVE_CONSTRAINT_MESSAGES`
 entry (`api/v1/dives.py`) or the 422 misdescribes itself. Neither is a `DiveTechScalars` field,
-since `store_tech_scalars` overwrites every field on re-attach, and the prefill seeds neither.
-`METERS_PER_BAR` stays 10.0: a column `NULL` on most rows would step one diver's trend by 3%. UDDF
-carries `altitude` (`informationbeforediveType`) but no `water_type`, 3.2.2 having no per-dive
-salinity; `dives.csv` gains `water_type` and `altitude_m`. Any future `GET /dives` filter must join
-`_cached_read_dives`' `key_prefix`.
+since `store_tech_scalars` overwrites every field on re-attach, and the prefill seeds each only as
+the document states it of the dive, never from a recording's `salinity`. `METERS_PER_BAR` stays
+10.0: a column `NULL` on most rows would step one diver's trend by 3%. UDDF carries `altitude`
+(`informationbeforediveType`) but no `water_type`, 3.2.2 having no per-dive salinity; `dives.csv`
+gains `water_type` and `altitude_m`. Any future `GET /dives` filter must join `_cached_read_dives`'
+`key_prefix`.
 
 ## Measurements are metric in the database and on the wire; `units` is who's looking
 
