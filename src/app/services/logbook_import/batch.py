@@ -2,13 +2,14 @@
 
 **A batch writes what its files would write imported one at a time, in the batch's order** -
 each as an import of its own, previewed and applied - and that is the whole of what two files
-make of each other. Each file is planned against the logbook as the files before it left it,
-and written before the next is planned, so every rule the import has about a recording the
-account stores applies unchanged to one an earlier file of the same batch brought: the
-same-recording gate fills it, the strict gate attaches a second computer's to its dive, and
-a file whose bytes already gave a dive its identity links. The FIT and the JSON of one dive
-are one dive with one recording holding both files, whether they arrive together or on two
-days, and the same batch twice writes nothing the second time.
+make of each other but for dive numbers, given after the last file in date order
+(`assign_suggested_numbers`). Each file is planned against the logbook as the files before it
+left it, and written before the next is planned, so every rule the import has about a
+recording the account stores applies unchanged to one an earlier file of the same batch
+brought: the same-recording gate fills it, the strict gate attaches a second computer's to its
+dive, and a file whose bytes already gave a dive its identity links. The FIT and the JSON of
+one dive are one dive with one recording holding both files, whether they arrive together or
+on two days, and the same batch twice writes nothing the second time.
 
 **The preview runs the same pass and rolls it back**, which is what makes its counts the
 apply's rather than a prediction of them: a later file's outcome depends on what the earlier
@@ -48,6 +49,7 @@ from ...schemas.logbook_import import (
     ImportPortraitOffer,
     ImportSpecies,
 )
+from ..dive_numbering import assign_suggested_numbers
 from ..dive_recordings import DEVICE_COLUMNS
 from ..storage_usage import ensure_room, get_storage_usage, storage_limit_bytes
 from .planner import COLLECTIONS, MAX_NOTES, Action, ImportPlan, plan_import, portrait_change
@@ -327,6 +329,7 @@ async def import_batch(
     )
     staged = StagedFiles()
     written_dives: set[int] = set()
+    unnumbered: list[int] = []
     dives = _Dives()
     plans: list[ImportPlan] = []
     retired = 0
@@ -347,10 +350,15 @@ async def import_batch(
             )
             written = await write_import(db, user_id=user_id, loaded=row.loaded, plan=plan, staged=staged)
             written_dives.update(written.dive_ids.values())
+            unnumbered.extend(written.dive_ids[source] for source in plan.unnumbered_dives)
             dives.add(index, row.loaded, plan, written)
             plans.append(plan)
             retired += portrait_change(plan)[1]
 
+        # The one thing a batch does as a whole rather than file by file: its dives with no
+        # number are numbered in date order across every file, as the dive form would number
+        # them entered in that order, which a file planned on its own cannot see.
+        await assign_suggested_numbers(db, user_id, unnumbered)
         await ensure_room(
             db, user_id=user_id, incoming=staged.ceiling(), retired=retired, exact=staged.exact, used=used
         )
