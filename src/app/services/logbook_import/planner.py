@@ -193,9 +193,9 @@ MAX_NOTES = 500
 def add_note(notes: list[ImportNote], note: ImportNote) -> int:
     """Append `note` under the cap, and say how many notes that cost: 0, or the 1 dropped.
 
-    At the cap a derived value's note gives way to any other, the latest first: it says what
-    the import did, the others what it could not do, and a batch of dive-computer files would
-    otherwise crowd every skipped record out of the list.
+    At the cap a derived value's note gives way to any other, the latest first. It is the one
+    kind written once per dive of a dive-computer file, so a batch of them would otherwise
+    crowd every other note out of the list, a skipped record's among them.
     """
     if len(notes) < MAX_NOTES:
         notes.append(note)

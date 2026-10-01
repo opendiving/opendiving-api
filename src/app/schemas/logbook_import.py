@@ -1222,8 +1222,9 @@ class ImportReport(BaseModel):
         int,
         Field(
             default=0,
-            description="Notes beyond the cap that are not in `notes`. Non-zero means the list above is a prefix, "
-            "not the whole story - the counts are still complete.",
+            description="Notes beyond the cap that are not in `notes`. Non-zero means the list above is not the "
+            "whole story - the counts are still complete. At the cap a `value_derived` note gives way to any "
+            "other, so the list keeps those first.",
         ),
     ]
     conversion: Annotated[
