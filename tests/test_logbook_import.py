@@ -1879,7 +1879,7 @@ class TestTheOldSpellingsAreUndefinedMembers:
         parsed = json.loads(document)
         dive = parsed["dives"][0]
         dive["dive_number"] = dive.pop("number")
-        assert dive["dive_number"] > 0, "the fixture has to carry a number the placeholder is distinguishable from"
+        assert dive["dive_number"] > 0, "the fixture has to carry a number for the old spelling to lose"
         parsed["certifications"][0]["certification_number"] = "1234567"
         return json.dumps(parsed).encode()
 
