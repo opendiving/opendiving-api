@@ -30,6 +30,7 @@ from unittest.mock import AsyncMock
 
 import divejson
 import pytest
+from divejson.converter import site_members
 
 from src.app.models.certification import Certification
 from src.app.models.course import Course
@@ -925,6 +926,45 @@ class TestReferences:
             "bbox": {"south": 27.68, "north": 27.83, "west": 34.18, "east": 34.3},
         }
         assert site["location"]["position"] != site["position"]
+
+    @pytest.mark.asyncio
+    async def test_a_dive_site_carries_every_member_in_the_section_s_order(self, monkeypatch):
+        """§6.10's members as the format orders them, read off the schema the validator
+        holds - so a member written under another name, or one left out of the mapping,
+        fails here rather than at somebody else's importer."""
+        document = await _render(full_bundle(), monkeypatch)
+        site = document["sites"][0]
+
+        assert list(site) == [member for member in site_members() if member in site]
+        assert site["other_names"] == ["Shark & Yolanda", "砂辺"]
+        assert site["external_ids"] == [
+            {"registry": "openstreetmap", "identifier": "node/313862678"},
+            {"registry": "wikidata", "identifier": "Q1047347"},
+        ]
+        assert (site["depth_from"], site["depth_to"], site["water_type"], site["altitude"]) == (5.0, 40.0, "salt", 0)
+        assert site["entry_types"] == ["shore", "boat"]
+        assert site["tags"] == ["wreck"]
+        assert not _issues(document)
+
+    @pytest.mark.asyncio
+    async def test_a_site_s_empty_lists_are_absent(self, monkeypatch):
+        """An empty list says nothing absence does not, as a contact's empty `roles`."""
+        document = await _render(full_bundle(), monkeypatch)
+
+        assert not {"other_names", "external_ids", "entry_types", "tags"} & set(document["sites"][1])
+
+    @pytest.mark.asyncio
+    async def test_a_site_s_vocabulary_value_outside_the_format_is_left_out(self, monkeypatch):
+        """No `CHECK` stops one being stored, so the writer drops the value and keeps the
+        site - and an entry type item by item, the rest kept."""
+        bundle = full_bundle()
+        bundle.dive_sites[0].water_type = "lava"
+        bundle.dive_sites[0].entry_types = ["shore", "zipline"]
+
+        site = (await _render(bundle, monkeypatch))["sites"][0]
+
+        assert "water_type" not in site
+        assert site["entry_types"] == ["shore"]
 
     @pytest.mark.asyncio
     async def test_a_dive_site_with_no_locality_carries_no_location_member(self, monkeypatch):

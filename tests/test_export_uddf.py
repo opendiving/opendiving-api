@@ -986,6 +986,43 @@ class TestDiveSiteGeography:
         document = await _render(full_bundle(), monkeypatch=monkeypatch)
         assert self._site(_tree(document), 1).find(f"{UDDF}geography") is None
 
+    @pytest.mark.asyncio
+    async def test_the_other_names_the_altitude_and_the_depth_range_go_out(self, schema, monkeypatch):
+        """What the `divejson` package's writer writes for a site, in the XSD's order:
+        `<aliasname>`s after the name, the altitude inside `<geography>`, and `<sitedata>`
+        with its deep end first. Its tags, registry entries, water type and entry types
+        have no element and stay in `logbook.divejson`."""
+        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        schema.validate(document)
+        site = self._site(_tree(document), 0)
+
+        assert [child.tag.removeprefix(UDDF) for child in site] == [
+            "name",
+            "aliasname",
+            "aliasname",
+            "geography",
+            "sitedata",
+            "notes",
+        ]
+        assert [alias.text for alias in site.findall(f"{UDDF}aliasname")] == ["Shark & Yolanda", "砂辺"]
+        assert _text(site.find(f"{UDDF}geography"), f"{UDDF}altitude") == "0"
+        sitedata = site.find(f"{UDDF}sitedata")
+        assert [child.tag.removeprefix(UDDF) for child in sitedata] == ["maximumdepth", "minimumdepth"]
+        assert (_text(sitedata, f"{UDDF}maximumdepth"), _text(sitedata, f"{UDDF}minimumdepth")) == ("40", "5")
+
+    @pytest.mark.asyncio
+    async def test_an_altitude_with_no_place_borrows_the_name_as_a_pin_does(self, schema, monkeypatch):
+        """`<altitude>` lives inside `<geography>`, whose `<location>` is mandatory - the
+        position's rule, so the site's name stands in rather than the altitude being lost."""
+        site = make_dive_site(2, UUIDS["site-wall"], altitude=1800, depth_to=12.0)
+        document = await _render(build_bundle(dive_sites=[site]), monkeypatch=monkeypatch)
+        schema.validate(document)
+        written = self._site(_tree(document), 0)
+
+        assert _text(written.find(f"{UDDF}geography"), f"{UDDF}location") == "Yolanda"
+        assert _text(written.find(f"{UDDF}geography"), f"{UDDF}altitude") == "1800"
+        assert [child.tag.removeprefix(UDDF) for child in written.find(f"{UDDF}sitedata")] == ["maximumdepth"]
+
 
 class TestWaypoints:
     """The depth channel alone sets the time axis, and every waypoint carries a depth.

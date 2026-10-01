@@ -335,6 +335,18 @@ def full_bundle() -> ExportBundle:
         location_bbox_west=34.18,
         location_bbox_east=34.30,
         notes="Current picks up after slack.",
+        # Every member a site gained beside its pin and its locality, so each writer's
+        # mapping of them is exercised rather than their absence.
+        other_names=["Shark & Yolanda", "砂辺"],
+        external_ids=[
+            {"registry": "openstreetmap", "identifier": "node/313862678"},
+            {"registry": "wikidata", "identifier": "Q1047347"},
+        ],
+        depth_from=5.0,
+        depth_to=40.0,
+        water_type="salt",
+        altitude=0,
+        entry_types=["shore", "boat"],
     )
     # No locality at all, which is the common shape and the one UDDF has to fall back on.
     wall = make_dive_site(2, UUIDS["site-wall"])
@@ -750,6 +762,7 @@ def full_bundle() -> ExportBundle:
         tags=[drift, night, wreck],
         # Not in name order on the air dive: the diver's own order is what travels.
         tag_ids_by_dive={1: [2, 1], 2: [1]},
+        tag_ids_by_site={1: [2]},
     )
 
 
