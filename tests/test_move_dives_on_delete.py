@@ -154,7 +154,7 @@ def dive_site_route(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "resolve": AsyncMock(return_value={replacement_uuid: 99}),
         "replace": AsyncMock(side_effect=_records(calls, "replace", 3)),
         "delete": AsyncMock(side_effect=_records(calls, "delete")),
-        "invalidate_list": AsyncMock(),
+        "invalidate_sites": AsyncMock(),
         "invalidate_dives": AsyncMock(),
         "invalidate_trips": AsyncMock(),
         "redis": _FakeRedis(),
@@ -165,7 +165,7 @@ def dive_site_route(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(dive_sites_module, "resolve_dive_site_ids_for_user", stubs["resolve"])
     monkeypatch.setattr(dive_sites_module, "replace_dive_site_on_dives", stubs["replace"])
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "delete", stubs["delete"])
-    monkeypatch.setattr(dive_sites_module._dive_site_cache, "invalidate_list", stubs["invalidate_list"])
+    monkeypatch.setattr(dive_sites_module, "invalidate_dive_site_caches", stubs["invalidate_sites"])
     monkeypatch.setattr(dive_sites_module, "invalidate_dive_caches", stubs["invalidate_dives"])
     monkeypatch.setattr(dive_sites_module, "invalidate_trip_caches", stubs["invalidate_trips"])
 
@@ -385,6 +385,14 @@ class TestEraseDiveSiteWithAReplacement:
         await _erase_dive_site(dive_site_route, move_dives_to=dive_site_route["replacement_uuid"])
 
         dive_site_route["invalidate_trips"].assert_awaited_once_with(USER_ID)
+
+    @pytest.mark.asyncio
+    async def test_the_replacement_s_own_read_is_dropped(self, dive_site_route: dict[str, Any]) -> None:
+        """Its summary just took in this site's dives, and nothing in the request names its
+        cached read - so every site read of the owner goes, the list's and the single ones."""
+        await _erase_dive_site(dive_site_route, move_dives_to=dive_site_route["replacement_uuid"])
+
+        dive_site_route["invalidate_sites"].assert_awaited_once_with(USER_ID)
 
     @pytest.mark.asyncio
     async def test_the_response_says_nothing_about_what_moved(self, dive_site_route: dict[str, Any]) -> None:

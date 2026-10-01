@@ -101,6 +101,7 @@ from src.app.services.logbook_import.planner import (
     _DIVE_BOUNDS,
     _MIXTURE_BOUNDS,
     _SIGHTING_BOUNDS,
+    _SITE_BOUNDS,
 )
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
 from src.app.services.recording_shape import READOUT_BOUNDS
@@ -153,7 +154,12 @@ async def _patch_start_time(
     the UPDATE all run for real, because what these two tests claim is about the endpoint.
     `test_dive_start_time.py` pins `split_updated_start_time` on its own.
     """
-    for name in ("invalidate_dive_caches", "invalidate_gear_caches", "invalidate_trip_caches"):
+    for name in (
+        "invalidate_dive_caches",
+        "invalidate_gear_caches",
+        "invalidate_trip_caches",
+        "invalidate_dive_site_caches",
+    ):
         monkeypatch.setattr(dives_module, name, AsyncMock())
     await dives_module.patch_dive(
         request=MagicMock(),
@@ -3959,8 +3965,8 @@ class TestThePortrait:
 
 
 class TestTheBoundsCensus:
-    """A guard, not a test of behaviour: a new single-column bound on `dive` or
-    `dive_mixture` must not be able to land without an import-side counterpart.
+    """A guard, not a test of behaviour: a new single-column bound on a table an import
+    writes values into must not be able to land without an import-side counterpart.
 
     The same shape as
     `test_every_single_column_bound_a_file_can_reach_has_a_parse_side_guard`, and for the
@@ -3972,6 +3978,8 @@ class TestTheBoundsCensus:
     PAIR_RULES = frozenset(
         {
             "ck_dive_avg_depth_within_max",
+            # `_plan_site` drops both ends of an inverted depth range.
+            "ck_dive_site_depth_range",
             "ck_dive_entry_position_pair",
             "ck_dive_exit_position_pair",
             "ck_dive_mixture_oxygen_helium_sum",
@@ -4005,7 +4013,7 @@ class TestTheBoundsCensus:
     def test_every_bound_the_document_can_reach_has_a_guard(self) -> None:
         guarded = {
             bound.field
-            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, READOUT_BOUNDS, _SIGHTING_BOUNDS)
+            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, READOUT_BOUNDS, _SIGHTING_BOUNDS, _SITE_BOUNDS)
             for bound in bounds
         }
         # Column names, mapped onto the wire names the planner reads them under.
@@ -4013,7 +4021,7 @@ class TestTheBoundsCensus:
         unguarded = []
         # `tuple[Any, ...]` because `Model.__table__` is typed `FromClause` on a precisely
         # typed class, and only `Table` carries `.constraints`.
-        models: tuple[Any, ...] = (Dive, DiveMixture, DiveRecording, DiveSpecies)
+        models: tuple[Any, ...] = (Dive, DiveMixture, DiveRecording, DiveSpecies, DiveSite)
         for model in models:
             table = model.__table__
             for constraint in table.constraints:
@@ -4386,6 +4394,11 @@ class TestTheIntegerColumnCensus:
         ("dive_tag", "position"): "the list index, not the document's",
         ("dive_site", "id"): "the sequence's",
         ("dive_site", "user_id"): "the caller's",
+        ("dive_site", "altitude"): "bounded in `_SITE_BOUNDS`, to the model's own -450..6500",
+        ("dive_site_tag", "id"): "the sequence's",
+        ("dive_site_tag", "dive_site_id"): "resolved from a row this import wrote",
+        ("dive_site_tag", "tag_id"): "a tag this import wrote, or one the caller already had",
+        ("dive_site_tag", "position"): "the list index, not the document's",
         ("gear_set", "id"): "the sequence's",
         ("gear_set", "user_id"): "the caller's",
         ("certification", "id"): "the sequence's",
@@ -4435,6 +4448,7 @@ class TestTheIntegerColumnCensus:
         from src.app.models.certification_file import CertificationFile
         from src.app.models.course_person import CoursePerson
         from src.app.models.dive_person import DivePerson
+        from src.app.models.dive_site_tag import DiveSiteTag
         from src.app.models.dive_tag import DiveTag
         from src.app.models.person import Person
         from src.app.models.tag import Tag
@@ -4459,6 +4473,7 @@ class TestTheIntegerColumnCensus:
             TripPart,
             Course,
             DiveSite,
+            DiveSiteTag,
             GearItem,
             GearSet,
             GearServiceSchedule,

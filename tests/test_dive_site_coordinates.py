@@ -150,6 +150,9 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     db_dive_site.location_name = "Dahab, Egypt"
     db_dive_site.latitude = None
     db_dive_site.longitude = None
+    db_dive_site.other_names = []
+    db_dive_site.depth_from = None
+    db_dive_site.depth_to = None
     seen["db_dive_site"] = db_dive_site
 
     async def fake_update(*, db: Any, object: dict, uuid: uuid_pkg.UUID) -> None:
@@ -158,7 +161,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(dive_sites_module, "_get_owned_dive_site", AsyncMock(return_value=db_dive_site))
     monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "update", fake_update)
-    monkeypatch.setattr(dive_sites_module._dive_site_cache, "invalidate_list", AsyncMock())
+    monkeypatch.setattr(dive_sites_module, "invalidate_dive_site_caches", AsyncMock())
     seen["invalidate_dive_caches"] = AsyncMock()
     monkeypatch.setattr(dive_sites_module, "invalidate_dive_caches", seen["invalidate_dive_caches"])
 
@@ -166,8 +169,6 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 async def _patch(values: dict[str, Any], mock_redis: Any) -> None:
-    """`patch_dive_site` is `@cache`-decorated, so it needs a client even on a PATCH -
-    the decorator's only job on a non-GET is dropping the item's cached entry."""
     request = MagicMock()
     request.method = "PATCH"
     with patch.object(cache_module, "client", mock_redis):

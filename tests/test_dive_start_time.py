@@ -283,6 +283,7 @@ class TestAnUpdateMayPreserveButNotRemove:
         monkeypatch.setattr(dives_module, "invalidate_dive_caches", AsyncMock())
         monkeypatch.setattr(dives_module, "invalidate_gear_caches", AsyncMock())
         monkeypatch.setattr(dives_module, "invalidate_trip_caches", AsyncMock())
+        monkeypatch.setattr(dives_module, "invalidate_dive_site_caches", AsyncMock())
         seen["dive"] = db_dive
         return seen
 

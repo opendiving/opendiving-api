@@ -22,7 +22,7 @@ import pkgutil
 import uuid as uuid_pkg
 from collections.abc import Generator, Sequence
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,7 +35,6 @@ from src.app.api.v1 import dive_sites as dive_sites_module
 from src.app.core.config import settings
 from src.app.core.schemas import RejectsExplicitNulls
 from src.app.core.setup import create_application
-from src.app.core.utils import cache as cache_module
 from src.app.models.certification import Certification
 from src.app.models.contact import Contact
 from src.app.models.course import Course
@@ -256,19 +255,6 @@ def test_a_schema_that_declares_nothing_accepts_any_null() -> None:
 OWNER = {"id": 7, "uuid": uuid_pkg.uuid4(), "username": "ada", "is_superuser": False}
 
 
-def _fake_redis() -> Any:
-    """Just the calls `@cache` makes on the write path - delete the item key, then scan
-    and delete the list keys.
-    """
-    fake = Mock()
-    fake.get = AsyncMock(return_value=None)
-    fake.set = AsyncMock()
-    fake.expire = AsyncMock()
-    fake.delete = AsyncMock()
-    fake.scan = AsyncMock(return_value=(0, []))
-    return fake
-
-
 @pytest.fixture(scope="module")
 def owned_app() -> Any:
     """Its own app with `apply_migrations_on_start=False`, as in `test_ownership.py` - the
@@ -319,13 +305,10 @@ class TestTheNullNeverReachesTheDatabase:
         # it, not just the name - because a place is a value object with nothing to merge
         # a partial clear into.
         update = AsyncMock()
-        # Unlike the 422 above, this one runs the handler to completion - and
-        # `patch_dive_site` is `@cache`-decorated, so it reaches Redis on the way out.
-        monkeypatch.setattr(cache_module, "client", _fake_redis())
         monkeypatch.setattr(dive_sites_module, "_get_owned_dive_site", AsyncMock())
         monkeypatch.setattr(dive_sites_module.crud_dive_sites, "update", update)
         monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", AsyncMock(return_value=False))
-        monkeypatch.setattr(dive_sites_module._dive_site_cache, "invalidate_list", AsyncMock())
+        monkeypatch.setattr(dive_sites_module, "invalidate_dive_site_caches", AsyncMock())
         monkeypatch.setattr(dive_sites_module, "invalidate_dive_caches", AsyncMock())
 
         response = signed_in_client.patch(f"/api/v1/dive-site/{uuid_pkg.uuid4()}", json={"location": None})

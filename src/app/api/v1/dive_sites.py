@@ -391,11 +391,13 @@ async def patch_dive_site(
     ):
         raise DuplicateValueException("A dive site with this name already exists at this location")
 
-    # The schema checks a pair it was sent; the stored end of one it was not is read here.
-    depth_from = values.depth_from if "depth_from" in sent else db_dive_site.depth_from
-    depth_to = values.depth_to if "depth_to" in sent else db_dive_site.depth_to
-    if depth_from is not None and depth_to is not None and depth_from > depth_to:
-        raise UnprocessableEntityException(DEPTH_RANGE_MESSAGE)
+    # The schema checks a pair it was sent whole; against the stored end of one it was sent
+    # half of, the route checks.
+    if "depth_from" in sent or "depth_to" in sent:
+        depth_from = values.depth_from if "depth_from" in sent else db_dive_site.depth_from
+        depth_to = values.depth_to if "depth_to" in sent else db_dive_site.depth_to
+        if depth_from is not None and depth_to is not None and depth_from > depth_to:
+            raise UnprocessableEntityException(DEPTH_RANGE_MESSAGE)
 
     update_data = values.model_dump(exclude_unset=True, exclude={"location", "tags"})
     if replaces_location:

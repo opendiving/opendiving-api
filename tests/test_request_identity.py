@@ -258,7 +258,12 @@ def _install_dive(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         monkeypatch.setattr(dives_module, name, AsyncMock())
     for name in ("replace_species_for_dive", "recalculate_dive_stats", "recalculate_gear_dive_counts"):
         monkeypatch.setattr(dives_module, name, AsyncMock())
-    for name in ("invalidate_dive_caches", "invalidate_gear_caches", "invalidate_trip_caches"):
+    for name in (
+        "invalidate_dive_caches",
+        "invalidate_gear_caches",
+        "invalidate_trip_caches",
+        "invalidate_dive_site_caches",
+    ):
         monkeypatch.setattr(dives_module, name, AsyncMock())
     for name in ("get_mixtures_for_dive", "get_dive_sites_for_dive", "get_gear_items_for_dive", "get_species_for_dive"):
         monkeypatch.setattr(dives_module, name, AsyncMock(return_value=[]))
@@ -271,7 +276,7 @@ def _install_dive_site(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     stored = DiveSiteReadInternal(id=11, user_id=CALLER_ID, uuid=ROW_UUID, name="Blue Hole", created_at=CREATED_AT)
     created = AsyncMock(return_value=stored)
     monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", AsyncMock(return_value=False))
-    monkeypatch.setattr(dive_sites_module._dive_site_cache, "invalidate_list", AsyncMock())
+    monkeypatch.setattr(dive_sites_module, "invalidate_dive_site_caches", AsyncMock())
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "create", created)
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "get", AsyncMock(return_value=stored))
     return created
@@ -452,7 +457,7 @@ LIST_ROUTES = (
         "_cached_read_dives",
         _PUBLIC_ROW | {"dive_number": 1, "start_time": START_TIME, "duration": 1800},
     ),
-    ListRoute("/dive-sites", dive_sites_module._dive_site_cache, "read_list", _PUBLIC_ROW | {"name": "Blue Hole"}),
+    ListRoute("/dive-sites", dive_sites_module, "_cached_read_dive_sites", _PUBLIC_ROW | {"name": "Blue Hole"}),
     ListRoute(
         "/certifications",
         certifications_module,

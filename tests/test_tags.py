@@ -144,12 +144,14 @@ def route_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "update": AsyncMock(),
         "delete": AsyncMock(),
         "invalidate_dive_caches": AsyncMock(),
+        "invalidate_dive_site_caches": AsyncMock(),
     }
     monkeypatch.setattr(tags_module, "_get_owned_tag", stubs["owned"])
     monkeypatch.setattr(tags_module, "tag_name_exists", stubs["exists"])
     monkeypatch.setattr(tags_module.crud_tags, "update", stubs["update"])
     monkeypatch.setattr(tags_module.crud_tags, "delete", stubs["delete"])
     monkeypatch.setattr(tags_module, "invalidate_dive_caches", stubs["invalidate_dive_caches"])
+    monkeypatch.setattr(tags_module, "invalidate_dive_site_caches", stubs["invalidate_dive_site_caches"])
     return stubs
 
 
@@ -171,9 +173,9 @@ class TestTheRoutes:
         route_collaborators["update"].assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_rename_drops_the_dive_caches(self, route_collaborators: dict[str, Any]) -> None:
-        """A dive read carries its tags by name, so every cached one naming this tag is
-        stale the moment it is renamed."""
+    async def test_a_rename_drops_the_dive_and_site_caches(self, route_collaborators: dict[str, Any]) -> None:
+        """A dive read and a site read carry their tags by name, so every cached one naming
+        this tag is stale the moment it is renamed."""
         await tags_module.patch_tag(
             request=MagicMock(),
             uuid=uuid7(),
@@ -184,6 +186,7 @@ class TestTheRoutes:
 
         assert route_collaborators["update"].await_args.kwargs["object"] == {"name": "night dive"}
         route_collaborators["invalidate_dive_caches"].assert_awaited_once_with(USER_ID)
+        route_collaborators["invalidate_dive_site_caches"].assert_awaited_once_with(USER_ID)
 
     @pytest.mark.asyncio
     async def test_an_empty_patch_changes_nothing(self, route_collaborators: dict[str, Any]) -> None:
@@ -199,11 +202,12 @@ class TestTheRoutes:
         route_collaborators["invalidate_dive_caches"].assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_delete_drops_the_dive_caches(self, route_collaborators: dict[str, Any]) -> None:
+    async def test_a_delete_drops_the_dive_and_site_caches(self, route_collaborators: dict[str, Any]) -> None:
         await tags_module.erase_tag(request=MagicMock(), uuid=uuid7(), current_user=_current_user(), db=MagicMock())
 
         route_collaborators["delete"].assert_awaited_once()
         route_collaborators["invalidate_dive_caches"].assert_awaited_once_with(USER_ID)
+        route_collaborators["invalidate_dive_site_caches"].assert_awaited_once_with(USER_ID)
 
     def test_a_vanished_tag_on_a_dive_is_named(self) -> None:
         error = IntegrityError("INSERT", {}, Exception('violates foreign key constraint "dive_tag_tag_id_fkey"'))
@@ -227,7 +231,12 @@ def _as(user: User) -> dict[str, Any]:
 
 
 def _no_caches(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("invalidate_dive_caches", "invalidate_gear_caches", "invalidate_trip_caches"):
+    for name in (
+        "invalidate_dive_caches",
+        "invalidate_gear_caches",
+        "invalidate_trip_caches",
+        "invalidate_dive_site_caches",
+    ):
         monkeypatch.setattr(dives_module, name, AsyncMock())
 
 

@@ -2874,7 +2874,12 @@ class TestWriteDiveEmbedsSightings:
             monkeypatch.setattr(dives_module, name, AsyncMock())
         for name in ("recalculate_dive_stats", "recalculate_gear_dive_counts"):
             monkeypatch.setattr(dives_module, name, AsyncMock())
-        for name in ("invalidate_dive_caches", "invalidate_gear_caches", "invalidate_trip_caches"):
+        for name in (
+            "invalidate_dive_caches",
+            "invalidate_gear_caches",
+            "invalidate_trip_caches",
+            "invalidate_dive_site_caches",
+        ):
             monkeypatch.setattr(dives_module, name, AsyncMock())
         monkeypatch.setattr(dives_module, "get_mixtures_for_dive", AsyncMock(return_value=[]))
         monkeypatch.setattr(dives_module, "get_dive_sites_for_dive", AsyncMock(return_value=[]))

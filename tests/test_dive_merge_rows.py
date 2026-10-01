@@ -113,6 +113,7 @@ def merging(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dives_module, "invalidate_dive_caches", AsyncMock())
     monkeypatch.setattr(dives_module, "invalidate_gear_caches", AsyncMock())
     monkeypatch.setattr(dives_module, "invalidate_trip_caches", AsyncMock())
+    monkeypatch.setattr(dives_module, "invalidate_dive_site_caches", AsyncMock())
     monkeypatch.setattr(dives_module, "_cached_read_dive", _cached_read_dive.__wrapped__)  # type: ignore[attr-defined]
 
 
@@ -914,14 +915,16 @@ class TestTheStatsAndCachesFollow:
         self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User, monkeypatch: Any
     ) -> None:
         """One dive fewer and one dive rewritten, so both the list pages and the two dives'
-        own entries are stale - and the gear items' `dive_count` with them, and the counts of
-        the trips the two were on."""
+        own entries are stale - and the gear items' `dive_count` with them, the counts of the
+        trips the two were on, and the summaries of their sites."""
         dropped = AsyncMock()
         gear_dropped = AsyncMock()
         trips_dropped = AsyncMock()
+        sites_dropped = AsyncMock()
         monkeypatch.setattr(dives_module, "invalidate_dive_caches", dropped)
         monkeypatch.setattr(dives_module, "invalidate_gear_caches", gear_dropped)
         monkeypatch.setattr(dives_module, "invalidate_trip_caches", trips_dropped)
+        monkeypatch.setattr(dives_module, "invalidate_dive_site_caches", sites_dropped)
         first, second = await _two_halves(async_db, db, diver)
 
         await _merge(async_db, diver, first, second)
@@ -929,6 +932,7 @@ class TestTheStatsAndCachesFollow:
         dropped.assert_awaited_once_with(diver.id)
         gear_dropped.assert_awaited_once_with(diver.id)
         trips_dropped.assert_awaited_once_with(diver.id)
+        sites_dropped.assert_awaited_once_with(diver.id)
 
 
 class TestTheTimeSpanWhenTheGapIsLonger:

@@ -20,11 +20,14 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from uuid6 import uuid7
 
 from src.app.api import router
 from src.app.api.dependencies import get_current_user
+from src.app.api.v1 import dive_sites as dive_sites_module
 from src.app.core.config import settings
 from src.app.core.setup import create_application
+from src.app.crud.crud_dive_sites import HeldSite
 from src.app.services import dive_site_catalog
 from src.app.services.dive_site_catalog import SUGGESTION_LIMIT, CatalogSite, search_sites
 
@@ -440,13 +443,27 @@ class TestTheVendoredFile:
 
 @pytest.fixture(scope="module")
 def catalog_app() -> Any:
-    """Its own app with `apply_migrations_on_start=False`, like `test_geocoding.py` - nothing
-    below this route touches a database."""
+    """Its own app with `apply_migrations_on_start=False`, like `test_geocoding.py`. The one
+    query below this route - which of the caller's sites already carry a result's registry
+    entry - is stubbed by `held`; `test_dive_site_members.py` runs it against Postgres."""
     return create_application(router=router, settings=settings, apply_migrations_on_start=False)
 
 
 @pytest.fixture
-def client(catalog_app: Any) -> Generator[TestClient]:
+def held(monkeypatch: pytest.MonkeyPatch) -> dict[tuple[str, str], list[HeldSite]]:
+    """The caller's sites by registry entry, empty unless a test fills it."""
+    holders: dict[tuple[str, str], list[HeldSite]] = {}
+
+    async def _sites_by_external_id(db: Any, *, user_id: int) -> dict[tuple[str, str], list[HeldSite]]:
+        assert user_id == CURRENT_USER["id"]
+        return holders
+
+    monkeypatch.setattr(dive_sites_module, "sites_by_external_id", _sites_by_external_id)
+    return holders
+
+
+@pytest.fixture
+def client(catalog_app: Any, held: dict[tuple[str, str], list[HeldSite]]) -> Generator[TestClient]:
     catalog_app.dependency_overrides[get_current_user] = lambda: CURRENT_USER
     with TestClient(catalog_app) as test_client:
         yield test_client
@@ -493,7 +510,41 @@ class TestTheEndpoint:
             "source",
             "source_id",
             "attribution",
+            "external_id",
+            "held_site",
         }
+
+    def test_the_registry_entry_is_the_record_s_in_the_format_s_spelling(self, client: TestClient):
+        """What a pick sends back in `external_ids`, ready to store: the catalogue's `osm` is
+        DiveJSON's `openstreetmap`, and the identifier is the catalogue's own key."""
+        first = client.get("/api/v1/dive-sites/suggest", params={"q": "thistlegorm"}).json()["results"][0]
+
+        assert first["external_id"] == {"registry": "openstreetmap", "identifier": first["source_id"]}
+        assert first["held_site"] is None
+
+    def test_a_wikidata_record_keeps_its_item_id(self, client: TestClient):
+        results = client.get("/api/v1/dive-sites/suggest", params={"q": "percy's hole"}).json()["results"]
+        wikidata = [result for result in results if result["source"] == "wikidata"]
+
+        assert wikidata, "the checked-in catalog should hold Percy's Hole from Wikidata"
+        for result in wikidata:
+            assert result["external_id"] == {"registry": "wikidata", "identifier": result["source_id"]}
+
+    def test_a_record_the_caller_holds_names_the_first_holder(
+        self, client: TestClient, held: dict[tuple[str, str], list[HeldSite]]
+    ):
+        """The first by name where several of the caller's sites carry the entry - the
+        lookup returns them in that order."""
+        first = client.get("/api/v1/dive-sites/suggest", params={"q": "thistlegorm"}).json()["results"][0]
+        mine, also_mine = uuid7(), uuid7()
+        held[("openstreetmap", first["source_id"])] = [
+            HeldSite(id=1, uuid=mine, name="Thistlegorm"),
+            HeldSite(id=2, uuid=also_mine, name="Thistlegorm (stern)"),
+        ]
+
+        again = client.get("/api/v1/dive-sites/suggest", params={"q": "thistlegorm"}).json()["results"][0]
+
+        assert again["held_site"] == {"uuid": str(mine), "name": "Thistlegorm"}
 
     def test_answers_with_a_real_site(self, client: TestClient):
         body = client.get("/api/v1/dive-sites/suggest", params={"q": "thistlegorm"}).json()
