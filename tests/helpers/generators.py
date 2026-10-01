@@ -330,6 +330,7 @@ def create_dive(
     trip: models.Trip | None = None,
     course: models.Course | None = None,
     is_deleted: bool = False,
+    max_depth: float | None = None,
 ) -> models.Dive:
     return _persist(
         db,
@@ -340,6 +341,7 @@ def create_dive(
             dive_number=1,
             start_time=datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
             duration=1800,
+            max_depth=max_depth,
             notes="",
             is_deleted=is_deleted,
         ),

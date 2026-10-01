@@ -26,9 +26,9 @@ from ...crud.crud_trip_parts import (
 )
 from ...crud.crud_trips import (
     NO_DIVES,
-    TripCounts,
+    TripFigures,
     crud_trips,
-    get_counts_for_trips,
+    get_figures_for_trips,
     get_trips_page,
     resolve_trip_id_for_user,
     trip_name_exists,
@@ -100,18 +100,18 @@ def _to_public_trip(
     db_trip: TripReadInternal | dict[str, Any],
     *,
     user_uuid: uuid_pkg.UUID,
-    counts: TripCounts,
+    figures: TripFigures,
     parts: list[TripPartRead] | None = None,
     people: list[PersonReferenceRead] | None = None,
 ) -> TripRead:
     """Convert an internal trip representation (integer FKs) into its public shape
     (owning user referenced by `uuid`, parts and people embedded as read from the child
-    tables, and the counts over its dives).
+    tables, and the figures over its dives).
     """
     data = db_trip if isinstance(db_trip, dict) else db_trip.model_dump()
     return TripRead(
         **{k: v for k, v in data.items() if k not in ("id", "user_id")},
-        **counts._asdict(),
+        **figures._asdict(),
         user_uuid=user_uuid,
         parts=parts or [],
         people=people or [],
@@ -135,7 +135,7 @@ _trip_cache: OwnedResourceCache[TripReadInternal, TripRead] = OwnedResourceCache
     item_cache_prefix="user_{user_id}_trip",
     crud=crud_trips,
     schema_to_select=TripReadInternal,
-    to_public=lambda db_trip, user_uuid: _to_public_trip(db_trip, user_uuid=user_uuid, counts=NO_DIVES),
+    to_public=lambda db_trip, user_uuid: _to_public_trip(db_trip, user_uuid=user_uuid, figures=NO_DIVES),
     search_columns=("name",),
 )
 
@@ -198,7 +198,7 @@ async def write_trip(
     created = _to_public_trip(
         cast(TripReadInternal, trip_read),
         user_uuid=current_user["uuid"],
-        counts=NO_DIVES,
+        figures=NO_DIVES,
         parts=stored_parts,
         people=stored_people,
     )
@@ -221,7 +221,7 @@ async def _cached_read_trips(
     search: str | None,
 ) -> dict:
     """Fetches (and caches) a user's paginated trip list, each trip with its parts, its people
-    and the counts over its dives.
+    and the figures over its dives.
 
     Only ever called after `read_trips` below has checked the caller's authorization - a
     `@cache` hit skips this body entirely, authorization logic included.
@@ -244,13 +244,13 @@ async def _cached_read_trips(
     trip_ids = [trip["id"] for trip in trips_data["data"]]
     parts_by_trip = await get_parts_for_trips(db=db, trip_ids=trip_ids)
     people_by_trip = await get_people_for_trips(db, trip_ids)
-    counts_by_trip = await get_counts_for_trips(db, trip_ids=trip_ids, user_id=user_id)
+    figures_by_trip = await get_figures_for_trips(db, trip_ids=trip_ids, user_id=user_id)
 
     trips_data["data"] = [
         _to_public_trip(
             trip,
             user_uuid=user_uuid,
-            counts=counts_by_trip[trip["id"]],
+            figures=figures_by_trip[trip["id"]],
             parts=parts_by_trip.get(trip["id"], []),
             people=people_by_trip.get(trip["id"]),
         ).model_dump()
@@ -276,7 +276,8 @@ async def read_trips(
     """List the caller's trips, most recent first, each with its parts and people.
 
     Each trip also counts its live dives, the distinct dive sites they name and the distinct
-    species recorded on them - `0` for a trip no dive is on.
+    species recorded on them - `0` for a trip no dive is on - and carries the deepest of those
+    dives' `max_depth`, `null` when none recorded one.
 
     A trip's position in the list is the earliest start date across its parts; a trip
     whose parts carry no dates at all sorts after every trip that has one.
@@ -309,7 +310,7 @@ async def read_trips(
 async def _cached_read_trip(
     request: Request, user_id: int, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
 ) -> dict[str, Any]:
-    """Fetches (and caches) a single trip by uuid, with its parts, its people and the counts
+    """Fetches (and caches) a single trip by uuid, with its parts, its people and the figures
     over its dives attached.
 
     Like `_cached_read_trips`, this must only be called once the route has established
@@ -322,8 +323,8 @@ async def _cached_read_trip(
 
     parts = await get_parts_for_trip(db=db, trip_id=db_trip.id)
     people = (await get_people_for_trips(db, [db_trip.id])).get(db_trip.id)
-    counts = (await get_counts_for_trips(db, trip_ids=[db_trip.id], user_id=user_id))[db_trip.id]
-    return _to_public_trip(db_trip, user_uuid=owner_uuid, counts=counts, parts=parts, people=people).model_dump()
+    figures = (await get_figures_for_trips(db, trip_ids=[db_trip.id], user_id=user_id))[db_trip.id]
+    return _to_public_trip(db_trip, user_uuid=owner_uuid, figures=figures, parts=parts, people=people).model_dump()
 
 
 @router.get("/trip/{uuid}", response_model=TripRead)
@@ -334,7 +335,7 @@ async def read_trip(
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
     """Return a single trip by its public uuid, with the parts it ran, the people on it and
-    the counts over its dives that `GET /trips` carries.
+    the figures over its dives that `GET /trips` carries.
 
     404 when no such trip exists - and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable.
@@ -459,7 +460,7 @@ async def erase_trip(
     # Commits the reassignment above along with the delete - `crud_trips.delete` is the
     # only writer here that commits, and both wrote through this one session.
     await crud_trips.delete(db=db, uuid=uuid)
-    # Every trip read, not only this one's: a move changes the replacement's counts.
+    # Every trip read, not only this one's: a move changes the replacement's figures.
     await invalidate_trip_caches(owner_id)
     # Unconditional, like `erase_dive_site`. Either branch changes what this user's dives
     # report: a move rewrites each moved dive's `trip_uuid`, and a plain delete nulls

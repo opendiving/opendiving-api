@@ -82,6 +82,13 @@ class TripRead(TripBase, PublicUUIDSchema):
             description="Distinct species recorded on those dives, counted as `species_seen` counts them",
         ),
     ]
+    max_depth: Annotated[
+        float | None,
+        Field(
+            examples=[32.4],
+            description="The greatest `max_depth` among those dives, in metres; null when none recorded one",
+        ),
+    ]
     user_uuid: uuid_pkg.UUID
     created_at: datetime
     map_picture: Annotated[
