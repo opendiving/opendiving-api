@@ -153,16 +153,17 @@ already pays for this invalidation.
 
 `GET /dive-sites`, `GET /trips` and `GET /gear-items` take `search=`, a case-insensitive substring
 match, with `items_per_page` capped at 100 by `clamp_pagination` (`DEFAULT_MAX_ITEMS_PER_PAGE`).
-Sites match `name` and the locality's name (`DIVE_SITE_SEARCH_COLUMNS`), trips their own name and
-their parts'; gear matches `name` and `brand`, not `type` — `type` is a closed vocabulary with its
-own filter, and "reg" would match every regulator. `core/utils/search.py` builds the `select()` by
-hand: FastCRUD's `__ilike` filters AND together and `__or` groups operators on one column, not
-columns. It selects the mapper's columns, as `get_multi` does, so rows are dicts like the unsearched
-path and a column kept on the table after leaving the mapper is never read. `escape_like()` escapes
-`\`, `%`, `_` in that order, paired with `.ilike(pattern, escape="\\")`. `search` is appended to the
-list cache key after `user_{id}_{resource}:page_{n}:items_per_page:{n}`, so the
-`user_{id}_{resource}:*` wildcard still purges it; routes lowercase and strip the term first. A
-resource without `search_columns` passes no `search` kwarg, or `@cache` would `KeyError`. Gear calls
+Sites match `name`, the locality's name (`DIVE_SITE_SEARCH_COLUMNS`) and each other name via
+`json_array_elements_text`, the column being ASCII-escaped JSON; trips their own name and their
+parts'; gear matches `name` and `brand`, not `type` — `type` is a closed vocabulary with its own
+filter, and "reg" would match every regulator. `core/utils/search.py` builds the `select()` by hand:
+FastCRUD's `__ilike` filters AND together and `__or` groups operators on one column, not columns. It
+selects the mapper's columns, as `get_multi` does, so rows are dicts like the unsearched path and a
+column kept on the table after leaving the mapper is never read. `escape_like()` escapes `\`, `%`,
+`_` in that order, paired with `.ilike(pattern, escape="\\")`. `search` is appended to the list
+cache key after `user_{id}_{resource}:page_{n}:items_per_page:{n}`, so the `user_{id}_{resource}:*`
+wildcard still purges it; routes lowercase and strip the term first. A resource without
+`search_columns` passes no `search` kwarg, or `@cache` would `KeyError`. Gear calls
 `search_clause`/`search_multi` directly, not through `OwnedResourceCache`.
 
 ## Resource routes are flat, `/...` + explicit ids, never `/{username}/...`

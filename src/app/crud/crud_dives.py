@@ -26,15 +26,6 @@ CRUDDive = FastCRUD[Dive, DiveCreateInternal, DiveUpdate, DiveUpdateInternal, Di
 crud_dives = CRUDDive(Dive)
 
 
-# The list's filters by dive site, gear item, species, person or tag, each a single
-# `id IN (subquery)` condition rather than a separate round trip to resolve matching dive ids.
-#
-# None of the subqueries scopes by owner, and that is safe rather than an omission: the
-# `user_id` condition `get_dives_page` always applies is what bounds the result, and each of
-# these only narrows it further. `showing_species` could not scope by owner in any case - the
-# catalog is global and `species` has no `user_id` - which is exactly why it needs no migration
-# either: it reads `dive_species.species_id`, already indexed, and the model comment says it was
-# indexed for this.
 def offset_of_the(order: Any) -> Any:
     """The `utc_offset_minutes` of the first dive in the group under `order`.
 
@@ -73,6 +64,15 @@ def date_only_of_the(order: Any) -> Any:
     return func.array_agg(aggregate_order_by(Dive.start_date_only, order, Dive.id.asc()), type_=ARRAY(Boolean))[1]
 
 
+# The list's filters by dive site, gear item, species, person or tag, each a single
+# `id IN (subquery)` condition rather than a separate round trip to resolve matching dive ids.
+#
+# None of the subqueries scopes by owner, and that is safe rather than an omission: the
+# `user_id` condition `get_dives_page` always applies is what bounds the result, and each of
+# these only narrows it further. `showing_species` could not scope by owner in any case - the
+# catalog is global and `species` has no `user_id` - which is exactly why it needs no migration
+# either: it reads `dive_species.species_id`, already indexed, and the model comment says it was
+# indexed for this.
 def at_dive_site(dive_site_id: int) -> ColumnElement[bool]:
     return Dive.id.in_(select(DiveDiveSite.dive_id).where(DiveDiveSite.dive_site_id == dive_site_id))
 

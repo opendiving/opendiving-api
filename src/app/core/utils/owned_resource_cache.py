@@ -43,7 +43,7 @@ class OwnedResourceCache[InternalT, PublicT]:
       `min(part.start_date) DESC NULLS LAST` is an aggregate over another table that no
       `sort_columns` string can name. It still constructs one of these for
       `list_cache_key_prefix`, so its hand-rolled list helper keeps the key shape this
-      factory defines - and it is the one caller that passes no `sort_columns` at all.
+      factory defines - and, like `dive_sites.py`, it passes no `sort_columns` at all.
     - `courses.py` - the one that opts out for a **different reason**: not enrichment, an
       ordering. `GET /courses` sorts `start_date DESC NULLS LAST` with a `uuid` tie-break,
       and no path through this factory can produce it - `get_multi` and
