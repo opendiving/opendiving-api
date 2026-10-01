@@ -29,8 +29,8 @@ The last four classes are the exception and run against a live Postgres, for the
 inserts; `TestSearchAgainstPostgres` covers the correlated EXISTS, which compiles to the
 same text whether or not it correlates; `TestListOrdering` covers the correlated
 aggregate the page is sorted by, which no compiled query can be read for; and
-`TestTheCounts` covers the distinct counts over a trip's dives, which only rows can get
-wrong. All four skip themselves when no database is reachable; see CONTRIBUTING.md for why
+`TestTheFigures` covers the distinct counts and the deepest dive over a trip's dives, which
+only rows can get wrong. All four skip themselves when no database is reachable; see CONTRIBUTING.md for why
 a run on the host needs `POSTGRES_SERVER=localhost` to make them execute.
 """
 
@@ -59,7 +59,7 @@ from src.app.core.utils import cache as cache_module
 from src.app.core.utils.cache import across_builds, namespaced
 from src.app.crud import crud_trips as crud_trips_module
 from src.app.crud.crud_trip_parts import get_parts_for_trip, replace_parts_for_trip
-from src.app.crud.crud_trips import NO_DIVES, TripCounts, get_counts_for_trips, get_trips_page
+from src.app.crud.crud_trips import NO_DIVES, TripFigures, get_figures_for_trips, get_trips_page
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_site import DiveSite
@@ -513,7 +513,7 @@ class TestReadPath:
             AsyncMock(return_value={11: [_part("Moalboal"), _part("Bohol")], 12: []}),
         )
         monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
-        monkeypatch.setattr(trips_module, "get_counts_for_trips", AsyncMock(return_value={11: NO_DIVES, 12: NO_DIVES}))
+        monkeypatch.setattr(trips_module, "get_figures_for_trips", AsyncMock(return_value={11: NO_DIVES, 12: NO_DIVES}))
 
         with patch.object(cache_module, "client", _FakeRedis()):
             page = await trips_module._cached_read_trips(
@@ -534,17 +534,17 @@ class TestReadPath:
         assert "id" not in page["data"][0]
 
     @pytest.mark.asyncio
-    async def test_a_page_carries_each_trips_own_counts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_a_page_carries_each_trips_own_figures(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """From one query over the page's trip ids, owner-scoped, never one per trip."""
         rows = [
             {**_internal_trip(11, "Cebu 2026").model_dump(), "id": 11, "user_id": USER_ID},
             {**_internal_trip(12, "Red Sea 2025").model_dump(), "id": 12, "user_id": USER_ID},
         ]
-        counts = AsyncMock(return_value={11: TripCounts(4, 3, 17), 12: NO_DIVES})
+        figures = AsyncMock(return_value={11: TripFigures(4, 3, 17, 32.4), 12: NO_DIVES})
         monkeypatch.setattr(trips_module, "get_trips_page", AsyncMock(return_value={"data": rows, "total_count": 2}))
         monkeypatch.setattr(trips_module, "get_parts_for_trips", AsyncMock(return_value={}))
         monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
-        monkeypatch.setattr(trips_module, "get_counts_for_trips", counts)
+        monkeypatch.setattr(trips_module, "get_figures_for_trips", figures)
 
         with patch.object(cache_module, "client", _FakeRedis()):
             page = await trips_module._cached_read_trips(
@@ -557,12 +557,9 @@ class TestReadPath:
                 search=None,
             )
 
-        assert [(t["dive_count"], t["dive_site_count"], t["species_count"]) for t in page["data"]] == [
-            (4, 3, 17),
-            (0, 0, 0),
-        ]
-        counts.assert_awaited_once()
-        assert counts.await_args.kwargs == {"trip_ids": [11, 12], "user_id": USER_ID}  # type: ignore[union-attr]
+        assert [_figures_of(t) for t in page["data"]] == [(4, 3, 17, 32.4), (0, 0, 0, None)]
+        figures.assert_awaited_once()
+        assert figures.await_args.kwargs == {"trip_ids": [11, 12], "user_id": USER_ID}  # type: ignore[union-attr]
 
     @pytest.mark.asyncio
     async def test_the_search_term_reaches_the_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -617,7 +614,7 @@ class TestReadPath:
         assert fnmatch(key, across_builds(f"user_{USER_ID}_trips:*"))
 
     @pytest.mark.asyncio
-    async def test_a_single_trip_embeds_its_parts_and_counts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_a_single_trip_embeds_its_parts_and_figures(self, monkeypatch: pytest.MonkeyPatch) -> None:
         trip = _internal_trip()
         monkeypatch.setattr(trips_module.crud_trips, "get", AsyncMock(return_value=trip))
         monkeypatch.setattr(
@@ -625,7 +622,7 @@ class TestReadPath:
         )
         monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
         monkeypatch.setattr(
-            trips_module, "get_counts_for_trips", AsyncMock(return_value={trip.id: TripCounts(4, 3, 17)})
+            trips_module, "get_figures_for_trips", AsyncMock(return_value={trip.id: TripFigures(4, 3, 17, 32.4)})
         )
         redis = _FakeRedis()
 
@@ -638,7 +635,7 @@ class TestReadPath:
             )
 
         assert [part["location"]["name"] for part in body["parts"]] == ["Moalboal", "Bohol"]
-        assert (body["dive_count"], body["dive_site_count"], body["species_count"]) == (4, 3, 17)
+        assert _figures_of(body) == (4, 3, 17, 32.4)
         # Under the user, so the sweep every dive write makes reaches it without naming it.
         (key,) = redis.written
         assert key == namespaced(f"user_{USER_ID}_trip:{trip.uuid}")
@@ -961,8 +958,8 @@ def _link(db: Session, dive: Dive, *, sites: Sequence[DiveSite] = (), species: S
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
-class TestTheCounts:
-    """`get_counts_for_trips` executed rather than stubbed.
+class TestTheFigures:
+    """`get_figures_for_trips` executed rather than stubbed.
 
     Both join tables fan each dive out to sites x species rows, so every count is only right
     if it is `DISTINCT` - a trip whose dives share a site or a species reads high otherwise,
@@ -970,8 +967,8 @@ class TestTheCounts:
     """
 
     @staticmethod
-    async def _counts(async_db: AsyncSession, diver: User, *trips: Trip) -> list[TripCounts]:
-        by_trip = await get_counts_for_trips(async_db, trip_ids=[trip.id for trip in trips], user_id=diver.id)
+    async def _figures(async_db: AsyncSession, diver: User, *trips: Trip) -> list[TripFigures]:
+        by_trip = await get_figures_for_trips(async_db, trip_ids=[trip.id for trip in trips], user_id=diver.id)
         return [by_trip[trip.id] for trip in trips]
 
     @pytest.mark.asyncio
@@ -984,7 +981,7 @@ class TestTheCounts:
         _link(db, create_dive(db, diver, trip=trip), sites=[drift, wall], species=[turtle])
         _link(db, create_dive(db, diver, trip=trip), sites=[wreck], species=[manta, moray])
 
-        assert await self._counts(async_db, diver, trip) == [TripCounts(2, 3, 3)]
+        assert await self._figures(async_db, diver, trip) == [TripFigures(2, 3, 3, None)]
 
     @pytest.mark.asyncio
     async def test_a_shared_site_and_a_repeated_species_count_once(
@@ -997,24 +994,48 @@ class TestTheCounts:
         _link(db, create_dive(db, diver, trip=trip), sites=[wall], species=[turtle])
         _link(db, create_dive(db, diver, trip=trip), sites=[wall], species=[turtle, manta])
 
-        assert await self._counts(async_db, diver, trip) == [TripCounts(3, 2, 2)]
+        assert await self._figures(async_db, diver, trip) == [TripFigures(3, 2, 2, None)]
+
+    @pytest.mark.asyncio
+    async def test_the_deepest_dive_wins(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        """Over the fan-out too: the shallow dive's sites and species repeat its row, the
+        deep one's do not, and a dive with no depth recorded is no rival to either."""
+        trip = create_trip(db, diver)
+        drift, wall = create_dive_site(db, diver), create_dive_site(db, diver)
+        _link(db, create_dive(db, diver, trip=trip, max_depth=18.5), sites=[drift, wall], species=[create_species(db)])
+        create_dive(db, diver, trip=trip, max_depth=32.4)
+        create_dive(db, diver, trip=trip)
+
+        assert await self._figures(async_db, diver, trip) == [TripFigures(3, 2, 1, 32.4)]
+
+    @pytest.mark.asyncio
+    async def test_dives_that_recorded_no_depth_have_none(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        trip = create_trip(db, diver)
+        create_dive(db, diver, trip=trip)
+        create_dive(db, diver, trip=trip)
+
+        assert await self._figures(async_db, diver, trip) == [TripFigures(2, 0, 0, None)]
 
     @pytest.mark.asyncio
     async def test_a_trip_with_no_dives_counts_zero(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         empty, busy = create_trip(db, diver), create_trip(db, diver)
-        _link(db, create_dive(db, diver, trip=busy), sites=[create_dive_site(db, diver)])
+        _link(db, create_dive(db, diver, trip=busy, max_depth=21.0), sites=[create_dive_site(db, diver)])
 
-        assert await self._counts(async_db, diver, empty, busy) == [NO_DIVES, TripCounts(1, 1, 0)]
+        assert await self._figures(async_db, diver, empty, busy) == [NO_DIVES, TripFigures(1, 1, 0, 21.0)]
+        assert NO_DIVES.max_depth is None
 
     @pytest.mark.asyncio
     async def test_a_deleted_dive_counts_for_nothing(self, db: Session, async_db: AsyncSession, diver: User) -> None:
-        """Its join rows outlive it - the soft delete issues no `DELETE` for them to cascade."""
+        """Its join rows outlive it - the soft delete issues no `DELETE` for them to cascade -
+        and so does its depth, the deepest on the trip."""
         trip = create_trip(db, diver)
-        _link(db, create_dive(db, diver, trip=trip), sites=[create_dive_site(db, diver)])
-        erased = create_dive(db, diver, trip=trip, is_deleted=True)
+        _link(db, create_dive(db, diver, trip=trip, max_depth=25.0), sites=[create_dive_site(db, diver)])
+        erased = create_dive(db, diver, trip=trip, is_deleted=True, max_depth=40.0)
         _link(db, erased, sites=[create_dive_site(db, diver)], species=[create_species(db)])
 
-        assert await self._counts(async_db, diver, trip) == [TripCounts(1, 1, 0)]
+        assert await self._figures(async_db, diver, trip) == [TripFigures(1, 1, 0, 25.0)]
 
     @pytest.mark.asyncio
     async def test_a_dive_moved_between_trips_updates_both_reads(
@@ -1026,45 +1047,71 @@ class TestTheCounts:
         left, joined = create_trip(db, diver), create_trip(db, diver)
         wall = create_dive_site(db, diver)
         turtle = create_species(db)
-        _link(db, create_dive(db, diver, trip=left), sites=[wall], species=[turtle])
-        moved = create_dive(db, diver, trip=left)
+        _link(db, create_dive(db, diver, trip=left, max_depth=18.0), sites=[wall], species=[turtle])
+        moved = create_dive(db, diver, trip=left, max_depth=30.0)
         _link(db, moved, sites=[wall, create_dive_site(db, diver)], species=[create_species(db)])
         monkeypatch.setattr(cache_module, "client", _ServingRedis())
 
-        async def reads() -> dict[str, tuple[TripCounts, TripCounts]]:
-            page: Any = await trips_module._cached_read_trips(
-                _get_request(),
-                user_id=diver.id,
-                user_uuid=diver.uuid,
-                db=async_db,
-                page=1,
-                items_per_page=10,
-                search=None,
-            )
-            listed = {trip["uuid"]: trip for trip in page["data"]}
-            result = {}
-            for trip in (left, joined):
-                single: Any = await trips_module._cached_read_trip(
-                    _get_request(), user_id=diver.id, uuid=trip.uuid, owner_uuid=diver.uuid, db=async_db
-                )
-                result[trip.name] = (_counts_of(single), _counts_of(listed[str(trip.uuid)]))
-            return result
+        before = await _reads(async_db, diver, left, joined)
+        await _patch_dive(async_db, diver, moved, {"trip_uuid": str(joined.uuid)})
 
-        before = await reads()
-        await dives_module.patch_dive(
-            request=MagicMock(),
-            uuid=moved.uuid,
-            values=DiveUpdateRequest.model_validate({"trip_uuid": str(joined.uuid)}),
-            current_user={"id": diver.id, "uuid": diver.uuid},
-            db=async_db,
+        assert before == {left.name: (TripFigures(2, 2, 2, 30.0),) * 2, joined.name: (NO_DIVES,) * 2}
+        assert await _reads(async_db, diver, left, joined) == {
+            left.name: (TripFigures(1, 1, 1, 18.0),) * 2,
+            joined.name: (TripFigures(1, 2, 1, 30.0),) * 2,
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_depth_edit_reaches_both_reads(
+        self, db: Session, async_db: AsyncSession, diver: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A `PATCH /dive` naming nothing but `max_depth` touches no trip, site or sighting,
+        and still changes what the trip it is on says."""
+        trip = create_trip(db, diver)
+        edited = create_dive(db, diver, trip=trip, max_depth=18.0)
+        monkeypatch.setattr(cache_module, "client", _ServingRedis())
+
+        before = await _reads(async_db, diver, trip)
+        await _patch_dive(async_db, diver, edited, {"max_depth": 31.5})
+
+        assert before == {trip.name: (TripFigures(1, 0, 0, 18.0),) * 2}
+        assert await _reads(async_db, diver, trip) == {trip.name: (TripFigures(1, 0, 0, 31.5),) * 2}
+
+
+async def _reads(async_db: AsyncSession, diver: User, *trips: Trip) -> dict[str, tuple[TripFigures, TripFigures]]:
+    """Each trip's figures as its single read and the first list page say them, both through
+    whatever `cache_module.client` serves."""
+    page: Any = await trips_module._cached_read_trips(
+        _get_request(),
+        user_id=diver.id,
+        user_uuid=diver.uuid,
+        db=async_db,
+        page=1,
+        items_per_page=10,
+        search=None,
+    )
+    listed = {trip["uuid"]: trip for trip in page["data"]}
+    result = {}
+    for trip in trips:
+        single: Any = await trips_module._cached_read_trip(
+            _get_request(), user_id=diver.id, uuid=trip.uuid, owner_uuid=diver.uuid, db=async_db
         )
+        result[trip.name] = (_figures_of(single), _figures_of(listed[str(trip.uuid)]))
+    return result
 
-        assert before == {left.name: (TripCounts(2, 2, 2),) * 2, joined.name: (NO_DIVES,) * 2}
-        assert await reads() == {left.name: (TripCounts(1, 1, 1),) * 2, joined.name: (TripCounts(1, 2, 1),) * 2}
+
+async def _patch_dive(async_db: AsyncSession, diver: User, dive: Dive, values: dict[str, Any]) -> None:
+    await dives_module.patch_dive(
+        request=MagicMock(),
+        uuid=dive.uuid,
+        values=DiveUpdateRequest.model_validate(values),
+        current_user={"id": diver.id, "uuid": diver.uuid},
+        db=async_db,
+    )
 
 
-def _counts_of(trip: dict[str, Any]) -> TripCounts:
-    return TripCounts(trip["dive_count"], trip["dive_site_count"], trip["species_count"])
+def _figures_of(trip: dict[str, Any]) -> TripFigures:
+    return TripFigures(trip["dive_count"], trip["dive_site_count"], trip["species_count"], trip["max_depth"])
 
 
 class _ServingRedis:
