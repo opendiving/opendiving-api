@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import Column, Date, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import Date, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -67,11 +67,4 @@ class TripPart(Base):
         ForeignKey("contact.id", ondelete="SET NULL"), default=None, index=True
     )
 
-    __mapper_args__ = {"exclude_properties": ["full_name"]}
-
-    __table_args__ = (
-        # Unmapped, and dropped a deploy later: DECISIONS.md, "A column the serving build maps
-        # is dropped a deploy after it is unmapped".
-        Column("full_name", String(512), nullable=True),
-        Index("ix_trip_part_trip_id_position", "trip_id", "position"),
-    )
+    __table_args__ = (Index("ix_trip_part_trip_id_position", "trip_id", "position"),)
