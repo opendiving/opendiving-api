@@ -57,6 +57,7 @@ from ...models.dive_person import DivePerson
 from ...models.dive_profile import DiveProfile
 from ...models.dive_recording import DiveRecording
 from ...models.dive_site import DiveSite
+from ...models.dive_site_tag import DiveSiteTag
 from ...models.dive_species import DiveSpecies
 from ...models.dive_tag import DiveTag
 from ...models.gear_item import GearItem
@@ -195,9 +196,10 @@ class ExportBundle:
     person_ids_by_trip: dict[int, list[tuple[int, str | None]]]
     person_ids_by_course: dict[int, list[tuple[int, str | None]]]
     # By name, as `GET /tags` lists them - every one, a tag on no live dive included - and
-    # each dive's in the diver's order.
+    # each dive's and each site's in the diver's order, keyed for every dive and site.
     tags: list[Tag]
     tag_ids_by_dive: dict[int, list[int]]
+    tag_ids_by_site: dict[int, list[int]]
 
     trip_by_id: dict[int, Trip] = field(init=False)
     course_by_id: dict[int, Course] = field(init=False)
@@ -293,9 +295,10 @@ class ExportBundle:
             return self._references(self.person_ids_by_trip[row.id])
         return self._references(self.person_ids_by_course[row.id])
 
-    def tags_for(self, dive: Dive) -> list[Tag]:
-        """A dive's tags in the order the diver listed them."""
-        return [tag for tag_id in self.tag_ids_by_dive[dive.id] if (tag := self.tag_by_id.get(tag_id))]
+    def tags_for(self, row: Dive | DiveSite) -> list[Tag]:
+        """A dive's or a site's tags in the order the diver listed them."""
+        ids = self.tag_ids_by_dive[row.id] if isinstance(row, Dive) else self.tag_ids_by_site[row.id]
+        return [tag for tag_id in ids if (tag := self.tag_by_id.get(tag_id))]
 
     def instructor_for(self, row: Course | Certification) -> Person | None:
         """A card's instructor, or a course's first by position - the one name each of the
@@ -325,19 +328,20 @@ async def _person_ids_by_host(
     return by_host
 
 
-async def _tag_ids_by_dive(db: AsyncSession, dive_ids: list[int]) -> dict[int, list[int]]:
-    """Each dive's tag ids in position order, keyed for every dive."""
-    by_dive: dict[int, list[int]] = {dive_id: [] for dive_id in dive_ids}
-    if not dive_ids:
-        return by_dive
+async def _tag_ids_by_host(db: AsyncSession, host_column: Any, model: Any, host_ids: list[int]) -> dict[int, list[int]]:
+    """One join table's tag ids in position order, keyed for every host - a dive's or a
+    site's."""
+    by_host: dict[int, list[int]] = {host_id: [] for host_id in host_ids}
+    if not host_ids:
+        return by_host
     rows = await db.execute(
-        select(DiveTag.dive_id, DiveTag.tag_id)
-        .where(DiveTag.dive_id.in_(dive_ids))
-        .order_by(DiveTag.dive_id, DiveTag.position)
+        select(host_column.label("host_id"), model.tag_id)
+        .where(host_column.in_(host_ids))
+        .order_by(host_column, model.position)
     )
     for row in rows:
-        by_dive[row.dive_id].append(row.tag_id)
-    return by_dive
+        by_host[row.host_id].append(row.tag_id)
+    return by_host
 
 
 async def _linked_uuids(db: AsyncSession, *, user_id: int) -> dict[int, uuid_pkg.UUID]:
@@ -547,7 +551,10 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
             db, CoursePerson.course_id, CoursePerson, [course.id for course in courses]
         ),
         tags=await _owned(db, Tag, user_id=user_id, order_by=(Tag.name, Tag.id)),
-        tag_ids_by_dive=await _tag_ids_by_dive(db, dive_ids),
+        tag_ids_by_dive=await _tag_ids_by_host(db, DiveTag.dive_id, DiveTag, dive_ids),
+        tag_ids_by_site=await _tag_ids_by_host(
+            db, DiveSiteTag.dive_site_id, DiveSiteTag, [site.id for site in dive_sites]
+        ),
     )
 
 

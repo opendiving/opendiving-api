@@ -76,6 +76,9 @@ reading the XSD, and each is exported in `logbook.divejson`/CSV instead:
   `<trippart>` links only a dive base and UDDF has no course, so every person still goes
   out as a `<buddy>` and those references do not; on a dive, `instructor`, `student`,
   `companion` and no role at all go out as the plain link a reader takes for `buddy`.
+- **A site's tags, external ids, water type and entry types.** No element for any of them:
+  `<sitedata>`'s `<density>` is a number and UDDF names no registry, no entry and no label.
+  Its other names, its altitude and its depth range do have a slot, and go out.
 - **A dive's tags, waves, weather and boat name.** No element for any of them. And three
   vocabularies UDDF only partly speaks: `<apparatus>` has no freedive, no snorkel outing and
   no `other`, and one `rebreather` for both circuits, so a semi-closed dive reads back as
@@ -695,25 +698,34 @@ def _divesite_element(bundle: ExportBundle, guides: dict[tuple[int, int], str]) 
     for site in bundle.dive_sites:
         element = _sub(divesite, "site", id=_uddf_id("site", site.uuid))
         _sub(element, "name", site.name)
+        for other_name in site.other_names:
+            _sub(element, "aliasname", other_name)
         # A lone coordinate is not a position and the write side won't store one, so a
         # pair is all or nothing here too.
         position = (site.latitude, site.longitude) if site.latitude is not None and site.longitude is not None else None
-        if site.location_name or position is not None:
+        if site.location_name or position is not None or site.altitude is not None:
             # `geographyType` makes `<location>` mandatory, so a site with nothing to put
             # in a `<geography>` gets none at all rather than an empty one - and a site
-            # that has only coordinates repeats its name there, since dropping the
-            # position to stay silent about the locality would lose the more useful half.
+            # that has only coordinates or an altitude repeats its name there, since
+            # dropping them to stay silent about the locality would lose the more useful
+            # half.
             #
             # The locality's name: `divejson-py` reads this element back into
             # `location.name`, so a document round-tripping through it comes back with the
             # place it went out with. The locality's own centre and its box have no slot in
             # `geographyType` at all and are lost here - the `<latitude>`/`<longitude>` below
-            # are the *site's* pin.
+            # are the *site's* pin, and the `<altitude>` the site's own.
             geography = _sub(element, "geography")
             _sub(geography, "location", site.location_name or site.name)
             if position is not None:
                 _sub(geography, "latitude", _num(position[0]))
                 _sub(geography, "longitude", _num(position[1]))
+            _optional(geography, "altitude", site.altitude)
+        if site.depth_from is not None or site.depth_to is not None:
+            sitedata = _sub(element, "sitedata")
+            # `sitedataType` is an `xs:sequence`, and it lists the deep end first.
+            _optional(sitedata, "maximumdepth", site.depth_to)
+            _optional(sitedata, "minimumdepth", site.depth_from)
         if site.notes:
             _sub(_sub(element, "notes"), "para", site.notes)
     return divesite

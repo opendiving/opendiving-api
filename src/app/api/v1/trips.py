@@ -117,9 +117,9 @@ def _to_public_trip(
     )
 
 
-# Kept for its `list_cache_key_prefix` only - `read_list`/`read_item`, and so `to_public`,
-# are never called, and it is the one instance that declares no `sort_columns`, the list's
-# ordering being an aggregate over `trip_part` rather than a column of `trip`. A trip read
+# Kept for its `list_cache_key_prefix` only - `read_list`, and so `to_public`, is never
+# called, and like `dive_sites.py`'s it declares no `sort_columns`, the list's ordering
+# being an aggregate over `trip_part` rather than a column of `trip`. A trip read
 # also embeds its parts and counts its dives, which are further queries zipped back into the
 # page (see the factory's docstring, which lists `dives.py` and the other opt-outs). The
 # single read is hand-written too, under `user_{id}_trip` so that
@@ -130,10 +130,7 @@ def _to_public_trip(
 # `trip_part`, and `crud_trips.search_conditions` is what searches them.
 _trip_cache: OwnedResourceCache[TripReadInternal, TripRead] = OwnedResourceCache(
     resource_name="trips",
-    resource_label="Trip",
-    item_cache_prefix="user_{user_id}_trip",
     crud=crud_trips,
-    schema_to_select=TripReadInternal,
     to_public=lambda db_trip, user_uuid: _to_public_trip(db_trip, user_uuid=user_uuid, figures=NO_DIVES),
     search_columns=("name",),
 )

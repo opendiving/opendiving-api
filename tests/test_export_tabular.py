@@ -349,7 +349,26 @@ class TestTheNormalizedFiles:
         by_name = {row[0]: dict(zip(TAGS_HEADER, row, strict=True)) for row in rows[1:]}
 
         assert {name: row["dives"] for name, row in by_name.items()} == {"drift": "0", "night": "2", "wreck": "1"}
+        assert {name: row["sites"] for name, row in by_name.items()} == {"drift": "0", "night": "0", "wreck": "1"}
         assert by_name["drift"]["tag_uuid"] == str(UUIDS["tag-drift"])
+
+    def test_a_site_s_members_have_a_column_each(self):
+        """The lists joined with the `;` these files mean *list* by, a registry entry as
+        `registry:identifier`, and every cell empty where the site holds nothing."""
+        rows = _parse(_render(write_dive_sites_csv(full_bundle())))
+        by_name = {row[0]: dict(zip(DIVE_SITES_HEADER, row, strict=True)) for row in rows[1:]}
+        members = ("other_names", "external_ids", "depth_from", "depth_to", "water_type", "altitude")
+
+        assert [by_name["Shark Reef"][member] for member in members] == [
+            "Shark & Yolanda; 砂辺",
+            "openstreetmap:node/313862678; wikidata:Q1047347",
+            "5.0",
+            "40.0",
+            "salt",
+            "0",
+        ]
+        assert (by_name["Shark Reef"]["entry_types"], by_name["Shark Reef"]["tags"]) == ("shore; boat", "wreck")
+        assert [by_name["Yolanda"][member] for member in (*members, "entry_types", "tags")] == [""] * 8
 
     def test_dive_sites_count_visits_not_dives(self):
         """Yolanda is the second site of one dive and the only site of another."""

@@ -241,6 +241,7 @@ def build_bundle(
     person_ids_by_course: dict[int, list[tuple[int, str | None]]] | None = None,
     tags: list[Tag] | None = None,
     tag_ids_by_dive: dict[int, list[int]] | None = None,
+    tag_ids_by_site: dict[int, list[int]] | None = None,
 ) -> ExportBundle:
     """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive".
 
@@ -297,6 +298,7 @@ def build_bundle(
         person_ids_by_course={**{course.id: [] for course in (courses or [])}, **(person_ids_by_course or {})},
         tags=tags or [],
         tag_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(tag_ids_by_dive or {})},
+        tag_ids_by_site={**{site.id: [] for site in (dive_sites or [])}, **(tag_ids_by_site or {})},
     )
 
 
@@ -333,6 +335,18 @@ def full_bundle() -> ExportBundle:
         location_bbox_west=34.18,
         location_bbox_east=34.30,
         notes="Current picks up after slack.",
+        # Every member a site gained beside its pin and its locality, so each writer's
+        # mapping of them is exercised rather than their absence.
+        other_names=["Shark & Yolanda", "砂辺"],
+        external_ids=[
+            {"registry": "openstreetmap", "identifier": "node/313862678"},
+            {"registry": "wikidata", "identifier": "Q1047347"},
+        ],
+        depth_from=5.0,
+        depth_to=40.0,
+        water_type="salt",
+        altitude=0,
+        entry_types=["shore", "boat"],
     )
     # No locality at all, which is the common shape and the one UDDF has to fall back on.
     wall = make_dive_site(2, UUIDS["site-wall"])
@@ -748,6 +762,7 @@ def full_bundle() -> ExportBundle:
         tags=[drift, night, wreck],
         # Not in name order on the air dive: the diver's own order is what travels.
         tag_ids_by_dive={1: [2, 1], 2: [1]},
+        tag_ids_by_site={1: [2]},
     )
 
 

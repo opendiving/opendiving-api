@@ -90,6 +90,8 @@ _DEVICE_MAX = 64
 _FIRMWARE_MAX = 32
 # §6.1's bound on a phone number, the diver's and an emergency contact's alike.
 _PHONE_MAX = 32
+# §6.10a's bound on a registry's identifier for a site.
+_IDENTIFIER_MAX = 255
 
 
 def _unknown_is_absent(enum: type[StrEnum]) -> BeforeValidator:
@@ -222,7 +224,7 @@ class ImportDiver(_ReadModel):
     """Whose logbook the document is. Its identity and settings are read and reported, and
     never applied; its check-in details and its portrait are offered in the preview and
     written as the diver confirms them - see `DECISIONS.md`. The tag list this app's writer
-    puts under its key is read, so a tag on no dive comes back. Every member is optional
+    puts under its key is read, so a tag on no dive or site comes back. Every member is optional
     because §6.1 makes them so: a converter whose source records nothing about an owner
     omits the whole object rather than minting identity for a person."""
 
@@ -476,6 +478,14 @@ class ImportCourse(_ReadModel):
     created_at: datetime | None = None
 
 
+class ImportExternalId(_ReadModel):
+    """A site's registry entry (spec §6.10a), as written - its `extensions` ignored, this app
+    storing them nowhere."""
+
+    registry: str
+    identifier: Annotated[str, Field(max_length=_IDENTIFIER_MAX)]
+
+
 class ImportDiveSite(_ReadModel):
     """One dive site (spec §6.10).
 
@@ -490,8 +500,18 @@ class ImportDiveSite(_ReadModel):
 
     uuid: uuid_pkg.UUID
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    # Read as written: the planner trims each and drops the ones the name already says.
+    other_names: Annotated[list[Annotated[str, Field(max_length=_NAME_MAX)]], Field(default_factory=list), _Collection]
     location: ImportLocation | None = None
     position: ImportPosition | None = None
+    # Shape only: the planner holds each to the registry's form and drops what is not.
+    external_ids: Annotated[list[ImportExternalId], Field(default_factory=list), _Collection]
+    depth_from: float | None = None
+    depth_to: float | None = None
+    water_type: Annotated[WaterType | None, _unknown_is_absent(WaterType), Field(default=None)]
+    altitude: int | None = None
+    entry_types: Annotated[list[EntryType] | None, _unknown_items_dropped(EntryType), Field(default=None)]
+    tags: Annotated[list[str], Field(default_factory=list), _Collection]
     notes: str | None = None
     created_at: datetime | None = None
 

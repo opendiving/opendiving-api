@@ -1,8 +1,9 @@
 """The diver's tags: `GET /tags`, `PATCH /tag/{uuid}` and `DELETE /tag/{uuid}`.
 
-No create route: a dive write names its tags and creates the ones the diver lacks. The list
-is not cached, for the people list's reason - one query over tens of rows. A dive read carries
-its tags' names, so a rename and a delete drop the diver's dive caches.
+No create route: a dive or dive site write names its tags and creates the ones the diver
+lacks. The list is not cached, for the people list's reason - one query over tens of rows. A
+dive read and a site read carry their tags' names, so a rename and a delete drop the diver's
+dive and site caches.
 """
 
 import uuid as uuid_pkg
@@ -19,7 +20,7 @@ from ...core.exceptions.http_exceptions import DuplicateValueException
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_tags import crud_tags, get_tags_page, tag_name_exists
 from ...schemas.tag import TAG_NAME_MAX, TagRead, TagReadInternal, TagUpdate
-from ...services.cache_invalidation import invalidate_dive_caches
+from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches
 
 router = APIRouter(tags=["tags"])
 
@@ -50,8 +51,9 @@ async def read_tags(
         str | None, Query(max_length=TAG_NAME_MAX, description="Case-insensitive substring match on the name")
     ] = None,
 ) -> dict[str, Any]:
-    """List the caller's tags by name, each with how many live dives carry it - zero for a
-    tag no dive carries any more, which stays until it is deleted.
+    """List the caller's tags by name, each with how many live dives and how many dive sites
+    carry it - zero and zero for a tag nothing carries any more, which stays until it is
+    deleted.
 
     `search` narrows the list as a picker is typed into. Out-of-range pagination is clamped
     rather than rejected.
@@ -78,7 +80,7 @@ async def patch_tag(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Rename a tag; every dive carrying it carries the new name.
+    """Rename a tag; every dive and dive site carrying it carries the new name.
 
     404 unless the caller owns it. The name is trimmed, and one another of the caller's tags
     has once both are case-folded - `Night` beside `night`, `GROSSES RIFF` beside `Großes
@@ -95,11 +97,12 @@ async def patch_tag(
     try:
         await crud_tags.update(db=db, object={"name": values.name}, uuid=uuid)
     except IntegrityError as e:
-        # A concurrent rename or dive write took the name between the check and the write.
+        # A concurrent rename, dive write or site write took the name between the check and the write.
         await db.rollback()
         raise DuplicateValueException(_NAME_TAKEN) from e
 
     await invalidate_dive_caches(db_tag.user_id)
+    await invalidate_dive_site_caches(db_tag.user_id)
     return {"message": "Tag updated"}
 
 
@@ -110,7 +113,8 @@ async def erase_tag(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Delete a tag. It leaves every dive that carried it; nothing else about them changes.
+    """Delete a tag. It leaves every dive and dive site that carried it; nothing else about
+    them changes.
 
     404 unless the caller owns it, and a second `DELETE` is a 404 too. There is no way back.
     """
@@ -119,4 +123,5 @@ async def erase_tag(
     await crud_tags.delete(db=db, uuid=uuid)
 
     await invalidate_dive_caches(db_tag.user_id)
+    await invalidate_dive_site_caches(db_tag.user_id)
     return {"message": "Tag deleted"}

@@ -57,6 +57,7 @@ from src.app.models.dive_person import DivePerson
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_site import DiveSite
+from src.app.models.dive_site_tag import DiveSiteTag
 from src.app.models.dive_species import DiveSpecies
 from src.app.models.dive_tag import DiveTag
 from src.app.models.gear_item import GearItem
@@ -101,6 +102,7 @@ from src.app.services.logbook_import.planner import (
     _DIVE_BOUNDS,
     _MIXTURE_BOUNDS,
     _SIGHTING_BOUNDS,
+    _SITE_BOUNDS,
 )
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
 from src.app.services.recording_shape import READOUT_BOUNDS
@@ -153,7 +155,12 @@ async def _patch_start_time(
     the UPDATE all run for real, because what these two tests claim is about the endpoint.
     `test_dive_start_time.py` pins `split_updated_start_time` on its own.
     """
-    for name in ("invalidate_dive_caches", "invalidate_gear_caches", "invalidate_trip_caches"):
+    for name in (
+        "invalidate_dive_caches",
+        "invalidate_gear_caches",
+        "invalidate_trip_caches",
+        "invalidate_dive_site_caches",
+    ):
         monkeypatch.setattr(dives_module, name, AsyncMock())
     await dives_module.patch_dive(
         request=MagicMock(),
@@ -2818,6 +2825,166 @@ class TestTheClassificationConditionsAndTags:
         assert await _tags_of(async_db, destination.id) == ["drift"]
 
 
+def _site_document(*sites: dict[str, Any]) -> bytes:
+    """Hand-written sites, each with a fresh uuid unless it names one."""
+    return json.dumps(
+        {"format": "divejson", "version": "1.0", "sites": [{"uuid": str(uuid7()), **site} for site in sites]}
+    ).encode()
+
+
+async def _sites_of(db: AsyncSession, user_id: int) -> list[DiveSite]:
+    return list((await db.execute(select(DiveSite).where(DiveSite.user_id == user_id))).scalars())
+
+
+def _entry() -> dict[str, str]:
+    """A registry entry no other test's sites carry, these rows outliving every run."""
+    return {"registry": "openstreetmap", "identifier": f"node/{uuid7().int % 10**12 + 1}"}
+
+
+class TestASiteSMembersAndItsRegistryEntries:
+    @pytest.mark.asyncio
+    async def test_a_round_trip_brings_every_member_and_every_tag_back(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """A created site carries every member the document gives it, and the tags it names
+        join the note that names the tags an import makes."""
+        source = create_user(db)
+        site = create_dive_site(db, source)
+        site.other_names, site.external_ids = ["砂辺"], [_entry()]
+        site.depth_from, site.depth_to, site.water_type, site.altitude = 3.0, 18.5, "fresh", 1800
+        site.entry_types = ["shore", "boat"]
+        cave = create_tag(db, source, name="Cave")
+        db.add(DiveSiteTag(dive_site_id=site.id, tag_id=cave.id, position=0))
+        db.commit()
+        document = await _export(async_db, source.id)
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, document)
+
+        (copy,) = await _sites_of(async_db, destination.id)
+        assert (copy.other_names, copy.external_ids) == (["砂辺"], site.external_ids)
+        assert (copy.depth_from, copy.depth_to, copy.water_type, copy.altitude) == (3.0, 18.5, "fresh", 1800)
+        assert copy.entry_types == ["shore", "boat"]
+        on_site = await async_db.execute(
+            select(Tag.name).join(DiveSiteTag, DiveSiteTag.tag_id == Tag.id).where(DiveSiteTag.dive_site_id == copy.id)
+        )
+        assert list(on_site.scalars()) == ["Cave"]
+        (note,) = [note for note in plan.notes if note.code is ImportNoteCode.TAGS_CREATED]
+        assert '"Cave"' in note.message
+
+    @pytest.mark.asyncio
+    async def test_an_entry_on_one_site_each_side_links_them_and_writes_nothing(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The one key that crosses logbooks, read where it singles a site out on both sides:
+        under another uuid and another name, the document's site is the caller's."""
+        user = create_user(db)
+        held = create_dive_site(db, user)
+        entry = _entry()
+        held.external_ids = [entry]
+        db.commit()
+        document = _site_document({"name": "Somebody else's name", "external_ids": [entry], "depth_to": 40})
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert _counts(plan)["sites"] == (0, 1, 0, 0)
+        (site,) = await _sites_of(async_db, user.id)
+        assert (site.id, site.name, site.depth_to) == (held.id, held.name, None)
+
+    @pytest.mark.asyncio
+    async def test_an_entry_two_of_the_caller_s_sites_carry_says_nothing(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Two sites may share an entry, so it names neither: the import goes on to the name."""
+        user = create_user(db)
+        entry = _entry()
+        for site in (create_dive_site(db, user), create_dive_site(db, user)):
+            site.external_ids = [entry]
+        db.commit()
+
+        plan = await _apply(async_db, user.id, _site_document({"name": "A third", "external_ids": [entry]}))
+
+        assert _counts(plan)["sites"] == (1, 0, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_an_entry_two_of_the_document_s_sites_carry_links_neither(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Two sites of one document are never linked to one site on the strength of it."""
+        user = create_user(db)
+        held = create_dive_site(db, user)
+        entry = _entry()
+        held.external_ids = [entry]
+        db.commit()
+
+        plan = await _apply(
+            async_db,
+            user.id,
+            _site_document(
+                {"name": "North entry", "external_ids": [entry]}, {"name": "South entry", "external_ids": [entry]}
+            ),
+        )
+
+        assert _counts(plan)["sites"] == (2, 0, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_entries_naming_two_of_the_caller_s_sites_fall_through_to_the_name(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        user = create_user(db)
+        first, second = create_dive_site(db, user), create_dive_site(db, user)
+        one, other = _entry(), _entry()
+        first.external_ids, second.external_ids = [one], [other]
+        db.commit()
+
+        plan = await _apply(
+            async_db,
+            user.id,
+            _site_document(
+                {"name": second.name, "location": {"name": second.location_name}, "external_ids": [one, other]}
+            ),
+        )
+
+        assert _counts(plan)["sites"] == (0, 1, 0, 0)
+        assert {note.message for note in plan.notes if note.collection == "sites"} == {
+            "You already have a dive site with this name, so this record was linked to it rather than duplicated."
+        }
+
+    @pytest.mark.asyncio
+    async def test_what_the_app_cannot_hold_is_dropped_and_the_site_is_not(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """An entry out of its registry's form, a depth range the wrong way round - both ends
+        go, as half a position does - and an altitude off the format's range, each named; a
+        blank other name, one the name says, a repeated entry and an unknown entry type, each
+        dropped saying nothing the record does not."""
+        user = create_user(db)
+        entry = _entry()
+        document = _site_document(
+            {
+                "name": "Blue Hole",
+                "other_names": ["  ", "BLUE HOLE", "El Bells", "el bells"],
+                "external_ids": [entry, entry, {"registry": "wikidata", "identifier": "Q0"}],
+                "depth_from": 30,
+                "depth_to": 10,
+                "altitude": 9000,
+                "entry_types": ["boat", "zipline", "shore"],
+                "water_type": "lava",
+            }
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        (site,) = await _sites_of(async_db, user.id)
+        assert site.other_names == ["El Bells"]
+        assert site.external_ids == [entry]
+        assert (site.depth_from, site.depth_to, site.altitude, site.water_type) == (None, None, None, None)
+        assert site.entry_types == ["shore", "boat"]
+        dropped = [note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED]
+        assert len(dropped) == 3
+        assert any("wikidata" in message for message in dropped)
+
+
 class TestNothingInventedNothingFatal:
     @pytest.mark.asyncio
     async def test_a_value_the_database_refuses_is_dropped_and_the_dive_imports(
@@ -3959,8 +4126,8 @@ class TestThePortrait:
 
 
 class TestTheBoundsCensus:
-    """A guard, not a test of behaviour: a new single-column bound on `dive` or
-    `dive_mixture` must not be able to land without an import-side counterpart.
+    """A guard, not a test of behaviour: a new single-column bound on a table an import
+    writes values into must not be able to land without an import-side counterpart.
 
     The same shape as
     `test_every_single_column_bound_a_file_can_reach_has_a_parse_side_guard`, and for the
@@ -3972,6 +4139,8 @@ class TestTheBoundsCensus:
     PAIR_RULES = frozenset(
         {
             "ck_dive_avg_depth_within_max",
+            # `_plan_site` drops both ends of an inverted depth range.
+            "ck_dive_site_depth_range",
             "ck_dive_entry_position_pair",
             "ck_dive_exit_position_pair",
             "ck_dive_mixture_oxygen_helium_sum",
@@ -4005,7 +4174,7 @@ class TestTheBoundsCensus:
     def test_every_bound_the_document_can_reach_has_a_guard(self) -> None:
         guarded = {
             bound.field
-            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, READOUT_BOUNDS, _SIGHTING_BOUNDS)
+            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, READOUT_BOUNDS, _SIGHTING_BOUNDS, _SITE_BOUNDS)
             for bound in bounds
         }
         # Column names, mapped onto the wire names the planner reads them under.
@@ -4013,7 +4182,7 @@ class TestTheBoundsCensus:
         unguarded = []
         # `tuple[Any, ...]` because `Model.__table__` is typed `FromClause` on a precisely
         # typed class, and only `Table` carries `.constraints`.
-        models: tuple[Any, ...] = (Dive, DiveMixture, DiveRecording, DiveSpecies)
+        models: tuple[Any, ...] = (Dive, DiveMixture, DiveRecording, DiveSpecies, DiveSite)
         for model in models:
             table = model.__table__
             for constraint in table.constraints:
@@ -4386,6 +4555,11 @@ class TestTheIntegerColumnCensus:
         ("dive_tag", "position"): "the list index, not the document's",
         ("dive_site", "id"): "the sequence's",
         ("dive_site", "user_id"): "the caller's",
+        ("dive_site", "altitude"): "bounded in `_SITE_BOUNDS`, to the model's own -450..6500",
+        ("dive_site_tag", "id"): "the sequence's",
+        ("dive_site_tag", "dive_site_id"): "resolved from a row this import wrote",
+        ("dive_site_tag", "tag_id"): "a tag this import wrote, or one the caller already had",
+        ("dive_site_tag", "position"): "the list index, not the document's",
         ("gear_set", "id"): "the sequence's",
         ("gear_set", "user_id"): "the caller's",
         ("certification", "id"): "the sequence's",
@@ -4459,6 +4633,7 @@ class TestTheIntegerColumnCensus:
             TripPart,
             Course,
             DiveSite,
+            DiveSiteTag,
             GearItem,
             GearSet,
             GearServiceSchedule,

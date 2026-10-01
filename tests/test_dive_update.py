@@ -86,6 +86,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(dives_module, "invalidate_dive_caches", AsyncMock())
     monkeypatch.setattr(dives_module, "invalidate_gear_caches", AsyncMock())
     monkeypatch.setattr(dives_module, "invalidate_trip_caches", AsyncMock())
+    monkeypatch.setattr(dives_module, "invalidate_dive_site_caches", AsyncMock())
 
     return seen
 

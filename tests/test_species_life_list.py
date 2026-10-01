@@ -109,7 +109,15 @@ def _service_answering(by_call: dict[tuple[int, str | None], str]) -> Any:
     wrong cache entry comes back with visibly the wrong rows rather than merely the wrong
     count."""
 
-    async def service(*, db: Any, user_id: int, offset: int, limit: int, search: str | None = None) -> dict[str, Any]:
+    async def service(
+        *,
+        db: Any,
+        user_id: int,
+        offset: int,
+        limit: int,
+        search: str | None = None,
+        dive_site_id: int | None = None,
+    ) -> dict[str, Any]:
         return {"data": [_row(by_call[(offset, search)])], "total_count": 1}
 
     return patch.object(users_module, "species_life_list", service)
@@ -195,8 +203,9 @@ class TestTheCacheKeyCarriesTheWholeQuery:
         # helper's - which is exactly the one whose keyword arguments the key is filled from.
         parameters = set(inspect.signature(users_module._cached_species_life_list).parameters)
 
-        for placeholder in ("user_id", "page", "items_per_page", "search"):
+        for placeholder in ("user_id", "page", "items_per_page", "search", "dive_site_id"):
             assert placeholder in parameters
+            assert f"{{{placeholder}}}" in SPECIES_LIFE_LIST_CACHE_KEY_PREFIX
 
 
 class TestTheRoute:

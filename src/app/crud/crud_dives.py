@@ -3,7 +3,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastcrud import FastCRUD
-from sqlalchemy import ColumnElement, func, select, update
+from sqlalchemy import ARRAY, Boolean, ColumnElement, Integer, func, select, update
+from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.dive import Dive
@@ -23,6 +24,44 @@ from ..schemas.dive import (
 
 CRUDDive = FastCRUD[Dive, DiveCreateInternal, DiveUpdate, DiveUpdateInternal, DiveDelete, DiveReadInternal]
 crud_dives = CRUDDive(Dive)
+
+
+def offset_of_the(order: Any) -> Any:
+    """The `utc_offset_minutes` of the first dive in the group under `order`.
+
+    **A dive displays in the timezone it was logged in**, which an aggregate over dives has to
+    honour like every other dive-derived surface - `_to_public_start_time`, `dive_neighbors`,
+    `dive_activity` and `gas_use_history` all reconstruct it, and `DECISIONS.md` states it as the
+    API contract. A `timestamptz` stores only an absolute instant, so a dive logged at 09:00 in
+    Bangkok comes back as 02:00 UTC and would read as the wrong local time - and, for an evening
+    dive, the wrong day.
+
+    It is harder for an aggregate - the life list's `first_seen` and `last_seen`, a site's
+    `last_dived_on` - than anywhere else in the app: the offset wanted is the one belonging to
+    the single dive that produced the `min()` or the `max()`, and no aggregate over the offset
+    column can say which that was.
+    Ordering `array_agg` and taking its first element is what pairs the two, in one pass over the
+    group that Postgres is already making. `Dive.id` breaks a tie between two dives at the same
+    instant, so a diver with two logs at one timestamp does not get a different offset run to
+    run.
+
+    The conversion itself still happens in Python, through `combine_dive_start_time`. Deliberately,
+    and the same call `dive_activity` explains: `core/utils/datetime_offset.py` is documented as
+    the single place that conversion happens, and the failure mode of a second copy of it in SQL
+    is a list that quietly disagrees with the dive pages it was built from.
+
+    A NULL offset - the logbook importer's offset-unknown state - travels this path intact and
+    needs no special case at either end: a Postgres array may hold NULL elements, so the
+    subscript yields `None`, and the combiner reads that as "the column holds the wall clock" and
+    hands it back naive. `SpeciesLifeListEntry`'s two timestamps admit that naive value, and a
+    bare date too - `date_only_of_the` pairs the flag the same way.
+    """
+    return func.array_agg(aggregate_order_by(Dive.utc_offset_minutes, order, Dive.id.asc()), type_=ARRAY(Integer))[1]
+
+
+def date_only_of_the(order: Any) -> Any:
+    """`start_date_only` of the same dive `offset_of_the` picks, by the same ordering."""
+    return func.array_agg(aggregate_order_by(Dive.start_date_only, order, Dive.id.asc()), type_=ARRAY(Boolean))[1]
 
 
 # The list's filters by dive site, gear item, species, person or tag, each a single

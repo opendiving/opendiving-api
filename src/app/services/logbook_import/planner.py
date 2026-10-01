@@ -50,6 +50,7 @@ from uuid6 import uuid7
 from ...core.schemas import NOTES_MAX_LENGTH
 from ...core.utils.datetime_offset import split_dive_start_time
 from ...core.utils.uploads import safe_filename
+from ...crud.crud_dive_sites import sites_by_external_id
 from ...crud.crud_dive_species import StoredSighting
 from ...models.certification import Certification
 from ...models.contact import Contact
@@ -70,6 +71,7 @@ from ...models.user import User
 from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, CertificationAgency, CertificationSide
 from ...schemas.contact import ADDRESS_FIELDS, CONTACT_ADDRESS_PREFIX, canonical_roles, check_website
 from ...schemas.dive_profile import MILLISECONDS_PER_SECOND
+from ...schemas.dive_site import ExternalId, canonical_entry_types, canonical_external_ids, canonical_other_names
 from ...schemas.export import DIVEJSON_PRODUCER_KEY
 from ...schemas.gear_item import GearType
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
@@ -504,6 +506,14 @@ _DIVE_BOUNDS: tuple[Bound, ...] = (
     Bound("rating", lambda value: 1 <= value <= 5, "a rating must be between 1 and 5"),
 )
 
+# A site's single-column bounds, from `models/dive_site.py`. The depth pair's order is a pair
+# rule, which `_plan_site` handles as `_plan_dive` handles a dive's: both ends go.
+_SITE_BOUNDS: tuple[Bound, ...] = (
+    Bound("depth_from", lambda value: value >= 0, "a depth cannot be negative"),
+    Bound("depth_to", lambda value: value >= 0, "a depth cannot be negative"),
+    Bound("altitude", lambda value: -450 <= value <= 6500, "altitude must be between -450 and 6500 metres"),
+)
+
 # A sighting's count, from `models/dive_species.py`, with the column's width as its ceiling:
 # the format floors it above zero and caps it nowhere.
 _SIGHTING_BOUNDS: tuple[Bound, ...] = (
@@ -540,6 +550,26 @@ def _unpressurized(cylinder: ImportCylinder) -> list[str]:
         for name in ("start_pressure", "end_pressure")
         if (value := getattr(cylinder, name)) is not None and finite(value) and value <= 0
     ]
+
+
+def _site_external_ids(site: ImportDiveSite) -> tuple[list[ExternalId], list[str]]:
+    """A site's registry entries as a write stores them, and why each refused one was.
+
+    Held to the write schema's own rules - the producer-key pattern, the identifier's form
+    under a registry the format names - with a repeated pair kept once. A refused entry is
+    dropped and named, never the site: it is one link out of the logbook, not the record.
+    """
+    kept: list[ExternalId] = []
+    refused: list[str] = []
+    for entry in site.external_ids:
+        try:
+            kept.append(ExternalId(registry=entry.registry, identifier=entry.identifier))
+        except ValidationError:
+            refused.append(
+                f"A registry entry ({entry.registry!r}, {entry.identifier!r}) was not in that registry's form, "
+                "and was dropped"
+            )
+    return canonical_external_ids(kept), refused
 
 
 def _key(*parts: str | None) -> tuple[str, ...]:
@@ -1074,6 +1104,7 @@ class _Planner:
         await self._plan_people()
         await self._plan_trips()
         await self._plan_courses()
+        await self._load_tag_index()
         await self._plan_sites()
         await self._plan_species()
         await self._plan_gear()
@@ -1645,14 +1676,33 @@ class _Planner:
         return record
 
     async def _plan_sites(self) -> None:
+        """Every site, matched by uuid, then by a registry entry, then by name and locality.
+
+        The middle step reads the one key that crosses logbooks, and only where it singles a
+        site out on both sides: an entry that exactly one of the caller's sites carries and
+        exactly one of the document's does. Two sites may share an entry - a registry's
+        object can be coarser than a diver's sites - so an entry two of either side's carry
+        says nothing about which one is meant, and the import falls through to the name.
+        """
         existing = await self._rows_by_uuid(DiveSite, [site.uuid for site in self._document.sites])
         index = await self._existing_by_key(
             DiveSite, (DiveSite.name, DiveSite.location_name), lambda row: _key(row[0], row[1])
         )
+        held = await sites_by_external_id(self._db, user_id=self._user_id)
+        entries = {site.uuid: _site_external_ids(site)[0] for site in self._document.sites}
+        on_document_sites: dict[tuple[str, str], int] = {}
+        for kept in entries.values():
+            for entry in kept:
+                on_document_sites[entry.pair] = on_document_sites.get(entry.pair, 0) + 1
         aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
         for site in self._document.sites:
             self._claim_document_uuid("sites", site)
-            self._records["sites"][site.uuid] = self._plan_site(site, existing, index, aliases)
+            single = {
+                holders[0].id
+                for entry in entries[site.uuid]
+                if on_document_sites[entry.pair] == 1 and len(holders := held.get(entry.pair, [])) == 1
+            }
+            self._records["sites"][site.uuid] = self._plan_site(site, existing, index, aliases, single)
 
     def _plan_site(
         self,
@@ -1660,6 +1710,7 @@ class _Planner:
         existing: dict[uuid_pkg.UUID, _ExistingRow],
         index: dict[tuple[str, ...], int],
         aliases: dict[tuple[str, ...], uuid_pkg.UUID],
+        held_by_entry: set[int],
     ) -> PlannedRecord:
         if not (site.name or "").strip():
             return self._skip("sites", site.uuid, "A dive site needs a name, and this one has none.")
@@ -1674,6 +1725,19 @@ class _Planner:
             prefix=DIVE_SITE_LOCATION_PREFIX,
         )
         record = self._resolve("sites", site.uuid, existing)
+        if record.action is Action.CREATE and len(held_by_entry) == 1:
+            # Every entry that singles a site out names the same one of the caller's. A match
+            # writes nothing, as a match by uuid or by name writes nothing.
+            self._note(
+                ImportNoteCode.RECORD_LINKED,
+                "You already have a dive site carrying the same registry entry, so this record was linked to it "
+                "rather than duplicated.",
+                collection="sites",
+                uuid=site.uuid,
+            )
+            return PlannedRecord(
+                action=Action.LINK, source_uuid=site.uuid, uuid=site.uuid, row_id=next(iter(held_by_entry))
+            )
         if record.action is Action.CREATE:
             site_key = _key(site.name, place[f"{DIVE_SITE_LOCATION_PREFIX}name"])
             record = self._claim_unique("sites", record, index, aliases, site_key, "dive site", index_key=site_key)
@@ -1681,15 +1745,36 @@ class _Planner:
             return record
 
         latitude, longitude = self._position("sites", site.uuid, site.position, "site's")
+        bounded = self._bounded("sites", site.uuid, site, _SITE_BOUNDS)
+        depth_from, depth_to = bounded.get("depth_from"), bounded.get("depth_to")
+        if depth_from is not None and depth_to is not None and depth_from > depth_to:
+            # No "the bad value" in a pair: both go, as half a position does.
+            self._dropped("sites", site.uuid, "The depth range was shallower at its deep end, and was dropped")
+            depth_from = depth_to = None
+        external_ids, refused = _site_external_ids(site)
+        for reason in refused:
+            self._dropped("sites", site.uuid, reason)
         record.values = {
             "user_id": self._user_id,
             "name": site.name,
+            # Trimmed as a tag is, a blank one dropped, and one the name or an earlier one
+            # already says dropped too: it says nothing the record does not.
+            "other_names": canonical_other_names(
+                site.name, [trimmed for raw in site.other_names if (trimmed := trim_tag(raw))]
+            ),
             "latitude": latitude,
             "longitude": longitude,
+            "external_ids": [entry.model_dump() for entry in external_ids],
+            "depth_from": depth_from,
+            "depth_to": depth_to,
+            "water_type": None if site.water_type is None else site.water_type.value,
+            "altitude": bounded.get("altitude"),
+            "entry_types": [entry.value for entry in canonical_entry_types(site.entry_types or [])],
             "notes": self._notes_text("sites", site.uuid, site.notes),
             "created_at": self._created_at(site.created_at),
             **place,
         }
+        record.children = {"tags": self._tag_names(site.tags, collection="sites", record_uuid=site.uuid)}
         return record
 
     async def _plan_species(self) -> None:
@@ -2040,10 +2125,14 @@ class _Planner:
         }
         return record
 
-    async def _plan_dives(self) -> None:
-        existing = await self._rows_by_uuid(Dive, [dive.uuid for dive in self._document.dives])
+    async def _load_tag_index(self) -> None:
+        """The caller's tags by `tag_key`, before the first collection that names one - a
+        site's tags and a dive's are one vocabulary."""
         tags = await self._db.execute(select(Tag.name, Tag.id).where(Tag.user_id == self._user_id))
         self._tag_index = {tag_key(row.name): row.id for row in tags}
+
+    async def _plan_dives(self) -> None:
+        existing = await self._rows_by_uuid(Dive, [dive.uuid for dive in self._document.dives])
         self._claimed_digests = await self._stored_digests()
         for dive in self._document.dives:
             self._claim_document_uuid("dives", dive)
@@ -2371,7 +2460,7 @@ class _Planner:
     def _tag_names(
         self, names: Sequence[str], *, collection: str | None = None, record_uuid: uuid_pkg.UUID | None = None
     ) -> list[str]:
-        """Tags as a dive write stores them: each trimmed, a blank one dropped, one longer than
+        """Tags as a dive or site write stores them: each trimmed, a blank one dropped, one longer than
         the column dropped and noted, and two that fold to one kept once, at the first -
         what the read model would refuse is restated here, since the import validates no
         schema of its own. Each the caller lacks is one this import makes."""
@@ -2396,7 +2485,7 @@ class _Planner:
 
     def _plan_tag_list(self) -> None:
         """The diver's whole tag list, from this app's extension - the one value the import
-        reads from that block, so a tag on no dive survives a round trip. Only strings count:
+        reads from that block, so a tag on no dive or site survives a round trip. Only strings count:
         §5.5 lets anything sit under the key."""
         diver = self._document.diver
         listed = None if diver is None else _producer_entry(diver, "tags")

@@ -228,10 +228,7 @@ class TestListCacheKeys:
         # `KeyError` on a placeholder it can't fill.
         unsearchable: OwnedResourceCache = OwnedResourceCache(
             resource_name="gear_sets",
-            resource_label="Gear set",
-            item_cache_prefix="gear_set_cache",
             crud=crud_gear_items,
-            schema_to_select=dict,
             to_public=lambda item, user_uuid: item,
             sort_columns="name",
         )

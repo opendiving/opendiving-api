@@ -495,7 +495,7 @@ def _get_request() -> MagicMock:
 
 class TestReadPath:
     """The trips reads are hand-rolled `@cache` helpers rather than
-    `OwnedResourceCache.read_list`/`read_item`, because each one zips a second query's
+    `OwnedResourceCache.read_list`, because each one zips a second query's
     rows back into the response. The keys have to stay byte-identical to the ones the
     write paths sweep, or an edit stops being visible until the entry expires.
     """

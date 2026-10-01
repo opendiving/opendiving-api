@@ -34,6 +34,7 @@ from ...core.utils.datetime_offset import combine_dive_start_time, combine_start
 from ...models.contact import Contact
 from ...models.course import Course
 from ...models.dive import Dive
+from ...models.dive_site import DiveSite
 from ...models.person import Person
 from ...models.trip import Trip
 from ...models.user import User
@@ -69,6 +70,7 @@ from ...schemas.export import (
     ExportDiver,
     ExportDiveSite,
     ExportEmergencyContact,
+    ExportExternalId,
     ExportGearItem,
     ExportGearServiceRecord,
     ExportGearServiceSchedule,
@@ -149,8 +151,9 @@ def _speakable(value: str | None, vocabulary: type[StrEnum]) -> bool:
       `certification.agency`) - the record is uninterpretable and is omitted, which is the
       writer's side of the rule the reader already follows (spec §5.6, and
       `logbook_import/planner.py::_agency`, which skips for that reason).
-    - OPTIONAL (`gear_item.type`, `dive.water_type` and the dive's other vocabularies,
-      `dive_recording.mode`/`salinity`, `dive_mixture.role`/`usage`, `course.agency`/`status`)
+    - OPTIONAL (`gear_item.type`, `dive.water_type` and the dive's other vocabularies, a
+      site's `water_type` and `entry_types`, `dive_recording.mode`/`salinity`,
+      `dive_mixture.role`/`usage`, `course.agency`/`status`)
       - `_sayable` below drops the *field* and keeps the record.
       A diver's cylinder must not vanish from their export over how its category is spelt,
       and neither must their course.
@@ -241,6 +244,33 @@ def _export_contact(contact: Contact) -> ExportContact:
         address=None if address is None else ExportAddress(**address.model_dump()),
         notes=_text(contact.notes),
         created_at=contact.created_at,
+    )
+
+
+def _export_dive_site(bundle: ExportBundle, site: DiveSite) -> ExportDiveSite:
+    """One dive site, as §6.10 spells it.
+
+    The vocabularies go through `_sayable` - `entry_types` item by item, as a contact's roles
+    do - and each list the site holds nothing in is written as absence.
+    """
+    entry_types = [entry for value in site.entry_types if (entry := _sayable(value, EntryType)) is not None]
+    return ExportDiveSite(
+        uuid=site.uuid,
+        name=site.name,
+        other_names=site.other_names or None,
+        # The locality's own centre and box, never the site's pin - which goes in `position`
+        # below and is a different fact (spec §6.10).
+        location=_location(location_from_row(site, DIVE_SITE_LOCATION_PREFIX)),
+        position=_position(site.latitude, site.longitude),
+        external_ids=[ExportExternalId(**entry) for entry in site.external_ids] or None,
+        depth_from=site.depth_from,
+        depth_to=site.depth_to,
+        water_type=_sayable(site.water_type, WaterType),
+        altitude=site.altitude,
+        entry_types=entry_types or None,
+        tags=[tag.name for tag in bundle.tags_for(site)] or None,
+        notes=_text(site.notes),
+        created_at=site.created_at,
     )
 
 
@@ -674,22 +704,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
             # OPTIONAL (spec §6.17), so neither can cost the record - see `_speakable`.
             [_export_course(bundle, course) for course in bundle.courses],
         ),
-        (
-            "sites",
-            [
-                ExportDiveSite(
-                    uuid=site.uuid,
-                    name=site.name,
-                    # The locality's own centre and box, never the site's pin - which goes
-                    # in `position` below and is a different fact (spec §6.10).
-                    location=_location(location_from_row(site, DIVE_SITE_LOCATION_PREFIX)),
-                    position=_position(site.latitude, site.longitude),
-                    notes=_text(site.notes),
-                    created_at=site.created_at,
-                )
-                for site in bundle.dive_sites
-            ],
-        ),
+        ("sites", [_export_dive_site(bundle, site) for site in bundle.dive_sites]),
         (
             "species",
             [

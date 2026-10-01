@@ -14,12 +14,13 @@ A contact is the same shape again, five hosts wide: a dive, a course, a certific
 a service record and a trip part carry its uuid. A person is four: a dive, a trip and a
 course list it, and a certification names it as its instructor.
 
-A tag is one host wide and carries more than a uuid: a dive read lists its tags by name, so
-renaming or deleting one drops the diver's dive caches.
+A tag is two hosts wide and carries more than a uuid: a dive read and a dive site read list
+their tags by name, so renaming or deleting one drops the diver's dive and site caches.
 
-A trip runs the other way: its read counts the dives assigned to it and the sites and species
-they name, and carries the deepest of them, so a dive write that can move one of those drops the
-diver's trip caches.
+A trip and a dive site run the other way: a trip's read counts the dives assigned to it and
+the sites and species they name and carries the deepest of them, and a site's summarises the
+dives naming it - how many, the latest, the deepest, the species, the rating. So every dive
+write that can move one of those drops the diver's trip caches and site caches together.
 
 These helpers live here rather than in the route modules so `dives.py`, `gear_items.py`,
 `dive_sites.py`, `courses.py`, `contacts.py`, `people.py` and `tags.py` can all reach them
@@ -43,10 +44,10 @@ async def invalidate_dive_caches(user_id: int) -> None:
     dive site or a gear item.
 
     Deliberately two patterns rather than one `user_{id}_dive*`: that shorter
-    pattern would also sweep `user_{id}_dive_sites:page_...` (the dive *site* list
-    cache), which is a different resource and needn't be dropped just because a
-    dive changed. Harmless if it happened, but it would quietly cost every dive
-    edit an extra dive-site list rebuild.
+    pattern would also sweep the dive *site* keys (`user_{id}_dive_sites:page_...`,
+    `user_{id}_dive_site:{uuid}`), which are a different resource with an invalidator of
+    their own - called by the dive writes that move a site's summary, and not by the writes
+    that reach a dive read alone, such as a gear item's rename or a recording attached.
     """
     await delete_keys_by_pattern(f"user_{user_id}_dives:*")
     await delete_keys_by_pattern(f"user_{user_id}_dive:*")
@@ -110,11 +111,11 @@ async def invalidate_gear_caches(user_id: int) -> None:
     await delete_keys_by_pattern(f"user_{user_id}_gear_*")
 
 
-# The two list caches that live *inside* their routers as `OwnedResourceCache` instances
-# (`api/v1/dive_sites.py::_dive_site_cache`, `api/v1/trips.py::_trip_cache`). Their writers
-# outside those routers - an import filling both collections from a service, every dive
-# route changing a trip's counts - have no business importing a route module, so the key
-# shape is shared instead of the object: these two go through
+# The two list caches whose key shape an `OwnedResourceCache` instance defines inside its
+# router (`api/v1/dive_sites.py::_dive_site_cache`, `api/v1/trips.py::_trip_cache`). Their
+# writers outside those routers - an import filling both collections from a service, every
+# dive route changing a trip's counts and a site's summary - have no business importing a
+# route module, so the key shape is shared instead of the object: these two go through
 # `OwnedResourceCache.list_cache_pattern`, the same function `invalidate_list` uses, and
 # `tests/test_cache_utils.py` checks the resource names still match the real caches'.
 #
@@ -122,8 +123,15 @@ async def invalidate_gear_caches(user_id: int) -> None:
 # the 60-second list expiry - at exactly the moment the diver goes looking at what they
 # just restored.
 async def invalidate_dive_site_caches(user_id: int) -> None:
-    """Drop every cached dive-site list page for a user."""
+    """Drop every cached dive-site read for a user: the list pages and the single sites
+    (`user_{id}_dive_site:{uuid}`).
+
+    Two patterns, as for trips, and for the same reason: a site's read summarises the dives
+    naming it, so a dive write that cannot name the sites it moved - a dive deleted, a site's
+    dives moved onto another - still has to reach them all.
+    """
     await delete_keys_by_pattern(OwnedResourceCache.list_cache_pattern("dive_sites", user_id))
+    await delete_keys_by_pattern(f"user_{user_id}_dive_site:*")
 
 
 async def invalidate_trip_caches(user_id: int) -> None:

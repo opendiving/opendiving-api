@@ -21,15 +21,16 @@ def folded(column: SQLColumnExpression[str]) -> ColumnElement[Any]:
 
 
 class Tag(Base, PublicUUIDMixin, TimestampMixin):
-    """A word from the diver's own vocabulary, listed on dives through `dive_tag`.
+    """A word from the diver's own vocabulary, listed on dives through `dive_tag` and on dive
+    sites through `dive_site_tag`.
 
-    A record rather than a string on the dive so it renames across every dive and counts
-    its dives. Unique per diver on the trimmed, case-folded name - DiveJSON's §3 rule 8 -
+    A record rather than a string on its host so it renames across every dive and site and
+    counts both. Unique per diver on the trimmed, case-folded name - DiveJSON's §3 rule 8 -
     which is a departure from the `lower(name)` of *"Case-insensitive per-user
     uniqueness"* in DECISIONS.md, on purpose.
 
-    No `SoftDeleteMixin`, and nothing deletes a tag when its last dive drops it: the diver
-    keeps the word until they delete it.
+    No `SoftDeleteMixin`, and nothing deletes a tag when its last dive or site drops it: the
+    diver keeps the word until they delete it.
     """
 
     __tablename__ = "tag"

@@ -403,10 +403,29 @@ def write_courses_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(COURSES_HEADER, rows())
 
 
-DIVE_SITES_HEADER = ("name", "location", "latitude", "longitude", "dives", "notes", "dive_site_uuid")
+DIVE_SITES_HEADER = (
+    "name",
+    "other_names",
+    "location",
+    "latitude",
+    "longitude",
+    "external_ids",
+    "depth_from",
+    "depth_to",
+    "water_type",
+    "altitude",
+    "entry_types",
+    "tags",
+    "dives",
+    "notes",
+    "dive_site_uuid",
+)
 
 
 def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
+    """One row per site, each list joined with the `;` these files mean *list* by. A
+    registry entry is `registry:identifier`, which splits at its first colon: a registry
+    is named as a producer key is, and that has none."""
     counts: dict[int, int] = {}
     for site_ids in bundle.site_ids_by_dive.values():
         for site_id in site_ids:
@@ -416,9 +435,19 @@ def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
         for site in bundle.dive_sites:
             yield (
                 site.name,
+                "; ".join(site.other_names),
                 site.location_name,
                 site.latitude,
                 site.longitude,
+                "; ".join(f"{entry['registry']}:{entry['identifier']}" for entry in site.external_ids),
+                site.depth_from,
+                site.depth_to,
+                site.water_type,
+                site.altitude,
+                # The stored strings, as `contacts.csv` writes a role: a CSV has no vocabulary
+                # to keep.
+                "; ".join(site.entry_types),
+                "; ".join(tag.name for tag in bundle.tags_for(site)),
                 counts.get(site.id, 0),
                 site.notes,
                 str(site.uuid),
@@ -687,18 +716,25 @@ def write_people_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(PEOPLE_HEADER, rows())
 
 
-TAGS_HEADER = ("name", "dives", "tag_uuid")
+TAGS_HEADER = ("name", "dives", "sites", "tag_uuid")
 
 
 def write_tags_csv(bundle: ExportBundle) -> Iterator[str]:
-    """One row per tag, with how many of the exported dives carry it - zero for a tag on none,
-    which is in the account all the same."""
+    """One row per tag, with how many of the exported dives and sites carry it - zero for a
+    tag on none, which is in the account all the same."""
     dive_counts: dict[int, int] = {}
     for dive in bundle.dives:
         for tag in bundle.tags_for(dive):
             dive_counts[tag.id] = dive_counts.get(tag.id, 0) + 1
+    site_counts: dict[int, int] = {}
+    for site in bundle.dive_sites:
+        for tag in bundle.tags_for(site):
+            site_counts[tag.id] = site_counts.get(tag.id, 0) + 1
 
-    return _rows_to_csv(TAGS_HEADER, ((tag.name, dive_counts.get(tag.id, 0), str(tag.uuid)) for tag in bundle.tags))
+    return _rows_to_csv(
+        TAGS_HEADER,
+        ((tag.name, dive_counts.get(tag.id, 0), site_counts.get(tag.id, 0), str(tag.uuid)) for tag in bundle.tags),
+    )
 
 
 # The archive's `csv/` directory, in the order the files are added to it.
