@@ -3613,9 +3613,8 @@ Every checkout sets `persist-credentials: false`. `actions/checkout` otherwise l
 and executes it (pytest, `alembic upgrade head`, and mypy via `plugins = ["pydantic.mypy"]` all
 import it), so a compromised dependency finds a credential on disk. No job uses git after checkout.
 
-`tests.yml`'s service containers and the coverage table in `$GITHUB_STEP_SUMMARY` use the runner or
-the Actions runtime token, which no `permissions:` entry governs. `astral-sh/setup-uv`'s
-`github-token` only downloads a public release.
+`tests.yml`'s service containers use the runner, which no `permissions:` entry governs.
+`astral-sh/setup-uv`'s `github-token` only downloads a public release.
 
 A job needing more takes a job-level block and re-states `contents: read`, since a job-level
 `permissions:` replaces the workflow's; see `pr-title.yml` and `publish-image.yml`'s
@@ -4482,8 +4481,7 @@ set-union sweep would notice.
 with a client-side `default=` goes into the INSERT whether or not the script's `data` dict names it.
 A column dropped from the model makes that INSERT an `UndefinedColumn`, which the bare
 `except Exception` in `create_first_user` logs and swallows, so a fresh install comes up with no
-superuser. Nothing else covers the script: `--cov` is scoped to `src/app` and it runs from a
-one-shot compose service.
+superuser. Nothing else covers the script: it runs from a one-shot compose service.
 
 The two `Table` definitions are therefore module-level constants so
 `tests/test_create_first_superuser.py` asserts both directions of drift: every column the copy names

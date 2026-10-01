@@ -47,7 +47,7 @@ uv run mdformat --check *.md docs .github tests
 uv run mypy src --config-file pyproject.toml
 uv run mypy tests --config-file pyproject.toml
 uv run mypy scripts --config-file pyproject.toml
-uv run pytest --cov=src/app --cov-report=term-missing
+uv run pytest
 ```
 
 If your PR touches `src/app/models/`, add the migration drift check — CI runs it and the suite does
