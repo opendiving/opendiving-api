@@ -236,15 +236,15 @@ token. All of those want a bearer token. The ones that don't are **support**, th
 themselves, the two health checks — `/health` says the process is up, `/health/ready` says Postgres
 and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how somebody with
 no account asks a closed instance for an invitation, `GET /config`, which tells the web app whether
-registration is open - whether the project itself operates the instance, and whether any join link
-exists (`join_links`) - before anyone has signed in, `GET /join-channel/{slug}`, which says whether
-one join link is live, `GET /species/{uuid}/photo`, which serves a public Commons image to an
-`<img>` tag that has no way to send a token, and `GET /checkin/{token}` with its `/portrait` and
-`/certification/{uuid}/front`, the check-in page a diver shared as a link, where the token in the
-path is the credential. `tests/test_route_authentication.py` is the guard that keeps the *anonymous*
-half of that list honest — it compares the app's real route table against its own allowlist and
-holds the reason for each — but nothing checks this paragraph, so a new route family belongs here by
-hand.
+registration is open - whether the project itself operates the instance, whether any join link
+exists (`join_links`), and whether a map renderer draws the cards' maps (`map_pictures`) - before
+anyone has signed in, `GET /join-channel/{slug}`, which says whether one join link is live,
+`GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>` tag that has no way
+to send a token, and `GET /checkin/{token}` with its `/portrait` and `/certification/{uuid}/front`,
+the check-in page a diver shared as a link, where the token in the path is the credential.
+`tests/test_route_authentication.py` is the guard that keeps the *anonymous* half of that list
+honest — it compares the app's real route table against its own allowlist and holds the reason for
+each — but nothing checks this paragraph, so a new route family belongs here by hand.
 
 A typical import flow:
 

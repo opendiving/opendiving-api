@@ -210,13 +210,15 @@ async def _claim(key: str, *, seconds: float) -> bool:
 
 
 async def _release(key: str) -> None:
+    """Let a claim go. Shielded, since the usual reason to is a request being cancelled - and
+    a claim left standing holds every other request for that picture until it lapses."""
     if cache.client is None:
         return
-    try:
-        await cache.client.delete(key)
-    except RedisError:
-        # It lapses on its own, holding the picture's next request until it does.
-        logger.warning("A map picture's draw claim could not be released: %s", key)
+    with anyio.CancelScope(shield=True):
+        try:
+            await cache.client.delete(key)
+        except RedisError:
+            logger.warning("A map picture's draw claim could not be released: %s", key)
 
 
 async def _store(*, user_id: int, digest: str, theme: MapTheme, image: bytes, sha256: str) -> None:
@@ -274,18 +276,37 @@ def _retrieve(task: asyncio.Task[Any]) -> None:
         task.exception()
 
 
-async def _draw(
-    *, claim: str, user_id: int, payload: dict[str, Any], theme: MapTheme, signature: str, timeout: float
-) -> ServedMapPicture:
+async def _draw_as_claimant(
+    db: AsyncSession,
+    *,
+    claim: str,
+    user_id: int,
+    digest: str,
+    payload: dict[str, Any],
+    theme: MapTheme,
+    signature: str,
+    timeout: float,
+) -> ServedMapPicture | None:
+    """Draw the picture this request has claimed, or let the claim go and answer `None` when
+    another request stored it between this one's miss and its claim.
+
+    Every way out before the draw's own task holds the claim lets it go here.
+    """
     try:
-        await enforce_rate_limit(
-            f"map-picture:user:{user_id}",
-            settings.MAP_PICTURE_RATE_LIMIT_PER_USER,
-            settings.MAP_PICTURE_RATE_LIMIT_WINDOW_SECONDS,
-        )
+        stored = await _find(db, user_id=user_id, digest=digest, theme=theme)
+        await release_read_transaction(db)
+        if stored is None:
+            await enforce_rate_limit(
+                f"map-picture:user:{user_id}",
+                settings.MAP_PICTURE_RATE_LIMIT_PER_USER,
+                settings.MAP_PICTURE_RATE_LIMIT_WINDOW_SECONDS,
+            )
     except BaseException:
         await _release(claim)
         raise
+    if stored is not None:
+        await _release(claim)
+        return None
     task = asyncio.create_task(
         _draw_and_store(
             claim=claim, user_id=user_id, payload=payload, theme=theme, signature=signature, timeout=timeout
@@ -339,14 +360,18 @@ async def find_or_draw(
         if remaining <= 0:
             raise MapPictureUnavailable("no picture was stored before the deadline")
         if await _claim(claim, seconds=remaining):
-            # Looked for once more: the previous claimant may have stored it and let go
-            # between this request's miss and its claim.
-            if await _find(db, user_id=user_id, digest=current, theme=theme) is None:
-                await release_read_transaction(db)
-                return await _draw(
-                    claim=claim, user_id=user_id, payload=payload, theme=theme, signature=signature, timeout=remaining
-                )
-            await _release(claim)
+            drawn = await _draw_as_claimant(
+                db,
+                claim=claim,
+                user_id=user_id,
+                digest=current,
+                payload=payload,
+                theme=theme,
+                signature=signature,
+                timeout=remaining,
+            )
+            if drawn is not None:
+                return drawn
             continue
         await anyio.sleep(min(_WAIT_POLL_SECONDS, remaining))
 

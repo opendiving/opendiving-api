@@ -955,11 +955,55 @@ class TestTheRoutes:
         assert not [key for key in redis.values if key.startswith("map-picture:draw:")]
 
     @pytest.mark.asyncio
+    async def test_a_claimant_cancelled_before_its_draw_lets_the_claim_go(
+        self,
+        api: tuple[httpx.AsyncClient, User],
+        db: Session,
+        renderer: StubRenderer,
+        redis: FakeRedis,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancelled between taking the claim and starting the draw - here, in the look it takes
+        once more after claiming. A claim left standing would hold every other request for the
+        picture until it lapsed, past their own deadlines."""
+        _client, diver = api
+        reached, held = asyncio.Event(), asyncio.Event()
+        release = map_pictures.release_read_transaction
+
+        async def held_once_claimed(session: Any) -> None:
+            await release(session)
+            if [key for key in redis.values if key.startswith("map-picture:draw:")]:
+                reached.set()
+                await held.wait()
+
+        monkeypatch.setattr(map_pictures, "release_read_transaction", held_once_claimed)
+
+        async with local_session() as session:
+            request = asyncio.create_task(
+                map_pictures.find_or_draw(
+                    session,
+                    user_id=diver.id,
+                    payload=trip_payload({"parts": []}),
+                    theme=MapTheme.LIGHT,
+                    if_none_match=None,
+                )
+            )
+            await asyncio.wait_for(reached.wait(), timeout=5)
+            assert [key for key in redis.values if key.startswith("map-picture:draw:")]
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+
+        assert not [key for key in redis.values if key.startswith("map-picture:draw:")]
+        assert renderer.renders == []
+
+    @pytest.mark.asyncio
     async def test_draws_are_rate_limited_and_stored_pictures_and_waiters_are_not(
         self,
         api: tuple[httpx.AsyncClient, User],
         db: Session,
         renderer: StubRenderer,
+        redis: FakeRedis,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         client, diver = api
@@ -980,6 +1024,7 @@ class TestTheRoutes:
         assert refused.status_code == 429
         assert stored.status_code == 200
         assert len(renderer.renders) == 1
+        assert not [key for key in redis.values if key.startswith("map-picture:draw:")], "a refused claim stood"
 
     @pytest.mark.asyncio
     async def test_a_row_whose_file_is_gone_is_drawn_again(
