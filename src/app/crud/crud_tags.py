@@ -11,6 +11,7 @@ from uuid6 import uuid7
 
 from ..core.utils.search import search_clause
 from ..models.dive import Dive
+from ..models.dive_site_tag import DiveSiteTag
 from ..models.dive_tag import DiveTag
 from ..models.tag import Tag, folded
 from ..schemas.tag import TagCreateInternal, TagRead, TagReadInternal, TagUpdate, TagUpdateInternal
@@ -36,8 +37,20 @@ def _dive_count() -> Any:
     )
 
 
+def _site_count() -> Any:
+    """The sites carrying the tag - exactly what `GET /dive-sites?tag_uuid=` matches."""
+    return select(func.count(DiveSiteTag.id)).where(DiveSiteTag.tag_id == Tag.id).correlate(Tag).scalar_subquery()
+
+
 def _select_tags() -> Any:
-    return select(Tag.uuid, Tag.name, _dive_count().label("dive_count"), Tag.created_at, Tag.updated_at)
+    return select(
+        Tag.uuid,
+        Tag.name,
+        _dive_count().label("dive_count"),
+        _site_count().label("site_count"),
+        Tag.created_at,
+        Tag.updated_at,
+    )
 
 
 async def get_tags_page(
@@ -155,5 +168,33 @@ async def replace_tags_for_dive(db: AsyncSession, dive_id: int, tag_ids: Sequenc
     await db.execute(delete(DiveTag).where(DiveTag.dive_id == dive_id))
     for position, tag_id in enumerate(dict.fromkeys(tag_ids)):
         db.add(DiveTag(dive_id=dive_id, tag_id=tag_id, position=position))
+    if commit:
+        await db.commit()
+
+
+async def get_tags_for_dive_sites(db: AsyncSession, dive_site_ids: Sequence[int]) -> dict[int, list[str]]:
+    """Each site's tags by name in the diver's order, keyed for every site asked about."""
+    by_site: dict[int, list[str]] = {site_id: [] for site_id in dive_site_ids}
+    if not dive_site_ids:
+        return by_site
+    rows = await db.execute(
+        select(DiveSiteTag.dive_site_id, Tag.name)
+        .join(Tag, Tag.id == DiveSiteTag.tag_id)
+        .where(DiveSiteTag.dive_site_id.in_(set(dive_site_ids)))
+        .order_by(DiveSiteTag.dive_site_id, DiveSiteTag.position)
+    )
+    for row in rows:
+        by_site[row.dive_site_id].append(row.name)
+    return by_site
+
+
+async def replace_tags_for_dive_site(
+    db: AsyncSession, dive_site_id: int, tag_ids: Sequence[int], commit: bool = True
+) -> None:
+    """Replace a site's tags with the given ordered list, as `replace_tags_for_dive` replaces
+    a dive's."""
+    await db.execute(delete(DiveSiteTag).where(DiveSiteTag.dive_site_id == dive_site_id))
+    for position, tag_id in enumerate(dict.fromkeys(tag_ids)):
+        db.add(DiveSiteTag(dive_site_id=dive_site_id, tag_id=tag_id, position=position))
     if commit:
         await db.commit()

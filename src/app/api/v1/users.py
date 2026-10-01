@@ -31,6 +31,7 @@ from ...core.utils.request_context import RequestContext
 from ...core.utils.uploads import content_disposition_attachment
 from ...crud.crud_auth_audit_events import record_auth_event
 from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
+from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_user_sessions import revoke_session
 from ...crud.crud_users import crud_users
@@ -892,19 +893,30 @@ async def read_dive_activity(
 # wrong answer rather than a slow one, and every other way of checking it either reads this
 # file's source text or passes whenever it happens to run outside the 60 s TTL.
 SPECIES_LIFE_LIST_CACHE_KEY_PREFIX = (
-    "user_{user_id}_dives:species:page_{page}:items_per_page:{items_per_page}:search:{search}"
+    "user_{user_id}_dives:species:page_{page}:items_per_page:{items_per_page}:search:{search}:site_{dive_site_id}"
 )
 
 
 @cache(key_prefix=SPECIES_LIFE_LIST_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
 async def _cached_species_life_list(
-    request: Request, user_id: int, db: AsyncSession, page: int, items_per_page: int, search: str | None
+    request: Request,
+    user_id: int,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    search: str | None,
+    dive_site_id: int | None,
 ) -> dict:
     """Fetches (and caches) a page of the caller's life list. Authorization happens in the
     route before this is reached.
     """
     data = await species_life_list(
-        db=db, user_id=user_id, offset=compute_offset(page, items_per_page), limit=items_per_page, search=search
+        db=db,
+        user_id=user_id,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+        search=search,
+        dive_site_id=dive_site_id,
     )
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
     return response
@@ -921,6 +933,9 @@ async def read_species_life_list(
         str | None,
         Query(max_length=255, description="Match by any name the species goes by, as the catalog search does"),
     ] = None,
+    dive_site_uuid: Annotated[
+        uuid_pkg.UUID | None, Query(description="Only the species sighted on dives naming this site")
+    ] = None,
 ) -> dict:
     """Every species the caller has ever logged, most recently seen first.
 
@@ -932,8 +947,12 @@ async def read_species_life_list(
     was the only sighting - which is also why `total_count` equals the `species_seen` on
     `GET /user/dive-stats` for the same account.
 
-    Always the caller's own account, like the rest of `/user/...` - no uuid parameter, so there
-    is no ownership check to get backwards. Out-of-range pagination is clamped, not rejected.
+    `dive_site_uuid` keeps the species sighted on dives naming that site at any position, as
+    the site's summary counts them, with each one's figures over those dives alone. A uuid that
+    is not one of the caller's sites returns an empty page rather than an error.
+
+    Always the caller's own account, like the rest of `/user/...`. Out-of-range pagination is
+    clamped, not rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
     # Normalized here rather than in the service, so the shape the cache key is built from is
@@ -941,6 +960,13 @@ async def read_species_life_list(
     # own search parameter. An all-whitespace term becomes `None` rather than a `%%` pattern
     # that matches the unfiltered list under a different key.
     normalized = " ".join(search.split()) if search is not None else None
+    dive_site_id: int | None = None
+    if dive_site_uuid is not None:
+        # The dives list's -1: it matches no site, so a foreign uuid reads as an empty page.
+        site_map = await resolve_dive_site_ids_for_user(
+            db=db, dive_site_uuids=[dive_site_uuid], user_id=current_user["id"]
+        )
+        dive_site_id = (site_map or {}).get(dive_site_uuid, -1)
     return await _cached_species_life_list(
         request,
         user_id=current_user["id"],
@@ -948,6 +974,7 @@ async def read_species_life_list(
         page=page,
         items_per_page=items_per_page,
         search=normalized or None,
+        dive_site_id=dive_site_id,
     )
 
 
@@ -1045,9 +1072,7 @@ async def erase_user(
     purge_after = (deleted_at or now) + timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS)
 
     # Hygiene rather than correctness: every read 401s from this instant regardless, and
-    # user ids are sequential and never reused, so nothing can be served out of these. The
-    # uuid-keyed `dive_site_cache:{uuid}` entries are not swept - they are not user-scoped,
-    # and are unreachable for the same reason.
+    # user ids are sequential and never reused, so nothing can be served out of these.
     await delete_keys_by_pattern(f"user_{current_user['id']}_*")
 
     if newly_deleted:

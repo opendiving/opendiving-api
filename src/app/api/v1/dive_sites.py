@@ -2,7 +2,8 @@ import uuid as uuid_pkg
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastcrud import PaginatedListResponse
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
@@ -16,15 +17,36 @@ from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_dive_dive_sites import replace_dive_site_on_dives
-from ...crud.crud_dive_sites import crud_dive_sites, dive_site_name_exists, resolve_dive_site_ids_for_user
+from ...crud.crud_dive_sites import (
+    DIVE_SITE_SEARCH_COLUMNS,
+    crud_dive_sites,
+    dive_site_name_exists,
+    get_dive_sites_page,
+    get_summaries_for_dive_sites,
+    resolve_dive_site_ids_for_user,
+    sites_by_external_id,
+)
+from ...crud.crud_tags import (
+    get_tags_for_dive_sites,
+    replace_tags_for_dive_site,
+    resolve_tag_id_for_user,
+    resolve_tag_ids,
+)
 from ...schemas.dive_site import (
+    DEPTH_RANGE_MESSAGE,
+    SUGGESTION_REGISTRY,
     DiveSiteCreate,
     DiveSiteCreateInternal,
+    DiveSiteListSort,
     DiveSiteRead,
     DiveSiteReadInternal,
+    DiveSiteReference,
     DiveSiteSuggestion,
     DiveSiteSuggestResponse,
+    DiveSiteSummary,
     DiveSiteUpdateRequest,
+    ExternalIdRead,
+    canonical_other_names,
 )
 from ...schemas.location import (
     DIVE_SITE_LOCATION_PREFIX,
@@ -32,20 +54,11 @@ from ...schemas.location import (
     location_columns,
     location_from_row,
 )
-from ...services.cache_invalidation import invalidate_dive_caches, invalidate_trip_caches
+from ...schemas.tag import TAG_NOT_FOUND
+from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches, invalidate_trip_caches
 from ...services.dive_site_catalog import search_sites
 
 router = APIRouter(tags=["dive-sites"])
-
-# What `GET /dive-sites?search=` matches against. A diver with hundreds of logged sites
-# can't usefully scroll them, so the dive form's picker narrows the list server-side as you
-# type. The locality is searched alongside the name because that's how people remember
-# sites they haven't dived in a while ("that wall in Dahab") - see DECISIONS.md.
-#
-# Named rather than inlined, on `COURSE_SEARCH_COLUMNS`' precedent: `test_picker_search.py`
-# asserts these columns exist on the model, and a second spelling of the tuple is a second
-# thing to keep true.
-DIVE_SITE_SEARCH_COLUMNS = ("name", "location_name")
 
 
 async def _get_owned_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
@@ -66,30 +79,57 @@ async def _get_owned_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_us
 
 
 def _to_public_dive_site(
-    db_dive_site: DiveSiteReadInternal | dict[str, Any], *, user_uuid: uuid_pkg.UUID
+    db_dive_site: DiveSiteReadInternal | dict[str, Any],
+    *,
+    user_uuid: uuid_pkg.UUID,
+    tags: list[str],
+    summary: DiveSiteSummary,
 ) -> DiveSiteRead:
     """Convert an internal dive site representation (integer FKs, flat locality columns)
-    into its public shape (owning user referenced by `uuid`, locality nested)."""
+    into its public shape (owning user referenced by `uuid`, locality nested, tags and the
+    summary of its dives attached)."""
     data = db_dive_site if isinstance(db_dive_site, dict) else db_dive_site.model_dump()
     dropped = {"id", "user_id"} | {f"{DIVE_SITE_LOCATION_PREFIX}{field}" for field in LOCATION_FIELDS}
     return DiveSiteRead(
         **{k: v for k, v in data.items() if k not in dropped},
+        **summary.model_dump(),
         location=location_from_row(data, DIVE_SITE_LOCATION_PREFIX),
+        tags=tags,
         user_uuid=user_uuid,
     )
 
 
+# Kept for its key shapes only, as `trips.py` keeps its own: a site read carries its tags and
+# the summary of its dives, two further queries zipped back into the page, and the list sorts
+# on that summary, which no `sort_columns` string can name. Both reads are hand-written below,
+# and the single one sits under `user_{id}_dive_site` so that `invalidate_dive_site_caches`
+# drops it by pattern with the list - which every dive write moving a summary has to do,
+# naming no site.
 _dive_site_cache: OwnedResourceCache[DiveSiteReadInternal, DiveSiteRead] = OwnedResourceCache(
     resource_name="dive_sites",
     resource_label="Dive site",
-    item_cache_prefix="dive_site_cache",
+    item_cache_prefix="user_{user_id}_dive_site",
     crud=crud_dive_sites,
     schema_to_select=DiveSiteReadInternal,
-    to_public=lambda db_dive_site, user_uuid: _to_public_dive_site(db_dive_site, user_uuid=user_uuid),
-    sort_columns="name",
-    sort_orders="asc",
+    to_public=lambda db_dive_site, user_uuid: _to_public_dive_site(
+        db_dive_site, user_uuid=user_uuid, tags=[], summary=DiveSiteSummary()
+    ),
     search_columns=DIVE_SITE_SEARCH_COLUMNS,
 )
+
+
+async def _resolved_tag_ids(db: AsyncSession, *, user_id: int, names: list[str]) -> list[int]:
+    return await resolve_tag_ids(db, user_id=user_id, names=names) if names else []
+
+
+async def _replace_tags(db: AsyncSession, *, dive_site_id: int, tag_ids: list[int]) -> None:
+    """Write a site's tags, a tag deleted between the resolve and the insert being a 422
+    as it is on a dive."""
+    try:
+        await replace_tags_for_dive_site(db, dive_site_id, tag_ids)
+    except IntegrityError as e:
+        await db.rollback()
+        raise UnprocessableEntityException(TAG_NOT_FOUND) from e
 
 
 @router.post("/dive-site", response_model=DiveSiteRead, status_code=201)
@@ -110,6 +150,14 @@ async def write_dive_site(
     is a name and nothing else. Its position is the
     *place's*, never the site's: filling it from the site's own pin would claim the town
     sits exactly where the marker was dropped.
+
+    `other_names`, `external_ids` and `entry_types` are stored conforming rather than
+    refused: another name the name or an earlier one already says is dropped, compared
+    trimmed and case-folded, and a repeated registry entry or entry type is kept once. An
+    `external_ids` entry under `wikidata` or `openstreetmap` must have that registry's
+    identifier form; any other registry is stored as sent. `depth_from` above `depth_to` is
+    a 422. `tags` are by name, each matched to the diver's tag of that name or created, as a
+    dive's are.
     """
     location = dive_site.location
     if await dive_site_name_exists(
@@ -120,15 +168,18 @@ async def write_dive_site(
     ):
         raise DuplicateValueException("A dive site with this name already exists at this location")
 
+    tag_ids = await _resolved_tag_ids(db, user_id=current_user["id"], names=dive_site.tags)
     dive_site_internal = DiveSiteCreateInternal(
-        **dive_site.model_dump(exclude={"location"}),
+        **dive_site.model_dump(exclude={"location", "tags"}),
         **location_columns(location, DIVE_SITE_LOCATION_PREFIX),
         user_id=current_user["id"],
     )
     created_dive_site = await crud_dive_sites.create(
         db=db, object=dive_site_internal, schema_to_select=DiveSiteReadInternal, return_as_model=True
     )
-    await _dive_site_cache.invalidate_list(current_user["id"])
+    if tag_ids:
+        await _replace_tags(db, dive_site_id=created_dive_site.id, tag_ids=tag_ids)
+    await invalidate_dive_site_caches(current_user["id"])
 
     dive_site_read = await crud_dive_sites.get(
         db=db, id=created_dive_site.id, schema_to_select=DiveSiteReadInternal, return_as_model=True
@@ -136,7 +187,58 @@ async def write_dive_site(
     if dive_site_read is None:
         raise NotFoundException("Created dive site not found")
 
-    return _to_public_dive_site(cast(DiveSiteReadInternal, dive_site_read), user_uuid=current_user["uuid"])
+    tags = (await get_tags_for_dive_sites(db, [created_dive_site.id]))[created_dive_site.id] if tag_ids else []
+    # No dive can name a site that did not exist, so a new one has nothing to summarise.
+    return _to_public_dive_site(
+        cast(DiveSiteReadInternal, dive_site_read),
+        user_uuid=current_user["uuid"],
+        tags=tags,
+        summary=DiveSiteSummary(),
+    )
+
+
+# Every query parameter has to be in this key: `@cache` keys on its placeholders alone, so a
+# filter or an order missing from it serves one page for another for sixty seconds. The shape
+# up to the search is `_dive_site_cache`'s, which keeps it under the pattern
+# `invalidate_dive_site_caches` sweeps.
+_LIST_CACHE_KEY_PREFIX = _dive_site_cache.list_cache_key_prefix + ":tag_{tag_id}:sort_{sort}"
+
+
+@cache(key_prefix=_LIST_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
+async def _cached_read_dive_sites(
+    request: Request,
+    user_id: int,
+    user_uuid: uuid_pkg.UUID,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    search: str | None,
+    tag_id: int | None,
+    sort: DiveSiteListSort,
+) -> dict:
+    """Fetches (and caches) a page of the caller's sites, each with its tags and the summary
+    of its dives. Only ever called once `read_dive_sites` has authorized the caller - a hit
+    skips this body, authorization included."""
+    sites_data = await get_dive_sites_page(
+        db,
+        user_id=user_id,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+        search=search,
+        tag_id=tag_id,
+        sort=sort,
+    )
+    site_ids = [site["id"] for site in sites_data["data"]]
+    tags_by_site = await get_tags_for_dive_sites(db, site_ids)
+    summaries = await get_summaries_for_dive_sites(db, dive_site_ids=site_ids, user_id=user_id)
+    sites_data["data"] = [
+        _to_public_dive_site(
+            site, user_uuid=user_uuid, tags=tags_by_site[site["id"]], summary=summaries[site["id"]]
+        ).model_dump()
+        for site in sites_data["data"]
+    ]
+    response: dict[str, Any] = paginated_response(crud_data=sites_data, page=page, items_per_page=items_per_page)
+    return response
 
 
 @router.get("/dive-sites", response_model=PaginatedListResponse[DiveSiteRead])
@@ -148,19 +250,37 @@ async def read_dive_sites(
     items_per_page: int = 10,
     search: Annotated[
         str | None,
-        Query(max_length=255, description="Case-insensitive substring match on name or locality"),
+        Query(max_length=255, description="Case-insensitive substring match on the name, other names or locality"),
     ] = None,
+    tag_uuid: Annotated[uuid_pkg.UUID | None, Query(description="Only the sites carrying this tag")] = None,
+    sort: Annotated[
+        DiveSiteListSort,
+        Query(
+            description="`name`; `dive_count`, most dived first; or `last_dived_on`, most recently dived first and "
+            "every site no dive names last. Ties go by name"
+        ),
+    ] = DiveSiteListSort.NAME,
 ) -> dict:
-    """List the caller's dive sites.
+    """List the caller's dive sites, each with its tags and the summary of the caller's dives
+    there.
 
-    `search` matches a case-insensitive substring against the site's name and both of its
-    locality's names, which is what backs the dive form's picker: it narrows server-side as
-    you type rather than shipping the whole list to the browser. Out-of-range pagination is
-    clamped, not rejected.
+    `search` matches a case-insensitive substring against the site's name, its other names
+    and its locality's name, which is what backs the dive form's picker: it narrows
+    server-side as you type rather than shipping the whole list to the browser. `tag_uuid`
+    keeps the sites carrying that tag, and one that is not the caller's returns an empty
+    page rather than an error. Out-of-range pagination is clamped, not rejected.
+
+    The summary counts the live dives naming the site at any position, so the second site of
+    a drift dive counts that dive too.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
-    return await _dive_site_cache.read_list(
+    tag_id: int | None = None
+    if tag_uuid is not None:
+        # -1 can never match a tag, so a foreign or unknown uuid answers an empty page.
+        tag_id = await resolve_tag_id_for_user(db, tag_uuid=tag_uuid, user_id=current_user["id"]) or -1
+
+    return await _cached_read_dive_sites(
         request,
         user_id=current_user["id"],
         user_uuid=current_user["uuid"],
@@ -170,7 +290,29 @@ async def read_dive_sites(
         # Normalized here rather than in the cache layer so that " Blue " and "blue" share
         # one cache entry instead of two identical ones under different keys.
         search=(search or "").strip().lower() or None,
+        tag_id=tag_id,
+        sort=sort,
     )
+
+
+@cache(key_prefix="user_{user_id}_dive_site", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
+async def _cached_read_dive_site(
+    request: Request, user_id: int, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
+) -> DiveSiteRead:
+    """Fetches (and caches) one site with its tags and summary. Like the list, reached only
+    once the route has established that the caller owns it."""
+    db_dive_site = await crud_dive_sites.get(
+        db=db, uuid=uuid, schema_to_select=DiveSiteReadInternal, return_as_model=True
+    )
+    if db_dive_site is None:
+        raise NotFoundException("Dive site not found")
+    db_dive_site = cast(DiveSiteReadInternal, db_dive_site)
+
+    tags = (await get_tags_for_dive_sites(db, [db_dive_site.id]))[db_dive_site.id]
+    summary = (await get_summaries_for_dive_sites(db, dive_site_ids=[db_dive_site.id], user_id=user_id))[
+        db_dive_site.id
+    ]
+    return _to_public_dive_site(db_dive_site, user_uuid=owner_uuid, tags=tags, summary=summary)
 
 
 @router.get("/dive-site/{uuid}", response_model=DiveSiteRead)
@@ -180,7 +322,8 @@ async def read_dive_site(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveSiteRead:
-    """Return a single dive site by its public uuid.
+    """Return a single dive site by its public uuid, with its tags and the summary of the
+    caller's dives there that `GET /dive-sites` carries.
 
     404 when no such site exists - and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable.
@@ -188,11 +331,12 @@ async def read_dive_site(
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_dive_site(db, uuid, current_user)
 
-    return await _dive_site_cache.read_item(request, uuid=uuid, owner_uuid=current_user["uuid"], db=db)
+    return await _cached_read_dive_site(
+        request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
+    )
 
 
 @router.patch("/dive-site/{uuid}")
-@cache("dive_site_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def patch_dive_site(
     request: Request,
     uuid: uuid_pkg.UUID,
@@ -215,17 +359,24 @@ async def patch_dive_site(
     name would otherwise leave the previous locality's centre and box behind. An explicit
     `null` clears it, which is how a site entered with the wrong place is corrected back to
     "not recorded".
+
+    A list - `other_names`, `external_ids`, `entry_types`, `tags` - replaces the stored one
+    whole, and an explicit `null` clears a scalar. The depth range is checked against the
+    stored end a body leaves out, so a `depth_from` below the stored `depth_to` is a 422. A
+    rename onto one of the site's other names is a rename: that other name is dropped.
     """
     db_dive_site = await _get_owned_dive_site(db, uuid, current_user)
+    owner_id = db_dive_site.user_id
+    sent = values.model_fields_set
 
     # Two gates, not one, because the two questions have different answers. Uniqueness is
     # a rule about name-at-locality and nothing else; staleness is about every field
     # `DiveSiteInfo` embeds, which is the whole place object and the position. Only
     # `latitude` is tested here: `WholeCoordinatePair` has already refused any body that
     # names one coordinate without the other, so longitude never travels alone.
-    replaces_location = "location" in values.model_fields_set
+    replaces_location = "location" in sent
     touches_name_or_location = values.name is not None or replaces_location
-    touches_dive_summary = touches_name_or_location or "latitude" in values.model_fields_set
+    touches_dive_summary = touches_name_or_location or "latitude" in sent
     effective_name = values.name if values.name is not None else db_dive_site.name
     effective_location_name = (
         (None if values.location is None else values.location.name) if replaces_location else db_dive_site.location_name
@@ -233,35 +384,54 @@ async def patch_dive_site(
 
     if touches_name_or_location and await dive_site_name_exists(
         db=db,
-        user_id=db_dive_site.user_id,
+        user_id=owner_id,
         name=effective_name,
         location_name=effective_location_name,
         exclude_id=db_dive_site.id,
     ):
         raise DuplicateValueException("A dive site with this name already exists at this location")
 
-    update_data = values.model_dump(exclude_unset=True, exclude={"location"})
+    # The schema checks a pair it was sent; the stored end of one it was not is read here.
+    depth_from = values.depth_from if "depth_from" in sent else db_dive_site.depth_from
+    depth_to = values.depth_to if "depth_to" in sent else db_dive_site.depth_to
+    if depth_from is not None and depth_to is not None and depth_from > depth_to:
+        raise UnprocessableEntityException(DEPTH_RANGE_MESSAGE)
+
+    update_data = values.model_dump(exclude_unset=True, exclude={"location", "tags"})
     if replaces_location:
         update_data |= location_columns(values.location, DIVE_SITE_LOCATION_PREFIX)
+    # Against the name the site ends up with, so a rename onto another name drops that one
+    # from the stored list, and another name the stored name already says is dropped.
+    if values.name is not None or values.other_names is not None:
+        current = values.other_names if values.other_names is not None else db_dive_site.other_names
+        conformed = canonical_other_names(effective_name, current)
+        if values.other_names is not None or conformed != db_dive_site.other_names:
+            update_data["other_names"] = conformed
+
+    tag_ids = None if values.tags is None else await _resolved_tag_ids(db, user_id=owner_id, names=values.tags)
+
     if update_data:
         await crud_dive_sites.update(db=db, object=update_data, uuid=uuid)
-        await _dive_site_cache.invalidate_list(db_dive_site.user_id)
+    if tag_ids is not None:
+        await _replace_tags(db, dive_site_id=db_dive_site.id, tag_ids=tag_ids)
+
+    if update_data or tag_ids is not None:
+        await invalidate_dive_site_caches(owner_id)
         # Dive reads embed this site's name, locality and position, so a rename, a new
         # place or a dragged marker makes every cached dive logged here stale - the bug
         # that used to be documented as a known limitation, fixable now that the
         # single-dive cache key is user-scoped. The locality counts whole: a body that
         # only moves the place's centre still reshapes `DiveSiteInfo`. Those three and
-        # nothing else - `DiveSiteInfo` carries no notes, and dropping every cached dive a
-        # diver has because they retyped a description would be a real cost for no
-        # staleness avoided.
+        # nothing else - `DiveSiteInfo` carries no notes and none of the site's other
+        # members, and dropping every cached dive a diver has because they retyped a
+        # description would be a real cost for no staleness avoided.
         if touches_dive_summary:
-            await invalidate_dive_caches(db_dive_site.user_id)
+            await invalidate_dive_caches(owner_id)
 
     return {"message": "Dive site updated"}
 
 
 @router.delete("/dive-site/{uuid}")
-@cache("dive_site_cache", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def erase_dive_site(
     request: Request,
     uuid: uuid_pkg.UUID,
@@ -315,7 +485,9 @@ async def erase_dive_site(
     # Commits the reassignment above along with the delete - `crud_dive_sites.delete` is the
     # only writer here that commits, and both wrote through this one session.
     await crud_dive_sites.delete(db=db, uuid=uuid)
-    await _dive_site_cache.invalidate_list(owner_id)
+    # This site's own read and the list pages, and - whichever branch ran - the replacement's
+    # read, whose summary just gained this site's dives.
+    await invalidate_dive_site_caches(owner_id)
     # The cascade shortens the site list of every dive logged here, so drop those reads too.
     await invalidate_dive_caches(owner_id)
     # And the site counts of every trip those dives are on, whichever branch ran: a move can
@@ -326,25 +498,23 @@ async def erase_dive_site(
 
 
 # -------------- catalog suggestions --------------
-# The one route in this module that is about nobody's dive sites. Everything above is scoped
-# to the caller; this answers from a read-only catalog vendored in the image
-# (`services/dive_site_catalog.py`), so two accounts asking the same thing get byte-identical
-# answers. Picking a suggestion does not link to it - the client copies the values into an
-# ordinary `POST /dive-site`, and nothing downstream knows the catalog exists.
+# The one route in this module whose results are nobody's dive sites. It answers from a
+# read-only catalog vendored in the image (`services/dive_site_catalog.py`), and marks each
+# result with the caller's own site that already carries its registry entry - the entry a
+# pick stores in the new site's `external_ids`, through an ordinary `POST /dive-site`.
 #
-# **No `@cache` decorator**, for the reason `api/v1/species.py` gives for its own search: the
-# answer is local, non-user-scoped and immutable until the image is rebuilt, so a cache would
-# mean building an invalidation surface for a problem that does not exist. Scanning a few
-# thousand value objects already in memory is cheaper than the Redis round trip would be.
+# **No `@cache` decorator.** The catalog half is local and immutable until the image is
+# rebuilt, and the held-site half changes with every site write, so a cache would mean an
+# invalidation surface on every one of them for one query over the caller's own sites.
 #
 # **No per-user rate budget either**, unlike both comparable endpoints (`/species/search` and
 # `/geocode/search`, 600/hour each), and the absence is argued rather than overlooked. Those
 # budgets exist because each request spends a scarce *shared* resource - a third party's
 # goodwill, a remote catalogue's capacity - and bound what one account can make this instance
 # do to somebody else. This request spends a bounded scan over a file already resident in
-# memory: no third party, no network, no database. That is the profile of `GET /dives`, which
-# carries no budget either. If it ever stops being true, `enforce_rate_limit` is one awaited
-# call away and fails open when Redis is absent.
+# memory and one query over the caller's own sites: no third party, no network. That is the
+# profile of `GET /dives`, which carries no budget either. If it ever stops being true,
+# `enforce_rate_limit` is one awaited call away and fails open when Redis is absent.
 #
 # No route-ordering hazard, unlike species: every parameterised dive-site route lives under
 # the singular `/dive-site/{uuid}`, so a literal subpath of the plural segment can be declared
@@ -353,6 +523,7 @@ async def erase_dive_site(
 @router.get("/dive-sites/suggest", response_model=DiveSiteSuggestResponse)
 async def read_dive_site_suggestions(
     current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
     q: Annotated[str, Query(min_length=2, max_length=200, description="Part of a dive site's name.")],
     latitude: Annotated[
         float | None,
@@ -364,9 +535,13 @@ async def read_dive_site_suggestions(
 
     Answers from a catalog of real dive sites extracted from OpenStreetMap and Wikidata and
     shipped inside this image, which is the gap the place search cannot fill: a geocoder
-    knows where Dahab is, not where the Blue Hole's north entry is. Nothing is stored and
-    nothing is owned - picking a suggestion means creating an ordinary dive site of your own
-    from its values, which you can then rename, move and annotate like any other.
+    knows where Dahab is, not where the Blue Hole's north entry is. Picking a suggestion
+    means creating an ordinary dive site of your own from its values, which you can then
+    rename, move and annotate like any other: send its `external_id` in the new site's
+    `external_ids` and the site keeps the record's registry entry.
+
+    `held_site` names your site that already carries that entry - the first by name where
+    several do - so a form can offer it instead of making a second.
 
     Send `latitude` and `longitude` together when the form already has a position and results
     come back nearest first, which is the only thing that separates a same-name cluster:
@@ -394,8 +569,12 @@ async def read_dive_site_suggestions(
         raise UnprocessableEntityException("latitude and longitude must be sent together")
 
     sites, has_more = search_sites(q.strip(), latitude, longitude)
-    return DiveSiteSuggestResponse(
-        results=[
+    held = await sites_by_external_id(db, user_id=current_user["id"]) if sites else {}
+    results = []
+    for site in sites:
+        external_id = ExternalIdRead(registry=SUGGESTION_REGISTRY[site.source], identifier=site.source_id)
+        holders = held.get((external_id.registry, external_id.identifier))
+        results.append(
             DiveSiteSuggestion(
                 name=site.name,
                 name_en=site.name_en,
@@ -407,8 +586,8 @@ async def read_dive_site_suggestions(
                 source=cast(Any, site.source),
                 source_id=site.source_id,
                 attribution=site.attribution,
+                external_id=external_id,
+                held_site=None if not holders else DiveSiteReference(uuid=holders[0].uuid, name=holders[0].name),
             )
-            for site in sites
-        ],
-        has_more=has_more,
-    )
+        )
+    return DiveSiteSuggestResponse(results=results, has_more=has_more)

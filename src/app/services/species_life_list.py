@@ -22,12 +22,12 @@ family's path shape.
 
 from typing import Any
 
-from sqlalchemy import ARRAY, Boolean, Integer, func, or_, select
-from sqlalchemy.dialects.postgresql import aggregate_order_by
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.utils.datetime_offset import combine_dive_start_time
 from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like
+from ..crud.crud_dives import at_dive_site, date_only_of_the, offset_of_the
 from ..models.dive import Dive
 from ..models.dive_species import DiveSpecies
 from ..models.species import Species
@@ -50,43 +50,6 @@ def _sighting_join(statement: Any, *, user_id: int) -> Any:
     )
 
 
-def _offset_of_the(order: Any) -> Any:
-    """The `utc_offset_minutes` of the first dive in the group under `order`.
-
-    **A dive displays in the timezone it was logged in**, which this endpoint has to honour like
-    every other dive-derived surface - `_to_public_start_time`, `dive_neighbors`,
-    `dive_activity` and `gas_use_history` all reconstruct it, and `DECISIONS.md` states it as the
-    API contract. A `timestamptz` stores only an absolute instant, so a dive logged at 09:00 in
-    Bangkok comes back as 02:00 UTC and would read as the wrong local time - and, for an evening
-    dive, the wrong day.
-
-    That is harder here than anywhere else in the app, because `first_seen` and `last_seen` are
-    *aggregates*: the offset wanted is the one belonging to the single dive that produced the
-    `min()` or the `max()`, and no aggregate over the offset column can say which that was.
-    Ordering `array_agg` and taking its first element is what pairs the two, in one pass over the
-    group that Postgres is already making. `Dive.id` breaks a tie between two dives at the same
-    instant, so a diver with two logs at one timestamp does not get a different offset run to
-    run.
-
-    The conversion itself still happens in Python, through `combine_dive_start_time`. Deliberately,
-    and the same call `dive_activity` explains: `core/utils/datetime_offset.py` is documented as
-    the single place that conversion happens, and the failure mode of a second copy of it in SQL
-    is a list that quietly disagrees with the dive pages it was built from.
-
-    A NULL offset - the logbook importer's offset-unknown state - travels this path intact and
-    needs no special case at either end: a Postgres array may hold NULL elements, so the
-    subscript yields `None`, and the combiner reads that as "the column holds the wall clock" and
-    hands it back naive. `SpeciesLifeListEntry`'s two timestamps admit that naive value, and a
-    bare date too - `_date_only_of_the` pairs the flag the same way.
-    """
-    return func.array_agg(aggregate_order_by(Dive.utc_offset_minutes, order, Dive.id.asc()), type_=ARRAY(Integer))[1]
-
-
-def _date_only_of_the(order: Any) -> Any:
-    """`start_date_only` of the same dive `_offset_of_the` picks, by the same ordering."""
-    return func.array_agg(aggregate_order_by(Dive.start_date_only, order, Dive.id.asc()), type_=ARRAY(Boolean))[1]
-
-
 def _search_clause(search: str) -> Any:
     """Match a species by the same names the catalog search already matches on.
 
@@ -106,7 +69,13 @@ def _search_clause(search: str) -> Any:
 
 
 async def species_life_list(
-    db: AsyncSession, *, user_id: int, offset: int, limit: int, search: str | None = None
+    db: AsyncSession,
+    *,
+    user_id: int,
+    offset: int,
+    limit: int,
+    search: str | None = None,
+    dive_site_id: int | None = None,
 ) -> dict[str, Any]:
     """One page of the diver's life list, plus the total, in `get_multi`'s shape.
 
@@ -121,10 +90,14 @@ async def species_life_list(
     `Dive.is_deleted`.
 
     **The two dates come back in the offset the diver logged those dives in**, which takes more
-    than a `min()`/`max()` - see `_offset_of_the`. Ordering is by the UTC instant either way:
+    than a `min()`/`max()` - see `offset_of_the`. Ordering is by the UTC instant either way:
     "first seen" means the earliest dive chronologically, whatever local time it read as.
     """
     conditions = [] if search is None else [_search_clause(search)]
+    if dive_site_id is not None:
+        # A dive naming the site at any position, as the site's summary counts it - so a
+        # site page's species list is as long as its species count.
+        conditions.append(at_dive_site(dive_site_id))
 
     total_count = await db.scalar(
         _sighting_join(select(func.count(func.distinct(Species.id))), user_id=user_id).where(*conditions)
@@ -146,10 +119,10 @@ async def species_life_list(
                     func.count(func.distinct(Dive.id)).label("dive_count"),
                     func.min(Dive.start_time).label("first_seen"),
                     last_seen,
-                    _offset_of_the(Dive.start_time.asc()).label("first_offset"),
-                    _offset_of_the(Dive.start_time.desc()).label("last_offset"),
-                    _date_only_of_the(Dive.start_time.asc()).label("first_date_only"),
-                    _date_only_of_the(Dive.start_time.desc()).label("last_date_only"),
+                    offset_of_the(Dive.start_time.asc()).label("first_offset"),
+                    offset_of_the(Dive.start_time.desc()).label("last_offset"),
+                    date_only_of_the(Dive.start_time.asc()).label("first_date_only"),
+                    date_only_of_the(Dive.start_time.desc()).label("last_date_only"),
                 ),
                 user_id=user_id,
             )

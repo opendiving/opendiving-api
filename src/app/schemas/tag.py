@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Annotated, Any, ClassVar
 
-from divejson.validate import WHITE_SPACE
+from divejson.validate import WHITE_SPACE, folded
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
 
 from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
@@ -19,12 +19,13 @@ def trim_tag(value: Any) -> Any:
 
 
 def tag_key(name: str) -> str:
-    """The comparison rule 8 makes, in Python: trimmed and Unicode full case-folded.
+    """The comparison rule 8 makes, in Python: the format's own `folded`, trimmed and
+    Unicode full case-folded - the one a site's other names are compared by too.
 
     `ux_tag_user_id_name_folded` is the authority - Postgres's `casefold()` under
     `pg_unicode_fast` - and this agrees with it on everything either is likely to meet.
     """
-    return name.strip(WHITE_SPACE).casefold()
+    return folded(name)
 
 
 # Stored trimmed, so the folded unique index is the trimmed key.
@@ -51,8 +52,8 @@ TagsWrite = Annotated[
     AfterValidator(_first_of_each_fold),
     Field(
         default_factory=list,
-        description="The dive's tags by name, in the diver's order. Each is trimmed and matched to the diver's tag "
-        "of that name compared case-folded, or creates one; two that fold to one keep the first spelling.",
+        description="The tags by name, in the diver's order. Each is trimmed and matched to the diver's tag of that "
+        "name compared case-folded, or creates one; two that fold to one keep the first spelling.",
     ),
 ]
 TagsUpdate = Annotated[
@@ -63,11 +64,12 @@ TagsUpdate = Annotated[
 
 
 class TagRead(PublicUUIDSchema):
-    """A tag as `GET /tags` serves it. `dive_count` is the live dives carrying it, and may be
-    zero: a tag stays until the diver deletes it."""
+    """A tag as `GET /tags` serves it. `dive_count` is the live dives carrying it and
+    `site_count` the sites, and both may be zero: a tag stays until the diver deletes it."""
 
     name: str
     dive_count: Annotated[int, Field(description="Live dives carrying this tag")]
+    site_count: Annotated[int, Field(description="Dive sites carrying this tag")]
     created_at: datetime
     updated_at: datetime | None = None
 
