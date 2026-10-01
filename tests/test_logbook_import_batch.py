@@ -17,6 +17,7 @@ import io
 import json
 import uuid as uuid_pkg
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -43,6 +44,7 @@ from src.app.schemas.dive_mixture import DiveMixtureCreate
 from src.app.schemas.logbook_import import ImportDiveOutcome, ImportMemberNotKept, ImportNoteCode
 from src.app.services import blob_store
 from src.app.services.dive_files import FILLABLE_MIXTURE_FIELDS, delete_dive_file, store_recording_file
+from src.app.services.dive_numbering import suggest_dive_number
 from src.app.services.dive_profiles import backfill_profiles
 from src.app.services.dive_reader import read_prefill
 from src.app.services.dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS
@@ -323,7 +325,7 @@ class TestThePair:
         assert recording["profile"]["data"]["pressure"], "the JSON's pressure channel joins the FIT's"
         assert [row["gas_number"] for row in dive["cylinders"]] == [0]
         assert [series["gas_number"] for series in recording["profile"]["data"]["pressure"]] == [0]
-        assert dive["dive"][0] == 0, "no dive number is invented"
+        assert dive["dive"][0] == 1, "numbered as the form numbers a first dive, not by the computer's counter of 3"
 
         assert [row.kept for row in report.members] == [True, True]
         [row] = report.dives
@@ -1363,28 +1365,172 @@ class TestAClearedValueStaysCleared:
         assert (cylinder.oxygen, cylinder.start_pressure, cylinder.end_pressure) == (33.0, None, None)
 
 
-def _divejson(**dive: Any) -> bytes:
-    """A DiveJSON document of one dive whose profile reads 26.2, 21.4 and 23.0 degrees."""
+def _logged(db: Session, user: User, number: int, start: datetime) -> Dive:
+    """A dive the diver already has, numbered and dated."""
+    dive = create_dive(db, user)
+    dive.dive_number, dive.start_time = number, start
+    db.commit()
+    return dive
+
+
+async def _numbers(db: AsyncSession, user: User) -> list[int]:
+    """The account's dive numbers in date order, as the dive list reads them."""
+    rows = await db.execute(
+        select(Dive.dive_number)
+        .where(Dive.user_id == user.id, Dive.is_deleted.is_(False))
+        .order_by(Dive.start_time, Dive.id)
+    )
+    return list(rows.scalars())
+
+
+def _logbook_of(*dives: dict[str, Any]) -> bytes:
+    """A hand-written DiveJSON logbook, for the starts no dive computer's file writes."""
+    return json.dumps(
+        {
+            "format": "divejson",
+            "version": "1.0",
+            "dives": [{"uuid": str(uuid_pkg.uuid4()), "duration": 1800, **dive} for dive in dives],
+        }
+    ).encode()
+
+
+class TestADiveWithNoNumberIsNumberedAsTheFormWould:
+    """No dive computer's file states a dive number, so an import numbers a dive whose file
+    states none as the dive form prefills it - `GET /dives/next-number` for its start - taking
+    the whole import in date order, so each dive sees the ones before it. A stated number is
+    kept, a dive the import reaches without writing keeps its own, and nothing the diver
+    already has is renumbered."""
+
+    EXISTING = ((10, datetime(2026, 1, 10, 9, tzinfo=UTC)), (11, datetime(2026, 3, 10, 9, tzinfo=UTC)))
+
+    # Named so that the batch's order, which is by name, is not their date order.
+    STARTS = {
+        "a.json": "2026-05-02T10:00:00.000+03:00",
+        "b.json": "2026-02-01T10:00:00.000+03:00",
+        "c.json": "2026-04-01T10:00:00.000+03:00",
+    }
+
+    @pytest.mark.asyncio
+    async def test_several_files_take_the_numbers_the_form_suggests_in_date_order(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        imported, by_hand = create_user(db), create_user(db)
+        for user in (imported, by_hand):
+            for number, start in self.EXISTING:
+                _logged(db, user, number, start)
+
+        await _import(async_db, imported, [(name, _unique_export(start)) for name, start in self.STARTS.items()])
+        for start in sorted(datetime.fromisoformat(one) for one in self.STARTS.values()):
+            suggestion = await suggest_dive_number(async_db, by_hand.id, start)
+            _logged(db, by_hand, suggestion.dive_number, start)
+
+        assert await _numbers(async_db, imported) == await _numbers(async_db, by_hand)
+        # February's #11 is the March dive's too: the form suggests a taken number, and says
+        # so rather than refusing it, and the March dive keeps its own.
+        assert await _numbers(async_db, imported) == [10, 11, 11, 12, 13]
+
+    @pytest.mark.asyncio
+    async def test_a_stated_number_is_kept_and_every_start_is_placed_as_the_dive_list_places_it(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """Newest first, as many logbooks list their dives. A start with no UTC offset sits at
+        its wall clock read as UTC and a bare date at the start of its day - where the dive
+        list and the renumber tool place them - so the 08:00 with no offset comes after the
+        09:00 at +02:00."""
+        diver = create_user(db)
+        _logged(db, diver, 10, datetime(2026, 1, 10, 9, tzinfo=UTC))
+
+        await _import(
+            async_db,
+            diver,
+            [
+                (
+                    "logbook.divejson",
+                    _logbook_of(
+                        {"started_at": "2026-03-05T08:00:00", "notes": "no offset"},
+                        {"started_at": "2026-03-05T09:00:00+02:00", "notes": "at +02:00"},
+                        {"started_at": "2026-03-05", "notes": "a date"},
+                        {"started_at": "2026-02-15T10:00:00+01:00", "notes": "after the stated one"},
+                        {"started_at": "2026-02-01T09:00:00+01:00", "number": 30, "notes": "stated"},
+                    ),
+                )
+            ],
+        )
+
+        rows = await async_db.execute(
+            select(Dive.notes, Dive.dive_number).where(Dive.user_id == diver.id).order_by(Dive.start_time, Dive.id)
+        )
+        assert [tuple(row) for row in rows] == [
+            ("", 10),
+            ("stated", 30),
+            ("after the stated one", 31),
+            ("a date", 32),
+            ("at +02:00", 33),
+            ("no offset", 34),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("first", "second", "outcome"),
+        [
+            pytest.param(None, None, ImportDiveOutcome.LINKED, id="linked"),
+            pytest.param(("dive.fit", OCEAN_FIT), ("dive.json", OCEAN_JSON), ImportDiveOutcome.UPDATED, id="filled"),
+            pytest.param(
+                ("dive.fit", OCEAN_FIT), ("perdix.uddf", _perdix_uddf()), ImportDiveOutcome.UPDATED, id="attached"
+            ),
+        ],
+    )
+    async def test_a_dive_the_import_reaches_without_writing_it_keeps_its_number(
+        self,
+        volume: Any,
+        async_db: AsyncSession,
+        db: Session,
+        first: tuple[str, bytes] | None,
+        second: tuple[str, bytes] | None,
+        outcome: ImportDiveOutcome,
+    ) -> None:
+        """The Perdix's file states #8 and moves nothing either: an attach writes no dive."""
+        if first is None or second is None:
+            first = second = ("dive.json", _unique_export())
+        diver = create_user(db)
+        await _import(async_db, diver, [first])
+        await async_db.execute(update(Dive).where(Dive.user_id == diver.id).values(dive_number=42))
+        await async_db.commit()
+
+        report = await _import(async_db, diver, [second])
+
+        assert [row.outcome for row in report.dives] == [outcome]
+        assert await _numbers(async_db, diver) == [42]
+
+    @pytest.mark.asyncio
+    async def test_a_restored_dive_is_numbered_as_the_dive_it_comes_back_as(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """A restore keeps nothing of the deleted row but its identity, its number included."""
+        diver = create_user(db)
+        _logged(db, diver, 10, datetime(2026, 1, 10, 9, tzinfo=UTC))
+        export = ("dive.json", _unique_export())
+        await _import(async_db, diver, [export])
+        await async_db.execute(
+            update(Dive)
+            .where(Dive.user_id == diver.id, Dive.dive_number == 11)
+            .values(dive_number=99, is_deleted=True, deleted_at=datetime.now(UTC))
+        )
+        await async_db.commit()
+
+        report = await _import(async_db, diver, [export])
+
+        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.RESTORED]
+        assert await _numbers(async_db, diver) == [10, 11]
+
+
+def _profiled(**dive: Any) -> dict[str, Any]:
+    """One dive for `_logbook_of`, whose profile reads 26.2, 21.4 and 23.0 degrees."""
     profile = {
         "depth": {"times": [0, 60_000, 1_740_000], "values": [0, 1800, 0]},
         "temperature": {"times": [0, 60_000, 1_740_000], "values": [262, 214, 230]},
     }
-    body = {
-        "format": "divejson",
-        "version": "1.0",
-        "exported_at": "2026-09-09T10:00:00+00:00",
-        "dives": [
-            {
-                "uuid": str(uuid_pkg.uuid4()),
-                "number": 1,
-                "started_at": "2026-08-01T10:00:00+02:00",
-                "duration": 1800,
-                "recordings": [{"profile": profile}],
-                **dive,
-            }
-        ],
-    }
-    return json.dumps(body).encode()
+    return {"started_at": "2026-08-01T10:00:00+02:00", "recordings": [{"profile": profile}], **dive}
 
 
 async def _bottom_temperature(db: AsyncSession, user: User) -> float | None:
@@ -1454,7 +1600,7 @@ class TestAFileLandsAsTheFormShowsIt:
         self, volume: Any, async_db: AsyncSession, db: Session, stated: float | None, stored: float
     ) -> None:
         diver = create_user(db)
-        document = _divejson() if stated is None else _divejson(bottom_temperature=stated)
+        document = _logbook_of(_profiled() if stated is None else _profiled(bottom_temperature=stated))
 
         await _import(async_db, diver, [("logbook.divejson", document)])
 
@@ -1480,7 +1626,7 @@ class TestAFileLandsAsTheFormShowsIt:
         """Rounded before the bounds, so the 0 never reaches the volume's `CHECK`; and one past
         the default decimal context's 28 digits rounds rather than raising."""
         diver = create_user(db)
-        document = _divejson(cylinders=[{"volume": 0.004}, {"volume": 1e30}, {"volume": 11.104999}])
+        document = _logbook_of(_profiled(cylinders=[{"volume": 0.004}, {"volume": 1e30}, {"volume": 11.104999}]))
 
         report = await _import(async_db, diver, [("logbook.divejson", document)])
 

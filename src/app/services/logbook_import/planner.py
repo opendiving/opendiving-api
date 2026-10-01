@@ -432,6 +432,9 @@ class ImportPlan:
     # it is one recording's file and is not. See `LoadedImport.kept`.
     kept: bool = False
     not_kept: ImportMemberNotKept | None = None
+    # The dives this file writes - creates or restores - whose document states no number, by
+    # source uuid. Written holding `0`, and numbered by `import_batch` after its last file.
+    unnumbered_dives: list[uuid_pkg.UUID] = field(default_factory=list)
 
     async def portrait_offer(self) -> ImportPortraitOffer | None:
         """The preview's portrait fields, the archive's drawn small enough to travel inline."""
@@ -650,6 +653,8 @@ class _Planner:
         # Incoming recordings that belong to dives this account already has - see
         # `PlannedRecordingMatch`. Filled by `_plan_dives`, walked by the writer.
         self._recording_matches: list[PlannedRecordingMatch] = []
+        # The dives this file writes with no number of their own - see `ImportPlan`.
+        self._unnumbered_dives: list[uuid_pkg.UUID] = []
         # `None` until asked. See `_has_recordings`.
         self._account_has_recordings: bool | None = None
         # The caller's contacts by name, and the names this document's contacts - and the
@@ -1123,6 +1128,7 @@ class _Planner:
             is_archive=self._loaded.is_archive,
             records=self._records,
             recording_matches=self._recording_matches,
+            unnumbered_dives=self._unnumbered_dives,
             notes=self._notes,
             notes_dropped=self._notes_dropped,
             files_referenced=self._files_referenced,
@@ -2387,16 +2393,19 @@ class _Planner:
         # A bare date is the date-only state (spec §5.2): stored as its day with no clock,
         # never as a midnight somebody would read as the time the dive began.
         start_time, offset_minutes, date_only = split_dive_start_time(dive.started_at)
+        number = bounded.get("number")
         record.values = {
             "user_id": self._user_id,
             # A dive number is the diver's own numbering and `NOT NULL` here. Absent - or
-            # dropped by the bound above - it falls back to the placeholder `0` rather than
-            # the record being dropped: duplicate dive numbers are legal by design (see
-            # `DiveNumberingSummary`, which counts them rather than refusing them), so a
-            # placeholder costs nothing a diver cannot fix, while dropping the dive would
-            # lose everything else it carries. Every unnumbered dive in one document
-            # therefore lands on 0, not on 1, 2, 3.
-            "dive_number": bounded.get("number", 0),
+            # dropped by the bound above - the dive takes the number the dive form would
+            # suggest, given once the whole import is written (`import_batch`), because the
+            # import's unnumbered dives are numbered in date order across all its files and
+            # no one file's plan sees the others. `0` holds the column until then. The
+            # suggestion is given even where another dive holds it: duplicate dive numbers
+            # are legal by design (see `DiveNumberingSummary`, which counts them rather than
+            # refusing them), so a clash costs nothing a diver cannot fix, while dropping the
+            # dive would lose everything else it carries.
+            "dive_number": 0 if number is None else number,
             "start_time": start_time,
             "utc_offset_minutes": offset_minutes,
             "start_date_only": date_only,
@@ -2472,6 +2481,8 @@ class _Planner:
             "mixtures": mixtures,
             "recordings": recordings,
         }
+        if number is None:
+            self._unnumbered_dives.append(dive.uuid)
         return record
 
     def _tag_names(

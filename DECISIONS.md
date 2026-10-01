@@ -1367,6 +1367,7 @@ counter: it starts at 1 on a new or factory-reset computer and restarts on the n
 importing it as `dive_number` stamps a #5 onto someone's 300th dive. The reader writes it to the
 recording's device, never to the dive's `number`, so the prefill's `dive_number` is null for every
 dive-computer file and the number comes from `GET /dives/next-number`, derived from the dive's date.
+A logbook import numbers such a dive the same way (`assign_suggested_numbers`).
 
 The counter is kept under its own name: `ParsedDiveSchema.device.dive_number`, stored as
 `dive_recording.device_dive_number`. The two are different quantities.
@@ -5750,8 +5751,8 @@ service `type`) carries an unknown value, which §5.6 reads as absent. A course'
 OPTIONAL and so costs the field rather than the record — see *A course may have no agency, and a
 certification may not*.
 
-Two derivations are allowed and reported: a dive with no `duration` takes its profile's span; one
-with no `number` gets a placeholder, duplicates being legal (`DiveNumberingSummary`).
+Two derivations are allowed: a dive with no `duration` takes its profile's span, reported; one with
+no `number` takes the dive form's suggestion, duplicates being legal (`DiveNumberingSummary`).
 
 `visibility` is finer in the format (a number, §6.2) than here (whole metres); a fractional value is
 dropped and reported, not rounded.
@@ -6908,8 +6909,9 @@ what the files before it wrote, so the gates pair a computer's two exports, or t
 across two days. The preview runs the same pass and rolls it back. Each file converts alone as a
 one-member zip named by its digest, so a record with no id takes its identity from the bytes. A file
 of one dive and one computer's record is kept, its recording derived from its files as the form's
-is. Rejected: folding pairs in the documents before planning, a second writer; pairing by basename,
-true of the Suunto app alone.
+is. Dive numbers are the exception: given after the last file, in date order across files. Rejected:
+folding pairs in the documents before planning, a second writer; pairing by basename, true of the
+Suunto app alone.
 
 ## A dive's cylinders fill from whichever recording pairs with them
 

@@ -15,16 +15,18 @@ the two things a diver wants from it are in direct conflict:
 - A fully backfilled log should read 1..N with nothing missing.
 
 Both are served by never renumbering automatically, and offering the diver an explicit
-renumber instead. So: `suggest_dive_number` proposes (the form can overwrite it),
+renumber instead. So: `suggest_dive_number` proposes (the form can overwrite it, and
+`assign_suggested_numbers` gives it to a dive an import writes unnumbered),
 `summarize_numbering` reports (the log shows it, and the diver can ignore it), and
 `renumber_dives` only ever runs when asked. Nothing here is enforced at write time -
 there is deliberately no unique constraint on `(user_id, dive_number)`, since duplicates
 are a normal transient state mid-backfill. See DECISIONS.md.
 """
 
+from collections.abc import Collection
 from datetime import UTC, datetime
 
-from sqlalchemy import ColumnElement, exists, func, select, update
+from sqlalchemy import ColumnElement, exists, func, literal, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.utils.datetime_offset import combine_dive_start_time, split_start_time
@@ -89,6 +91,63 @@ async def suggest_dive_number(db: AsyncSession, user_id: int, start_time: dateti
     is_taken = await db.scalar(select(exists().where(*_live_dives_of(user_id), Dive.dive_number == dive_number)))
 
     return DiveNumberSuggestion(dive_number=dive_number, is_taken=bool(is_taken))
+
+
+async def assign_suggested_numbers(db: AsyncSession, user_id: int, dive_ids: Collection[int]) -> None:
+    """Give each of `dive_ids` the number `suggest_dive_number` would prefill for it.
+
+    For dives written without a number of their own - a logbook import's, where the document
+    states none. They are taken in `(start_time, id)` order, so each one's predecessor is
+    numbered by the time it is reached and a run of them reads N+1, N+2, N+3 rather than all
+    landing on N+1. No other dive is touched, and a number another dive holds is given
+    anyway, as the form gives it.
+
+    Placed by the `start_time` column, as the dive list and `renumber_dives` place a dive: a
+    start with no UTC offset at its wall clock read as UTC, a bare date at the start of its
+    day. Does not commit.
+    """
+    wanted = set(dive_ids)
+    if not wanted:
+        return
+
+    ends = (
+        await db.execute(
+            select(*_CHRONOLOGICAL).where(*_live_dives_of(user_id), Dive.id.in_(wanted)).order_by(*_CHRONOLOGICAL)
+        )
+    ).all()
+    if not ends:
+        return
+    position = tuple_(*_CHRONOLOGICAL)
+    first, last = (
+        tuple_(literal(end.start_time, Dive.start_time.type), literal(end.id, Dive.id.type))
+        for end in (ends[0], ends[-1])
+    )
+
+    # The earliest one's predecessor, which is `suggest_dive_number`'s lookup, 0 standing for
+    # none; every later one's is inside the span read below.
+    number = (
+        await db.scalar(
+            select(Dive.dive_number)
+            .where(*_live_dives_of(user_id), position < first)
+            .order_by(Dive.start_time.desc(), Dive.id.desc())
+            .limit(1)
+        )
+        or 0
+    )
+    span = await db.execute(
+        select(Dive.id, Dive.dive_number)
+        .where(*_live_dives_of(user_id), position >= first, position <= last)
+        .order_by(*_CHRONOLOGICAL)
+    )
+    numbered = []
+    for dive_id, dive_number in span:
+        if dive_id in wanted:
+            number += 1
+            numbered.append({"id": dive_id, "dive_number": number})
+        else:
+            number = dive_number
+    if numbered:
+        await db.execute(update(Dive), numbered)
 
 
 async def summarize_numbering(db: AsyncSession, user_id: int) -> DiveNumberingSummary:
