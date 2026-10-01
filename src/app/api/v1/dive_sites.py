@@ -99,7 +99,7 @@ def _to_public_dive_site(
     )
 
 
-# Kept for its key shapes only, as `trips.py` keeps its own: a site read carries its tags and
+# Kept for its list key's shape only, as `trips.py` keeps its own: a site read carries its tags and
 # the summary of its dives, two further queries zipped back into the page, and the list sorts
 # on that summary, which no `sort_columns` string can name. Both reads are hand-written below,
 # and the single one sits under `user_{id}_dive_site` so that `invalidate_dive_site_caches`
@@ -107,10 +107,7 @@ def _to_public_dive_site(
 # naming no site.
 _dive_site_cache: OwnedResourceCache[DiveSiteReadInternal, DiveSiteRead] = OwnedResourceCache(
     resource_name="dive_sites",
-    resource_label="Dive site",
-    item_cache_prefix="user_{user_id}_dive_site",
     crud=crud_dive_sites,
-    schema_to_select=DiveSiteReadInternal,
     to_public=lambda db_dive_site, user_uuid: _to_public_dive_site(
         db_dive_site, user_uuid=user_uuid, tags=[], summary=DiveSiteSummary()
     ),

@@ -2460,7 +2460,7 @@ class _Planner:
     def _tag_names(
         self, names: Sequence[str], *, collection: str | None = None, record_uuid: uuid_pkg.UUID | None = None
     ) -> list[str]:
-        """Tags as a dive write stores them: each trimmed, a blank one dropped, one longer than
+        """Tags as a dive or site write stores them: each trimmed, a blank one dropped, one longer than
         the column dropped and noted, and two that fold to one kept once, at the first -
         what the read model would refuse is restated here, since the import validates no
         schema of its own. Each the caller lacks is one this import makes."""
@@ -2485,7 +2485,7 @@ class _Planner:
 
     def _plan_tag_list(self) -> None:
         """The diver's whole tag list, from this app's extension - the one value the import
-        reads from that block, so a tag on no dive survives a round trip. Only strings count:
+        reads from that block, so a tag on no dive or site survives a round trip. Only strings count:
         §5.5 lets anything sit under the key."""
         diver = self._document.diver
         listed = None if diver is None else _producer_entry(diver, "tags")

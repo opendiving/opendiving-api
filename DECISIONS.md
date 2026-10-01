@@ -136,21 +136,18 @@ that expression, because DiveJSON's §3 rule 8 is Unicode full case folding, whi
 `name::text COLLATE`, since `alembic check` strips a cast through the collation and compares equal
 only when both sides carry one.
 
-## `dive_sites.py` caching mirrors `dives.py`
+## A dive site's reads are cached under its owner, and every dive write that moves its summary drops them
 
-`dive_sites.py` instantiates one `OwnedResourceCache` (`core/utils/owned_resource_cache.py`), built
-on the same Redis-backed `@cache` decorator as `dives.py`. `read_list` (`GET /dive-sites`) wraps
-`get_multi` with
-`@cache(key_prefix="user_{user_id}_...", resource_id_name="user_id", expiration=60)`; `read_item`
-(`GET /dive-site/{id}`) wraps `get` with `key_prefix="dive_site_cache"`. Both are called only after
-the route's ownership check; the factory exposes the cached reads and never the check, so
-authorization cannot land inside a cached function. Every mutation invalidates: `write_dive_site`
-calls `invalidate_list(user_id)`; `patch_*`/`erase_*` carry `@cache("dive_site_cache", ...)`, which
-invalidates the item key on any non-GET call, and call `invalidate_list(owner_id)` by hand because
-the owner is known only after the fetch and cannot be expressed via `to_invalidate_extra`. `patch_*`
-skips the list when `update_data` is empty. The factory covers only read/cache/invalidate; route
-bodies stay per resource. `dives.py` keeps `_cached_read_dives`/`_cached_read_dive`, since its reads
-add filters, related uuids and mixtures. New simple owned resources use `OwnedResourceCache`.
+A site read carries its tags and a summary of the owner's live dives naming it — how many, the
+latest local date, the deepest, the species, the mean rating — so a dive write stales it as it
+stales a trip read. Both reads are hand-written `@cache` helpers in `dive_sites.py`, the list under
+`_dive_site_cache`'s key shape plus `tag_{tag_id}:sort_{sort}`, the single read under
+`user_{user_id}_dive_site`, and `invalidate_dive_site_caches` drops both by pattern. Every route
+that drops the trip reads over a dive write drops these too — create, patch, delete, merge, import,
+and a site's delete with its dives moved — and a tag's rename and delete drop them as they drop the
+dive reads; `test_dive_site_members.py` reads that pairing off the routes. *Rejected:* no cache, as
+`tags.py` has — the dive form's picker reads the same first page on every open, and the trip read
+already pays for this invalidation.
 
 ## The dive form's pickers search server-side via `search=`, never fetching whole tables
 
@@ -508,9 +505,8 @@ owner's next dive mutation.
 
 The single-item gear caches are keyed `user_{user_id}_gear_item:{uuid}` /
 `user_{user_id}_gear_set:{uuid}`, beside the list caches `user_{user_id}_gear_items:page_...` and
-`user_{user_id}_gear_sets:page_...` — unlike `dive_site_cache:{uuid}`. `invalidate_gear_caches()`
-(`api/v1/gear_items.py`) is therefore one `delete_keys_by_pattern("user_{id}_gear_*")` covering all
-four.
+`user_{user_id}_gear_sets:page_...`. `invalidate_gear_caches()` (`api/v1/gear_items.py`) is
+therefore one `delete_keys_by_pattern("user_{id}_gear_*")` covering all four.
 
 The user scoping is what makes that possible. A gear set read embeds its items' names/brands, so
 editing an *item* must invalidate *set* reads. A gear item read carries `dive_count`, so any
@@ -5288,22 +5284,23 @@ is `services/marine_areas.py` one size up and copies that reasoning: a vendored,
 extract beats a live dependency, since a self-hoster should not acquire an outbound host, an account
 and a second failure mode for a form suggestion.
 
-No schema change, by design. A pick copies values into an ordinary per-user `dive_site` row through
-`POST /dive-site`; nothing links to the catalog. That is the opposite of the species catalog because
-the entity differs: a species is a universal immutable fact, so a shared row is right; a dive site
-is personal and editable, and the whole chain — join table, per-user rows, per-user uniqueness,
-user-scoped caches, export — is built on ownership.
+A pick makes an ordinary per-user `dive_site` row through `POST /dive-site`, keeping only the
+record's OpenStreetMap or Wikidata entry in `external_ids` — the registry's identity, not this
+file's row. The opposite of the species catalog, because the entity differs: a species is a
+universal immutable fact, so a shared row is right; a dive site is personal and editable, and the
+whole chain — join table, per-user rows, uniqueness, caches, export — is built on ownership.
 
 ## Dive-site catalog: The PostGIS revisit condition is *not* met by these query parameters
 
 *"Dive site coordinates are two `Float` columns"* rejects PostGIS with "Revisit if 'sites near me'
 ever ships", and `search_sites` takes a latitude and longitude and ranks by distance. The condition
 is not met. There is no table: the catalog is a tuple of frozen value objects parsed from a file in
-the image, and the database never sees the request. There is no spatial query: a linear scan over a
-few thousand in-memory objects computes a haversine per match after the name has narrowed the
-answer, and no index would help. The rejected cost was an install step — a new Postgres image and an
-extension for every self-hoster — and nothing here adds one. The condition is about the diver's own
-`dive_site` rows becoming searchable by distance in Postgres, and nothing here moves towards it.
+the image, and the one query a request makes reads the caller's own sites for the registry entries
+the results carry. There is no spatial query: a linear scan over a few thousand in-memory objects
+computes a haversine per match after the name has narrowed the answer, and no index would help. The
+rejected cost was an install step — a new Postgres image and an extension for every self-hoster —
+and nothing here adds one. The condition is about the diver's own `dive_site` rows becoming
+searchable by distance in Postgres, and nothing here moves towards it.
 
 ## Dive-site catalog: Refresh policy, and why `marine_areas`' excuse is not available
 
@@ -5341,15 +5338,15 @@ no `source` key there, so it cannot become a record source by accident.
 ## Dive-site catalog: What the wire carries, and the two things it deliberately does not
 
 Results follow `SpeciesSearchResponse`'s shape, capped at 10, no `clamp_pagination`; each carries
-exactly `name`, `name_en`, `latitude`, `longitude`, `country`, `region`, `source`, `source_id` and
-`attribution`. `country_code` stays off the wire: the field a client fills is a place's `name`, free
-text — display name to the UI, code to the data. No distance field: the web tier has
-`haversineMeters` and a `formatDistance` wired to the unit preference. Name fills from `name`, not
-`name_en`; both are searched, so a Latin keyboard reaches 砂辺.
+`name`, `name_en`, `latitude`, `longitude`, `country`, `region`, `source`, `source_id`,
+`attribution`, `external_id` — the record's entry in DiveJSON's spelling, which a pick sends back —
+and `held_site`, the caller's site already carrying it, first by name. The web keys rows on
+`source`/`source_id`. No `country_code`: a client fills a place's free-text `name`. No distance: the
+web formats one. Name fills from `name`; `name_en` is searched too, so Latin typing reaches 砂辺.
 
-No `@cache`, for `api/v1/species.py`'s reason: local, non-user-scoped, immutable until rebuild. No
-per-user rate budget: the 600/hour ones bound a shared resource; this is a scan over a resident
-file, and `enforce_rate_limit` is one call away.
+No `@cache`: the held site moves with every site write. No rate budget: the 600/hour ones bound a
+shared resource; this scans a resident file and queries the caller's sites once, `GET /dives`'
+profile.
 
 With a position, distance is the ranking, not a tie-break. Without one: exact name, prefix,
 substring, then name; full ties keep file order, since `CatalogSite` is not orderable. Half a

@@ -93,8 +93,8 @@ async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> N
     raise exc
 
 
-# Kept for its `list_cache_key_prefix` and `invalidate_list` only - `read_list`/`read_item`
-# are never called, exactly as in `trips.py`. Its `search_columns` being non-empty is what
+# Kept for its `list_cache_key_prefix` and `invalidate_list` only - `read_list` is never
+# called, exactly as in `trips.py`. Its `search_columns` being non-empty is what
 # keeps the `:search:{search}` segment in the key, and that segment is load-bearing: two
 # different searches on the same page must not serve each other's results.
 #
@@ -103,10 +103,7 @@ async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> N
 # prefix at `_LIST_CACHE_KEY_PREFIX` below.
 _course_cache: OwnedResourceCache[CourseReadInternal, CourseRead] = OwnedResourceCache(
     resource_name="courses",
-    resource_label="Course",
-    item_cache_prefix="user_{user_id}_course",
     crud=crud_courses,
-    schema_to_select=CourseReadInternal,
     to_public=lambda db_course, user_uuid: _to_public_course(db_course, user_uuid=user_uuid),
     sort_columns="start_date",
     sort_orders="desc",

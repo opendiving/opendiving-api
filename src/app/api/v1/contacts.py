@@ -48,15 +48,12 @@ def _to_public_contact(db_contact: ContactReadInternal | dict[str, Any], *, user
     )
 
 
-# Serves the list through `read_list`. The single read is hand-written below instead of
-# going through `read_item`, whose key cannot carry the user: every contact key sits under
-# `user_{id}_contact` so one pattern drops both, as courses do.
+# Serves the list through `read_list`. The single read is hand-written below, as every
+# single read is: every contact key sits under `user_{id}_contact` so one pattern drops both,
+# as courses do.
 _contact_cache: OwnedResourceCache[ContactReadInternal, ContactRead] = OwnedResourceCache(
     resource_name="contacts",
-    resource_label="Contact",
-    item_cache_prefix="user_{user_id}_contact",
     crud=crud_contacts,
-    schema_to_select=ContactReadInternal,
     to_public=lambda db_contact, user_uuid: _to_public_contact(db_contact, user_uuid=user_uuid),
     sort_columns="name",
     sort_orders="asc",

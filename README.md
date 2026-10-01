@@ -26,6 +26,10 @@ else; what is here is the source, and the notes for working on it.
   dive, trips, weights, water type, altitude, the kind of dive, a rating, tags, the air temperature,
   current, waves and weather, how the diver got in and the boat's name, and notes. Soft deletes
   throughout.
+- **Dive sites** — each with its other names, its entries in OpenStreetMap or Wikidata, the depth
+  range dived there, the water, the altitude, how divers get in and tags from the same vocabulary as
+  dives, and a summary of your own dives there: how many, the last, the deepest, the species seen
+  and your mean rating. The list sorts on that summary and filters by tag.
 - **Technical diving** — per-cylinder ppO₂ limits and gas roles, each computer's CNS/OTU and surface
   pressure persisted from imports, and per-tank gas consumption derived from recorded gas switches
   on multi-tank dives.
@@ -70,8 +74,9 @@ else; what is here is the source, and the notes for working on it.
 - **Dive-site suggestions** — `GET /dive-sites/suggest` answers from a catalog of real dive sites
   bundled in the image, so the site form can offer "SS Thistlegorm" rather than only the town it is
   near. A geocoder knows where Dahab is, not where the Blue Hole's north entry is. No account, no
-  key and no outbound call: the file ships with the app, and picking a suggestion just fills in a
-  dive site of your own that you can rename, move and annotate.
+  key and no outbound call: the file ships with the app, and picking a suggestion makes a dive site
+  of your own that you can rename, move and annotate, which keeps the record's OpenStreetMap or
+  Wikidata entry. A suggestion you already hold names your site.
 - **Gear** — items, gear sets with default weights, service **schedules** (by months and/or dives),
   service history, a due-soon endpoint, and a scheduled email reminder digest.
 - **Certifications** — c-card records with front/back card images, and an email when a card or the

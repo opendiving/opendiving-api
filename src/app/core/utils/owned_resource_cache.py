@@ -7,22 +7,25 @@ from fastcrud import compute_offset, paginated_response
 from sqlalchemy import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..exceptions.http_exceptions import NotFoundException
 from .cache import cache, delete_keys_by_pattern
 from .search import search_clause, search_multi
 
 
 class OwnedResourceCache[InternalT, PublicT]:
-    """Factory for the read-caching pattern shared by simple per-user owned resources
-    (trips, dive sites, ...): a paginated list endpoint and a single-item endpoint, each
-    backed by a `@cache`-wrapped read helper, plus list-cache invalidation on mutation.
+    """Factory for the list-caching pattern shared by per-user owned resources: the key shape
+    of a paginated list endpoint, a `@cache`-wrapped read helper for the plainest of them, and
+    list-cache invalidation on mutation.
 
     This intentionally does *not* wrap the create/patch/delete routes themselves, nor the
     ownership check: per `DECISIONS.md` ("auth before cache"), the ownership check must run
     *before* a cached read is ever called, since `@cache` can serve a cached response
     without re-running any authorization logic. Each resource's route still performs that
-    check itself, then delegates the actual (cached) data-fetching to `read_list`/`read_item`
-    below, and calls `invalidate_list` after a mutation.
+    check itself, then delegates the actual (cached) data-fetching to `read_list` below, and
+    calls `invalidate_list` after a mutation.
+
+    There is no single-item read here. Every single read is hand-written under
+    `user_{id}_{resource}` beside its list, so that one owner-scoped pattern drops both - which
+    a key of the uuid alone cannot do.
 
     Resources whose read/list logic does more than a straight `get_multi`/`get` plus a shape
     conversion don't fit this shape and should keep their own hand-written cache helpers
@@ -76,28 +79,25 @@ class OwnedResourceCache[InternalT, PublicT]:
       count of live dives that name it, which every dive write moves, so a cache would owe an
       invalidation to every dive route for a list of one query over tens of rows.
 
-    In each of the first four the enrichment is a second query whose results have to be
-    zipped back into the page before conversion, which is precisely the step this factory has
-    no room for.
-    Adding a generic hook for it would complicate the factory for its straightforward users
-    (dive sites, gear sets, and the contact list) to serve four callers that each need
-    something different; the duplication is the cheaper side of that trade. Revisit if the
-    enrichment shape ever converges. `courses.py` would still be outside it either way -
-    a hook for a second query does not buy an `ORDER BY` clause.
+    - `dive_sites.py` - opts out for `trips.py`'s two reasons: each site carries its tags and
+      the summary of the dives naming it, further queries zipped back into the page, and the
+      list sorts on that summary, which no `sort_columns` string can name. It keeps an
+      instance for the key shape.
 
-    `contacts.py` takes `read_list` and hand-writes the single read, as `courses.py` does,
-    because `read_item`'s key cannot carry the user and every contact key sits under
-    `user_{id}_contact` so that one pattern drops both.
+    In each of the enriched ones the enrichment is a second query whose results have to be
+    zipped back into the page before conversion, which is precisely the step this factory has
+    no room for. Adding a generic hook for it would complicate the factory for its one
+    straightforward user, the contact list, to serve callers that each need something
+    different; the duplication is the cheaper side of that trade. Revisit if the enrichment
+    shape ever converges. `courses.py` would still be outside it either way - a hook for a
+    second query does not buy an `ORDER BY` clause.
     """
 
     def __init__(
         self,
         *,
         resource_name: str,
-        resource_label: str,
-        item_cache_prefix: str,
         crud: Any,
-        schema_to_select: type[InternalT],
         to_public: Callable[[InternalT, uuid_pkg.UUID], PublicT],
         sort_columns: str | None = None,
         sort_orders: str = "asc",
@@ -110,38 +110,30 @@ class OwnedResourceCache[InternalT, PublicT]:
         resource_name: str
             Plural, snake_case resource name used to build list cache keys/invalidation
             patterns, e.g. "trips" -> `user_{user_id}_trips:*`.
-        resource_label: str
-            Human-readable singular label used in `NotFoundException` messages, e.g. "Trip".
-        item_cache_prefix: str
-            Cache key prefix for the single-item cache, e.g. "dive_site_cache".
         crud: FastCRUD
-            The resource's FastCRUD instance (must support `get_multi`/`get`).
-        schema_to_select: type
-            The internal read schema passed as `schema_to_select` to `crud.get`/`get_multi`.
+            The resource's FastCRUD instance (must support `get_multi`).
         to_public: Callable[[InternalT, uuid.UUID], PublicT]
             Converts an internal row (as returned by `crud`) plus the owner's `user_uuid`
             into the resource's public response shape.
         sort_columns / sort_orders: str
             Passed through to `crud.get_multi` for the list endpoint. `sort_columns` may be
             omitted only by a resource that opts out of `read_list` entirely and keeps an
-            instance for `list_cache_key_prefix` alone - `trips.py` is
-            the one, its order being an aggregate over another table rather than a column
-            of its own. `read_list` then raises rather than sorting by nothing.
+            instance for `list_cache_key_prefix` alone - `trips.py` and `dive_sites.py`, their
+            orders being aggregates over another table rather than columns of their own.
+            `read_list` then raises rather than sorting by nothing.
         search_columns: tuple[str, ...]
             Model column names a `search=` term matches against, OR'd together and matched
             case-insensitively as a substring, e.g. `("name", "location_name")`. Leave empty to
             opt out of search entirely, in which case `read_list` takes no `search` argument
             and the cache key is unchanged.
         list_expiration: int
-            TTL (seconds) for the list cache. The single-item cache takes `@cache`'s default.
+            TTL (seconds) for the list cache.
         """
         # Public, unlike its siblings: `tests/test_cache_utils.py` reads it off the real
         # dive-site and trip caches to check that `cache_invalidation`'s hard-coded names
         # still name the resources it means to sweep.
         self.resource_name = resource_name
-        self._resource_label = resource_label
         self._crud = crud
-        self._schema_to_select = schema_to_select
         self._to_public = to_public
         self._sort_columns = sort_columns
         self._sort_orders = sort_orders
@@ -161,10 +153,6 @@ class OwnedResourceCache[InternalT, PublicT]:
             resource_id_name="user_id",
             expiration=list_expiration,
         )(self._read_list_uncached)
-
-        self.read_item = cache(key_prefix=item_cache_prefix, resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)(
-            self._read_item_uncached
-        )
 
     @property
     def _required_sort_column(self) -> str:
@@ -215,8 +203,8 @@ class OwnedResourceCache[InternalT, PublicT]:
     def search_conditions(self, *, user_id: int, term: str) -> tuple[ColumnElement[bool], ...]:
         """The `WHERE` clauses matching the user's rows against a search term.
 
-        No liveness clause: both resources routed through this factory are hard-deleted, so
-        the column this used to name no longer exists on either of their models.
+        No liveness clause: every resource routed through this factory is hard-deleted, so the
+        column this used to name exists on none of their models.
         """
         model = self._crud.model
         return (
@@ -236,20 +224,6 @@ class OwnedResourceCache[InternalT, PublicT]:
             offset=offset,
             limit=limit,
         )
-
-    async def _read_item_uncached(
-        self, request: Request, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
-    ) -> PublicT:
-        """Fetches (and, via `read_item`, caches) a single resource by uuid, regardless of owner.
-
-        Only ever reached through `read_item`, and only after the caller's authorization has
-        already been checked by the route - see the class docstring.
-        """
-        db_item = await self._crud.get(db=db, uuid=uuid, schema_to_select=self._schema_to_select, return_as_model=True)
-        if db_item is None:
-            raise NotFoundException(f"{self._resource_label} not found")
-
-        return self._to_public(db_item, owner_uuid)
 
     @staticmethod
     def list_cache_pattern(resource_name: str, user_id: int) -> str:
