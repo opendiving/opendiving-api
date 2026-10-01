@@ -1391,6 +1391,10 @@ async def _bottom_temperature(db: AsyncSession, user: User) -> float | None:
     return (await db.execute(select(Dive.bottom_temperature).where(Dive.user_id == user.id))).scalar_one()
 
 
+def _temperature_notes(report: BatchReport) -> int:
+    return sum("bottom temperature" in note.message for note in report.notes)
+
+
 # What the dive form shows of a cylinder.
 _FORM_CYLINDER_MEMBERS = ("volume", "oxygen", "helium", "start_pressure", "end_pressure", "po2_limit", "gas_number")
 
@@ -1413,21 +1417,36 @@ class TestAFileLandsAsTheFormShowsIt:
     async def test_an_unstated_bottom_temperature_is_the_coldest_sample(
         self, volume: Any, async_db: AsyncSession, db: Session, name: str, coldest: float
     ) -> None:
+        """And says it was taken, as a derived duration is."""
         diver = create_user(db)
 
-        await _import(async_db, diver, [(name, _fixture(name))])
+        report = await _import(async_db, diver, [(name, _fixture(name))])
 
         assert await _bottom_temperature(async_db, diver) == coldest
         assert read_prefill(_fixture(name))[1].bottom_temperature == coldest
+        assert _temperature_notes(report) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_file_joining_the_dive_another_created_says_nothing(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The JSON's dive is the FIT's, so it writes no temperature to report."""
+        diver = create_user(db)
+
+        report = await _import(async_db, diver, PAIR)
+
+        assert await _bottom_temperature(async_db, diver) == 28.0
+        assert _temperature_notes(report) == 1
 
     @pytest.mark.asyncio
     async def test_a_stated_bottom_temperature_wins(self, volume: Any, async_db: AsyncSession, db: Session) -> None:
         """DM5's XML states 25.0, and its coldest sample is 25.2."""
         diver = create_user(db)
 
-        await _import(async_db, diver, [("dive.xml", _fixture("nitrox-deco.xml"))])
+        report = await _import(async_db, diver, [("dive.xml", _fixture("nitrox-deco.xml"))])
 
         assert await _bottom_temperature(async_db, diver) == 25.0
+        assert _temperature_notes(report) == 0
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("stated", "stored"), [(None, 21.4), (25.0, 25.0)], ids=["unstated", "stated"])

@@ -293,9 +293,9 @@ def bottom_temperature(stated: float | None, profile: NormalizedProfile | None) 
     The dive form and logbook import both apply it, so a file lands with one value through
     either door. Every dive-computer format but DM5's XML leaves the value unstated, and the
     default is the app's arithmetic rather than the converter's: a format writer deriving it
-    would be making a reading up. A `NaN` or `inf` is no statement.
+    would be making a reading up.
     """
-    if stated is not None and math.isfinite(stated):
+    if stated is not None:
         return stated
     if profile is None or profile.temperature is None:
         return None

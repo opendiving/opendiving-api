@@ -2379,6 +2379,9 @@ class _Planner:
             )
             visibility = None
 
+        stated_temperature = dive.bottom_temperature if finite(dive.bottom_temperature) else None
+        temperature = bottom_temperature(stated_temperature, None if profile is None else profile.profile)
+
         entry = self._position(collection, dive.uuid, dive.entry_position, "entry")
         exit_ = self._position(collection, dive.uuid, dive.exit_position, "exit")
         # A bare date is the date-only state (spec §5.2): stored as its day with no clock,
@@ -2401,9 +2404,7 @@ class _Planner:
             "notes": self._notes_text("dives", dive.uuid, dive.notes),
             "max_depth": max_depth,
             "avg_depth": avg_depth,
-            "bottom_temperature": bottom_temperature(
-                dive.bottom_temperature, None if profile is None else profile.profile
-            ),
+            "bottom_temperature": temperature,
             "visibility": None if visibility is None else int(visibility),
             "weight": bounded.get("weight"),
             "water_type": None if dive.water_type is None else dive.water_type.value,
@@ -2448,6 +2449,15 @@ class _Planner:
                 # unusable object inside it.
                 self._keep_on_match(already)
                 return PlannedRecord(action=Action.SKIP, source_uuid=dive.uuid, uuid=record.uuid)
+        if stated_temperature is None and temperature is not None:
+            # The dive form's default, derived and reported as the duration is - here, where the
+            # dive is known to be written, since a match writes no dive's temperature.
+            self._note(
+                ImportNoteCode.VALUE_DROPPED,
+                "This dive records no bottom temperature, so it was taken from the coldest reading of its own profile.",
+                collection=collection,
+                uuid=dive.uuid,
+            )
         recordings = self._keep_on_dive(dive, recordings)
 
         record.children = {

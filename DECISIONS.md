@@ -439,8 +439,9 @@ refuses, a 422 naming a converter bug.
 projected, and samples never cross `/dive/parse` (*"A profile is never read over `/dive/parse`"*).
 
 The prefill rounds a cylinder's pressures, fractions, ppO₂ limit and volume, and the CNS and OTU
-readouts, to two decimals (`_two_places` in `services/dive_reader.py`): the reader passes the file's
-digits (`20714062 Pa -> 207.14062 bar`), and the web renders two. It quantizes via
+readouts, to two decimals (`two_places` in `services/dive_reader.py`), and logbook import rounds a
+cylinder the same way before its bounds: the reader passes the file's digits
+(`20714062 Pa -> 207.14062 bar`), and the web renders two. It quantizes via
 `Decimal(str(value)).quantize(Decimal("0.01"))`, not `round(value, 2)`, which lands `2.675` on
 `2.67`. Depths and temperatures keep the document's precision; a stored recording keeps the reader's
 digits.
