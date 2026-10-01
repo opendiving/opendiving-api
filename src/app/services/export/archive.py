@@ -14,6 +14,9 @@ files/...            every stored dive-computer export, under a per-dive name
 certifications/...   both sides of every stored c-card
 ```
 
+Map pictures are not here: the server drew them from places the documents above already
+carry, and any instance with a renderer draws them again.
+
 **Memory.** The archive is written into a `SpooledTemporaryFile`, which keeps small
 exports entirely in RAM and spills to disk past `SPOOL_THRESHOLD` - so a diver with three
 dives never touches the filesystem and one with eight hundred never holds their whole

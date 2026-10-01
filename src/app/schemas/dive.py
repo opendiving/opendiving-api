@@ -538,6 +538,15 @@ class DiveListItem(DiveRead):
             "when there is none to draw",
         ),
     ]
+    map_picture: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="The name of the map behind the dive's card, as `v` for `GET /dive/{uuid}/map-picture`; "
+            "it changes whenever the picture would. Null when this instance draws no map pictures, when no site "
+            "has a position and the dive has no fix, or while the renderer has not yet named how it draws",
+        ),
+    ]
 
 
 class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):

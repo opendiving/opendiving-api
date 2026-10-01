@@ -652,7 +652,7 @@ class TestTheHostsCarryReferences:
 
         expected = [{"person_uuid": person_uuid, "role": "companion"}]
         assert [row["people"] for row in page["data"] if row["uuid"] == trip_uuid] == [expected]
-        assert [reference.model_dump() for reference in single.people] == expected
+        assert single["people"] == expected
 
     @pytest.mark.asyncio
     async def test_a_dive_write_refuses_someone_elses_person_before_anything_is_written(

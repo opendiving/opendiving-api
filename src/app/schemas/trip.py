@@ -84,6 +84,15 @@ class TripRead(TripBase, PublicUUIDSchema):
     ]
     user_uuid: uuid_pkg.UUID
     created_at: datetime
+    map_picture: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="The name of the map behind the trip's card, as `v` for `GET /trip/{uuid}/map-picture`; "
+            "it changes whenever the picture would. Null when this instance draws no map pictures, or while the "
+            "renderer has not yet named how it draws. A trip with no place has one: the whole world",
+        ),
+    ]
 
 
 class TripReadInternal(TripBase, PublicUUIDSchema):

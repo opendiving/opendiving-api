@@ -56,6 +56,23 @@ def create_user_picture(
     return _persist(db, picture)
 
 
+def create_map_picture(
+    db: Session, user: models.User, *, theme: str = "light", last_served_at: datetime | None = None
+) -> models.MapPicture:
+    """A map picture row naming a key nothing has written, under a digest nothing else uses."""
+    return _persist(
+        db,
+        models.MapPicture(
+            user_id=user.id,
+            digest=uuid7().hex * 2,
+            theme=theme,
+            storage_key=f"map-pictures/cc/{uuid7()}_{'c' * 64}",
+            sha256="c" * 64,
+            last_served_at=last_served_at or datetime.now(UTC),
+        ),
+    )
+
+
 def create_dive_site(db: Session, user: models.User) -> models.DiveSite:
     """A dive site of this user's, named uniquely for the same reason `create_user` is:
     these rows persist in the suite's own database and nothing removes them."""

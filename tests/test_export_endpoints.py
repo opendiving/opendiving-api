@@ -204,7 +204,7 @@ class TestBodies:
 class TestRateLimit:
     @pytest.mark.parametrize("path", PATHS)
     def test_every_route_is_limited(self, client: TestClient, signed_in, monkeypatch, path):
-        """One archive request reads every blob the caller owns, and nothing else in the
+        """One archive request reads every file the caller stored, and nothing else in the
         API does that."""
         monkeypatch.setattr(
             export_route, "enforce_rate_limit", AsyncMock(side_effect=RateLimitException("Too many requests."))

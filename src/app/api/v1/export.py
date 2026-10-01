@@ -14,7 +14,7 @@ layer because each is an HTTP concern:
   the worst possible thing to get wrong. `no-store` rather than `private` because the file
   includes c-card scans and the check-in portrait, which have no business sitting in a
   browser's disk cache.
-- **Rate limited.** An archive walks every blob the caller owns; unthrottled it is a
+- **Rate limited.** An archive walks every file the caller stored; unthrottled it is a
   cheap way to make a shared instance do a lot of I/O. The bounds are generous - this is
   a button a diver presses once, not a polled endpoint.
 - **Spooled, not streamed live.** Each response is built into a `SpooledTemporaryFile`

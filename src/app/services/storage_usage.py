@@ -6,7 +6,8 @@ rather than counts, and these sums are over a handful of indexed per-user rows. 
 summed is what each object occupies: a dive-computer file's `stored_byte_size`, compressed;
 a card scan's `byte_size`, reached through its certification's owner since the file row has
 none of its own; a picture's original and rendition. Species photographs are a global
-catalogue and no account's. A dive's files are hard-deleted with it, soft delete included,
+catalogue and no account's. Map pictures are drawn by the server and are not the diver's to
+manage or delete, so they count against nobody. A dive's files are hard-deleted with it, soft delete included,
 so every `dive_file` row belongs to a live dive and the sum needs no join to `dive`.
 
 **Every write for an existing account checks before its blob write**, so a refusal leaves

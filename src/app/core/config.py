@@ -540,6 +540,63 @@ class GeocodingSettings(BaseSettings):
     GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS: int = config("GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS", default=1)
 
 
+def normalize_map_renderer_url(raw: str) -> str:
+    """`MAP_RENDERER_URL` as an origin `services.map_renderer` can call, or `""` for off.
+
+    A bare `host:port` is taken as plain HTTP, because that is the form a Render Blueprint's
+    `fromService … property: hostport` supplies for a private service. `urlparse` would read
+    the host of `renderer:10000` as a scheme, so the bare form is recognised by its missing
+    `://` before anything parses it.
+    """
+    value = raw.strip()
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"http://{value}"
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError(
+            f"MAP_RENDERER_URL is {raw!r}, which names no renderer. Set it in your .env to the "
+            "renderer's host:port or http(s) URL, or leave it empty to draw no map pictures."
+        )
+    return value.rstrip("/")
+
+
+class MapPictureSettings(BaseSettings):
+    # The map renderer that draws dive and trip cards' map pictures (`services.map_renderer`),
+    # a service of its own reachable only inside the stack. Empty, the default, draws none:
+    # every record's `map_picture` is null and `GET /config` says `map_pictures: false`.
+    MAP_RENDERER_URL: str = config("MAP_RENDERER_URL", default="")
+
+    # Seconds one draw may take, queueing at the renderer included. A margin over a full
+    # renderer queue - 24 draws - at about three seconds a cold draw; raise it, never lower
+    # it, where the renderer's measured cold time times 24 exceeds it, and keep any proxy in
+    # front of the API waiting at least this long.
+    MAP_RENDERER_TIMEOUT: float = config("MAP_RENDERER_TIMEOUT", default=90.0)
+
+    # Draws one account may start per window: a first view asks for at most ten cards'
+    # pictures, so this admits three such pages a minute. A stored picture, and a request
+    # waiting on another's draw of the same one, are never counted.
+    MAP_PICTURE_RATE_LIMIT_WINDOW_SECONDS: int = config("MAP_PICTURE_RATE_LIMIT_WINDOW_SECONDS", default=60)
+    MAP_PICTURE_RATE_LIMIT_PER_USER: int = config("MAP_PICTURE_RATE_LIMIT_PER_USER", default=30)
+
+    @field_validator("MAP_RENDERER_URL")
+    @classmethod
+    def _callable_map_renderer_url(cls, value: str) -> str:
+        return normalize_map_renderer_url(value)
+
+    @field_validator("MAP_RENDERER_TIMEOUT")
+    @classmethod
+    def _positive_map_renderer_timeout(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError(f"MAP_RENDERER_TIMEOUT is {value}; a draw needs a deadline above zero seconds.")
+        return value
+
+    @property
+    def map_pictures(self) -> bool:
+        return bool(self.MAP_RENDERER_URL)
+
+
 class SpeciesSettings(BaseSettings):
     # The species catalog's upstream sources, proxied server-side exactly as geocoding is
     # (see `services.species_service`). None takes a key. The two name registers below are
@@ -615,7 +672,7 @@ class ExportSettings(BaseSettings):
     #
     # Authenticated and owner-only, so this is not an abuse
     # boundary the way the support form's is - it is there because one archive request
-    # reads every blob the caller owns, and nothing else in the API does that. The bound
+    # reads every file the caller stored, and nothing else in the API does that. The bound
     # is deliberately generous: this is a button a diver presses once, and someone
     # scripting a nightly backup of their own account should not hit it.
     EXPORT_RATE_LIMIT_WINDOW_SECONDS: int = config("EXPORT_RATE_LIMIT_WINDOW_SECONDS", default=3600)
@@ -1046,6 +1103,7 @@ class Settings(
     EmailSettings,
     ContactSettings,
     GeocodingSettings,
+    MapPictureSettings,
     SpeciesSettings,
     ExportSettings,
     LogbookImportSettings,

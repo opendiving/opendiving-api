@@ -22,7 +22,7 @@ from src.app.services import blob_store
 from src.scripts import sweep_orphaned_files as sweeper
 from tests.conftest import db_available
 from tests.helpers.fake_s3 import FakeS3Client, select_s3_backend
-from tests.helpers.generators import create_species, create_user, create_user_picture
+from tests.helpers.generators import create_map_picture, create_species, create_user, create_user_picture
 
 REFERENCED = "dive-files/aa/referenced"
 ORPHAN = "dive-files/bb/orphan"
@@ -264,6 +264,21 @@ class TestReferencedKeys:
         referenced = await sweeper._referenced_keys(async_db)
 
         assert None not in referenced
+
+    @pytest.mark.asyncio
+    async def test_a_stored_map_picture_is_not_swept(self, db: Session, async_db: AsyncSession, volume: Path) -> None:
+        """Forgetting the kind here would unlink every live map picture on `--delete`, which the
+        cards would survive only by drawing them all again."""
+        picture = create_map_picture(db, create_user(db))
+        _write(volume, picture.storage_key, age_hours=48)
+        _write(volume, ORPHAN, age_hours=48)
+
+        with _with_referenced(await sweeper._referenced_keys(async_db)):
+            report = await sweeper.sweep(delete=True)
+
+        assert (volume / picture.storage_key).is_file()
+        assert not (volume / ORPHAN).exists()
+        assert report.deleted == 1
 
     @pytest.mark.asyncio
     async def test_a_species_photo_key_counts_as_referenced(self, db: Session, async_db: AsyncSession) -> None:

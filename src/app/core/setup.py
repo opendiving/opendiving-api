@@ -16,7 +16,7 @@ from ..api.dependencies import get_current_superuser
 from ..middleware.client_cache_middleware import ClientCacheMiddleware
 from ..middleware.security_headers_middleware import SecurityHeadersMiddleware
 from ..models import *  # noqa: F403
-from ..services import blob_store
+from ..services import blob_store, map_renderer
 from ..services.blob_store import ensure_storage_ready
 from .config import (
     AppSettings,
@@ -232,12 +232,14 @@ def lifespan_factory(
 
             await warn_if_files_volume_looks_empty()
             await measure_unsized_renditions()
+            map_renderer.start_signature_refresh()
 
             initialization_complete.set()
 
             yield
 
         finally:
+            await map_renderer.stop_signature_refresh()
             if isinstance(settings, RedisCacheSettings):
                 await close_redis_cache_pool()
 
