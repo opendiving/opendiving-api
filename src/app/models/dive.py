@@ -168,9 +168,10 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # dive somewhere unusual.
             #
             # One constraint per column, mirrored one-for-one by a validator on
-            # `ParsedDiveSchema`, so that every single-column bound a file can reach
-            # still has a parse-side guard (`test_every_single_column_bound_a_file_can
-            # _reach_has_a_parse_side_guard` counts them).
+            # `ParsedDiveSchema`, so that every single-column bound a file can reach,
+            # but the dive's own members the form validates, still has a parse-side guard
+            # (`test_every_single_column_bound_a_file_can_reach_has_a_parse_side_guard`
+            # counts them).
             CheckConstraint(
                 "entry_latitude IS NULL OR (entry_latitude >= -90 AND entry_latitude <= 90)",
                 name="ck_dive_entry_latitude_range",

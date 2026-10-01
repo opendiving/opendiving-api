@@ -306,11 +306,12 @@ def prefill(read: ReadDive, shaped: ShapedRecording | None) -> ParsedDiveSchema:
     """The dive form's values for one file: the document's dive, as this app shows it.
 
     A pure function of the document. The dive's `duration`, `max_depth`, `avg_depth` and
-    start pass as the document writes them; its cylinders, readouts and ppO₂ limits are
-    rounded to the two decimals the form shows; its positions to six places; and
-    `dive_number` is the document's own `number`, which a logbook format states and no
-    dive-computer format does - a device's counter is not the diver's dive number, and lands
-    on the recording as `device.dive_number`.
+    start pass as the document writes them, and so does the rest of what it states of the
+    dive - notes, conditions, rating, tags - with no bound applied (`ParsedDiveSchema` says
+    why); its cylinders, readouts and ppO₂ limits are rounded to the two decimals the form
+    shows; its positions to six places; and `dive_number` is the document's own `number`,
+    which a logbook format states and no dive-computer format does - a device's counter is
+    not the diver's dive number, and lands on the recording as `device.dive_number`.
 
     The recording's members come from `shaped`, the same shaping the attach path stores, so
     the form shows the device and settings the recording will carry.
@@ -328,6 +329,20 @@ def prefill(read: ReadDive, shaped: ShapedRecording | None) -> ParsedDiveSchema:
         max_depth=dive.max_depth,
         start_time=read.started_at,
         mixtures=[_mixture(cylinder) for cylinder in dive.cylinders],
+        notes=dive.notes,
+        visibility=dive.visibility,
+        weight=dive.weight,
+        water_type=dive.water_type,
+        altitude=dive.altitude,
+        type=dive.type,
+        rating=dive.rating,
+        air_temperature=dive.air_temperature,
+        current=dive.current,
+        waves=dive.waves,
+        weather=dive.weather,
+        entry_type=dive.entry_type,
+        boat_name=dive.boat_name,
+        tags=dive.tags,
         device=ParsedDevice(**{member: device.get(column) for member, column in DEVICE_COLUMNS.items()})
         if device
         else None,
