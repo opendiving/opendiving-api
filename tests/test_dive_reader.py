@@ -17,11 +17,13 @@ import divejson
 import pytest
 from divejson import Conversion, Issue, NonConformingOutputError, SourceTooLargeError
 
-from src.app.schemas.dive import DiveMode
+from src.app.schemas.dive import Current, DiveMode, DiveType, EntryType, Salinity, WaterType, Waves, Weather
+from src.app.schemas.logbook_import import ImportDive
 from src.app.services import dive_reader
 from src.app.services.dive_reader import (
     CONVERTER_BUG,
     DiveFileReadError,
+    ReadDive,
     UnsupportedDiveFileError,
     prefill,
     read_dive_file,
@@ -257,6 +259,83 @@ class TestThePrefill:
         ]
         assert shaped is not None and shaped.profile is not None
         assert [series.gas_number for series in shaped.profile.pressure] == [0]
+
+    @pytest.mark.asyncio
+    async def test_a_one_dive_uddf_prefills_the_rest_of_the_dive_it_states(self) -> None:
+        """What logbook import stores of the dive beside its readings, here every member this
+        app's own UDDF writer carries."""
+        read = read_dive_file(
+            await _one_dive_uddf(
+                notes="Saw a turtle",
+                visibility=15,
+                weight=6.5,
+                altitude=372,
+                air_temperature=24.0,
+                type=DiveType.OPEN_CIRCUIT,
+                rating=4,
+                current=Current.LIGHT,
+                entry_type=EntryType.SHORE,
+            )
+        )
+        parsed = prefill(read, shape(read))
+
+        assert parsed.notes == "Saw a turtle"
+        assert (parsed.visibility, parsed.weight, parsed.altitude, parsed.air_temperature) == (15, 6.5, 372, 24.0)
+        assert (parsed.type, parsed.rating, parsed.current, parsed.entry_type) == (
+            DiveType.OPEN_CIRCUIT,
+            4,
+            Current.LIGHT,
+            EntryType.SHORE,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_fractional_visibility_passes_unchanged(self) -> None:
+        """The import drops it, this app storing whole metres; the form shows it and refuses
+        the save, so the diver says what the file meant."""
+        read = read_dive_file(await _one_dive_uddf(visibility=2.5))
+
+        assert prefill(read, shape(read)).visibility == 2.5
+
+    def test_every_member_the_document_states_reaches_the_form(self) -> None:
+        """Waves, weather, the water, a boat and tags are members no format this app reads
+        writes yet, and pass the same way when one does."""
+        dive = ImportDive.model_validate(
+            {
+                "uuid": UUIDS["dive-air"],
+                "started_at": "2026-06-01T08:15:00+02:00",
+                "water_type": "fresh",
+                "waves": "slight",
+                "weather": "overcast",
+                "boat_name": "Legend",
+                "tags": ["wreck", "night"],
+            }
+        )
+        parsed = prefill(ReadDive(format="uddf", dive=dive, recording=None, started_at=None), None)
+
+        assert (parsed.water_type, parsed.waves, parsed.weather) == (WaterType.FRESH, Waves.SLIGHT, Weather.OVERCAST)
+        assert (parsed.boat_name, parsed.tags) == ("Legend", ["wreck", "night"])
+
+    def test_a_computers_empty_notes_state_nothing(self) -> None:
+        """The Ocean's JSON writes `"Notes": ""`, and states no tags."""
+        _, parsed = read_prefill(_fixture("suunto-ocean-2026.json"))
+
+        assert (parsed.notes, parsed.tags) == (None, [])
+
+    def test_the_water_type_is_never_the_devices_salinity(self) -> None:
+        """A computer's salinity is a calibration, kept as the recording's, and the dive's
+        `water_type` stays what the document states of the dive."""
+        dive = ImportDive.model_validate(
+            {
+                "uuid": UUIDS["dive-air"],
+                "started_at": "2026-06-01T08:15:00+02:00",
+                "recordings": [{"device": {"brand": "Garmin"}, "salinity": "salt"}],
+            }
+        )
+        read = ReadDive(format="fit", dive=dive, recording=dive.recordings[0], started_at=None)
+        parsed = prefill(read, shape(read))
+
+        assert parsed.salinity is Salinity.SALT
+        assert parsed.water_type is None
 
     def test_a_cylinder_the_file_records_a_zero_end_for_arrives_empty(self) -> None:
         """A zero pressure is a file's absent-marker, and the form's pressure band drops it

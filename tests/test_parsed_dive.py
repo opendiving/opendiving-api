@@ -1,4 +1,5 @@
-"""`POST /dive/parse`'s schema: every bounded column a file can reach has a guard on the way in.
+"""`POST /dive/parse`'s schema: every bounded column a file can reach has a guard on the way in,
+but the dive's own members the form validates in front of the diver.
 
 These are the schema's own validators, which the dive form's projection (`dive_reader.prefill`)
 builds its values through - so a value the database would refuse never prefills a form whose
@@ -12,6 +13,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import CheckConstraint
 
+from src.app.core.schemas import NOTES_MAX_LENGTH
 from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_recording import DiveRecording
@@ -86,8 +88,9 @@ class TestEveryBoundHasAGuard:
         `ck_dive_avg_depth_within_max` constrain a *pair*, so there is no "the bad value" to
         null. The two `ck_dive_*_position_pair` constraints are pairs in the same sense and
         are honoured by `_drop_half_positions`, a *model* validator this counter cannot see;
-        the four coordinate ranges under them are single-column and are counted. `altitude`
-        is bounded and no file reaches it - it is diver-entered only.
+        the four coordinate ranges under them are single-column and are counted.
+        `visibility`, `weight`, `altitude` and `rating` are bounded and a file reaches them,
+        and they pass unguarded by ruling - `TestTheDivesOwnMembers` below.
         """
         bounded = {
             (Dive, "avg_depth"),
@@ -165,6 +168,9 @@ class TestReadingsThatAreNotReadings:
             otu_start=float("-inf"),
             otu_end=float("nan"),
             surface_pressure_bar=float("nan"),
+            visibility=float("nan"),
+            weight=float("inf"),
+            air_temperature=float("-inf"),
         )
         mixture = _mixture(
             end_pressure=float("nan"),
@@ -227,6 +233,28 @@ class TestReadingsThatAreNotReadings:
         dive = _dive(exit_latitude=0.0, exit_longitude=0.0)
 
         assert (dive.exit_latitude, dive.exit_longitude) == (None, None)
+
+
+class TestTheDivesOwnMembers:
+    """The rest of the dive a file states reaches the form as the file has it, where the
+    form's validation refuses what this app cannot store and the diver decides what was
+    meant. Logbook import drops the same values with a note, having nobody to ask."""
+
+    def test_a_value_the_app_cannot_store_passes_as_written(self) -> None:
+        notes = "x" * (NOTES_MAX_LENGTH + 1)
+        dive = _dive(visibility=2.5, weight=-1.0, altitude=7000, rating=7, notes=notes, tags=[" ", "a" * 200])
+
+        assert (dive.visibility, dive.weight, dive.altitude, dive.rating) == (2.5, -1.0, 7000, 7)
+        assert dive.notes == notes
+        assert dive.tags == [" ", "a" * 200]
+
+    def test_a_member_the_file_does_not_state_is_still_in_the_response(self) -> None:
+        """Every member is always present, so a client reads `null` or `[]` as "the file
+        states nothing" rather than as a missing key."""
+        body = ParsedDiveResponse(**_dive().model_dump(), file_token="token").model_dump(mode="json")
+
+        assert body["notes"] is None and body["water_type"] is None and body["boat_name"] is None
+        assert body["tags"] == []
 
 
 class TestTheDevice:

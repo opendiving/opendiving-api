@@ -5,7 +5,7 @@ from typing import Annotated, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .dive import DecoAlgorithm, DiveMode, Salinity
+from .dive import Current, DecoAlgorithm, DiveMode, DiveType, EntryType, Salinity, WaterType, Waves, Weather
 from .dive_mixture import GasRole
 
 # The bounds `ck_dive_entry_latitude_range` and its three siblings enforce, and the only
@@ -383,6 +383,31 @@ class ParsedDiveSchema(_ParserOutput):
     max_depth: float | None
     start_time: str | None
     mixtures: list[DiveMixtureSchema]
+
+    # The rest of the dive as the document states it - what a logbook format records beside
+    # the readings - under the dive form's own names, so a file read here prefills what
+    # logbook import would store. `water_type` is the document's dive member alone, never
+    # `salinity` below.
+    #
+    # **No bound on any of them, and that is a ruling rather than an oversight.** A
+    # fractional visibility, a rating past 5 or notes past `NOTES_MAX_LENGTH` reach the form
+    # as the file has them, where its validation refuses the save and shows the field, and
+    # the diver decides what the file meant. Logbook import's planner drops the same values
+    # with a note, because a batch has nobody to ask.
+    notes: str | None = None
+    visibility: float | None = None
+    weight: float | None = None
+    water_type: WaterType | None = None
+    altitude: int | None = None
+    type: DiveType | None = None
+    rating: int | None = None
+    air_temperature: float | None = None
+    current: Current | None = None
+    waves: Waves | None = None
+    weather: Weather | None = None
+    entry_type: EntryType | None = None
+    boat_name: str | None = None
+    tags: Annotated[list[str], Field(default_factory=list)]
 
     # What recorded the file, on the same all-nullable terms as everything else here. Not
     # a form field and not a server-side write either, which makes it the first member on
