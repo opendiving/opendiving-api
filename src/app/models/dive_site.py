@@ -1,4 +1,4 @@
-from sqlalchemy import Float, ForeignKey, Index, String, Text, func
+from sqlalchemy import JSON, CheckConstraint, Float, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -29,6 +29,22 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
     location_bbox_north: Mapped[float | None] = mapped_column(Float, default=None)
     location_bbox_west: Mapped[float | None] = mapped_column(Float, default=None)
     location_bbox_east: Mapped[float | None] = mapped_column(Float, default=None)
+    # What the place is, as against what a dive there recorded: a site's water type,
+    # altitude and entry types are the place's, a dive's are the day's, and neither is filled
+    # from the other. The lists are JSON on `contact.roles`' terms - nothing queries into
+    # them but the other-names search, which reads the elements as text - and every writer
+    # stores them conforming (`schemas/dive_site.py`): no other name equal to `name` or to
+    # another once trimmed and case-folded, no registry entry twice, `entry_types` in
+    # `EntryType`'s order. `water_type` and `entry_types` carry no `CHECK`, as the dive's
+    # vocabularies carry none; the depths and the altitude carry the format's bounds.
+    other_names: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
+    # `{"registry", "identifier"}` objects, DiveJSON's External Id without its extensions.
+    external_ids: Mapped[list[dict[str, str]]] = mapped_column(JSON, default_factory=list, server_default="[]")
+    depth_from: Mapped[float | None] = mapped_column(Float, default=None)
+    depth_to: Mapped[float | None] = mapped_column(Float, default=None)
+    water_type: Mapped[str | None] = mapped_column(String(32), default=None)
+    altitude: Mapped[int | None] = mapped_column(Integer, default=None)
+    entry_types: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
 
     @declared_attr.directive
     @classmethod
@@ -58,5 +74,14 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
                 "ix_dive_site_user_id_name",
                 "user_id",
                 "name",
+            ),
+            CheckConstraint("depth_from IS NULL OR depth_from >= 0", name="ck_dive_site_depth_from_non_negative"),
+            CheckConstraint("depth_to IS NULL OR depth_to >= 0", name="ck_dive_site_depth_to_non_negative"),
+            CheckConstraint(
+                "depth_from IS NULL OR depth_to IS NULL OR depth_from <= depth_to", name="ck_dive_site_depth_range"
+            ),
+            # The dive's range, `ck_dive_altitude_range`, for the same water.
+            CheckConstraint(
+                "altitude IS NULL OR (altitude >= -450 AND altitude <= 6500)", name="ck_dive_site_altitude_range"
             ),
         )
