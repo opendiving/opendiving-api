@@ -340,6 +340,56 @@ class TestThePatch:
         stored["invalidate_sites"].assert_not_awaited()
 
 
+class TestTheReads:
+    @pytest.mark.asyncio
+    async def test_a_tag_that_is_not_the_caller_s_answers_an_empty_page(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Not a 404: the uuid names a resource whose existence must stay unprobeable."""
+        cached = AsyncMock(return_value={})
+        monkeypatch.setattr(dive_sites_module, "resolve_tag_id_for_user", AsyncMock(return_value=None))
+        monkeypatch.setattr(dive_sites_module, "_cached_read_dive_sites", cached)
+
+        await dive_sites_module.read_dive_sites(
+            request=MagicMock(),
+            current_user={"id": USER_ID, "uuid": uuid7()},
+            db=MagicMock(),
+            search="  Sunabe ",
+            tag_uuid=uuid7(),
+            sort=DiveSiteListSort.LAST_DIVED_ON,
+        )
+
+        assert cached.await_args is not None
+        kwargs = cached.await_args.kwargs
+        assert (kwargs["tag_id"], kwargs["search"], kwargs["sort"]) == (-1, "sunabe", DiveSiteListSort.LAST_DIVED_ON)
+
+    @pytest.mark.asyncio
+    async def test_the_single_read_authorizes_before_the_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(
+            dive_sites_module, "_get_owned_dive_site", AsyncMock(side_effect=lambda *_: calls.append("owned"))
+        )
+        monkeypatch.setattr(
+            dive_sites_module, "_cached_read_dive_site", AsyncMock(side_effect=lambda *_, **__: calls.append("read"))
+        )
+
+        await dive_sites_module.read_dive_site(
+            request=MagicMock(), uuid=uuid7(), current_user={"id": USER_ID, "uuid": uuid7()}, db=MagicMock()
+        )
+
+        assert calls == ["owned", "read"]
+
+    @pytest.mark.asyncio
+    async def test_a_tag_deleted_mid_write_is_a_422(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        error = IntegrityError("INSERT", {}, Exception('violates foreign key constraint "dive_site_tag_tag_id_fkey"'))
+        monkeypatch.setattr(dive_sites_module, "replace_tags_for_dive_site", AsyncMock(side_effect=error))
+        db = MagicMock()
+        db.rollback = AsyncMock()
+
+        with pytest.raises(UnprocessableEntityException):
+            await dive_sites_module._replace_tags(db, dive_site_id=11, tag_ids=[3])
+
+        db.rollback.assert_awaited_once()
+
+
 class TestEveryWriteThatMovesASummaryDropsTheSiteReads:
     """A site's read summarises the dives naming it, as a trip's counts the dives on it, so
     every route that drops the trip reads over what a write did to a trip's dives drops the
