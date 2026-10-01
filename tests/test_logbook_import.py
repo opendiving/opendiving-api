@@ -303,8 +303,8 @@ class TestConvertedUploads:
         the member `ImportDive` declares. A package resolved below the floor is caught on
         the writer's side by the conformance tests, which validate against the installed
         schema; nothing but this covers the reader, where the failure is each of these
-        eight dives landing on the placeholder `0` rather than an error - invisible to
-        every other assertion in this class, both of which count rather than read.
+        eight dives arriving with no number rather than an error - invisible to every
+        other assertion in this class, both of which count rather than read.
         """
         user = create_user(db)
 
@@ -1864,9 +1864,9 @@ class TestTheOldSpellingsAreUndefinedMembers:
 
     Every export this app wrote before the rename spells them that way, so this is what
     happens to one: §5.6's answer to a member a reader does not know, which is to ignore it
-    and carry on. The dive lands on the placeholder its own absent number would have given
-    it and the card carries no number - a loss the diver can see and fix, rather than a
-    refused logbook.
+    and carry on. The dive is left to be numbered as the dive form would number it, as any
+    dive with no number is, and the card carries no number - a loss the diver can see and
+    fix, rather than a refused logbook.
 
     The test is here so that the alias stays rejected. Added back as a kindness it would be
     a second spelling the format never had, and one nothing would later remember to remove.
@@ -1894,8 +1894,7 @@ class TestTheOldSpellingsAreUndefinedMembers:
 
         assert _counts(plan)["dives"] == (1, 0, 0, 0)
         assert _counts(plan)["certifications"] == (1, 0, 0, 0)
-        stored_dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
-        assert stored_dive.dive_number == 0
+        assert [str(dive) for dive in plan.unnumbered_dives] == [json.loads(document)["dives"][0]["uuid"]]
         stored_card = (
             (await async_db.execute(select(Certification).where(Certification.user_id == destination.id)))
             .scalars()
@@ -4310,9 +4309,10 @@ class TestNumbersWiderThanTheColumn:
     HUGE = 2**31
 
     @pytest.mark.asyncio
-    async def test_an_unstorable_number_falls_back_to_the_placeholder(
+    async def test_an_unstorable_number_leaves_the_dive_unnumbered(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
+        """Numbered afterwards as the dive form would number it, as any dive with no number is."""
         _, document = seeded
         parsed = json.loads(document)
         parsed["dives"][0]["number"] = self.HUGE
@@ -4322,8 +4322,7 @@ class TestNumbersWiderThanTheColumn:
 
         assert _counts(plan)["dives"] == (1, 0, 0, 0)
         assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
-        stored = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
-        assert stored.dive_number == 0
+        assert [str(dive) for dive in plan.unnumbered_dives] == [parsed["dives"][0]["uuid"]]
 
     @pytest.mark.asyncio
     async def test_an_unstorable_duration_skips_the_dive_rather_than_the_logbook(
