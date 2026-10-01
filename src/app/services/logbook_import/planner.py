@@ -185,8 +185,28 @@ _EMAIL = TypeAdapter(EmailStr)
 # How many notes a report carries. A logbook whose every record has something to say about
 # it would otherwise produce a response larger than the document it describes; the counts
 # stay complete either way, and `notes_truncated` says how many are missing. Well past any
-# real import - a clean round trip of the demo logbook produces a handful.
+# real import - a clean round trip of the demo logbook produces a handful - but for the
+# derived values it reports, one per dive of a dive-computer file, which yield (`add_note`).
 MAX_NOTES = 500
+
+
+def add_note(notes: list[ImportNote], note: ImportNote) -> int:
+    """Append `note` under the cap, and say how many notes that cost: 0, or the 1 dropped.
+
+    At the cap a derived value's note gives way to any other, the latest first. It is the one
+    kind written once per dive of a dive-computer file, so a batch of them would otherwise
+    crowd every other note out of the list, a skipped record's among them.
+    """
+    if len(notes) < MAX_NOTES:
+        notes.append(note)
+        return 0
+    if note.code != ImportNoteCode.VALUE_DERIVED:
+        derived = [index for index, kept in enumerate(notes) if kept.code == ImportNoteCode.VALUE_DERIVED]
+        if derived:
+            del notes[derived[-1]]
+            notes.append(note)
+    return 1
+
 
 # `IMPORT_PARSER_KEY` is **defined in `services/dive_profiles.py`** and imported above rather
 # than declared here, because that module is where the value means something: it is one of
@@ -686,10 +706,9 @@ class _Planner:
     # ------------------------------------------------------------------ notes
 
     def _note(self, code: ImportNoteCode, message: str, *, collection: str | None = None, uuid: Any = None) -> None:
-        if len(self._notes) >= MAX_NOTES:
-            self._notes_dropped += 1
-            return
-        self._notes.append(ImportNote(code=code, collection=collection, uuid=uuid, message=message))
+        self._notes_dropped += add_note(
+            self._notes, ImportNote(code=code, collection=collection, uuid=uuid, message=message)
+        )
 
     def _claim_document_uuid(self, collection: str, record: Any) -> None:
         """Make a record whose uuid another record of this collection already claimed its own.
@@ -2348,7 +2367,7 @@ class _Planner:
             # in milliseconds, and a dive's duration is whole seconds.
             duration = round(profile.duration / MILLISECONDS_PER_SECOND)
             self._note(
-                ImportNoteCode.VALUE_DROPPED,
+                ImportNoteCode.VALUE_DERIVED,
                 "This dive records no duration, so its length was taken from the span of its own profile.",
                 collection=collection,
                 uuid=dive.uuid,
@@ -2462,7 +2481,7 @@ class _Planner:
             # The dive form's default, derived and reported as the duration is - here, where the
             # dive is known to be written, since a match writes no dive's temperature.
             self._note(
-                ImportNoteCode.VALUE_DROPPED,
+                ImportNoteCode.VALUE_DERIVED,
                 "This dive records no bottom temperature, so it was taken from the coldest reading of its own profile.",
                 collection=collection,
                 uuid=dive.uuid,

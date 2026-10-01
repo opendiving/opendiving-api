@@ -112,7 +112,6 @@ from ..gear_service import recalculate_service_schedule
 from ..gear_stats import recalculate_gear_dive_counts
 from ..user_pictures import write_imported_portrait
 from .planner import (
-    MAX_NOTES,
     Action,
     ImportPlan,
     PlannedFile,
@@ -121,6 +120,7 @@ from .planner import (
     PlannedRecord,
     PlannedRecording,
     PlannedRecordingMatch,
+    add_note,
 )
 from .reader import LoadedImport
 from .staging import StagedFiles
@@ -222,10 +222,9 @@ class _Writer:
     def _note(
         self, code: ImportNoteCode, message: str, *, collection: str | None = None, uuid: uuid_pkg.UUID | None = None
     ) -> None:
-        if len(self._plan.notes) >= MAX_NOTES:
-            self._plan.notes_dropped += 1
-            return
-        self._plan.notes.append(ImportNote(code=code, collection=collection, uuid=uuid, message=message))
+        self._plan.notes_dropped += add_note(
+            self._plan.notes, ImportNote(code=code, collection=collection, uuid=uuid, message=message)
+        )
 
     # ------------------------------------------------------------------ blobs
 

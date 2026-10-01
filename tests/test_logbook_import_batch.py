@@ -1538,7 +1538,9 @@ async def _bottom_temperature(db: AsyncSession, user: User) -> float | None:
 
 
 def _temperature_notes(report: BatchReport) -> int:
-    return sum("bottom temperature" in note.message for note in report.notes)
+    return sum(
+        note.code is ImportNoteCode.VALUE_DERIVED and "bottom temperature" in note.message for note in report.notes
+    )
 
 
 # What the dive form shows of a cylinder.

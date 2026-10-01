@@ -727,6 +727,10 @@ class ImportNoteCode(StrEnum):
     READ_AS_WRITTEN = "read_as_written"
     # The record imported, but one of its values could not be stored as written.
     VALUE_DROPPED = "value_dropped"
+    # A value the document does not state was derived from what it does - a dive's duration
+    # from its profile's span, its bottom temperature from its coldest sample - as spec §5.4
+    # lets a reader that says so. Nothing was lost.
+    VALUE_DERIVED = "value_derived"
     # A reference names a record the document does not define, or one that was skipped.
     REFERENCE_UNRESOLVED = "reference_unresolved"
     # A species could not be matched to this instance's catalog, so the sighting link
@@ -1218,8 +1222,9 @@ class ImportReport(BaseModel):
         int,
         Field(
             default=0,
-            description="Notes beyond the cap that are not in `notes`. Non-zero means the list above is a prefix, "
-            "not the whole story - the counts are still complete.",
+            description="Notes beyond the cap that are not in `notes`. Non-zero means the list above is not the "
+            "whole story - the counts are still complete. At the cap a `value_derived` note gives way to any "
+            "other, so the list keeps those first.",
         ),
     ]
     conversion: Annotated[
