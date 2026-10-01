@@ -19,6 +19,7 @@ from src.app.models.dive import Dive
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
+from src.app.models.dive_site import DiveSite
 from src.app.schemas.logbook_import import ImportNoteCode
 from src.app.services.logbook_import import plan_import, write_import
 from src.app.services.logbook_import.reader import read_as_written
@@ -427,3 +428,49 @@ class TestAConvertedUpload:
             (row.cns_end, row.otu_end) for row in await _recordings(async_db, user.id) if row.cns_end is not None
         ]
         assert readouts == [(6.0, 9.0)]
+
+
+# A site as Subsurface 6 saves one after a reverse lookup: the pin as two space-separated
+# decimals, a one-line description, multi-line notes with the space its writer leaves before
+# `</notes>`, and the lookup's taxonomy, ocean included.
+SSRF_SITE = b"""<divelog program='subsurface' version='3'>
+<divesites>
+<site uuid='8d695877' name='Eel Garden' gps='28.478807 34.522936' description='Sandy slope north of the lighthouse'>
+  <notes>Entry from the beach steps.
+Strong current on the outgoing tide. </notes>
+  <geo cat='1' origin='0' value='Gulf of Aqaba'/>
+  <geo cat='2' origin='0' value='Egypt'/>
+  <geo cat='3' origin='0' value='South Sinai'/>
+  <geo cat='5' origin='0' value='Dahab'/>
+</site>
+</divesites>
+<dives>
+<dive number='1' divesiteid='8d695877' date='2026-07-07' time='10:05:00' duration='40:00 min'>
+  <divecomputer last-manual-time='40:00 min'>
+  <depth max='15.0 m' mean='13.0 m' />
+  </divecomputer>
+</dive>
+</dives>
+</divelog>
+"""
+
+
+@pytestmark_db
+class TestASubsurfaceSite:
+    @pytest.mark.asyncio
+    async def test_it_arrives_with_its_pin_its_notes_and_its_locality(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The installed reader carries what a Subsurface site holds beyond its name, which is
+        what proves the dependency floor moved: the description leads the notes, and the town,
+        region and country compose the locality with no ocean."""
+        user = create_user(db)
+
+        await _apply(async_db, user.id, SSRF_SITE, filename="logbook.ssrf")
+
+        site = (await async_db.execute(select(DiveSite).where(DiveSite.user_id == user.id))).scalar_one()
+        assert (site.latitude, site.longitude) == (28.478807, 34.522936)
+        assert site.notes == (
+            "Sandy slope north of the lighthouse\n\nEntry from the beach steps.\nStrong current on the outgoing tide."
+        )
+        assert site.location_name == "Dahab, South Sinai, Egypt"
