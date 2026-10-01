@@ -19,17 +19,26 @@ import pytest
 from sqlalchemy import Engine, text
 
 from tests.conftest import db_available
-from tests.helpers.migrations import migrate, scratch_database
+from tests.helpers.migrations import migrate, scratch_database, template_database
 
-pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
+pytestmark = [
+    pytest.mark.skipif(not db_available(), reason="No database connection available"),
+    pytest.mark.xdist_group(__name__),
+]
 
 _REVISION = "b5dad8793a54"
 _BELOW = "a8fb7217f84a"
 
 
+@pytest.fixture(scope="module")
+def below() -> Iterator[str]:
+    with template_database(_BELOW) as template:
+        yield template
+
+
 @pytest.fixture
-def scratch() -> Iterator[tuple[str, Engine]]:
-    with scratch_database("people") as database:
+def scratch(below: str) -> Iterator[tuple[str, Engine]]:
+    with scratch_database("people", below) as database:
         yield database
 
 
@@ -127,7 +136,6 @@ def _hidden_sets(engine: Engine) -> dict[str, list[str]]:
 class TestTheUpgrade:
     def test_one_person_per_distinct_string_per_diver_from_live_rows(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
 
         migrate(name, "upgrade", _REVISION)
@@ -145,7 +153,6 @@ class TestTheUpgrade:
 
     def test_every_course_lists_its_instructor_and_every_card_names_it(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
 
         migrate(name, "upgrade", _REVISION)
@@ -190,7 +197,6 @@ class TestTheUpgrade:
         """Right after `contact_uuid`, which is `DiveFormField`'s canonical position, and
         nowhere the contact was not hidden."""
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
 
         migrate(name, "upgrade", _REVISION)
@@ -210,7 +216,6 @@ class TestTheDowngrade:
         """And to the first spelling where a diver's differed only by case; a string only a
         hidden card carried is the documented loss."""
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
         hidden_before = _hidden_sets(engine)
 
@@ -229,7 +234,6 @@ class TestTheDowngrade:
 
     def test_upgrading_again_reproduces_the_people(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
 
         migrate(name, "upgrade", _REVISION)

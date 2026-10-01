@@ -2887,7 +2887,8 @@ collection via `skipif`), by one `CREATE DATABASE` issued from the configured da
 from `alembic upgrade head`, not `create_all`, so added columns arrive and the `client` fixture's
 real startup upgrade is a no-op. A model change without a revision fails locally; a test database
 stranded at a revision outside the branch makes `_ensure_tables` re-raise `CommandError` naming the
-`DROP DATABASE` that fixes it. CI's `POSTGRES_DB=postgres` derives `postgres_test` unaided.
+`DROP DATABASE` that fixes it. Under `pytest -n` each xdist worker owns one, `_test_gw0` and on;
+CI's first is `postgres_test_gw0`.
 
 ## A deleted gear item's service history has no view, and archiving is the surface that does
 
@@ -6446,9 +6447,9 @@ still 401s; cookie and `detail` are unchanged, so the endpoint is no oracle.
 
 ## Two checkouts running the suite at once share one database, and one of them drops it
 
-`tests/conftest.py` names the test database `POSTGRES_DB` plus `_test` and nothing else, so every
-worktree pointed at one Postgres runs against the same `opendive_test`, where `CONTRIBUTING.md`'s
-host-run recipe points them all.
+`tests/conftest.py` names the test database `POSTGRES_DB` plus `_test` (and the xdist worker under
+`pytest -n`) and nothing per checkout, so every worktree pointed at one Postgres runs against the
+same `opendive_test`, where `CONTRIBUTING.md`'s host-run recipe points them all.
 
 Concurrent runs interfere, and it looks like flakiness: one or two failures per run in a different
 unrelated module, passing on re-run. Anything counting or emptying a shared table is a candidate

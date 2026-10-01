@@ -42,8 +42,14 @@ _ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"
 # gitignored and so never followed the `git worktree add` - there isn't one. `core.config`
 # already emits that warning for the same path; a second copy of it says nothing new.
 _env = Config(_ENV_FILE if os.path.isfile(_ENV_FILE) else None)
-CONFIGURED_DATABASE = _env("POSTGRES_DB", default="postgres")
-TEST_DATABASE = f"{CONFIGURED_DATABASE}_test"
+# Under `pytest -n`, each xdist worker gets a database of its own (`_test_gw0`, ...), so no
+# test reads rows another process is writing mid-test. xdist sets `PYTEST_XDIST_WORKER`
+# before a worker imports this module. A worker also inherits the environment of the process
+# that spawned it, whose `POSTGRES_DB` this module has already redirected, so the
+# configured name is handed down in a variable of its own rather than read again.
+CONFIGURED_DATABASE = os.environ.setdefault("OPENDIVING_SUITE_CONFIGURED_DB", _env("POSTGRES_DB", default="postgres"))
+_WORKER = os.environ.get("PYTEST_XDIST_WORKER")
+TEST_DATABASE = f"{CONFIGURED_DATABASE}_test" + (f"_{_WORKER}" if _WORKER else "")
 os.environ["POSTGRES_DB"] = TEST_DATABASE
 
 import pytest

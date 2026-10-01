@@ -13,6 +13,8 @@ Nothing here needs a database - it asserts what the settings resolved to, not wh
 See *"The suite has its own database, and builds it with the migrations"* in DECISIONS.md.
 """
 
+import os
+
 from src.app.core.config import settings
 from src.app.core.db.database import DATABASE_URL
 from tests.conftest import CONFIGURED_DATABASE, TEST_DATABASE
@@ -25,9 +27,17 @@ class TestTheSuiteHasItsOwnDatabase:
 
     def test_it_is_the_configured_name_with_a_suffix(self):
         """Derived rather than a literal, so the two cannot coincide whatever the operator
-        called theirs - `opendive_test` against the stock `src/.env`, `postgres_test` in CI.
+        called theirs - `opendive_test` against the stock `src/.env`, `postgres_test_gw0`
+        for CI's first xdist worker.
         """
-        assert TEST_DATABASE == f"{CONFIGURED_DATABASE}_test"
+        worker = os.environ.get("PYTEST_XDIST_WORKER")
+        assert TEST_DATABASE == f"{CONFIGURED_DATABASE}_test" + (f"_{worker}" if worker else "")
+
+    def test_a_worker_derives_it_from_the_configured_name(self):
+        """An xdist worker inherits an environment whose `POSTGRES_DB` already names the
+        suite's database; derived from that, a worker's would be `opendive_test_test_gw0`.
+        """
+        assert not CONFIGURED_DATABASE.endswith("_test")
 
     def test_the_settings_the_app_was_built_from_name_it(self):
         """`settings` is what every fixture and every route reaches the database through, so

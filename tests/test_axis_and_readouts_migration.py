@@ -19,9 +19,12 @@ from sqlalchemy import Engine, text
 
 from src.app.core.db.migrations import MIGRATIONS_PATH
 from tests.conftest import db_available
-from tests.helpers.migrations import alembic, migrate, scratch_database
+from tests.helpers.migrations import alembic, migrate, scratch_database, template_database
 
-pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
+pytestmark = [
+    pytest.mark.skipif(not db_available(), reason="No database connection available"),
+    pytest.mark.xdist_group(__name__),
+]
 
 _REVISION = "ce09bc7d4c64"
 _BELOW = "dd420c8df9de"
@@ -36,9 +39,15 @@ def _revision() -> ModuleType:
     return module
 
 
+@pytest.fixture(scope="module")
+def below() -> Iterator[str]:
+    with template_database(_BELOW) as template:
+        yield template
+
+
 @pytest.fixture
-def scratch() -> Iterator[tuple[str, Engine]]:
-    with scratch_database("axis") as database:
+def scratch(below: str) -> Iterator[tuple[str, Engine]]:
+    with scratch_database("axis", below) as database:
         yield database
 
 
@@ -129,7 +138,6 @@ def _recordings(engine: Engine, dive_id: int) -> list[Any]:
 class TestTheUpgrade:
     def test_the_readouts_and_the_setting_move_onto_the_primary_recording(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
 
         migrate(name, "upgrade", _REVISION)
@@ -160,7 +168,6 @@ class TestTheUpgrade:
 
     def test_every_axis_entry_is_multiplied_and_stamped(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
 
         migrate(name, "upgrade", _REVISION)
@@ -186,7 +193,6 @@ class TestTheUpgrade:
 class TestTheDowngrade:
     def test_it_puts_the_data_back(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
         before = _snapshot(engine)
 
@@ -208,7 +214,6 @@ class TestTheDowngrade:
         """Data written after the change can carry an offset below a second, which the old
         axis cannot hold - so the downgrade refuses rather than rounds, and rolls back whole."""
         name, engine = scratch
-        migrate(name, "upgrade", _BELOW)
         _seed(engine)
         migrate(name, "upgrade", _REVISION)
         with engine.begin() as connection:
