@@ -392,8 +392,8 @@ class ParsedDiveSchema(_ParserOutput):
     # **No bound on any of them, and that is a ruling rather than an oversight.** A
     # fractional visibility, a rating past 5 or notes past `NOTES_MAX_LENGTH` reach the form
     # as the file has them, where its validation refuses the save and shows the field, and
-    # the diver decides what the file meant. Logbook import's planner drops the same values
-    # with a note, because a batch has nobody to ask.
+    # the diver decides what the file meant. Logbook import's planner drops each with a
+    # note, or cuts notes at the cap, because a batch has nobody to ask.
     notes: str | None = None
     visibility: float | None = None
     weight: float | None = None

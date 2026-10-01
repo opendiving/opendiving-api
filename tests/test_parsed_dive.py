@@ -238,7 +238,8 @@ class TestReadingsThatAreNotReadings:
 class TestTheDivesOwnMembers:
     """The rest of the dive a file states reaches the form as the file has it, where the
     form's validation refuses what this app cannot store and the diver decides what was
-    meant. Logbook import drops the same values with a note, having nobody to ask."""
+    meant. Logbook import drops each with a note, or cuts notes at the cap, having nobody
+    to ask."""
 
     def test_a_value_the_app_cannot_store_passes_as_written(self) -> None:
         notes = "x" * (NOTES_MAX_LENGTH + 1)

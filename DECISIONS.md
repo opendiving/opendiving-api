@@ -432,14 +432,12 @@ refuses, a 422 naming a converter bug.
 
 `ParsedDiveSchema` (`schemas/parsed_dive.py`) is the form's values: what a dive persists
 (`avg_depth`, `bottom_temperature`, `dive_number`, `duration`, `max_depth`, `start_time`,
-`mixtures`, the entry and exit fixes, and the rest the document states of the dive - `notes`,
-`visibility`, `weight`, `water_type`, `altitude`, `type`, `rating`, `air_temperature`, `current`,
-`waves`, `weather`, `entry_type`, `boat_name`, `tags`) and what lands on the first recording
-(`device`, `mode`, `deco_model`, `salinity`, the CNS, OTU and surface-pressure readouts).
-`DiveMixtureSchema` carries `end_pressure`, `helium`, `oxygen`, `start_pressure`, `volume`,
-`po2_limit`, `role` and `gas_number`. What nothing stores (tissue loading, `transmitter_id`, a
-mixture's `type`) is not projected, and samples never cross `/dive/parse` (*"A profile is never read
-over `/dive/parse`"*).
+`mixtures`, the entry and exit fixes, and the rest the document states of the dive) and what lands
+on the first recording (`device`, `mode`, `deco_model`, `salinity`, the CNS, OTU and
+surface-pressure readouts). `DiveMixtureSchema` carries `end_pressure`, `helium`, `oxygen`,
+`start_pressure`, `volume`, `po2_limit`, `role` and `gas_number`. What nothing stores (tissue
+loading, `transmitter_id`, a mixture's `type`) is not projected, and samples never cross
+`/dive/parse` (*"A profile is never read over `/dive/parse`"*).
 
 The prefill rounds a cylinder's pressures, fractions, ppO₂ limit and volume, and the CNS and OTU
 readouts, to two decimals (`_two_places` in `services/dive_reader.py`): the reader passes the file's
@@ -447,11 +445,6 @@ digits (`20714062 Pa -> 207.14062 bar`), and the web renders two. It quantizes v
 `Decimal(str(value)).quantize(Decimal("0.01"))`, not `round(value, 2)`, which lands `2.675` on
 `2.67`. Depths and temperatures keep the document's precision; a stored recording keeps the reader's
 digits.
-
-The dive's own members pass as written, with no bound: a fractional visibility, a rating of 7 or
-notes past the cap reach the form, whose validation refuses the save in front of the diver, who
-decides what the file meant. Logbook import's planner drops the same values with a note, a batch
-having nobody to ask.
 
 ## Gear is `GearItem` + `GearSet`, not a single `Gear` table
 
@@ -1982,9 +1975,9 @@ becomes
 - `ParsedDiveSchema` validators mirror each `CHECK`'s numbers, nulling, not rejecting:
   `surface_pressure_bar` and `po2_limit` two-sided; `cns_start`, `cns_end`, `otu_start`, `otu_end`,
   `gas_number` at `< 0`; `avg_depth`, `max_depth` at `<= 0`. Scope: bounded and reader-reachable,
-  but the dive's own members the form validates (*"`ParsedDiveSchema`/`DiveMixtureSchema` carry only
-  fields the backend models support"*). `ck_dive_mixture_oxygen_helium_sum`,
-  `ck_dive_mixture_pressure_order`, `duration`, `volume`, `oxygen` and `helium` stay unguarded.
+  but the dive's own members the form validates (the comment above them on `ParsedDiveSchema`).
+  `ck_dive_mixture_oxygen_helium_sum`, `ck_dive_mixture_pressure_order`, `duration`, `volume`,
+  `oxygen` and `helium` stay unguarded.
 - The `noop` branch's writes and commit share one `try`/`rollback`, since a `CHECK` raises from
   `execute()` (`TestReExtractionFailureDoesNotFailTheRequest`).
 - `begin_nested()` per recording in `backfill_tech_fields` wraps the statements; a rejected
