@@ -430,13 +430,11 @@ refuses, a 422 naming a converter bug.
 
 ## `ParsedDiveSchema`/`DiveMixtureSchema` carry only fields the backend models support
 
-`ParsedDiveSchema` (`schemas/parsed_dive.py`) is the form's values: what a dive persists
-(`avg_depth`, `bottom_temperature`, `dive_number`, `duration`, `max_depth`, `start_time`,
-`mixtures`, the entry and exit fixes, and the rest the document states of the dive) and what lands
-on the first recording (`device`, `mode`, `deco_model`, `salinity`, the CNS, OTU and
-surface-pressure readouts). `DiveMixtureSchema` carries `end_pressure`, `helium`, `oxygen`,
-`start_pressure`, `volume`, `po2_limit`, `role` and `gas_number`. What nothing stores (tissue
-loading, `transmitter_id`, a mixture's `type`) is not projected, and samples never cross
+`ParsedDiveSchema` (`schemas/parsed_dive.py`) is the form's values: what a dive persists, from the
+document's dive, and what lands on the first recording (`device`, `mode`, `deco_model`, `salinity`,
+the CNS, OTU and surface-pressure readouts). `DiveMixtureSchema` carries `end_pressure`, `helium`,
+`oxygen`, `start_pressure`, `volume`, `po2_limit`, `role` and `gas_number`. What nothing stores
+(tissue loading, `transmitter_id`, a mixture's `type`) is not projected, and samples never cross
 `/dive/parse` (*"A profile is never read over `/dive/parse`"*).
 
 The prefill rounds a cylinder's pressures, fractions, ppO₂ limit and volume, and the CNS and OTU
