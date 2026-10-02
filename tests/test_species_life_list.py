@@ -22,7 +22,7 @@ in the SQL: a `GROUP BY` leaning on functional-dependency inference, three aggre
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,15 +33,17 @@ from uuid6 import uuid7
 from src.app.api import router as api_router
 from src.app.api.dependencies import get_current_user
 from src.app.api.v1 import users as users_module
-from src.app.api.v1.users import SPECIES_LIFE_LIST_CACHE_KEY_PREFIX
+from src.app.api.v1.users import SPECIES_LIFE_LIST_CACHE_KEY_PREFIX, SPECIES_LIFE_LIST_DETAIL_CACHE_KEY_PREFIX
 from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.core.setup import create_application
+from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_species import DiveSpecies
+from src.app.schemas.species import SpeciesLifeListDetail
 from src.app.services.dive_stats import recalculate_dive_stats
-from src.app.services.species_life_list import species_life_list
+from src.app.services.species_life_list import species_life_list, species_life_list_detail
 from tests.conftest import db_available
-from tests.helpers.generators import create_dive, create_species, create_user
+from tests.helpers.generators import create_dive, create_dive_site, create_species, create_user
 from tests.helpers.routes import iter_api_routes
 
 CURRENT_USER = {"id": 7, "uuid": uuid7(), "username": "ada", "is_superuser": False}
@@ -649,3 +651,129 @@ class TestTheDiveFilterAgainstPostgres:
         )
 
         assert [row["id"] for row in page["data"]] == [on_trip.id]
+
+
+def _detail_path(species_uuid: Any) -> str:
+    return f"{LIFE_LIST_PATH}/{species_uuid}"
+
+
+class TestTheDetailRoute:
+    def test_it_answers_the_entry_with_its_site_count(self, client: TestClient) -> None:
+        detail = SpeciesLifeListDetail(**{**_row("Amphiprion ocellaris"), "dive_count": 4}, dive_site_count=2)
+        with patch.object(users_module, "species_life_list_detail", AsyncMock(return_value=detail)) as service:
+            response = client.get(_detail_path(detail.uuid))
+
+        assert response.status_code == 200
+        assert response.json()["dive_count"] == 4
+        assert response.json()["dive_site_count"] == 2
+        service.assert_awaited_once_with(db=ANY, user_id=CURRENT_USER["id"], species_uuid=detail.uuid)
+
+    def test_a_species_the_caller_never_logged_is_a_404_and_is_not_cached(
+        self, client: TestClient, redis: _FakeRedis
+    ) -> None:
+        """Uncached so a first sighting shows at once rather than after the TTL."""
+        with patch.object(users_module, "species_life_list_detail", AsyncMock(return_value=None)):
+            response = client.get(_detail_path(uuid7()))
+
+        assert response.status_code == 404
+        assert redis.store == {}
+
+    def test_each_species_gets_its_own_entry_under_the_dive_sweep(self, client: TestClient, redis: _FakeRedis) -> None:
+        """Under `user_{id}_dives:` so a dive write drops it with the list it must agree with,
+        and keyed by the species so one page cannot serve another's figures."""
+        first, second = (SpeciesLifeListDetail(**_row(name), dive_site_count=1) for name in ("one", "two"))
+        with patch.object(users_module, "species_life_list_detail", AsyncMock(side_effect=[first, second])):
+            client.get(_detail_path(first.uuid))
+            answered = client.get(_detail_path(second.uuid)).json()
+
+        assert answered["scientific_name"] == "two"
+        assert len(redis.store) == 2
+        assert SPECIES_LIFE_LIST_DETAIL_CACHE_KEY_PREFIX.startswith("user_{user_id}_dives:")
+
+
+@pytest.mark.skipif(not db_available(), reason="requires a database")
+class TestTheDetailAggregate:
+    def _log(self, db: Session, diver: Any, species: Any, *sites: Any, is_deleted: bool = False) -> Any:
+        dive = create_dive(db, diver, is_deleted=is_deleted)
+        db.add(DiveSpecies(dive_id=dive.id, species_id=species.id, position=0))
+        for position, site in enumerate(sites):
+            db.add(DiveDiveSite(dive_id=dive.id, dive_site_id=site.id, position=position))
+        db.commit()
+        return dive
+
+    @pytest.mark.asyncio
+    async def test_sites_count_once_each_at_any_position(self, db: Session, async_db: AsyncSession) -> None:
+        """A drift dive across two sites counts for both, a second dive at one of them adds no
+        site, and a dive naming no site adds none - while every one of the three still counts
+        as a dive, the join to `dive_dive_site` multiplying no `dive_count`."""
+        diver = create_user(db)
+        species = create_species(db)
+        north, south = create_dive_site(db, diver), create_dive_site(db, diver)
+        self._log(db, diver, species, north, south)
+        self._log(db, diver, species, south)
+        self._log(db, diver, species)
+
+        detail = await species_life_list_detail(async_db, user_id=diver.id, species_uuid=species.uuid)
+
+        assert detail is not None
+        assert detail.dive_count == 3
+        assert detail.dive_site_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_dives_site_does_not_count(self, db: Session, async_db: AsyncSession) -> None:
+        diver = create_user(db)
+        species = create_species(db)
+        self._log(db, diver, species, create_dive_site(db, diver))
+        self._log(db, diver, species, create_dive_site(db, diver), is_deleted=True)
+
+        detail = await species_life_list_detail(async_db, user_id=diver.id, species_uuid=species.uuid)
+
+        assert detail is not None
+        assert (detail.dive_count, detail.dive_site_count) == (1, 1)
+
+    @pytest.mark.asyncio
+    async def test_only_site_less_dives_is_zero_sites(self, db: Session, async_db: AsyncSession) -> None:
+        """The outer join: an inner one would drop the species and 404 a diver who saw it."""
+        diver = create_user(db)
+        species = create_species(db)
+        self._log(db, diver, species)
+
+        detail = await species_life_list_detail(async_db, user_id=diver.id, species_uuid=species.uuid)
+
+        assert detail is not None
+        assert (detail.dive_count, detail.dive_site_count) == (1, 0)
+
+    @pytest.mark.asyncio
+    async def test_it_is_none_exactly_when_the_list_leaves_the_species_out(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Seen only on a deleted dive, seen only by another diver, never seen: the three ways
+        the life list has no row, and each is `None` here."""
+        diver = create_user(db)
+        someone_else = create_user(db)
+        deleted_only, theirs, unseen = create_species(db), create_species(db), create_species(db)
+        self._log(db, diver, deleted_only, is_deleted=True)
+        self._log(db, someone_else, theirs, create_dive_site(db, someone_else))
+
+        for species in (deleted_only, theirs, unseen):
+            assert await species_life_list_detail(async_db, user_id=diver.id, species_uuid=species.uuid) is None
+
+    @pytest.mark.asyncio
+    async def test_it_carries_the_lists_figures_for_the_same_species(self, db: Session, async_db: AsyncSession) -> None:
+        """The two are read by different statements, so what keeps them equal is the shared
+        column list - this is what fails if one of them stops using it."""
+        diver = create_user(db)
+        species = create_species(db)
+        site = create_dive_site(db, diver)
+        for day, offset_minutes in ((3, 180), (9, 480)):
+            dive = self._log(db, diver, species, site, create_dive_site(db, diver))
+            dive.start_time = datetime(2026, 6, day, 9, 0, tzinfo=UTC)
+            dive.utc_offset_minutes = offset_minutes
+        db.commit()
+
+        listed = (await species_life_list(async_db, user_id=diver.id, offset=0, limit=10))["data"][0]
+        detail = await species_life_list_detail(async_db, user_id=diver.id, species_uuid=species.uuid)
+
+        assert detail is not None
+        assert detail.model_dump(exclude={"dive_site_count"}) == listed
+        assert detail.dive_site_count == 3

@@ -524,6 +524,10 @@ UNOWNED_ROUTES: dict[tuple[str, str], str] = {
         "Commons file shared by every account, so there is no owner to compare against and "
         "nothing an ownership check could protect."
     ),
+    ("GET", "/api/v1/user/species/{uuid}"): (
+        "The uuid is the global catalog's; the caller's own dives scope the query, and a species "
+        "they never logged is a 404 like one the catalog lacks."
+    ),
     ("GET", "/api/v1/checkin/{token}/certification/{uuid}/front"): (
         "Anonymous, so there is no caller to own it: the owner is the diver the check-in link names, "
         "and `find_card_front` scopes the card to that diver's `user_id` - someone else's card is the "

@@ -20,6 +20,7 @@ log as a whole", which is exactly what `/user/dive-stats`, `/user/gas-use-histor
 family's path shape.
 """
 
+import uuid as uuid_pkg
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -29,10 +30,11 @@ from ..core.utils.datetime_offset import combine_dive_start_time
 from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like
 from ..crud.crud_dives import at_dive_site, date_only_of_the, offset_of_the
 from ..models.dive import Dive
+from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_species import DiveSpecies
 from ..models.species import Species
 from ..models.species_name import SpeciesName
-from ..schemas.species import SpeciesLifeListEntry
+from ..schemas.species import SpeciesLifeListDetail, SpeciesLifeListEntry
 
 
 def _sighting_join(statement: Any, *, user_id: int) -> Any:
@@ -66,6 +68,44 @@ def _search_clause(search: str) -> Any:
         .exists()
     )
     return or_(matching_alias, Species.scientific_name.ilike(pattern, escape=LIKE_ESCAPE_CHAR))
+
+
+_LAST_SEEN = func.max(Dive.start_time).label("last_seen")
+
+
+def _history_columns() -> tuple[Any, ...]:
+    """The taxon and the diver's history with it - one list entry's columns, shared with the
+    single-species read so the two can never count a species' dives differently."""
+    return (
+        Species.uuid,
+        Species.scientific_name,
+        Species.common_name,
+        Species.rank,
+        Species.photo_sha256,
+        # `DISTINCT` because a dive can only carry a species once - the unique constraint on
+        # `dive_species` says so - but the count has to survive anything a join adds here, as
+        # the single-species read's join to `dive_dive_site` does, rather than depending on that.
+        func.count(func.distinct(Dive.id)).label("dive_count"),
+        func.min(Dive.start_time).label("first_seen"),
+        _LAST_SEEN,
+        offset_of_the(Dive.start_time.asc()).label("first_offset"),
+        offset_of_the(Dive.start_time.desc()).label("last_offset"),
+        date_only_of_the(Dive.start_time.asc()).label("first_date_only"),
+        date_only_of_the(Dive.start_time.desc()).label("last_date_only"),
+    )
+
+
+def _history_fields(row: Any) -> dict[str, Any]:
+    return {
+        "uuid": row.uuid,
+        "scientific_name": row.scientific_name,
+        "common_name": row.common_name,
+        "rank": row.rank,
+        "photo_sha256": row.photo_sha256,
+        "dive_count": row.dive_count,
+        "first_seen": combine_dive_start_time(row.first_seen, row.first_offset, row.first_date_only),
+        "last_seen": combine_dive_start_time(row.last_seen, row.last_offset, row.last_date_only),
+    }
 
 
 async def species_life_list(
@@ -103,52 +143,52 @@ async def species_life_list(
         _sighting_join(select(func.count(func.distinct(Species.id))), user_id=user_id).where(*conditions)
     )
 
-    last_seen = func.max(Dive.start_time).label("last_seen")
     rows = (
         await db.execute(
-            _sighting_join(
-                select(
-                    Species.uuid,
-                    Species.scientific_name,
-                    Species.common_name,
-                    Species.rank,
-                    Species.photo_sha256,
-                    # `DISTINCT` because a dive can only carry a species once - the unique
-                    # constraint on `dive_species` says so - but the count has to survive
-                    # anything a future join adds here rather than depending on that.
-                    func.count(func.distinct(Dive.id)).label("dive_count"),
-                    func.min(Dive.start_time).label("first_seen"),
-                    last_seen,
-                    offset_of_the(Dive.start_time.asc()).label("first_offset"),
-                    offset_of_the(Dive.start_time.desc()).label("last_offset"),
-                    date_only_of_the(Dive.start_time.asc()).label("first_date_only"),
-                    date_only_of_the(Dive.start_time.desc()).label("last_date_only"),
-                ),
-                user_id=user_id,
-            )
+            _sighting_join(select(*_history_columns()), user_id=user_id)
             .where(*conditions)
             # Grouped by the primary key alone: every other selected `species` column is
             # functionally dependent on it, which Postgres understands.
             .group_by(Species.id)
-            .order_by(last_seen.desc(), Species.id)
+            .order_by(_LAST_SEEN.desc(), Species.id)
             .offset(offset)
             .limit(limit)
         )
     ).all()
 
     return {
-        "data": [
-            SpeciesLifeListEntry(
-                uuid=row.uuid,
-                scientific_name=row.scientific_name,
-                common_name=row.common_name,
-                rank=row.rank,
-                photo_sha256=row.photo_sha256,
-                dive_count=row.dive_count,
-                first_seen=combine_dive_start_time(row.first_seen, row.first_offset, row.first_date_only),
-                last_seen=combine_dive_start_time(row.last_seen, row.last_offset, row.last_date_only),
-            ).model_dump()
-            for row in rows
-        ],
+        "data": [SpeciesLifeListEntry(**_history_fields(row)).model_dump() for row in rows],
         "total_count": total_count or 0,
     }
+
+
+async def species_life_list_detail(
+    db: AsyncSession, *, user_id: int, species_uuid: uuid_pkg.UUID
+) -> SpeciesLifeListDetail | None:
+    """One species' life-list entry, plus how many of the diver's sites those dives name.
+
+    `None` when no live dive of theirs records it - the same condition that keeps it off the
+    list - whether or not the catalog holds the species.
+
+    Sites are counted as the site summary counts dives: a dive naming a site at any position
+    counts for it. The outer join keeps a species sighted only on site-less dives, at a site
+    count of 0; the duplicate rows it makes for a multi-site dive are why every aggregate
+    here is distinct or order-picked.
+    """
+    row = (
+        await db.execute(
+            _sighting_join(
+                select(
+                    *_history_columns(),
+                    func.count(func.distinct(DiveDiveSite.dive_site_id)).label("dive_site_count"),
+                ),
+                user_id=user_id,
+            )
+            .outerjoin(DiveDiveSite, DiveDiveSite.dive_id == Dive.id)
+            .where(Species.uuid == species_uuid)
+            .group_by(Species.id)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    return SpeciesLifeListDetail(**_history_fields(row), dive_site_count=row.dive_site_count)

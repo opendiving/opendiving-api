@@ -46,7 +46,7 @@ from ...schemas.email_change import (
     EmailChangeVerifyRequest,
     EmailChangeVerifyResponse,
 )
-from ...schemas.species import SpeciesLifeListEntry
+from ...schemas.species import SpeciesLifeListDetail, SpeciesLifeListEntry
 from ...schemas.storage import StorageUsageRead
 from ...schemas.user import (
     ANCHOR_REQUIRED_MESSAGES,
@@ -66,7 +66,7 @@ from ...services.email_service import (
     send_email_change_confirmation_email,
     send_email_changed_notification,
 )
-from ...services.species_life_list import species_life_list
+from ...services.species_life_list import species_life_list, species_life_list_detail
 from ...services.storage_usage import get_storage_usage, storage_limit_bytes
 from ...services.user_pictures import (
     AVATAR_FRAME,
@@ -976,6 +976,42 @@ async def read_species_life_list(
         search=normalized or None,
         dive_site_id=dive_site_id,
     )
+
+
+# Under the life list's prefix, so the same dive-write sweep drops it and the two never
+# disagree - as must the site count, which a site delete changes through its own call to
+# `invalidate_dive_caches`. A species row is immutable, so its uuid is a stable key segment.
+SPECIES_LIFE_LIST_DETAIL_CACHE_KEY_PREFIX = "user_{user_id}_dives:species:{species_uuid}"
+
+
+@cache(key_prefix=SPECIES_LIFE_LIST_DETAIL_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
+async def _cached_species_life_list_detail(
+    request: Request, user_id: int, db: AsyncSession, species_uuid: uuid_pkg.UUID
+) -> SpeciesLifeListDetail:
+    """Fetches (and caches) one species' entry for the caller. The 404 raises before anything
+    is stored, so a first sighting shows at once rather than after the TTL."""
+    detail = await species_life_list_detail(db=db, user_id=user_id, species_uuid=species_uuid)
+    if detail is None:
+        raise NotFoundException("Species not in your log")
+    return detail
+
+
+@router.get("/user/species/{uuid}", response_model=SpeciesLifeListDetail)
+async def read_species_life_list_detail(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> SpeciesLifeListDetail:
+    """The caller's history with one species: its `GET /user/species` row, with the same
+    figures, plus `dive_site_count` - the distinct sites those dives name at any position, as
+    a site's summary counts its dives.
+
+    404 when no live dive of the caller's records the species, whether or not the catalog
+    holds it: exactly the species the life list leaves out. The uuid is the catalog's, which
+    belongs to nobody, so the scoping is the query's and there is no ownership check to make.
+    """
+    return await _cached_species_life_list_detail(request, user_id=current_user["id"], db=db, species_uuid=uuid)
 
 
 @router.delete("/user", response_model=AccountDeletionResponse)
