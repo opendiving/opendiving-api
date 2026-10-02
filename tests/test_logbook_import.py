@@ -4671,7 +4671,7 @@ class TestTheAgencyVocabulary:
 
 class TestTheFormatLabelTable:
     """`FORMAT_LABELS`, `FORMAT_CONTENT_TYPES` and `FORMAT_KINDS` name every id
-    `divejson.read_formats()` returns.
+    `divejson.read_formats()` returns, and `ATTACHES_FIRST` names none it does not.
 
     The one guard in this repository that can see a **new reader** arrive. Everything else
     on both sides of the seam is written to tolerate an unknown format - the accepted set is
@@ -4719,7 +4719,12 @@ class TestTheFormatLabelTable:
         library has dropped is a format this build advertises and refuses."""
         stale = [
             fmt
-            for table in (dive_reader.FORMAT_LABELS, dive_reader.FORMAT_CONTENT_TYPES, dive_reader.FORMAT_KINDS)
+            for table in (
+                dive_reader.FORMAT_LABELS,
+                dive_reader.FORMAT_CONTENT_TYPES,
+                dive_reader.FORMAT_KINDS,
+                dive_reader.ATTACHES_FIRST,
+            )
             for fmt in table
             if fmt not in divejson.read_formats()
         ]

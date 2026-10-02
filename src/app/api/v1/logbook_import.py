@@ -259,14 +259,17 @@ async def preview_logbook_import(
     archive is opened, and its files join the rest. At most one full-export archive is
     imported at a time.
 
-    **An import of several files writes what its files would write imported one at a time,
-    in the order it reads them**: the archive, then DiveJSON documents, then logbooks, then
-    dive-computer files, each by name. So a dive computer's two exports of one dive are one
-    dive with both files, whether they arrive together or on two days, and two computers'
-    records of one dive are one dive with two recordings. A file that is one dive - one
-    computer's record of it, whatever its format - is kept on the dive it becomes, as the dive
-    form keeps a file it is handed, and a dive-computer file's dive takes its identifier from
-    its bytes: the same whenever the same file comes again, under any name.
+    **An import of several files writes what its files would write imported one at a time, in
+    the order it reads them**: the archive, then DiveJSON documents, then logbooks, then
+    dive-computer files - the Suunto app's JSON exports ahead of the rest, each by name. So
+    a dive computer's two exports of one dive are one dive with both files, whether they
+    arrive together or on two days, and two computers' records of one dive are one dive with
+    two recordings. A dive's first file decides its positions, which a later one only fills,
+    and the Suunto app's JSON states each satellite fix's error where the same dive's FIT
+    does not. A file that is one dive - one computer's record of it, whatever its format -
+    is kept on the dive it becomes, as the dive form keeps a file it is handed, and a
+    dive-computer file's dive takes its identifier from its bytes: the same whenever the
+    same file comes again, under any name.
 
     Every record lands in one of four buckets, per collection, summed over the files: **created**,
     **linked** (an existing record of yours already carries that identifier, or that name),

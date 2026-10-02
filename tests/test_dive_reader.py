@@ -193,7 +193,16 @@ class TestThePrefill:
         _, parsed = read_prefill(_fixture("suunto-ocean-2026.json"))
 
         assert (parsed.entry_latitude, parsed.entry_longitude) == (28.496525, 34.5168)
-        assert (parsed.exit_latitude, parsed.exit_longitude) == (28.496523, 34.516778)
+        assert (parsed.exit_latitude, parsed.exit_longitude) == (28.496447, 34.516765)
+
+    def test_the_exit_is_the_fix_the_receiver_vouched_for(self) -> None:
+        """Not the first fix after surfacing, which states 47 m of error, but the 9 m one 9 s
+        later - while the same dive's FIT states no error, and keeps its first fix."""
+        _, parsed = read_prefill(_fixture("ocean-poor-first-fix.json"))
+        _, fit = read_prefill(_fixture("ocean-poor-first-fix.fit"))
+
+        assert (parsed.exit_latitude, parsed.exit_longitude) == (28.470792, 34.507208)
+        assert (fit.exit_latitude, fit.exit_longitude) == (28.471383, 34.507658)
 
     def test_depths_pass_as_the_document_writes_them(self) -> None:
         _, parsed = read_prefill(suunto_json(max_depth=21.8000011))

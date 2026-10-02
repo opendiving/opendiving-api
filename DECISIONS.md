@@ -2041,6 +2041,16 @@ reach existing dives through a re-upload, because `should_extract` still answers
 `backfill_tech_fields` re-reads every candidate on every run so that it needs no version to bump; a
 fix of that shape ships with a backfill run, not with instructions to re-upload.
 
+## A dive's fixes stay as the reader that placed them chose
+
+A release that changes how the reader chooses a dive's entry or exit fix moves no fix already
+stored. The earlier fix is the previous rule's answer rather than a corrupt value, and every re-read
+of the files - a repeat upload, the profile backfill, the tech-field backfill - fills a blank fix
+and never overwrites one. What re-derives the primary recording outright moves it: the dive or its
+file deleted and uploaded again, a file removed from the primary, another recording made primary.
+Rejected: a backfill that rewrites every stored fix the dive's files yield, a data path the
+flagship's one account does not need.
+
 ## Real dive-computer files are committed, and only the cases no file shows are written
 
 `tests/fixtures/dive_files/` holds exports as the devices wrote them, marked `-text` in
@@ -6907,14 +6917,14 @@ bump moves no reader version, so it needs `--force --parser-key fit`.
 ## An import is its files imported one at a time
 
 An import of many files writes what each would write imported alone, in one order - archive,
-documents, logbooks, one computer's files, by name - in one transaction. A file is planned against
-what the files before it wrote, so the gates pair a computer's two exports, or two computers, as
-across two days. The preview runs the same pass and rolls it back. Each file converts alone as a
-one-member zip named by its digest, so a record with no id takes its identity from the bytes. A file
-of one dive and one computer's record is kept, its recording derived from its files as the form's
-is. Dive numbers are the exception: given after the last file, in date order across files. Rejected:
-folding pairs in the documents before planning, a second writer; pairing by basename, true of the
-Suunto app alone.
+documents, logbooks, computers' files, each by name - in one transaction. The Suunto app's JSON
+leads the computers' files: a dive's first file decides its fixes, and only the JSON states their
+error. Each file is planned against what the files before it wrote, so the gates pair a computer's
+two exports, or two computers, as across two days. Each file converts alone as a one-member zip
+named by its digest, so a record with no id takes its identity from the bytes. A file of one dive
+and one computer's record is kept, its recording derived as the form's is. Dive numbers are given
+after the last file, in date order. Rejected: folding pairs in the documents before planning, a
+second writer; pairing by basename, true of the Suunto app alone.
 
 ## A dive's cylinders fill from whichever recording pairs with them
 
