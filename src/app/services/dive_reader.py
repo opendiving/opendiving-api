@@ -97,6 +97,18 @@ def is_logbook_format(fmt: str) -> bool:
     return FORMAT_KINDS.get(fmt) == LOGBOOK
 
 
+# The formats whose files an import attaches ahead of the rest of their kind, in this order;
+# every other format follows, by name. A dive's first file decides what its recording states
+# - its fixes above all, which a later file only fills - and the Suunto app's JSON states each
+# fix's error where the same dive's FIT states none.
+ATTACHES_FIRST = ("suunto_json",)
+
+
+def attach_rank(fmt: str | None) -> int:
+    """Where a file of `fmt` attaches among its kind's in one import."""
+    return ATTACHES_FIRST.index(fmt) if fmt in ATTACHES_FIRST else len(ATTACHES_FIRST)
+
+
 _HUNDREDTHS = Decimal("0.01")
 # Digits enough for any finite float at two places: the default context's 28 signal
 # `InvalidOperation` from 1e26 up, and an imported document may state a cylinder that large.

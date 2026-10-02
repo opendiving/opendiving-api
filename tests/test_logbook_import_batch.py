@@ -86,6 +86,8 @@ OCEAN_JSON = _fixture("suunto-ocean-2026.json")
 TWO_TANK_FIT = _fixture("suunto-ocean.fit")
 TWO_TANK_JSON = _fixture("suunto-ocean.json")
 PAIR = [("dive.fit", OCEAN_FIT), ("dive.json", OCEAN_JSON)]
+POOR_FIX_FIT = _fixture("ocean-poor-first-fix.fit")
+POOR_FIX_JSON = _fixture("ocean-poor-first-fix.json")
 
 
 def _unique_export(start: str = "2026-09-10T09:30:00.000+03:00") -> bytes:
@@ -317,12 +319,12 @@ class TestThePair:
 
         [dive] = await _logbook(async_db, diver)
         [recording] = dive["recordings"]
-        assert [parser_key for _, parser_key, _ in recording["files"]] == ["fit", "suunto_json"]
+        assert [parser_key for _, parser_key, _ in recording["files"]] == ["suunto_json", "fit"]
         assert recording["columns"]["device_serial"] == "253810000400"
         assert recording["columns"]["device_model"] == "Suunto Ocean"
         assert recording["columns"]["device_name"] == "Porvoo"
-        assert recording["profile"]["parser_key"] == "fit"
-        assert recording["profile"]["data"]["pressure"], "the JSON's pressure channel joins the FIT's"
+        assert recording["profile"]["parser_key"] == "suunto_json"
+        assert recording["profile"]["data"]["pressure"], "the JSON's pressure channel, which the FIT lacks"
         assert [row["gas_number"] for row in dive["cylinders"]] == [0]
         assert [series["gas_number"] for series in recording["profile"]["data"]["pressure"]] == [0]
         assert dive["dive"][0] == 1, "numbered as the form numbers a first dive, not by the computer's counter of 3"
@@ -336,6 +338,22 @@ class TestThePair:
             ImportNoteCode.RECORDING_FILLED,
             ImportNoteCode.RECORDING_ATTACHED,
         }, "the logbook does not already have a recording the diver dropped a moment ago"
+
+    @pytest.mark.asyncio
+    async def test_the_json_attaches_first_whatever_the_names_and_its_exit_is_the_dive_s(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The JSON states each fix's error and the FIT none, and a dive's first file decides its
+        fixes - so the dive's exit is the 9 m fix the receiver vouched for, not the 47 m first
+        fix the FIT keeps, though the FIT's name sorts first."""
+        diver = create_user(db)
+
+        await _import(async_db, diver, [("a.fit", POOR_FIX_FIT), ("b.json", POOR_FIX_JSON)])
+
+        [dive] = await _logbook(async_db, diver)
+        [recording] = dive["recordings"]
+        assert [parser_key for _, parser_key, _ in recording["files"]] == ["suunto_json", "fit"]
+        assert dive["fixes"] == (28.471495, 34.507687, 28.470792, 34.507208)
 
 
 def _ssrf_of_two_computers_as_two_dives() -> bytes:
@@ -377,8 +395,10 @@ class TestTheBatchIsItsFilesInOrder:
 
     @staticmethod
     def _in_batch_order(files: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
-        """Logbooks ahead of a computer's files, each by name - the order the batch reads in."""
-        return sorted(files, key=lambda file: (not file[0].endswith(".uddf"), file[0]))
+        """Logbooks ahead of a computer's files, the Suunto app's JSON ahead of the other
+        computer files, each by name - the order the batch reads in. Every `.json` here is
+        the Suunto app's."""
+        return sorted(files, key=lambda file: (not file[0].endswith(".uddf"), not file[0].endswith(".json"), file[0]))
 
     @pytest.mark.asyncio
     async def test_one_request_and_one_file_at_a_time_write_the_same_logbook(
@@ -397,7 +417,7 @@ class TestTheBatchIsItsFilesInOrder:
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         """Each file is counted as its own import would count it, after the files before it
-        - so the pair's JSON is a dive skipped, its recording having filled the FIT's."""
+        - so the pair's FIT is a dive skipped, its recording having filled the JSON's."""
         diver = create_user(db)
 
         preview = await _import(async_db, diver, self.FILES, apply=False)
@@ -445,7 +465,7 @@ class TestTheBatchIsItsFilesInOrder:
 
         [dive] = await _logbook(async_db, destination)
         [recording] = dive["recordings"]
-        assert [parser_key for _, parser_key, _ in recording["files"]] == ["fit", "suunto_json"]
+        assert [parser_key for _, parser_key, _ in recording["files"]] == ["suunto_json", "fit"]
         rows = {row.name: row for row in report.members}
         assert rows["logbook.zip"].format == "archive"
         assert (rows["dive.fit"].kept, rows["dive.fit"].not_kept) == (False, ImportMemberNotKept.ALREADY_STORED)
@@ -547,7 +567,8 @@ class TestTheDoorDoesNotMatter:
     """The same files in the same order give equal recordings whether they arrive in one
     batch, in two imports or on the dive form - stored files, device, settings, readouts,
     gate figures, samples, labels and the profile's key - and the dive's cylinders equal
-    labels."""
+    labels. The batch's order is its own, the JSON of a pair first; two imports and the form
+    take the order given."""
 
     @staticmethod
     async def _recordings_and_labels(db: AsyncSession, dive_id: int) -> tuple[Any, Any]:
@@ -565,17 +586,23 @@ class TestTheDoorDoesNotMatter:
         self, volume: Any, async_db: AsyncSession, db: Session, fit: bytes, json: bytes, fit_first: bool
     ) -> None:
         files = [("a.fit", fit), ("b.json", json)] if fit_first else [("a.json", json), ("b.fit", fit)]
-        batch, days, form = create_user(db), create_user(db), create_user(db)
+        batch, in_batch_order, days, form = create_user(db), create_user(db), create_user(db), create_user(db)
 
         await _import(async_db, batch, files)
+        await _one_at_a_time(async_db, in_batch_order, TestTheBatchIsItsFilesInOrder._in_batch_order(files))
         await _one_at_a_time(async_db, days, files)
         on_the_form = await _on_the_form(async_db, db, form, files)
 
-        [batch_dive], [days_dive] = await _dive_ids(async_db, batch), await _dive_ids(async_db, days)
+        [batch_dive], [ordered_dive] = await _dive_ids(async_db, batch), await _dive_ids(async_db, in_batch_order)
         from_the_batch = await self._recordings_and_labels(async_db, batch_dive)
-        assert from_the_batch == await self._recordings_and_labels(async_db, days_dive)
-        assert from_the_batch == await self._recordings_and_labels(async_db, on_the_form.id)
+        assert from_the_batch == await self._recordings_and_labels(async_db, ordered_dive)
         [recording] = from_the_batch[0]
+        assert recording["profile"]["parser_key"] == "suunto_json", "the JSON first, whatever the names"
+
+        [days_dive] = await _dive_ids(async_db, days)
+        from_the_days = await self._recordings_and_labels(async_db, days_dive)
+        assert from_the_days == await self._recordings_and_labels(async_db, on_the_form.id)
+        [recording] = from_the_days[0]
         assert recording["profile"]["parser_key"] == ("fit" if fit_first else "suunto_json")
 
     @pytest.mark.asyncio
@@ -664,7 +691,7 @@ class TestTwoComputers:
         dive = await _dive(async_db, dive_id)
         perdix, ocean = dive["recordings"]
         assert [parser_key for _, parser_key, _ in perdix["files"]] == ["uddf"]
-        assert [parser_key for _, parser_key, _ in ocean["files"]] == ["fit", "suunto_json"]
+        assert [parser_key for _, parser_key, _ in ocean["files"]] == ["suunto_json", "fit"]
         assert dive["dive"][0] == 8
         stored = (await async_db.execute(select(Dive).where(Dive.id == dive_id))).scalar_one()
         assert stored.notes == "Along the wall."
@@ -853,7 +880,7 @@ class TestRowsAndRefusals:
         zip_row = next(row for row in rows if row.format == "zip")
         assert zip_row.opened == 2 and zip_row.container is None
         members = [row for row in rows if row.container is not None]
-        assert [row.name for row in members] == ["Suunto/dive.fit", "Suunto/dive.json"]
+        assert [row.name for row in members] == ["Suunto/dive.json", "Suunto/dive.fit"]
         assert {row.container for row in members} == {rows.index(zip_row)}
         assert {row.part for row in rows} == {0}
         files = (
@@ -1578,12 +1605,12 @@ class TestAFileLandsAsTheFormShowsIt:
     async def test_a_file_joining_the_dive_another_created_says_nothing(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
-        """The JSON's dive is the FIT's, so it writes no temperature to report."""
+        """The FIT's dive is the JSON's, so it writes no temperature to report."""
         diver = create_user(db)
 
         report = await _import(async_db, diver, PAIR)
 
-        assert await _bottom_temperature(async_db, diver) == 28.0
+        assert await _bottom_temperature(async_db, diver) == 29.2
         assert _temperature_notes(report) == 1
 
     @pytest.mark.asyncio

@@ -351,8 +351,8 @@ class DiveTechScalars(BaseModel):
         Field(
             default=None,
             examples=[28.437455],
-            description="Latitude of the last position the import recorded before the descent - a satellite fix, "
-            "or the dive-start position the computer logged itself",
+            description="Latitude of the position nearest the descent that the receiver vouched for - a satellite "
+            "fix, or the dive-start position the computer logged itself - else the last one before it",
         ),
     ]
     entry_longitude: Annotated[
@@ -360,17 +360,27 @@ class DiveTechScalars(BaseModel):
         Field(
             default=None,
             examples=[34.458997],
-            description="Longitude of the last position the import recorded before the descent - a satellite fix, "
-            "or the dive-start position the computer logged itself",
+            description="Longitude of the position nearest the descent that the receiver vouched for - a satellite "
+            "fix, or the dive-start position the computer logged itself - else the last one before it",
         ),
     ]
     exit_latitude: Annotated[
         float | None,
-        Field(default=None, examples=[28.437480], description="Latitude of the first satellite fix after the ascent"),
+        Field(
+            default=None,
+            examples=[28.437480],
+            description="Latitude of the satellite fix nearest the ascent that the receiver vouched for, "
+            "else the first after it",
+        ),
     ]
     exit_longitude: Annotated[
         float | None,
-        Field(default=None, examples=[34.458370], description="Longitude of the first satellite fix after the ascent"),
+        Field(
+            default=None,
+            examples=[34.458370],
+            description="Longitude of the satellite fix nearest the ascent that the receiver vouched for, "
+            "else the first after it",
+        ),
     ]
 
 

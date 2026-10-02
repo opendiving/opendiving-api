@@ -40,9 +40,11 @@ dependencies = [
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
     #
-    # 0.20.0 is the floor because it is the first release whose `.ssrf` reader carries a site's
-    # pin, its description and notes, and its `<geo>` locality; resolved lower, a Subsurface
-    # site imports with its name alone. The floor still carries what 0.19.0's did: a site's
+    # 0.21.0 is the floor because it is the first release whose Suunto JSON and FIT readers
+    # take a dive's entry and exit at the fix nearest the descent or the surfacing that the
+    # receiver vouched for; resolved lower, an Ocean dive's exit is its first fix after
+    # surfacing, however poor. The floor still carries what 0.20.0's did: an `.ssrf` site's
+    # pin, its description and notes, and its `<geo>` locality; what 0.19.0's did: a site's
     # other names, external ids, depth range, water type, altitude, entry types and tags; what
     # 0.18.0's did: a location with one name and no `full_name`; what 0.17.0's did: a dive's
     # `type`, `rating`, `tags`, `air_temperature`, `current`, `waves`, `weather`, `entry_type`
@@ -65,7 +67,7 @@ dependencies = [
     # `agency`, and the readers spell a dive's number `number`, so a UDDF or `.ssrf` dive
     # `services/logbook_import/reader.py` converts on the request path keeps its own number
     # rather than the placeholder `0`.
-    "divejson>=0.20.0",
+    "divejson>=0.21.0",
     "webauthn>=3.0.0",
     # Decodes and renders the uploaded pictures (`services/user_pictures.py`) and the species
     # photos (`services/species_photos.py`) - the only image processing in the app. 12.0.0 is the first release with official Python 3.14

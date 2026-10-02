@@ -78,7 +78,7 @@ from ...schemas.logbook_import import (
     ImportNoteCode,
 )
 from ..dive_files import MAX_DIVE_FILE_SIZE, FileExtraction, extraction_of
-from ..dive_reader import ReadDive, formats_this_build_reads, is_logbook_format
+from ..dive_reader import ReadDive, attach_rank, formats_this_build_reads, is_logbook_format
 from ..export.archive import DIVEJSON_NAME
 
 if TYPE_CHECKING:
@@ -923,10 +923,10 @@ class BatchRow:
 class LoadedBatch:
     """Every file of an import, in the one order the import reads them in.
 
-    That order is the batch's: by kind (`FileKind`), then by name, ties broken by digest. A
-    browser's folder walk is not sorted, so nothing may depend on the order files arrive in.
-    Holds the containers it opened, so it is a context manager and the caller uses it as one;
-    the request's spools are the request's to close.
+    That order is the batch's: by kind (`FileKind`), then by format (`attach_rank`), then by
+    name, ties broken by digest. A browser's folder walk is not sorted, so nothing may
+    depend on the order files arrive in. Holds the containers it opened, so it is a context
+    manager and the caller uses it as one; the request's spools are the request's to close.
     """
 
     rows: list[BatchRow] = field(default_factory=list)
@@ -1154,7 +1154,7 @@ def _survey(parts: Sequence[ImportPart]) -> LoadedBatch:
         for row in batch.rows:
             if row._info is not None:
                 _digest_member(row)
-        batch.rows.sort(key=lambda row: (row.kind, row.name, row.sha256))
+        batch.rows.sort(key=lambda row: (row.kind, attach_rank(row.format), row.name, row.sha256))
         index_of = {id(row): index for index, row in enumerate(batch.rows)}
         for row in batch.rows:
             if row._zip is not None:
