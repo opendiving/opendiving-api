@@ -197,6 +197,15 @@ class SpeciesLifeListEntry(PublicUUIDSchema):
     last_seen: DiveLocalStartTime
 
 
+class SpeciesLifeListDetail(SpeciesLifeListEntry):
+    """`GET /user/species/{uuid}` - one species' life-list entry, with the same figures the
+    list carries for it, plus the sites."""
+
+    dive_site_count: Annotated[
+        int, Field(ge=0, examples=[3], description="Distinct dive sites those dives name, at any position")
+    ]
+
+
 class SpeciesResolveRequest(BaseModel):
     """Body for `POST /species/resolve` - the one field that identifies a taxon globally.
 
