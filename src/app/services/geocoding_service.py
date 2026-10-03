@@ -46,6 +46,7 @@ from typing import Any, NamedTuple
 
 import anyio
 import httpx
+from anyio import sleep  # A name of this module's own, so a test can stub its wait and nobody else's.
 from pydantic import ValidationError
 from redis.exceptions import RedisError
 
@@ -325,7 +326,7 @@ async def _fetch(provider: str, base_url: str, path: str, params: dict[str, Any]
     WARNING.
     """
     if not await _claim_provider_slot(provider):
-        await anyio.sleep(min(settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS, _MAX_PROVIDER_WAIT_SECONDS))
+        await sleep(min(settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS, _MAX_PROVIDER_WAIT_SECONDS))
         if not await _claim_provider_slot(provider):
             logger.warning("Skipping a %s call to %s: this instance is over its provider rate limit.", provider, path)
             return None
