@@ -3,6 +3,7 @@
 import logging
 import smtplib
 import ssl
+import threading
 from datetime import date
 from email.message import EmailMessage
 from unittest.mock import MagicMock, patch
@@ -231,32 +232,34 @@ class TestSendMagicLinkEmail:
     async def test_sends_over_smtp_when_configured(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES = 30
-            mock_run_sync.return_value = None
 
             await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=abc", "481052")
 
-            mock_run_sync.assert_called_once()
-            _send_fn, message = mock_run_sync.call_args.args
+            mock_transport.assert_called_once()
+            (message,) = mock_transport.call_args.args
             assert message["To"] == "user@example.com"
             assert message["From"] == "noreply@opendiving.example"
             assert "https://app.example.com/auth/verify?token=abc" in message.get_content()
 
     @pytest.mark.asyncio
     async def test_the_blocking_client_runs_off_the_event_loop_thread(self):
+        sent_from: list[int] = []
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.MAGIC_LINK_TOKEN_EXPIRE_MINUTES = 30
+            mock_transport.side_effect = lambda _message: sent_from.append(threading.get_ident())
 
             await send_magic_link_email("user@example.com", "https://app.example.com/auth/verify?token=abc", "481052")
 
-            assert mock_run_sync.call_args.args[0] is _send
+        (sending_thread,) = sent_from
+        assert sending_thread != threading.get_ident()
 
 
 class TestSendPasskeyAddedEmail:
@@ -264,14 +267,14 @@ class TestSendPasskeyAddedEmail:
     async def test_the_way_out_is_the_page_that_removes_it(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.FRONTEND_URL = "https://app.example.com"
 
             await send_passkey_added_email("diver@example.com", "<b>iPhone</b>")
 
-        body = mock_run_sync.call_args.args[1].get_content()
+        body = mock_transport.call_args.args[0].get_content()
         assert 'href="https://app.example.com/settings/authentication">remove it' in body
         assert "&lt;b&gt;iPhone&lt;/b&gt;" in body
 
@@ -301,7 +304,7 @@ class TestSendInvitationEmail:
         """One invitation, handed back as the message that would have been posted."""
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings, PROJECT_OPERATED=project_operated)
             mock_settings.FRONTEND_URL = "https://dive.example.com"
@@ -310,7 +313,7 @@ class TestSendInvitationEmail:
 
         # The sender hands `_send` the message as a positional argument; naming the type
         # here is what keeps mypy from reading the rest of this class as `Any`.
-        message: EmailMessage = mock_run_sync.call_args.args[1]
+        message: EmailMessage = mock_transport.call_args.args[0]
         return message
 
     @pytest.mark.asyncio
@@ -368,14 +371,14 @@ class TestSendInvitationEmail:
         forwards this needs to know which mailbox was invited."""
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.FRONTEND_URL = "https://dive.example.com"
 
             await send_invitation_email("Invitee@example.com", "Ada Reef")
 
-        _send_fn, message = mock_run_sync.call_args.args
+        (message,) = mock_transport.call_args.args
         body = message.get_content()
         assert message["To"] == "Invitee@example.com"
         assert "Ada Reef" in message["Subject"]
@@ -397,14 +400,14 @@ class TestSendInvitationEmail:
         reads, which is exactly the shape `send_passkey_added_email` escapes for."""
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.FRONTEND_URL = "https://dive.example.com"
 
             await send_invitation_email("invitee@example.com", "<script>alert(1)</script>")
 
-        body = mock_run_sync.call_args.args[1].get_content()
+        body = mock_transport.call_args.args[0].get_content()
         assert "<script>" not in body
         assert "&lt;script&gt;" in body
 
@@ -448,14 +451,14 @@ class TestSendGearServiceDigestEmail:
     async def test_lists_every_item_and_links_to_it(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.FRONTEND_URL = "https://app.example.com"
 
             await send_gear_service_digest_email("diver@example.com", self.LINES)
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             body = message.get_content()
             assert message["To"] == "diver@example.com"
             assert message["Subject"] == "2 pieces of gear need servicing"
@@ -473,7 +476,7 @@ class TestSendGearServiceDigestEmail:
         """
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.FRONTEND_URL = "https://app.example.com"
@@ -483,7 +486,7 @@ class TestSendGearServiceDigestEmail:
                 [("<img src=x onerror=alert(1)>", "Service overdue since <b>ages</b>", "0199-aaaa")],
             )
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             body = message.get_content()
             assert "<img src=x" not in body
             assert "&lt;img src=x onerror=alert(1)&gt;" in body
@@ -495,14 +498,14 @@ class TestSendGearServiceDigestEmail:
     async def test_subject_is_singular_for_one_item(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.FRONTEND_URL = "https://app.example.com"
 
             await send_gear_service_digest_email("diver@example.com", self.LINES[:1])
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             assert message["Subject"] == "Your dive gear needs servicing"
 
 
@@ -528,14 +531,14 @@ class TestSendRenewalReminderEmail:
     async def test_lists_every_subject_and_links_to_where_it_is_edited(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.FRONTEND_URL = "https://app.example.com"
 
             await send_renewal_reminder_email("diver@example.com", self.LINES)
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             body = message.get_content()
             assert message["To"] == "diver@example.com"
             assert message["Subject"] == "2 renewals need your attention"
@@ -551,14 +554,14 @@ class TestSendRenewalReminderEmail:
     async def test_the_subject_names_a_single_subject(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.FRONTEND_URL = "https://app.example.com"
 
             await send_renewal_reminder_email("diver@example.com", self.LINES[1:])
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             assert message["Subject"] == "DAN Europe dive insurance expires 5 Dec 2026"
 
     @pytest.mark.asyncio
@@ -567,7 +570,7 @@ class TestSendRenewalReminderEmail:
         diver and unconstrained by any schema."""
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.FRONTEND_URL = "https://app.example.com"
@@ -577,7 +580,7 @@ class TestSendRenewalReminderEmail:
                 [("<img src=x onerror=alert(1)> dive insurance", "expires 5 Dec 2026", "/settings/checkin")],
             )
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             body = message.get_content()
             assert "<img src=x" not in body
             assert "&lt;img src=x onerror=alert(1)&gt;" in body
@@ -618,14 +621,14 @@ class TestSendYearInReviewEmail:
     async def _sent(self, review, units="metric"):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.FRONTEND_URL = "https://app.example.com"
 
             await send_year_in_review_email("diver@example.com", review, units)
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             return message
 
     @pytest.mark.asyncio
@@ -694,7 +697,7 @@ class TestSupportFormHeaders:
     async def test_a_stranger_typed_subject_with_crlf_is_flattened(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             _configured(mock_settings)
             mock_settings.CONTACT_FORM_EMAIL = "support@opendiving.example"
@@ -707,7 +710,7 @@ class TestSupportFormHeaders:
                 message="The chart renders nothing.",
             )
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             assert "\n" not in str(message["Subject"])
             assert message["Bcc"] is None
 
