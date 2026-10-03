@@ -3,15 +3,14 @@ signature it last named.
 
 The renderer is a command of the web image, reachable only inside the stack at
 `MAP_RENDERER_URL`. `GET /signature` names how this instance draws - its drawing code and its
-basemap - and `POST /render` draws one record's picture, a 2048x1024 WebP, saying in
-`X-Map-Signature` which signature drew it. The signature is part of every picture's digest
-(`services/map_pictures.py`), so a renderer that would draw differently names every picture
-afresh.
+basemap - and `POST /render` draws one map tile, a 1024x1024 WebP, saying in `X-Map-Signature`
+which signature drew it. Every stored tile is keyed by the signature as well as its address
+(`services/map_tiles.py`), so a renderer that would draw differently names every tile afresh.
 
-**No list waits on the renderer.** The signature is held in memory per process: fetched when
+**A stored tile waits on nothing.** The signature is held in memory per process: fetched when
 the process starts, refreshed on a timer, kept through an outage, and adopted from any draw
-that names another. A list reads it and never calls out; a process that has not learned it
-yet names no pictures.
+that names another. A tile request reads it and calls out only on a miss, or while the
+process has not learned it yet.
 """
 
 import asyncio
@@ -31,7 +30,8 @@ logger = logging.getLogger(__name__)
 _SIGNATURE = re.compile(r"[0-9a-f]{64}")
 
 # A known signature changes only when the renderer is redeployed, so a minute is soon enough;
-# an unknown one leaves every card without a picture, so it is asked for again sooner.
+# an unknown one costs every tile request a round trip to learn it, so it is asked for again
+# sooner.
 _REFRESH_SECONDS = 60.0
 _RETRY_SECONDS = 5.0
 _SIGNATURE_TIMEOUT_SECONDS = 5.0
@@ -43,7 +43,7 @@ _refresher: asyncio.Task[None] | None = None
 
 
 class RendererUnavailable(Exception):
-    """The renderer handed back no picture or no signature: unreachable, refusing, past its
+    """The renderer handed back no tile or no signature: unreachable, refusing, past its
     deadline, or answering outside its contract."""
 
 
@@ -116,9 +116,9 @@ async def _keep_signature_fresh() -> None:
 
 def start_signature_refresh() -> None:
     """Begin learning the signature, in the background so a renderer that is down never holds
-    up startup. Nothing to learn while map pictures are off."""
+    up startup. Nothing to learn while map tiles are off."""
     global _refresher
-    if settings.map_pictures and _refresher is None:
+    if settings.map_tiles and _refresher is None:
         _refresher = asyncio.create_task(_keep_signature_fresh())
 
 
@@ -139,7 +139,7 @@ def _is_webp(data: bytes) -> bool:
 async def render(body: dict[str, Any], *, timeout: float) -> Drawn:
     """Have the renderer draw `body`, within `timeout` seconds all told.
 
-    Anything but a whole WebP naming its signature is a failure, never a partial picture.
+    Anything but a whole WebP naming its signature is a failure, never a partial tile.
     """
     try:
         with anyio.fail_after(timeout):

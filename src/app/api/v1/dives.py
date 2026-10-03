@@ -146,7 +146,6 @@ from ...services.dive_recordings import (
 )
 from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
-from ...services.map_pictures import dive_map_picture
 from ...services.person_links import resolve_people_references
 
 router = APIRouter(tags=["dives"])
@@ -953,7 +952,7 @@ async def read_dives(
     if tag_uuid is not None:
         tag_id = await resolve_tag_id_for_user(db, tag_uuid=tag_uuid, user_id=current_user["id"]) or -1
 
-    response = await _cached_read_dives(
+    return await _cached_read_dives(
         request,
         user_id=current_user["id"],
         user_uuid=current_user["uuid"],
@@ -970,11 +969,6 @@ async def read_dives(
         dive_type=dive_type,
         sort=sort,
     )
-    # Named after the cached read rather than inside it, so a renderer whose signature
-    # changed, or was learned after startup, names every row at once.
-    for dive in response["data"]:
-        dive["map_picture"] = dive_map_picture(dive)
-    return response
 
 
 # -------------- numbering --------------

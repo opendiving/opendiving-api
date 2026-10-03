@@ -228,7 +228,8 @@ restore) and **user** (profile, avatar, check-in portrait, the check-in link, em
 statistics, gas-use history, the species life list, account deletion); **dives**, the bulk of it,
 with their **recordings** — attach an export, read one recording's per-sample profile back, fold two
 dives into one — alongside **trips**, **dive sites**, the shared **species** catalog a dive can
-reference, and a **geocoding** helper for naming a site pinned on a map; **gear** as items, sets,
+reference, a **geocoding** helper for naming a site pinned on a map, and the **map tiles** every
+card and page head is composed from, drawn once for the whole instance; **gear** as items, sets,
 service schedules and service records; **certifications** with their card images and the **courses**
 that issued them; **export** in DiveJSON, UDDF, CSV or full-archive form and **import** back from
 either of the first and the last, or from any format the converter reads; **invitations**, which
@@ -242,8 +243,8 @@ themselves, the two health checks — `/health` says the process is up, `/health
 and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how somebody with
 no account asks a closed instance for an invitation, `GET /config`, which tells the web app whether
 registration is open - whether the project itself operates the instance, whether any join link
-exists (`join_links`), and whether a map renderer draws the cards' maps (`map_pictures`) - before
-anyone has signed in, `GET /join-channel/{slug}`, which says whether one join link is live,
+exists (`join_links`), and whether a map renderer draws the map tiles (`map_tiles`) - before anyone
+has signed in, `GET /join-channel/{slug}`, which says whether one join link is live,
 `GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>` tag that has no way
 to send a token, and `GET /checkin/{token}` with its `/portrait` and `/certification/{uuid}/front`,
 the check-in page a diver shared as a link, where the token in the path is the credential.

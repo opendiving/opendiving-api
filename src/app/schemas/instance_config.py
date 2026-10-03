@@ -36,6 +36,6 @@ class InstanceConfigRead(BaseModel):
     # slug at a time (`GET /join-channel/{slug}`) so a visitor holding one link learns
     # nothing about the others. The privacy page shows its join-link paragraph on it.
     join_links: bool
-    # Whether this instance names a map renderer, so the web can say what its cards show and
-    # what its privacy page owes without probing a service only the API can reach.
-    map_pictures: bool
+    # Whether this instance names a map renderer, so the web knows whether to ask for tiles at
+    # all and what its privacy page owes without probing a service only the API can reach.
+    map_tiles: bool

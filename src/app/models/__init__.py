@@ -28,7 +28,7 @@ from .gear_set import GearSet
 from .gear_set_item import GearSetItem
 from .invitation import Invitation
 from .invite_request import InviteRequest
-from .map_picture import MapPicture
+from .map_tile import MapTile
 from .person import Person
 from .species import Species
 from .species_name import SpeciesName

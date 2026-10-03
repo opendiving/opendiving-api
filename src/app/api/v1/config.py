@@ -5,7 +5,8 @@ because the web app has to decide, before its landing page paints, whether the h
 sign-in form or a request-an-invite form and, when the latter, whether that form carries the
 project's waitlist wording or the generic wording true of any instance. It has no other
 channel by which to learn either. And whether any join link exists, and whether a map
-renderer draws the cards' maps, which decide what the privacy page describes.
+renderer draws the tiles cards and page heads are composed from, which decide what those
+show and what the privacy page describes.
 
 **An endpoint rather than a copy in the web container's own environment**, and the reason
 is three-fold. The mode is API truth, and the app has a recorded precedent for what two
@@ -32,8 +33,8 @@ async def read_instance_config() -> InstanceConfigRead:
 
     Anonymous, and not a leak: the landing page discloses the mode anyway by which form it
     shows, the operator by which copy that form carries, and the privacy page whether join
-    links exist and who draws the cards' maps by what it describes, so this only saves a
-    client from inferring them. Nothing here is per-caller, which is what makes it safe for
+    links exist and who draws the maps by what it describes, so this only saves a client
+    from inferring them. Nothing here is per-caller, which is what makes it safe for
     `ClientCacheMiddleware` to mark publicly cacheable - and a minute of caching is right,
     since the values change only when the operator restarts the API.
     """
@@ -41,5 +42,5 @@ async def read_instance_config() -> InstanceConfigRead:
         registration_mode=settings.REGISTRATION_MODE,
         project_operated=settings.PROJECT_OPERATED,
         join_links=bool(settings.join_channels),
-        map_pictures=settings.map_pictures,
+        map_tiles=settings.map_tiles,
     )

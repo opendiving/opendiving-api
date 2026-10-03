@@ -49,7 +49,6 @@ from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
-from src.app.models.map_picture import MapPicture
 from src.app.models.person import Person
 from src.app.models.tag import Tag
 from src.app.models.trip import Trip
@@ -71,7 +70,6 @@ from tests.helpers.generators import (
     create_gear_service_record,
     create_gear_service_schedule,
     create_gear_set,
-    create_map_picture,
     create_person,
     create_tag,
     create_trip,
@@ -146,7 +144,6 @@ class TestDeletingAUserTakesEverythingWithIt:
         create_gear_service_record(db, diver, item, schedule=schedule)
         gear_set = create_gear_set(db, diver)
         create_dive_form_preset(db, diver)
-        create_map_picture(db, diver)
         certification = Certification(user_id=diver.id, agency="padi", name="Rescue Diver", notes="")
         db.add_all(
             [
@@ -239,7 +236,6 @@ class TestDeletingAUserTakesEverythingWithIt:
             GearServiceRecord,
             GearServiceSchedule,
             GearSet,
-            MapPicture,
             Person,
             Tag,
             Trip,

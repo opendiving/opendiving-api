@@ -46,7 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..app.core.db.database import local_session
 from ..app.models.certification_file import CertificationFile
 from ..app.models.dive_file import DiveFile
-from ..app.models.map_picture import MapPicture
+from ..app.models.map_tile import MapTile
 from ..app.models.species import Species
 from ..app.models.user_picture import UserPicture
 from ..app.services import blob_store
@@ -118,14 +118,14 @@ async def _referenced_keys(session: AsyncSession) -> set[str]:
         .scalars()
         .all()
     )
-    map_picture_keys = (await session.execute(select(MapPicture.storage_key))).scalars().all()
+    map_tile_keys = (await session.execute(select(MapTile.storage_key))).scalars().all()
     return (
         set(dive_keys)
         | set(card_keys)
         | set(rendition_keys)
         | set(original_keys)
         | set(species_photo_keys)
-        | set(map_picture_keys)
+        | set(map_tile_keys)
     )
 
 

@@ -768,9 +768,9 @@ class TestTheConfigRoute:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("renderer", "expected"), [("", False), ("http://map-renderer:3001", True)])
-    async def test_it_reports_whether_map_pictures_are_drawn(self, renderer: str, expected: bool) -> None:
+    async def test_it_reports_whether_map_tiles_are_drawn(self, renderer: str, expected: bool) -> None:
         with patch.object(settings, "MAP_RENDERER_URL", renderer):
-            assert (await read_instance_config()).map_pictures is expected
+            assert (await read_instance_config()).map_tiles is expected
 
     @pytest.mark.asyncio
     async def test_it_carries_nothing_else(self) -> None:
@@ -787,7 +787,7 @@ class TestTheConfigRoute:
                 "registration_mode": "invite",
                 "project_operated": False,
                 "join_links": False,
-                "map_pictures": False,
+                "map_tiles": False,
             }
 
 

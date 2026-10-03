@@ -318,28 +318,6 @@ FETCH_OWNED_ROUTES = [
         for method, extra in _CRUD_METHODS
     ),
     OwnedRoute("GET", "/api/v1/dive/{uuid}/neighbors", "src.app.api.v1.dives:crud_dives", "Dive not found"),
-    # The map pictures: `theme` is required, so it is what gets the request to the handler.
-    OwnedRoute(
-        "GET",
-        "/api/v1/dive/{uuid}/map-picture",
-        "src.app.api.v1.map_pictures:crud_dives",
-        "Dive not found",
-        {"params": {"theme": "light"}},
-    ),
-    OwnedRoute(
-        "GET",
-        "/api/v1/trip/{uuid}/map-picture",
-        "src.app.api.v1.map_pictures:crud_trips",
-        "Trip not found",
-        {"params": {"theme": "light"}},
-    ),
-    OwnedRoute(
-        "GET",
-        "/api/v1/dive-site/{uuid}/map-picture",
-        "src.app.api.v1.map_pictures:crud_dive_sites",
-        "Dive site not found",
-        {"params": {"theme": "light"}},
-    ),
     # The recordings and their files. Every one of them resolves the *dive* first and the
     # recording or file second, so someone else's dive uuid is a 404 before the `{rid}`/
     # `{fid}` in the path is looked at - which is what makes a second identifier here no
