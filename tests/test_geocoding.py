@@ -505,7 +505,7 @@ class TestCouldNotAsk:
         would erase a location typed by hand a round trip later."""
         with (
             _responds(REVERSE_PAYLOAD),
-            patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock),
+            patch("src.app.services.geocoding_service.sleep", new_callable=AsyncMock),
             patch("src.app.services.geocoding_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
@@ -1085,7 +1085,7 @@ class TestThrottling:
         same "no suggestion" a provider outage produces."""
         with (
             _responds(REVERSE_PAYLOAD) as provider,
-            patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock),
+            patch("src.app.services.geocoding_service.sleep", new_callable=AsyncMock),
             patch("src.app.services.geocoding_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
@@ -1104,7 +1104,7 @@ class TestThrottling:
         answer rather than a confidently wrong one."""
         with (
             _responds(_photon(MOALBOAL_CEBU)) as provider,
-            patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock) as slept,
+            patch("src.app.services.geocoding_service.sleep", new_callable=AsyncMock) as slept,
             patch("src.app.services.geocoding_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = [RateLimitException("Too many requests."), None]
@@ -1122,7 +1122,7 @@ class TestThrottling:
 
         with (
             _responds([]),
-            patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock) as slept,
+            patch("src.app.services.geocoding_service.sleep", new_callable=AsyncMock) as slept,
             patch("src.app.services.geocoding_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = RateLimitException("Too many requests.")
@@ -1143,7 +1143,7 @@ class TestThrottling:
 
         with (
             _providers(search=_photon(MOALBOAL_CEBU)) as provider,
-            patch("src.app.services.geocoding_service.anyio.sleep", new_callable=AsyncMock) as slept,
+            patch("src.app.services.geocoding_service.sleep", new_callable=AsyncMock) as slept,
             patch("src.app.services.geocoding_service.enforce_rate_limit", side_effect=one_a_window),
         ):
             client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})

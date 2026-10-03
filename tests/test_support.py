@@ -200,13 +200,13 @@ class TestSendSupportRequestEmail:
     async def test_sends_to_the_configured_inbox_replying_to_the_submitter(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             self._configure(mock_settings)
 
             await send_support_request_email(**self.ARGS)
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             assert message["To"] == "support@opendiving.app"
             # Never sent *as* the submitter - only our own address is SPF/DKIM-covered.
             assert message["From"] == "noreply@mail.opendiving.app"
@@ -218,7 +218,7 @@ class TestSendSupportRequestEmail:
         """The one sender in this module whose content a stranger typed."""
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             self._configure(mock_settings)
 
@@ -226,7 +226,7 @@ class TestSendSupportRequestEmail:
                 **{**self.ARGS, "message": '<a href="https://evil.example">click</a>', "name": "<b>bold</b>"}
             )
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             body = message.get_content()
             assert "<a href=" not in body
             assert "&lt;a href=" in body
@@ -236,13 +236,13 @@ class TestSendSupportRequestEmail:
     async def test_keeps_line_breaks_readable(self):
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             self._configure(mock_settings)
 
             await send_support_request_email(**{**self.ARGS, "message": "line one\nline two"})
 
-            _send_fn, message = mock_run_sync.call_args.args
+            (message,) = mock_transport.call_args.args
             assert "line one<br>line two" in message.get_content()
 
     @pytest.mark.asyncio
@@ -254,7 +254,7 @@ class TestSendSupportRequestEmail:
         """
         with (
             patch("src.app.services.email_service.settings") as mock_settings,
-            patch("src.app.services.email_service.anyio.to_thread.run_sync") as mock_run_sync,
+            patch("src.app.services.email_service._send") as mock_transport,
         ):
             self._configure(mock_settings)
             mock_settings.CONTACT_FORM_EMAIL = None
@@ -262,4 +262,4 @@ class TestSendSupportRequestEmail:
             with pytest.raises(EmailDeliveryError, match="CONTACT_FORM_EMAIL"):
                 await send_support_request_email(**self.ARGS)
 
-            mock_run_sync.assert_not_called()
+            mock_transport.assert_not_called()
