@@ -56,17 +56,28 @@ def create_user_picture(
     return _persist(db, picture)
 
 
-def create_map_picture(
-    db: Session, user: models.User, *, theme: str = "light", last_served_at: datetime | None = None
-) -> models.MapPicture:
-    """A map picture row naming a key nothing has written, under a digest nothing else uses."""
+def create_map_tile(
+    db: Session,
+    *,
+    signature: str | None = None,
+    theme: str = "light",
+    z: int = 0,
+    x: int = 0,
+    y: int = 0,
+    last_served_at: datetime | None = None,
+) -> models.MapTile:
+    """A map tile row naming a key nothing has written, under a signature nothing else uses
+    unless one is given: the table is shared by every account, and these rows persist in the
+    suite's own database."""
     return _persist(
         db,
-        models.MapPicture(
-            user_id=user.id,
-            digest=uuid7().hex * 2,
+        models.MapTile(
+            z=z,
+            x=x,
+            y=y,
             theme=theme,
-            storage_key=f"map-pictures/cc/{uuid7()}_{'c' * 64}",
+            signature=signature or uuid7().hex * 2,
+            storage_key=f"map-tiles/cc/{uuid7()}_{'c' * 64}",
             sha256="c" * 64,
             last_served_at=last_served_at or datetime.now(UTC),
         ),

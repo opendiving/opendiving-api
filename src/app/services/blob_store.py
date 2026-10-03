@@ -83,8 +83,8 @@ _S3_DELETE_BATCH = 1000
 _pending_removals: set[asyncio.Future[None]] = set()
 
 # The kinds stored compressed: dive-computer exports alone, the kind `services/dive_files.py`
-# stores under. Card scans are JPEG, PNG or PDF and pictures, species photos and map pictures
-# are WebP - bytes that are compressed already and that zstd cannot shrink.
+# stores under. Card scans are JPEG, PNG or PDF and pictures, species photos and map tiles are
+# WebP - bytes that are compressed already and that zstd cannot shrink.
 _COMPRESSED_KINDS = frozenset({"dive-files"})
 
 # What ends a key whose object is one zstd frame. The codec lives in the key and never in a

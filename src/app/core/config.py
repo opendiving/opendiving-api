@@ -557,29 +557,33 @@ def normalize_map_renderer_url(raw: str) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ValueError(
             f"MAP_RENDERER_URL is {raw!r}, which names no renderer. Set it in your .env to the "
-            "renderer's host:port or http(s) URL, or leave it empty to draw no map pictures."
+            "renderer's host:port or http(s) URL, or leave it empty to draw no map tiles."
         )
     return value.rstrip("/")
 
 
-class MapPictureSettings(BaseSettings):
-    # The map renderer that draws dive, trip and dive site cards' map pictures
-    # (`services.map_renderer`), a service of its own reachable only inside the stack. Empty, the
-    # default, draws none: every record's `map_picture` is null and `GET /config` says
-    # `map_pictures: false`.
+class MapRendererSettings(BaseSettings):
+    # The map renderer that draws the map tiles every dive, trip and dive site card and page head
+    # is composed from (`services.map_renderer`), a service of its own reachable only inside the
+    # stack. Empty, the default, draws none: `GET /config` says `map_tiles: false` and the tile
+    # route answers 404.
     MAP_RENDERER_URL: str = config("MAP_RENDERER_URL", default="")
 
-    # Seconds one draw may take, queueing at the renderer included. A margin over a full
-    # renderer queue - 24 draws - at about three seconds a cold draw; raise it, never lower
-    # it, where the renderer's measured cold time times 24 exceeds it, and keep any proxy in
-    # front of the API waiting at least this long.
+    # Seconds one draw may take, queueing at the renderer included: a margin over the renderer's
+    # full queue at its slowest cold tile. Raise it, never lower it, where the queue times your
+    # renderer's slowest cold draw exceeds it, and keep any proxy in front of the API waiting at
+    # least this long.
     MAP_RENDERER_TIMEOUT: float = config("MAP_RENDERER_TIMEOUT", default=90.0)
 
-    # Draws one account may start per window: a first view asks for at most ten cards'
-    # pictures, so this admits three such pages a minute. A stored picture, and a request
-    # waiting on another's draw of the same one, are never counted.
-    MAP_PICTURE_RATE_LIMIT_WINDOW_SECONDS: int = config("MAP_PICTURE_RATE_LIMIT_WINDOW_SECONDS", default=60)
-    MAP_PICTURE_RATE_LIMIT_PER_USER: int = config("MAP_PICTURE_RATE_LIMIT_PER_USER", default=30)
+    # Two limits per account over one window, each answered 429 past it. Draws an account may
+    # start: a first view of ten cards and a page head can ask for six tiles each, so the default
+    # admits that twice over; a stored tile, and a request waiting on another's draw of the same
+    # one, are never counted. Tile requests, stored ones and waits included: tiles are shared, and
+    # a stored one answers faster than a drawn one, so this is the rate at which an account can
+    # probe what this instance has drawn.
+    MAP_RENDERER_DRAW_LIMIT_PER_USER: int = config("MAP_RENDERER_DRAW_LIMIT_PER_USER", default=150)
+    MAP_RENDERER_REQUEST_LIMIT_PER_USER: int = config("MAP_RENDERER_REQUEST_LIMIT_PER_USER", default=1200)
+    MAP_RENDERER_LIMIT_WINDOW_SECONDS: int = config("MAP_RENDERER_LIMIT_WINDOW_SECONDS", default=60)
 
     @field_validator("MAP_RENDERER_URL")
     @classmethod
@@ -594,7 +598,7 @@ class MapPictureSettings(BaseSettings):
         return value
 
     @property
-    def map_pictures(self) -> bool:
+    def map_tiles(self) -> bool:
         return bool(self.MAP_RENDERER_URL)
 
 
@@ -1104,7 +1108,7 @@ class Settings(
     EmailSettings,
     ContactSettings,
     GeocodingSettings,
-    MapPictureSettings,
+    MapRendererSettings,
     SpeciesSettings,
     ExportSettings,
     LogbookImportSettings,

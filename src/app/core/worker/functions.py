@@ -23,12 +23,11 @@ from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.invitation import Invitation
 from ...models.invite_request import InviteRequest
-from ...models.map_picture import MapPicture
 from ...models.user import User
 from ...models.user_picture import UserPicture
 from ...models.user_session import UserSession
 from ...schemas.gear_service import ServiceStatus
-from ...services import blob_store, map_pictures
+from ...services import blob_store, map_tiles
 from ...services.checkin_links import swept_checkin_link_predicate
 from ...services.email_service import (
     send_gear_service_digest_email,
@@ -392,29 +391,28 @@ async def record_sign_in_totals(ctx: dict[Any, Any]) -> str:
     return "Recorded daily sign-in totals"
 
 
-async def purge_unserved_map_pictures(ctx: dict[Any, Any]) -> str:
-    """Delete the map pictures no request has found for `UNSERVED_RETENTION`, and their
-    files, a batch per transaction until none is left.
+async def purge_unserved_map_tiles(ctx: dict[Any, Any]) -> str:
+    """Delete the map tiles no request has found for `UNSERVED_RETENTION`, and their files, a
+    batch per transaction until none is left.
 
-    What a deleted dive, trip or dive site leaves behind goes this way too, unless another
-    record of its account shows the same places and keeps the picture in use: nothing deletes
-    a picture with its record, since a picture is named by places rather than by a record.
+    The only way a tile goes: it belongs to no record and no account, so nothing deletes one
+    with either, and a tile drawn by a renderer since redeployed is simply never found again.
     """
-    cutoff = datetime.now(UTC) - map_pictures.UNSERVED_RETENTION
+    cutoff = datetime.now(UTC) - map_tiles.UNSERVED_RETENTION
     purged = 0
     while True:
         async with local_session() as db:
-            batch = await map_pictures.purge_unserved(db, cutoff=cutoff, limit=map_pictures.PURGE_BATCH_SIZE)
+            batch = await map_tiles.purge_unserved(db, cutoff=cutoff, limit=map_tiles.PURGE_BATCH_SIZE)
         purged += batch
-        if batch < map_pictures.PURGE_BATCH_SIZE:
+        if batch < map_tiles.PURGE_BATCH_SIZE:
             break
 
     if purged == 0:
-        logging.info("No unserved map pictures to purge")
-        return "No unserved map pictures to purge"
+        logging.info("No unserved map tiles to purge")
+        return "No unserved map tiles to purge"
 
-    logging.info("Purged %d unserved map picture(s)", purged)
-    return f"Purged {purged} unserved map picture(s)"
+    logging.info("Purged %d unserved map tile(s)", purged)
+    return f"Purged {purged} unserved map tile(s)"
 
 
 # One sweep's worth of accounts. The work per account is a cascade delete over every dive,
@@ -447,8 +445,8 @@ async def _collect_stored_file_keys(db: AsyncSession, user_id: int) -> list[str]
     `POST /auth/restore` inside the grace period should bring back a whole account rather
     than a faceless one.
 
-    Map pictures are the fourth: drawn from the diver's places, which makes them the diver's
-    data whatever drew them.
+    Map tiles are not here: drawn from the basemap alone and shared by every account, they
+    are nobody's, and taking them with one account would delete tiles others are shown.
     """
     dive_file_keys = (await db.execute(select(DiveFile.storage_key).where(DiveFile.user_id == user_id))).scalars().all()
     certification_file_keys = (
@@ -470,10 +468,7 @@ async def _collect_stored_file_keys(db: AsyncSession, user_id: int) -> list[str]
         )
     ).all()
     picture_file_keys = [key for row in picture_keys for key in row if key]
-    map_picture_keys = (
-        (await db.execute(select(MapPicture.storage_key).where(MapPicture.user_id == user_id))).scalars().all()
-    )
-    return [*dive_file_keys, *certification_file_keys, *picture_file_keys, *map_picture_keys]
+    return [*dive_file_keys, *certification_file_keys, *picture_file_keys]
 
 
 async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cutoff: datetime) -> bool:

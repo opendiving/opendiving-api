@@ -29,6 +29,7 @@ from src.app.models.authentication_request import AuthenticationRequest
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
 from src.app.models.dive_file import DiveFile
+from src.app.models.map_tile import MapTile
 from src.app.models.user import User
 from src.app.services import blob_store
 from tests.conftest import db_available
@@ -36,7 +37,7 @@ from tests.helpers.fake_s3 import select_s3_backend
 from tests.helpers.generators import (
     create_dive,
     create_dive_recording,
-    create_map_picture,
+    create_map_tile,
     create_user,
     create_user_picture,
 )
@@ -570,13 +571,13 @@ class TestPurgeDeletedAccountsAgainstPostgres:
         assert [key for key in keys if blob_store.exists(key)] == [], "a picture outlived the account"
 
     @pytest.mark.asyncio
-    async def test_its_map_pictures_go_with_the_account(self, db: Session) -> None:
-        """The fourth key source. Drawn by the server, but from the diver's places, so the
-        rows' cascade must not leave their files behind."""
+    async def test_it_touches_no_map_tile(self, db: Session) -> None:
+        """Tiles are nobody's: drawn from the basemap alone and shared by every account, so a
+        purge that took the ones its diver was shown would take tiles others are shown."""
         diver = create_user(db)
-        keys = [create_map_picture(db, diver, theme=theme).storage_key for theme in ("light", "dark")]
-        for key in keys:
-            await blob_store.put(key, b"a map, notionally")
+        tile = create_map_tile(db)
+        tile_id, key = tile.id, tile.storage_key
+        await blob_store.put(key, b"a map, notionally")
 
         self._request_deletion(db, diver, days_ago=settings.ACCOUNT_DELETION_GRACE_DAYS + 1)
         diver_id = diver.id
@@ -586,4 +587,5 @@ class TestPurgeDeletedAccountsAgainstPostgres:
         await blob_store._await_pending_removals()
 
         assert db.get(User, diver_id) is None
-        assert [key for key in keys if blob_store.exists(key)] == [], "a map picture outlived the account"
+        assert db.get(MapTile, tile_id) is not None
+        assert blob_store.exists(key)

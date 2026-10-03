@@ -4650,9 +4650,9 @@ It is enrolled by hand in `ANONYMOUS_BY_DESIGN` (`tests/test_route_authenticatio
 columns, so a kind missing there is on disk and referenced by nothing, and every file of it past the
 24-hour grace window is an orphan for `--delete` to unlink. The suspicious-fraction refusal is the
 only brake, `--force` overrides it, and it does not engage below 20 files on the volume, so the
-smallest instances have none. Species photos are the worst case, being the only kind on a global
-table. `_referenced_keys`' docstring does not count its sources, because any count goes stale at the
-next kind.
+smallest instances have none. Species photos and map tiles are the worst cases, being kinds on
+global tables. `_referenced_keys`' docstring does not count its sources, because any count goes
+stale at the next kind.
 
 ## Species photos: Backfilling selects on the timestamp, not on the absence of bytes
 
@@ -6864,7 +6864,7 @@ The codec lives in the key, not in `Content-Encoding`, which R2 acts on - it dec
 gzip-encoded objects on read and documents nothing for zstd; a codec column would leave the sweeper,
 `migrate_blobs.py` and an operator with `ls` unable to tell a frame from a file. Level 9, measured
 on Suunto exports: level 3 leaves 18% more bytes for a fifth of the CPU, level 19 costs sixty times
-the CPU for 13% fewer. Cards, pictures, species photos and map pictures are JPEG, PNG, PDF or WebP,
+the CPU for 13% fewer. Cards, pictures, species photos and map tiles are JPEG, PNG, PDF or WebP,
 which zstd cannot shrink, so only this kind compresses.
 
 ## `JOIN_CHANNELS` is the project's switch, and the template says no more than that
@@ -6939,22 +6939,22 @@ position from a recording past the first is a guess, and fills only a row record
 contradicts, or the last row meeting the last cylinder. Pressures fill as a pair. A recording past
 the first appends no cylinder carrying nothing.
 
-## Map pictures are drawn on first view and named by what they show
+## Map tiles are drawn once for the whole instance, and any signed-in account may read one
 
-A dive, trip or dive site card's map is drawn by the map renderer the first time a card asks
-(`api/v1/map_pictures.py`), stored per account and theme under a digest of the record's positional
-fields and the renderer's signature, and served from storage afterwards. Whatever moves a record's
-places names another picture, so nothing invalidates one and existing records need no backfill.
-Rejected: drawing on save. A card's places are written by dive create, update, merge and delete,
-recording attach, delete and promotion, file delete, a site's edit or delete, logbook import, trip
-create, update and delete, the backfill scripts, the admin panel and FK cascades - the last two with
-nothing to hook - and it would be the API's first enqueued job. Rejected too: one store keyed by
-digest alone, where a fast hit tells one account another has a picture of that place.
+The renderer draws Web Mercator square `z/x/y` in a theme the first time anyone asks
+(`api/v1/map_tiles.py`), stored under that address and the renderer's signature, with no account. It
+holds nothing of a record - the web composes maps from tiles and draws the pins - so one row serves
+every record and account and nothing invalidates it. The zoom stops at `MAX_ZOOM`, the web's deepest
+fit, bounding the store. A stored tile answers faster than a drawn one, so an account can learn that
+someone here was shown a region recently: accepted, as a tile names only a region. Rejected: a store
+per account, drawing each coast once per diver. Every tile request, hits included, counts against
+`MAP_RENDERER_REQUEST_LIMIT_PER_USER`, so a probe runs no faster. Rejected: no request limit, where
+past the draw limit a stored tile's 200 against an unstored one's 429 is an exact oracle.
 
-## Map pictures count against no storage limit and are not exported
+## Map tiles are nobody's data
 
-They are derived: drawn by the server from places the export already carries, redrawn by any
-instance with a renderer, and not the diver's to see or delete, so `STORAGE_LIMIT_MB` would bill a
-diver for files they cannot manage - species photos' footing. They are still the diver's data: the
-purge's `_collect_stored_file_keys` and the sweeper's `_referenced_keys` read `map_picture`, and the
-worker deletes one unserved for 30 days. Rejected: counting them as picture renditions.
+A tile is drawn from the basemap alone and shared by every account, so it counts toward no storage
+limit, is not exported, and no account's purge collects it - taking the tiles one diver was shown
+would take tiles others are shown. The sweeper's `_referenced_keys` reads `map_tile`, and the worker
+deletes a tile unserved for `UNSERVED_RETENTION`. Rejected: the purge collecting the tiles an
+account's requests drew first, which ties shared files to whoever happened to ask first.
