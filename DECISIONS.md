@@ -2953,9 +2953,9 @@ is load-bearing: a `NOT NULL` column on a populated table needs a server-side de
 ## The attribution string is a wire format, so its shape is part of the API contract
 
 `GeocodeResult.attribution` is a wire format: `parseAttribution`
-(`opendiving-web/src/lib/map-tiles.ts`) reads `[label](href)` and degrades to plain text, so a shape
-change ships client-first. A pin's credit is Nominatim's `licence`, and `_normalize` falls back to
-`_DEFAULT_ATTRIBUTION` only when it is absent; a search result always carries
+(`opendiving-web/src/components/attribution.tsx`) reads `[label](href)` and degrades to plain text,
+so a shape change ships client-first. A pin's credit is Nominatim's `licence`, and `_normalize`
+falls back to `_DEFAULT_ATTRIBUTION` only when it is absent; a search result always carries
 `_DEFAULT_ATTRIBUTION`, since Photon sends no licence. `_linked_attribution` folds
 `<text> <trailing-url>` into `[<text>](<url>)` and nothing else: a rule about shape, not
 OpenStreetMap, because `GEOCODER_URL` is an operator setting and a hardcoded credit or
