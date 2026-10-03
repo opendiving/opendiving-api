@@ -213,7 +213,9 @@ async def _find_by_digest(db: AsyncSession, *, user_id: int, digest: str) -> _Ex
         DiveFile.updated_at,
     ).where(DiveFile.user_id == user_id, DiveFile.sha256 == digest)
     row = (await db.execute(stmt)).one_or_none()
-    return None if row is None else _ExistingRow(*row)
+    # `tuple()` because SQLAlchemy types a ten-column row with an open `*tuple[Any, ...]` tail,
+    # which mypy counts as surplus arguments.
+    return None if row is None else _ExistingRow(*tuple(row))
 
 
 async def _ensure_room_for(db: AsyncSession, *, user_id: int, data: bytes) -> None:

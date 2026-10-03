@@ -686,9 +686,9 @@ class TestSearchConditions:
         a search for "50%" is a search for everything, in the child table too."""
         sql = _as_sql(*crud_trips_module.search_conditions(user_id=USER_ID, term="50%"))
 
-        # The rendered literal doubles each backslash; what matters is that the `%` the
-        # diver typed arrives escaped rather than as a live wildcard, under an `ESCAPE`.
-        assert sql.count(f"'%50{'\\' * 2}%%' ESCAPE") == 2
+        # What matters is that the `%` the diver typed arrives escaped rather than as a live
+        # wildcard, under an `ESCAPE`.
+        assert sql.count("'%50\\%%' ESCAPE") == 2
 
 
 @pytest.fixture
