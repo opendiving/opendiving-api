@@ -563,9 +563,10 @@ def normalize_map_renderer_url(raw: str) -> str:
 
 
 class MapPictureSettings(BaseSettings):
-    # The map renderer that draws dive and trip cards' map pictures (`services.map_renderer`),
-    # a service of its own reachable only inside the stack. Empty, the default, draws none:
-    # every record's `map_picture` is null and `GET /config` says `map_pictures: false`.
+    # The map renderer that draws dive, trip and dive site cards' map pictures
+    # (`services.map_renderer`), a service of its own reachable only inside the stack. Empty, the
+    # default, draws none: every record's `map_picture` is null and `GET /config` says
+    # `map_pictures: false`.
     MAP_RENDERER_URL: str = config("MAP_RENDERER_URL", default="")
 
     # Seconds one draw may take, queueing at the renderer included. A margin over a full

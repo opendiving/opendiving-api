@@ -257,6 +257,15 @@ class DiveSiteRead(DiveSiteBase, _DiveSiteMembersRead, DiveSiteSummary, PublicUU
     tags: Annotated[list[str], Field(default_factory=list)]
     user_uuid: uuid_pkg.UUID
     created_at: datetime
+    map_picture: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="The name of the map behind the site's card, as `v` for `GET /dive-site/{uuid}/map-picture`; "
+            "it changes whenever the picture would. Null when this instance draws no map pictures, when the site has "
+            "no position, or while the renderer has not yet named how it draws",
+        ),
+    ]
 
 
 class DiveSiteReadInternal(DiveSiteBase, _DiveSiteMembersRead, DiveSiteLocationColumns, PublicUUIDSchema):

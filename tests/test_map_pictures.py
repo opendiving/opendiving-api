@@ -1,4 +1,4 @@
-"""Dive and trip map pictures: what names one, the renderer's contract from the API's side,
+"""Dive, trip and dive site map pictures: what names one, the renderer's contract from the API's side,
 and the routes that find or draw one.
 
 Every draw here goes to `StubRenderer`, which speaks the renderer's contract and refuses a
@@ -50,6 +50,7 @@ from src.app.services.map_pictures import (
     digest,
     dive_map_picture,
     dive_payload,
+    dive_site_map_picture,
     trip_map_picture,
     trip_payload,
 )
@@ -446,6 +447,24 @@ class TestARecordsMapPicture:
     def test_a_trip_with_no_place_has_one(self, renderer: StubRenderer, parts: list[dict[str, Any]]) -> None:
         """Its card shows the whole world."""
         assert trip_map_picture({"parts": parts}) is not None
+
+    def test_a_site_names_the_picture_a_one_site_dive_there_with_no_fix_does(self, renderer: StubRenderer) -> None:
+        site = {"name": "Blue Hole", "latitude": 28.5721, "longitude": 34.5370, "notes": "The arch at 55 m"}
+        at_it = _dive(dive_sites=[{**site, "name": "Another name"}], **dict.fromkeys(map_pictures.FIX_FIELDS))
+
+        assert dive_site_map_picture(site) == dive_map_picture(at_it) is not None
+        assert dive_site_map_picture(site) != dive_map_picture(_dive(dive_sites=[site]))
+
+    def test_none_for_a_site_without_a_renderer_a_signature_or_a_position(
+        self, renderer: StubRenderer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        site = {"latitude": 28.5721, "longitude": 34.5370}
+        assert dive_site_map_picture({"latitude": None, "longitude": None}) is None
+        monkeypatch.setattr(map_renderer, "_signature", None)
+        assert dive_site_map_picture(site) is None
+        monkeypatch.setattr(map_renderer, "_signature", SIGNATURE)
+        monkeypatch.setattr(settings, "MAP_RENDERER_URL", "")
+        assert dive_site_map_picture(site) is None
 
 
 # -------------- the setting --------------
@@ -1173,6 +1192,105 @@ class TestTheListAndTheRouteAgree:
     ) -> None:
         client, _diver = api
         assert (await client.get("/api/v1/config")).json()["map_pictures"] is True
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestASitesPicture:
+    """A site is drawn as a one-site dive with no fix, through the dive's own find-or-draw."""
+
+    @pytest.mark.asyncio
+    async def test_every_read_of_a_site_names_the_picture_its_route_serves(
+        self, api: tuple[httpx.AsyncClient, User], db: Session, renderer: StubRenderer
+    ) -> None:
+        client, diver = api
+        created = await client.post(
+            "/api/v1/dive-site",
+            json={"name": f"Blue Hole {uuid7().hex[-8:]}", "latitude": 28.5721, "longitude": 34.537},
+        )
+        assert created.status_code == 201, created.text
+        body = created.json()
+
+        listed = await _listed(client, "/api/v1/dive-sites", body["uuid"])
+        single = (await client.get(f"/api/v1/dive-site/{body['uuid']}")).json()["map_picture"]
+        response = await client.get(_picture_url("dive-site", body["uuid"], v=listed))
+
+        assert listed is not None
+        assert body["map_picture"] == single == listed
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/webp"
+        assert response.headers["cache-control"] == "private, max-age=300"
+        assert _rows(db, diver)[0].digest == listed
+        assert renderer.renders == [
+            {
+                "kind": "dive",
+                "theme": "light",
+                "dive_sites": [{"latitude": 28.5721, "longitude": 34.537}],
+                **dict.fromkeys(map_pictures.FIX_FIELDS),
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_site_and_a_one_site_dive_there_with_no_fix_share_one_picture(
+        self, api: tuple[httpx.AsyncClient, User], db: Session, renderer: StubRenderer
+    ) -> None:
+        client, diver = api
+        dive = _dive_at(db, diver, (28.57, 34.53))
+        site_uuid = db.execute(
+            select(DiveSite.uuid).join(DiveDiveSite).where(DiveDiveSite.dive_id == dive.id)
+        ).scalar_one()
+
+        drawn = await client.get(_picture_url("dive", dive.uuid))
+        served = await client.get(_picture_url("dive-site", site_uuid))
+
+        assert drawn.status_code == served.status_code == 200
+        assert served.content == drawn.content
+        assert served.headers["etag"] == drawn.headers["etag"]
+        assert len(renderer.renders) == 1
+        assert len(_rows(db, diver)) == 1
+        assert (
+            await _listed(client, "/api/v1/dive-sites", site_uuid)
+            == await _listed(client, "/api/v1/dives", dive.uuid)
+            is not None
+        )
+
+    @pytest.mark.asyncio
+    async def test_someone_elses_site_reads_as_a_missing_one(
+        self, api: tuple[httpx.AsyncClient, User], db: Session, renderer: StubRenderer
+    ) -> None:
+        client, _diver = api
+        theirs = _site(db, create_user(db), 28.57, 34.53)
+
+        someone_elses = await client.get(_picture_url("dive-site", theirs.uuid))
+        missing = await client.get(_picture_url("dive-site", uuid7()))
+
+        assert someone_elses.status_code == missing.status_code == 404
+        assert someone_elses.json() == missing.json() == {"detail": "Dive site not found"}
+        assert renderer.renders == []
+
+    @pytest.mark.asyncio
+    async def test_a_site_with_no_position_names_none_and_is_a_404(
+        self, api: tuple[httpx.AsyncClient, User], db: Session, renderer: StubRenderer
+    ) -> None:
+        client, diver = api
+        site = _site(db, diver, None, None)
+
+        assert await _listed(client, "/api/v1/dive-sites", site.uuid) is None
+        assert (await client.get(f"/api/v1/dive-site/{site.uuid}")).json()["map_picture"] is None
+        assert (await client.get(_picture_url("dive-site", site.uuid))).status_code == 404
+        assert renderer.renders == []
+
+    @pytest.mark.asyncio
+    async def test_without_a_renderer_a_site_names_none_and_is_a_404(
+        self, api: tuple[httpx.AsyncClient, User], db: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, diver = api
+        monkeypatch.setattr(settings, "MAP_RENDERER_URL", "")
+        monkeypatch.setattr(map_renderer, "_signature", SIGNATURE)
+        site = _site(db, diver, 28.57, 34.53)
+
+        assert await _listed(client, "/api/v1/dive-sites", site.uuid) is None
+        assert (await client.get(f"/api/v1/dive-site/{site.uuid}")).json()["map_picture"] is None
+        assert (await client.get(_picture_url("dive-site", site.uuid))).status_code == 404
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
