@@ -333,6 +333,13 @@ FETCH_OWNED_ROUTES = [
         "Trip not found",
         {"params": {"theme": "light"}},
     ),
+    OwnedRoute(
+        "GET",
+        "/api/v1/dive-site/{uuid}/map-picture",
+        "src.app.api.v1.map_pictures:crud_dive_sites",
+        "Dive site not found",
+        {"params": {"theme": "light"}},
+    ),
     # The recordings and their files. Every one of them resolves the *dive* first and the
     # recording or file second, so someone else's dive uuid is a 404 before the `{rid}`/
     # `{fid}` in the path is looked at - which is what makes a second identifier here no

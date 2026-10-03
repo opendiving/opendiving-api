@@ -344,7 +344,7 @@ class TestTheReads:
     @pytest.mark.asyncio
     async def test_a_tag_that_is_not_the_caller_s_answers_an_empty_page(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Not a 404: the uuid names a resource whose existence must stay unprobeable."""
-        cached = AsyncMock(return_value={})
+        cached = AsyncMock(return_value={"data": []})
         monkeypatch.setattr(dive_sites_module, "resolve_tag_id_for_user", AsyncMock(return_value=None))
         monkeypatch.setattr(dive_sites_module, "_cached_read_dive_sites", cached)
 
@@ -364,12 +364,15 @@ class TestTheReads:
     @pytest.mark.asyncio
     async def test_the_single_read_authorizes_before_the_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[str] = []
+
+        def read(*_: Any, **__: Any) -> dict[str, Any]:
+            calls.append("read")
+            return {}
+
         monkeypatch.setattr(
             dive_sites_module, "_get_owned_dive_site", AsyncMock(side_effect=lambda *_: calls.append("owned"))
         )
-        monkeypatch.setattr(
-            dive_sites_module, "_cached_read_dive_site", AsyncMock(side_effect=lambda *_, **__: calls.append("read"))
-        )
+        monkeypatch.setattr(dive_sites_module, "_cached_read_dive_site", AsyncMock(side_effect=read))
 
         await dive_sites_module.read_dive_site(
             request=MagicMock(), uuid=uuid7(), current_user={"id": USER_ID, "uuid": uuid7()}, db=MagicMock()
@@ -496,10 +499,10 @@ def _at(db: Session, dive: Dive, *sites: DiveSite) -> None:
 
 
 async def _read(async_db: AsyncSession, user: User, uuid: Any) -> DiveSiteRead:
-    read: DiveSiteRead = await dive_sites_module._cached_read_dive_site.__wrapped__(  # type: ignore[attr-defined]
+    read = await dive_sites_module._cached_read_dive_site.__wrapped__(  # type: ignore[attr-defined]
         None, user_id=user.id, uuid=uuid, owner_uuid=user.uuid, db=async_db
     )
-    return read
+    return DiveSiteRead.model_validate(read)
 
 
 async def _page(async_db: AsyncSession, user: User, **arguments: Any) -> list[dict[str, Any]]:

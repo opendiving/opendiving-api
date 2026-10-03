@@ -6941,7 +6941,7 @@ the first appends no cylinder carrying nothing.
 
 ## Map pictures are drawn on first view and named by what they show
 
-A dive or trip card's map is drawn by the map renderer the first time a card asks
+A dive, trip or dive site card's map is drawn by the map renderer the first time a card asks
 (`api/v1/map_pictures.py`), stored per account and theme under a digest of the record's positional
 fields and the renderer's signature, and served from storage afterwards. Whatever moves a record's
 places names another picture, so nothing invalidates one and existing records need no backfill.

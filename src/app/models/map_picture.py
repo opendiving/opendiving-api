@@ -7,8 +7,8 @@ from ..core.db.database import Base
 
 
 class MapPicture(Base):
-    """A dive's or a trip's map picture, drawn by the map renderer the first time a card asked
-    for it, in one theme.
+    """A dive's, a trip's or a dive site's map picture, drawn by the map renderer the first time
+    a card asked for it, in one theme.
 
     Named by `digest` - what the renderer was sent and the signature of the renderer that drew
     it (`services/map_pictures.py`) - rather than by the record, so whatever moves a record's

@@ -1,5 +1,5 @@
-"""A dive card's and a trip card's map picture, drawn by the map renderer the first time a
-card asks and served from storage after that (`services/map_pictures.py`).
+"""A dive card's, a trip card's and a dive site card's map picture, drawn by the map renderer
+the first time a card asks and served from storage after that (`services/map_pictures.py`).
 
 Never `@cache`d, as no binary read is: Redis holds serialized responses, and the `ETag` does
 this job in the browser.
@@ -16,10 +16,12 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
 from ...core.utils.uploads import content_disposition_attachment
 from ...crud.crud_dive_dive_sites import get_dive_sites_for_dive
+from ...crud.crud_dive_sites import crud_dive_sites
 from ...crud.crud_dives import crud_dives
 from ...crud.crud_trip_parts import get_parts_for_trip
 from ...crud.crud_trips import crud_trips
 from ...schemas.dive import DiveReadInternal
+from ...schemas.dive_site import DiveSiteReadInternal
 from ...schemas.map_picture import MapTheme
 from ...schemas.trip import TripReadInternal
 from ...services.map_pictures import (
@@ -28,6 +30,7 @@ from ...services.map_pictures import (
     MapPicturesOff,
     MapPictureUnavailable,
     dive_payload,
+    dive_site_payload,
     etag,
     find_or_draw,
     trip_payload,
@@ -145,4 +148,34 @@ async def read_trip_map_picture(
     )
     parts = await get_parts_for_trip(db=db, trip_id=trip.id)
     payload = trip_payload({"parts": [part.model_dump() for part in parts]})
+    return await _respond(request, db, user_id=current_user["id"], payload=payload, theme=theme, v=v)
+
+
+@router.get("/dive-site/{uuid}/map-picture", tags=["dive-sites"], response_class=Response, responses=_RESPONSES)
+async def read_dive_site_map_picture(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    theme: Annotated[MapTheme, _THEME],
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[str | None, _VERSION] = None,
+) -> Response:
+    """The map behind the dive site's card: the site, pinned, in `theme`, as a 2048x1024 WebP.
+
+    Drawn as a dive at that one site recording no fix, so the two share one stored picture,
+    and kept as `GET /dive/{uuid}/map-picture` is, with the same answer to `v`. 404 for a
+    site that is not the caller's, as for one that does not exist, and for one with no
+    position - its list row says `map_picture: null`.
+    """
+    site = await fetch_owned_or_raise(
+        db=db,
+        crud=crud_dive_sites,
+        uuid=uuid,
+        current_user=current_user,
+        schema=DiveSiteReadInternal,
+        not_found_message="Dive site not found",
+    )
+    payload = dive_site_payload(site.model_dump(include={"latitude", "longitude"}))
+    if payload is None:
+        raise NotFoundException("This dive site has no position to draw")
     return await _respond(request, db, user_id=current_user["id"], payload=payload, theme=theme, v=v)

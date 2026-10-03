@@ -1,4 +1,4 @@
-"""Dive and trip map pictures: what names one, and finding or drawing it.
+"""Dive, trip and dive site map pictures: what names one, and finding or drawing it.
 
 **Drawn on first view, not on save.** A card asks for its record's picture; the route builds
 the record's positional subset - the payload - from the database, and this module digests it
@@ -10,6 +10,7 @@ so a stale one is never served and no write path knows this module exists.
 because a field the renderer reads and the digest leaves out would be a picture that never
 updates. The kind is in both, since it decides how the renderer reads the fields; the theme
 keys the row beside the digest instead; names are in neither, the renderer drawing no text.
+A dive site has no kind of its own: it is drawn as a one-site dive with no fix.
 
 **Concurrent misses share one draw**, across every API process: the first claims it in
 Redis, the rest wait for its row. The claimant draws in a task of its own, so a client that
@@ -114,6 +115,13 @@ def dive_payload(dive: Mapping[str, Any]) -> dict[str, Any] | None:
     return {"kind": "dive", "dive_sites": sites, **fixes}
 
 
+def dive_site_payload(site: Mapping[str, Any]) -> dict[str, Any] | None:
+    """What the renderer is sent for a dive site: a one-site dive's payload with no fix, built
+    by `dive_payload` itself, so a site and a dive there recording no fix name one picture and
+    share it. `None` for a site with no position."""
+    return dive_payload({"dive_sites": [site]})
+
+
 def _location(location: Mapping[str, Any] | None) -> dict[str, float | None] | None:
     return None if location is None else {field: _coordinate(location.get(field)) for field in _LOCATION_FIELDS}
 
@@ -146,6 +154,10 @@ def dive_map_picture(dive: Mapping[str, Any]) -> str | None:
 
 def trip_map_picture(trip: Mapping[str, Any]) -> str | None:
     return current_digest(trip_payload(trip))
+
+
+def dive_site_map_picture(site: Mapping[str, Any]) -> str | None:
+    return current_digest(dive_site_payload(site))
 
 
 def etag(sha256: str) -> str:

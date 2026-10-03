@@ -57,6 +57,7 @@ from ...schemas.location import (
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches, invalidate_trip_caches
 from ...services.dive_site_catalog import search_sites
+from ...services.map_pictures import dive_site_map_picture
 
 router = APIRouter(tags=["dive-sites"])
 
@@ -186,12 +187,14 @@ async def write_dive_site(
 
     tags = (await get_tags_for_dive_sites(db, [created_dive_site.id]))[created_dive_site.id] if tag_ids else []
     # No dive can name a site that did not exist, so a new one has nothing to summarise.
-    return _to_public_dive_site(
+    created = _to_public_dive_site(
         cast(DiveSiteReadInternal, dive_site_read),
         user_uuid=current_user["uuid"],
         tags=tags,
         summary=DiveSiteSummary(),
     )
+    created.map_picture = dive_site_map_picture(created.model_dump())
+    return created
 
 
 # Every query parameter has to be in this key: `@cache` keys on its placeholders alone, so a
@@ -277,7 +280,7 @@ async def read_dive_sites(
         # -1 can never match a tag, so a foreign or unknown uuid answers an empty page.
         tag_id = await resolve_tag_id_for_user(db, tag_uuid=tag_uuid, user_id=current_user["id"]) or -1
 
-    return await _cached_read_dive_sites(
+    response = await _cached_read_dive_sites(
         request,
         user_id=current_user["id"],
         user_uuid=current_user["uuid"],
@@ -290,12 +293,17 @@ async def read_dive_sites(
         tag_id=tag_id,
         sort=sort,
     )
+    # Named after the cached read rather than inside it, as `read_dives` names its rows'
+    # pictures, so a renderer whose signature changed names every row at once.
+    for site in response["data"]:
+        site["map_picture"] = dive_site_map_picture(site)
+    return response
 
 
 @cache(key_prefix="user_{user_id}_dive_site", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)
 async def _cached_read_dive_site(
     request: Request, user_id: int, uuid: uuid_pkg.UUID, owner_uuid: uuid_pkg.UUID, db: AsyncSession
-) -> DiveSiteRead:
+) -> dict[str, Any]:
     """Fetches (and caches) one site with its tags and summary. Like the list, reached only
     once the route has established that the caller owns it."""
     db_dive_site = await crud_dive_sites.get(
@@ -309,7 +317,7 @@ async def _cached_read_dive_site(
     summary = (await get_summaries_for_dive_sites(db, dive_site_ids=[db_dive_site.id], user_id=user_id))[
         db_dive_site.id
     ]
-    return _to_public_dive_site(db_dive_site, user_uuid=owner_uuid, tags=tags, summary=summary)
+    return _to_public_dive_site(db_dive_site, user_uuid=owner_uuid, tags=tags, summary=summary).model_dump()
 
 
 @router.get("/dive-site/{uuid}", response_model=DiveSiteRead)
@@ -318,7 +326,7 @@ async def read_dive_site(
     uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-) -> DiveSiteRead:
+) -> dict[str, Any]:
     """Return a single dive site by its public uuid, with its tags and the summary of the
     caller's dives there that `GET /dive-sites` carries.
 
@@ -328,9 +336,12 @@ async def read_dive_site(
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
     await _get_owned_dive_site(db, uuid, current_user)
 
-    return await _cached_read_dive_site(
+    site = await _cached_read_dive_site(
         request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
     )
+    # After the cached read, as `read_dive_sites` names its rows' pictures: this one is kept an hour.
+    site["map_picture"] = dive_site_map_picture(site)
+    return site
 
 
 @router.patch("/dive-site/{uuid}")

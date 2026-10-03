@@ -396,9 +396,9 @@ async def purge_unserved_map_pictures(ctx: dict[Any, Any]) -> str:
     """Delete the map pictures no request has found for `UNSERVED_RETENTION`, and their
     files, a batch per transaction until none is left.
 
-    What a deleted dive or trip leaves behind goes this way too, unless another record of its
-    account shows the same places and keeps the picture in use: nothing deletes a picture
-    with its record, since a picture is named by places rather than by a record.
+    What a deleted dive, trip or dive site leaves behind goes this way too, unless another
+    record of its account shows the same places and keeps the picture in use: nothing deletes
+    a picture with its record, since a picture is named by places rather than by a record.
     """
     cutoff = datetime.now(UTC) - map_pictures.UNSERVED_RETENTION
     purged = 0
