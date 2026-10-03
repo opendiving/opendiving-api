@@ -105,9 +105,8 @@ class TestSearchClause:
         sql = _as_sql(search_clause(DiveSite, ("name",), "50%"), model=DiveSite)
 
         # Without the ESCAPE clause the backslash `escape_like` added would be matched
-        # literally instead of neutralizing the "%". (Backslashes render doubled in
-        # literal SQL; the real query sends the pattern as a bound parameter.)
-        assert "ILIKE '%50\\\\%%' ESCAPE '\\\\'" in sql
+        # literally instead of neutralizing the "%".
+        assert "ILIKE '%50\\%%' ESCAPE '\\'" in sql
 
 
 class TestThePeopleSearch:
@@ -117,8 +116,8 @@ class TestThePeopleSearch:
         the other pickers do not need."""
         sql = _as_sql(person_search_condition("alex"), model=Person)
 
-        assert "person.name ILIKE '%alex%' ESCAPE '\\\\'" in sql
-        assert "\"user\".username ILIKE '%alex%' ESCAPE '\\\\'" in sql
+        assert "person.name ILIKE '%alex%' ESCAPE '\\'" in sql
+        assert "\"user\".username ILIKE '%alex%' ESCAPE '\\'" in sql
         assert " OR " in sql
 
 
@@ -130,8 +129,8 @@ class TestOwnedResourceSearchConditions:
         # match every user's sites.
         assert (
             "dive_site.user_id = 42 "
-            "AND (dive_site.name ILIKE '%dahab%' ESCAPE '\\\\' "
-            "OR dive_site.location_name ILIKE '%dahab%' ESCAPE '\\\\')" in sql
+            "AND (dive_site.name ILIKE '%dahab%' ESCAPE '\\' "
+            "OR dive_site.location_name ILIKE '%dahab%' ESCAPE '\\')" in sql
         )
 
     def test_trips_are_scoped_the_same_way(self) -> None:

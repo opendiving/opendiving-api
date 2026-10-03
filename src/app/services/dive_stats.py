@@ -36,7 +36,7 @@ async def recalculate_dive_stats(db: AsyncSession, user_id: int, commit: bool = 
             # (defeating the point of the covering index) even though `id` is never null and
             # the two forms are equivalent here.
             func.count(),
-            func.coalesce(func.max(Dive.max_depth), 0),
+            func.max(Dive.max_depth),
             func.coalesce(func.sum(Dive.duration), 0),
         ).where(Dive.user_id == user_id, Dive.is_deleted.is_(False))
     )
@@ -55,14 +55,14 @@ async def recalculate_dive_stats(db: AsyncSession, user_id: int, commit: bool = 
         stats = UserDiveStats(
             user_id=user_id,
             total_dives=total_dives,
-            max_depth=float(max_depth),
+            max_depth=float(max_depth or 0),
             total_time=int(total_time),
             species_seen=int(species_seen or 0),
         )
         db.add(stats)
     else:
         stats.total_dives = total_dives
-        stats.max_depth = float(max_depth)
+        stats.max_depth = float(max_depth or 0)
         stats.total_time = int(total_time)
         # Set on this branch too, which is the one nearly every real write takes - the
         # insert above only ever runs once per account. Updating only the insert would
