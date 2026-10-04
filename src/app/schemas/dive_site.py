@@ -528,10 +528,14 @@ class DiveSiteSuggestResponse(BaseModel):
 
 
 class DiveSiteLookupItem(PublicUUIDSchema):
-    """One row of `GET /dive-sites/lookup`: the name and the locality a picker shows under it.
+    """One row of `GET /dive-sites/lookup`: the name and the locality a picker shows under it,
+    and the members a dive form fills from the site picked, as `DiveSiteRead` carries them.
 
     Not `DiveSiteReference`, which names the suggest route's held site and carries no
     locality, nor the dive's `DiveSiteInfo`, which requires coordinates."""
 
     name: str
     location: LocationRead | None = None
+    water_type: StoredVocabulary | None = None
+    altitude: int | None = None
+    entry_types: Annotated[list[StoredVocabulary], Field(default_factory=list)]

@@ -159,6 +159,8 @@ class TripUpdateInternal(TripUpdate):
 
 
 class TripLookupItem(PublicUUIDSchema):
-    """One row of `GET /trips/lookup`. The name alone: a trip's name usually carries its year."""
+    """One row of `GET /trips/lookup`: the name, which usually carries the trip's year, and the
+    people a dive form fills from the trip picked, as `TripRead` carries them."""
 
     name: str
+    people: PeopleRead

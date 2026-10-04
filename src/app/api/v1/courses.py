@@ -4,6 +4,7 @@ from typing import Annotated, Any, NoReturn, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from sqlalchemy import and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +27,7 @@ from ...crud.crud_people import (
     get_people_for_courses,
     replace_people_for_course,
 )
+from ...models.contact import Contact
 from ...models.course import Course
 from ...models.dive import Dive
 from ...schemas.certification import CertificationAgency, validate_agency_pairing
@@ -38,7 +40,7 @@ from ...schemas.course import (
     CourseStatus,
     CourseUpdateRequest,
 )
-from ...schemas.lookup import LookupUntil, lookup_bound
+from ...schemas.lookup import LookupUntil, LookupUuids, lookup_bound
 from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
@@ -358,6 +360,49 @@ async def read_courses(
     )
 
 
+async def _lookup_courses(
+    *,
+    user_id: int,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    search: str | None,
+    until: datetime | None,
+    uuids: list[uuid_pkg.UUID] | None,
+) -> dict:
+    """A page of `GET /courses/lookup`, its people read for the whole page at once. Reached
+    only after the route has authorized the caller."""
+    conditions: tuple[Any, ...] = (Course.user_id == user_id,)
+    if search:
+        conditions += (search_clause(Course, COURSE_SEARCH_COLUMNS, search),)
+    if uuids:
+        conditions += (Course.uuid.in_(uuids),)
+    data = await get_lookup_page(
+        db,
+        model=Course,
+        columns=(Course.id, Course.uuid, Course.name, Contact.uuid.label("contact_uuid")),
+        conditions=conditions,
+        used_by=Dive.course_id,
+        user_id=user_id,
+        bound=until,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+        # The owner's own contact only, as `get_contact_uuids_by_ids` reads the list's.
+        from_clause=Course.__table__.outerjoin(
+            Contact.__table__, and_(Contact.id == Course.contact_id, Contact.user_id == Course.user_id)
+        ),
+    )
+    people_by_course = await get_people_for_courses(db, [row["id"] for row in data["data"]])
+    data["data"] = [
+        CourseLookupItem(
+            uuid=row["uuid"], name=row["name"], contact_uuid=row["contact_uuid"], people=people_by_course[row["id"]]
+        ).model_dump()
+        for row in data["data"]
+    ]
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
 # Under the list's prefix, so every sweep that drops the list drops the lookup with it.
 _LOOKUP_CACHE_KEY_PREFIX = _course_cache.list_cache_key_prefix + ":lookup:until_{until}"
 
@@ -372,26 +417,11 @@ async def _cached_lookup_courses(
     search: str | None,
     until: datetime | None,
 ) -> dict:
-    """Fetches (and caches) a page of `GET /courses/lookup`, under the list's prefix so that
-    `invalidate_course_caches` drops it with the list. Reached only after the route has
-    authorized the caller."""
-    conditions: tuple[Any, ...] = (Course.user_id == user_id,)
-    if search:
-        conditions += (search_clause(Course, COURSE_SEARCH_COLUMNS, search),)
-    data = await get_lookup_page(
-        db,
-        model=Course,
-        columns=(Course.uuid, Course.name),
-        conditions=conditions,
-        used_by=Dive.course_id,
-        user_id=user_id,
-        bound=until,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
+    """`_lookup_courses` with no uuids, cached under the list's prefix so that
+    `invalidate_course_caches` drops it with the list."""
+    return await _lookup_courses(
+        user_id=user_id, db=db, page=page, items_per_page=items_per_page, search=search, until=until, uuids=None
     )
-    data["data"] = [CourseLookupItem.model_validate(row).model_dump() for row in data["data"]]
-    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
-    return response
 
 
 @router.get("/courses/lookup", response_model=PaginatedListResponse[CourseLookupItem])
@@ -406,25 +436,29 @@ async def lookup_courses(
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on the course's name"),
     ] = None,
+    uuid: LookupUuids = None,
 ) -> dict:
-    """The caller's courses as a picker lists them: uuid and name, the course a dive at or
-    before `until` was last logged on first, then courses no such dive is on, newest created
-    first.
+    """The caller's courses as a picker lists them: uuid and name, with the contact and people
+    a dive form fills from them. The course a dive at or before `until` was last logged on
+    first, then courses no such dive is on, newest created first.
 
     `search` matches what `GET /courses` matches; its date, agency and status filters are the
-    list's alone. Out-of-range pagination is clamped.
+    list's alone. `uuid` narrows the rows to the courses a form already holds, and is not
+    cached: no two forms hold the same set for long. Out-of-range pagination is clamped.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
+    query: dict[str, Any] = {
+        "user_id": current_user["id"],
+        "db": db,
+        "page": page,
+        "items_per_page": items_per_page,
+        "search": (search or "").strip().lower() or None,
+        "until": lookup_bound(until),
+    }
 
-    return await _cached_lookup_courses(
-        request,
-        user_id=current_user["id"],
-        db=db,
-        page=page,
-        items_per_page=items_per_page,
-        search=(search or "").strip().lower() or None,
-        until=lookup_bound(until),
-    )
+    if uuid:
+        return await _lookup_courses(**query, uuids=uuid)
+    return await _cached_lookup_courses(request, **query)
 
 
 @cache(key_prefix="user_{user_id}_course", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)

@@ -184,7 +184,9 @@ class CourseUpdateInternal(CourseUpdate):
 
 
 class CourseLookupItem(PublicUUIDSchema):
-    """One row of `GET /courses/lookup`. A host needing the course's contact or people reads
-    `GET /course/{uuid}` on pick."""
+    """One row of `GET /courses/lookup`: the name, and the contact and people a dive form fills
+    from the course picked, as `CourseRead` carries them."""
 
     name: str
+    contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
+    people: PeopleRead
