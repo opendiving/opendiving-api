@@ -1,4 +1,5 @@
 import uuid as uuid_pkg
+from datetime import datetime
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -24,20 +25,25 @@ from ...crud.crud_dive_sites import (
     get_dive_sites_page,
     get_summaries_for_dive_sites,
     resolve_dive_site_ids_for_user,
+    search_condition,
     sites_by_external_id,
 )
+from ...crud.crud_lookups import get_lookup_page
 from ...crud.crud_tags import (
     get_tags_for_dive_sites,
     replace_tags_for_dive_site,
     resolve_tag_id_for_user,
     resolve_tag_ids,
 )
+from ...models.dive_dive_site import DiveDiveSite
+from ...models.dive_site import DiveSite
 from ...schemas.dive_site import (
     DEPTH_RANGE_MESSAGE,
     SUGGESTION_REGISTRY,
     DiveSiteCreate,
     DiveSiteCreateInternal,
     DiveSiteListSort,
+    DiveSiteLookupItem,
     DiveSiteRead,
     DiveSiteReadInternal,
     DiveSiteReference,
@@ -54,6 +60,7 @@ from ...schemas.location import (
     location_columns,
     location_from_row,
 )
+from ...schemas.lookup import LookupUntil, lookup_bound
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches, invalidate_trip_caches
 from ...services.dive_site_catalog import search_sites
@@ -262,8 +269,7 @@ async def read_dive_sites(
     there.
 
     `search` matches a case-insensitive substring against the site's name, its other names
-    and its locality's name, which is what backs the dive form's picker: it narrows
-    server-side as you type rather than shipping the whole list to the browser. `tag_uuid`
+    and its locality's name. `tag_uuid`
     keeps the sites carrying that tag, and one that is not the caller's returns an empty
     page rather than an error. Out-of-range pagination is clamped, not rejected.
 
@@ -289,6 +295,86 @@ async def read_dive_sites(
         search=(search or "").strip().lower() or None,
         tag_id=tag_id,
         sort=sort,
+    )
+
+
+_LOOKUP_COLUMNS = (
+    DiveSite.uuid,
+    DiveSite.name,
+    *(getattr(DiveSite, f"{DIVE_SITE_LOCATION_PREFIX}{field}") for field in LOCATION_FIELDS),
+)
+
+
+# Under the list's prefix, so every sweep that drops the list drops the lookup with it.
+_LOOKUP_CACHE_KEY_PREFIX = _dive_site_cache.list_cache_key_prefix + ":lookup:until_{until}"
+
+
+@cache(key_prefix=_LOOKUP_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
+async def _cached_lookup_dive_sites(
+    request: Request,
+    user_id: int,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    search: str | None,
+    until: datetime | None,
+) -> dict:
+    """Fetches (and caches) a page of `GET /dive-sites/lookup`, under the list's prefix so that
+    `invalidate_dive_site_caches` drops it with the list. Reached only after the route has
+    authorized the caller."""
+    conditions: tuple[Any, ...] = (DiveSite.user_id == user_id,)
+    if search:
+        conditions += (search_condition(search),)
+    data = await get_lookup_page(
+        db,
+        model=DiveSite,
+        columns=_LOOKUP_COLUMNS,
+        conditions=conditions,
+        used_by=DiveDiveSite.dive_site_id,
+        user_id=user_id,
+        bound=until,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+    )
+    data["data"] = [
+        DiveSiteLookupItem(
+            uuid=row["uuid"], name=row["name"], location=location_from_row(row, DIVE_SITE_LOCATION_PREFIX)
+        ).model_dump()
+        for row in data["data"]
+    ]
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
+@router.get("/dive-sites/lookup", response_model=PaginatedListResponse[DiveSiteLookupItem])
+async def lookup_dive_sites(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    until: LookupUntil = None,
+    page: int = 1,
+    items_per_page: int = 10,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive substring match on the name, other names or locality"),
+    ] = None,
+) -> dict:
+    """The caller's sites as a picker lists them: uuid, name and locality, the site a dive at
+    or before `until` named most recently first, then sites no such dive names, newest
+    created first.
+
+    `search` matches what `GET /dive-sites` matches. Out-of-range pagination is clamped.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
+    return await _cached_lookup_dive_sites(
+        request,
+        user_id=current_user["id"],
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        search=(search or "").strip().lower() or None,
+        until=lookup_bound(until),
     )
 
 

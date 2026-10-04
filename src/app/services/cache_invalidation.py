@@ -79,6 +79,9 @@ async def invalidate_course_caches(user_id: int) -> None:
     Deleting a course additionally calls `invalidate_dive_caches` and
     `invalidate_certification_caches`: both those reads carry the course's uuid, and the
     `ON DELETE SET NULL` just made every one of them read back `course_uuid: null`.
+
+    A dive's create, patch, delete and merge call it too: `GET /courses/lookup` ranks courses
+    by the dives on them.
     """
     await delete_keys_by_pattern(f"user_{user_id}_course*")
 
@@ -92,6 +95,9 @@ async def invalidate_contact_caches(user_id: int) -> None:
     A contact's reads embed nothing, and the five hosts that reference one carry only its
     uuid, so a rename reaches no other family. Deleting a contact drops all five hosts'
     families, the `ON DELETE SET NULL` having rewritten their rows.
+
+    A dive's create, patch, delete and merge call it too: `GET /contacts/lookup` ranks contacts
+    by the dives naming them.
     """
     await delete_keys_by_pattern(f"user_{user_id}_contact*")
 

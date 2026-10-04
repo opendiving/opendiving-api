@@ -1,8 +1,9 @@
 import uuid as uuid_pkg
+from datetime import datetime
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastcrud import PaginatedListResponse
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
@@ -12,17 +13,22 @@ from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_contacts import CONTACT_SEARCH_COLUMNS, contact_name_exists, crud_contacts
+from ...crud.crud_lookups import get_lookup_page
+from ...models.contact import Contact
+from ...models.dive import Dive
 from ...schemas.contact import (
     ADDRESS_FIELDS,
     CONTACT_ADDRESS_PREFIX,
     ContactCreate,
     ContactCreateInternal,
+    ContactLookupItem,
     ContactRead,
     ContactReadInternal,
     ContactUpdateRequest,
     address_columns,
     address_from_row,
 )
+from ...schemas.lookup import LookupUntil, lookup_bound
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
     invalidate_contact_caches,
@@ -121,8 +127,8 @@ async def read_contacts(
 ) -> dict:
     """List the caller's contacts by name.
 
-    `search` narrows the list server-side as a picker is typed into, matching the name and
-    the city. Out-of-range pagination is clamped rather than rejected.
+    `search` matches a case-insensitive substring of the name or the city. Out-of-range
+    pagination is clamped rather than rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
@@ -136,6 +142,83 @@ async def read_contacts(
         # Normalized here rather than in the cache layer so " Blue " and "blue" share one
         # cache entry.
         search=(search or "").strip().lower() or None,
+    )
+
+
+_LOOKUP_COLUMNS = (
+    Contact.uuid,
+    Contact.name,
+    *(getattr(Contact, f"{CONTACT_ADDRESS_PREFIX}{field}") for field in ADDRESS_FIELDS),
+)
+
+
+# Under the list's prefix, so every sweep that drops the list drops the lookup with it.
+_LOOKUP_CACHE_KEY_PREFIX = _contact_cache.list_cache_key_prefix + ":lookup:until_{until}"
+
+
+@cache(key_prefix=_LOOKUP_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
+async def _cached_lookup_contacts(
+    request: Request,
+    user_id: int,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    search: str | None,
+    until: datetime | None,
+) -> dict:
+    """Fetches (and caches) a page of `GET /contacts/lookup`, under the list's prefix so that
+    `invalidate_contact_caches` drops it with the list. Reached only after the route has
+    authorized the caller."""
+    data = await get_lookup_page(
+        db,
+        model=Contact,
+        columns=_LOOKUP_COLUMNS,
+        conditions=_contact_cache.search_conditions(user_id=user_id, term=search)
+        if search
+        else (Contact.user_id == user_id,),
+        used_by=Dive.contact_id,
+        user_id=user_id,
+        bound=until,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+    )
+    data["data"] = [
+        ContactLookupItem(uuid=row["uuid"], name=row["name"], address=address_from_row(row)).model_dump()
+        for row in data["data"]
+    ]
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
+@router.get("/contacts/lookup", response_model=PaginatedListResponse[ContactLookupItem])
+async def lookup_contacts(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    until: LookupUntil = None,
+    page: int = 1,
+    items_per_page: int = 10,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive substring match on the name or the address's city"),
+    ] = None,
+) -> dict:
+    """The caller's contacts as a picker lists them: uuid, name and address, the contact that
+    ran a dive at or before `until` most recently first, then contacts no such dive names,
+    newest created first.
+
+    `search` matches what `GET /contacts` matches. Out-of-range pagination is clamped.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
+    return await _cached_lookup_contacts(
+        request,
+        user_id=current_user["id"],
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        search=(search or "").strip().lower() or None,
+        until=lookup_bound(until),
     )
 
 

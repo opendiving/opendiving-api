@@ -161,3 +161,15 @@ class GearItemUpdate(RejectsExplicitNulls):
 class GearItemUpdateInternal(GearItemUpdate):
     archived_at: datetime | None = None
     updated_at: datetime
+
+
+class GearItemLookupItem(PublicUUIDSchema):
+    """One row of `GET /gear-items/lookup`: `GearItemInfo`'s members, which a picker stores
+    for its label and its Rented and Archived badges. Its own class rather than that one, so
+    the dive's embedded shape can grow without widening every lookup row."""
+
+    name: str
+    brand: str | None = None
+    type: StoredVocabulary | None = None
+    rented: bool = False
+    is_archived: bool = False

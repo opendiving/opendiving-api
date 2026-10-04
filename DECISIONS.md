@@ -146,10 +146,9 @@ stales a trip read. Both reads are hand-written `@cache` helpers in `dive_sites.
 that drops the trip reads over a dive write drops these too — create, patch, delete, merge, import,
 and a site's delete with its dives moved — and a tag's rename and delete drop them as they drop the
 dive reads; `test_dive_site_members.py` reads that pairing off the routes. *Rejected:* no cache, as
-`tags.py` has — the dive form's picker reads the same first page on every open, and the trip read
-already pays for this invalidation.
+`tags.py` has — the trip read already pays for this invalidation, and the site lookup shares it.
 
-## The dive form's pickers search server-side via `search=`, never fetching whole tables
+## List routes search server-side via `search=`, never fetching whole tables
 
 `GET /dive-sites`, `GET /trips` and `GET /gear-items` take `search=`, a case-insensitive substring
 match, with `items_per_page` capped at 100 by `clamp_pagination` (`DEFAULT_MAX_ITEMS_PER_PAGE`).
@@ -165,6 +164,18 @@ cache key after `user_{id}_{resource}:page_{n}:items_per_page:{n}`, so the `user
 wildcard still purges it; routes lowercase and strip the term first. A resource without
 `search_columns` passes no `search` kwarg, or `@cache` would `KeyError`. Gear calls
 `search_clause`/`search_multi` directly, not through `OwnedResourceCache`.
+
+## Pickers read `GET /<plural>/lookup`, ordered by last use at or before `until`
+
+Each picked resource has a lookup beside its list: thin rows, the list's search, ordered by the
+latest live dive naming the item at or before `until` (`crud_lookups.py`), then never-used newest
+first. `until` is the edited record's date in any shape a form holds, normalised to one UTC instant
+the key carries after the list's prefix, so the list's sweep drops it. Contacts and courses now rank
+by dives, so the four dive writes drop their families. The people lookup is uncached for the list's
+reason. A key carrying a start time is cached here, unlike `GET /dives/next-number`'s, because a
+lookup is fetched when a picker opens, not on every date edit. *Rejected:* one
+`GET /lookup?resource=` for every kind — its own cache family, an invalidation in every write path,
+and a hint the server would format.
 
 ## Resource routes are flat, `/...` + explicit ids, never `/{username}/...`
 
@@ -478,10 +489,10 @@ cascades take the item's `dive_gear_item` and `gear_set_item` rows, its service 
 service records with it — see *"The row goes, and so does everything pointing at it"*.
 
 An archived item (retired, sold, returned to the rental shop) is hidden from `GET /gear-items`
-unless `include_archived=true`, so the dive form's picker stops offering it for a *new* dive, but it
-stays on every dive and in every set that references it and keeps its `dive_count`.
-`resolve_gear_item_ids_for_user()` resolves archived items normally: archiving must not make an
-existing dive or set unsavable. Only the listing filters them.
+unless `include_archived=true`, and from `GET /gear-items/lookup` always, so the dive form's picker
+stops offering it for a *new* dive, but it stays on every dive and in every set that references it
+and keeps its `dive_count`. `resolve_gear_item_ids_for_user()` resolves archived items normally:
+archiving must not make an existing dive or set unsavable. Only the listings filter them.
 
 `archived_at` is derived server-side in `patch_gear_item` from the request's `is_archived` flag (and
 cleared on unarchive), never accepted from the caller, so the two cannot drift.
@@ -515,10 +526,10 @@ editing an *item* must invalidate *set* reads. A gear item read carries `dive_co
 dive mutation knows the owner's `user_id` but not which gear uuids changed, and without the prefix
 the only pattern would be `gear_item_cache:*` — every user's gear.
 
-The gear-item list key also includes `archived_{include_archived}`, so the picker's active-only view
-and the management page's full view never serve each other — the same reason `_cached_read_dives`
-keys on its `trip_id`/`dive_site_id`/`gear_item_id` filters. See "Renaming a dive site or gear item
-invalidates that user's dive caches".
+The gear-item list key also includes `archived_{include_archived}`, so the active-only view and the
+full view never serve each other — the same reason `_cached_read_dives` keys on its
+`trip_id`/`dive_site_id`/`gear_item_id` filters. See "Renaming a dive site or gear item invalidates
+that user's dive caches".
 
 ## `GET /dives` takes a `gear_item_uuid` filter alongside `dive_site_uuid`
 

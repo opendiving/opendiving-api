@@ -1,4 +1,5 @@
 import uuid as uuid_pkg
+from datetime import datetime
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -18,6 +19,7 @@ from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_contacts import resolve_contact_ids_for_user
 from ...crud.crud_dives import reassign_dives_to_trip
+from ...crud.crud_lookups import get_lookup_page
 from ...crud.crud_people import get_people_for_trips, replace_people_for_trip
 from ...crud.crud_trip_parts import (
     get_parts_for_trip,
@@ -31,12 +33,17 @@ from ...crud.crud_trips import (
     get_figures_for_trips,
     get_trips_page,
     resolve_trip_id_for_user,
+    search_conditions,
     trip_name_exists,
 )
+from ...models.dive import Dive
+from ...models.trip import Trip
+from ...schemas.lookup import LookupUntil, lookup_bound
 from ...schemas.person import PersonReferenceRead
 from ...schemas.trip import (
     TripCreate,
     TripCreateInternal,
+    TripLookupItem,
     TripPartInput,
     TripPartRead,
     TripRead,
@@ -293,6 +300,70 @@ async def read_trips(
         # Normalized here rather than in the cache layer so that " Dahab " and "dahab"
         # share one cache entry instead of two identical ones under different keys.
         search=(search or "").strip().lower() or None,
+    )
+
+
+# Under the list's prefix, so every sweep that drops the list drops the lookup with it.
+_LOOKUP_CACHE_KEY_PREFIX = _trip_cache.list_cache_key_prefix + ":lookup:until_{until}"
+
+
+@cache(key_prefix=_LOOKUP_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
+async def _cached_lookup_trips(
+    request: Request,
+    user_id: int,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    search: str | None,
+    until: datetime | None,
+) -> dict:
+    """Fetches (and caches) a page of `GET /trips/lookup`, under the list's prefix so that
+    `invalidate_trip_caches` drops it with the list. Reached only after the route has
+    authorized the caller."""
+    data = await get_lookup_page(
+        db,
+        model=Trip,
+        columns=(Trip.uuid, Trip.name),
+        conditions=search_conditions(user_id=user_id, term=search) if search else (Trip.user_id == user_id,),
+        used_by=Dive.trip_id,
+        user_id=user_id,
+        bound=until,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+    )
+    data["data"] = [TripLookupItem.model_validate(row).model_dump() for row in data["data"]]
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
+@router.get("/trips/lookup", response_model=PaginatedListResponse[TripLookupItem])
+async def lookup_trips(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    until: LookupUntil = None,
+    page: int = 1,
+    items_per_page: int = 10,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive substring match on the trip's name or its places"),
+    ] = None,
+) -> dict:
+    """The caller's trips as a picker lists them: uuid and name, the trip a dive at or before
+    `until` was last on first, then trips no such dive is on, newest created first.
+
+    `search` matches what `GET /trips` matches. Out-of-range pagination is clamped.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
+    return await _cached_lookup_trips(
+        request,
+        user_id=current_user["id"],
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        search=(search or "").strip().lower() or None,
+        until=lookup_bound(until),
     )
 
 

@@ -275,3 +275,11 @@ class ContactUpdateRequest(_ContactUpdateFields):
 
 class ContactUpdateInternal(ContactUpdate):
     updated_at: datetime
+
+
+class ContactLookupItem(PublicUUIDSchema):
+    """One row of `GET /contacts/lookup`: the name, and the address a picker reads the town
+    and country from."""
+
+    name: str
+    address: ContactAddressRead | None = None
