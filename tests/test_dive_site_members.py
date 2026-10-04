@@ -794,7 +794,13 @@ class TestTheDatabase:
         reads, and the next read says what the database says."""
         swept = AsyncMock()
         monkeypatch.setattr(dives_module, "invalidate_dive_site_caches", swept)
-        for name in ("invalidate_dive_caches", "invalidate_gear_caches", "invalidate_trip_caches"):
+        for name in (
+            "invalidate_dive_caches",
+            "invalidate_gear_caches",
+            "invalidate_trip_caches",
+            "invalidate_contact_caches",
+            "invalidate_course_caches",
+        ):
             monkeypatch.setattr(dives_module, name, AsyncMock())
         site = create_dive_site(db, diver)
         dive = create_dive(db, diver)

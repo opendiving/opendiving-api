@@ -263,6 +263,8 @@ def _install_dive(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         "invalidate_gear_caches",
         "invalidate_trip_caches",
         "invalidate_dive_site_caches",
+        "invalidate_contact_caches",
+        "invalidate_course_caches",
     ):
         monkeypatch.setattr(dives_module, name, AsyncMock())
     for name in ("get_mixtures_for_dive", "get_dive_sites_for_dive", "get_gear_items_for_dive", "get_species_for_dive"):

@@ -95,6 +95,8 @@ from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResp
 from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import (
+    invalidate_contact_caches,
+    invalidate_course_caches,
     invalidate_dive_caches,
     invalidate_dive_site_caches,
     invalidate_gear_caches,
@@ -742,6 +744,9 @@ async def write_dive(
     # summarises the dives naming it.
     await invalidate_trip_caches(current_user["id"])
     await invalidate_dive_site_caches(current_user["id"])
+    # A contact's and a course's lookup rank by the dives naming them.
+    await invalidate_contact_caches(current_user["id"])
+    await invalidate_course_caches(current_user["id"])
 
     dive_read_internal = await crud_dives.get(db=db, id=created_dive.id, schema_to_select=DiveReadInternal)
     if dive_read_internal is None:
@@ -1399,6 +1404,8 @@ async def patch_dive(
         # just left.
         await invalidate_trip_caches(owner_id)
         await invalidate_dive_site_caches(owner_id)
+        await invalidate_contact_caches(owner_id)
+        await invalidate_course_caches(owner_id)
 
     return {"message": "Dive updated"}
 
@@ -1436,6 +1443,8 @@ async def erase_dive(
     # Nor to its trip's counts, nor to its sites' summaries.
     await invalidate_trip_caches(owner_id)
     await invalidate_dive_site_caches(owner_id)
+    await invalidate_contact_caches(owner_id)
+    await invalidate_course_caches(owner_id)
 
     return {"message": "Dive deleted"}
 
@@ -1505,6 +1514,8 @@ async def merge_two_dives(
     # which moves both dives' sites' summaries as well.
     await invalidate_trip_caches(owner_id)
     await invalidate_dive_site_caches(owner_id)
+    await invalidate_contact_caches(owner_id)
+    await invalidate_course_caches(owner_id)
 
     return DiveMergeResult(
         dive=await _cached_read_dive(

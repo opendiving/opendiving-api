@@ -525,3 +525,13 @@ class DiveSiteSuggestResponse(BaseModel):
 
     results: Annotated[list[DiveSiteSuggestion], Field(default_factory=list)]
     has_more: Annotated[bool, Field(default=False, description="True when matches were cut by the result cap")]
+
+
+class DiveSiteLookupItem(PublicUUIDSchema):
+    """One row of `GET /dive-sites/lookup`: the name and the locality a picker shows under it.
+
+    Not `DiveSiteReference`, which names the suggest route's held site and carries no
+    locality, nor the dive's `DiveSiteInfo`, which requires coordinates."""
+
+    name: str
+    location: LocationRead | None = None

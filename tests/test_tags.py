@@ -236,6 +236,8 @@ def _no_caches(monkeypatch: pytest.MonkeyPatch) -> None:
         "invalidate_gear_caches",
         "invalidate_trip_caches",
         "invalidate_dive_site_caches",
+        "invalidate_contact_caches",
+        "invalidate_course_caches",
     ):
         monkeypatch.setattr(dives_module, name, AsyncMock())
 

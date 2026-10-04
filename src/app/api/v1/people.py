@@ -1,6 +1,7 @@
-"""The people a diver was with: `POST /person`, `GET /people` and the single-person routes.
+"""The people a diver was with: `POST /person`, `GET /people`, `GET /people/lookup` and the
+single-person routes.
 
-Neither read is cached. A person read carries the linked account's current username and a
+No read is cached. A person read carries the linked account's current username and a
 dive count, and both change on writes this diver never makes - the linked account renaming
 or leaving - so a per-owner cache would serve a stale answer for its TTL, and nothing reaches
 another account's keys. The list is one query over tens of rows. What a person's *delete*
@@ -12,23 +13,29 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, NotFoundException
 from ...core.utils.pagination import clamp_pagination
+from ...crud.crud_lookups import get_lookup_page
 from ...crud.crud_people import (
     crud_people,
     get_people_page,
     get_person_read,
     person_name_exists,
+    person_search_condition,
 )
+from ...models.dive_person import DivePerson
+from ...models.person import Person
 from ...models.user import User
+from ...schemas.lookup import LookupUntil, lookup_bound
 from ...schemas.person import (
     PersonCreate,
     PersonCreateInternal,
+    PersonLookupItem,
     PersonRead,
     PersonReadInternal,
     PersonUpdateRequest,
@@ -115,8 +122,8 @@ async def read_people(
     """List the caller's people by name, each with its linked account's current username and
     how many live dives name it.
 
-    `search` narrows the list as a picker is typed into, matching the name and the linked
-    username. Out-of-range pagination is clamped rather than rejected.
+    `search` matches a case-insensitive substring of the name or the linked username.
+    Out-of-range pagination is clamped rather than rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
@@ -128,6 +135,49 @@ async def read_people(
         search=(search or "").strip().lower() or None,
     )
     data["data"] = [person.model_dump() for person in data["data"]]
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
+@router.get("/people/lookup", response_model=PaginatedListResponse[PersonLookupItem])
+async def lookup_people(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    until: LookupUntil = None,
+    page: int = 1,
+    items_per_page: int = 10,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive substring match on the name or the linked username"),
+    ] = None,
+) -> dict[str, Any]:
+    """The caller's people as a picker lists them: uuid, name and the linked account's current
+    username, the person on a dive at or before `until` most recently first, then people no
+    such dive names, newest created first.
+
+    `search` matches what `GET /people` matches. Out-of-range pagination is clamped.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
+    user_id = current_user["id"]
+    term = (search or "").strip().lower()
+    conditions: tuple[ColumnElement[bool], ...] = (Person.user_id == user_id,)
+    if term:
+        conditions += (person_search_condition(term),)
+    data = await get_lookup_page(
+        db,
+        model=Person,
+        columns=(Person.uuid, Person.name, User.username),
+        conditions=conditions,
+        used_by=DivePerson.person_id,
+        user_id=user_id,
+        bound=lookup_bound(until),
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+        from_clause=Person.__table__.outerjoin(User.__table__, User.id == Person.linked_user_id),
+    )
+    data["data"] = [PersonLookupItem.model_validate(row).model_dump() for row in data["data"]]
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
     return response
 

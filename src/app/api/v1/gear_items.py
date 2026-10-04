@@ -14,15 +14,19 @@ from ...core.utils.pagination import clamp_pagination
 from ...core.utils.search import search_clause, search_multi
 from ...crud.crud_gear_items import crud_gear_items, gear_item_name_exists
 from ...crud.crud_gear_service_schedules import get_schedules_for_gear_item, get_schedules_for_gear_items
+from ...crud.crud_lookups import get_lookup_page
+from ...models.dive_gear_item import DiveGearItem
 from ...models.gear_item import GearItem
 from ...schemas.gear_item import (
     GearItemCreate,
     GearItemCreateInternal,
+    GearItemLookupItem,
     GearItemRead,
     GearItemReadInternal,
     GearItemUpdate,
 )
 from ...schemas.gear_service import GearServiceScheduleInfo
+from ...schemas.lookup import LookupUntil, lookup_bound
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 
 router = APIRouter(tags=["gear"])
@@ -124,8 +128,8 @@ async def _cached_read_gear_items(
     Like the other cached read helpers, this must only ever be called after the caller's
     authorization has been checked by the route - `@cache` serves cached responses
     without re-running any authorization logic. `include_archived` is part of the cache
-    key so the picker's (non-archived) view and the management page's (full) view can't
-    serve each other's results, and `search` for the same reason between two queries.
+    key so the active-only view and the full one can't serve each other's results, and
+    `search` for the same reason between two queries.
 
     Hand-written rather than built with `OwnedResourceCache` (as trips, dive sites and
     gear sets are) because of the two things that factory has no room for: the extra
@@ -191,9 +195,7 @@ async def read_gear_items(
         Query(max_length=255, description="Case-insensitive substring match on name or brand"),
     ] = None,
 ) -> dict:
-    """List the caller's gear. Archived items are excluded unless `include_archived=true`,
-    so the dive form's picker only ever offers gear that's still in service.
-    """
+    """List the caller's gear. Archived items are excluded unless `include_archived=true`."""
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _cached_read_gear_items(
@@ -207,6 +209,77 @@ async def read_gear_items(
         # Normalized here rather than in the cache layer so that " MK25 " and "mk25"
         # share one cache entry instead of two identical ones under different keys.
         search=(search or "").strip().lower() or None,
+    )
+
+
+# Under the gear prefix, so `invalidate_gear_caches` drops the lookup with the list.
+_LOOKUP_CACHE_KEY_PREFIX = (
+    "user_{user_id}_gear_items:page_{page}:items_per_page:{items_per_page}:search_{search}:lookup:until_{until}"
+)
+
+
+@cache(key_prefix=_LOOKUP_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
+async def _cached_lookup_gear_items(
+    request: Request,
+    user_id: int,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    search: str | None,
+    until: datetime | None,
+) -> dict:
+    """Fetches (and caches) a page of `GET /gear-items/lookup`, under the gear prefix so that
+    `invalidate_gear_caches` drops it with the list. Reached only after the route has
+    authorized the caller."""
+    conditions: tuple[Any, ...] = (GearItem.user_id == user_id, GearItem.is_archived.is_(False))
+    if search:
+        conditions += (search_clause(GearItem, GEAR_ITEM_SEARCH_COLUMNS, search),)
+    data = await get_lookup_page(
+        db,
+        model=GearItem,
+        columns=(GearItem.uuid, GearItem.name, GearItem.brand, GearItem.type, GearItem.rented, GearItem.is_archived),
+        conditions=conditions,
+        used_by=DiveGearItem.gear_item_id,
+        user_id=user_id,
+        bound=until,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+    )
+    data["data"] = [GearItemLookupItem.model_validate(row).model_dump() for row in data["data"]]
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
+@router.get("/gear-items/lookup", response_model=PaginatedListResponse[GearItemLookupItem])
+async def lookup_gear_items(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    until: LookupUntil = None,
+    page: int = 1,
+    items_per_page: int = 10,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive substring match on name or brand"),
+    ] = None,
+) -> dict:
+    """The caller's gear in service as a picker lists it: what a dive embeds of an item, the
+    item on a dive at or before `until` most recently first, then items no such dive used,
+    newest created first.
+
+    Archived items are never listed: a picker offers kit still in service. `search` matches
+    what `GET /gear-items` matches. Out-of-range pagination is clamped.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
+    return await _cached_lookup_gear_items(
+        request,
+        user_id=current_user["id"],
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        search=(search or "").strip().lower() or None,
+        until=lookup_bound(until),
     )
 
 

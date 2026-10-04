@@ -1,5 +1,5 @@
 import uuid as uuid_pkg
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Any, NoReturn, cast
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -17,22 +17,28 @@ from ...core.schemas import validate_date_range
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
+from ...core.utils.search import search_clause
 from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import COURSE_SEARCH_COLUMNS, crud_courses, get_courses_page
+from ...crud.crud_lookups import get_lookup_page
 from ...crud.crud_people import (
     StoredReference,
     get_people_for_courses,
     replace_people_for_course,
 )
+from ...models.course import Course
+from ...models.dive import Dive
 from ...schemas.certification import CertificationAgency, validate_agency_pairing
 from ...schemas.course import (
     CourseCreate,
     CourseCreateInternal,
+    CourseLookupItem,
     CourseRead,
     CourseReadInternal,
     CourseStatus,
     CourseUpdateRequest,
 )
+from ...schemas.lookup import LookupUntil, lookup_bound
 from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
@@ -349,6 +355,75 @@ async def read_courses(
         # once it has made an unknown value a 422 above.
         agency=agency.value if agency is not None else None,
         status=status.value if status is not None else None,
+    )
+
+
+# Under the list's prefix, so every sweep that drops the list drops the lookup with it.
+_LOOKUP_CACHE_KEY_PREFIX = _course_cache.list_cache_key_prefix + ":lookup:until_{until}"
+
+
+@cache(key_prefix=_LOOKUP_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
+async def _cached_lookup_courses(
+    request: Request,
+    user_id: int,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    search: str | None,
+    until: datetime | None,
+) -> dict:
+    """Fetches (and caches) a page of `GET /courses/lookup`, under the list's prefix so that
+    `invalidate_course_caches` drops it with the list. Reached only after the route has
+    authorized the caller."""
+    conditions: tuple[Any, ...] = (Course.user_id == user_id,)
+    if search:
+        conditions += (search_clause(Course, COURSE_SEARCH_COLUMNS, search),)
+    data = await get_lookup_page(
+        db,
+        model=Course,
+        columns=(Course.uuid, Course.name),
+        conditions=conditions,
+        used_by=Dive.course_id,
+        user_id=user_id,
+        bound=until,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+    )
+    data["data"] = [CourseLookupItem.model_validate(row).model_dump() for row in data["data"]]
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
+@router.get("/courses/lookup", response_model=PaginatedListResponse[CourseLookupItem])
+async def lookup_courses(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    until: LookupUntil = None,
+    page: int = 1,
+    items_per_page: int = 10,
+    search: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive substring match on the course's name"),
+    ] = None,
+) -> dict:
+    """The caller's courses as a picker lists them: uuid and name, the course a dive at or
+    before `until` was last logged on first, then courses no such dive is on, newest created
+    first.
+
+    `search` matches what `GET /courses` matches; its date, agency and status filters are the
+    list's alone. Out-of-range pagination is clamped.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
+    return await _cached_lookup_courses(
+        request,
+        user_id=current_user["id"],
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        search=(search or "").strip().lower() or None,
+        until=lookup_bound(until),
     )
 
 

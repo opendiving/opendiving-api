@@ -181,3 +181,10 @@ class CourseUpdateRequest(CourseUpdate):
 
 class CourseUpdateInternal(CourseUpdate):
     updated_at: datetime
+
+
+class CourseLookupItem(PublicUUIDSchema):
+    """One row of `GET /courses/lookup`. A host needing the course's contact or people reads
+    `GET /course/{uuid}` on pick."""
+
+    name: str

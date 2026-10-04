@@ -165,3 +165,10 @@ class PersonUpdateRequest(PersonUpdate):
 
 class PersonUpdateInternal(PersonUpdate):
     updated_at: datetime
+
+
+class PersonLookupItem(PublicUUIDSchema):
+    """One row of `GET /people/lookup`: the name and the linked account's current username."""
+
+    name: str
+    username: str | None = None

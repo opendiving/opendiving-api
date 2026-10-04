@@ -156,3 +156,9 @@ class TripUpdateRequest(TripUpdate):
 
 class TripUpdateInternal(TripUpdate):
     updated_at: datetime
+
+
+class TripLookupItem(PublicUUIDSchema):
+    """One row of `GET /trips/lookup`. The name alone: a trip's name usually carries its year."""
+
+    name: str
