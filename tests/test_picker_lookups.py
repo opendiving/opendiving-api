@@ -1,5 +1,5 @@
-"""`GET /<plural>/lookup`: the thin rows a picker lists, the ones the caller's dives used most
-recently at or before `until` first.
+"""`GET /<plural>/lookup`: the rows a picker lists, the ones the caller's dives used most
+recently at or before `until` first, carrying what a dive form fills from a pick.
 
 The pure half - the bound, the cache keys, the invalidation pairing - runs anywhere; the
 ordering, the rows and the search parity run against Postgres.
@@ -17,7 +17,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
-from sqlalchemy import update
+from sqlalchemy import delete, event, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
@@ -31,15 +31,17 @@ from src.app.api.v1 import trips as trips_module
 from src.app.core.utils.cache import _format_prefix
 from src.app.core.utils.owned_resource_cache import OwnedResourceCache
 from src.app.crud.crud_people import get_people_page
+from src.app.models.course_person import CoursePerson
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.dive_person import DivePerson
 from src.app.models.trip_part import TripPart
+from src.app.models.trip_person import TripPerson
 from src.app.models.user import User
 from src.app.schemas.dive import DiveLocalStartTime
 from src.app.schemas.dive_site import DiveSiteListSort
-from src.app.schemas.lookup import LookupUntil, lookup_bound
+from src.app.schemas.lookup import LookupUntil, LookupUuids, lookup_bound
 from tests.conftest import db_available
 from tests.helpers.generators import (
     create_contact,
@@ -388,7 +390,13 @@ def _gear_searchable(db: Session, item: Any) -> str:
 
 RESOURCES = [
     _Resource(
-        "trips", create_trip, _use_trip, _lookup_trips, _list_trips, _trip_searchable, frozenset({"uuid", "name"})
+        "trips",
+        create_trip,
+        _use_trip,
+        _lookup_trips,
+        _list_trips,
+        _trip_searchable,
+        frozenset({"uuid", "name", "people"}),
     ),
     _Resource(
         "dive_sites",
@@ -397,7 +405,7 @@ RESOURCES = [
         _lookup_sites,
         _list_sites,
         _site_searchable,
-        frozenset({"uuid", "name", "location"}),
+        frozenset({"uuid", "name", "location", "water_type", "altitude", "entry_types"}),
     ),
     _Resource(
         "contacts",
@@ -424,7 +432,7 @@ RESOURCES = [
         _lookup_courses,
         _list_courses,
         _course_searchable,
-        frozenset({"uuid", "name"}),
+        frozenset({"uuid", "name", "contact_uuid", "people"}),
     ),
     _Resource(
         "gear_items",
@@ -474,7 +482,9 @@ class TestTheLookup:
         assert order(await resource.lookup(async_db, diver, None, _bound(3)))[:2] == ["b", "a"]
 
     @pytest.mark.asyncio
-    async def test_the_row_is_thin(self, resource: _Resource, db: Session, async_db: AsyncSession, diver: User) -> None:
+    async def test_the_row_carries_these_keys_alone(
+        self, resource: _Resource, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
         resource.make(db, diver)
 
         rows = await resource.lookup(async_db, diver, None, None)
@@ -539,6 +549,178 @@ class TestTheSpecifics:
         assert (contact_row["address"]["city"], contact_row["address"]["country"]) == ("Dahab", "Egypt")
 
 
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestWhatTheFormFills:
+    """What a dive form fills from a pick rides on the row, so it never reads the record."""
+
+    @pytest.mark.asyncio
+    async def test_a_site_carries_its_water_type_altitude_and_entry_types(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        recorded, bare = create_dive_site(db, diver), create_dive_site(db, diver)
+        recorded.water_type, recorded.altitude, recorded.entry_types = "fresh", 372, ["shore", "boat"]
+        db.commit()
+
+        rows = {row["uuid"]: row for row in await _lookup_sites(async_db, diver, None, None)}
+
+        filled = ("water_type", "altitude", "entry_types")
+        assert [rows[recorded.uuid][key] for key in filled] == ["fresh", 372, ["shore", "boat"]]
+        assert [rows[bare.uuid][key] for key in filled] == [None, None, []]
+
+    @pytest.mark.asyncio
+    async def test_a_course_carries_its_contact_and_its_people_in_their_order(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        contact = create_contact(db, diver)
+        course, bare = create_course(db, diver), create_course(db, diver)
+        course.contact_id = contact.id
+        db.commit()
+        buddy, instructor = create_person(db, diver), create_person(db, diver)
+        # Inserted against their positions, so the order read back is the positions'.
+        _join(db, CoursePerson(course_id=course.id, person_id=instructor.id, position=1, role="instructor"))
+        _join(db, CoursePerson(course_id=course.id, person_id=buddy.id, position=0))
+
+        rows = {row["uuid"]: row for row in await _lookup_courses(async_db, diver, None, None)}
+
+        assert rows[course.uuid]["contact_uuid"] == contact.uuid
+        assert rows[course.uuid]["people"] == [
+            {"person_uuid": buddy.uuid, "role": None},
+            {"person_uuid": instructor.uuid, "role": "instructor"},
+        ]
+        assert (rows[bare.uuid]["contact_uuid"], rows[bare.uuid]["people"]) == (None, [])
+
+    @pytest.mark.asyncio
+    async def test_a_trip_carries_its_people_in_their_order(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        trip, bare = create_trip(db, diver), create_trip(db, diver)
+        guide, companion = create_person(db, diver), create_person(db, diver)
+        _join(db, TripPerson(trip_id=trip.id, person_id=companion.id, position=1, role="companion"))
+        _join(db, TripPerson(trip_id=trip.id, person_id=guide.id, position=0, role="guide"))
+
+        rows = {row["uuid"]: row for row in await _lookup_trips(async_db, diver, None, None)}
+
+        assert rows[trip.uuid]["people"] == [
+            {"person_uuid": guide.uuid, "role": "guide"},
+            {"person_uuid": companion.uuid, "role": "companion"},
+        ]
+        assert rows[bare.uuid]["people"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("make", "people_on", "people_table", "lookup"),
+        [
+            (
+                create_course,
+                lambda item, person: CoursePerson(course_id=item.id, person_id=person.id),
+                "course_person",
+                _lookup_courses,
+            ),
+            (
+                create_trip,
+                lambda item, person: TripPerson(trip_id=item.id, person_id=person.id),
+                "trip_person",
+                _lookup_trips,
+            ),
+        ],
+        ids=["courses", "trips"],
+    )
+    async def test_a_page_s_people_are_one_query_however_many_rows(
+        self,
+        make: Callable[[Session, User], Any],
+        people_on: Callable[[Any, Any], Any],
+        people_table: str,
+        lookup: Lookup,
+        db: Session,
+        async_db: AsyncSession,
+        diver: User,
+    ) -> None:
+        def add_one() -> None:
+            _join(db, people_on(make(db, diver), create_person(db, diver)))
+
+        statements: list[str] = []
+
+        def record(*args: Any) -> None:
+            statements.append(args[2])
+
+        add_one()
+        # Once before counting, so the connection's own setup is not counted.
+        await lookup(async_db, diver, None, None)
+        engine = async_db.bind.sync_engine  # type: ignore[union-attr]
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            await lookup(async_db, diver, None, None)
+            for_one = len(statements)
+            add_one()
+            add_one()
+            statements.clear()
+            rows = await lookup(async_db, diver, None, None)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        assert [len(row["people"]) for row in rows] == [1, 1, 1]
+        assert len(statements) == for_one
+        assert sum(f"FROM {people_table} " in statement for statement in statements) == 1
+
+
+async def _filtered(route: Any, async_db: AsyncSession, user: User, uuids: list[Any], search: str | None = None) -> Any:
+    """Through the route itself with no request: a filtered page that reached `@cache` would
+    fail on it, so a pass is also the filter's page staying uncached."""
+    return await route(
+        request=None,
+        current_user={"id": user.id, "uuid": user.uuid},
+        db=async_db,
+        until=None,
+        page=1,
+        items_per_page=50,
+        search=search,
+        uuid=uuids,
+    )
+
+
+_FILTERED: dict[str, tuple[Any, Callable[[Session, User], Any]]] = {
+    "trips": (trips_module.lookup_trips, create_trip),
+    "dive_sites": (dive_sites_module.lookup_dive_sites, create_dive_site),
+    "courses": (courses_module.lookup_courses, create_course),
+}
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+@pytest.mark.parametrize("name", list(_FILTERED))
+class TestTheUuidFilter:
+    """A form holds uuids no search produced; the filter resolves them in one request."""
+
+    @pytest.mark.asyncio
+    async def test_the_caller_s_rows_with_those_uuids_and_no_others(
+        self, name: str, db: Session, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        route, make = _FILTERED[name]
+        wanted, also_wanted, _unnamed = make(db, diver), make(db, diver), make(db, diver)
+        someone_else_s = make(db, other_diver)
+        deleted = make(db, diver)
+        deleted_uuid = deleted.uuid
+        db.execute(delete(type(deleted)).where(type(deleted).id == deleted.id))
+        db.commit()
+
+        result = await _filtered(
+            route, async_db, diver, [wanted.uuid, also_wanted.uuid, someone_else_s.uuid, deleted_uuid]
+        )
+
+        assert {row["uuid"] for row in result["data"]} == {wanted.uuid, also_wanted.uuid}
+        assert result["total_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_it_narrows_a_search_as_well(
+        self, name: str, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        route, make = _FILTERED[name]
+        wanted, other = make(db, diver), make(db, diver)
+
+        result = await _filtered(route, async_db, diver, [wanted.uuid, other.uuid], search=wanted.name.lower())
+
+        assert [row["uuid"] for row in result["data"]] == [wanted.uuid]
+
+
 class TestTheQueryParameter:
     """Through FastAPI's own parsing, on an app of one route declaring the lookups' `until`:
     the union of a datetime and a date has to reach `lookup_bound` as the form sent it."""
@@ -570,3 +752,37 @@ class TestTheQueryParameter:
 
     def test_anything_else_is_a_422(self) -> None:
         assert self._client().get("/lookup", params={"until": "yesterday"}).status_code == 422
+
+
+class TestTheUuidParameter:
+    """Repeated once per uuid, as FastAPI reads a list from a query string."""
+
+    @staticmethod
+    def _client() -> TestClient:
+        app = FastAPI()
+
+        @app.get("/lookup")
+        def lookup(uuid: LookupUuids = None) -> dict[str, list[str] | None]:
+            return {"uuids": None if uuid is None else [str(each) for each in uuid]}
+
+        return TestClient(app)
+
+    def test_each_repeat_is_one_uuid(self) -> None:
+        sent = [str(uuid7()), str(uuid7())]
+
+        response = self._client().get("/lookup", params={"uuid": sent})
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"uuids": sent}
+
+    def test_absent_is_no_filter(self) -> None:
+        assert self._client().get("/lookup").json() == {"uuids": None}
+
+    def test_no_more_than_a_page_holds(self) -> None:
+        client = self._client()
+
+        assert client.get("/lookup", params={"uuid": [str(uuid7()) for _ in range(100)]}).status_code == 200
+        assert client.get("/lookup", params={"uuid": [str(uuid7()) for _ in range(101)]}).status_code == 422
+
+    def test_a_malformed_uuid_is_a_422(self) -> None:
+        assert self._client().get("/lookup", params={"uuid": "not-a-uuid"}).status_code == 422

@@ -38,7 +38,7 @@ from ...crud.crud_trips import (
 )
 from ...models.dive import Dive
 from ...models.trip import Trip
-from ...schemas.lookup import LookupUntil, lookup_bound
+from ...schemas.lookup import LookupUntil, LookupUuids, lookup_bound
 from ...schemas.person import PersonReferenceRead
 from ...schemas.trip import (
     TripCreate,
@@ -303,6 +303,43 @@ async def read_trips(
     )
 
 
+async def _lookup_trips(
+    *,
+    user_id: int,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    search: str | None,
+    until: datetime | None,
+    uuids: list[uuid_pkg.UUID] | None,
+) -> dict:
+    """A page of `GET /trips/lookup`, its people read for the whole page at once. Reached only
+    after the route has authorized the caller."""
+    conditions: tuple[Any, ...] = (
+        search_conditions(user_id=user_id, term=search) if search else (Trip.user_id == user_id,)
+    )
+    if uuids:
+        conditions += (Trip.uuid.in_(uuids),)
+    data = await get_lookup_page(
+        db,
+        model=Trip,
+        columns=(Trip.id, Trip.uuid, Trip.name),
+        conditions=conditions,
+        used_by=Dive.trip_id,
+        user_id=user_id,
+        bound=until,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+    )
+    people_by_trip = await get_people_for_trips(db, [row["id"] for row in data["data"]])
+    data["data"] = [
+        TripLookupItem(uuid=row["uuid"], name=row["name"], people=people_by_trip[row["id"]]).model_dump()
+        for row in data["data"]
+    ]
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
 # Under the list's prefix, so every sweep that drops the list drops the lookup with it.
 _LOOKUP_CACHE_KEY_PREFIX = _trip_cache.list_cache_key_prefix + ":lookup:until_{until}"
 
@@ -317,23 +354,11 @@ async def _cached_lookup_trips(
     search: str | None,
     until: datetime | None,
 ) -> dict:
-    """Fetches (and caches) a page of `GET /trips/lookup`, under the list's prefix so that
-    `invalidate_trip_caches` drops it with the list. Reached only after the route has
-    authorized the caller."""
-    data = await get_lookup_page(
-        db,
-        model=Trip,
-        columns=(Trip.uuid, Trip.name),
-        conditions=search_conditions(user_id=user_id, term=search) if search else (Trip.user_id == user_id,),
-        used_by=Dive.trip_id,
-        user_id=user_id,
-        bound=until,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
+    """`_lookup_trips` with no uuids, cached under the list's prefix so that
+    `invalidate_trip_caches` drops it with the list."""
+    return await _lookup_trips(
+        user_id=user_id, db=db, page=page, items_per_page=items_per_page, search=search, until=until, uuids=None
     )
-    data["data"] = [TripLookupItem.model_validate(row).model_dump() for row in data["data"]]
-    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
-    return response
 
 
 @router.get("/trips/lookup", response_model=PaginatedListResponse[TripLookupItem])
@@ -348,23 +373,29 @@ async def lookup_trips(
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on the trip's name or its places"),
     ] = None,
+    uuid: LookupUuids = None,
 ) -> dict:
-    """The caller's trips as a picker lists them: uuid and name, the trip a dive at or before
-    `until` was last on first, then trips no such dive is on, newest created first.
+    """The caller's trips as a picker lists them: uuid and name, with the people a dive form
+    fills from them. The trip a dive at or before `until` was last on first, then trips no
+    such dive is on, newest created first.
 
-    `search` matches what `GET /trips` matches. Out-of-range pagination is clamped.
+    `search` matches what `GET /trips` matches. `uuid` narrows the rows to the trips a form
+    already holds, and is not cached: no two forms hold the same set for long. Out-of-range
+    pagination is clamped.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
+    query: dict[str, Any] = {
+        "user_id": current_user["id"],
+        "db": db,
+        "page": page,
+        "items_per_page": items_per_page,
+        "search": (search or "").strip().lower() or None,
+        "until": lookup_bound(until),
+    }
 
-    return await _cached_lookup_trips(
-        request,
-        user_id=current_user["id"],
-        db=db,
-        page=page,
-        items_per_page=items_per_page,
-        search=(search or "").strip().lower() or None,
-        until=lookup_bound(until),
-    )
+    if uuid:
+        return await _lookup_trips(**query, uuids=uuid)
+    return await _cached_lookup_trips(request, **query)
 
 
 @cache(key_prefix="user_{user_id}_trip", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)

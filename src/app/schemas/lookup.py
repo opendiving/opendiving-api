@@ -1,8 +1,10 @@
+import uuid as uuid_pkg
 from datetime import UTC, date, datetime, time
 from typing import Annotated
 
 from fastapi import Query
 
+from ..core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE
 from .dive import DiveLocalStartTime
 
 # `DiveLocalStartTime` rather than `DiveStartTime`, because the hosts send what their form
@@ -13,6 +15,16 @@ LookupUntil = Annotated[
     Query(
         description="The date of the record being edited: only dives at or before it rank an item. "
         "A date counts its whole day; a time without an offset reads as UTC. Omitted, every dive counts"
+    ),
+]
+
+# Capped at the largest page, so every uuid one request names fits on one page of it.
+LookupUuids = Annotated[
+    list[uuid_pkg.UUID] | None,
+    Query(
+        max_length=DEFAULT_MAX_ITEMS_PER_PAGE,
+        description="Only the rows with these uuids, repeated once per uuid: the ones a form holds without "
+        "having searched for them. One that is not the caller's names nothing. The page still applies",
     ),
 ]
 

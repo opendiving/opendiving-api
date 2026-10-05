@@ -60,7 +60,7 @@ from ...schemas.location import (
     location_columns,
     location_from_row,
 )
-from ...schemas.lookup import LookupUntil, lookup_bound
+from ...schemas.lookup import LookupUntil, LookupUuids, lookup_bound
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches, invalidate_trip_caches
 from ...services.dive_site_catalog import search_sites
@@ -302,7 +302,53 @@ _LOOKUP_COLUMNS = (
     DiveSite.uuid,
     DiveSite.name,
     *(getattr(DiveSite, f"{DIVE_SITE_LOCATION_PREFIX}{field}") for field in LOCATION_FIELDS),
+    DiveSite.water_type,
+    DiveSite.altitude,
+    DiveSite.entry_types,
 )
+
+
+async def _lookup_dive_sites(
+    *,
+    user_id: int,
+    db: AsyncSession,
+    page: int,
+    items_per_page: int,
+    search: str | None,
+    until: datetime | None,
+    uuids: list[uuid_pkg.UUID] | None,
+) -> dict:
+    """A page of `GET /dive-sites/lookup`. Reached only after the route has authorized the
+    caller."""
+    conditions: tuple[Any, ...] = (DiveSite.user_id == user_id,)
+    if search:
+        conditions += (search_condition(search),)
+    if uuids:
+        conditions += (DiveSite.uuid.in_(uuids),)
+    data = await get_lookup_page(
+        db,
+        model=DiveSite,
+        columns=_LOOKUP_COLUMNS,
+        conditions=conditions,
+        used_by=DiveDiveSite.dive_site_id,
+        user_id=user_id,
+        bound=until,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+    )
+    data["data"] = [
+        DiveSiteLookupItem(
+            uuid=row["uuid"],
+            name=row["name"],
+            location=location_from_row(row, DIVE_SITE_LOCATION_PREFIX),
+            water_type=row["water_type"],
+            altitude=row["altitude"],
+            entry_types=row["entry_types"],
+        ).model_dump()
+        for row in data["data"]
+    ]
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
 
 
 # Under the list's prefix, so every sweep that drops the list drops the lookup with it.
@@ -319,31 +365,11 @@ async def _cached_lookup_dive_sites(
     search: str | None,
     until: datetime | None,
 ) -> dict:
-    """Fetches (and caches) a page of `GET /dive-sites/lookup`, under the list's prefix so that
-    `invalidate_dive_site_caches` drops it with the list. Reached only after the route has
-    authorized the caller."""
-    conditions: tuple[Any, ...] = (DiveSite.user_id == user_id,)
-    if search:
-        conditions += (search_condition(search),)
-    data = await get_lookup_page(
-        db,
-        model=DiveSite,
-        columns=_LOOKUP_COLUMNS,
-        conditions=conditions,
-        used_by=DiveDiveSite.dive_site_id,
-        user_id=user_id,
-        bound=until,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
+    """`_lookup_dive_sites` with no uuids, cached under the list's prefix so that
+    `invalidate_dive_site_caches` drops it with the list."""
+    return await _lookup_dive_sites(
+        user_id=user_id, db=db, page=page, items_per_page=items_per_page, search=search, until=until, uuids=None
     )
-    data["data"] = [
-        DiveSiteLookupItem(
-            uuid=row["uuid"], name=row["name"], location=location_from_row(row, DIVE_SITE_LOCATION_PREFIX)
-        ).model_dump()
-        for row in data["data"]
-    ]
-    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
-    return response
 
 
 @router.get("/dive-sites/lookup", response_model=PaginatedListResponse[DiveSiteLookupItem])
@@ -358,24 +384,29 @@ async def lookup_dive_sites(
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on the name, other names or locality"),
     ] = None,
+    uuid: LookupUuids = None,
 ) -> dict:
-    """The caller's sites as a picker lists them: uuid, name and locality, the site a dive at
-    or before `until` named most recently first, then sites no such dive names, newest
-    created first.
+    """The caller's sites as a picker lists them: uuid, name and locality, with the water type,
+    altitude and entry types a dive form fills from them. The site a dive at or before `until`
+    named most recently first, then sites no such dive names, newest created first.
 
-    `search` matches what `GET /dive-sites` matches. Out-of-range pagination is clamped.
+    `search` matches what `GET /dive-sites` matches. `uuid` narrows the rows to the sites a
+    form already holds, and is not cached: no two forms hold the same set for long. Out-of-range
+    pagination is clamped.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
+    query: dict[str, Any] = {
+        "user_id": current_user["id"],
+        "db": db,
+        "page": page,
+        "items_per_page": items_per_page,
+        "search": (search or "").strip().lower() or None,
+        "until": lookup_bound(until),
+    }
 
-    return await _cached_lookup_dive_sites(
-        request,
-        user_id=current_user["id"],
-        db=db,
-        page=page,
-        items_per_page=items_per_page,
-        search=(search or "").strip().lower() or None,
-        until=lookup_bound(until),
-    )
+    if uuid:
+        return await _lookup_dive_sites(**query, uuids=uuid)
+    return await _cached_lookup_dive_sites(request, **query)
 
 
 @cache(key_prefix="user_{user_id}_dive_site", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)

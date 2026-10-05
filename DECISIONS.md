@@ -167,15 +167,15 @@ wildcard still purges it; routes lowercase and strip the term first. A resource 
 
 ## Pickers read `GET /<plural>/lookup`, ordered by last use at or before `until`
 
-Each picked resource has a lookup beside its list: thin rows, the list's search, ordered by the
-latest live dive naming the item at or before `until` (`crud_lookups.py`), then never-used newest
-first. `until` is the edited record's date in any shape a form holds, normalised to one UTC instant
-the key carries after the list's prefix, so the list's sweep drops it. Contacts and courses now rank
-by dives, so the four dive writes drop their families. The people lookup is uncached for the list's
-reason. A key carrying a start time is cached here, unlike `GET /dives/next-number`'s, because a
-lookup is fetched when a picker opens, not on every date edit. *Rejected:* one
-`GET /lookup?resource=` for every kind — its own cache family, an invalidation in every write path,
-and a hint the server would format.
+Each picked resource has a lookup beside its list: the list's search, ordered by the latest live
+dive naming the item at or before `until` (`crud_lookups.py`), then never-used newest first. A row
+carries what the picker shows and what a dive form fills from the pick — a site's water type,
+altitude and entry types, a course's contact and people, a trip's people — so no pick reads a whole
+record. A repeated `uuid` narrows to the rows a form holds, uncached: no two forms hold one set for
+long. `until` becomes one UTC instant the key carries after the list's prefix, so the list's sweep
+drops it. Contacts and courses rank by dives, so the four dive writes drop their families. The
+people lookup is uncached for the list's reason. *Rejected:* one `GET /lookup?resource=` for every
+kind — its own cache family and an invalidation in every write path.
 
 ## Resource routes are flat, `/...` + explicit ids, never `/{username}/...`
 
