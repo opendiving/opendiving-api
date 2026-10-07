@@ -2320,10 +2320,9 @@ async def _fetch_media(url: str, *, claim_slot: bool) -> tuple[bytes, str] | Non
     it, which is a setting. It admits the two hosts one `imageinfo` reply can name and nothing
     else.
 
-    `claim_slot` is off only for the admin picker's previews: a dialog of two dozen of them
-    would spend a fifth of `SPECIES_COMMONS_RATE_LIMIT_REQUESTS` in one click, and a diver's
-    resolve running beside it would then find the counter spent and store a completed no-photo
-    verdict. Previews are bounded by the dialog's own cap and by one admin's pace instead.
+    `claim_slot` is off only for the admin picker's previews: a dialog's worth would spend a
+    large share of `SPECIES_COMMONS_RATE_LIMIT_REQUESTS` in one click, and a diver's resolve
+    running beside it would then find the counter spent and store a completed no-photo verdict. Previews are bounded by the dialog's own cap and by one admin's pace instead.
 
     **The `User-Agent` is not optional here.** Wikimedia's policy is the Foundation's and
     applies across its hosts, blocking generic and empty ones; an empty header was measured

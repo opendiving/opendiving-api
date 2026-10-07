@@ -71,9 +71,10 @@ COMMONS_THUMBNAIL_WIDTH = 500
 #
 # **Two names, because one `imageinfo` reply carries two hosts.** Commons answers an
 # `iiurlwidth` request with a `thumburl` on `thumb.wikimedia.org` and the full-size `url` on
-# `upload.wikimedia.org`, and `_commons_imageinfo` prefers the thumbnail - so a fence holding
-# only the second refuses every thumbnail there is, which is a feature that fetches nothing at
-# all rather than one that fetches badly. `thumb.wikimedia.org` presents a certificate whose
+# `upload.wikimedia.org` - and, for a file narrower than the width asked for, with a `thumburl`
+# that is the unscaled original on the upload host. `_commons_imageinfo` prefers `thumburl`, so
+# a fence holding only the second refuses every scaled thumbnail there is, which is a feature
+# that fetches nothing at all rather than one that fetches badly. `thumb.wikimedia.org` presents a certificate whose
 # SANs include `*.wikimedia.org`, the same wildcard family covering `upload.wikimedia.org`; it
 # is Wikimedia's own infrastructure and not a redirect target.
 #
