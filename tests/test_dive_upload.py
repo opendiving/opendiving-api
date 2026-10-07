@@ -244,7 +244,7 @@ class TestADayIsNoStartToMatchOn:
             mixtures=[],
         )
 
-        assert await _parse_matches(AsyncMock(), user_id=1, parsed=parsed) == []
+        assert await _parse_matches(AsyncMock(), user_id=1, parsed=parsed, profile=None) == []
         looked_up.assert_not_called()
 
     @pytest.mark.asyncio
@@ -261,5 +261,5 @@ class TestADayIsNoStartToMatchOn:
             mixtures=[],
         )
 
-        assert await _parse_matches(AsyncMock(), user_id=1, parsed=parsed) == []
+        assert await _parse_matches(AsyncMock(), user_id=1, parsed=parsed, profile=None) == []
         looked_up.assert_called_once()

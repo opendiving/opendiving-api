@@ -141,7 +141,7 @@ class TestThePrefill:
     """`POST /dive/parse`'s values for each file: the document's dive, as the form shows it."""
 
     def test_the_d5_json_rounds_its_pressures_to_the_forms_two_decimals(self) -> None:
-        _, parsed = read_prefill(_fixture("suunto-d5.json"))
+        _, parsed, _ = read_prefill(_fixture("suunto-d5.json"))
 
         assert [(mixture.start_pressure, mixture.end_pressure) for mixture in parsed.mixtures] == [
             (207.14, 122.44),
@@ -157,7 +157,7 @@ class TestThePrefill:
         assert read_prefill(content)[1].mixtures[0].start_pressure == 200.68
 
     def test_the_dm5_xml_rounds_its_pressures_the_same_way(self) -> None:
-        _, parsed = read_prefill(_fixture("nitrox-deco.xml"))
+        _, parsed, _ = read_prefill(_fixture("nitrox-deco.xml"))
 
         assert (parsed.mixtures[0].start_pressure, parsed.mixtures[0].end_pressure) == (211.39, 144.62)
 
@@ -190,7 +190,7 @@ class TestThePrefill:
         assert read_prefill(_fixture(name))[1].bottom_temperature == coldest
 
     def test_positions_round_to_six_places(self) -> None:
-        _, parsed = read_prefill(_fixture("suunto-ocean-2026.json"))
+        _, parsed, _ = read_prefill(_fixture("suunto-ocean-2026.json"))
 
         assert (parsed.entry_latitude, parsed.entry_longitude) == (28.496525, 34.5168)
         assert (parsed.exit_latitude, parsed.exit_longitude) == (28.496447, 34.516765)
@@ -198,26 +198,26 @@ class TestThePrefill:
     def test_the_exit_is_the_fix_the_receiver_vouched_for(self) -> None:
         """Not the first fix after surfacing, which states 47 m of error, but the 9 m one 9 s
         later - while the same dive's FIT states no error, and keeps its first fix."""
-        _, parsed = read_prefill(_fixture("ocean-poor-first-fix.json"))
-        _, fit = read_prefill(_fixture("ocean-poor-first-fix.fit"))
+        _, parsed, _ = read_prefill(_fixture("ocean-poor-first-fix.json"))
+        _, fit, _ = read_prefill(_fixture("ocean-poor-first-fix.fit"))
 
         assert (parsed.exit_latitude, parsed.exit_longitude) == (28.470792, 34.507208)
         assert (fit.exit_latitude, fit.exit_longitude) == (28.471383, 34.507658)
 
     def test_depths_pass_as_the_document_writes_them(self) -> None:
-        _, parsed = read_prefill(suunto_json(max_depth=21.8000011))
+        _, parsed, _ = read_prefill(suunto_json(max_depth=21.8000011))
 
         assert parsed.max_depth == 21.8000011
 
     @pytest.mark.parametrize("name", ["suunto-d5.json", "nitrox-deco.xml", "suunto-ocean-2026.fit"])
     def test_no_dive_computer_format_states_the_divers_dive_number(self, name: str) -> None:
         """A device's counter lands on the recording's device, never on the dive."""
-        _, parsed = read_prefill(_fixture(name))
+        _, parsed, _ = read_prefill(_fixture(name))
 
         assert parsed.dive_number is None
 
     def test_the_fits_counter_is_the_devices(self) -> None:
-        _, parsed = read_prefill(_fixture("suunto-ocean-2026.fit"))
+        _, parsed, _ = read_prefill(_fixture("suunto-ocean-2026.fit"))
 
         assert parsed.device is not None and parsed.device.dive_number == 3
 
@@ -228,7 +228,7 @@ class TestThePrefill:
         assert prefill(read, shape(read)).dive_number == 8
 
     def test_the_recordings_device_and_settings_come_through(self) -> None:
-        _, parsed = read_prefill(_fixture("suunto-d5.json"))
+        _, parsed, _ = read_prefill(_fixture("suunto-d5.json"))
 
         assert parsed.device is not None
         assert (parsed.device.brand, parsed.device.name, parsed.device.firmware) == ("Suunto", "Suunto D5", "3.0.2143")
@@ -326,7 +326,7 @@ class TestThePrefill:
 
     def test_a_computers_empty_notes_state_nothing(self) -> None:
         """The Ocean's JSON writes `"Notes": ""`, and states no tags."""
-        _, parsed = read_prefill(_fixture("suunto-ocean-2026.json"))
+        _, parsed, _ = read_prefill(_fixture("suunto-ocean-2026.json"))
 
         assert (parsed.notes, parsed.tags) == (None, [])
 

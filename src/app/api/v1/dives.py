@@ -122,6 +122,7 @@ from ...services.dive_merge import DiveNotMergeableError, merge_dives
 from ...services.dive_neighbors import find_dive_neighbors
 from ...services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
 from ...services.dive_profiles import (
+    NormalizedProfile,
     ProfileGasAttribution,
     get_gas_attribution_for_dives,
     get_profile_version,
@@ -147,6 +148,7 @@ from ...services.dive_recordings import (
 from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
 from ...services.person_links import resolve_people_references
+from ...services.recording_shape import gate_figures
 
 router = APIRouter(tags=["dives"])
 
@@ -461,7 +463,7 @@ async def parse_dive(
         # the C-accelerated `json`/`expat` the text formats ride on. What bounds the worst
         # case is the reader's own cap on the messages one FIT may hold, which a file under
         # the upload cap can reach and no single dive does.
-        format_id, parsed = await run_in_threadpool(read_prefill, content)
+        format_id, parsed, profile = await run_in_threadpool(read_prefill, content)
     except UnsupportedDiveFileError as exc:
         # 415 and 409 stay raw `HTTPException`s - unlike 400/403/404/422, `http_exceptions`
         # has no class for either code.
@@ -476,7 +478,7 @@ async def parse_dive(
             sha256=digest,
             parser_key=format_id,
         ),
-        matches=await _parse_matches(db, user_id=current_user["id"], parsed=parsed),
+        matches=await _parse_matches(db, user_id=current_user["id"], parsed=parsed, profile=profile),
     )
 
 
@@ -488,7 +490,9 @@ def _is_a_day(started_at: str) -> bool:
     return True
 
 
-async def _parse_matches(db: AsyncSession, *, user_id: int, parsed: ParsedDiveSchema) -> list[ParsedDiveMatch]:
+async def _parse_matches(
+    db: AsyncSession, *, user_id: int, parsed: ParsedDiveSchema, profile: NormalizedProfile | None
+) -> list[ParsedDiveMatch]:
     """The caller's dives this parsed file might belong to, nearest start first.
 
     Scoped to the caller's own recordings by the query itself - `load_candidates` filters on
@@ -511,12 +515,16 @@ async def _parse_matches(db: AsyncSession, *, user_id: int, parsed: ParsedDiveSc
         # still gets its values - just one with no clock to match on.
         return []
 
+    # The recording's own figures, as `RecordingFacts` requires and the attach path passes
+    # them - never the dive's, which a reader may have derived over a narrower window.
+    duration, max_depth = gate_figures(profile)
     incoming = RecordingFacts(
         device=device_of(parsed.device),
         start_time=start_time,
         utc_offset_minutes=offset_minutes,
-        duration=parsed.duration,
-        max_depth=parsed.max_depth,
+        duration=duration,
+        max_depth=max_depth,
+        sampled_span=None if profile is None else profile.duration,
     )
     # Nearest start first, so a form's default offer is the closest candidate rather than the
     # oldest. Sorted through `start_delta` rather than by a plain subtraction, because that
@@ -1439,9 +1447,11 @@ async def merge_two_dives(
     Two *different* computers were both recording throughout, so their recordings are simply
     appended side by side, the surviving dive's first.
 
-    Either way the surviving dive's duration and maximum depth are re-seeded from what its
-    recordings now carry, and a second computer's cylinder numbering is mapped onto this
-    dive's own list.
+    A fold gives the surviving dive the time in the water and the average depth its folded
+    samples hold, the stretch the computer was off counting only when it went off in the
+    water; recordings side by side leave both as the surviving dive had them. Either way its
+    maximum depth is the deepest any of its recordings reached, and a second computer's
+    cylinder numbering is mapped onto this dive's own list.
 
     404 when either uuid is not a live dive of yours, exactly as for a dive that does not
     exist. 422 when the two are the same dive, when either was entered by hand and has no

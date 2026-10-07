@@ -180,7 +180,9 @@ async def _profile(db: AsyncSession, recording_id: int) -> Any:
 
 async def _row(db: AsyncSession, dive: Dive) -> Any:
     return (
-        await db.execute(select(Dive.duration, Dive.max_depth, Dive.notes, Dive.is_deleted).where(Dive.id == dive.id))
+        await db.execute(
+            select(Dive.duration, Dive.avg_depth, Dive.max_depth, Dive.notes, Dive.is_deleted).where(Dive.id == dive.id)
+        )
     ).one()
 
 
@@ -316,18 +318,42 @@ class TestOneComputersTwoRecordsFoldIntoOne:
         assert recording.start_time == datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC)
 
     @pytest.mark.asyncio
-    async def test_the_dives_figures_are_re_seeded_from_the_merged_profile(
+    async def test_the_dives_figures_are_its_time_in_the_water_over_the_merged_profile(
         self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
     ) -> None:
-        """223 plus the second record's sampled 2 940. Its *logged* 2 921 would give 3 144,
-        and the samples are what the merged profile contains."""
+        """The computer went off 5 m down, so the 43 seconds it was off count: 223 plus the
+        second record's 2 940 in the water. The average is over the same 3 163 seconds."""
         first, second = await _two_halves(async_db, db, diver)
 
         await _merge(async_db, diver, first, second)
 
         row = await _row(async_db, first)
         assert row.duration == 3163
+        assert row.avg_depth == round((180 * 5.0 + 43 * (5.0 + 19.04) / 2 + 2940 * 19.04) / 3163, 2)
         assert row.max_depth == 19.04
+
+    @pytest.mark.asyncio
+    async def test_the_stretch_after_the_diver_surfaced_is_not_time_in_the_water(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """A diver who surfaced to reposition the boat: the first record ends at the surface,
+        so the 43 seconds before the second began are left out where the sampled span would
+        count them."""
+        first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
+        second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 21, 38, tzinfo=UTC), number=215)
+        surfaced = (*_samples(FIRST_PART_SAMPLES - 1, depth_cm=500), (180.0, 0.0))
+        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=surfaced), filename="one.json")
+        await _attach(
+            async_db,
+            diver,
+            second,
+            _export(start=SECOND_START, samples=_samples(SECOND_PART_SAMPLES, depth_cm=1904)),
+            filename="two.json",
+        )
+
+        await _merge(async_db, diver, first, second)
+
+        assert (await _row(async_db, first)).duration == 180 + 2940
 
     @pytest.mark.asyncio
     async def test_the_later_dive_is_soft_deleted(
@@ -378,6 +404,31 @@ class TestTwoDifferentComputers:
         recordings = await _recordings(async_db, first)
         assert [row.ordinal for row in recordings] == [0, 1]
         assert [row.device_serial for row in recordings] == ["253810000400", "D9772626"]
+
+    @pytest.mark.asyncio
+    async def test_the_surviving_dive_keeps_its_own_time_and_average(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """Both computers recorded the same time in the water, so the survivor's figures are
+        its primary computer's and no span across the two replaces them. The maximum is still
+        the deepest either reached."""
+        first = _dive_at(
+            db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214, duration=2400, avg_depth=4.0
+        )
+        second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 18, 10, tzinfo=UTC), number=215)
+        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(5)), filename="a.json")
+        await _attach(
+            async_db,
+            diver,
+            second,
+            _export(start="2026-09-08T15:18:10.000+03:00", serial="D9772626", samples=_samples(5, depth_cm=900)),
+            filename="b.json",
+        )
+
+        await _merge(async_db, diver, first, second)
+
+        row = await _row(async_db, first)
+        assert (row.duration, row.avg_depth, row.max_depth) == (2400, 4.0, 9.0)
 
     @pytest.mark.asyncio
     async def test_the_appended_recording_keeps_its_own_samples_and_start(
@@ -456,13 +507,37 @@ class TestWhatTheMergeRefuses:
         on. The number to change is the average, which is theirs and on a form they can
         reach.
         """
+        first = _dive_at(
+            db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214, avg_depth=30.0, max_depth=45.0
+        )
+        second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 18, 10, tzinfo=UTC), number=215)
+        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(5)), filename="a.json")
+        await _attach(
+            async_db,
+            diver,
+            second,
+            _export(start="2026-09-08T15:18:10.000+03:00", serial="D9772626", samples=_samples(5)),
+            filename="b.json",
+        )
+
+        with pytest.raises(UnprocessableEntityException, match="average depth"):
+            await _merge(async_db, diver, first, second)
+
+    @pytest.mark.asyncio
+    async def test_a_fold_replaces_the_average_rather_than_refusing_it(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """A fold writes the average over its own samples, which cannot be deeper than their
+        deepest, so the average the dive held is no reason to refuse it."""
         first, second = await _two_halves(async_db, db, diver)
         first.avg_depth = 30.0
         first.max_depth = 45.0
         db.commit()
 
-        with pytest.raises(UnprocessableEntityException, match="average depth"):
-            await _merge(async_db, diver, first, second)
+        await _merge(async_db, diver, first, second)
+
+        row = await _row(async_db, first)
+        assert row.avg_depth is not None and row.avg_depth <= row.max_depth == 19.04
 
     def test_merging_a_dive_with_itself_is_refused_by_the_schema(self) -> None:
         """Before the route is entered at all: one uuid twice would soft-delete the dive it
