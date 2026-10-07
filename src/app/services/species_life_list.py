@@ -21,6 +21,7 @@ family's path shape.
 """
 
 import uuid as uuid_pkg
+from collections.abc import Awaitable, Callable, Collection
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -34,7 +35,13 @@ from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_species import DiveSpecies
 from ..models.species import Species
 from ..models.species_name import SpeciesName
-from ..schemas.species import SpeciesLifeListDetail, SpeciesLifeListEntry
+from ..schemas.species import (
+    SpeciesLifeListDetail,
+    SpeciesLifeListEntry,
+    SpeciesSuggestion,
+    SpeciesSuggestResponse,
+)
+from .species_service import _MAX_RESULTS, _WORMS_ATTRIBUTION, search_species
 
 
 def _sighting_join(statement: Any, *, user_id: int) -> Any:
@@ -192,3 +199,108 @@ async def species_life_list_detail(
     if row is None:
         return None
     return SpeciesLifeListDetail(**_history_fields(row), dive_site_count=row.dive_site_count)
+
+
+async def suggest_species(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    query: str,
+    dive_site_ids: Collection[int],
+    excluded_uuids: Collection[uuid_pkg.UUID],
+    before_search: Callable[[], Awaitable[None]],
+) -> SpeciesSuggestResponse:
+    """The dive form's species menu: the caller's own species first, then the catalog search.
+
+    The own rows are one ordering, `dive_count_at_sites DESC, last_seen DESC`, which is the
+    three tiers' order in one key - every species logged at the form's sites precedes every
+    one that was not, and the rest fall back on recency. They match `query` by the names a
+    diver can read and never by a stored alias, so a foreign vernacular cannot fill the page
+    ahead of the search; that species still arrives from the search tier, hinted.
+
+    The search tier is asked only for two characters or more and only when the own rows leave
+    room, and `before_search` - the caller's rate limit - runs exactly then, so opening the
+    menu or typing one letter never spends the register budget.
+    """
+    normalized = " ".join(query.split()).casefold()
+    count_at_sites = (
+        func.count(func.distinct(Dive.id))
+        .filter(Dive.id.in_(select(DiveDiveSite.dive_id).where(DiveDiveSite.dive_site_id.in_(dive_site_ids))))
+        .label("dive_count_at_sites")
+    )
+    conditions: list[Any] = []
+    if normalized:
+        pattern = f"%{escape_like(normalized)}%"
+        conditions.append(
+            or_(
+                Species.scientific_name.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+                Species.common_name.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+            )
+        )
+    if excluded_uuids:
+        conditions.append(Species.uuid.not_in(excluded_uuids))
+
+    rows = (
+        await db.execute(
+            _sighting_join(
+                select(
+                    Species.uuid,
+                    Species.aphia_id,
+                    Species.scientific_name,
+                    Species.common_name,
+                    Species.rank,
+                    Species.status,
+                    count_at_sites,
+                    _LAST_SEEN,
+                    offset_of_the(Dive.start_time.desc()).label("last_offset"),
+                    date_only_of_the(Dive.start_time.desc()).label("last_date_only"),
+                ),
+                user_id=user_id,
+            )
+            .where(*conditions)
+            .group_by(Species.id)
+            .order_by(count_at_sites.desc(), _LAST_SEEN.desc(), Species.id)
+            # One past the page, to tell a full page from a cut one.
+            .limit(_MAX_RESULTS + 1)
+        )
+    ).all()
+    # Built from columns before `search_species` releases the read transaction, so nothing
+    # held here is an ORM object that release would expire.
+    own = [
+        SpeciesSuggestion(
+            aphia_id=row.aphia_id,
+            uuid=row.uuid,
+            scientific_name=row.scientific_name,
+            common_name=row.common_name,
+            rank=row.rank,
+            status=row.status,
+            # A visible name explains every own match, so there is never a hidden one to name.
+            matched_name=None,
+            source="catalog",
+            attribution=_WORMS_ATTRIBUTION,
+            dive_count_at_sites=row.dive_count_at_sites,
+            last_seen=combine_dive_start_time(row.last_seen, row.last_offset, row.last_date_only),
+        )
+        for row in rows
+    ]
+
+    if len(own) >= _MAX_RESULTS:
+        # Cut, or full with the search never asked: either way there is more behind the page,
+        # except under an empty query, which has no search behind it.
+        return SpeciesSuggestResponse(results=own[:_MAX_RESULTS], has_more=len(own) > _MAX_RESULTS or bool(normalized))
+    if len(normalized) < 2:
+        # One letter is the caller's own species only; the catalog was not asked, so a short
+        # list must not read as every species carrying that letter.
+        return SpeciesSuggestResponse(results=own, has_more=bool(normalized))
+
+    await before_search()
+    searched = await search_species(db=db, query=normalized)
+    shown = {suggestion.aphia_id for suggestion in own}
+    excluded = set(excluded_uuids)
+    appended = [
+        SpeciesSuggestion(**result.model_dump())
+        for result in searched.results
+        if result.aphia_id not in shown and (result.uuid is None or result.uuid not in excluded)
+    ]
+    room = _MAX_RESULTS - len(own)
+    return SpeciesSuggestResponse(results=own + appended[:room], has_more=searched.has_more or len(appended) > room)

@@ -3,6 +3,7 @@ import uuid as uuid_pkg
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Cookie, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
@@ -25,7 +26,7 @@ from ...core.exceptions.http_exceptions import (
 from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
 from ...core.utils.cache import cache, delete_keys_by_pattern
 from ...core.utils.client_ip import client_ip
-from ...core.utils.pagination import clamp_pagination
+from ...core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE, clamp_pagination
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.request_context import RequestContext
 from ...core.utils.uploads import content_disposition_attachment
@@ -35,6 +36,7 @@ from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_user_sessions import revoke_session
 from ...crud.crud_users import crud_users
+from ...models.dive_site import DiveSite
 from ...models.user import User
 from ...schemas.auth import LinkCheckResponse
 from ...schemas.auth_audit_event import AuthEventType
@@ -46,7 +48,7 @@ from ...schemas.email_change import (
     EmailChangeVerifyRequest,
     EmailChangeVerifyResponse,
 )
-from ...schemas.species import SpeciesLifeListDetail, SpeciesLifeListEntry
+from ...schemas.species import SpeciesLifeListDetail, SpeciesLifeListEntry, SpeciesSuggestResponse
 from ...schemas.storage import StorageUsageRead
 from ...schemas.user import AccountDeletionResponse, UserRead, UserUpdate
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
@@ -58,7 +60,7 @@ from ...services.email_service import (
     send_email_change_confirmation_email,
     send_email_changed_notification,
 )
-from ...services.species_life_list import species_life_list, species_life_list_detail
+from ...services.species_life_list import species_life_list, species_life_list_detail, suggest_species
 from ...services.storage_usage import get_storage_usage, storage_limit_bytes
 from ...services.user_pictures import (
     AVATAR_FRAME,
@@ -76,6 +78,7 @@ from ...services.user_pictures import (
     recrop_picture,
     store_picture,
 )
+from .species import enforce_species_limit
 
 logger = logging.getLogger(__name__)
 
@@ -945,6 +948,66 @@ async def read_species_life_list(
         items_per_page=items_per_page,
         search=normalized or None,
         dive_site_id=dive_site_id,
+    )
+
+
+# Declared before `/user/species/{uuid}`, which would otherwise read "suggest" as a uuid and 422.
+@router.get("/user/species/suggest", response_model=SpeciesSuggestResponse)
+async def read_species_suggestions(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    q: Annotated[str, Query(max_length=255, description="Common or scientific name; empty for no filter")] = "",
+    dive_site_uuid: Annotated[
+        list[uuid_pkg.UUID] | None,
+        Query(
+            max_length=DEFAULT_MAX_ITEMS_PER_PAGE,
+            description="The sites the dive names, repeated once per site: the species logged on the caller's "
+            "dives there come first. One that is not the caller's names no dives",
+        ),
+    ] = None,
+    exclude_species_uuid: Annotated[
+        list[uuid_pkg.UUID] | None,
+        Query(
+            max_length=DEFAULT_MAX_ITEMS_PER_PAGE,
+            description="The species the dive already holds, repeated once per species: none of them is suggested",
+        ),
+    ] = None,
+) -> SpeciesSuggestResponse:
+    """The dive form's species menu, in three tiers on one page.
+
+    First the species the caller logged on their dives at the given sites, by how many such
+    dives (`dive_count_at_sites`); then the rest of the species they have logged, by
+    `last_seen`; then the catalog and register matches, ranked as `GET /species/search` ranks
+    them, without the species already shown. A typed `q` filters the first two tiers by the
+    scientific and common name - one letter is enough - and keeps their order.
+
+    The registers are asked only when `q` has two or more characters and the caller's own
+    matches leave room on the page, and only then does the request count against the
+    per-account species budget, so it is the only case that can 429. `has_more` is true when
+    the page was cut, or when a typed `q` never reached the catalog search.
+
+    Uncached, like the search it wraps.
+    """
+    user_id = current_user["id"]
+    dive_site_ids: list[int] = []
+    if dive_site_uuid:
+        # Not `resolve_dive_site_ids_for_user`, which answers nothing at all when any one uuid is
+        # foreign: a form holding a deleted site beside a live one keeps the live one's tier.
+        dive_site_ids = list(
+            (
+                await db.scalars(
+                    select(DiveSite.id).where(DiveSite.uuid.in_(dive_site_uuid), DiveSite.user_id == user_id)
+                )
+            ).all()
+        )
+
+    return await suggest_species(
+        db,
+        user_id=user_id,
+        query=q,
+        dive_site_ids=dive_site_ids,
+        excluded_uuids=exclude_species_uuid or [],
+        before_search=partial(enforce_species_limit, user_id),
     )
 
 

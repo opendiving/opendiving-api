@@ -4717,6 +4717,17 @@ Quiet properties: it reaches through `Dive.is_deleted` as `recalculate_dive_stat
 takes no `user_id`, spells `(species_map or {}).get(uuid, -1)` since an unknown uuid resolves to
 `None`, and adds `species_{id}` to the dives cache key.
 
+## The dive form's species menu is the life list's join ahead of the catalog search
+
+`GET /user/species/suggest` sits beside the life list, leaving `/species/search` ownerless. Own rows
+order by `dive_count_at_sites DESC, last_seen DESC`, so the request's sites' species lead and the
+rest follow by recency; a typed `q` filters them by scientific and common name only, never an alias,
+which would fill the page ahead of the search. `search_species` is called, and the per-user species
+budget paid, only for two characters or more with room left on the page, so opening the menu never
+spends it. No `until`, unlike the lookups: a site's species do not move with the dive's date.
+Uncached, like the search. *Rejected:* a user-aware parameter on `/species/search`, and merging the
+two feeds in the browser.
+
 ## Signing is a maintainer's setting, and the hook checks before it blocks
 
 Contributors need not sign (`CONTRIBUTING.md`, *Pull requests*);

@@ -49,8 +49,9 @@ router = APIRouter(tags=["species"])
 _PHOTO_CACHE_CONTROL = "public, max-age=300"
 
 
-async def _enforce_species_limit(user_id: int) -> None:
-    """Per-user budget, shared by search and resolve, and the only thing here that can 429.
+async def enforce_species_limit(user_id: int) -> None:
+    """Per-user budget, shared by search, resolve and the suggestions that reach the search
+    (`GET /user/species/suggest`), and the only thing here that can 429.
 
     Distinct from the per-provider caps inside the service: those bound what this instance
     does to a third party and *degrade* when hit, since they are global and one diver's
@@ -95,7 +96,7 @@ async def read_species_search(
     any language. Results are ordered by how well each row answers the query, with species
     ahead of the genera and families above them.
     """
-    await _enforce_species_limit(current_user["id"])
+    await enforce_species_limit(current_user["id"])
     # Normalized here as well as in the service, so the shape the cache key is built from is
     # the shape this route accepted - the reasoning `read_dive_sites` spells out for its own
     # search parameter.
@@ -125,7 +126,7 @@ async def write_species_resolve(
     Called at pick time rather than at dive-save time, which is what keeps saving a dive from
     ever blocking on a third party.
     """
-    await _enforce_species_limit(current_user["id"])
+    await enforce_species_limit(current_user["id"])
     species = await resolve_species(db=db, aphia_id=values.aphia_id)
     return SpeciesRead.model_validate(species, from_attributes=True)
 
