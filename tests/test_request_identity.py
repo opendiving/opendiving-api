@@ -466,7 +466,7 @@ LIST_ROUTES = (
         "/dives",
         dives_module,
         "_cached_read_dives",
-        _PUBLIC_ROW | {"dive_number": 1, "start_time": START_TIME, "duration": 1800},
+        _PUBLIC_ROW | {"dive_number": 1, "start_time": START_TIME, "duration": 1800, "recording_count": 0},
     ),
     ListRoute("/dive-sites", dive_sites_module, "_cached_read_dive_sites", _PUBLIC_ROW | {"name": "Blue Hole"}),
     ListRoute(

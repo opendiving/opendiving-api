@@ -20,6 +20,7 @@ from ..schemas.dive import DiveListItem, DiveReadInternal, DiveSiteInfo
 from ..schemas.dive_profile import DepthOutline
 from ..schemas.gear_item import GearItemInfo
 from .dive_profiles import get_depth_outlines_for_dives
+from .dive_recordings import recording_counts_for_dives
 
 # The internal keys a public dive drops in favour of the uuids it resolves them to.
 INTERNAL_KEYS = frozenset({"id", "user_id", "trip_id", "course_id", "contact_id"})
@@ -55,6 +56,7 @@ def to_public_dive(
     dive_sites: list[DiveSiteInfo],
     gear_items: list[GearItemInfo],
     depth_outline: DepthOutline | None,
+    recording_count: int,
 ) -> DiveListItem:
     """Convert an internal dive representation (integer FKs) into its public list-row shape
     (owning user, trip, training course and contact referenced by `uuid`)."""
@@ -68,6 +70,7 @@ def to_public_dive(
         dive_sites=dive_sites,
         gear_items=gear_items,
         depth_outline=depth_outline,
+        recording_count=recording_count,
     )
 
 
@@ -75,7 +78,7 @@ async def to_dive_list_items(
     db: AsyncSession, rows: list[dict[str, Any]], *, user_id: int, user_uuid: uuid_pkg.UUID
 ) -> list[dict[str, Any]]:
     """Each row - every `dive` column, as `get_dives_page` returns it - with its dive site(s),
-    gear, trip/course/contact uuids and depth outline, through one batched lookup apiece for
+    gear, trip/course/contact uuids, depth outline and recording count, through one batched lookup apiece for
     the whole page."""
     dive_ids = [d["id"] for d in rows]
     sites_by_dive = await get_dive_sites_for_dives(db=db, dive_ids=dive_ids)
@@ -88,6 +91,7 @@ async def to_dive_list_items(
         db=db, contact_ids=[d["contact_id"] for d in rows], user_id=user_id
     )
     outline_by_dive = await get_depth_outlines_for_dives(db, dive_ids=dive_ids)
+    recording_count_by_dive = await recording_counts_for_dives(db, dive_ids=dive_ids)
 
     return [
         to_public_dive(
@@ -99,6 +103,7 @@ async def to_dive_list_items(
             dive_sites=sites_by_dive.get(dive["id"], []),
             gear_items=gear_by_dive.get(dive["id"], []),
             depth_outline=outline_by_dive.get(dive["id"]),
+            recording_count=recording_count_by_dive.get(dive["id"], 0),
         ).model_dump()
         for dive in rows
     ]

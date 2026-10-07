@@ -930,6 +930,18 @@ async def primary_recording_ids(db: AsyncSession, *, dive_ids: Sequence[int]) ->
     return {row.dive_id: row.id for row in rows}
 
 
+async def recording_counts_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, int]:
+    """How many recordings each dive holds, for the dive list; a dive with none is absent."""
+    if not dive_ids:
+        return {}
+    rows = await db.execute(
+        select(DiveRecording.dive_id, func.count().label("recordings"))
+        .where(DiveRecording.dive_id.in_(set(dive_ids)))
+        .group_by(DiveRecording.dive_id)
+    )
+    return {row.dive_id: row.recordings for row in rows}
+
+
 async def resolve_recording(db: AsyncSession, *, dive_id: int, uuid: uuid_pkg.UUID) -> int:
     """One of this dive's recordings by public uuid, or `RecordingNotFoundError`.
 

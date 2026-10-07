@@ -32,7 +32,7 @@ from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
-from src.app.schemas.dive import DecoAlgorithm, DiveMode, DiveRead, RecordingUpdateRequest
+from src.app.schemas.dive import DecoAlgorithm, DiveListSort, DiveMode, DiveRead, RecordingUpdateRequest
 from src.app.schemas.dive_profile import ProfileProvenance
 from src.app.schemas.parsed_dive import ParsedDecoModel
 from src.app.services import blob_store
@@ -1052,3 +1052,34 @@ class TestTheDiveRead:
         read = (await get_recordings_for_dives(async_db, dive_ids=[dive.id]))[dive.id]
 
         assert read[0].device is None
+
+
+class TestTheDiveList:
+    @pytest.mark.asyncio
+    async def test_each_row_counts_its_recordings(
+        self, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        create_dive_recording(db, diver, dive)
+        create_dive_recording(db, diver, dive, ordinal=1)
+        hand_logged = create_dive(db, diver)
+
+        page = await dives_module._cached_read_dives.__wrapped__(  # type: ignore[attr-defined]
+            request=None,
+            user_id=diver.id,
+            user_uuid=diver.uuid,
+            db=async_db,
+            page=1,
+            items_per_page=10,
+            trip_id=None,
+            course_id=None,
+            dive_site_id=None,
+            gear_item_id=None,
+            species_id=None,
+            person_id=None,
+            tag_id=None,
+            dive_type=None,
+            sort=DiveListSort.DATE,
+        )
+
+        counts = {row["uuid"]: row["recording_count"] for row in page["data"]}
+        assert counts == {dive.uuid: 2, hand_logged.uuid: 0}
