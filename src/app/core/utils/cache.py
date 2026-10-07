@@ -43,7 +43,7 @@ def _source_fingerprint() -> str | None:
     digest of the code closes it with nothing to configure and nothing to remember.
 
     **The whole package rather than `schemas/` alone.** A response body is shaped by the
-    schema *and* by whatever populated it, so a `_to_public_dive` that starts filling a field
+    schema *and* by whatever populated it, so a `to_public_dive` that starts filling a field
     differently changes the body with no schema edit anywhere - and a rule that says "the
     code" needs no judgement about which files count.
 

@@ -1,9 +1,29 @@
+import uuid as uuid_pkg
 from collections.abc import Sequence
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Any, Protocol
 
 from fastcrud import FastCRUD
-from sqlalchemy import ARRAY, Boolean, ColumnElement, Integer, func, select, update
+from sqlalchemy import (
+    ARRAY,
+    Boolean,
+    ColumnElement,
+    Date,
+    DateTime,
+    Integer,
+    Interval,
+    and_,
+    case,
+    cast,
+    false,
+    func,
+    literal,
+    literal_column,
+    null,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,7 +50,7 @@ def offset_of_the(order: Any) -> Any:
     """The `utc_offset_minutes` of the first dive in the group under `order`.
 
     **A dive displays in the timezone it was logged in**, which an aggregate over dives has to
-    honour like every other dive-derived surface - `_to_public_start_time`, `dive_neighbors`,
+    honour like every other dive-derived surface - `to_public_start_time`, `dive_neighbors`,
     `dive_activity` and `gas_use_history` all reconstruct it, and `DECISIONS.md` states it as the
     API contract. A `timestamptz` stores only an absolute instant, so a dive logged at 09:00 in
     Bangkok comes back as 02:00 UTC and would read as the wrong local time - and, for an evening
@@ -47,8 +67,9 @@ def offset_of_the(order: Any) -> Any:
 
     The conversion itself still happens in Python, through `combine_dive_start_time`. Deliberately,
     and the same call `dive_activity` explains: `core/utils/datetime_offset.py` is documented as
-    the single place that conversion happens, and the failure mode of a second copy of it in SQL
-    is a list that quietly disagrees with the dive pages it was built from.
+    the single place that conversion happens for what is displayed or bucketed, and the failure
+    mode of a second copy of it in SQL is a list that quietly disagrees with the dive pages it was
+    built from. `DIVE_LOCAL_DAY` below is the one SQL copy, for a predicate, and is test-pinned.
 
     A NULL offset - the logbook importer's offset-unknown state - travels this path intact and
     needs no special case at either end: a Postgres array may hold NULL elements, so the
@@ -102,6 +123,107 @@ _LIST_ORDERS: dict[DiveListSort, tuple[ColumnElement[Any], ...]] = {
     DiveListSort.DATE: (Dive.start_time.desc(),),
     DiveListSort.RATING: (Dive.rating.desc().nulls_last(), Dive.start_time.desc()),
 }
+
+
+# A dive's own local calendar day, in SQL: the stored instant read `AT TIME ZONE 'UTC'` - the
+# api sets no session time zone, so a bare cast would follow the server's - plus the stored
+# offset, zero where it is NULL. That one sum serves every stored state: a NULL offset holds the
+# wall clock labelled UTC, and a bare date holds its midnight on the same label.
+#
+# For a predicate a paginated list has to apply in the database; `core/utils/datetime_offset.py`
+# stays the single place a day is displayed or bucketed, and `tests/test_trip_candidates.py` pins
+# this to `local_day()`. See DECISIONS.md, *"A trip's candidates are chosen by a local day
+# computed in SQL"*.
+DIVE_LOCAL_DAY: ColumnElement[date] = cast(
+    func.timezone("UTC", Dive.start_time, type_=DateTime)
+    + func.coalesce(Dive.utc_offset_minutes, 0) * literal_column("INTERVAL '1 minute'", Interval),
+    Date,
+)
+
+
+class DatedPart(Protocol):
+    """What the predicates below read of a trip's part."""
+
+    @property
+    def start_date(self) -> date | None: ...
+
+    @property
+    def end_date(self) -> date | None: ...
+
+
+def _instant_window(parts: Sequence[DatedPart]) -> list[ColumnElement[bool]]:
+    """Stored instants bracketing every dive whose local day a dated part covers, as
+    `year_window` brackets a year: a day wider at each end, because a stored offset is under a
+    day either way. A pre-filter that lets `ix_dive_user_id_start_time` bound the scan;
+    `DIVE_LOCAL_DAY` decides. An open end on any part leaves that side unbounded."""
+    dated = [part for part in parts if part.start_date or part.end_date]
+    bounds: list[ColumnElement[bool]] = []
+    starts = [part.start_date for part in dated]
+    if all(starts):
+        first = min(day for day in starts if day)
+        bounds.append(Dive.start_time >= datetime.combine(first, time(), UTC) - timedelta(days=1))
+    ends = [part.end_date for part in dated]
+    if all(ends):
+        last = max(day for day in ends if day)
+        bounds.append(Dive.start_time < datetime.combine(last, time(), UTC) + timedelta(days=2))
+    return bounds
+
+
+def covered_by(parts: Sequence[DatedPart]) -> ColumnElement[bool]:
+    """Whether a dive's local day is one some part covers: on or after its `start_date` where
+    it has one, on or before its `end_date` where it has one. An open end is no bound - a
+    trip the diver is still on collects every dive since - and a part with no dates covers
+    no day."""
+    arms = [
+        and_(
+            *([DIVE_LOCAL_DAY >= part.start_date] if part.start_date else []),
+            *([DIVE_LOCAL_DAY <= part.end_date] if part.end_date else []),
+        )
+        for part in parts
+        if part.start_date or part.end_date
+    ]
+    if not arms:
+        return false()
+    return and_(or_(*arms), *_instant_window(parts))
+
+
+def candidate_of(parts: Sequence[DatedPart]) -> ColumnElement[bool]:
+    """A dive on no trip whose local day one of `parts` covers - a trip's candidate, once the
+    caller adds the owner and liveness every dive query carries. A dive on another trip is
+    never one: the trip page is not where a dive changes trips."""
+    return and_(Dive.trip_id.is_(None), covered_by(parts))
+
+
+def part_for_day(parts: Sequence[DatedPart]) -> ColumnElement[Any]:
+    """The index of the part a dive's local day is attributed to, NULL where none covers it.
+
+    Mirrors `tripPartForDay` in opendiving-web's `src/lib/trip-dive-sections.ts`, which places
+    the same dives in the same parts on the trip page, so a part's count and its add reach
+    exactly the dives its card shows. A part with both dates beats an open-ended one, the
+    first such part in the diver's order winning a day two cover; among open-ended parts the
+    one whose date is nearer wins, and a tie goes to the first. A part never attributed a day
+    - the second of two with the same dates - counts nothing. Copied rather than shared, so a
+    change to the rule on either side has to be made on both: `tests/test_trip_candidates.py`
+    copies the cases of `trip-dive-sections.test.ts`, and nothing runs across the repos.
+    """
+    whens: list[tuple[ColumnElement[bool], int]] = [
+        (DIVE_LOCAL_DAY.between(part.start_date, part.end_date), index)
+        for index, part in enumerate(parts)
+        if part.start_date and part.end_date
+    ]
+    reach: dict[int, ColumnElement[Any]] = {}
+    for index, part in enumerate(parts):
+        if part.start_date and not part.end_date:
+            reach[index] = case((DIVE_LOCAL_DAY >= part.start_date, DIVE_LOCAL_DAY - part.start_date))
+        elif part.end_date and not part.start_date:
+            reach[index] = case((DIVE_LOCAL_DAY <= part.end_date, literal(part.end_date, Date) - DIVE_LOCAL_DAY))
+    if reach:
+        # `LEAST` skips NULLs, so the nearest is over the parts that reach the day at all.
+        nearest = func.least(*reach.values())
+        whens.extend((distance == nearest, index) for index, distance in reach.items())
+    if not whens:
+        return null()
+    return case(*whens)
 
 
 async def get_dives_page(
@@ -168,6 +290,37 @@ async def reassign_dives_to_trip(db: AsyncSession, *, user_id: int, from_trip_id
         update(Dive)
         .where(Dive.trip_id == from_trip_id, Dive.user_id == user_id, Dive.is_deleted.is_(False))
         .values(trip_id=to_trip_id, updated_at=datetime.now(UTC))
+        .returning(Dive.id)
+    )
+    return len(moved.all())
+
+
+async def assign_candidates_to_trip(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    trip_id: int,
+    parts: Sequence[DatedPart],
+    dive_uuids: Sequence[uuid_pkg.UUID] | None = None,
+    part_index: int | None = None,
+) -> int:
+    """Put the trip's candidates on it - all of them, those among `dive_uuids`, or those
+    `part_for_day` attributes to the part at `part_index` - and return how many moved. Does
+    not commit.
+
+    Each scope only narrows the candidate predicate, so a dive already on a trip, deleted or
+    another diver's is never touched whatever the caller names. `user_id` and `updated_at`
+    are here for the reasons `reassign_dives_to_trip` gives.
+    """
+    narrowing: list[ColumnElement[bool]] = []
+    if dive_uuids is not None:
+        narrowing.append(Dive.uuid.in_(dive_uuids))
+    if part_index is not None:
+        narrowing.append(part_for_day(parts) == part_index)
+    moved = await db.execute(
+        update(Dive)
+        .where(Dive.user_id == user_id, Dive.is_deleted.is_(False), candidate_of(parts), *narrowing)
+        .values(trip_id=trip_id, updated_at=datetime.now(UTC))
         .returning(Dive.id)
     )
     return len(moved.all())

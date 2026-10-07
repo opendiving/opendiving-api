@@ -22,7 +22,6 @@ from ...core.exceptions.http_exceptions import (
 from ...core.security import create_dive_file_token
 from ...core.utils.cache import cache
 from ...core.utils.datetime_offset import (
-    combine_dive_start_time,
     combine_start_time,
     split_local_start_time,
     split_start_time,
@@ -34,12 +33,10 @@ from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
-    get_dive_sites_for_dives,
     replace_dive_sites_for_dive,
 )
 from ...crud.crud_dive_gear_items import (
     get_gear_items_for_dive,
-    get_gear_items_for_dives,
     replace_gear_items_for_dive,
 )
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
@@ -89,7 +86,7 @@ from ...schemas.dive import (
     validate_depth_pair,
 )
 from ...schemas.dive_mixture import DiveMixtureRead
-from ...schemas.dive_profile import DepthOutline, RecordingProfileRead
+from ...schemas.dive_profile import RecordingProfileRead
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
 from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
@@ -119,12 +116,12 @@ from ...services.dive_files import (
     store_recording_file,
 )
 from ...services.dive_gas import resolve_gas_use
+from ...services.dive_list_items import INTERNAL_KEYS, to_dive_list_items, to_public_start_time
 from ...services.dive_merge import DiveNotMergeableError, merge_dives
 from ...services.dive_neighbors import find_dive_neighbors
 from ...services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
 from ...services.dive_profiles import (
     ProfileGasAttribution,
-    get_depth_outlines_for_dives,
     get_gas_attribution_for_dives,
     get_profile_version,
     load_profile,
@@ -365,56 +362,6 @@ async def _get_owned_dive(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: d
     )
 
 
-def _to_public_start_time(data: dict[str, Any]) -> dict[str, Any]:
-    """Re-attaches a stored `utc_offset_minutes` to `start_time` and drops the now-redundant
-    offset and date-only keys, so the public `DiveRead`/`DiveReadWithMixtures` shape exposes a
-    single `start_time` (e.g. `2021-04-04T10:04:47.910+02:00`) rather than a column triple -
-    see `core/utils/datetime_offset.py`.
-
-    **Offset-aware for every dive but two kinds.** A dive whose source recorded no offset
-    stores a NULL there, and the recorded wall clock comes back with no zone attached
-    (`2021-04-04T10:04:47.910`); one whose source recorded no time of day comes back as its
-    bare date (`2021-04-04`). Only logbook import can create either; the read shapes carry
-    `DiveLocalStartTime` so they can serve both, `DiveCreate` still requires an offset, and
-    `patch_dive` keeps each state only for a dive already in it.
-    """
-    data = dict(data)
-    offset_minutes = data.pop("utc_offset_minutes")
-    date_only = data.pop("start_date_only", False)
-    data["start_time"] = combine_dive_start_time(data["start_time"], offset_minutes, date_only)
-    return data
-
-
-# The internal keys a public dive drops in favour of the uuids it resolves them to.
-_INTERNAL_KEYS = frozenset({"id", "user_id", "trip_id", "course_id", "contact_id"})
-
-
-def _to_public_dive(
-    db_dive: DiveReadInternal | dict[str, Any],
-    *,
-    user_uuid: uuid_pkg.UUID,
-    trip_uuid: uuid_pkg.UUID | None,
-    course_uuid: uuid_pkg.UUID | None,
-    contact_uuid: uuid_pkg.UUID | None,
-    dive_sites: list[DiveSiteInfo],
-    gear_items: list[GearItemInfo],
-    depth_outline: DepthOutline | None,
-) -> DiveListItem:
-    """Convert an internal dive representation (integer FKs) into its public list-row shape
-    (owning user, trip, training course and contact referenced by `uuid`)."""
-    data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
-    return DiveListItem(
-        **{k: v for k, v in data.items() if k not in _INTERNAL_KEYS},
-        user_uuid=user_uuid,
-        trip_uuid=trip_uuid,
-        course_uuid=course_uuid,
-        contact_uuid=contact_uuid,
-        dive_sites=dive_sites,
-        gear_items=gear_items,
-        depth_outline=depth_outline,
-    )
-
-
 def _to_public_dive_with_mixtures(
     db_dive: DiveReadInternal | dict[str, Any],
     *,
@@ -443,9 +390,9 @@ def _to_public_dive_with_mixtures(
     the dive cannot yet have a recording to have been extracted from - which is also why
     `recordings` defaults to empty there rather than being queried for.
     """
-    data = _to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
+    data = to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
     return DiveReadWithMixtures(
-        **{k: v for k, v in data.items() if k not in _INTERNAL_KEYS},
+        **{k: v for k, v in data.items() if k not in INTERNAL_KEYS},
         user_uuid=user_uuid,
         trip_uuid=trip_uuid,
         course_uuid=course_uuid,
@@ -841,33 +788,7 @@ async def _cached_read_dives(
         sort=sort,
     )
 
-    # Enrich each dive with its dive site(s), gear, trip/course/contact uuids and depth
-    # outline via batched lookups.
-    dive_ids = [d["id"] for d in dives_data["data"]]
-    sites_by_dive = await get_dive_sites_for_dives(db=db, dive_ids=dive_ids)
-    gear_by_dive = await get_gear_items_for_dives(db=db, dive_ids=dive_ids)
-    referenced_trip_ids = [d["trip_id"] for d in dives_data["data"] if d["trip_id"] is not None]
-    trip_uuid_by_id = await get_trip_uuids_by_ids(db=db, trip_ids=referenced_trip_ids, user_id=user_id)
-    referenced_course_ids = [d["course_id"] for d in dives_data["data"] if d["course_id"] is not None]
-    course_uuid_by_id = await get_course_uuids_by_ids(db=db, course_ids=referenced_course_ids, user_id=user_id)
-    contact_uuid_by_id = await get_contact_uuids_by_ids(
-        db=db, contact_ids=[d["contact_id"] for d in dives_data["data"]], user_id=user_id
-    )
-    outline_by_dive = await get_depth_outlines_for_dives(db, dive_ids=dive_ids)
-
-    dives_data["data"] = [
-        _to_public_dive(
-            dive,
-            user_uuid=user_uuid,
-            trip_uuid=trip_uuid_by_id.get(dive["trip_id"]) if dive["trip_id"] is not None else None,
-            course_uuid=course_uuid_by_id.get(dive["course_id"]) if dive["course_id"] is not None else None,
-            contact_uuid=contact_uuid_by_id.get(dive["contact_id"]),
-            dive_sites=sites_by_dive.get(dive["id"], []),
-            gear_items=gear_by_dive.get(dive["id"], []),
-            depth_outline=outline_by_dive.get(dive["id"]),
-        ).model_dump()
-        for dive in dives_data["data"]
-    ]
+    dives_data["data"] = await to_dive_list_items(db, dives_data["data"], user_id=user_id, user_uuid=user_uuid)
 
     response: dict[str, Any] = paginated_response(crud_data=dives_data, page=page, items_per_page=items_per_page)
     return response

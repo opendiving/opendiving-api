@@ -171,9 +171,9 @@ class TestTheDiveReadsScopeThatLookup:
                 "src.app.api.v1.dives.get_dives_page",
                 AsyncMock(return_value={"data": rows, "total_count": len(rows)}),
             ),
-            patch("src.app.api.v1.dives.get_trip_uuids_by_ids", lookup),
-            patch("src.app.api.v1.dives.get_dive_sites_for_dives", AsyncMock(return_value={})),
-            patch("src.app.api.v1.dives.get_gear_items_for_dives", AsyncMock(return_value={})),
+            patch("src.app.services.dive_list_items.get_trip_uuids_by_ids", lookup),
+            patch("src.app.services.dive_list_items.get_dive_sites_for_dives", AsyncMock(return_value={})),
+            patch("src.app.services.dive_list_items.get_gear_items_for_dives", AsyncMock(return_value={})),
         ):
             await _read_dives_uncached(
                 request=None,

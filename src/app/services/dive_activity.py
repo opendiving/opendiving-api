@@ -42,8 +42,9 @@ def bucket_by_day(dives: Sequence[tuple[datetime, int | None]]) -> list[DiveActi
 
     Doing it here rather than as a `date_trunc` over `start_time + utc_offset_minutes` in
     SQL is deliberate. `core/utils/datetime_offset.py` is documented as the single place
-    that conversion happens, and the failure mode of a second copy of it in another
-    language is a chart that quietly disagrees with the dive pages it was built from.
+    that conversion happens for anything displayed or bucketed, which this is, and the
+    failure mode of a second copy of it in another language is a chart that quietly
+    disagrees with the dive pages it was built from.
     The cost is two small columns per dive on a cached endpoint - the same trade
     `gas_use_history` already makes, for the same reason.
 

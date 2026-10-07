@@ -4,6 +4,7 @@ from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +19,12 @@ from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_contacts import resolve_contact_ids_for_user
-from ...crud.crud_dives import reassign_dives_to_trip
+from ...crud.crud_dives import (
+    assign_candidates_to_trip,
+    candidate_of,
+    get_dives_page,
+    reassign_dives_to_trip,
+)
 from ...crud.crud_lookups import get_lookup_page
 from ...crud.crud_people import get_people_for_trips, replace_people_for_trip
 from ...crud.crud_trip_parts import (
@@ -30,6 +36,8 @@ from ...crud.crud_trips import (
     NO_DIVES,
     TripFigures,
     crud_trips,
+    get_candidate_counts_for_trips,
+    get_contact_uuids_for_trips,
     get_figures_for_trips,
     get_trips_page,
     resolve_trip_id_for_user,
@@ -38,19 +46,28 @@ from ...crud.crud_trips import (
 )
 from ...models.dive import Dive
 from ...models.trip import Trip
+from ...schemas.dive import DiveListItem
 from ...schemas.lookup import LookupUntil, LookupUuids, lookup_bound
 from ...schemas.person import PersonReferenceRead
 from ...schemas.trip import (
     TripCreate,
     TripCreateInternal,
+    TripDiveAddRequest,
+    TripDiveAddResult,
     TripLookupItem,
     TripPartInput,
     TripPartRead,
+    TripPartWithCandidatesRead,
     TripRead,
     TripReadInternal,
     TripUpdateRequest,
 )
-from ...services.cache_invalidation import invalidate_dive_caches, invalidate_trip_caches
+from ...services.cache_invalidation import (
+    invalidate_dive_caches,
+    invalidate_dive_site_caches,
+    invalidate_trip_caches,
+)
+from ...services.dive_list_items import to_dive_list_items
 from ...services.person_links import resolve_people_references
 
 router = APIRouter(tags=["trips"])
@@ -107,21 +124,54 @@ def _to_public_trip(
     *,
     user_uuid: uuid_pkg.UUID,
     figures: TripFigures,
-    parts: list[TripPartRead] | None = None,
+    parts: list[TripPartRead],
+    candidate_counts: list[int],
+    contact_uuids: list[uuid_pkg.UUID],
     people: list[PersonReferenceRead] | None = None,
 ) -> TripRead:
     """Convert an internal trip representation (integer FKs) into its public shape
     (owning user referenced by `uuid`, parts and people embedded as read from the child
-    tables, and the figures over its dives).
+    tables, and the figures over its dives and its candidates).
     """
     data = db_trip if isinstance(db_trip, dict) else db_trip.model_dump()
     return TripRead(
         **{k: v for k, v in data.items() if k not in ("id", "user_id")},
         **figures._asdict(),
         user_uuid=user_uuid,
-        parts=parts or [],
+        parts=[
+            TripPartWithCandidatesRead(**part.model_dump(), candidate_count=count)
+            for part, count in zip(parts, candidate_counts, strict=True)
+        ],
+        candidate_count=sum(candidate_counts),
+        contact_uuids=contact_uuids,
         people=people or [],
     )
+
+
+async def _public_trips(
+    db: AsyncSession, rows: list[dict[str, Any]], *, user_id: int, user_uuid: uuid_pkg.UUID
+) -> list[TripRead]:
+    """Trip rows - every `trip` column, the internal `id` included - in their public shape, each
+    child query batched over all of them. The list and the single read both come through here,
+    so the two cannot disagree about a trip."""
+    trip_ids = [row["id"] for row in rows]
+    parts_by_trip = await get_parts_for_trips(db=db, trip_ids=trip_ids)
+    people_by_trip = await get_people_for_trips(db, trip_ids)
+    figures_by_trip = await get_figures_for_trips(db, trip_ids=trip_ids, user_id=user_id)
+    candidates_by_trip = await get_candidate_counts_for_trips(db, parts_by_trip=parts_by_trip, user_id=user_id)
+    contacts_by_trip = await get_contact_uuids_for_trips(db, trip_ids=trip_ids, user_id=user_id)
+    return [
+        _to_public_trip(
+            row,
+            user_uuid=user_uuid,
+            figures=figures_by_trip[row["id"]],
+            parts=parts_by_trip[row["id"]],
+            candidate_counts=candidates_by_trip[row["id"]],
+            contact_uuids=contacts_by_trip[row["id"]],
+            people=people_by_trip.get(row["id"]),
+        )
+        for row in rows
+    ]
 
 
 # Kept for its `list_cache_key_prefix` only - `read_list`, and so `to_public`, is never
@@ -138,7 +188,9 @@ def _to_public_trip(
 _trip_cache: OwnedResourceCache[TripReadInternal, TripRead] = OwnedResourceCache(
     resource_name="trips",
     crud=crud_trips,
-    to_public=lambda db_trip, user_uuid: _to_public_trip(db_trip, user_uuid=user_uuid, figures=NO_DIVES),
+    to_public=lambda db_trip, user_uuid: _to_public_trip(
+        db_trip, user_uuid=user_uuid, figures=NO_DIVES, parts=[], candidate_counts=[], contact_uuids=[]
+    ),
     search_columns=("name",),
 )
 
@@ -197,12 +249,18 @@ async def write_trip(
 
     stored_parts = await get_parts_for_trip(db=db, trip_id=created_trip.id)
     stored_people = (await get_people_for_trips(db, [created_trip.id]))[created_trip.id] if people else []
+    # Its parts may cover dives already logged on no trip, which are its candidates from now on.
+    candidates = await get_candidate_counts_for_trips(
+        db, parts_by_trip={created_trip.id: stored_parts}, user_id=current_user["id"]
+    )
     # A dive can only name a trip that already exists, so a new one has none.
     return _to_public_trip(
         cast(TripReadInternal, trip_read),
         user_uuid=current_user["uuid"],
         figures=NO_DIVES,
         parts=stored_parts,
+        candidate_counts=candidates[created_trip.id],
+        contact_uuids=[],
         people=stored_people,
     )
 
@@ -239,23 +297,10 @@ async def _cached_read_trips(
         search=search,
     )
 
-    # One batched query for the page rather than one per trip. `get_trips_page` returns
-    # full-column dicts, matching `get_multi` without a `schema_to_select`, so the internal
-    # `id` the child rows hang off is there to read.
-    trip_ids = [trip["id"] for trip in trips_data["data"]]
-    parts_by_trip = await get_parts_for_trips(db=db, trip_ids=trip_ids)
-    people_by_trip = await get_people_for_trips(db, trip_ids)
-    figures_by_trip = await get_figures_for_trips(db, trip_ids=trip_ids, user_id=user_id)
-
+    # `get_trips_page` returns full-column dicts, matching `get_multi` without a
+    # `schema_to_select`, so the internal `id` the child rows hang off is there to read.
     trips_data["data"] = [
-        _to_public_trip(
-            trip,
-            user_uuid=user_uuid,
-            figures=figures_by_trip[trip["id"]],
-            parts=parts_by_trip.get(trip["id"], []),
-            people=people_by_trip.get(trip["id"]),
-        ).model_dump()
-        for trip in trips_data["data"]
+        trip.model_dump() for trip in await _public_trips(db, trips_data["data"], user_id=user_id, user_uuid=user_uuid)
     ]
 
     response: dict[str, Any] = paginated_response(crud_data=trips_data, page=page, items_per_page=items_per_page)
@@ -278,7 +323,13 @@ async def read_trips(
 
     Each trip also counts its live dives, the distinct dive sites they name and the distinct
     species recorded on them - `0` for a trip no dive is on - and carries the deepest of those
-    dives' `max_depth`, `null` when none recorded one.
+    dives' `max_depth`, `null` when none recorded one, and the contacts they name.
+
+    `candidate_count` counts the caller's live dives on no trip whose own local day one of the
+    trip's parts covers - the ones `GET /trip/{uuid}/dives` lists beside the trip's own - and
+    each part's `candidate_count` those it takes. Where parts overlap a day goes to one of
+    them, as the trip page places it, so the parts' counts add up to the trip's. A dive can be
+    a candidate of two trips at once and counts for both.
 
     A trip's position in the list is the earliest start date across its parts; a trip
     whose parts carry no dates at all sorts after every trip that has one.
@@ -411,12 +462,10 @@ async def _cached_read_trip(
     db_trip = await crud_trips.get(db=db, uuid=uuid, schema_to_select=TripReadInternal, return_as_model=True)
     if db_trip is None:
         raise NotFoundException("Trip not found")
-    db_trip = cast(TripReadInternal, db_trip)
-
-    parts = await get_parts_for_trip(db=db, trip_id=db_trip.id)
-    people = (await get_people_for_trips(db, [db_trip.id])).get(db_trip.id)
-    figures = (await get_figures_for_trips(db, trip_ids=[db_trip.id], user_id=user_id))[db_trip.id]
-    return _to_public_trip(db_trip, user_uuid=owner_uuid, figures=figures, parts=parts, people=people).model_dump()
+    (trip,) = await _public_trips(
+        db, [cast(TripReadInternal, db_trip).model_dump()], user_id=user_id, user_uuid=owner_uuid
+    )
+    return trip.model_dump()
 
 
 @router.get("/trip/{uuid}", response_model=TripRead)
@@ -438,6 +487,130 @@ async def read_trip(
     return await _cached_read_trip(
         request, user_id=current_user["id"], uuid=uuid, owner_uuid=current_user["uuid"], db=db
     )
+
+
+# Under the dives prefix rather than the trip's, so every dive write's sweep drops it: a dive
+# logged, edited or deleted can join or leave this list without naming the trip. `@cache` keys
+# on its prefix's placeholders alone, hence the page size in it too.
+@cache(
+    key_prefix="user_{user_id}_dives:trip_{trip_id}:page_{page}:items_per_page:{items_per_page}",
+    resource_id_name="user_id",
+    expiration=60,
+)
+async def _cached_read_trip_dives(
+    request: Request,
+    user_id: int,
+    user_uuid: uuid_pkg.UUID,
+    db: AsyncSession,
+    trip_id: int,
+    page: int,
+    items_per_page: int,
+) -> dict:
+    """A page of the trip's dives and its candidates, newest first. Only ever called after
+    `read_trip_dives` has authorized the caller: a hit skips this body."""
+    parts = await get_parts_for_trip(db=db, trip_id=trip_id)
+    dives_data = await get_dives_page(
+        db,
+        user_id=user_id,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+        conditions=[or_(Dive.trip_id == trip_id, candidate_of(parts))],
+    )
+    dives_data["data"] = await to_dive_list_items(db, dives_data["data"], user_id=user_id, user_uuid=user_uuid)
+    response: dict[str, Any] = paginated_response(crud_data=dives_data, page=page, items_per_page=items_per_page)
+    return response
+
+
+@router.get("/trip/{uuid}/dives", response_model=PaginatedListResponse[DiveListItem])
+async def read_trip_dives(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: int = 1,
+    items_per_page: int = 10,
+) -> dict:
+    """The trip's live dives and its candidates in one list, newest first, as `GET /dives`
+    shapes its rows.
+
+    A candidate is one of the caller's live dives that is on no trip and whose own local day -
+    the day the diver was there - one of the trip's parts covers: on or after the part's
+    `start_date` where it has one, on or before its `end_date` where it has one. A part with
+    no dates covers no day, and a dive on another trip is never a candidate. A row's
+    `trip_uuid` tells the two apart: this trip's on the trip's own dives, `null` on a
+    candidate.
+
+    404 for a trip that is not the caller's, as every `/trip/{uuid}` route answers.
+    Out-of-range pagination is clamped.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
+    # Authorize before the cached read: `@cache` replays a hit without re-checking.
+    db_trip = await _get_owned_trip(db, uuid, current_user)
+
+    return await _cached_read_trip_dives(
+        request,
+        user_id=current_user["id"],
+        user_uuid=current_user["uuid"],
+        db=db,
+        trip_id=db_trip.id,
+        page=page,
+        items_per_page=items_per_page,
+    )
+
+
+@router.post("/trip/{uuid}/dives", response_model=TripDiveAddResult)
+async def add_trip_dives(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    scope: TripDiveAddRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> TripDiveAddResult:
+    """Put candidates of the trip on it, in one write: the `dive_uuids` named, the ones a
+    `part` takes, or - with `{}` - every one. `GET /trip/{uuid}/dives` says what a candidate
+    is.
+
+    `part` names a part by its `start_date` and `end_date` exactly as the trip read carries
+    them, and takes the candidates the trip page shows in that part's card; where two parts
+    carry the same dates it names the first. Dates no part of the trip carries are a 422 - the
+    parts were edited since the page read them.
+
+    A named dive that is not a candidate - already on a trip, deleted, someone else's or
+    nonexistent - is left alone and is not an error: the request is a snapshot of a page, and one
+    stale entry must not strand the rest. `added` then says fewer than were named, and says
+    the same whether a skipped uuid exists or not.
+    """
+    db_trip = await _get_owned_trip(db, uuid, current_user)
+    parts = await get_parts_for_trip(db=db, trip_id=db_trip.id)
+
+    part_index: int | None = None
+    if scope.part is not None:
+        named = (scope.part.start_date, scope.part.end_date)
+        part_index = next(
+            (index for index, part in enumerate(parts) if (part.start_date, part.end_date) == named), None
+        )
+        if part_index is None:
+            raise UnprocessableEntityException("No part of this trip has those dates.")
+
+    added = await assign_candidates_to_trip(
+        db,
+        user_id=db_trip.user_id,
+        trip_id=db_trip.id,
+        parts=parts,
+        dive_uuids=scope.dive_uuids,
+        part_index=part_index,
+    )
+    await db.commit()
+
+    if added:
+        # Every dive read carries `trip_uuid`; a trip read counts its dives and its
+        # candidates; and a site's summary is dropped beside the trip's wherever a dive moves.
+        await invalidate_dive_caches(db_trip.user_id)
+        await invalidate_trip_caches(db_trip.user_id)
+        await invalidate_dive_site_caches(db_trip.user_id)
+
+    return TripDiveAddResult(added=added)
 
 
 @router.patch("/trip/{uuid}")
@@ -498,6 +671,9 @@ async def patch_trip(
     # read of this trip says.
     if update_data or parts is not None or people is not None:
         await invalidate_trip_caches(db_trip.user_id)
+    # A part's dates decide which dives on no trip the trip's dive list carries.
+    if parts is not None:
+        await invalidate_dive_caches(db_trip.user_id)
 
     return {"message": "Trip updated"}
 

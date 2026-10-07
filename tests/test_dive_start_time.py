@@ -34,6 +34,7 @@ from src.app.core.utils.datetime_offset import (
     split_updated_start_time,
 )
 from src.app.schemas.dive import DiveCreate, DiveNeighbor, DiveUpdate, DiveUpdateRequest
+from src.app.services.dive_list_items import to_public_start_time
 
 
 class TestSplitAndCombineStartTime:
@@ -108,7 +109,7 @@ class TestTheDateOnlyState:
         assert type(DiveNeighbor.model_validate(dumped).start_time) is date
 
     def test_the_dive_read_takes_the_flag_and_serves_the_bare_date(self) -> None:
-        public = dives_module._to_public_start_time(
+        public = to_public_start_time(
             {"start_time": datetime(2002, 6, 18, tzinfo=UTC), "utc_offset_minutes": None, "start_date_only": True}
         )
 

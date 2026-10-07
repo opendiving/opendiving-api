@@ -242,9 +242,10 @@ string such as `"2021-04-04T10:04:47.910+02:00"`. `DiveCreate` rejects a naive d
 offset-less value for an import that lost it — see *A dive's UTC offset may be unknown, and only
 import can make it so* and *An offset-unknown dive keeps its wall clock editable*. `write_dive`
 (`api/v1/dives.py`) calls `split_start_time()`; `patch_dive` calls `split_updated_start_time()`, the
-same split plus the update-only rules; `_to_public_start_time()` calls `combine_dive_start_time()`
-on read. Only `DiveCreateInternal`/`DiveUpdateInternal`/`DiveReadInternal` carry
-`utc_offset_minutes` as a field, never `DiveCreate`/`DiveUpdate`/`DiveRead`.
+same split plus the update-only rules; `to_public_start_time()` (`services/dive_list_items.py`)
+calls `combine_dive_start_time()` on read. Only
+`DiveCreateInternal`/`DiveUpdateInternal`/`DiveReadInternal` carry `utc_offset_minutes` as a field,
+never `DiveCreate`/`DiveUpdate`/`DiveRead`.
 
 ## `recalculate_dive_stats`'s aggregate is backed by a covering index, not incremental counters
 
@@ -1790,8 +1791,10 @@ to a bare extension, so `default` supplies the stem.
 `GET /user/dive-activity` returns one `{year, month, day, dives}` per day dived, counted in Python
 off `start_time` and `utc_offset_minutes`, not by `GROUP BY date_trunc`.
 
-- `combine_start_time` (`core/utils/datetime_offset.py`) is the offset arithmetic's only home; a SQL
-  copy drifts a day off from the dive pages.
+- `combine_start_time` (`core/utils/datetime_offset.py`) is the offset arithmetic's only home for
+  anything displayed or bucketed; a SQL copy drifts a day off from the dive pages. The exception is
+  a predicate the database must apply - see *"A trip's candidates are chosen by a local day computed
+  in SQL"*.
 - The day is the dive's local one (the `diveWallClockTime` rule).
 - Days, not months: `DiveActivityCard` sums upward itself; a `granularity` parameter would cost a
   second cache entry.
@@ -5095,7 +5098,7 @@ column-shaped internal schemas the way the dive views are; that is a wider admin
 `CertificationRead` carries `course_uuid` and all three producers fill it: both cached readers run
 the batched `get_course_uuids_by_ids`, and `write_certification` passes the request's value.
 `_to_public_certification` stays a synchronous pure function taking the resolved value; `course_id`
-joins its exclusion set as `trip_id` does in `_to_public_dive`.
+joins its exclusion set as `trip_id` does in `to_public_dive`.
 
 ## The hook script is repo content; what wires it up is not
 
@@ -6969,3 +6972,14 @@ limit, is not exported, and no account's purge collects it - taking the tiles on
 would take tiles others are shown. The sweeper's `_referenced_keys` reads `map_tile`, and the worker
 deletes a tile unserved for `UNSERVED_RETENTION`. Rejected: the purge collecting the tiles an
 account's requests drew first, which ties shared files to whoever happened to ask first.
+
+## A trip's candidates are chosen by a local day computed in SQL
+
+`GET /trip/{uuid}/dives` pages a trip's dives together with its candidates - dives on no trip whose
+own local day a part covers - so membership has to be decided in the query: deciding it after the
+rows come back leaves the page and its `total_count` wrong. `crud_dives.DIVE_LOCAL_DAY` is the
+stored instant read `AT TIME ZONE 'UTC'` (the api sets no session time zone) plus the offset, zero
+where NULL, cast to a date, and a test pins it to `local_day()` for every stored state. Python stays
+the single place a day is displayed or bucketed. Rejected: a day-wide instant window narrowed in
+Python, which pages wrong; and narrowing in the browser, which leaves the trip read's counts no
+server to come from.
