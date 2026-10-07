@@ -33,6 +33,7 @@ from src.app.core.worker.functions import (
 from src.app.core.worker.settings import WorkerSettings
 from src.app.models import Certification, Dive, DiveDiveSite, DiveSpecies
 from src.app.models.authentication_request import AuthenticationRequest
+from src.app.models.checkin_details import CheckinInsurancePolicy
 from src.app.models.invitation import Invitation
 from src.app.models.invite_request import InviteRequest
 from src.app.models.user import User
@@ -707,15 +708,16 @@ def _certification_row(**overrides):
     return SimpleNamespace(**{**defaults, **overrides})
 
 
-def _insurance_row(**overrides):
-    """A row as the renewal job's insurance query yields it."""
+def _policy_row(**overrides):
+    """A row as the renewal job's insurance-policy query yields it."""
     defaults = {
         "user_id": 1,
         "email": "diver@example.com",
-        "insurance_provider": "DAN Europe",
-        "insurance_expires_on": TODAY + timedelta(days=10),
-        "insurance_notified_stage": None,
-        "insurance_notified_for": None,
+        "policy_id": 40,
+        "provider": "DAN Europe",
+        "expires_on": TODAY + timedelta(days=10),
+        "notified_stage": None,
+        "notified_for": None,
     }
     return SimpleNamespace(**{**defaults, **overrides})
 
@@ -723,10 +725,10 @@ def _insurance_row(**overrides):
 class _RenewalSession(_RecordingSession):
     """Answers the job's two reads by which table each one is from."""
 
-    def __init__(self, certifications, insurances):
+    def __init__(self, certifications, policies):
         super().__init__([])
         self._certifications = certifications
-        self._insurances = insurances
+        self._policies = policies
         self.update_statements = []
 
     async def execute(self, statement, parameters=None):
@@ -736,7 +738,7 @@ class _RenewalSession(_RecordingSession):
             return await super().execute(statement, parameters)
         self.calls.append(compiled)
         result = MagicMock()
-        result.all.return_value = self._certifications if "FROM certification" in compiled else self._insurances
+        result.all.return_value = self._certifications if "FROM certification" in compiled else self._policies
         return result
 
 
@@ -748,7 +750,7 @@ def _renewal_patches(session):
 
 
 class TestSendRenewalReminders:
-    """One email per diver, cards and insurance together, sent before the pair is marked."""
+    """One email per diver, cards and policies together, sent before each pair is marked."""
 
     @pytest.mark.asyncio
     async def test_sends_nothing_when_nothing_is_running_out(self) -> None:
@@ -768,7 +770,11 @@ class TestSendRenewalReminders:
             _certification_row(certification_id=21, name="EFR", agency="efr", expires_on=TODAY - timedelta(days=3)),
             _certification_row(user_id=2, email="other@example.com", certification_id=22),
         ]
-        session = _RenewalSession(certifications, [_insurance_row()])
+        policies = [
+            _policy_row(),
+            _policy_row(policy_id=41, provider="DiveAssure", expires_on=TODAY + timedelta(days=80)),
+        ]
+        session = _RenewalSession(certifications, policies)
         session_patch, email_patch = _renewal_patches(session)
         with session_patch, email_patch as send:
             result = await send_renewal_reminders({}, today=TODAY)
@@ -780,8 +786,9 @@ class TestSendRenewalReminders:
             ("EFR EFR", "expired 23 Sep 2026", "/certifications"),
             ("DAN Europe dive insurance", "expires 6 Oct 2026", "/settings/checkin"),
             ("PADI Rescue Diver", "expires 25 Nov 2026", "/certifications"),
+            ("DiveAssure dive insurance", "expires 15 Dec 2026", "/settings/checkin"),
         ]
-        assert "Sent 2 renewal reminder(s) covering 4 subject(s)" in result
+        assert "Sent 2 renewal reminder(s) covering 5 subject(s)" in result
 
     @pytest.mark.asyncio
     async def test_marks_each_subject_after_sending(self) -> None:
@@ -789,7 +796,8 @@ class TestSendRenewalReminders:
             _certification_row(certification_id=20),
             _certification_row(certification_id=21, expires_on=TODAY - timedelta(days=1)),
         ]
-        session = _RenewalSession(certifications, [_insurance_row()])
+        policies = [_policy_row(), _policy_row(policy_id=41, expires_on=TODAY - timedelta(days=2))]
+        session = _RenewalSession(certifications, policies)
         session_patch, email_patch = _renewal_patches(session)
         with session_patch, email_patch:
             await send_renewal_reminders({}, today=TODAY)
@@ -806,11 +814,12 @@ class TestSendRenewalReminders:
                 {"id": 21, "expiry_notified_stage": "expired", "expiry_notified_for": TODAY - timedelta(days=1)},
             ]
         ]
-        # ...and the insurance on the account's own row.
-        [insurance_mark] = [statement for statement, params in session.update_statements if params is None]
-        values = insurance_mark.compile().params
-        assert values["insurance_notified_stage"] == "expiring_soon"
-        assert values["insurance_notified_for"] == TODAY + timedelta(days=10)
+        # ...and each policy on its own row, by id.
+        policy_marks = [statement.compile().params for statement, params in session.update_statements if params is None]
+        assert [(values["id_1"], values["notified_stage"], values["notified_for"]) for values in policy_marks] == [
+            (40, "expiring_soon", TODAY + timedelta(days=10)),
+            (41, "expired", TODAY - timedelta(days=2)),
+        ]
         session.commit.assert_awaited()
 
     @pytest.mark.asyncio
@@ -819,9 +828,7 @@ class TestSendRenewalReminders:
         card = _certification_row(
             expires_on=expires_on, expiry_notified_stage="expiring_soon", expiry_notified_for=expires_on
         )
-        insured = _insurance_row(
-            insurance_expires_on=expires_on, insurance_notified_stage="expiring_soon", insurance_notified_for=expires_on
-        )
+        insured = _policy_row(expires_on=expires_on, notified_stage="expiring_soon", notified_for=expires_on)
         session = _RenewalSession([card], [insured])
         session_patch, email_patch = _renewal_patches(session)
         with session_patch, email_patch as send:
@@ -836,13 +843,13 @@ class TestSendRenewalReminders:
         with session_patch, email_patch:
             await send_renewal_reminders({}, today=TODAY)
 
-        certifications, insurances = session.calls
+        certifications, policies = session.calls
         assert "certification.is_deleted IS false" in certifications
-        for statement in (certifications, insurances):
+        for statement in (certifications, policies):
             assert '"user".is_deleted IS false' in statement
             assert '"user".renewal_reminder_emails IS true' in statement
         assert "certification.expires_on <=" in certifications
-        assert '"user".insurance_expires_on <=' in insurances
+        assert "checkin_insurance_policy.expires_on <=" in policies
 
 
 def _review(year: int = 2025) -> YearInReview:
@@ -975,27 +982,47 @@ class TestSendRenewalRemindersAgainstPostgres:
         yield
         await async_engine.dispose()
 
-    def _due(self, db: Session, diver: User) -> Certification:
+    def _due(self, db: Session, diver: User) -> tuple[Certification, list[CheckinInsurancePolicy]]:
         card = create_certification(db, diver)
         card.expires_on = self.TODAY + timedelta(days=30)
-        diver.insurance_provider = "DAN Europe"
-        diver.insurance_expires_on = self.TODAY - timedelta(days=1)
+        policies = [
+            CheckinInsurancePolicy(
+                user_id=diver.id, position=0, provider="DAN Europe", expires_on=self.TODAY - timedelta(days=1)
+            ),
+            CheckinInsurancePolicy(
+                user_id=diver.id, position=1, provider="DiveAssure", expires_on=self.TODAY + timedelta(days=5)
+            ),
+            # Outside the window: no line, no mark.
+            CheckinInsurancePolicy(
+                user_id=diver.id, position=2, provider="Far Off", expires_on=self.TODAY + timedelta(days=400)
+            ),
+        ]
+        db.add_all(policies)
         db.commit()
-        return card
+        return card, policies
 
     @pytest.mark.asyncio
     async def test_the_marks_reach_postgres(self, db: Session, diver: User) -> None:
-        card = self._due(db, diver)
+        card, policies = self._due(db, diver)
 
         with patch("src.app.core.worker.functions.send_renewal_reminder_email", new_callable=AsyncMock) as send:
             await send_renewal_reminders({}, today=self.TODAY)
 
         [lines] = [call.args[1] for call in send.await_args_list if call.args[0] == diver.email]
-        assert len(lines) == 2
+        assert len(lines) == 3
+        assert [label for label, _, _ in lines if label.endswith("insurance")] == [
+            "DAN Europe dive insurance",
+            "DiveAssure dive insurance",
+        ]
         db.refresh(card)
-        db.refresh(diver)
         assert (card.expiry_notified_stage, card.expiry_notified_for) == ("expiring_soon", card.expires_on)
-        assert (diver.insurance_notified_stage, diver.insurance_notified_for) == ("expired", diver.insurance_expires_on)
+        for policy in policies:
+            db.refresh(policy)
+        assert [(policy.notified_stage, policy.notified_for) for policy in policies] == [
+            ("expired", self.TODAY - timedelta(days=1)),
+            ("expiring_soon", self.TODAY + timedelta(days=5)),
+            (None, None),
+        ]
 
     @pytest.mark.asyncio
     async def test_a_second_run_sends_nothing_new(self, db: Session, diver: User) -> None:

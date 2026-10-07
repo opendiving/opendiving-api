@@ -34,6 +34,7 @@ from src.app.core.worker.settings import WorkerSettings
 from src.app.crud.crud_users import read_account
 from src.app.main import app
 from src.app.models.certification import Certification
+from src.app.models.checkin_details import CheckinDetails, CheckinEmergencyContact, CheckinInsurancePolicy
 from src.app.models.checkin_link import CheckinLink
 from src.app.models.user import User
 from src.app.models.user_dive_stats import UserDiveStats
@@ -324,13 +325,21 @@ class TestAgainstPostgres:
     async def test_the_summary_is_what_the_signed_in_endpoints_say(
         self, db: Session, async_db: AsyncSession, http: httpx.AsyncClient, sign_in: SignIn
     ) -> None:
-        """Every field the check-in page prints, off `GET /user` and `GET /certifications` for
-        the same diver - in the list's order, with each card's dive centre and instructor by
-        name, and its front's type and nothing of the back. A deleted card is not there."""
+        """Every field the check-in page prints, off `GET /user`, `GET /user/checkin-details`
+        and `GET /certifications` for the same diver - in the list's order, with each card's
+        dive centre and instructor by name, and its front's type and nothing of the back. A
+        deleted card is not there, and neither is the sign-in address."""
         diver = create_user(db)
-        diver.phone, diver.date_of_birth = "+20 100 000 0000", date(1990, 4, 2)
-        diver.insurance_provider, diver.insurance_policy_number = "DAN Europe", "DE-1234"
-        diver.emergency_contact_name, diver.emergency_contact_phone = "Sam", "+44 20 0000 0000"
+        db.add_all(
+            [
+                CheckinDetails(
+                    user_id=diver.id, email="desk@example.org", phone="+20 100 000 0000", date_of_birth=date(1990, 4, 2)
+                ),
+                CheckinInsurancePolicy(user_id=diver.id, position=0, provider="DAN Europe", number="DE-1234"),
+                CheckinEmergencyContact(user_id=diver.id, position=1, name="Kim"),
+                CheckinEmergencyContact(user_id=diver.id, position=0, name="Sam", phone="+44 20 0000 0000"),
+            ]
+        )
         centre = create_contact(db, diver)
         instructor = create_person(db, diver)
         newest = Certification(
@@ -384,8 +393,15 @@ class TestAgainstPostgres:
         assert response.headers["cache-control"] == NO_STORE
         summary = response.json()
         account = UserRead.model_validate(await read_account(async_db, uuid=diver.uuid)).model_dump(mode="json")
-        assert summary["diver"] == {field: account[field] for field in CheckinDiver.model_fields}
+        details = await http.get("/api/v1/user/checkin-details")
+        assert summary["diver"] == details.json() | {
+            field: account[field] for field in ("name", "portrait_sha256", "units")
+        }
+        assert summary["diver"].keys() == CheckinDiver.model_fields.keys()
+        assert [contact["name"] for contact in summary["diver"]["emergency_contacts"]] == ["Sam", "Kim"]
+        assert summary["diver"]["email"] == "desk@example.org"
         assert summary["diver"]["portrait_sha256"] is not None
+        assert diver.email not in response.text
 
         listed = await cast(Any, _cached_read_certifications).__wrapped__(
             request=None,

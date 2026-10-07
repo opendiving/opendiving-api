@@ -42,6 +42,7 @@ from uuid6 import uuid7
 
 from src.app.models.contact import Contact
 from src.app.models.gear_item import GearItem
+from src.app.schemas.checkin_details import CheckinDetailsRead, EmergencyContact, InsurancePolicy
 from src.app.schemas.dive import DiveMode
 from src.app.schemas.gear_item import GearType
 from src.app.schemas.location import LocationRead
@@ -69,7 +70,6 @@ from tests.helpers.export import (
     full_bundle,
     make_dive,
     make_dive_site,
-    make_user,
     mixture,
 )
 
@@ -1357,20 +1357,23 @@ class TestWhatUddfCannotHold:
 
     @pytest.mark.asyncio
     async def test_the_owner_s_email_is_not_in_the_file(self, monkeypatch):
-        """The schema has a slot. A UDDF file is what a diver hands to a dive shop."""
-        document = await _render(full_bundle(), monkeypatch=monkeypatch)
+        """The sign-in address is the account's, never a detail the diver gives out. The
+        check-in email is, and goes out in its slot."""
+        bundle = replace(full_bundle(), checkin_details=CheckinDetailsRead(email="desk@example.org"))
+
+        document = await _render(bundle, monkeypatch=monkeypatch)
+
         assert b"ada@example.com" not in document
+        assert b"<email>desk@example.org</email>" in document
 
     @pytest.mark.asyncio
-    async def test_the_emergency_contact_and_the_policy_number_are_not_in_the_file(self, monkeypatch):
+    async def test_the_emergency_contacts_and_the_policy_numbers_are_not_in_the_file(self, monkeypatch):
         """UDDF has no element for a person to call and none for a policy number."""
         bundle = replace(
             full_bundle(),
-            user=make_user(
-                emergency_contact_name="Grace Hopper",
-                emergency_contact_phone="+1 202 555 0143",
-                insurance_provider="DAN Europe",
-                insurance_policy_number="DE-4471902",
+            checkin_details=CheckinDetailsRead(
+                emergency_contacts=[EmergencyContact(name="Grace Hopper", phone="+1 202 555 0143")],
+                insurance_policies=[InsurancePolicy(provider="DAN Europe", number="DE-4471902")],
             ),
         )
 
@@ -1391,18 +1394,20 @@ class TestTheOwner:
         return owner
 
     @pytest.mark.asyncio
-    async def test_the_birthdate_phone_and_insurance_go_out_in_the_xsd_s_order(self, schema, monkeypatch):
-        """`<contact>` sits between `<personal>` and `<equipment>`, `<diveinsurances>` after
-        it, and both dates are `xs:dateTime`, so they go out widened to midnight - the XSD
-        rejects a bare date there."""
+    async def test_the_birthdate_contact_and_policies_go_out_in_the_xsd_s_order(self, schema, monkeypatch):
+        """`<contact>` sits between `<personal>` and `<equipment>`, phone before email,
+        `<diveinsurances>` after it with one `<insurance>` per policy, and both dates are
+        `xs:dateTime`, so they go out widened to midnight - the XSD rejects a bare date there."""
         bundle = replace(
             full_bundle(),
-            user=make_user(
+            checkin_details=CheckinDetailsRead(
+                email="desk@example.org",
                 date_of_birth=date(1988, 4, 12),
                 phone="+20 100 123 4567",
-                insurance_provider="DAN Europe",
-                insurance_policy_number="DE-4471902",
-                insurance_expires_on=date(2027, 6, 30),
+                insurance_policies=[
+                    InsurancePolicy(provider="DAN Europe", number="DE-4471902", expires_on=date(2027, 6, 30)),
+                    InsurancePolicy(provider="DiveAssure"),
+                ],
             ),
         )
 
@@ -1417,11 +1422,26 @@ class TestTheOwner:
             "diveinsurances",
         ]
         assert _text(owner, f"{UDDF}personal/{UDDF}birthdate/{UDDF}datetime") == "1988-04-12T00:00:00"
-        assert [phone.text for phone in owner.findall(f"{UDDF}contact/*")] == ["+20 100 123 4567"]
-        insurance = owner.find(f"{UDDF}diveinsurances/{UDDF}insurance")
-        assert insurance is not None
-        assert _text(insurance, f"{UDDF}name") == "DAN Europe"
-        assert _text(insurance, f"{UDDF}validdate/{UDDF}datetime") == "2027-06-30T00:00:00"
+        assert [(child.tag.removeprefix(UDDF), child.text) for child in owner.findall(f"{UDDF}contact/*")] == [
+            ("phone", "+20 100 123 4567"),
+            ("email", "desk@example.org"),
+        ]
+        dan, assure = owner.findall(f"{UDDF}diveinsurances/{UDDF}insurance")
+        assert _text(dan, f"{UDDF}name") == "DAN Europe"
+        assert _text(dan, f"{UDDF}validdate/{UDDF}datetime") == "2027-06-30T00:00:00"
+        assert _text(assure, f"{UDDF}name") == "DiveAssure"
+        assert assure.find(f"{UDDF}validdate") is None
+
+    @pytest.mark.asyncio
+    async def test_an_email_alone_is_a_contact_block(self, schema, monkeypatch):
+        bundle = replace(full_bundle(), checkin_details=CheckinDetailsRead(email="desk@example.org"))
+
+        document = await _render(bundle, monkeypatch=monkeypatch)
+
+        schema.validate(document)
+        assert [child.tag.removeprefix(UDDF) for child in self._owner(document).findall(f"{UDDF}contact/*")] == [
+            "email"
+        ]
 
     @pytest.mark.asyncio
     async def test_an_account_that_filled_in_none_writes_names_and_gear_only(self, monkeypatch):
@@ -1429,23 +1449,6 @@ class TestTheOwner:
 
         assert [child.tag.removeprefix(UDDF) for child in owner] == ["personal", "equipment"]
         assert owner.find(f"{UDDF}personal/{UDDF}birthdate") is None
-
-    @pytest.mark.asyncio
-    async def test_an_insurance_with_no_provider_is_not_written(self, schema, monkeypatch):
-        """`<name>` is mandatory in `insuranceType`, and a blank string is no provider."""
-        bundle = replace(
-            full_bundle(),
-            user=make_user(
-                phone="",
-                insurance_provider=" ",
-                insurance_expires_on=date(2027, 6, 30),
-            ),
-        )
-
-        document = await _render(bundle, monkeypatch=monkeypatch)
-
-        schema.validate(document)
-        assert [child.tag.removeprefix(UDDF) for child in self._owner(document)] == ["personal", "equipment"]
 
 
 class TestDecoReadouts:
