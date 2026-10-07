@@ -165,7 +165,7 @@ wildcard still purges it; routes lowercase and strip the term first. A resource 
 `search_columns` passes no `search` kwarg, or `@cache` would `KeyError`. Gear calls
 `search_clause`/`search_multi` directly, not through `OwnedResourceCache`.
 
-## Pickers read `GET /<plural>/lookup`, ordered by last use at or before `until`
+## Every picker but species reads `GET /<plural>/lookup`, ordered by last use at or before `until`
 
 Each picked resource but species has a lookup beside its list (species: *"The dive form's species
 menu is the life list's join ahead of the catalog search"*): the list's search, ordered by the
