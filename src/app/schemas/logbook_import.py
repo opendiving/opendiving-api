@@ -47,6 +47,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from ..core.utils.datetime_offset import full_date_is_a_date
 from .certification import CertificationAgency
+from .checkin_details import CheckinDetailsUpdate, EmergencyContact, InsurancePolicy
 from .contact import ADDRESS_POSTCODE_MAX, CONTACT_EMAIL_MAX, CONTACT_WEBSITE_MAX, ContactRole
 from .course import CourseStatus
 from .dive import (
@@ -65,17 +66,6 @@ from .dive_mixture import GasRole, TankUsage
 from .dive_profile import ProfileEventType
 from .gear_service import ServiceKind
 from .person import PERSON_EMAIL_MAX, PersonRole
-from .user import (
-    ANCHOR_REQUIRED_MESSAGES,
-    EMERGENCY_CONTACT_FIELDS,
-    INSURANCE_FIELDS,
-    BirthDate,
-    CheckInName,
-    CheckInPhone,
-    CheckInShortText,
-    is_blank,
-    lacks_its_anchor,
-)
 
 # The spec's own string bounds (§6). Named rather than repeated inline because each one
 # governs several members, and because each is also the width of the column behind it -
@@ -749,8 +739,9 @@ class ImportNoteCode(StrEnum):
     RECORDING_FILLED = "recording_filled"
     # The `diver` member's identity and settings were read and deliberately not applied.
     DIVER_NOT_APPLIED = "diver_not_applied"
-    # An emergency contact or an insurance in the document is not offered: it names nobody
-    # or no insurer, or it comes after the first and the account holds one of each.
+    # A check-in detail in the document is not offered: an emergency contact that names
+    # nobody, a policy that names no insurer, a row past the list's cap, or an email that is
+    # not an address or is this account's sign-in address.
     CHECK_IN_DETAIL_DROPPED = "check_in_detail_dropped"
     # A check-in detail the diver confirmed in the preview was written to the account; the
     # portrait they took from the archive among them.
@@ -1029,38 +1020,14 @@ class ImportDiveReport(BaseModel):
 # ---------------------------------------------------------------- the check-in details
 
 
-class ImportCheckInEmergencyContact(BaseModel):
-    """An emergency contact as the preview shows it and as the diver sends it back.
+class ImportEmailDetail(BaseModel):
+    """The check-in email: what the account holds, and what the document proposes - an address
+    the route takes back, normalized as it normalizes one. Never the sign-in address, unless
+    that is already the account's check-in email."""
 
-    One shape for both directions, so a client edits the proposal and submits what it holds.
-    The bounds are `UserUpdate`'s for the same columns, which is what a submission has to
-    meet; `name` is optional in the shape because the account's own contact may lack one,
-    and a submission that leaves it out beside a phone or a relationship is refused.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: CheckInName | None = None
-    phone: CheckInPhone | None = None
-    relationship: CheckInShortText | None = None
-
-
-class ImportCheckInInsurance(BaseModel):
-    """A dive insurance, on `ImportCheckInEmergencyContact`'s terms, `provider` its anchor."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    provider: CheckInName | None = None
-    number: CheckInShortText | None = None
-    expires_on: date | None = None
-
-
-class ImportBornOnDetail(BaseModel):
-    """The date of birth: what the account holds, and what the document proposes."""
-
-    detail: Literal["born_on"] = "born_on"
-    account: date | None = None
-    proposed: date
+    detail: Literal["email"] = "email"
+    account: str | None = None
+    proposed: str
 
 
 class ImportPhoneDetail(BaseModel):
@@ -1069,85 +1036,49 @@ class ImportPhoneDetail(BaseModel):
     proposed: str
 
 
-class ImportEmergencyContactDetail(BaseModel):
-    """The proposal is whole: the account's contact where every member the document's
-    carries equals the account's, otherwise the document's contact alone."""
-
-    detail: Literal["emergency_contact"] = "emergency_contact"
-    account: ImportCheckInEmergencyContact | None = None
-    proposed: ImportCheckInEmergencyContact
+class ImportDateOfBirthDetail(BaseModel):
+    detail: Literal["date_of_birth"] = "date_of_birth"
+    account: date | None = None
+    proposed: date
 
 
-class ImportInsuranceDetail(BaseModel):
-    """Proposed whole, on `ImportEmergencyContactDetail`'s terms."""
+class ImportEmergencyContactsDetail(BaseModel):
+    """The account's list beside the document's, proposed as a list. Each document row that
+    matches an account row - every member it carries equal to that row's - is that account
+    row; otherwise the document's row stands as it is."""
 
-    detail: Literal["insurance"] = "insurance"
-    account: ImportCheckInInsurance | None = None
-    proposed: ImportCheckInInsurance
+    detail: Literal["emergency_contacts"] = "emergency_contacts"
+    account: list[EmergencyContact]
+    proposed: list[EmergencyContact]
+
+
+class ImportInsurancePoliciesDetail(BaseModel):
+    """Proposed as a list, on `ImportEmergencyContactsDetail`'s terms - so this app's own UDDF,
+    which has no slot for a policy number, proposes the account's policies with theirs."""
+
+    detail: Literal["insurance_policies"] = "insurance_policies"
+    account: list[InsurancePolicy]
+    proposed: list[InsurancePolicy]
 
 
 ImportCheckInDetail = Annotated[
-    ImportBornOnDetail | ImportPhoneDetail | ImportEmergencyContactDetail | ImportInsuranceDetail,
+    ImportEmailDetail
+    | ImportPhoneDetail
+    | ImportDateOfBirthDetail
+    | ImportEmergencyContactsDetail
+    | ImportInsurancePoliciesDetail,
     Field(discriminator="detail"),
 ]
 
 
-class ImportCheckInSubmission(BaseModel):
-    """The check-in details the diver confirmed in the preview, sent back beside the token.
+class ImportCheckInSubmission(CheckinDetailsUpdate):
+    """The check-in details the diver confirmed in the preview, sent back beside the token,
+    keyed and bounded as `PATCH /user/checkin-details` keys and bounds them.
 
-    A detail left out is not written; one sent as `null` is cleared. An object replaces the
-    account's whole, so a member it leaves out is cleared with it. A detail the document
-    does not carry is not written whatever is sent for it.
+    A member left out is not written; a scalar sent as `null` is cleared, and a list sent
+    replaces the account's whole. A member the document does not carry is not written
+    whatever is sent for it.
     """
-
-    model_config = ConfigDict(extra="forbid")
-
-    born_on: BirthDate | None = None
-    phone: CheckInPhone | None = None
-    emergency_contact: ImportCheckInEmergencyContact | None = None
-    insurance: ImportCheckInInsurance | None = None
-
-    def columns(self) -> dict[str, dict[str, Any]]:
-        """Each submitted detail as the account columns it writes, keyed by detail.
-
-        A blank string is written as `null`, the columns' one spelling of unset.
-        """
-        contact = self.emergency_contact or ImportCheckInEmergencyContact()
-        insurance = self.insurance or ImportCheckInInsurance()
-        every: dict[str, dict[str, Any]] = {
-            "born_on": {"date_of_birth": self.born_on},
-            "phone": {"phone": self.phone},
-            "emergency_contact": dict(
-                zip(EMERGENCY_CONTACT_FIELDS, (contact.name, contact.phone, contact.relationship), strict=True)
-            ),
-            "insurance": dict(
-                zip(INSURANCE_FIELDS, (insurance.provider, insurance.number, insurance.expires_on), strict=True)
-            ),
-        }
-        return {
-            detail: {column: None if is_blank(value) else value for column, value in columns.items()}
-            for detail, columns in every.items()
-            if detail in self.model_fields_set
-        }
-
-    def anchor_errors(self) -> list[dict[str, Any]]:
-        """`PATCH /user`'s anchor rule, as validation errors located inside this body."""
-        columns = self.columns()
-        errors = []
-        for detail, fields, member in (
-            ("emergency_contact", EMERGENCY_CONTACT_FIELDS, "name"),
-            ("insurance", INSURANCE_FIELDS, "provider"),
-        ):
-            if detail in columns and lacks_its_anchor(columns[detail], fields):
-                errors.append(
-                    {
-                        "type": "missing",
-                        "loc": (detail, member),
-                        "msg": ANCHOR_REQUIRED_MESSAGES[fields[0]],
-                        "input": None,
-                    }
-                )
-        return errors
 
 
 # ---------------------------------------------------------------- the portrait

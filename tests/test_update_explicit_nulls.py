@@ -36,6 +36,7 @@ from src.app.core.config import settings
 from src.app.core.schemas import RejectsExplicitNulls
 from src.app.core.setup import create_application
 from src.app.models.certification import Certification
+from src.app.models.checkin_details import CheckinDetails
 from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.dive import Dive
@@ -51,6 +52,7 @@ from src.app.models.trip import Trip
 from src.app.models.user import User
 from src.app.models.webauthn_credential import WebauthnCredential
 from src.app.schemas.certification import CertificationUpdate
+from src.app.schemas.checkin_details import CheckinDetailsUpdate
 from src.app.schemas.contact import ContactUpdate
 from src.app.schemas.course import CourseUpdate
 from src.app.schemas.dive import DiveUpdate
@@ -87,6 +89,9 @@ SCHEMAS_AND_TABLES: list[tuple[type[RejectsExplicitNulls], Any]] = [
     (GearServiceRecordUpdate, GearServiceRecord),
     (UserUpdate, User),
     (UserAdminUpdate, User),
+    # The check-in details' scalars are nullable, and clearing one is the point; its lists
+    # are rows in two other tables, refused as `null` because `[]` is how one is cleared.
+    (CheckinDetailsUpdate, CheckinDetails),
     (WebauthnCredentialUpdate, WebauthnCredential),
 ]
 
@@ -175,7 +180,9 @@ def test_the_declared_fields_match_the_table(schema: type[RejectsExplicitNulls],
     columns = model.__table__.columns
     from_table = {name for name in schema.model_fields if name in columns and not columns[name].nullable}
 
-    assert set(schema.NON_NULLABLE_FIELDS) == from_table
+    # A member that is no column of the table - a list of child rows - is the schema's own to
+    # guard, and `test_every_declared_field_exists_on_the_schema` still holds it to a field.
+    assert {name for name in schema.NON_NULLABLE_FIELDS if name in columns} == from_table
 
 
 @pytest.mark.parametrize(("schema", "_model"), SCHEMAS_AND_TABLES, ids=lambda p: getattr(p, "__name__", str(p)))

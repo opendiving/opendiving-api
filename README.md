@@ -79,8 +79,8 @@ else; what is here is the source, and the notes for working on it.
   Wikidata entry. A suggestion you already hold names your site.
 - **Gear** — items, gear sets with default weights, service **schedules** (by months and/or dives),
   service history, a due-soon endpoint, and a scheduled email reminder digest.
-- **Certifications** — c-card records with front/back card images, and an email when a card or the
-  account's dive insurance is about to expire and again when it has.
+- **Certifications** — c-card records with front/back card images, and an email when a card or one
+  of the diver's insurance policies is about to expire and again when it has.
 - **Year in review** — each January, an email with the diver's previous year in figures.
 - **Training courses** — the course a card came out of and the dives logged on it, with the agency,
   status, the people on it and the contact that ran it. No mainstream logbook models this: the
@@ -224,30 +224,31 @@ for it — generated from the routes themselves, so they describe the API as it 
 than as a list here last remembered it.
 
 The families: **auth** (email link or six-digit code, Google, passkeys, refresh, sign-out, account
-restore) and **user** (profile, avatar, check-in portrait, the check-in link, email change, dive
-statistics, gas-use history, the species life list, account deletion); **dives**, the bulk of it,
-with their **recordings** — attach an export, read one recording's per-sample profile back, fold two
-dives into one — alongside **trips**, **dive sites**, the shared **species** catalog a dive can
-reference, a **geocoding** helper for naming a site pinned on a map, and the **map tiles** every
-card and page head is composed from, drawn once for the whole instance; **gear** as items, sets,
-service schedules and service records; **certifications** with their card images and the **courses**
-that issued them; **export** in DiveJSON, UDDF, CSV or full-archive form and **import** back from
-either of the first and the last, or from any format the converter reads; **invitations**, which
-exist only where the operator has closed registration (`REGISTRATION_MODE`, documented with the rest
-of the settings in `src/.env.example`) — a member sends and revokes their own, and the routes answer
-404 on an open instance; and **admin**, the operator's own — the queue of people who have asked to
-be let in, inviting or removing them in a batch, and the daily totals of accounts created, sign-ins
-and active accounts — which is the one family gated on `is_superuser` rather than merely on having a
-token. All of those want a bearer token. The ones that don't are **support**, the auth routes
-themselves, the two health checks — `/health` says the process is up, `/health/ready` says Postgres
-and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how somebody with
-no account asks a closed instance for an invitation, `GET /config`, which tells the web app whether
-registration is open - whether the project itself operates the instance, whether any join link
-exists (`join_links`), and whether a map renderer draws the map tiles (`map_tiles`) - before anyone
-has signed in, `GET /join-channel/{slug}`, which says whether one join link is live,
-`GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>` tag that has no way
-to send a token, and `GET /checkin/{token}` with its `/portrait` and `/certification/{uuid}/front`,
-the check-in page a diver shared as a link, where the token in the path is the credential.
+restore) and **user** (profile, avatar, check-in portrait, the check-in details, the check-in link,
+email change, dive statistics, gas-use history, the species life list, account deletion); **dives**,
+the bulk of it, with their **recordings** — attach an export, read one recording's per-sample
+profile back, fold two dives into one — alongside **trips**, **dive sites**, the shared **species**
+catalog a dive can reference, a **geocoding** helper for naming a site pinned on a map, and the
+**map tiles** every card and page head is composed from, drawn once for the whole instance; **gear**
+as items, sets, service schedules and service records; **certifications** with their card images and
+the **courses** that issued them; **export** in DiveJSON, UDDF, CSV or full-archive form and
+**import** back from either of the first and the last, or from any format the converter reads;
+**invitations**, which exist only where the operator has closed registration (`REGISTRATION_MODE`,
+documented with the rest of the settings in `src/.env.example`) — a member sends and revokes their
+own, and the routes answer 404 on an open instance; and **admin**, the operator's own — the queue of
+people who have asked to be let in, inviting or removing them in a batch, and the daily totals of
+accounts created, sign-ins and active accounts — which is the one family gated on `is_superuser`
+rather than merely on having a token. All of those want a bearer token. The ones that don't are
+**support**, the auth routes themselves, the two health checks — `/health` says the process is up,
+`/health/ready` says Postgres and Redis answered, and 503s when they didn't —
+`POST /invite-requests`, which is how somebody with no account asks a closed instance for an
+invitation, `GET /config`, which tells the web app whether registration is open - whether the
+project itself operates the instance, whether any join link exists (`join_links`), and whether a map
+renderer draws the map tiles (`map_tiles`) - before anyone has signed in,
+`GET /join-channel/{slug}`, which says whether one join link is live, `GET /species/{uuid}/photo`,
+which serves a public Commons image to an `<img>` tag that has no way to send a token, and
+`GET /checkin/{token}` with its `/portrait` and `/certification/{uuid}/front`, the check-in page a
+diver shared as a link, where the token in the path is the credential.
 `tests/test_route_authentication.py` is the guard that keeps the *anonymous* half of that list
 honest — it compares the app's real route table against its own allowlist and holds the reason for
 each — but nothing checks this paragraph, so a new route family belongs here by hand.

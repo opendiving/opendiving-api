@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import zipfile
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -25,6 +26,7 @@ import pytest
 from src.app.models.certification import Certification
 from src.app.models.user_picture import UserPicture
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
+from src.app.schemas.checkin_details import CheckinDetailsRead
 from src.app.schemas.dive import DiveFileInfo
 from src.app.schemas.user_picture import PictureKind
 from src.app.services.blob_store import BlobMissingError
@@ -272,6 +274,19 @@ class TestInventory:
         assert archive.testzip() is None
         assert "logbook.divejson" in archive.namelist()
         assert not [name for name in archive.namelist() if name.startswith(("files/", "certifications/"))]
+
+    @pytest.mark.asyncio
+    async def test_the_sign_in_address_is_in_no_member(self, monkeypatch):
+        """The check-in email is the address the diver gives out; the one they sign in with is
+        the account's, and no document, CSV or file in the archive carries it."""
+        bundle = replace(
+            _bundle_matching_the_stub_blobs(), checkin_details=CheckinDetailsRead(email="desk@example.org")
+        )
+        archive = await _build(bundle, monkeypatch)
+        sign_in = bundle.user.email.encode()
+
+        assert [name for name in archive.namelist() if sign_in.lower() in archive.read(name).lower()] == []
+        assert b"desk@example.org" in archive.read("logbook.divejson")
 
     @pytest.mark.asyncio
     async def test_the_uddf_member_is_the_same_bytes_the_endpoint_serves(self, monkeypatch):

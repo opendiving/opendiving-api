@@ -42,10 +42,10 @@ from src.app.core.db.database import async_get_db
 from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.security import create_logbook_import_token
 from src.app.core.setup import create_application
+from src.app.schemas.checkin_details import InsurancePolicy
 from src.app.schemas.logbook_import import (
-    ImportBornOnDetail,
-    ImportCheckInInsurance,
-    ImportInsuranceDetail,
+    ImportDateOfBirthDetail,
+    ImportInsurancePoliciesDetail,
     ImportPortraitOffer,
 )
 from src.app.services.logbook_import import batch as batch_module
@@ -237,10 +237,10 @@ class TestPreview:
         async def plan_with_a_section(db: Any, **kwargs: Any) -> Any:
             plan = await stub(db, **kwargs)
             plan.check_in_details = [
-                ImportBornOnDetail(proposed=date(1988, 4, 12)),
-                ImportInsuranceDetail(
-                    account=ImportCheckInInsurance(provider="DAN Europe", number="DE-4471902"),
-                    proposed=ImportCheckInInsurance(provider="Aqua Med"),
+                ImportDateOfBirthDetail(proposed=date(1988, 4, 12)),
+                ImportInsurancePoliciesDetail(
+                    account=[InsurancePolicy(provider="DAN Europe", number="DE-4471902")],
+                    proposed=[InsurancePolicy(provider="Aqua Med")],
                 ),
             ]
             return plan
@@ -250,11 +250,11 @@ class TestPreview:
         body = client.post(PREVIEW_PATH, files=_files()).json()
 
         assert body["check_in_details"] == [
-            {"detail": "born_on", "account": None, "proposed": "1988-04-12"},
+            {"detail": "date_of_birth", "account": None, "proposed": "1988-04-12"},
             {
-                "detail": "insurance",
-                "account": {"provider": "DAN Europe", "number": "DE-4471902", "expires_on": None},
-                "proposed": {"provider": "Aqua Med", "number": None, "expires_on": None},
+                "detail": "insurance_policies",
+                "account": [{"provider": "DAN Europe", "number": "DE-4471902", "expires_on": None}],
+                "proposed": [{"provider": "Aqua Med", "number": None, "expires_on": None}],
             },
         ]
 
@@ -777,7 +777,7 @@ class TestApply:
         client.post(
             APPLY_PATH,
             files=_files(),
-            data={"token": self._token(), "check_in_details": json.dumps({"born_on": "1988-04-12"})},
+            data={"token": self._token(), "check_in_details": json.dumps({"date_of_birth": "1988-04-12"})},
         )
 
         assert seen == [None]
@@ -808,7 +808,12 @@ class TestApply:
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
         seen = self._planned_check_in(monkeypatch)
-        submitted = {"born_on": "1988-04-12", "emergency_contact": {"name": "Grace Hopper"}, "insurance": None}
+        submitted = {
+            "date_of_birth": "1988-04-12",
+            "emergency_contacts": [{"name": "Grace Hopper"}],
+            "insurance_policies": [],
+            "email": None,
+        }
 
         response = client.post(
             APPLY_PATH, files=_files(), data={"token": self._token(), "check_in_details": json.dumps(submitted)}
@@ -816,8 +821,8 @@ class TestApply:
 
         assert response.status_code == 200
         (submission,) = seen
-        assert submission.model_fields_set == {"born_on", "emergency_contact", "insurance"}
-        assert submission.insurance is None
+        assert submission.model_fields_set == {"date_of_birth", "emergency_contacts", "insurance_policies", "email"}
+        assert (submission.insurance_policies, submission.email) == ([], None)
 
     def test_an_apply_without_them_submits_nothing(self, signed_in: Any, client: TestClient, monkeypatch: Any) -> None:
         """A client that never showed the section - the web build before this field existed
@@ -831,19 +836,23 @@ class TestApply:
     @pytest.mark.parametrize(
         ("submitted", "loc"),
         [
-            ({"emergency_contact": {"phone": "+1 202 555 0143"}}, ["emergency_contact", "name"]),
-            ({"insurance": {"provider": " ", "number": "DE-4471902"}}, ["insurance", "provider"]),
-            ({"born_on": "2999-01-01"}, ["born_on"]),
+            ({"emergency_contacts": [{"phone": "+1 202 555 0143"}]}, ["emergency_contacts", 0, "name"]),
+            (
+                {"insurance_policies": [{"provider": "DAN"}, {"provider": " ", "number": "DE-4471902"}]},
+                ["insurance_policies", 1, "provider"],
+            ),
+            ({"date_of_birth": "2999-01-01"}, ["date_of_birth"]),
             ({"phone": "1" * 33}, ["phone"]),
-            ({"emergency_contact": {"name": "G" * 256}}, ["emergency_contact", "name"]),
+            ({"emergency_contacts": [{"name": "G" * 256}]}, ["emergency_contacts", 0, "name"]),
+            ({"email": "not an address"}, ["email"]),
             ({"address": "Dahab"}, ["address"]),
         ],
     )
-    def test_a_submission_patch_user_would_refuse_is_a_422_naming_the_field(
+    def test_a_submission_the_route_would_refuse_is_a_422_naming_the_field(
         self, signed_in: Any, client: TestClient, monkeypatch: Any, submitted: dict[str, Any], loc: list[str]
     ) -> None:
-        """The bounds, the future-date guard and the anchor rule `PATCH /user` applies to the
-        same columns, refused before anything is read or planned."""
+        """The bounds, the future-date guard and the anchors `PATCH /user/checkin-details`
+        applies, refused before anything is read or planned."""
         seen = self._planned_check_in(monkeypatch)
 
         response = client.post(
@@ -1152,4 +1161,10 @@ class TestTheDocument:
         assert apply["required"] == ["file", "token"]
         submission = apply["properties"]["check_in_details"]["anyOf"][0]["contentSchema"]
         assert "$ref" not in json.dumps(submission)
-        assert set(submission["properties"]) == {"born_on", "phone", "emergency_contact", "insurance"}
+        assert set(submission["properties"]) == {
+            "email",
+            "phone",
+            "date_of_birth",
+            "emergency_contacts",
+            "insurance_policies",
+        }

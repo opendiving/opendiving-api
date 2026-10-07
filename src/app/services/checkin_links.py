@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.security import generate_secure_token, hash_token
 from ..crud.crud_certifications import get_every_certification
+from ..crud.crud_checkin_details import read_checkin_details
 from ..crud.crud_contacts import get_contact_names_by_ids
 from ..crud.crud_people import get_person_names_by_ids
 from ..crud.crud_users import read_account
@@ -161,12 +162,14 @@ async def resolve_checkin_link(db: AsyncSession, *, token: str) -> LiveCheckinLi
 
 async def checkin_summary(db: AsyncSession, link: LiveCheckinLink) -> CheckinSummary | None:
     """What the check-in page prints, read the way the signed-in page reads it: the account
-    through `get_current_user`'s own query and the cards in the list endpoint's order. The
-    figures are the link's. `None` if the account went between resolving the link and now.
+    through `get_current_user`'s own query, the check-in details through their route's, and
+    the cards in the list endpoint's order. The figures are the link's. `None` if the account
+    went between resolving the link and now.
     """
     account = await read_account(db, uuid=link.user_uuid)
     if account is None:
         return None
+    details = await read_checkin_details(db, user_id=link.user_id)
 
     cards = await get_every_certification(db, user_id=link.user_id)
     files = await get_file_infos_for_certifications(db, certification_ids=[card["id"] for card in cards])
@@ -193,7 +196,14 @@ async def checkin_summary(db: AsyncSession, link: LiveCheckinLink) -> CheckinSum
 
     return CheckinSummary(
         expires_at=link.expires_at,
-        diver=CheckinDiver.model_validate(account),
+        # Named member by member: the account's `email` is the sign-in address, which the
+        # page never prints.
+        diver=CheckinDiver(
+            **details.model_dump(),
+            name=account["name"],
+            portrait_sha256=account["portrait_sha256"],
+            units=account["units"],
+        ),
         diving=link.figures,
         certifications=certifications,
     )

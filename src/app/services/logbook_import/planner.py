@@ -50,6 +50,7 @@ from uuid6 import uuid7
 from ...core.schemas import NOTES_MAX_LENGTH
 from ...core.utils.datetime_offset import split_dive_start_time
 from ...core.utils.uploads import safe_filename
+from ...crud.crud_checkin_details import read_checkin_details
 from ...crud.crud_dive_sites import sites_by_external_id
 from ...crud.crud_dive_species import StoredSighting
 from ...models.certification import Certification
@@ -106,7 +107,6 @@ from ...schemas.logbook_import import (
 )
 from ...schemas.person import PersonRole
 from ...schemas.tag import TAG_NAME_MAX, tag_key, trim_tag
-from ...schemas.user import CHECK_IN_FIELDS
 from ...schemas.user_picture import PictureCrop
 from ..certification_files import MAX_CARD_FILE_SIZE
 from ..dive_files import MAX_DIVE_FILE_SIZE
@@ -1163,23 +1163,20 @@ class _Planner:
         )
 
     async def _plan_diver(self) -> None:
-        """The document's own identity and settings are never applied; its check-in details
-        are offered, and written as the diver submitted them (`check_in.py`)."""
+        """The document's own identity and settings are never applied; its check-in details,
+        its email among them, are offered, and written as the diver submitted them
+        (`check_in.py`)."""
         diver = self._document.diver
         if diver is None:
             return
-        if diver.name or diver.username or diver.email or _carries_settings(diver.extensions):
+        if diver.name or diver.username or _carries_settings(diver.extensions):
             self._note(
                 ImportNoteCode.DIVER_NOT_APPLIED,
-                "The document's own name, email and settings are not applied: this account keeps its own.",
+                "The document's own name and settings are not applied: this account keeps its own.",
             )
-        row = (
-            await self._db.execute(
-                select(*(getattr(User, column) for column in CHECK_IN_FIELDS)).where(User.id == self._user_id)
-            )
-        ).one()
-        account = row._asdict()
-        self._check_in_details = propose(diver, account, self._note)
+        sign_in = (await self._db.execute(select(User.email).where(User.id == self._user_id))).scalar_one()
+        account = await read_checkin_details(self._db, user_id=self._user_id)
+        self._check_in_details = propose(diver, account, sign_in, self._note)
         self._check_in_values = to_write(self._check_in_details, self._check_in, account, self._note)
 
     async def _plan_portrait(self) -> None:

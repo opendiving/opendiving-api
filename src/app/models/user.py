@@ -1,6 +1,4 @@
-from datetime import date
-
-from sqlalchemy import JSON, Boolean, Date, Index, Integer, String, func
+from sqlalchemy import JSON, Boolean, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -71,35 +69,8 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # adding this NOT NULL column a value for the rows already in the table.
     dive_form_hidden_fields: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
 
-    # What a dive shop's desk asks for, held once so a diver stops writing it out on
-    # arrival. Columns on the account rather than a diver-owned table: one value each, no
-    # metadata and no history worth keeping, and `get_current_user` already selects every
-    # mapped column. The two pictures are the opposite case - each keeps an original with a
-    # name, a type and a crop - which is why they have `user_picture`.
-    #
-    # Every one is nullable, so none carries a `server_default`: that pair exists for a
-    # `NOT NULL` column being added over rows that already exist (see `gear_service_emails`
-    # above), and "not filled in" is the ordinary state for all of these. Clearing one is an
-    # explicit `null` on `PATCH /user`.
-    #
-    # The phone numbers are free text bounded by length - shops in six countries write them
-    # six ways, and nothing here dials one. Every width is DiveJSON §6.1's bound on the member
-    # the column travels as, so an import can write whatever a conforming document carries.
-    date_of_birth: Mapped[date | None] = mapped_column(Date, default=None)
-    phone: Mapped[str | None] = mapped_column(String(32), default=None)
-    emergency_contact_name: Mapped[str | None] = mapped_column(String(255), default=None)
-    emergency_contact_phone: Mapped[str | None] = mapped_column(String(32), default=None)
-    emergency_contact_relationship: Mapped[str | None] = mapped_column(String(64), default=None)
-    insurance_provider: Mapped[str | None] = mapped_column(String(255), default=None)
-    insurance_policy_number: Mapped[str | None] = mapped_column(String(64), default=None)
-    insurance_expires_on: Mapped[date | None] = mapped_column(Date, default=None)
-
-    # Bookkeeping the worker alone reads, on no schema that crosses the wire. The first pair is
-    # the (stage, expiry date) `send_renewal_reminders` last emailed about for the insurance
-    # above - `certification` carries the same pair for each card; the last is the calendar
+    # Bookkeeping the worker alone reads, on no schema that crosses the wire: the calendar
     # year `send_year_in_review` last sent this diver a review of. Null is "never sent".
-    insurance_notified_stage: Mapped[str | None] = mapped_column(String(16), default=None)
-    insurance_notified_for: Mapped[date | None] = mapped_column(Date, default=None)
     year_in_review_sent_for: Mapped[int | None] = mapped_column(Integer, default=None)
 
     # Overrides `SoftDeleteMixin.is_deleted` to add an index: unlike Dive, Certification and

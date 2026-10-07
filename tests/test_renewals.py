@@ -116,7 +116,5 @@ class TestWording:
         # A new member without a label would print its raw value in someone's inbox.
         assert certification_label(agency=agency.value, agency_other="X", name="N") != f"{agency.value} N"
 
-    def test_the_insurance_is_named_by_its_insurer(self) -> None:
+    def test_a_policy_is_named_by_its_insurer(self) -> None:
         assert insurance_label("DAN Europe") == "DAN Europe dive insurance"
-        assert insurance_label(None) == "Dive insurance"
-        assert insurance_label("  ") == "Dive insurance"

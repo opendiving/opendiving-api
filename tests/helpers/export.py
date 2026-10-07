@@ -34,6 +34,7 @@ from src.app.models.trip import Trip
 from src.app.models.user import User
 from src.app.models.user_picture import UserPicture
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
+from src.app.schemas.checkin_details import CheckinDetailsRead
 from src.app.schemas.dive import DiveFileInfo
 from src.app.schemas.dive_mixture import DiveMixtureRead
 from src.app.schemas.location import LocationRead
@@ -104,11 +105,8 @@ def _with_id[T](row: T, row_id: int) -> T:
     return row
 
 
-def make_user(dive_form_hidden_fields: list[str] | None = None, **columns: Any) -> User:
-    """The account every bundle here belongs to. `**columns` is what a test fills the
-    check-in details in with, which are absent by default because an account that never
-    entered any is the ordinary one.
-    """
+def make_user(dive_form_hidden_fields: list[str] | None = None) -> User:
+    """The account every bundle here belongs to."""
     return _with_id(
         User(
             name="Ada Lovelace",
@@ -117,7 +115,6 @@ def make_user(dive_form_hidden_fields: list[str] | None = None, **columns: Any) 
             uuid=UUIDS["user"],
             created_at=CREATED_AT,
             dive_form_hidden_fields=dive_form_hidden_fields or [],
-            **columns,
         ),
         1,
     )
@@ -242,6 +239,7 @@ def build_bundle(
     tags: list[Tag] | None = None,
     tag_ids_by_dive: dict[int, list[int]] | None = None,
     tag_ids_by_site: dict[int, list[int]] | None = None,
+    checkin_details: CheckinDetailsRead | None = None,
 ) -> ExportBundle:
     """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive".
 
@@ -267,6 +265,8 @@ def build_bundle(
         }
     return ExportBundle(
         user=make_user(dive_form_hidden_fields),
+        # Empty by default, because an account that never entered any is the ordinary one.
+        checkin_details=checkin_details or CheckinDetailsRead(),
         dives=dives,
         mixtures_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(mixtures_by_dive or {})},
         site_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(site_ids_by_dive or {})},

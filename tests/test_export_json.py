@@ -39,10 +39,10 @@ from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.trip import Trip
 from src.app.models.user_picture import UserPicture
+from src.app.schemas.checkin_details import CheckinDetailsRead, EmergencyContact, InsurancePolicy
 from src.app.schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION, ExportCourse, ExportEnvelope
 from src.app.schemas.location import LocationRead
 from src.app.schemas.trip import TripPartRead
-from src.app.schemas.user import CHECK_IN_FIELDS
 from src.app.schemas.user_picture import PictureKind
 from src.app.services.dive_profiles import MERGE_PARSER_KEY, LoadedProfile
 from src.app.services.export.envelope import write_divejson
@@ -61,7 +61,6 @@ from tests.helpers.export import (
     full_bundle,
     make_dive,
     make_recording,
-    make_user,
     mixture,
 )
 
@@ -522,59 +521,53 @@ class TestTheCheckInDetails:
 
     @pytest.mark.asyncio
     async def test_they_are_core_diver_members(self, monkeypatch):
-        """The contact and the insurance are one-element arrays, the account holding one of
-        each. The two members left unset are absent rather than null, the format's one
-        spelling of "not recorded". The producer entry keeps the preferences and none of
-        these, and the document conforms - no other test here validates a diver carrying
-        them, which is what makes this the check on the `divejson` floor.
+        """Every contact and every policy, in the diver's order. The members left unset are
+        absent rather than null, the format's one spelling of "not recorded". The producer
+        entry keeps the preferences and none of these, and the document conforms - no other
+        test here validates a diver carrying them, which is what makes this the check on the
+        `divejson` floor.
         """
         bundle = replace(
             full_bundle(),
-            user=make_user(
-                dive_form_hidden_fields=["altitude", "mixture.po2_limit"],
+            checkin_details=CheckinDetailsRead(
+                email="desk@example.org",
                 date_of_birth=date(1988, 4, 12),
                 phone="+20 100 123 4567",
-                emergency_contact_name="Grace Hopper",
-                emergency_contact_phone="+1 202 555 0143",
-                insurance_provider="DAN Europe",
-                insurance_expires_on=date(2027, 6, 30),
+                emergency_contacts=[
+                    EmergencyContact(name="Grace Hopper", phone="+1 202 555 0143"),
+                    EmergencyContact(name="Alan Turing", relationship="Father"),
+                ],
+                insurance_policies=[
+                    InsurancePolicy(provider="DAN Europe", expires_on=date(2027, 6, 30)),
+                    InsurancePolicy(provider="DiveAssure", number="DA-1"),
+                ],
             ),
         )
 
         document = await _render(bundle, monkeypatch)
         diver = document["diver"]
 
+        assert diver["email"] == "desk@example.org"
         assert diver["born_on"] == "1988-04-12"
         assert diver["phone"] == "+20 100 123 4567"
-        assert diver["emergency_contacts"] == [{"name": "Grace Hopper", "phone": "+1 202 555 0143"}]
-        assert diver["insurances"] == [{"provider": "DAN Europe", "expires_on": "2027-06-30"}]
-        assert set(diver["extensions"]["opendiving"]).isdisjoint(CHECK_IN_FIELDS)
+        assert diver["emergency_contacts"] == [
+            {"name": "Grace Hopper", "phone": "+1 202 555 0143"},
+            {"name": "Alan Turing", "relationship": "Father"},
+        ]
+        assert diver["insurances"] == [
+            {"provider": "DAN Europe", "expires_on": "2027-06-30"},
+            {"provider": "DiveAssure", "number": "DA-1"},
+        ]
+        assert set(diver["extensions"]["opendiving"]).isdisjoint(CheckinDetailsRead.model_fields)
         _assert_conforms(document)
 
     @pytest.mark.asyncio
-    async def test_an_account_that_filled_in_none_carries_none(self, monkeypatch):
-        diver = (await _render(full_bundle(), monkeypatch))["diver"]
-
-        assert set(diver).isdisjoint({"born_on", "phone", "emergency_contacts", "insurances"})
-
-    @pytest.mark.asyncio
-    async def test_a_contact_with_no_name_and_a_policy_with_no_provider_are_left_out(self, monkeypatch):
-        """Their anchors are REQUIRED in the format, and a row saved before `PATCH /user`
-        required them can lack one. A blank string is no anchor either, and a blank phone
-        is no phone."""
-        bundle = replace(
-            full_bundle(),
-            user=make_user(
-                phone=" ",
-                emergency_contact_name="",
-                emergency_contact_phone="+1 202 555 0143",
-                insurance_policy_number="DE-4471902",
-            ),
-        )
-
+    async def test_an_account_that_filled_in_none_carries_none_and_never_its_sign_in_address(self, monkeypatch):
+        bundle = full_bundle()
         document = await _render(bundle, monkeypatch)
 
-        assert set(document["diver"]).isdisjoint({"phone", "emergency_contacts", "insurances"})
+        assert set(document["diver"]).isdisjoint({"email", "born_on", "phone", "emergency_contacts", "insurances"})
+        assert bundle.user.email not in json.dumps(document)
         _assert_conforms(document)
 
 

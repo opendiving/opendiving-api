@@ -39,6 +39,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...crud.crud_checkin_details import read_checkin_details
 from ...crud.crud_dive_mixtures import get_mixtures_for_dives
 from ...crud.crud_dive_species import StoredSighting
 from ...crud.crud_trip_parts import get_parts_for_trips
@@ -73,6 +74,7 @@ from ...models.trip_person import TripPerson
 from ...models.user import User
 from ...models.user_picture import UserPicture
 from ...schemas.certification import CertificationFileInfo
+from ...schemas.checkin_details import CheckinDetailsRead
 from ...schemas.dive import DiveFileInfo
 from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.person import PersonRole
@@ -145,6 +147,8 @@ class ExportBundle:
     """
 
     user: User
+    # The diver's check-in details, the empty object where none are saved.
+    checkin_details: CheckinDetailsRead
     dives: list[Dive]
     mixtures_by_dive: dict[int, list[DiveMixtureRead]]
     site_ids_by_dive: dict[int, list[int]]
@@ -510,6 +514,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
 
     return ExportBundle(
         user=user,
+        checkin_details=await read_checkin_details(db, user_id=user_id),
         dives=dives,
         mixtures_by_dive=await get_mixtures_for_dives(db=db, dive_ids=dive_ids),
         site_ids_by_dive=site_ids_by_dive,

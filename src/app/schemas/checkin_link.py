@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # `checkin_link.total_dives` is a Postgres `integer`, and so is the `user_dive_stats` column the
 # logged count comes from.
 from ..core.schemas import POSTGRES_INTEGER_MAX, StoredVocabulary
+from .checkin_details import CheckinDetailsRead
 
 
 class CheckinLinkCreate(BaseModel):
@@ -52,22 +53,14 @@ class CheckinFigures(BaseModel):
     last_dive_on: date | None
 
 
-class CheckinDiver(BaseModel):
-    """What the check-in page prints about the diver, named as `UserRead` names it, and the
-    `units` it prints the depth in. `portrait_sha256` is null when there is no portrait, and
-    the avatar is never here."""
+class CheckinDiver(CheckinDetailsRead):
+    """What the check-in page prints about the diver: the check-in details, the name as
+    `UserRead` names it, and the `units` it prints the depth in. `portrait_sha256` is null
+    when there is no portrait, and the avatar and the sign-in address are never here."""
 
     name: str
     portrait_sha256: str | None = None
     units: StoredVocabulary
-    date_of_birth: date | None = None
-    phone: str | None = None
-    insurance_provider: str | None = None
-    insurance_policy_number: str | None = None
-    insurance_expires_on: date | None = None
-    emergency_contact_name: str | None = None
-    emergency_contact_phone: str | None = None
-    emergency_contact_relationship: str | None = None
 
 
 class CheckinCertification(BaseModel):

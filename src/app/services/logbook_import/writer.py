@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 from uuid6 import uuid7
 
+from ...crud.crud_checkin_details import write_checkin_details
 from ...crud.crud_dive_dive_sites import replace_dive_sites_for_dive
 from ...crud.crud_dive_gear_items import replace_gear_items_for_dive
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
@@ -67,8 +68,8 @@ from ...models.gear_set import GearSet
 from ...models.person import Person
 from ...models.trip import Trip
 from ...models.trip_part import TripPart
-from ...models.user import User
 from ...schemas.certification import CertificationSide
+from ...schemas.checkin_details import CheckinDetailsUpdate
 from ...schemas.dive import DiveMode, Salinity
 from ...schemas.dive_mixture import DiveMixtureCreate
 from ...schemas.logbook_import import ImportMemberNotKept, ImportNote, ImportNoteCode
@@ -334,9 +335,13 @@ class _Writer:
         await self._recalculate()
 
     async def _write_check_in(self) -> None:
+        """Through the route's own write, so a policy saved unchanged keeps its reminder."""
         if self._plan.check_in_values:
-            await self._db.execute(
-                update(User).where(User.id == self._user_id).values(**self._plan.check_in_values, updated_at=self._now)
+            await write_checkin_details(
+                self._db,
+                user_id=self._user_id,
+                values=CheckinDetailsUpdate.model_validate(self._plan.check_in_values),
+                commit=False,
             )
 
     async def _write_portrait(self) -> None:
