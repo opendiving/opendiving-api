@@ -434,7 +434,7 @@ class TestNormalizingTheBytes:
     @pytest.mark.asyncio
     async def test_empty_bytes_are_refused_before_pillow_sees_them(self) -> None:
         with pytest.raises(species_photos.UnsupportedPhotoImageError):
-            await species_photos.process_photo(b"")
+            await species_photos.process_photo(b"", minimum_width=None)
 
 
 # -------------- fetching, end to end against a mocked Wikimedia --------------
@@ -495,10 +495,26 @@ def _entity_payload(qid: str, *, aphia_id: int, taxon_name: str, images: list[tu
 # Commons handing back a host the fence happened to like, over a feature that had never fetched
 # a single photo in production. A fixture that names something upstream does not send cannot
 # fail, whatever it asserts.
-_THUMB_URL = "https://thumb.wikimedia.org/wikipedia/commons/thumb/e/ef/Some_fish.jpg/500px-Some_fish.jpg"
+#
+# Both URLs carry the `utm_*` query strings Commons appends to them now; the fence tests the
+# host alone, and a fixture without them would be one more reply Commons does not send.
+_THUMB_URL = (
+    "https://thumb.wikimedia.org/wikipedia/commons/thumb/e/ef/Some_fish.jpg/500px-Some_fish.jpg"
+    "?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=thumbnail"
+)
 
 # The full-size original, on the other host. Commons returns both in one reply.
-_FULL_URL = "https://upload.wikimedia.org/wikipedia/commons/e/ef/Some_fish.jpg"
+_FULL_URL = (
+    "https://upload.wikimedia.org/wikipedia/commons/e/ef/Some_fish.jpg"
+    "?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=original"
+)
+
+# What `thumburl` is for a source narrower than the width asked for: the original itself, on
+# the upload host, tagged as an unscaled thumbnail - while `thumbwidth` still says 500.
+_UNSCALED_THUMB_URL = (
+    "https://upload.wikimedia.org/wikipedia/commons/e/ef/Some_fish.jpg"
+    "?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=thumbnail_unscaled"
+)
 
 # The hosts the fake serves bytes from, **spelled out rather than read from
 # `species_photos.PHOTO_BYTE_HOSTS`**. Sourcing them from the constant under test would make
@@ -507,15 +523,17 @@ _FULL_URL = "https://upload.wikimedia.org/wikipedia/commons/e/ef/Some_fish.jpg"
 _COMMONS_BYTE_HOSTS = frozenset({"thumb.wikimedia.org", "upload.wikimedia.org"})
 
 
-def _imageinfo_payload(*, thumb_url: str | None = _THUMB_URL, url: str = _FULL_URL) -> dict[str, Any]:
+def _imageinfo_payload(*, thumb_url: str = _THUMB_URL, url: str = _FULL_URL) -> dict[str, Any]:
     """One Commons `imageinfo` entry, carrying both of the URLs a real reply carries.
 
-    `thumb_url=None` omits `thumburl` altogether, which is what Commons does when the source
-    file is narrower than the width asked for - it does not upscale - and is the one case where
-    the full-size `url` on the other host is what actually gets fetched.
+    `thumbwidth` is the width asked for whatever was served, which is what Commons reports - so
+    a narrow file is modelled by passing `_UNSCALED_THUMB_URL` and narrow bytes, never by
+    changing this number.
     """
     info: dict[str, Any] = {
         "url": url,
+        "thumburl": thumb_url,
+        "thumbwidth": 500,
         "descriptionurl": "https://commons.wikimedia.org/wiki/File:Some_fish.jpg",
         "extmetadata": {
             "Artist": {"value": "<bdi>Raimond Spekking</bdi>"},
@@ -523,9 +541,6 @@ def _imageinfo_payload(*, thumb_url: str | None = _THUMB_URL, url: str = _FULL_U
             "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0"},
         },
     }
-    if thumb_url is not None:
-        info["thumburl"] = thumb_url
-        info["thumbwidth"] = 500
     return {
         "batchcomplete": True,
         "query": {"pages": [{"pageid": 1, "title": "File:Some fish.jpg", "imageinfo": [info]}]},
@@ -573,6 +588,11 @@ def unthrottled() -> Generator[None]:
         yield
 
 
+async def _fetch_photo(**kwargs: Any) -> species_photos.FetchedPhoto | None:
+    """`fetch_species_photo`'s photo alone, for the tests about whether one arrives."""
+    return (await species_service.fetch_species_photo(**kwargs)).photo
+
+
 class TestFetchingAPhoto:
     @pytest.mark.asyncio
     async def test_the_whole_pipeline_produces_stored_bytes_and_a_credit(self) -> None:
@@ -590,7 +610,7 @@ class TestFetchingAPhoto:
         )
 
         with _wikimedia(imageinfo=_imageinfo_payload(thumb_url=_THUMB_URL), image_bytes=plain_png(size=(500, 333))):
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="Amphiprion ocellaris", aphia_id=278400, entity=candidate_entity, synonym_aphia_ids=[]
             )
 
@@ -609,7 +629,7 @@ class TestFetchingAPhoto:
         of them. Asserting the host that was actually contacted is what makes that visible;
         asserting only that a photo came back would pass on either host."""
         with _wikimedia(imageinfo=_imageinfo_payload(), image_bytes=plain_png(size=(500, 333))) as wikimedia:
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="Amphiprion ocellaris",
                 aphia_id=278400,
                 entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
@@ -621,22 +641,40 @@ class TestFetchingAPhoto:
         assert byte_hosts == ["thumb.wikimedia.org"]
 
     @pytest.mark.asyncio
-    async def test_a_file_too_narrow_to_thumbnail_is_fetched_whole_from_the_other_host(self) -> None:
-        """Commons omits `thumburl` when the source file is narrower than the width asked for,
-        because it does not upscale - and the full-size `url` is the right answer there, since
-        such a file is already thumbnail-sized. `thumburl or url` is therefore unchanged by the
-        fence fix; what changed is that **both** of the hosts those two fields name are now
-        admitted, so this path and the one above both reach bytes."""
-        with _wikimedia(imageinfo=_imageinfo_payload(thumb_url=None), image_bytes=plain_png(size=(320, 240))) as w:
-            photo = await species_service.fetch_species_photo(
+    async def test_a_file_narrower_than_the_floor_is_refused_as_the_rule_declining(self) -> None:
+        """Commons does not upscale, so for a source narrower than 500 px `thumburl` is the
+        original itself, on the upload host - and storing it would serve a soft photo forever.
+        The floor reads the bytes, and its refusal is the rule's answer, `declined`, rather
+        than the `unavailable` of bytes that would not decode."""
+        with _wikimedia(
+            imageinfo=_imageinfo_payload(thumb_url=_UNSCALED_THUMB_URL), image_bytes=plain_png(size=(320, 240))
+        ) as w:
+            attempt = await species_service.fetch_species_photo(
                 scientific_name="Amphiprion ocellaris",
                 aphia_id=278400,
                 entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
                 synonym_aphia_ids=[],
             )
 
-        assert photo is not None
+        assert attempt.photo is None
+        assert attempt.outcome is species_service.PhotoOutcome.DECLINED
         assert [r.url.host for r in w.requests if (r.url.host or "") in _COMMONS_BYTE_HOSTS] == ["upload.wikimedia.org"]
+
+    @pytest.mark.asyncio
+    async def test_a_file_exactly_at_the_floor_is_stored_with_its_dimensions(self) -> None:
+        with _wikimedia(
+            imageinfo=_imageinfo_payload(thumb_url=_UNSCALED_THUMB_URL), image_bytes=plain_png(size=(500, 200))
+        ):
+            attempt = await species_service.fetch_species_photo(
+                scientific_name="Amphiprion ocellaris",
+                aphia_id=278400,
+                entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
+                synonym_aphia_ids=[],
+            )
+
+        assert attempt.photo is not None
+        assert (attempt.photo.width, attempt.photo.height) == (500, 200)
+        assert attempt.outcome is species_service.PhotoOutcome.PHOTO
 
     @pytest.mark.asyncio
     async def test_the_thumbnail_is_asked_for_at_a_real_bucket_width(self) -> None:
@@ -648,7 +686,7 @@ class TestFetchingAPhoto:
         with _wikimedia(
             imageinfo=_imageinfo_payload(thumb_url=_THUMB_URL), image_bytes=plain_png(size=(500, 333))
         ) as wikimedia:
-            await species_service.fetch_species_photo(
+            await _fetch_photo(
                 scientific_name="Amphiprion ocellaris", aphia_id=278400, entity=candidate_entity, synonym_aphia_ids=[]
             )
 
@@ -664,7 +702,7 @@ class TestFetchingAPhoto:
         with _wikimedia(
             imageinfo=_imageinfo_payload(thumb_url=_THUMB_URL), image_bytes=plain_png(size=(500, 333))
         ) as wikimedia:
-            await species_service.fetch_species_photo(
+            await _fetch_photo(
                 scientific_name="Amphiprion ocellaris",
                 aphia_id=278400,
                 entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
@@ -684,7 +722,7 @@ class TestFetchingAPhoto:
         )
 
         with _wikimedia() as wikimedia:
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="Triaenodon obesus", aphia_id=214557, entity=entity, synonym_aphia_ids=[]
             )
 
@@ -702,7 +740,7 @@ class TestFetchingAPhoto:
         )
 
         with _wikimedia() as wikimedia:
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="Triaenodon obesus", aphia_id=214557, entity=entity, synonym_aphia_ids=[220032]
             )
 
@@ -731,7 +769,7 @@ class TestFetchingAPhoto:
             imageinfo=_imageinfo_payload(thumb_url=_THUMB_URL),
             image_bytes=plain_png(size=(500, 333)),
         ) as wikimedia:
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="Stegostoma tigrinum",
                 aphia_id=313100,
                 entity=None,
@@ -749,7 +787,7 @@ class TestFetchingAPhoto:
         per-synonym request however long the list is - the flagship case has 22 ids and some
         taxa have 55."""
         with _wikimedia() as wikimedia:
-            await species_service.fetch_species_photo(
+            await _fetch_photo(
                 scientific_name="Fucus vesiculosus",
                 aphia_id=145548,
                 entity=None,
@@ -764,7 +802,7 @@ class TestFetchingAPhoto:
         """The common case by a distance - across the whole register only 11.7% of items
         carrying a WoRMS id have a P18 - so it must not cost a search that can find nothing."""
         with _wikimedia() as wikimedia:
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="zzfixture nothing", aphia_id=1, entity=None, synonym_aphia_ids=[]
             )
 
@@ -774,7 +812,7 @@ class TestFetchingAPhoto:
     @pytest.mark.asyncio
     async def test_an_unroutable_commons_yields_no_photo_rather_than_raising(self) -> None:
         with _wikimedia(commons_raises=True):
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="Amphiprion ocellaris",
                 aphia_id=278400,
                 entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
@@ -786,7 +824,7 @@ class TestFetchingAPhoto:
     @pytest.mark.asyncio
     async def test_a_non_200_from_the_byte_host_yields_no_photo(self) -> None:
         with _wikimedia(imageinfo=_imageinfo_payload(thumb_url=_THUMB_URL), image_status=403, image_bytes=b"denied"):
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="Amphiprion ocellaris",
                 aphia_id=278400,
                 entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
@@ -805,7 +843,7 @@ class TestFetchingAPhoto:
             imageinfo=_imageinfo_payload(thumb_url="https://169.254.169.254/latest/meta-data/"),
             image_bytes=plain_png(size=(500, 333)),
         ) as wikimedia:
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="Amphiprion ocellaris",
                 aphia_id=278400,
                 entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
@@ -828,7 +866,7 @@ class TestFetchingAPhoto:
             imageinfo=_imageinfo_payload(thumb_url="https://static.wikimedia.org/wikipedia/commons/x.jpg"),
             image_bytes=plain_png(size=(500, 333)),
         ) as wikimedia:
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="Amphiprion ocellaris",
                 aphia_id=278400,
                 entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
@@ -843,7 +881,7 @@ class TestFetchingAPhoto:
         """A Commons error page served with a 200, which is the shape that would otherwise
         escape as an exception from Pillow into a caller mid-resolve."""
         with _wikimedia(imageinfo=_imageinfo_payload(thumb_url=_THUMB_URL), image_bytes=b"<html>oops</html>"):
-            photo = await species_service.fetch_species_photo(
+            photo = await _fetch_photo(
                 scientific_name="Amphiprion ocellaris",
                 aphia_id=278400,
                 entity=_local_entity(images=[("Amphiprion ocellaris.jpg", "normal")]),
@@ -933,7 +971,9 @@ class TestCommonsCannotFailAResolve:
         save = AsyncMock()
 
         with (
-            patch.object(species_service, "fetch_species_photo", AsyncMock(return_value=None)),
+            patch.object(
+                species_service, "fetch_species_photo", AsyncMock(return_value=species_service.PhotoAttempt.declined())
+            ),
             patch.object(species_service.species_photos, "save_photo_attempt", save),
             patch.object(species_service, "_worms", AsyncMock(side_effect=_worms_answers)),
             patch.object(species_service, "_wikidata", AsyncMock(return_value={"query": {"search": []}})),
@@ -956,7 +996,9 @@ class TestCommonsCannotFailAResolve:
             patch.object(
                 species_service.species_photos, "save_photo_attempt", AsyncMock(side_effect=OSError("no space"))
             ),
-            patch.object(species_service, "fetch_species_photo", AsyncMock(return_value=None)),
+            patch.object(
+                species_service, "fetch_species_photo", AsyncMock(return_value=species_service.PhotoAttempt.declined())
+            ),
             patch.object(species_service, "_worms", AsyncMock(side_effect=_worms_answers)),
             patch.object(species_service, "_wikidata", AsyncMock(return_value={"query": {"search": []}})),
         ):
@@ -981,7 +1023,9 @@ class TestCommonsCannotFailAResolve:
         db.commit = AsyncMock(side_effect=commit)
         with (
             patch.object(species_service.species_photos, "save_photo_attempt", AsyncMock(side_effect=save)),
-            patch.object(species_service, "fetch_species_photo", AsyncMock(return_value=None)),
+            patch.object(
+                species_service, "fetch_species_photo", AsyncMock(return_value=species_service.PhotoAttempt.declined())
+            ),
             patch.object(species_service, "_worms", AsyncMock(side_effect=_worms_answers)),
             patch.object(species_service, "_wikidata", AsyncMock(return_value={"query": {"search": []}})),
         ):
@@ -1032,7 +1076,7 @@ def volume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 class TestStoringAnAttempt:
     def _photo(self, data: bytes = b"webp-bytes") -> species_photos.FetchedPhoto:
         return species_photos.fetched_photo(
-            data=data,
+            photo=species_photos.NormalizedPhoto(data=data, width=500, height=333),
             file="Amphiprion ocellaris.jpg",
             credit=PhotoCredit(
                 author="Raimond Spekking",
@@ -1315,7 +1359,7 @@ class TestBackfill:
         await async_db.commit()
         species = create_species(db)
 
-        completed_with_nothing = species_service.PhotoAttempt(photo=None, completed=True)
+        completed_with_nothing = species_service.PhotoAttempt.declined()
         with patch.object(backfill, "fetch_photo_for_species", AsyncMock(return_value=completed_with_nothing)):
             first = await backfill.backfill_species_photos(async_db, limit=None)
 
@@ -1338,7 +1382,7 @@ class TestBackfill:
         await async_db.commit()
         species = create_species(db)
 
-        cancelled = species_service.PhotoAttempt(photo=None, completed=False)
+        cancelled = species_service.PhotoAttempt.timed_out()
         with patch.object(backfill, "fetch_photo_for_species", AsyncMock(return_value=cancelled)):
             report = await backfill.backfill_species_photos(async_db, limit=None)
 
@@ -1381,9 +1425,11 @@ class TestBackfill:
         species = create_species(db)
 
         photo = species_photos.fetched_photo(
-            data=b"webp", file="Some fish.jpg", credit=PhotoCredit(None, None, None, None)
+            photo=species_photos.NormalizedPhoto(data=b"webp", width=500, height=333),
+            file="Some fish.jpg",
+            credit=PhotoCredit(None, None, None, None),
         )
-        attempt = species_service.PhotoAttempt(photo=photo, completed=True)
+        attempt = species_service.PhotoAttempt.found(photo)
         with patch.object(backfill, "fetch_photo_for_species", AsyncMock(return_value=attempt)):
             report = await backfill.backfill_species_photos(async_db, limit=None)
 
