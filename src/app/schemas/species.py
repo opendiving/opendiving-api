@@ -13,6 +13,7 @@ column widths in `models/species.py`, since that is where they are headed.
 
 import uuid as uuid_pkg
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -252,6 +253,82 @@ class SpeciesResolveRequest(BaseModel):
     aphia_id: Annotated[int, Field(gt=0, examples=[278400], description="WoRMS AphiaID of the species to resolve")]
 
 
+# -------------- the operator's routes --------------
+
+
+class PhotoCuration(StrEnum):
+    """What a human decided about a species' photo; `photo_curation` is NULL when the rule
+    decides. Either value takes the row out of every rule-driven write - see
+    `services.species_photos.save_photo_attempt`."""
+
+    HIDDEN = "hidden"
+    PINNED = "pinned"
+
+
+class AdminSpeciesFilter(StrEnum):
+    """The catalog page's chips, each a predicate on the row. `narrow` is a photo under the
+    size floor, which only a pin can hold once the backfill's `--recheck-size` has run."""
+
+    WITH_PHOTO = "with_photo"
+    WITHOUT_PHOTO = "without_photo"
+    HIDDEN = "hidden"
+    PINNED = "pinned"
+    NARROW = "narrow"
+
+
+class AdminSpeciesRead(SpeciesRead):
+    """`SpeciesRead` plus what an operator curating photos needs: when the rule last ran, what
+    a human decided, and the stored bytes' size so a grid can reserve the box before the image
+    arrives. Only the `/admin` routes return it, which is what keeps `SpeciesRead` - and every
+    cached shape embedding a species - unchanged."""
+
+    photo_fetched_at: datetime | None = None
+    photo_curation: Annotated[
+        PhotoCuration | None, Field(default=None, description="hidden | pinned; null when the rule decides")
+    ]
+    photo_width: Annotated[int | None, Field(default=None, ge=1)]
+    photo_height: Annotated[int | None, Field(default=None, ge=1)]
+
+
+class AdminSpeciesPhotoPin(BaseModel):
+    """Body for `PUT /admin/species/{uuid}/photo`: the file to pin, as a Commons file title
+    (with or without `File:`) or its file-page URL."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    file: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=1024,
+            examples=["Seriphus politus 28977555.jpg", "https://commons.wikimedia.org/wiki/File:Seriphus_politus.jpg"],
+        ),
+    ]
+
+
+class AdminSpeciesPhotoCandidate(BaseModel):
+    """One file the photo picker offers. `width`/`height` are the Commons original's; a pinned
+    file is stored at that width or at 500 px, whichever is smaller. `preview` is a `data:` URI,
+    null when its bytes did not arrive."""
+
+    file: Annotated[str, Field(max_length=255)]
+    width: int | None = None
+    height: int | None = None
+    license: Annotated[str | None, Field(default=None, max_length=128)]
+    author: Annotated[str | None, Field(default=None, max_length=255)]
+    source_url: Annotated[str | None, Field(default=None, max_length=512)]
+    preview: str | None = None
+    is_current: bool = False
+
+
+class AdminSpeciesPhotoCandidates(BaseModel):
+    """`GET /admin/species/{uuid}/photo-candidates`: the Commons category the files came from,
+    when there was one, and the files."""
+
+    category: Annotated[str | None, Field(default=None, max_length=255)]
+    candidates: Annotated[list[AdminSpeciesPhotoCandidate], Field(default_factory=list)]
+
+
 # -------------- admin-panel schemas --------------
 # Registered in `admin/views.py`. `Species` and `SpeciesName` are registered without
 # "delete" - see there for why - so their `*Delete` schemas exist only for completeness,
@@ -286,7 +363,8 @@ class SpeciesUpdate(BaseModel):
     call `UserUpdate` makes about the pictures and for the same reason: they are written
     by `services.species_photos`, which owns the blob beside them, and an edit that could
     null the key while leaving the file on the volume is exactly the orphan this app has a
-    sweeper for. Re-fetching a photo is a backfill run, not a form field.
+    sweeper for. Re-fetching, hiding or pinning a photo is an operator's route under `/admin`
+    or a backfill run, not a form field.
     """
 
     model_config = ConfigDict(extra="forbid")

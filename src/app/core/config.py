@@ -620,14 +620,16 @@ class SpeciesSettings(BaseSettings):
     # because WoRMS alone cannot answer "clownfish": *Amphiprion ocellaris* carries exactly
     # one vernacular in WoRMS, and it is in Japanese.
     WIKIDATA_API_URL: str = config("WIKIDATA_API_URL", default="https://www.wikidata.org/w/api.php")
-    # Wikimedia Commons, asked only for a photo's credit metadata and thumbnail URL once a
-    # Wikidata entity has already named the file (P18). Unlike the two above it is asked
-    # nothing a diver typed - it receives a file title derived from an AphiaID.
+    # Wikimedia Commons, asked for a photo's credit metadata and thumbnail URL once a Wikidata
+    # entity has named the file (P18) or an admin has, and - for an admin choosing one - for
+    # the files in a species' Commons category. Unlike the two above it is asked nothing a
+    # diver typed - it receives file and category titles derived from an AphiaID.
     #
     # **A setting, while the hosts the bytes are fetched from are hard-coded.** That asymmetry
     # is the point: `services.species_photos` will only ever fetch image bytes from the two
-    # hosts a Commons `imageinfo` reply names - `thumb.wikimedia.org` for a thumbnail and
-    # `upload.wikimedia.org` for a file already small enough to serve whole - which is an SSRF
+    # hosts a Commons `imageinfo` reply names - `thumb.wikimedia.org` for a scaled thumbnail and
+    # `upload.wikimedia.org` for an original, which is what a file narrower than the width asked
+    # for comes back as - which is an SSRF
     # fence, and a fence with an environment variable in front of it is not a fence. This
     # setting exists so an instance can point the metadata call at a mirror - and so the
     # "unroutable host degrades to no photo" behaviour is checkable without editing code.
@@ -666,7 +668,11 @@ class SpeciesSettings(BaseSettings):
     # unguarded - a provider with no entry there is a `KeyError`, not a missing throttle.
     # Lower than Wikidata's: this one is charged at most twice per *new* species (the credit
     # call and the byte fetch) rather than once per enriched search candidate, so a number
-    # that would bottleneck a picker cannot bottleneck this.
+    # that would bottleneck a picker cannot bottleneck this. An admin adds to it - two or three
+    # metadata calls to open the photo picker, two for a pin - but the picker's previews are
+    # charged nothing: a dialog's worth would spend a large share of the window in one click
+    # and leave a diver's resolve beside it with no slot. The picker's own cap and one admin's
+    # pace bound those instead.
     SPECIES_COMMONS_RATE_LIMIT_WINDOW_SECONDS: int = config("SPECIES_COMMONS_RATE_LIMIT_WINDOW_SECONDS", default=60)
     SPECIES_COMMONS_RATE_LIMIT_REQUESTS: int = config("SPECIES_COMMONS_RATE_LIMIT_REQUESTS", default=120)
 

@@ -242,7 +242,7 @@ V1_ROUTES_DIR = Path(__file__).resolve().parents[1] / "src" / "app" / "api" / "v
 # structurally cannot say so - it named the schedules route, and the records route beside
 # it was covered by nothing at all.
 PAGINATED_LIST_ROUTES: dict[str, tuple[str, ...]] = {
-    "admin.py": ("read_invite_requests",),
+    "admin.py": ("read_admin_species", "read_invite_requests"),
     "certifications.py": ("read_certifications",),
     "contacts.py": ("lookup_contacts", "read_contacts"),
     "courses.py": ("lookup_courses", "read_courses"),

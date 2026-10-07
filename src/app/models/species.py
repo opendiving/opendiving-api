@@ -28,11 +28,12 @@ class Species(Base, PublicUUIDMixin, TimestampMixin):
 
     **The `photo_*` columns are the one exception, and they are exempt rather than a
     contradiction.** The immutability argument is about *invalidation* - a rename cannot be
-    expressed in a pattern vocabulary that only speaks `user_{id}_*`. Filling a photo column
-    inherits exactly the same bounded staleness and nothing worse: the only long-lived cached
-    surface carrying one is the single-dive response, whose `SpeciesInfo` gains
-    `photo_sha256`, and it self-heals within that same TTL. Nothing else caches a photo
-    field. See "Filling a photo column is exempt from the immutability argument" in
+    expressed in a pattern vocabulary that only speaks `user_{id}_*`. Writing a photo column -
+    filling one, or an operator replacing, hiding or dropping one - inherits the same bounded
+    staleness: the digest is cached in the single-dive response for its hour and in the life
+    list and its single-species read for a minute, and each self-heals within its TTL. A
+    cleared photo is the worse case, a stale digest naming bytes the route now 404s, and it is
+    accepted on the same terms. See "Rows are immutable in v1" under *Species* in
     DECISIONS.md.
 
     **Identity is the accepted WoRMS AphiaID**, never a synonym's. Resolving an unaccepted
@@ -95,8 +96,8 @@ class Species(Base, PublicUUIDMixin, TimestampMixin):
     # entity carries P18 (image), so storing the qid now is what makes photos cheap later.
     wikidata_qid: Mapped[str | None] = mapped_column(String(32), default=None)
 
-    # One Wikimedia Commons photograph, fetched once and stored on this instance's files
-    # volume - never hotlinked. Written by `services.species_photos`, served by
+    # One Wikimedia Commons photograph, fetched and stored on this instance's files volume -
+    # never hotlinked. Written by `services.species_photos`, served by
     # `GET /species/{uuid}/photo`, and all nullable because most of the register has no
     # usable image and this app refuses to guess (see that module's selection rule).
     #
@@ -130,6 +131,18 @@ class Species(Base, PublicUUIDMixin, TimestampMixin):
     # outcome for most of the catalog, and every re-run would re-query the whole photo-less
     # tail forever. See `src/scripts/backfill_species_photos.py`.
     photo_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    # What a human decided about this row's photo: "hidden" (no photo, and the rule may not
+    # put one back) or "pinned" (this file, chosen by hand); NULL lets the rule decide. The
+    # backfill's fetch and every rule-driven write skip a curated row - see
+    # `species_photos.save_photo_attempt` - and the size re-check clears a pin only when its
+    # bytes are gone. A short string rather than an enum type for the reason `rank` is one: a
+    # third value then needs no type migration.
+    photo_curation: Mapped[str | None] = mapped_column(String(16), default=None)
+    # The stored bytes' own dimensions, after the EXIF transpose. NULL for a row with no photo
+    # and for one stored before these columns existed, until the backfill's `--recheck-size`
+    # measures it.
+    photo_width: Mapped[int | None] = mapped_column(Integer, default=None)
+    photo_height: Mapped[int | None] = mapped_column(Integer, default=None)
 
     __table_args__ = (
         # The same unique index `dive_file`, `certification_file` and `user` carry on their

@@ -511,6 +511,16 @@ UNOWNED_ROUTES: dict[tuple[str, str], str] = {
         "Commons file shared by every account, so there is no owner to compare against and "
         "nothing an ownership check could protect."
     ),
+    **dict.fromkeys(
+        (
+            ("GET", "/api/v1/admin/species/{uuid}/photo-candidates"),
+            ("PUT", "/api/v1/admin/species/{uuid}/photo"),
+            ("DELETE", "/api/v1/admin/species/{uuid}/photo"),
+            ("POST", "/api/v1/admin/species/{uuid}/photo/refetch"),
+        ),
+        "The species catalog is global, and these are the operator's routes over it, gated on "
+        "the superuser by the `/admin` router - there is no owner to compare against.",
+    ),
     ("GET", "/api/v1/user/species/{uuid}"): (
         "The uuid is the global catalog's; the caller's own dives scope the query, and a species "
         "they never logged is a 404 like one the catalog lacks."
