@@ -1,5 +1,5 @@
-"""The operator's contract: the invite queue, inviting from it in a batch, and the daily
-totals of accounts and sign-ins.
+"""The operator's contract: the invite queue, inviting from it in a batch, the daily totals of
+accounts and sign-ins, and curating the species catalog's photos.
 
 **The first routes in `/api/v1` to be superuser-gated.** `is_superuser` has existed on
 `User` since the beginning and until now gated exactly one thing - the docs router on
@@ -22,19 +22,21 @@ refused here whatever page they came from.
 """
 
 import logging
+import uuid as uuid_pkg
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_superuser
 from ...core.config import settings
-from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import UnprocessableEntityException
+from ...core.db.database import async_get_db, release_read_transaction
+from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.request_context import RequestContext
 from ...crud.crud_auth_audit_events import record_auth_event
@@ -43,6 +45,7 @@ from ...crud.crud_invitations import account_exists_for, crud_invitations, live_
 from ...crud.crud_invite_requests import delete_invite_requests
 from ...crud.crud_user_sessions import accounts_with_a_live_session
 from ...models.invite_request import InviteRequest
+from ...models.species import Species
 from ...models.user import User
 from ...schemas.auth_audit_event import AuthEventType
 from ...schemas.daily_total import DailyMetric, DailyStatsDay, DailyStatsRead, DailyStatsTotals
@@ -59,7 +62,17 @@ from ...schemas.invite_request import (
     AdminInviteRequestRead,
 )
 from ...schemas.join_channel import JoinChannelRead
+from ...schemas.species import (
+    AdminSpeciesFilter,
+    AdminSpeciesPhotoCandidate,
+    AdminSpeciesPhotoCandidates,
+    AdminSpeciesPhotoPin,
+    AdminSpeciesRead,
+    PhotoCuration,
+)
+from ...services import species_photos, species_service
 from ...services.email_service import send_invitation_email
+from ...services.species_life_list import _search_clause
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_current_superuser)])
 
@@ -263,3 +276,209 @@ async def read_daily_stats(
             active_now=await accounts_with_a_live_session(db),
         ),
     )
+
+
+# -------------- the species catalog's photos --------------
+
+# Each chip as the predicate it is. `narrow` reads the stored bytes' width, which a photo kept
+# before the floor existed lacks until the backfill's `--recheck-size` measures it - and that
+# pass drops every unpinned narrow photo as it goes, so the chip lists pins.
+_SPECIES_FILTERS = {
+    AdminSpeciesFilter.WITH_PHOTO: Species.photo_storage_key.is_not(None),
+    AdminSpeciesFilter.WITHOUT_PHOTO: Species.photo_storage_key.is_(None),
+    AdminSpeciesFilter.HIDDEN: Species.photo_curation == PhotoCuration.HIDDEN,
+    AdminSpeciesFilter.PINNED: Species.photo_curation == PhotoCuration.PINNED,
+    AdminSpeciesFilter.NARROW: Species.photo_width < species_photos.COMMONS_THUMBNAIL_WIDTH,
+}
+
+# One message for every way the photo did not arrive, because `unavailable` covers a register
+# that did not answer and bytes that would not decode alike, and the row is unchanged either way.
+_PHOTO_UNAVAILABLE = "The photo could not be fetched; nothing changed."
+
+
+@router.get("/species", response_model=PaginatedListResponse[AdminSpeciesRead])
+async def read_admin_species(
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: int = 1,
+    items_per_page: int = 10,
+    search: Annotated[str | None, Query(max_length=255, description="Any name the species goes by")] = None,
+    chip: Annotated[AdminSpeciesFilter | None, Query(alias="filter")] = None,
+) -> dict:
+    """Every species in the catalog, newest first, with what the operator needs to curate its
+    photo.
+
+    `search` matches the names the catalog search matches on. `filter` is one of the page's
+    chips: `with_photo`, `without_photo`, `hidden`, `pinned`, or `narrow` - a stored photo
+    under the 500 px floor, which only a pin can hold once `--recheck-size` has run.
+
+    Unindexed and uncached: the catalog is thousands of rows and this is one operator's page.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
+    clauses = []
+    if search and (term := search.strip()):
+        clauses.append(_search_clause(term))
+    if chip is not None:
+        clauses.append(_SPECIES_FILTERS[chip])
+
+    rows = (
+        await db.execute(
+            select(Species)
+            .where(*clauses)
+            .order_by(Species.created_at.desc(), Species.id.desc())
+            .offset(compute_offset(page, items_per_page))
+            .limit(items_per_page)
+        )
+    ).scalars()
+    total = await db.scalar(select(func.count()).select_from(Species).where(*clauses))
+
+    data: dict[str, Any] = {
+        "data": [AdminSpeciesRead.model_validate(row, from_attributes=True).model_dump() for row in rows],
+        "total_count": int(total or 0),
+    }
+    return paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+
+
+@dataclass(frozen=True, slots=True)
+class _PhotoInputs:
+    id: int
+    aphia_id: int
+    scientific_name: str
+    genus: str | None
+    wikidata_qid: str | None
+    photo_file: str | None
+
+
+async def _photo_inputs(db: AsyncSession, uuid: uuid_pkg.UUID) -> _PhotoInputs:
+    """The columns the photo routes work from, detached, with the read transaction released -
+    every route below goes outbound or writes next, and none may hold a connection idle across
+    a Commons call. 404 for an unknown uuid."""
+    row = (
+        await db.execute(
+            select(
+                Species.id,
+                Species.aphia_id,
+                Species.scientific_name,
+                Species.genus,
+                Species.wikidata_qid,
+                Species.photo_file,
+            ).where(Species.uuid == uuid)
+        )
+    ).one_or_none()
+    if row is None:
+        raise NotFoundException("Species not found")
+    await release_read_transaction(db)
+    return _PhotoInputs(*row)
+
+
+async def _admin_species(db: AsyncSession, species_id: int) -> AdminSpeciesRead:
+    species = (await db.execute(select(Species).where(Species.id == species_id))).scalar_one()
+    return AdminSpeciesRead.model_validate(species, from_attributes=True)
+
+
+@router.get("/species/{uuid}/photo-candidates", response_model=AdminSpeciesPhotoCandidates)
+async def read_species_photo_candidates(
+    uuid: uuid_pkg.UUID, db: Annotated[AsyncSession, Depends(async_get_db)]
+) -> AdminSpeciesPhotoCandidates:
+    """The Commons files the operator may pin for this species, each with a preview.
+
+    The item's own P18 values first, then the file stored now, then its Commons category's
+    files - the item's P373, or one of the stored file's categories when the item names none -
+    capped at two dozen. `preview` is a `data:` URI of the 250 px rendition, so the page shows
+    it without contacting Wikimedia; it is null where the bytes did not arrive in time.
+
+    A species with no Wikidata item and no stored file answers an empty list; pinning a pasted
+    title still works.
+    """
+    row = await _photo_inputs(db, uuid)
+    found = await species_service.photo_candidates(
+        wikidata_qid=row.wikidata_qid, photo_file=row.photo_file, genus=row.genus
+    )
+    return AdminSpeciesPhotoCandidates(
+        category=found.category,
+        candidates=[
+            AdminSpeciesPhotoCandidate(
+                file=candidate.file,
+                width=candidate.width,
+                height=candidate.height,
+                license=candidate.credit.license_name,
+                author=candidate.credit.author,
+                source_url=candidate.credit.source_url,
+                preview=candidate.preview,
+                is_current=candidate.is_current,
+            )
+            for candidate in found.candidates
+        ],
+    )
+
+
+@router.put("/species/{uuid}/photo", response_model=AdminSpeciesRead)
+async def pin_species_photo(
+    uuid: uuid_pkg.UUID, body: AdminSpeciesPhotoPin, db: Annotated[AsyncSession, Depends(async_get_db)]
+) -> AdminSpeciesRead:
+    """Pin a Commons file as this species' photo, replacing whatever was there.
+
+    `file` is a file title, with or without `File:`, or its `commons.wikimedia.org/wiki/File:`
+    page URL. The size floor does not apply: the operator saw the file and chose it. A pinned
+    row is left alone by the backfill, `--force` included, until a re-fetch hands it back to
+    the rule.
+
+    `422` for input that names no raster file, a file Commons does not have, or bytes that
+    will not decode; `503` when Commons could not be asked, with the row unchanged.
+    """
+    title = species_photos.normalize_file_title(body.file)
+    if title is None:
+        raise UnprocessableEntityException("That is not the title or page URL of a photograph on Wikimedia Commons.")
+    row = await _photo_inputs(db, uuid)
+
+    try:
+        attempt = await species_service.fetch_pinned_photo(title)
+    except species_service.CommonsFileMissingError as exc:
+        raise UnprocessableEntityException(f"Wikimedia Commons has no file named {title!r}.") from exc
+    except species_photos.UnsupportedPhotoImageError as exc:
+        raise UnprocessableEntityException(f"{title!r} could not be used: {exc}") from exc
+    if attempt.photo is None:
+        raise HTTPException(status_code=503, detail=_PHOTO_UNAVAILABLE)
+
+    await species_photos.write_curated_photo(db, species_id=row.id, photo=attempt.photo, curation=PhotoCuration.PINNED)
+    return await _admin_species(db, row.id)
+
+
+@router.delete("/species/{uuid}/photo", response_model=AdminSpeciesRead)
+async def hide_species_photo(
+    uuid: uuid_pkg.UUID, db: Annotated[AsyncSession, Depends(async_get_db)]
+) -> AdminSpeciesRead:
+    """Hide this species' photo: clear it, delete its bytes, and keep the rule from putting one
+    back.
+
+    The stored bytes go rather than being kept behind a flag, because nothing would serve them
+    and a kept blob is one the sweeper cannot reclaim. Undoing a hide is a re-fetch or a pin.
+    Returns the row, `photo_curation` reading `hidden`.
+    """
+    row = await _photo_inputs(db, uuid)
+    await species_photos.write_curated_photo(db, species_id=row.id, photo=None, curation=PhotoCuration.HIDDEN)
+    return await _admin_species(db, row.id)
+
+
+@router.post("/species/{uuid}/photo/refetch", response_model=AdminSpeciesRead)
+async def refetch_species_photo(
+    uuid: uuid_pkg.UUID, db: Annotated[AsyncSession, Depends(async_get_db)]
+) -> AdminSpeciesRead:
+    """Ask the selection rule again, now, and make the row say what it answers.
+
+    What lands an upstream fix to Wikidata on this instance at once, and what hands a hidden or
+    pinned row back to the rule: either way `photo_curation` ends up null. A photo the rule
+    chooses replaces what was there; a rule that declines - no candidate, an ambiguous choice,
+    a file under the floor - clears the stored photo.
+
+    `503`, with the row and its bytes untouched, when the rule could not be asked: a register
+    or Commons that did not answer, a spent provider counter, bytes that would not decode, or
+    the budget running out. Slow by nature - the same budgets as a resolve.
+    """
+    row = await _photo_inputs(db, uuid)
+    attempt = await species_service.fetch_photo_for_species(scientific_name=row.scientific_name, aphia_id=row.aphia_id)
+    if not attempt.completed or attempt.outcome is species_service.PhotoOutcome.UNAVAILABLE:
+        raise HTTPException(status_code=503, detail=_PHOTO_UNAVAILABLE)
+
+    await species_photos.write_curated_photo(db, species_id=row.id, photo=attempt.photo, curation=None)
+    return await _admin_species(db, row.id)
