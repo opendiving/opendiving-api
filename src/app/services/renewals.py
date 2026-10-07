@@ -129,8 +129,7 @@ def certification_label(*, agency: str, agency_other: str | None, name: str) -> 
     return f"{label} {name}"
 
 
-def insurance_label(provider: str | None) -> str:
-    """The Renewals card's insurance row, as one phrase: a policy with a date and no insurer
-    named is still a policy running out."""
-    named = (provider or "").strip()
-    return f"{named} dive insurance" if named else "Dive insurance"
+def insurance_label(provider: str) -> str:
+    """The Renewals card's row for one policy, named by its insurer - which every policy has,
+    and which tells two policies apart."""
+    return f"{provider} dive insurance"

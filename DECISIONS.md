@@ -822,11 +822,11 @@ applied by SQLAlchemy on INSERT, so autogenerate cannot see it and a revision ge
 
 ## Renewal reminders fire once per (stage, date), with no re-nag
 
-`send_renewal_reminders` emails when a certification or the account's insurance enters the 90-day
-window (`CERTIFICATION_EXPIRING_SOON_DAYS`, the web's name and value) and when it expires. The state
-is a nullable pair on the subject's own row — `certification.expiry_notified_stage`/`_for`,
-`user.insurance_notified_stage`/`_for` — and the job sends when the live pair differs from the
-stored one. A renewal moves the date, so the pair stops matching and the reminder re-arms with
+`send_renewal_reminders` emails when a certification or an insurance policy enters the 90-day window
+(`CERTIFICATION_EXPIRING_SOON_DAYS`, the web's name and value) and when it expires. The state is a
+nullable pair on the subject's own row — `certification.expiry_notified_stage`/`_for`,
+`checkin_insurance_policy.notified_stage`/`_for` — and the job sends when the live pair differs from
+the stored one. A renewal moves the date, so the pair stops matching and the reminder re-arms with
 nothing clearing it. This is `should_notify` minus the dive arm and the quarterly re-nag: an expired
 card is renewed or let lapse, and the Renewals card shows it either way. The pair stays off
 `CertificationRead`, so no cached read changes shape. `user.renewal_reminder_emails` is the opt-out,
@@ -2244,8 +2244,8 @@ Departed from: a date-only dive's `<datetime>` is the bare date, which UDDF's pr
 XSD types `xs:dateTime`; the tests widen it for their XSD pass alone. Midnight would be a time
 nobody recorded.
 
-The owner's email stays out of `contactType`, though the phone goes in; a UDDF file gets handed to
-shops.
+The owner's check-in email goes in `contactType` after the phone; the sign-in address never does, a
+UDDF file being what gets handed to shops.
 
 ## Gas mixes dedupe on a rounded key, because the corpus carries float noise
 
@@ -5903,16 +5903,16 @@ Six invalidators run after commit: `invalidate_dive_caches`, `invalidate_certifi
 
 ## The `diver` member's identity and settings are never applied, and its check-in details only as confirmed
 
-A document's owner — name, username, email, `created_at` — and its preferences under this producer's
-key are never applied: changing a live account's identity or settings as a side effect of a restore
-is a worse surprise than setting them once. The archive's avatar is not restored either.
+A document's owner — name, username, `created_at` — and its preferences under this producer's key
+are never applied: changing a live account's identity or settings as a side effect of a restore is a
+worse surprise than setting them once. The archive's avatar is not restored either.
 
-The check-in details — date of birth, phone, emergency contact, insurance, portrait — are shown in
-the preview beside the account's, and the apply writes exactly those the diver submits (§6.1's
-SHOULD NOT). The importer cannot tell a restore from a buddy's file, so writing on the document's
-say-so would take a stranger's contact or face. An object is proposed whole, never merged member by
-member, which would pair one insurer's name with another's policy number. The portrait travels
-beside the facts rather than among them, so a client that knows only the facts keeps the account's.
+The check-in details and the portrait are shown in the preview beside the account's, and the apply
+writes exactly those the diver submits (§6.1's SHOULD NOT): the importer cannot tell a restore from
+a buddy's file. Matching rows are proposed as the account's, never merged member by member, which
+would pair one insurer with another's policy number. The sign-in address, which every older export
+carries as the email, is not offered unless it already is the check-in email. The portrait travels
+beside the facts, so a client that knows only the facts keeps the account's.
 
 Rejected: restore-means-restore for preferences; filling only empty details.
 
@@ -6743,19 +6743,16 @@ through this API beyond the exceptions *Current-user routes live at a bare `/use
 OpenAPI document: no request body schema publishes an owner property and no operation declares one
 as a query parameter, so a schema written later cannot reintroduce it unnoticed.
 
-## The check-in details are columns on `user`, and an explicit null clears one
+## The check-in details are their own object, at `/user/checkin-details`
 
-Date of birth, phone, the emergency contact's three fields and the insurance provider, policy number
-and expiry are eight nullable columns on `user`, listed once as `CHECK_IN_FIELDS` in
-`schemas/user.py`. *Rejected:* a diver-owned table allowing several policies or contacts — it buys a
-second policy nobody asked for. Nullable rather than defaulted: unfilled is the ordinary state, and
-`{"emergency_contact_name": null}` is how a diver removes a contact, so none of them joins
-`NON_NULLABLE_FIELDS`. They reach the admin panel through `UserAdminUpdate`'s inheritance, unhidden,
-the panel being off by default and retiring. On export they are the Diver's `born_on`, `phone`,
-`emergency_contacts` and `insurances` (§6.1), each column as wide as its member, and import applies
-them per *The `diver` member's identity and settings are never applied, and its check-in details
-only as confirmed*. `PATCH /user` refuses a contact without a name or an insurance without a
-provider, the format's anchors; the export omits an older row in that state.
+The email a diver gives out, a phone, a date of birth, emergency contacts in call order and
+insurance policies are `checkin_details` plus two child tables keyed on the user, at most five rows
+each. Off `user`, they ride no signed-in request, and `email` is the diver's while `user.email`
+stays the sign-in address, which no export or sheet carries. `PATCH` replaces each member it
+carries, a list whole, and leaves the rest, so a stale tab reverts only the group it edits. A
+policy's reminder pair lives on its row and carries across a save to a new row with the same
+provider and expiry. *Rejected:* a ninth `user` column; one `PUT` of the whole object; one contact
+and one policy.
 
 ## A trip's list order is an aggregate, so the query is hand-written
 
