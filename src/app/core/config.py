@@ -641,8 +641,9 @@ class SpeciesSettings(BaseSettings):
         "SPECIES_USER_AGENT", default="OpenDiving (+https://github.com/opendiving/opendiving-api)"
     )
 
-    # What one account may spend across `/species/search` and `/species/resolve` together,
-    # and the only limit here that can produce a 429. Sized like the geocoder's for the same
+    # What one account may spend across `/species/search`, `/species/resolve` and the
+    # `/user/species/suggest` calls that reach the search, together, and the only limit here
+    # that can produce a 429. Sized like the geocoder's for the same
     # reason: search backs a type-ahead, so an evening of logging a week's dives can honestly
     # produce hundreds of calls, and it counts cache hits too.
     SPECIES_RATE_LIMIT_WINDOW_SECONDS: int = config("SPECIES_RATE_LIMIT_WINDOW_SECONDS", default=3600)

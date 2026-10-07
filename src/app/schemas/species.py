@@ -173,6 +173,39 @@ class SpeciesSearchResponse(BaseModel):
     ]
 
 
+class SpeciesSuggestion(SpeciesSearchResult):
+    """One row of `GET /user/species/suggest`: a search result, plus the caller's history with
+    the taxon that put it where it is on the page.
+
+    A row the caller has logged carries its `last_seen`; one that came from the catalog search
+    carries 0 and null, which is how a client tells the three tiers apart.
+    """
+
+    dive_count_at_sites: Annotated[
+        int,
+        Field(
+            default=0,
+            ge=0,
+            examples=[3],
+            description="The caller's live dives naming any of the request's sites on which this species was logged",
+        ),
+    ]
+    last_seen: Annotated[
+        DiveLocalStartTime | None,
+        Field(default=None, description="Start of the caller's latest live dive that logged it, anywhere"),
+    ]
+
+
+class SpeciesSuggestResponse(BaseModel):
+    """A capped list like `SpeciesSearchResponse`, for the same reasons."""
+
+    results: Annotated[list[SpeciesSuggestion], Field(default_factory=list)]
+    has_more: Annotated[
+        bool,
+        Field(default=False, description="True when the page was cut, or the catalog search was not asked"),
+    ]
+
+
 class SpeciesLifeListEntry(PublicUUIDSchema):
     """One row of `GET /user/species` - a species this diver has logged, and their history
     with it.
