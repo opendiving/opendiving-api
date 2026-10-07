@@ -39,7 +39,7 @@ from ...crud.crud_dive_gear_items import (
     get_gear_items_for_dive,
     replace_gear_items_for_dive,
 )
-from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
+from ...crud.crud_dive_mixtures import get_mixtures_for_dive, get_recent_volumes, replace_mixtures_for_dive
 from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
 from ...crud.crud_dive_species import (
     StoredSighting,
@@ -85,9 +85,10 @@ from ...schemas.dive import (
     SightingWrite,
     validate_depth_pair,
 )
-from ...schemas.dive_mixture import DiveMixtureRead
+from ...schemas.dive_mixture import DiveMixtureRead, RecentVolumes
 from ...schemas.dive_profile import RecordingProfileRead
 from ...schemas.gear_item import GearItemInfo
+from ...schemas.lookup import LookupUntil, lookup_bound
 from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
 from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
 from ...schemas.tag import TAG_NOT_FOUND
@@ -977,6 +978,43 @@ async def renumber_user_dives(
         await invalidate_dive_caches(current_user["id"])
 
     return result
+
+
+# -------------- recent volumes --------------
+
+_RECENT_VOLUMES_LIMIT = 10
+
+# Under `user_{id}_dives:` like the numbering summary, so the sweep every mixture write
+# already runs drops it; `until` is one UTC instant, as the lookups key theirs.
+_RECENT_VOLUMES_CACHE_KEY_PREFIX = "user_{user_id}_dives:recent_volumes:until_{until}"
+
+
+@cache(key_prefix=_RECENT_VOLUMES_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
+async def _cached_recent_volumes(
+    request: Request, user_id: int, db: AsyncSession, until: datetime | None
+) -> RecentVolumes:
+    """Fetches (and caches) a user's recent cylinder volumes. Authorization happens in the
+    route before this is reached - `@cache` serves a hit without re-checking it.
+    """
+    return RecentVolumes(
+        volumes=await get_recent_volumes(db, user_id=user_id, bound=until, limit=_RECENT_VOLUMES_LIMIT)
+    )
+
+
+@router.get("/dives/recent-volumes", response_model=RecentVolumes)
+async def read_recent_volumes(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    until: LookupUntil = None,
+) -> RecentVolumes:
+    """The distinct cylinder volumes the caller's dives at or before `until` used, the most
+    recently used first, at most ten.
+
+    `until` is the edited dive's start, read as the pickers' lookups read it, so a back-filled
+    dive is offered the cylinders of its own time rather than today's.
+    """
+    return await _cached_recent_volumes(request, user_id=current_user["id"], db=db, until=lookup_bound(until))
 
 
 # Keyed `user_{user_id}_dive:{uuid}` rather than the flat `dive_cache:{uuid}` it used to
