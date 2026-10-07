@@ -167,13 +167,14 @@ wildcard still purges it; routes lowercase and strip the term first. A resource 
 
 ## Pickers read `GET /<plural>/lookup`, ordered by last use at or before `until`
 
-Each picked resource has a lookup beside its list: the list's search, ordered by the latest live
-dive naming the item at or before `until` (`crud_lookups.py`), then never-used newest first. A row
-carries what the picker shows and what a dive form fills from the pick — a site's water type,
-altitude and entry types, a course's contact and people, a trip's people — so no pick reads a whole
-record. A repeated `uuid` narrows to the rows a form holds, uncached: no two forms hold one set for
-long. `until` becomes one UTC instant the key carries after the list's prefix, so the list's sweep
-drops it. Contacts and courses rank by dives, so the four dive writes drop their families. The
+Each picked resource but species has a lookup beside its list (species: *"The dive form's species
+menu is the life list's join ahead of the catalog search"*): the list's search, ordered by the
+latest live dive naming the item at or before `until` (`crud_lookups.py`), then never-used newest
+first. A row carries what the picker shows and what a dive form fills from the pick — a site's water
+type, altitude and entry types, a course's contact and people, a trip's people — so no pick reads a
+whole record. A repeated `uuid` narrows to the rows a form holds, uncached: no two forms hold one
+set for long. `until` becomes one UTC instant the key carries after the list's prefix, so the list's
+sweep drops it. Contacts and courses rank by dives, so the four dive writes drop their families. The
 people lookup is uncached for the list's reason. *Rejected:* one `GET /lookup?resource=` for every
 kind — its own cache family and an invalidation in every write path.
 
