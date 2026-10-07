@@ -50,7 +50,7 @@ def offset_of_the(order: Any) -> Any:
     """The `utc_offset_minutes` of the first dive in the group under `order`.
 
     **A dive displays in the timezone it was logged in**, which an aggregate over dives has to
-    honour like every other dive-derived surface - `_to_public_start_time`, `dive_neighbors`,
+    honour like every other dive-derived surface - `to_public_start_time`, `dive_neighbors`,
     `dive_activity` and `gas_use_history` all reconstruct it, and `DECISIONS.md` states it as the
     API contract. A `timestamptz` stores only an absolute instant, so a dive logged at 09:00 in
     Bangkok comes back as 02:00 UTC and would read as the wrong local time - and, for an evening

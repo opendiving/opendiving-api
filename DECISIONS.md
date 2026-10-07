@@ -242,9 +242,10 @@ string such as `"2021-04-04T10:04:47.910+02:00"`. `DiveCreate` rejects a naive d
 offset-less value for an import that lost it — see *A dive's UTC offset may be unknown, and only
 import can make it so* and *An offset-unknown dive keeps its wall clock editable*. `write_dive`
 (`api/v1/dives.py`) calls `split_start_time()`; `patch_dive` calls `split_updated_start_time()`, the
-same split plus the update-only rules; `_to_public_start_time()` calls `combine_dive_start_time()`
-on read. Only `DiveCreateInternal`/`DiveUpdateInternal`/`DiveReadInternal` carry
-`utc_offset_minutes` as a field, never `DiveCreate`/`DiveUpdate`/`DiveRead`.
+same split plus the update-only rules; `to_public_start_time()` (`services/dive_list_items.py`)
+calls `combine_dive_start_time()` on read. Only
+`DiveCreateInternal`/`DiveUpdateInternal`/`DiveReadInternal` carry `utc_offset_minutes` as a field,
+never `DiveCreate`/`DiveUpdate`/`DiveRead`.
 
 ## `recalculate_dive_stats`'s aggregate is backed by a covering index, not incremental counters
 
@@ -5097,7 +5098,7 @@ column-shaped internal schemas the way the dive views are; that is a wider admin
 `CertificationRead` carries `course_uuid` and all three producers fill it: both cached readers run
 the batched `get_course_uuids_by_ids`, and `write_certification` passes the request's value.
 `_to_public_certification` stays a synchronous pure function taking the resolved value; `course_id`
-joins its exclusion set as `trip_id` does in `_to_public_dive`.
+joins its exclusion set as `trip_id` does in `to_public_dive`.
 
 ## The hook script is repo content; what wires it up is not
 
