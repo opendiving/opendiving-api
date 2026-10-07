@@ -582,7 +582,7 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
             DiveGasUsePoint(
                 dive_uuid=dive.uuid,
                 dive_number=dive.dive_number,
-                # Re-attached to the dive's own offset, exactly as `_to_public_dive` does
+                # Re-attached to the dive's own offset, exactly as `to_public_dive` does
                 # it - a point on this graph has to be the same instant, labeled the same
                 # way, as the dive page it links to.
                 start_time=combine_dive_start_time(dive.start_time, dive.utc_offset_minutes, dive.start_date_only),

@@ -10,6 +10,7 @@ from ..core.schemas import (
     RejectsExplicitNulls,
     validate_date_range,
 )
+from ..core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE
 from .location import LocationInput, LocationRead
 from .person import PeopleRead, PeopleUpdate, PeopleWrite
 
@@ -55,6 +56,22 @@ class TripPartRead(BaseModel):
     ]
 
 
+class TripPartWithCandidatesRead(TripPartRead):
+    """A part as a trip read carries it: with the candidates its card on the trip page shows.
+
+    A subclass rather than a field on `TripPartRead`, which the export reads too: the count is
+    required here, so no trip read can leave it out, and nothing but a trip read carries one."""
+
+    candidate_count: Annotated[
+        int,
+        Field(
+            examples=[4],
+            description="The owner's live dives on no trip whose own local day this part covers - where parts "
+            "overlap, only those the trip page places in this one",
+        ),
+    ]
+
+
 class TripBase(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=255, examples=["Red Sea Liveaboard 2024"])]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
@@ -67,7 +84,7 @@ class TripRead(TripBase, PublicUUIDSchema):
     No span of its own: a trip's dates are its parts'.
     """
 
-    parts: Annotated[list[TripPartRead], Field(default_factory=list)]
+    parts: Annotated[list[TripPartWithCandidatesRead], Field(default_factory=list)]
     # Who came on the trip, which is not a walk of its dives: a companion who never dived is
     # here and on none of them.
     people: PeopleRead
@@ -88,6 +105,18 @@ class TripRead(TripBase, PublicUUIDSchema):
             examples=[32.4],
             description="The greatest `max_depth` among those dives, in metres; null when none recorded one",
         ),
+    ]
+    candidate_count: Annotated[
+        int,
+        Field(
+            examples=[9],
+            description="The owner's live dives on no trip whose own local day one of its parts covers, each "
+            "counted once",
+        ),
+    ]
+    contact_uuids: Annotated[
+        list[uuid_pkg.UUID],
+        Field(description="The contacts the trip's own live dives name, each once, the newest dive's first"),
     ]
     user_uuid: uuid_pkg.UUID
     created_at: datetime
@@ -164,3 +193,53 @@ class TripLookupItem(PublicUUIDSchema):
 
     name: str
     people: PeopleRead
+
+
+class TripPartDates(BaseModel):
+    """A part named by its dates, exactly as a trip read carries them. Parts have no id, and
+    are renumbered by every write that sends them, so the dates the diver saw on the part's
+    card are what names it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_date: date | None = None
+    end_date: date | None = None
+
+    @model_validator(mode="after")
+    def check_a_date_is_named(self) -> TripPartDates:
+        if self.start_date is None and self.end_date is None:
+            raise ValueError("A part is named by its dates, and a part with none has no candidates.")
+        return self
+
+
+class TripDiveAddRequest(BaseModel):
+    """Which of a trip's candidates to add to it: the dives named, the ones a part takes, or -
+    naming neither - every one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dive_uuids: Annotated[
+        list[uuid_pkg.UUID] | None,
+        Field(default=None, min_length=1, max_length=DEFAULT_MAX_ITEMS_PER_PAGE, description="These dives"),
+    ]
+    part: Annotated[TripPartDates | None, Field(default=None, description="The candidates this part takes")]
+
+    @model_validator(mode="after")
+    def check_one_scope(self) -> TripDiveAddRequest:
+        # An explicit null would otherwise read as naming nothing, which adds every candidate.
+        for name in ("dive_uuids", "part"):
+            if name in self.model_fields_set and getattr(self, name) is None:
+                raise ValueError(f"{name} may be omitted but not null.")
+        if self.dive_uuids is not None and self.part is not None:
+            raise ValueError("Name the dives or the part, not both.")
+        return self
+
+
+class TripDiveAddResult(BaseModel):
+    added: Annotated[
+        int,
+        Field(
+            examples=[4],
+            description="How many dives were put on the trip; fewer than named when some stopped being candidates",
+        ),
+    ]

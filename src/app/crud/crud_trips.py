@@ -1,8 +1,9 @@
 import uuid as uuid_pkg
+from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
 from fastcrud import FastCRUD
-from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy import ColumnElement, Integer, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like
@@ -12,6 +13,8 @@ from ..models.dive_species import DiveSpecies
 from ..models.trip import Trip
 from ..models.trip_part import TripPart
 from ..schemas.trip import TripCreateInternal, TripReadInternal, TripUpdate, TripUpdateInternal
+from .crud_contacts import get_contact_uuids_by_ids
+from .crud_dives import DatedPart, candidate_of, part_for_day
 
 CRUDTrip = FastCRUD[Trip, TripCreateInternal, TripUpdate, TripUpdateInternal, TripUpdate, TripReadInternal]
 crud_trips = CRUDTrip(Trip)
@@ -141,6 +144,75 @@ async def get_figures_for_trips(db: AsyncSession, *, trip_ids: list[int], user_i
         for row in rows
     }
     return {trip_id: derived.get(trip_id, NO_DIVES) for trip_id in trip_ids}
+
+
+async def get_candidate_counts_for_trips(
+    db: AsyncSession, *, parts_by_trip: Mapping[int, Sequence[DatedPart]], user_id: int
+) -> dict[int, list[int]]:
+    """How many candidates each of these trips' parts holds, in the parts' order, in one
+    statement - the trip's own count being their sum, since `part_for_day` gives each
+    candidate one part.
+
+    Evaluated per trip, never by one expression choosing a trip for a dive: a dive on no trip
+    can be a candidate of two at once - a past trip whose end was never filled in and the
+    later one covering the same day - and is shown on both, so it counts for both. Each trip
+    is one `UNION ALL` branch with its own attribution `CASE`, grouped through a subquery so
+    the `GROUP BY` names a column rather than repeating the expression's parameters.
+    """
+    counts = {trip_id: [0] * len(parts) for trip_id, parts in parts_by_trip.items()}
+    branches = []
+    for trip_id, parts in parts_by_trip.items():
+        if not any(part.start_date or part.end_date for part in parts):
+            continue
+        attributed = (
+            select(part_for_day(parts).label("part_index"))
+            .where(Dive.user_id == user_id, Dive.is_deleted.is_(False), candidate_of(parts))
+            .subquery()
+        )
+        branches.append(
+            select(literal(trip_id, Integer).label("trip_id"), attributed.c.part_index, func.count().label("held"))
+            .select_from(attributed)
+            .group_by(attributed.c.part_index)
+        )
+    if not branches:
+        return counts
+
+    for row in await db.execute(union_all(*branches)):
+        if row.part_index is not None:
+            counts[row.trip_id][row.part_index] += row.held
+    return counts
+
+
+async def get_contact_uuids_for_trips(
+    db: AsyncSession, *, trip_ids: list[int], user_id: int
+) -> dict[int, list[uuid_pkg.UUID]]:
+    """The contacts each trip's own live dives name - the dive centers it dived with - each
+    once, the one named by the newest dive first."""
+    by_trip: dict[int, list[int]] = {trip_id: [] for trip_id in trip_ids}
+    if not trip_ids:
+        return {}
+
+    rows = await db.execute(
+        select(Dive.trip_id, Dive.contact_id)
+        .where(
+            Dive.trip_id.in_(set(trip_ids)),
+            Dive.user_id == user_id,
+            Dive.is_deleted.is_(False),
+            Dive.contact_id.is_not(None),
+        )
+        .group_by(Dive.trip_id, Dive.contact_id)
+        .order_by(Dive.trip_id, func.max(Dive.start_time).desc(), Dive.contact_id)
+    )
+    for row in rows:
+        by_trip[row.trip_id].append(row.contact_id)
+
+    uuid_by_id = await get_contact_uuids_by_ids(
+        db=db, contact_ids=[contact_id for ids in by_trip.values() for contact_id in ids], user_id=user_id
+    )
+    return {
+        trip_id: [uuid_by_id[contact_id] for contact_id in ids if contact_id in uuid_by_id]
+        for trip_id, ids in by_trip.items()
+    }
 
 
 async def resolve_trip_id_for_user(db: AsyncSession, trip_uuid: uuid_pkg.UUID, user_id: int) -> int | None:

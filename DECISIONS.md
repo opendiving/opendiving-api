@@ -1790,8 +1790,10 @@ to a bare extension, so `default` supplies the stem.
 `GET /user/dive-activity` returns one `{year, month, day, dives}` per day dived, counted in Python
 off `start_time` and `utc_offset_minutes`, not by `GROUP BY date_trunc`.
 
-- `combine_start_time` (`core/utils/datetime_offset.py`) is the offset arithmetic's only home; a SQL
-  copy drifts a day off from the dive pages.
+- `combine_start_time` (`core/utils/datetime_offset.py`) is the offset arithmetic's only home for
+  anything displayed or bucketed; a SQL copy drifts a day off from the dive pages. The exception is
+  a predicate the database must apply - see *"A trip's candidates are chosen by a local day computed
+  in SQL"*.
 - The day is the dive's local one (the `diveWallClockTime` rule).
 - Days, not months: `DiveActivityCard` sums upward itself; a `granularity` parameter would cost a
   second cache entry.
@@ -6969,3 +6971,14 @@ limit, is not exported, and no account's purge collects it - taking the tiles on
 would take tiles others are shown. The sweeper's `_referenced_keys` reads `map_tile`, and the worker
 deletes a tile unserved for `UNSERVED_RETENTION`. Rejected: the purge collecting the tiles an
 account's requests drew first, which ties shared files to whoever happened to ask first.
+
+## A trip's candidates are chosen by a local day computed in SQL
+
+`GET /trip/{uuid}/dives` pages a trip's dives together with its candidates - dives on no trip whose
+own local day a part covers - so membership has to be decided in the query: deciding it after the
+rows come back leaves the page and its `total_count` wrong. `crud_dives.DIVE_LOCAL_DAY` is the
+stored instant read `AT TIME ZONE 'UTC'` (the api sets no session time zone) plus the offset, zero
+where NULL, cast to a date, and a test pins it to `local_day()` for every stored state. Python stays
+the single place a day is displayed or bucketed. Rejected: a day-wide instant window narrowed in
+Python, which pages wrong; and narrowing in the browser, which leaves the trip read's counts no
+server to come from.

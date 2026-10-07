@@ -8,8 +8,10 @@ instants, but once either is *read back*, Postgres/SQLAlchemy hand back a dateti
 whatever timezone the session is configured with (UTC here), not the original offset.
 
 So the offset a `start_time` was entered in is stored separately (`Dive.utc_offset_minutes`)
-and re-attached on the way out. This module is the single place that conversion happens,
-so `api/v1/dives.py` and `schemas/dive.py` stay in sync on exactly how it's done.
+and re-attached on the way out. This module is the single place that conversion happens
+for anything displayed or bucketed, so every read of a dive agrees on exactly how it's done.
+The one copy in SQL is `crud_dives.DIVE_LOCAL_DAY`, for a predicate a paginated list has to
+apply in the database, and a test pins it to `local_day()` over every stored state.
 
 **There is a third state, and only the logbook importer can create it.** A NULL
 `utc_offset_minutes` means "the wall clock was recorded and the instant is unknown" -

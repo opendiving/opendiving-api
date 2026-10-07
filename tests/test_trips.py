@@ -316,6 +316,7 @@ def write_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "replace_parts": AsyncMock(),
         "get_parts": AsyncMock(return_value=[_part("Moalboal")]),
         "invalidate_trips": AsyncMock(),
+        "invalidate_dives": AsyncMock(),
         "name_exists": AsyncMock(return_value=False),
         "owned": AsyncMock(return_value=created),
     }
@@ -328,8 +329,25 @@ def write_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(trips_module, "trip_name_exists", stubs["name_exists"])
     monkeypatch.setattr(trips_module, "_get_owned_trip", stubs["owned"])
     monkeypatch.setattr(trips_module, "invalidate_trip_caches", stubs["invalidate_trips"])
+    monkeypatch.setattr(trips_module, "invalidate_dive_caches", stubs["invalidate_dives"])
+    monkeypatch.setattr(trips_module, "get_candidate_counts_for_trips", AsyncMock(side_effect=_no_candidates))
 
     return stubs
+
+
+async def _no_candidates(db: Any, *, parts_by_trip: dict[int, list[Any]], user_id: int) -> dict[int, list[int]]:
+    return {trip_id: [0] * len(parts) for trip_id, parts in parts_by_trip.items()}
+
+
+def _no_derived(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stubs the candidate counts and the contacts, the two figures a read derives beside
+    `get_figures_for_trips` that the tests here do not look at."""
+    monkeypatch.setattr(trips_module, "get_candidate_counts_for_trips", AsyncMock(side_effect=_no_candidates))
+    monkeypatch.setattr(
+        trips_module,
+        "get_contact_uuids_for_trips",
+        AsyncMock(side_effect=lambda db, *, trip_ids, user_id: {trip_id: [] for trip_id in trip_ids}),
+    )
 
 
 def _current_user() -> dict[str, Any]:
@@ -454,12 +472,27 @@ class TestPatchTrip:
         write_collaborators["invalidate_trips"].assert_awaited_once_with(USER_ID)
 
     @pytest.mark.asyncio
+    async def test_a_parts_edit_drops_the_dive_reads_too(self, write_collaborators: dict[str, Any]) -> None:
+        """A part's dates decide which dives on no trip `GET /trip/{uuid}/dives` lists, and
+        that list is cached under the dives prefix."""
+        await _patch({"parts": [{"start_date": "2026-03-01"}]})
+
+        write_collaborators["invalidate_dives"].assert_awaited_once_with(USER_ID)
+
+    @pytest.mark.asyncio
+    async def test_a_rename_leaves_the_dive_reads_alone(self, write_collaborators: dict[str, Any]) -> None:
+        await _patch({"name": "Cebu 2027"})
+
+        write_collaborators["invalidate_dives"].assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_an_edit_that_changes_nothing_touches_nothing(self, write_collaborators: dict[str, Any]) -> None:
         await _patch({})
 
         write_collaborators["update"].assert_not_awaited()
         write_collaborators["replace_parts"].assert_not_awaited()
         write_collaborators["invalidate_trips"].assert_not_awaited()
+        write_collaborators["invalidate_dives"].assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_reversed_range_on_one_part_is_refused(self) -> None:
@@ -514,6 +547,7 @@ class TestReadPath:
         )
         monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
         monkeypatch.setattr(trips_module, "get_figures_for_trips", AsyncMock(return_value={11: NO_DIVES, 12: NO_DIVES}))
+        _no_derived(monkeypatch)
 
         with patch.object(cache_module, "client", _FakeRedis()):
             page = await trips_module._cached_read_trips(
@@ -542,9 +576,10 @@ class TestReadPath:
         ]
         figures = AsyncMock(return_value={11: TripFigures(4, 3, 17, 32.4), 12: NO_DIVES})
         monkeypatch.setattr(trips_module, "get_trips_page", AsyncMock(return_value={"data": rows, "total_count": 2}))
-        monkeypatch.setattr(trips_module, "get_parts_for_trips", AsyncMock(return_value={}))
+        monkeypatch.setattr(trips_module, "get_parts_for_trips", AsyncMock(return_value={11: [], 12: []}))
         monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
         monkeypatch.setattr(trips_module, "get_figures_for_trips", figures)
+        _no_derived(monkeypatch)
 
         with patch.object(cache_module, "client", _FakeRedis()):
             page = await trips_module._cached_read_trips(
@@ -618,12 +653,15 @@ class TestReadPath:
         trip = _internal_trip()
         monkeypatch.setattr(trips_module.crud_trips, "get", AsyncMock(return_value=trip))
         monkeypatch.setattr(
-            trips_module, "get_parts_for_trip", AsyncMock(return_value=[_part("Moalboal"), _part("Bohol")])
+            trips_module,
+            "get_parts_for_trips",
+            AsyncMock(return_value={trip.id: [_part("Moalboal"), _part("Bohol")]}),
         )
         monkeypatch.setattr(trips_module, "get_people_for_trips", AsyncMock(return_value={}))
         monkeypatch.setattr(
             trips_module, "get_figures_for_trips", AsyncMock(return_value={trip.id: TripFigures(4, 3, 17, 32.4)})
         )
+        _no_derived(monkeypatch)
         redis = _FakeRedis()
 
         with patch.object(cache_module, "client", redis):
