@@ -548,6 +548,10 @@ class DiveListItem(DiveRead):
             "when there is none to draw",
         ),
     ]
+    recording_count: Annotated[
+        int,
+        Field(ge=0, description="How many recordings the dive holds, as the dive page lists them; 0 when it has none"),
+    ]
 
 
 class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
