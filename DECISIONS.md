@@ -4665,17 +4665,18 @@ It is enrolled by hand in `ANONYMOUS_BY_DESIGN` (`tests/test_route_authenticatio
 
 ## Species photos: an operator's decision sticks, and a source under 500 px is refused
 
-`photo_curation` is `hidden`, `pinned` or NULL for "the rule decides"; the backfill, `--force`
-included, and `save_photo_attempt` never write a curated row. Hiding deletes the bytes rather than
-flagging them: nothing would serve them, and a kept blob is one the sweeper cannot reclaim.
+`photo_curation` is `hidden`, `pinned` or NULL for "the rule decides"; the backfill's fetch,
+`--force` included, and `save_photo_attempt` never write a curated row, and `--recheck-size` clears
+a pin only when its bytes are gone. Hiding deletes the bytes: nothing would serve them, and a kept
+blob is one the sweeper cannot reclaim.
 
 The floor is the 500 px bucket the fetch asks for, measured on the stored bytes after the EXIF
 transpose rather than on Commons' `width`, so `--recheck-size` applies the same test to stored rows
 without a Commons call; nothing resizes, so a narrow source is stored at its own width. A pin skips
-the floor: the operator saw the width and chose it.
+the floor: the operator chose that width.
 
-A re-fetch clears the photo only on `declined`, the rule's own answer; `unavailable`, every way of
-never really asking, is a 503 with the row untouched.
+A re-fetch clears the photo only on `declined`, the rule's own answer; `unavailable` is a 503 with
+the row untouched.
 
 ## Species photos: the picker's previews travel inline
 

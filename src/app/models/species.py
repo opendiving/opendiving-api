@@ -133,9 +133,10 @@ class Species(Base, PublicUUIDMixin, TimestampMixin):
     photo_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     # What a human decided about this row's photo: "hidden" (no photo, and the rule may not
     # put one back) or "pinned" (this file, chosen by hand); NULL lets the rule decide. The
-    # backfill and every rule-driven write skip a curated row - see
-    # `species_photos.save_photo_attempt`. A short string rather than an enum type for the
-    # reason `rank` is one: a third value then needs no type migration.
+    # backfill's fetch and every rule-driven write skip a curated row - see
+    # `species_photos.save_photo_attempt` - and the size re-check clears a pin only when its
+    # bytes are gone. A short string rather than an enum type for the reason `rank` is one: a
+    # third value then needs no type migration.
     photo_curation: Mapped[str | None] = mapped_column(String(16), default=None)
     # The stored bytes' own dimensions, after the EXIF transpose. NULL for a row with no photo
     # and for one stored before these columns existed, until the backfill's `--recheck-size`
