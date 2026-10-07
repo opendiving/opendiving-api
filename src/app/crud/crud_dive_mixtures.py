@@ -1,6 +1,10 @@
-from sqlalchemy import delete, select
+from datetime import datetime
+from typing import cast
+
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..models.dive import Dive
 from ..models.dive_mixture import DiveMixture
 from ..schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead
 
@@ -53,3 +57,23 @@ async def replace_mixtures_for_dive(
         db.add(DiveMixture(dive_id=dive_id, **mixture.model_dump()))
     if commit:
         await db.commit()
+
+
+async def get_recent_volumes(db: AsyncSession, *, user_id: int, bound: datetime | None, limit: int) -> list[float]:
+    """The distinct cylinder volumes on the caller's live dives at or before `bound`, the one a
+    dive used most recently first, then the smaller.
+
+    Compared as stored, with no rounding of its own: the readers already keep two places
+    (`dive_reader._mixture`), and a volume typed in is the volume the diver means.
+    """
+    statement = (
+        select(DiveMixture.volume)
+        .join(Dive, Dive.id == DiveMixture.dive_id)
+        .where(Dive.user_id == user_id, Dive.is_deleted.is_(False), DiveMixture.volume.is_not(None))
+        .group_by(DiveMixture.volume)
+        .order_by(func.max(Dive.start_time).desc(), DiveMixture.volume.asc())
+        .limit(limit)
+    )
+    if bound is not None:
+        statement = statement.where(Dive.start_time <= bound)
+    return cast(list[float], list((await db.scalars(statement)).all()))

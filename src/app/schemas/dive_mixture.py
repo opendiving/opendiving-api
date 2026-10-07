@@ -259,3 +259,15 @@ class DiveMixtureUpdate(BaseModel):
     ]
     role: Annotated[GasRole | None, Field(default=None, description="What the cylinder was carried for")]
     usage: Annotated[TankUsage | None, Field(default=None, description="How the cylinder was breathed")]
+
+
+class RecentVolumes(BaseModel):
+    """The cylinder volumes a dive form offers first, for `GET /dives/recent-volumes`."""
+
+    volumes: Annotated[
+        list[float],
+        Field(
+            examples=[[11.1, 15.0, 12.0]],
+            description="Distinct cylinder volumes in liters, the one a dive used most recently first; at most 10",
+        ),
+    ]
