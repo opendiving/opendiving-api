@@ -37,7 +37,6 @@ from ...models.dive import Dive
 from ...models.dive_site import DiveSite
 from ...models.person import Person
 from ...models.trip import Trip
-from ...models.user import User
 from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.contact import ContactRole, address_from_row
 from ...schemas.course import CourseStatus
@@ -93,7 +92,6 @@ from ...schemas.gear_service import ServiceKind
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LocationRead, location_from_row
 from ...schemas.person import PersonRole
 from ...schemas.trip import TripPartRead
-from ...schemas.user import EMERGENCY_CONTACT_FIELDS, INSURANCE_FIELDS, is_blank
 from ...schemas.user_picture import PictureKind
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
 from .loader import ExportBundle, ExportFileRow, ExportRecordingRow, ExportReference
@@ -339,30 +337,9 @@ def _mixture(mixture: DiveMixtureRead) -> ExportCylinder:
 
 
 def _filled(value: str | None) -> str | None:
-    """A check-in text column as the format spells it: `""` is absent, never an empty member."""
-    return None if is_blank(value) else value
-
-
-def _emergency_contacts(user: User) -> list[ExportEmergencyContact] | None:
-    """The account's one contact, or nothing - and nothing, too, for one with no name.
-
-    `name` is REQUIRED in the format and a row saved before `PATCH /user` required it can
-    still lack one. The diver still sees it in the app; the export leaves it out until they
-    name someone, since the app's writer has no report channel to say it dropped anything.
-    """
-    name, phone, relationship = (getattr(user, field) for field in EMERGENCY_CONTACT_FIELDS)
-    if is_blank(name):
-        return None
-    return [ExportEmergencyContact(name=name, phone=_filled(phone), relationship=_filled(relationship))]
-
-
-def _insurances(user: User) -> list[ExportInsurance] | None:
-    """The account's one policy, or nothing, on `_emergency_contacts`'s terms: no provider,
-    no policy."""
-    provider, number, expires_on = (getattr(user, field) for field in INSURANCE_FIELDS)
-    if is_blank(provider):
-        return None
-    return [ExportInsurance(provider=provider, number=_filled(number), expires_on=expires_on)]
+    """A person's or contact's text column as the format spells it: blank is absent, never an
+    empty member."""
+    return value if value and value.strip() else None
 
 
 def _portrait_file(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportStoredFile | None:
@@ -397,15 +374,19 @@ def _portrait_file(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportSt
 
 def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
     user = bundle.user
+    details = bundle.checkin_details
     return ExportDiver(
         uuid=user.uuid,
         name=user.name,
         username=user.username,
-        email=user.email,
-        phone=_filled(user.phone),
-        born_on=user.date_of_birth,
-        emergency_contacts=_emergency_contacts(user),
-        insurances=_insurances(user),
+        # The check-in email, the address the diver gives out. `user.email` is the sign-in
+        # address, which no export carries.
+        email=details.email,
+        phone=details.phone,
+        born_on=details.date_of_birth,
+        emergency_contacts=[ExportEmergencyContact(**contact.model_dump()) for contact in details.emergency_contacts]
+        or None,
+        insurances=[ExportInsurance(**policy.model_dump()) for policy in details.insurance_policies] or None,
         portrait_file=_portrait_file(bundle, paths),
         created_at=user.created_at,
         # The account-level preferences. They are here because `/export/archive` says

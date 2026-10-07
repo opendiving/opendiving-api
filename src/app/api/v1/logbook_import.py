@@ -135,8 +135,9 @@ _FILES = {
 }
 
 _CHECK_IN_DESCRIPTION = (
-    "The check-in details to write, as JSON: the preview's proposals as kept or edited. A detail left out is not "
-    "written, and `null` clears it."
+    "The check-in details to write, as JSON keyed as `PATCH /user/checkin-details` keys them: the preview's "
+    "proposals as kept or edited. A member left out is not written, `null` clears a scalar, and a list replaces "
+    "the account's whole."
 )
 _PORTRAIT_DESCRIPTION = (
     "The choice made for the preview's `portrait`, as JSON: `take` or `keep`, with the `account_sha256` the preview "
@@ -287,10 +288,12 @@ async def preview_logbook_import(
     conversion could not carry: findings grouped by kind and message, each with up to three
     paths into your original files. Treat a `kind` you do not recognise as a plain finding.
 
-    `check_in_details` has one entry for each check-in detail the logbook carries - date of
-    birth, phone, emergency contact, dive insurance - with your account's value beside the
-    proposal. An emergency contact or an insurance is proposed whole: your own where every
-    part the logbook gives matches it, otherwise the logbook's alone.
+    `check_in_details` has one entry for each member of the check-in details the logbook
+    carries - email, phone, date of birth, emergency contacts, insurance policies - keyed by
+    the member's name, with your account's value beside the proposal. A list is proposed as a
+    list: each of the logbook's rows is your own where every part it gives matches one of
+    yours, otherwise the logbook's alone. An email that is the address you sign in with is not
+    offered, unless it already is your check-in email.
 
     `portrait` is the archive's portrait beside your account's, when the archive carries one
     it can offer: yours as the digest `GET /user/portrait` answers to, the archive's as an
@@ -352,10 +355,10 @@ async def apply_logbook_import(
     Species before the transaction opens and stay whether the import completes or not.
 
     The document's diver identity and settings are never applied: this account keeps its own
-    name, email, units and notification settings. Its check-in details are written as sent in
-    `check_in_details` and only then - a detail not sent, or one the logbook does not carry,
-    stays as it is. What is sent meets the bounds `PATCH /user` does, and an emergency
-    contact without a name or an insurance without a provider is a 422.
+    name, sign-in email, units and notification settings. Its check-in details are written as
+    sent in `check_in_details` and only then - a member not sent, or one the logbook does not
+    carry, stays as it is. What is sent meets the bounds `PATCH /user/checkin-details` does,
+    so an emergency contact without a name or a policy without a provider is a 422.
 
     The archive's portrait replaces your account's only when `portrait` says `take`, and
     only while your portrait is still the one the preview showed; otherwise yours is kept,
@@ -377,10 +380,6 @@ async def apply_logbook_import(
             raise _missing("token")
         check_in = _submitted(body, "check_in_details", ImportCheckInSubmission)
         portrait = _submitted(body, "portrait", ImportPortraitChoice)
-        if check_in is not None and (anchor_errors := check_in.anchor_errors()):
-            raise RequestValidationError(
-                [{**error, "loc": ("body", "check_in_details", *error["loc"])} for error in anchor_errors]
-            )
 
         claims = verify_logbook_import_token(token)
         if claims is None or claims.user_uuid != str(current_user["uuid"]):

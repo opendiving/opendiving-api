@@ -119,9 +119,8 @@ async def export_divejson(
     diver's tags, marine-life sightings, gear and its service history, c-card records and the
     check-in details and portrait a dive shop asks for -
     everything the account holds except the binaries themselves, which the file references
-    by digest, the profile picture, which it does not name, and an emergency contact with no
-    name or an insurance with no provider, which the format cannot carry until the contact
-    is named or the insurer is.
+    by digest, and the profile picture, which it does not name. The diver's `email` is the
+    check-in email, absent when none is set; the sign-in address is in no export.
 
     For a copy that carries those binaries too, use `/export/archive`, whose
     `logbook.divejson` member is this same document.
@@ -147,12 +146,12 @@ async def export_uddf(
     this is the file to hand one of those. It carries the dives, their sites, trips,
     gases, cylinders, gear and full sample profiles, the contacts as dive bases, shops and
     the accommodation of each trip part, the people as buddies with a dive's guide under its
-    dive base, and the diver's date of birth, phone and dive insurance - but not the things
-    the format has no slot for (gear sets, service history, c-cards, training courses, a
-    contact's roles, a trip's people and every role but buddy and guide, a person's link to
-    an account, per-cylinder role and usage, the deco ceiling, the emergency contact, the
-    insurance policy number, the portrait, a dive's tags, waves, weather and boat name, and the
-    kinds of dive and of entry UDDF has no word for).
+    dive base, and the diver's date of birth, phone, check-in email and insurance policies -
+    but not the things the format has no slot for (gear sets, service history, c-cards,
+    training courses, a contact's roles, a trip's people and every role but buddy and guide,
+    a person's link to an account, per-cylinder role and usage, the deco ceiling, the
+    emergency contacts, the insurance policy numbers, the portrait, a dive's tags, waves,
+    weather and boat name, and the kinds of dive and of entry UDDF has no word for).
     For a lossless structured copy, use `/export/divejson`; for one that carries the
     stored files as well, `/export/archive`.
     """
@@ -211,8 +210,7 @@ async def export_archive(
     originals of the profile picture and the check-in portrait.
 
     This is the complete copy - nothing in the account is reachable only through the app
-    after taking it, bar an emergency contact with no name or an insurance with no provider,
-    which DiveJSON cannot carry until they are completed. **It includes the certification
+    after taking it. **It includes the certification
     card images and the portrait**, which are personal documents, so treat the file
     accordingly.
     """

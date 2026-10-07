@@ -1,9 +1,8 @@
-from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, ClassVar
+from typing import Annotated, ClassVar
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 from .dive_form_preset import DiveFormField, canonical_hidden_fields
@@ -25,80 +24,6 @@ class UnitSystem(StrEnum):
 
     METRIC = "metric"
     IMPERIAL = "imperial"
-
-
-#: The account columns a dive shop's desk asks for, in the order a form asks for them.
-#: Written once here because three places need the same list and must not spell it three
-#: ways: the two schemas below declare each field, and the model carries each column.
-#: Adding a column means adding it here, on the model, and on both schemas -
-#: `tests/test_check_in_details.py` fails on any of the three being missed.
-CHECK_IN_FIELDS: tuple[str, ...] = (
-    "date_of_birth",
-    "phone",
-    "emergency_contact_name",
-    "emergency_contact_phone",
-    "emergency_contact_relationship",
-    "insurance_provider",
-    "insurance_policy_number",
-    "insurance_expires_on",
-)
-
-#: The two check-in details that are one object each rather than one value, as their columns
-#: with the anchor first. DiveJSON makes the anchor REQUIRED inside each object (§6.1), so a
-#: contact nobody is named in, or a policy number with no insurer, is not a detail at all:
-#: `PATCH /user` refuses to leave one behind, the export omits one already stored, and an
-#: import drops one a document carries.
-EMERGENCY_CONTACT_FIELDS: tuple[str, ...] = (
-    "emergency_contact_name",
-    "emergency_contact_phone",
-    "emergency_contact_relationship",
-)
-INSURANCE_FIELDS: tuple[str, ...] = ("insurance_provider", "insurance_policy_number", "insurance_expires_on")
-
-#: What the 422 says about a missing anchor, keyed by the anchor's column.
-ANCHOR_REQUIRED_MESSAGES: dict[str, str] = {
-    "emergency_contact_name": "Required while the emergency contact has a phone or a relationship",
-    "insurance_provider": "Required while the insurance has a policy number or an expiry date",
-}
-
-
-def is_blank(value: object) -> bool:
-    """Unset, for a check-in detail: `None`, or a string with nothing but whitespace in it.
-
-    The columns take `""` from `PATCH /user` as readily as `null`, and a contact named `""`
-    is no more a contact than one named nothing - so every rule about whether a detail is
-    there asks this rather than `is None`.
-    """
-    return value is None or (isinstance(value, str) and not value.strip())
-
-
-def lacks_its_anchor(values: Mapping[str, Any], fields: tuple[str, ...]) -> bool:
-    """Whether `values` holds something of one object's but not the member that names it."""
-    anchor, *members = fields
-    return is_blank(values.get(anchor)) and any(not is_blank(values.get(member)) for member in members)
-
-
-def _not_in_the_future(value: date) -> date:
-    """A mistyped year is the whole of what this catches, and it reaches a dive shop as a
-    diver who is not born yet.
-
-    Only on the way in: `UserRead` carries the same field unguarded, so a row that somehow
-    holds one still reads back rather than 500-ing the account on every authenticated
-    request. There is no floor beneath it either - a plausible oldest diver is a guess, and
-    refusing a real one is worse than storing an odd one.
-    """
-    if value > datetime.now(UTC).date():
-        raise ValueError("a date of birth cannot be in the future")
-    return value
-
-
-# The check-in details' write-side types, stated once for the two routes that write them:
-# `PATCH /user` from the settings form, and the logbook import from what the diver confirmed
-# in its preview. Each bound is the column's width.
-BirthDate = Annotated[date, AfterValidator(_not_in_the_future)]
-CheckInPhone = Annotated[str, StringConstraints(max_length=32)]
-CheckInName = Annotated[str, StringConstraints(max_length=255)]
-CheckInShortText = Annotated[str, StringConstraints(max_length=64)]
 
 
 class UserBase(BaseModel):
@@ -153,19 +78,6 @@ class UserRead(PublicUUIDSchema):
     # reason this lives on the account rather than on the device. Same note as its two
     # neighbours above on what the default is and isn't for.
     dive_form_hidden_fields: Annotated[list[StoredVocabulary], Field(default_factory=list)]
-    # The check-in details, null until the diver fills one in. Unconstrained here although
-    # the columns are bounded and `UserUpdate` says so: this schema re-validates the stored
-    # row on every authenticated request (`get_current_user`), so a rule stated here answers
-    # a request the diver is making now for a value written long ago - the reasoning behind
-    # `StoredVocabulary` beside it. The write side is where a bad value is refused.
-    date_of_birth: date | None = None
-    phone: str | None = None
-    emergency_contact_name: str | None = None
-    emergency_contact_phone: str | None = None
-    emergency_contact_relationship: str | None = None
-    insurance_provider: str | None = None
-    insurance_policy_number: str | None = None
-    insurance_expires_on: date | None = None
     # The caller's own record of whether they are this instance's operator, so a client can
     # decide whether to offer the operator's surface at all. Not a disclosure about anybody
     # else: `GET /user` returns the caller's row, and of another account no route returns more
@@ -253,7 +165,7 @@ class UserUpdate(RejectsExplicitNulls):
     # Same reasoning for the settings page's other two email toggles.
     renewal_reminder_emails: Annotated[
         bool | None,
-        Field(default=None, description="Email me when a certification or my dive insurance is about to expire"),
+        Field(default=None, description="Email me when a certification or an insurance policy is about to expire"),
     ]
     year_in_review_emails: Annotated[
         bool | None, Field(default=None, description="Email me a review of my diving year each January")
@@ -273,27 +185,6 @@ class UserUpdate(RejectsExplicitNulls):
             max_length=len(DiveFormField),
             description="Dive form fields to keep hidden, in any order - stored canonically, duplicates collapsed",
         ),
-    ]
-
-    # The check-in details. Each is absent from `NON_NULLABLE_FIELDS` on purpose: the
-    # columns are nullable, and an explicit `null` is how a diver removes a detail they
-    # once gave - the emergency contact above all, which is three fields cleared together.
-    # An emergency contact or an insurance left holding a member but not its anchor is
-    # refused by the route, which is the one place that sees the row the patch lands on.
-    date_of_birth: Annotated[
-        BirthDate | None,
-        Field(default=None, examples=["1988-04-12"], description="Date of birth, as a shop's form asks"),
-    ]
-    phone: Annotated[CheckInPhone | None, Field(default=None, examples=["+20 100 123 4567"])]
-    emergency_contact_name: Annotated[CheckInName | None, Field(default=None)]
-    emergency_contact_phone: Annotated[CheckInPhone | None, Field(default=None)]
-    emergency_contact_relationship: Annotated[
-        CheckInShortText | None, Field(default=None, examples=["Partner"], description="Free text, not a vocabulary")
-    ]
-    insurance_provider: Annotated[CheckInName | None, Field(default=None, examples=["DAN Europe"])]
-    insurance_policy_number: Annotated[CheckInShortText | None, Field(default=None)]
-    insurance_expires_on: Annotated[
-        date | None, Field(default=None, description="Expiry of the dive insurance policy named above")
     ]
 
     @field_validator("dive_form_hidden_fields")

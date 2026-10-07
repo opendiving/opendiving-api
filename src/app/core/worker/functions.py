@@ -16,6 +16,7 @@ from ...models.auth_audit_event import AuthAuditEvent
 from ...models.authentication_request import AuthenticationRequest
 from ...models.certification import Certification
 from ...models.certification_file import CertificationFile
+from ...models.checkin_details import CheckinInsurancePolicy
 from ...models.checkin_link import CheckinLink
 from ...models.dive import Dive
 from ...models.dive_file import DiveFile
@@ -808,10 +809,10 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
 
 
 async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None) -> str:
-    """Email each diver one list of the certifications and insurance they need to renew.
+    """Email each diver one list of the certifications and insurance policies they need to renew.
 
     The gear digest's shape, cloned onto dates. The subjects are every live certification
-    with an `expires_on` and the account's dive insurance when it has an expiry; each is
+    with an `expires_on` and every insurance policy with one, one line each; each is
     sent once on entering the window and once on expiring (`services.renewals.should_remind`),
     with no re-nag after that. A renewal moves the date, and the stored pair then no longer
     matches, so the next window re-arms without anything clearing it.
@@ -849,24 +850,27 @@ async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None)
                 )
             )
         ).all()
-        insurances = (
+        policies = (
             await db.execute(
                 select(
                     User.id.label("user_id"),
                     User.email,
-                    User.insurance_provider,
-                    User.insurance_expires_on,
-                    User.insurance_notified_stage,
-                    User.insurance_notified_for,
-                ).where(
+                    CheckinInsurancePolicy.id.label("policy_id"),
+                    CheckinInsurancePolicy.provider,
+                    CheckinInsurancePolicy.expires_on,
+                    CheckinInsurancePolicy.notified_stage,
+                    CheckinInsurancePolicy.notified_for,
+                )
+                .join(User, User.id == CheckinInsurancePolicy.user_id)
+                .where(
                     User.is_deleted.is_(False),
                     User.renewal_reminder_emails.is_(True),
-                    User.insurance_expires_on <= horizon,
+                    CheckinInsurancePolicy.expires_on <= horizon,
                 )
             )
         ).all()
 
-    by_user: dict[int, dict[str, Any]] = defaultdict(lambda: {"email": "", "lines": [], "marks": [], "insurance": None})
+    by_user: dict[int, dict[str, Any]] = defaultdict(lambda: {"email": "", "lines": [], "marks": [], "policies": []})
     for row in certifications:
         stage = expiry_stage(row.expires_on, today)
         if stage is None or not should_remind(
@@ -883,23 +887,21 @@ async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None)
         bucket["marks"].append(
             {"id": row.certification_id, "expiry_notified_stage": stage.value, "expiry_notified_for": row.expires_on}
         )
-    for policy in insurances:
-        stage = expiry_stage(policy.insurance_expires_on, today)
+    for policy in policies:
+        stage = expiry_stage(policy.expires_on, today)
         if stage is None or not should_remind(
             stage=stage,
-            expires_on=policy.insurance_expires_on,
-            notified_stage=policy.insurance_notified_stage,
-            notified_for=policy.insurance_notified_for,
+            expires_on=policy.expires_on,
+            notified_stage=policy.notified_stage,
+            notified_for=policy.notified_for,
         ):
             continue
         bucket = by_user[policy.user_id]
         bucket["email"] = policy.email
-        text = expiry_text(stage, policy.insurance_expires_on)
+        text = expiry_text(stage, policy.expires_on)
         # `/settings/checkin`, where the policy is entered, as the Renewals card's insurance row links.
-        bucket["lines"].append(
-            (policy.insurance_expires_on, insurance_label(policy.insurance_provider), text, "/settings/checkin")
-        )
-        bucket["insurance"] = (stage.value, policy.insurance_expires_on)
+        bucket["lines"].append((policy.expires_on, insurance_label(policy.provider), text, "/settings/checkin"))
+        bucket["policies"].append((policy.policy_id, stage.value, policy.expires_on))
 
     if not by_user:
         logging.info("No renewal reminders to send")
@@ -909,7 +911,7 @@ async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None)
     sent_subjects = 0
     async with local_session() as db:
         for user_id, bucket in by_user.items():
-            # Soonest first, cards and insurance in one list, as the Renewals card orders them.
+            # Soonest first, cards and policies in one list, as the Renewals card orders them.
             lines = [(label, text, path) for _, label, text, path in sorted(bucket["lines"])]
             # Send, then mark, for the digest's reason: a failed send is a duplicate tomorrow
             # rather than a reminder that never arrives.
@@ -919,12 +921,14 @@ async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None)
             # DECISIONS.md, "The digest's mark is an ORM bulk UPDATE by primary key".
             if bucket["marks"]:
                 await db.execute(update(Certification), bucket["marks"])
-            if bucket["insurance"] is not None:
-                stage_value, expires_on = bucket["insurance"]
+            # One statement per policy rather than the bulk form above: a save replaces the
+            # rows, and a bulk UPDATE by primary key raises on one replaced since the read
+            # where this marks nothing - the reminder then repeats once.
+            for policy_id, stage_value, expires_on in bucket["policies"]:
                 await db.execute(
-                    update(User)
-                    .where(User.id == user_id)
-                    .values(insurance_notified_stage=stage_value, insurance_notified_for=expires_on)
+                    update(CheckinInsurancePolicy)
+                    .where(CheckinInsurancePolicy.id == policy_id)
+                    .values(notified_stage=stage_value, notified_for=expires_on)
                 )
             await db.commit()
             sent_users += 1

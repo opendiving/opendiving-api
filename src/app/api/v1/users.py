@@ -48,15 +48,7 @@ from ...schemas.email_change import (
 )
 from ...schemas.species import SpeciesLifeListDetail, SpeciesLifeListEntry
 from ...schemas.storage import StorageUsageRead
-from ...schemas.user import (
-    ANCHOR_REQUIRED_MESSAGES,
-    EMERGENCY_CONTACT_FIELDS,
-    INSURANCE_FIELDS,
-    AccountDeletionResponse,
-    UserRead,
-    UserUpdate,
-    lacks_its_anchor,
-)
+from ...schemas.user import AccountDeletionResponse, UserRead, UserUpdate
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
 from ...schemas.user_picture import PictureCrop, PictureCropRequest, PictureKind, PictureRead
 from ...services.dive_activity import dive_activity
@@ -155,32 +147,10 @@ async def patch_user(
     available", so unthrottled it is a wordlist oracle over who exists. The rest of the
     profile isn't limited.
 
-    An emergency contact needs a name and an insurance needs a provider: a patch that would
-    leave either holding its other fields without one is a 422 naming the missing field.
-    Only a patch touching that object's fields is checked, so clearing a whole contact
-    passes, and so does a units toggle on an account whose contact has no name yet.
+    The check-in details are not here: `PATCH /user/checkin-details` writes them.
     """
     # Note: `email` is deliberately not part of `UserUpdate` - see
     # `POST /user/email-change/request` for how email changes work instead.
-    patch = values.model_dump(exclude_unset=True)
-    after = {**current_user, **patch}
-    unanchored = [
-        fields[0]
-        for fields in (EMERGENCY_CONTACT_FIELDS, INSURANCE_FIELDS)
-        if patch.keys() & set(fields) and lacks_its_anchor(after, fields)
-    ]
-    if unanchored:
-        raise RequestValidationError(
-            [
-                {
-                    "type": "missing",
-                    "loc": ("body", anchor),
-                    "msg": ANCHOR_REQUIRED_MESSAGES[anchor],
-                    "input": after.get(anchor),
-                }
-                for anchor in unanchored
-            ]
-        )
     if values.username is not None and values.username != current_user["username"]:
         await enforce_rate_limit(
             f"username-change:user:{current_user['id']}",

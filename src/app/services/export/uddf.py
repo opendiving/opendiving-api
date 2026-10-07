@@ -53,7 +53,7 @@ reading the XSD, and each is exported in `logbook.divejson`/CSV instead:
   surface gradient factor - not a mandatory attribute we cannot fill, simply no slot. The
   per-waypoint `<gradientfactor>` above is the leading tissue's now, which is
   `gradient_factor` and not the surface figure beside it.
-- **The emergency contact and the insurance policy number.** UDDF has no element for a
+- **The emergency contacts and the insurance policy numbers.** UDDF has no element for a
   person to call, and `insuranceType` is a name, aliases, two dates and notes - no number.
   `<membership memberid>` is not one either: a membership is not a policy, and a reader
   could not tell a club from an insurer.
@@ -131,7 +131,6 @@ from ...schemas.dive_profile import (
 from ...schemas.gear_item import GearType
 from ...schemas.person import PersonRole
 from ...schemas.trip import TripPartRead
-from ...schemas.user import is_blank
 from ..dive_profiles import load_profile
 from .loader import ExportBundle
 from .naming import gas_name
@@ -519,37 +518,39 @@ def _diver_element(bundle: ExportBundle) -> ET.Element:
     """The owner, in the XSD's order: `personal`, `contact`, `equipment`, `diveinsurances` -
     and after it one `<buddy>` per person.
 
-    The date of birth, the phone and the insurance go out, being what a shop's desk asks for.
-    The emergency contact and the policy number have no element and stay in
-    `logbook.divejson`; an insurance whose provider is blank is not written, `<name>` being
-    mandatory.
+    The check-in details go out, being what a shop's desk asks for: the date of birth, the
+    phone and the check-in email, and one `<insurance>` per policy. The emergency contacts
+    and the policy numbers have no element and stay in `logbook.divejson`. The sign-in
+    address never goes out: it is the account's, not a detail the diver gives out.
     """
     user = bundle.user
+    details = bundle.checkin_details
     diver = ET.Element("diver")
     owner = _sub(diver, "owner", id="owner")
     personal = _sub(owner, "personal")
     first, last = _person_names(user.name, user.username)
     _sub(personal, "firstname", first)
     _sub(personal, "lastname", last)
-    if user.date_of_birth is not None:
-        _sub(_sub(personal, "birthdate"), "datetime", _midnight(user.date_of_birth))
+    if details.date_of_birth is not None:
+        _sub(_sub(personal, "birthdate"), "datetime", _midnight(details.date_of_birth))
 
-    # No `<contact><email>`, although the schema has the slot: a UDDF file is the thing a
-    # diver hands to a dive shop or uploads to divelogs.de, and their address riding along
-    # in it would be a surprise. It is in `logbook.divejson`, which is the diver's own copy.
-    # What the diver logged about others *is* written: a contact's email (`_contact_contents`),
-    # the listing on a shop's sign, and a person's email and phone (`_buddy_element`), in the
-    # slot UDDF gives a buddy. The owner's address is the account's sign-in, not a record.
-    if not is_blank(user.phone):
-        _sub(_sub(owner, "contact"), "phone", user.phone)
+    # `contactType` is a sequence, phone before email.
+    if details.phone is not None or details.email is not None:
+        contact = _sub(owner, "contact")
+        if details.phone is not None:
+            _sub(contact, "phone", details.phone)
+        if details.email is not None:
+            _sub(contact, "email", details.email)
     equipment = _equipment_element(bundle)
     if equipment is not None:
         owner.append(equipment)
-    if not is_blank(user.insurance_provider):
-        insurance = _sub(_sub(owner, "diveinsurances"), "insurance")
-        _sub(insurance, "name", user.insurance_provider)
-        if user.insurance_expires_on is not None:
-            _sub(_sub(insurance, "validdate"), "datetime", _midnight(user.insurance_expires_on))
+    if details.insurance_policies:
+        insurances = _sub(owner, "diveinsurances")
+        for policy in details.insurance_policies:
+            insurance = _sub(insurances, "insurance")
+            _sub(insurance, "name", policy.provider)
+            if policy.expires_on is not None:
+                _sub(_sub(insurance, "validdate"), "datetime", _midnight(policy.expires_on))
     for person in bundle.people:
         _buddy_element(diver, person)
     return diver

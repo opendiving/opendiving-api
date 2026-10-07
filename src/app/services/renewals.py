@@ -1,4 +1,4 @@
-"""When a certification or the dive insurance is worth a reminder email, and what it says.
+"""When a certification or an insurance policy is worth a reminder email, and what it says.
 
 Pure, like the top half of `services.gear_service`: no session and no clock of its own, so
 the rules are tested without a database (`tests/test_renewals.py`) and

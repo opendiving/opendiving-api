@@ -192,10 +192,10 @@ class ExportStoredFile(PublicUUIDSchema):
 class ExportDiver(PublicUUIDSchema):
     """Whose logbook this is.
 
-    The check-in details a dive shop's desk asks for are core members (spec §6.1): the date
-    of birth, the phone, and the emergency contact and the insurance as one-element arrays,
-    since the account stores one of each and the format orders several. Each is absent where
-    the diver filled nothing in.
+    The check-in details a dive shop's desk asks for are core members (spec §6.1): the email
+    the diver gives out, the date of birth, the phone, and the emergency contacts and the
+    insurance policies in the diver's order. Each is absent where the diver filled nothing
+    in. `email` is the check-in email and never the sign-in address, which no export carries.
 
     `portrait_file` is the check-in portrait's original, whole: the format leaves the framing
     to each reader, so this app's crop rides the file's own `extensions.opendiving` and an
@@ -213,7 +213,7 @@ class ExportDiver(PublicUUIDSchema):
 
     name: str
     username: str
-    email: str
+    email: str | None = None
     phone: str | None = None
     born_on: date | None = None
     emergency_contacts: list[ExportEmergencyContact] | None = None
