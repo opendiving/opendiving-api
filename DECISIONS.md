@@ -5818,9 +5818,10 @@ service `type`) carries an unknown value, which §5.6 reads as absent. A course'
 OPTIONAL and so costs the field rather than the record — see *A course may have no agency, and a
 certification may not*.
 
-Three derivations are allowed: a dive with no `duration` takes its profile's span, and one with no
-`bottom_temperature` its primary recording's coldest sample, as the dive form does, both reported;
-one with no `number` takes the dive form's suggestion, duplicates being legal
+Three derivations are allowed: a dive with no `duration` or `avg_depth` takes its profile's time in
+the water (`divejson.in_water`), the span standing in for a duration where no sample was in the
+water, and one with no `bottom_temperature` its primary recording's coldest sample, as the dive form
+does, all reported; one with no `number` takes the dive form's suggestion, duplicates being legal
 (`DiveNumberingSummary`).
 
 `visibility` is finer in the format (a number, §6.2) than here (whole metres); a fractional value is
@@ -6277,15 +6278,15 @@ The earlier dive survives by `starts_before` (`delta_seconds`' rule, `services/d
 `_orders_first` breaking ties by id; the loser is soft-deleted. Same-device records fold into one
 recording; different devices or a NULL start append. The offset is the recordings' delta, never the
 dives'. The gap stays empty: `join_profiles` is not `fill_channels`; pressure joins by `gas_number`;
-markers all stay. Provenance is `merge`, so `should_extract` never re-extracts; files stay.
-`duration`, `max_depth` and `dive_figures` recompute, `None` meaning leave alone; `start_time` and
-the fixes stay, `refresh_tech_scalars` uncalled; the absorbed record's readouts fill the survivor's
-blanks. An `avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write.
-`relabel_gas_numbers` precedes the join, keeping `usage` and filling the survivor's blank cylinder
-members from the absorbed rows it pairs, as an arrival does, an empty absorbed row not appended;
-moved profiles use `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions
-stay, notes append within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not
-reused.
+markers all stay. Provenance is `merge`, so `should_extract` never re-extracts; files stay. A fold's
+`duration` and `avg_depth` are its time in the water; side by side they stand; `max_depth` is the
+deepest reading; `None` means leave alone; `start_time` and the fixes stay, `refresh_tech_scalars`
+uncalled; the absorbed record's readouts fill the survivor's blanks. An `avg_depth` failing
+`ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers` precedes the join,
+keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
+as an arrival does, an empty absorbed row not appended; moved profiles use
+`replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
+within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
@@ -7022,3 +7023,16 @@ where NULL, cast to a date, and a test pins it to `local_day()` for every stored
 the single place a day is displayed or bucketed. Rejected: a day-wide instant window narrowed in
 Python, which pages wrong; and narrowing in the browser, which leaves the trip read's counts no
 server to come from.
+
+## A dive's duration and average depth are its time in the water
+
+`dive.duration` is the time in the water as the computer counts it, surface time before, between and
+after excluded, and `avg_depth` the time-weighted mean over it; the profile keeps every sample. A
+file's stated figure wins. Where none is stated the reader derives both from the samples deeper than
+1.2 m and `ParsedDiveSchema.inferred` names them, so a form takes a same-computer file's stated
+figure over a derived one. Every derivation here - a fold, the planner's missing figures, the
+backfill - calls `divejson.in_water`; match gates still compare spans (`RecordingFacts`), the parse
+included. `backfill_dive_figures` rewrites a stored value only while it equals the whole
+recording's: a duration within 1 s of the primary span, a mean within 0.1 m of the whole-recording
+mean. An imported dive moves only for a device the operator names, since nothing stored tells a
+stated figure from a span.

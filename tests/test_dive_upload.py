@@ -8,6 +8,7 @@ parse route's one read - the recordings a file might belong to - gets for a new 
 import io
 import uuid as uuid_pkg
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,7 +24,8 @@ from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.core.security import verify_dive_file_token
 from src.app.schemas.parsed_dive import ParsedDiveSchema
-from src.app.services.dive_files import MAX_DIVE_FILE_SIZE
+from src.app.services.dive_files import MAX_DIVE_FILE_SIZE, _incoming_facts, extract_file
+from src.app.services.dive_recordings import RecordingCandidate
 from tests.helpers.fit import dense_record_stream
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -263,3 +265,37 @@ class TestADayIsNoStartToMatchOn:
 
         assert await _parse_matches(AsyncMock(), user_id=1, parsed=parsed, profile=None) == []
         looked_up.assert_called_once()
+
+
+class TestTheParseMatchesOnTheRecordingsOwnFigures:
+    """`RecordingFacts` carries a recording's span and deepest sample, never the dive's
+    figures, which a reader may derive over a narrower window than the samples run."""
+
+    def _matches(self, monkeypatch: pytest.MonkeyPatch, *, span_shift_ms: int = 0) -> dict:
+        json_file = (FIXTURES / "dive_files" / "suunto-ocean-2026.json").read_bytes()
+        stored = _incoming_facts(extract_file(json_file, "suunto_json"))
+        assert stored is not None and stored.sampled_span is not None
+        stored = replace(stored, sampled_span=stored.sampled_span + span_shift_ms)
+        candidate = RecordingCandidate(
+            id=1, uuid=uuid_pkg.uuid4(), dive_id=1, dive_uuid=uuid_pkg.uuid4(), dive_number=7, ordinal=0, facts=stored
+        )
+        monkeypatch.setattr(dives_module, "load_candidates", AsyncMock(return_value=[candidate]))
+        status, body = _parse("dive.fit", (FIXTURES / "dive_files" / "suunto-ocean-2026.fit").read_bytes())
+        assert status == 200
+        return body
+
+    def test_an_ocean_fit_is_still_the_second_file_of_its_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The FIT's dive duration is its time in the water, 3 063 s, while its samples run
+        the span its JSON's recording stores."""
+        body = self._matches(monkeypatch)
+
+        assert body["duration"] == 3063
+        assert body["inferred"] == ["duration", "avg_depth"]
+        assert [match["same_recording"] for match in body["matches"]] == [True]
+
+    def test_the_span_clause_now_applies_to_a_parsed_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A parsed file carries its sampled span, so a stored recording whose samples run
+        ten seconds longer is a nearby dive rather than this file's other export."""
+        body = self._matches(monkeypatch, span_shift_ms=10_000)
+
+        assert [match["same_recording"] for match in body["matches"]] == [False]

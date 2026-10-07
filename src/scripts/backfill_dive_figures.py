@@ -5,20 +5,21 @@ Run once, after `backfill_dive_profiles`, from the API container:
     docker compose exec api python -m src.scripts.backfill_dive_figures --dry-run
     docker compose exec api python -m src.scripts.backfill_dive_figures --device suunto "Suunto Ocean"
 
-A dive's figures are its time in the water and the mean depth over it; an older reader or merge
-wrote the whole recording's span and mean, the minutes at the surface after the dive included.
+A dive's figures are its time in the water and the mean depth over it, where a stored row can
+hold the whole recording's span and mean, the minutes at the surface after the dive included.
 A figure that still equals what the whole recording gives is rewritten from the recording's
-files, or, where none can re-yield it, from its stored samples; a figure the diver typed over
-is left alone. `services/figures_backfill.py` has the predicate.
+files, or, where none can re-yield it, from its stored samples; any other figure is the diver's
+and is left alone. `services/figures_backfill.py` has the predicate.
 
 **`--device` names the primary devices whose logbook-imported dives may be rewritten**, as
 `dive_recording` stores them - a brand, and the model where it has one. Nothing stored says
 whether such a dive's document stated a figure that happens to equal its span, so those dives
-are only rewritten for a device the operator knows the old reader wrote: choose them from the
-dives' devices first. Without one, no imported dive is touched.
+are only rewritten for a device whose reader the operator knows wrote the span: choose them from
+the dives' devices first. Without one, no imported dive is touched.
 
 The report names the devices before any dive, so a run that rewrites nothing still says what it
-was scoped to. Safe to run repeatedly: a second run finds every figure it rewrote already at its new value.
+was scoped to. Safe to run repeatedly: a second run finds every figure it rewrote already at its
+new value.
 """
 
 import argparse
@@ -50,6 +51,9 @@ def _parse_args() -> argparse.Namespace:
         help="A primary device whose logbook-imported dives may be rewritten, as the recording stores it: "
         '`--device suunto "Suunto Ocean"`, or a brand alone for a recording with no model. Repeatable.',
     )
+    parser.add_argument(
+        "--user-id", type=int, default=None, help="Only this account's dives, to try a run on one first."
+    )
     parser.add_argument("--dry-run", action="store_true", help="Report what would be rewritten, write nothing.")
     return parser.parse_args()
 
@@ -66,7 +70,7 @@ async def main() -> None:
     await create_redis_cache_pool()
     try:
         async with local_session() as session:
-            report = await backfill_dive_figures(session, devices=devices, dry_run=args.dry_run)
+            report = await backfill_dive_figures(session, devices=devices, user_id=args.user_id, dry_run=args.dry_run)
     finally:
         await close_redis_cache_pool()
 

@@ -1,9 +1,9 @@
-"""The data path for dives whose `duration` and `avg_depth` were written over the whole recording.
+"""The data path for dives whose `duration` and `avg_depth` hold the whole recording's figures.
 
-A dive's figures are its time in the water and the mean depth over that time. Readers and
-merges before that rule wrote the recording's whole span and its whole-recording mean instead,
-the end-of-dive delay at the surface included, and nothing records whether a diver has since
-typed over either. So the test is on the value: a `duration` within a second of the primary
+A dive's figures are its time in the water and the mean depth over that time. A stored row can
+hold the recording's whole span and its whole-recording mean instead, the end-of-dive delay at
+the surface included, and nothing records whether a diver typed either. So the test is on the
+value: a `duration` within a second of the primary
 recording's span, and an `avg_depth` within 0.1 m of the time-weighted mean over its stored
 samples, read as untouched; anything else is the diver's and stays.
 
@@ -15,8 +15,8 @@ Where an untouched figure gets its new value from follows what can still yield i
 - **The stored samples**, where it holds no file, or a merge or a document supplied its
   profile: `in_water_of` over the depth channel, the only thing on the instance that can yield
   them. A document's dive only where its primary device is one the operator names, because
-  nothing stored tells a span the old reader wrote from a figure a document stated that
-  happens to equal the span.
+  nothing stored tells a span a reader wrote from a figure a document stated that happens to
+  equal the span.
 
 Driven by `src/scripts/backfill_dive_figures.py`, after `backfill_dive_profiles`.
 """
@@ -44,10 +44,10 @@ from .recording_shape import in_water_of
 
 logger = logging.getLogger(__name__)
 
-# How far an untouched figure sits from what the whole recording gives. A duration the old
-# FIT reader wrote is the session's elapsed time, which rounds up past the last whole-second
-# sample, so most sit exactly one second over and the bound is inclusive. A mean is the
-# watch's own over every second, against the stored samples' over every ten.
+# How far an untouched figure sits from what the whole recording gives. A FIT session's
+# elapsed time rounds up past the last whole-second sample, so most sit exactly one second
+# over and the bound is inclusive. A session's mean is the watch's own over every second,
+# against the stored samples' over every ten.
 SPAN_TOLERANCE_MS = 1000
 MEAN_TOLERANCE = Decimal("0.1")
 
@@ -140,7 +140,7 @@ def untouched_avg_depth(stored: float | None, whole_mean: Decimal | None) -> boo
 
 
 async def backfill_dive_figures(
-    db: AsyncSession, *, devices: Sequence[Device] = (), dry_run: bool = False
+    db: AsyncSession, *, devices: Sequence[Device] = (), user_id: int | None = None, dry_run: bool = False
 ) -> FiguresBackfillReport:
     """Rewrite every live dive's untouched `duration` and `avg_depth` to its time in the water.
 
@@ -148,7 +148,7 @@ async def backfill_dive_figures(
     figure is rewritten when it is untouched (`untouched_duration`, `untouched_avg_depth`) and
     differs from the new one, and an average only where it stays within the dive's maximum.
     `devices` names the primary devices whose document-supplied dives may be rewritten; any
-    other document-supplied dive stays as stored.
+    other document-supplied dive stays as stored. `user_id` confines the run to one account.
 
     Every touched user's stats are recalculated and dive caches invalidated, as the profile
     backfill invalidates them. See the script for why that needs a live Redis pool.
@@ -171,6 +171,8 @@ async def backfill_dive_figures(
         .where(Dive.is_deleted.is_(False), DiveProfile.max_depth_cm.is_not(None))
         .order_by(Dive.id)
     )
+    if user_id is not None:
+        stmt = stmt.where(Dive.user_id == user_id)
     examined = failed = pending = 0
     rewrites: list[FigureRewrite] = []
     touched_user_ids: set[int] = set()
