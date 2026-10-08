@@ -3,11 +3,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.contact import Contact
+from ..models.trip import Trip
 from ..models.trip_part import TripPart
-from ..schemas.location import LOCATION_FIELDS, location_columns, location_from_row
+from ..schemas.location import LOCATION_FIELDS, LocationRead, location_columns, location_from_row
 from ..schemas.trip import TripPartInput, TripPartRead
 
 # The place's columns, bare: a part has no position of its own for the locality's to be
@@ -63,6 +65,28 @@ async def get_parts_for_trips(db: AsyncSession, trip_ids: list[int]) -> dict[int
     for row in result:
         parts_by_trip[row.trip_id].append(_to_read(row))
     return parts_by_trip
+
+
+async def get_places_for_user(db: AsyncSession, user_id: int) -> list[LocationRead]:
+    """Every place across a user's trips that a map can draw, each once.
+
+    A part with no place, or a place with no position, has nothing to put on a map and is
+    left out. The same name at the same position on two trips is one place; its box can
+    still differ between the two picks, and the most recently written one is kept.
+    """
+    result = await db.execute(
+        select(*_LOCATION_COLUMNS)
+        .join(Trip, Trip.id == TripPart.trip_id)
+        .where(
+            Trip.user_id == user_id,
+            TripPart.name.is_not(None),
+            TripPart.latitude.is_not(None),
+            TripPart.longitude.is_not(None),
+        )
+        .ext(distinct_on(TripPart.name, TripPart.latitude, TripPart.longitude))
+        .order_by(TripPart.name, TripPart.latitude, TripPart.longitude, TripPart.id.desc())
+    )
+    return [LocationRead(**row._asdict()) for row in result]
 
 
 async def replace_parts_for_trip(
