@@ -335,20 +335,22 @@ def _serialize(element: ET.Element, *, level: int) -> bytes:
     return (_INDENT * level + ET.tostring(element, encoding="unicode") + "\n").encode("utf-8")
 
 
-def _person_names(full_name: str, username: str) -> tuple[str, str]:
+def _person_names(full_name: str) -> tuple[str, str]:
     """Split a single free-text name into UDDF's required `firstname`/`lastname` pair.
 
     `personalType` makes both mandatory, and we store one string. The first whitespace-
     separated token becomes the given name and the remainder the family name, which is
     right for the overwhelmingly common "Ada Lovelace" and harmless for the rest.
 
-    A one-token name leaves `<lastname>` **empty** rather than repeating the given name
-    or substituting the username: an empty `xs:string` is valid, and it says "we don't
-    hold this" instead of asserting a surname the diver never gave.
+    What the name does not hold stays **empty** rather than being made up: a one-token
+    name leaves `<lastname>` empty instead of repeating the given name, and a name that is
+    only whitespace leaves both empty instead of substituting the account's username, a
+    handle that means nothing outside this instance. An empty `xs:string` is valid, and it
+    says "we don't hold this" instead of asserting a name the diver never gave.
     """
     tokens = full_name.split()
     if not tokens:
-        return username, ""
+        return "", ""
     return tokens[0], " ".join(tokens[1:])
 
 
@@ -528,7 +530,7 @@ def _diver_element(bundle: ExportBundle) -> ET.Element:
     diver = ET.Element("diver")
     owner = _sub(diver, "owner", id="owner")
     personal = _sub(owner, "personal")
-    first, last = _person_names(user.name, user.username)
+    first, last = _person_names(user.name)
     _sub(personal, "firstname", first)
     _sub(personal, "lastname", last)
     if details.date_of_birth is not None:

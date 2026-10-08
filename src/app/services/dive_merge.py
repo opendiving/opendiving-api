@@ -14,13 +14,14 @@ already offers, and the route says so.
 
 **Two branches, and the device test picks between them.** Two records of *one computer* fold
 into one recording - the later record's samples offset onto the earlier's clock, the gap where
-the computer was off left as a gap. Two *different* computers were both recording the whole
-time, so their recordings simply sit side by side on the surviving dive, which is Subsurface's
-*join* rather than its merge.
+the computer was off left as a gap - and the dive's time in the water is read off the folded
+samples. Two *different* computers were both recording the whole time, so their recordings
+simply sit side by side on the surviving dive, which is Subsurface's *join* rather than its
+merge, and the dive keeps its figures.
 """
 
 import uuid as uuid_pkg
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -62,8 +63,8 @@ from .dive_recordings import (
     next_ordinal,
     same_device,
     starts_before,
-    wall_clock,
 )
+from .recording_shape import in_water_of
 
 
 class DiveNotMergeableError(Exception):
@@ -96,79 +97,42 @@ class _Recording:
 
 
 @dataclass(frozen=True, slots=True)
-class _Span:
-    """One recording's place on the dive's clock and what its samples cover.
+class DiveFigures:
+    """What a merge writes over the surviving dive's figures, `None` meaning leave it alone."""
 
-    The input to `dive_figures`, and deliberately not `_Recording` plus a lookup: the folded
-    recording's span is computed rather than read, so the figures have to be derivable from
-    values the caller holds rather than from rows it would have to write first.
-    """
-
-    start_time: datetime | None
-    utc_offset_minutes: int | None
-    # The profile's span, in the axis's milliseconds.
     duration: int | None
-    max_depth_cm: int | None
+    avg_depth: float | None
+    max_depth: float | None
 
 
 # ---------------------------------------------------------------- pure, DB-free
 
 
-def dive_figures(spans: Sequence[_Span]) -> tuple[int | None, float | None]:
-    """A dive's `duration` in seconds and its `max_depth`, from what its recordings carry.
+def dive_figures(depths_cm: Sequence[int | None], *, folded: NormalizedProfile | None) -> DiveFigures:
+    """The surviving dive's figures, by the branch the merge took.
 
-    **`duration` runs from the earliest recording's start to the last sample any of them
-    recorded**, which is not the same as the later dive's own logged end and is deliberately
-    the sampled figure. The corpus pair is the argument: two halves of one Perdix dive 223 s
-    apart whose second half samples 2 940 s gives 3 163, while its *logged* 2 921 would give
-    3 144 - and the samples are what the merged profile actually contains, so a dive claiming
-    3 144 would be claiming a span its own chart runs past.
+    **A fold's `duration` and `avg_depth` are the time in the water over the folded samples**
+    (`in_water_of`), so the stretch between the two records counts when the first one's last
+    sample is deeper than the threshold - a computer that died at depth - and not when the
+    diver had surfaced. Neither the sampled span, which counts that surface stretch, nor the
+    two dives' durations summed, which drop the in-water one.
 
-    `max_depth` is the deepest reading across every recording, whether or not it could be
-    placed on the clock: a depth is a reading rather than an instant, and needs no axis.
+    **Side by side - `folded` is `None` - both stand.** Two computers recorded the same time in
+    the water, and the surviving dive's figures are its primary computer's. So do a fold's
+    when its samples hold no interval in the water.
 
-    **A recording with no start, or with no samples, contributes to the depth and not to the
-    span.** There is nowhere to put it on the axis, and treating an unplaceable record as
-    starting at zero would make the dive claim a span nothing supports.
-
-    Either figure is `None` when nothing carries it, which is the caller's signal to leave
-    the dive's own value alone rather than to clear it.
+    `max_depth` is the deepest reading across every recording on either branch: a depth is a
+    reading rather than an instant, and needs no axis.
     """
-    placed = [
-        (span.start_time, span.utc_offset_minutes, span.duration)
-        for span in spans
-        if span.start_time is not None and span.duration is not None
-    ]
-    duration = None
-    if placed:
-        origin_start, origin_offset, _ = min(placed, key=_clock_key(placed))
-        duration = max(
-            round(delta_seconds(origin_start, origin_offset, start, offset) + covered / MILLISECONDS_PER_SECOND)
-            for start, offset, covered in placed
-        )
-
-    depths = [span.max_depth_cm for span in spans if span.max_depth_cm is not None]
-    return duration, (max(depths) / DEPTH_SCALE if depths else None)
-
-
-_Placed = tuple[datetime, int | None, int]
-
-
-def _clock_key(placed: Sequence[_Placed]) -> Callable[[_Placed], datetime]:
-    """The sort key that puts a set of starts in order, under the *Clocks* rule.
-
-    That rule is pairwise - instants where both sides carry an offset, wall clocks where
-    either does not - and pairwise is not an ordering over three or more: a set holding one
-    offset-less recording would compare *some* of its pairs as instants and some as clock
-    faces, which can disagree about which is earliest. Degenerating the whole set to one
-    clock is what the rule already says for every pair that involves the offset-less one, so
-    that is what a set does: instants when every member carries an offset, clock faces
-    otherwise. Two members is the pairwise rule exactly, which is the case the merge itself
-    always asks about.
-    """
-    if all(offset is not None for _, offset, _ in placed):
-        return lambda item: item[0]
-    return lambda item: wall_clock(item[0], item[1])
+    in_water = in_water_of(folded)
+    depths = [depth for depth in depths_cm if depth is not None]
+    return DiveFigures(
+        # The table's `duration > 0`: a stretch in the water shorter than half a second rounds
+        # to nothing, and the diver's figure stands rather than a zero the row would refuse.
+        duration=in_water.duration if in_water is not None and in_water.duration > 0 else None,
+        avg_depth=None if in_water is None else float(in_water.avg_depth),
+        max_depth=max(depths) / DEPTH_SCALE if depths else None,
+    )
 
 
 def merged_notes(survivor: str, absorbed: str, *, dive_number: int) -> str:
@@ -237,12 +201,14 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
         fold = await _plan_fold(db, survivor=primary_survivor, absorbed=primary_absorbed, mapping=mapping)
 
     moving = absorbed_recordings[1:] if folded else absorbed_recordings
-    spans = [
-        *(await _spans(db, recordings=survivor_recordings, replacing=fold)),
-        *(await _spans(db, recordings=moving)),
-    ]
-    duration, max_depth = dive_figures(spans)
-    _refuse_a_depth_the_dive_contradicts(survivor, max_depth)
+    figures = dive_figures(
+        [
+            *(await _deepest(db, recordings=survivor_recordings, replacing=fold)),
+            *(await _deepest(db, recordings=moving)),
+        ],
+        folded=None if fold is None else fold.profile,
+    )
+    _refuse_a_depth_the_dive_contradicts(survivor, figures)
 
     if cylinders is not None:
         await replace_mixtures_for_dive(db=db, dive_id=survivor.id, mixtures=cylinders, commit=False)
@@ -255,13 +221,9 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     values: dict[str, object] = {
         "notes": merged_notes(survivor.notes, absorbed.notes, dive_number=absorbed.dive_number)
     }
-    # `duration` has a `> 0` check on the table, so a merge of two profile-less recordings -
-    # which yields no span at all - leaves the diver's own figure alone rather than writing a
-    # zero the row would refuse.
-    if duration:
-        values["duration"] = duration
-    if max_depth is not None:
-        values["max_depth"] = max_depth
+    for column in ("duration", "avg_depth", "max_depth"):
+        if (value := getattr(figures, column)) is not None:
+            values[column] = value
     await db.execute(update(Dive).where(Dive.id == survivor.id).values(**values))
 
     await crud_dives.delete(db=db, uuid=absorbed.uuid, commit=False)
@@ -543,20 +505,23 @@ _LINKED_COLLECTIONS = (
 )
 
 
-def _refuse_a_depth_the_dive_contradicts(dive: DiveReadInternal, max_depth: float | None) -> None:
-    """Stop before writing a maximum shallower than the dive's own average depth.
+def _refuse_a_depth_the_dive_contradicts(dive: DiveReadInternal, figures: DiveFigures) -> None:
+    """Stop before writing a maximum shallower than the average depth the dive keeps.
 
     `ck_dive_avg_depth_within_max` would otherwise refuse the write from inside the
     transaction, and an `IntegrityError` there is a 500 rather than anything a diver can act
-    on. The pair can only disagree when the average was typed deeper than either recording
-    ever went, so the number to change is the average - which is the diver's, on a form they
-    can reach, and not this route's to silently drop.
+    on. An average the merge derives is a mean of the very samples the maximum is read from,
+    so only one the dive keeps can disagree - one typed deeper than either recording ever
+    went - and the number to change is that one, which is the diver's, on a form they can
+    reach, and not this route's to silently drop.
     """
-    if max_depth is None or dive.avg_depth is None or dive.avg_depth <= max_depth:
+    if figures.max_depth is None or figures.avg_depth is not None:
+        return
+    if dive.avg_depth is None or dive.avg_depth <= figures.max_depth:
         return
     raise DiveNotMergeableError(
         f"Dive {dive.dive_number} records an average depth of {dive.avg_depth} m, which is deeper than the "
-        f"{max_depth} m the merged recordings reached. Correct the average depth first, then merge."
+        f"{figures.max_depth} m the merged recordings reached. Correct the average depth first, then merge."
     )
 
 
@@ -597,38 +562,25 @@ async def _recordings(db: AsyncSession, *, dive_id: int) -> list[_Recording]:
     ]
 
 
-async def _spans(db: AsyncSession, *, recordings: Sequence[_Recording], replacing: _Fold | None = None) -> list[_Span]:
-    """What each of these recordings covers, for `dive_figures`.
+async def _deepest(
+    db: AsyncSession, *, recordings: Sequence[_Recording], replacing: _Fold | None = None
+) -> list[int | None]:
+    """Each of these recordings' deepest sample in centimetres, for `dive_figures`.
 
     `replacing` is the fold, whose recording is about to stop describing what it describes
-    now: its span is taken from the merged profile in hand rather than from the row, because
+    now: its depth is taken from the merged profile in hand rather than from the row, because
     the row has not been written yet and the figures are checked before anything is.
     """
-    stmt = select(DiveProfile.recording_id, DiveProfile.duration, DiveProfile.max_depth_cm).where(
+    stmt = select(DiveProfile.recording_id, DiveProfile.max_depth_cm).where(
         DiveProfile.recording_id.in_({recording.id for recording in recordings})
     )
-    figures = {row.recording_id: (row.duration, row.max_depth_cm) for row in await db.execute(stmt)}
+    stored = {row.recording_id: row.max_depth_cm for row in await db.execute(stmt)}
 
-    spans: list[_Span] = []
+    deepest: list[int | None] = []
     for recording in recordings:
         if replacing is not None and recording.id == replacing.recording_id:
             depths = replacing.profile.depth.v if replacing.profile is not None and replacing.profile.depth else []
-            spans.append(
-                _Span(
-                    start_time=replacing.start_time,
-                    utc_offset_minutes=replacing.utc_offset_minutes,
-                    duration=None if replacing.profile is None else replacing.profile.duration,
-                    max_depth_cm=max(depths) if depths else None,
-                )
-            )
-            continue
-        duration, max_depth_cm = figures.get(recording.id, (None, None))
-        spans.append(
-            _Span(
-                start_time=recording.start_time,
-                utc_offset_minutes=recording.utc_offset_minutes,
-                duration=duration,
-                max_depth_cm=max_depth_cm,
-            )
-        )
-    return spans
+            deepest.append(max(depths) if depths else None)
+        else:
+            deepest.append(stored.get(recording.id))
+    return deepest

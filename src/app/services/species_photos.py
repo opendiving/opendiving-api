@@ -31,16 +31,17 @@ import uuid as uuid_pkg
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from html.parser import HTMLParser
-from typing import Any
-from urllib.parse import urlsplit
+from typing import Any, cast
+from urllib.parse import unquote, urlsplit
 
 import anyio.to_thread
 from PIL import Image, ImageOps
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db.database import release_read_transaction
 from ..models.species import Species
+from ..schemas.species import PhotoCuration
 from . import blob_store
 
 logger = logging.getLogger(__name__)
@@ -70,9 +71,10 @@ COMMONS_THUMBNAIL_WIDTH = 500
 #
 # **Two names, because one `imageinfo` reply carries two hosts.** Commons answers an
 # `iiurlwidth` request with a `thumburl` on `thumb.wikimedia.org` and the full-size `url` on
-# `upload.wikimedia.org`, and `_commons_imageinfo` prefers the thumbnail - so a fence holding
-# only the second refuses every thumbnail there is, which is a feature that fetches nothing at
-# all rather than one that fetches badly. `thumb.wikimedia.org` presents a certificate whose
+# `upload.wikimedia.org` - and, for a file narrower than the width asked for, with a `thumburl`
+# that is the unscaled original on the upload host. `_commons_imageinfo` prefers `thumburl`, so
+# a fence holding only the second refuses every scaled thumbnail there is, which is a feature
+# that fetches nothing at all rather than one that fetches badly. `thumb.wikimedia.org` presents a certificate whose
 # SANs include `*.wikimedia.org`, the same wildcard family covering `upload.wikimedia.org`; it
 # is Wikimedia's own infrastructure and not a redirect target.
 #
@@ -136,6 +138,15 @@ class UnsupportedPhotoImageError(Exception):
     """The fetched bytes are not an image this can turn into a species photo."""
 
 
+class PhotoTooNarrowError(UnsupportedPhotoImageError):
+    """The bytes decode, but are narrower than the floor the caller set.
+
+    A subclass of its own because the two refusals mean different things to the caller: this
+    one is the rule answering "no photo", while the parent's undecodable or oversized bytes say
+    nothing about the file and may be a transient error page served with a 200.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ImageCandidate:
     """One P18 value on a Wikidata item: the Commons file title, and the statement's rank.
@@ -175,8 +186,19 @@ class FetchedPhoto:
 
     data: bytes
     sha256: str
+    width: int
+    height: int
     file: str
     credit: PhotoCredit
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedPhoto:
+    """`process_photo`'s output: the WebP to store and its own dimensions."""
+
+    data: bytes
+    width: int
+    height: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +305,38 @@ def _normalized_title(file: str) -> str:
     the two forms are interchangeable in a title, so a rule that matched only one would depend
     on which spelling a P18 statement happened to carry."""
     return file.replace("_", " ").casefold()
+
+
+_COMMONS_FILE_PAGE_PREFIX = "https://commons.wikimedia.org/wiki/"
+
+# What MediaWiki refuses in a title, plus the three it refuses in a file name (`:`, `/` and
+# `\`) and control characters. `|` matters beyond validity: it is the separator a multi-title
+# API call joins on, so one admitted here would ask about two files.
+_ILLEGAL_TITLE_CHARACTERS = re.compile(r"[#<>\[\]|{}:/\\\x00-\x1f\x7f]")
+
+
+def normalize_file_title(raw: str) -> str | None:
+    """A Commons file title or file-page URL, as the bare title P18 would carry - or `None`
+    for anything that is not a raster file title.
+
+    The admin pastes either form. Both reduce to the spelling P18 and `categorymembers` use:
+    no `File:` prefix, spaces rather than underscores, the first letter capitalized as
+    MediaWiki does in this namespace. One spelling is what lets the stored `photo_file`, a
+    candidate's `is_current` and the de-duplication of candidates agree.
+    """
+    title = raw.strip()
+    if title.startswith(_COMMONS_FILE_PAGE_PREFIX):
+        title = unquote(urlsplit(title).path.removeprefix("/wiki/"))
+    elif "://" in title:
+        return None
+    if title[:5].casefold() == "file:":
+        title = title[5:]
+    title = " ".join(title.replace("_", " ").split())
+    if not title or _ILLEGAL_TITLE_CHARACTERS.search(title):
+        return None
+    if len(title) > _FILE_MAX_LENGTH or not title.casefold().endswith(_PHOTOGRAPH_SUFFIXES):
+        return None
+    return title[0].upper() + title[1:]
 
 
 def _taxon_match_terms(taxon_name: str) -> tuple[str, ...]:
@@ -478,47 +532,77 @@ def _normalize(data: bytes) -> bytes:
         raise UnsupportedPhotoImageError("The fetched bytes are not a decodable image.") from exc
 
 
-async def process_photo(data: bytes) -> bytes:
-    """`_normalize`, off the event loop and behind `_DECODE_LIMITER`."""
+async def process_photo(data: bytes, *, minimum_width: int | None) -> NormalizedPhoto:
+    """`_normalize`, off the event loop and behind `_DECODE_LIMITER`, refusing bytes narrower
+    than `minimum_width`.
+
+    **The floor reads the bytes this produced, not Commons' `width` field.** The two differ for
+    an EXIF-rotated portrait, and the bytes are what is served - which is also what lets the
+    backfill's `--recheck-size` apply the same test to rows already stored. It sits here rather
+    than in `_normalize` because that function is a decode, and a test about alpha calls it
+    directly on an image far narrower than any floor. `None` is the pin's: an admin who saw the
+    file's width and chose it has overridden the rule, floor included.
+    """
     if not data:
         raise UnsupportedPhotoImageError("The fetched file is empty.")
-    return await anyio.to_thread.run_sync(_normalize, data, limiter=_DECODE_LIMITER)
+    encoded = await anyio.to_thread.run_sync(_normalize, data, limiter=_DECODE_LIMITER)
+    # The WebP this module just wrote, so its header is trusted and nothing is decoded.
+    with Image.open(io.BytesIO(encoded), formats=["WEBP"]) as image:
+        width, height = image.size
+    if minimum_width is not None and width < minimum_width:
+        raise PhotoTooNarrowError(f"That image is {width} px wide, under the {minimum_width} px floor.")
+    return NormalizedPhoto(data=encoded, width=width, height=height)
 
 
-def fetched_photo(*, data: bytes, file: str, credit: PhotoCredit) -> FetchedPhoto:
+def fetched_photo(*, photo: NormalizedPhoto, file: str, credit: PhotoCredit) -> FetchedPhoto:
     """Bundle normalized bytes with the credit and the file title they came from."""
     return FetchedPhoto(
-        data=data,
-        sha256=hashlib.sha256(data).hexdigest(),
+        data=photo.data,
+        sha256=hashlib.sha256(photo.data).hexdigest(),
+        width=photo.width,
+        height=photo.height,
         file=file[:_FILE_MAX_LENGTH],
         credit=credit,
     )
 
 
-async def save_photo_attempt(db: AsyncSession, *, species_id: int, photo: FetchedPhoto | None) -> None:
-    """Record what one photo attempt produced, whether or not it produced a photo.
+def _photo_values(photo: FetchedPhoto, *, key: str) -> dict[str, Any]:
+    return {
+        "photo_storage_key": key,
+        "photo_sha256": photo.sha256,
+        "photo_file": photo.file,
+        "photo_author": photo.credit.author,
+        "photo_license": photo.credit.license_name,
+        "photo_license_url": photo.credit.license_url,
+        "photo_source_url": photo.credit.source_url,
+        "photo_width": photo.width,
+        "photo_height": photo.height,
+    }
 
-    **`photo_fetched_at` is stamped either way, and that is the point rather than tidiness.**
-    "No photo" is the permanent outcome for most of the catalog - two of 42 refused by design
-    in the sample, and 88.3% of Wikidata items carrying a WoRMS id have no P18 at all - so a
-    backfill predicate keyed on the absence of stored *bytes* would never shrink and every
-    re-run would re-query Wikidata and Commons for the entire photo-less tail forever. Stamping
-    a failed attempt is what makes the second run report zero.
 
-    File first, row second, replaced file unlinked after the commit: the ordering rule
-    `user_pictures` states, for its reason. A crash between the first two strands an
-    unreferenced file, which the sweeper reclaims; the reverse order would leave a committed
-    row naming bytes that do not exist.
+# Every column that describes the stored photo, nulled together whenever the photo goes.
+# `photo_fetched_at` and `photo_curation` are not among them: one records that the rule was
+# asked, the other what a human decided, and neither is a fact about the bytes.
+_NO_PHOTO: dict[str, Any] = {
+    "photo_storage_key": None,
+    "photo_sha256": None,
+    "photo_file": None,
+    "photo_author": None,
+    "photo_license": None,
+    "photo_license_url": None,
+    "photo_source_url": None,
+    "photo_width": None,
+    "photo_height": None,
+}
 
-    Re-attempting a species that already has a photo replaces it. Only the backfill's `--force`
-    reaches that today, and it must not leave the old blob behind.
+
+async def _store_bytes(db: AsyncSession, *, species_id: int, photo: FetchedPhoto) -> tuple[str, str | None]:
+    """Write `photo`'s bytes under a fresh key; return that key and the one the row names now.
+
+    File first, row second, as `user_pictures` orders it: a crash before the row commits
+    strands an unreferenced file, which the sweeper reclaims, where the reverse order would
+    leave a committed row naming bytes that do not exist.
     """
-    now = datetime.now(UTC)
-    if photo is None:
-        await db.execute(update(Species).where(Species.id == species_id).values(photo_fetched_at=now))
-        await db.commit()
-        return
-
     existing_key = (
         await db.execute(select(Species.photo_storage_key).where(Species.id == species_id))
     ).scalar_one_or_none()
@@ -529,24 +613,138 @@ async def save_photo_attempt(db: AsyncSession, *, species_id: int, photo: Fetche
     # live ORM entity for the rollback to expire.
     await release_read_transaction(db)
     await blob_store.put(key, photo.data)
+    return key, existing_key
+
+
+async def save_photo_attempt(db: AsyncSession, *, species_id: int, photo: FetchedPhoto | None) -> None:
+    """Record what one rule-driven photo attempt produced, whether or not it produced a photo.
+
+    **`photo_fetched_at` is stamped either way, and that is the point rather than tidiness.**
+    "No photo" is the permanent outcome for most of the catalog - two of 42 refused by design
+    in the sample, and 88.3% of Wikidata items carrying a WoRMS id have no P18 at all - so a
+    backfill predicate keyed on the absence of stored *bytes* would never shrink and every
+    re-run would re-query Wikidata and Commons for the entire photo-less tail forever. Stamping
+    a failed attempt is what makes the second run report zero.
+
+    Re-attempting a species that already has a photo replaces it and unlinks the old blob
+    after the commit. Only the backfill's `--force` reaches that.
+
+    **A curated row is never written here.** Both statements carry `photo_curation IS NULL`,
+    because the backfill selects its candidates once at the start of a walk that runs for an
+    hour per thousand species, and a row an admin hid or pinned in that hour must come through
+    it untouched. The old blob is unlinked only when the write matched a row: one that matched
+    nothing must not delete the bytes a freshly pinned row names. The blob that write stored
+    is then the sweeper's.
+    """
+    now = datetime.now(UTC)
+    rule_decides = Species.photo_curation.is_(None)
+    if photo is None:
+        await db.execute(update(Species).where(Species.id == species_id, rule_decides).values(photo_fetched_at=now))
+        await db.commit()
+        return
+
+    key, existing_key = await _store_bytes(db, species_id=species_id, photo=photo)
+    result = cast(
+        CursorResult,
+        await db.execute(
+            update(Species)
+            .where(Species.id == species_id, rule_decides)
+            .values(**_photo_values(photo, key=key), photo_fetched_at=now)
+        ),
+    )
+    if result.rowcount and existing_key is not None and existing_key != key:
+        blob_store.delete_after_commit(db, existing_key)
+    await db.commit()
+
+
+async def write_curated_photo(
+    db: AsyncSession, *, species_id: int, photo: FetchedPhoto | None, curation: PhotoCuration | None
+) -> None:
+    """An admin's write: store `photo` (or clear the photo for `None`) and record `curation`.
+
+    The sibling of `save_photo_attempt` for the three admin actions - hide, pin and re-fetch -
+    and deliberately not bound by its guard, since a curated row is exactly what this exists
+    to write. It also differs on the no-photo path: there the rule's writer only stamps, while
+    an admin who hid a photo or a re-fetch the rule declined means the stored photo goes, so
+    every photo column is cleared and the old blob unlinked after the commit.
+    """
+    now = datetime.now(UTC)
+    if photo is None:
+        existing_key = (
+            await db.execute(select(Species.photo_storage_key).where(Species.id == species_id))
+        ).scalar_one_or_none()
+        values = dict(_NO_PHOTO)
+        key = None
+    else:
+        key, existing_key = await _store_bytes(db, species_id=species_id, photo=photo)
+        values = _photo_values(photo, key=key)
 
     await db.execute(
-        update(Species)
-        .where(Species.id == species_id)
-        .values(
-            photo_storage_key=key,
-            photo_sha256=photo.sha256,
-            photo_file=photo.file,
-            photo_author=photo.credit.author,
-            photo_license=photo.credit.license_name,
-            photo_license_url=photo.credit.license_url,
-            photo_source_url=photo.credit.source_url,
-            photo_fetched_at=now,
-        )
+        update(Species).where(Species.id == species_id).values(**values, photo_curation=curation, photo_fetched_at=now)
     )
     if existing_key is not None and existing_key != key:
         blob_store.delete_after_commit(db, existing_key)
     await db.commit()
+
+
+def measure_photo(data: bytes) -> tuple[int, int]:
+    """A stored photo's width and height, from its header alone.
+
+    Under the same format allowlist as the decode, because these are bytes read back from
+    storage rather than bytes this process just wrote. Raises `UnsupportedPhotoImageError` for
+    anything that will not open.
+    """
+    try:
+        with Image.open(io.BytesIO(data), formats=ALLOWED_FORMATS) as image:
+            width, height = image.size
+            return width, height
+    except Image.DecompressionBombError as exc:
+        raise UnsupportedPhotoImageError("That image describes far too many pixels.") from exc
+    except (OSError, ValueError, SyntaxError) as exc:
+        raise UnsupportedPhotoImageError("The stored bytes are not a decodable image.") from exc
+
+
+async def record_photo_dimensions(
+    db: AsyncSession, *, species_id: int, storage_key: str, width: int, height: int
+) -> bool:
+    """Write a measured photo's dimensions, if the row still names the bytes measured.
+
+    Guarded on `storage_key`, so a row pinned or re-fetched between the read and this write
+    keeps the dimensions its own write gave it. Whether the row matched is returned.
+    """
+    result = cast(
+        CursorResult,
+        await db.execute(
+            update(Species)
+            .where(Species.id == species_id, Species.photo_storage_key == storage_key)
+            .values(photo_width=width, photo_height=height)
+        ),
+    )
+    await db.commit()
+    return bool(result.rowcount)
+
+
+async def drop_stored_photo(db: AsyncSession, *, species_id: int, storage_key: str) -> bool:
+    """Clear a stored photo the size re-check refused, and unlink its bytes after the commit.
+
+    `photo_fetched_at` stays standing, so the backfill does not re-attempt the row: the rule
+    already chose this file, and asking again would choose it again. `photo_curation` is
+    cleared with the photo - the re-check drops a pinned row only when its bytes are gone, and
+    a pin naming bytes that do not exist protects nothing. Guarded on `storage_key` like
+    `record_photo_dimensions`, and whether the row matched is returned.
+    """
+    result = cast(
+        CursorResult,
+        await db.execute(
+            update(Species)
+            .where(Species.id == species_id, Species.photo_storage_key == storage_key)
+            .values(**_NO_PHOTO, photo_curation=None)
+        ),
+    )
+    if result.rowcount:
+        blob_store.delete_after_commit(db, storage_key)
+    await db.commit()
+    return bool(result.rowcount)
 
 
 async def get_stored_photo(db: AsyncSession, *, species_uuid: uuid_pkg.UUID) -> StoredSpeciesPhoto | None:

@@ -3255,8 +3255,10 @@ species) waits on cross-user invalidation.
 The `photo_*` columns are the one mutation, exempt because the argument is about invalidation: the
 only long-lived cached photo field is the single-dive response's `SpeciesInfo.photo_sha256`,
 self-healing within the same 3600 s; `SpeciesRead` is uncached and the life list's digest sits under
-a 60 s key. The taxonomy is written once, not the row; an immediate photo correction would need the
-sweep, so `--force` on the backfill is an operator action, not an endpoint.
+a 60 s key. The taxonomy is written once, not the row. The operator's photo routes under `/admin`
+and the backfill invalidate nothing: a hidden, declined or dropped photo leaves a stale digest whose
+URL 404s for up to that hour. Invalidating every user's dive keys wherever a photo is cleared is the
+follow-up if the hour matters.
 
 ## Sightings embed on `DiveReadWithMixtures`, not `DiveRead`
 
@@ -4521,13 +4523,14 @@ The next drop fails in CI rather than on somebody's first install.
 
 ## Species photos are the fourth kind on the files volume, and Commons is never hotlinked
 
-A species carries one Wikimedia Commons photograph, fetched once at resolve time, stored on the
-files volume under the `species-photos/` kind, and served by `GET /api/v1/species/{uuid}/photo`.
-Eight nullable columns on `species` hold where it is, which version it is, and the parts of its
-credit. It is the "future kind" the key layout in *"File payloads live on the files volume, not in
-Postgres"* anticipates; nothing at the `blob_store` layer changes for it.
+A species carries one Wikimedia Commons photograph, fetched at resolve time or by the backfill,
+stored on the files volume under the `species-photos/` kind, and served by
+`GET /api/v1/species/{uuid}/photo`. Nullable columns on `species` hold where it is, which version it
+is, its size, the parts of its credit, and what an operator decided about it. It is the "future
+kind" the key layout in *"File payloads live on the files volume, not in Postgres"* anticipates;
+nothing at the `blob_store` layer changes for it.
 
-## Species photos: Fetched once and served from here, rather than hotlinked
+## Species photos: Fetched and served from here, rather than hotlinked
 
 `<img src="https://upload.wikimedia.org/…">` is rejected on the grounds web `DECISIONS.md`'s
 *"Avatars are this instance's own, and there is no Gravatar fallback"* records — a third-party host
@@ -4634,7 +4637,9 @@ SSRF hole, while a name that stops resolving visibly stops working. A third name
 one-line change.
 
 Preferring `url` is rejected too: sampled originals exceed the 4 MB `MAX_PHOTO_DOWNLOAD_BYTES` cap,
-and the rest would be stored at full resolution, the no-resize rule being a licence constraint.
+and the rest would be stored at full resolution, the no-resize rule being a licence constraint. For
+a file narrower than 500 px, `thumburl` is itself the unscaled original on `upload.wikimedia.org`
+(`utm_content=thumbnail_unscaled`), with `thumbwidth` still reporting 500.
 
 `tests/test_species_photos.py`'s `_THUMB_URL` names the thumbnail host, its fake Commons routes by
 hostname, not substring (a substring test would accept
@@ -4658,6 +4663,29 @@ bytes, an ETag of the sha256, `If-None-Match` → 304, `nosniff`, the per-respon
 
 It is enrolled by hand in `ANONYMOUS_BY_DESIGN` (`tests/test_route_authentication.py`) and
 `UNOWNED_ROUTES` (`tests/test_ownership.py`).
+
+## Species photos: an operator's decision sticks, and a source under 500 px is refused
+
+`photo_curation` is `hidden`, `pinned` or NULL for "the rule decides"; the backfill's fetch,
+`--force` included, and `save_photo_attempt` never write a curated row, and `--recheck-size` clears
+a pin only when its bytes are gone. Hiding deletes the bytes: nothing would serve them, and a kept
+blob is one the sweeper cannot reclaim.
+
+The floor is the 500 px bucket the fetch asks for, measured on the stored bytes after the EXIF
+transpose rather than on Commons' `width`, so `--recheck-size` applies the same test to stored rows
+without a Commons call; nothing resizes, so a narrow source is stored at its own width. A pin skips
+the floor: the operator chose that width.
+
+A re-fetch clears the photo only on `declined`, the rule's own answer; `unavailable` is a 503 with
+the row untouched.
+
+## Species photos: the picker's previews travel inline
+
+`GET /admin/species/{uuid}/photo-candidates` returns each preview as a `data:` URI of Commons' 250
+px rendition. An authenticated preview route cannot be an `<img src>`, the bearer header being
+unsendable; hotlinking Wikimedia is rejected as for the photo itself. Previews claim no Commons
+counter slot, or one dialog would starve a diver's resolve, and share a per-process
+`anyio.CapacityLimiter(2)` with every byte fetch, after Wikimedia's media concurrency rule.
 
 ## The sweeper has to learn every new blob kind, and forgetting is destructive
 
@@ -4685,6 +4713,8 @@ degrades instance-wide.
 poisoned: a stamped `photo_fetched_at` over a null `photo_storage_key` is byte-for-byte a species
 the rule declined, so no `--retry-failed` could tell them apart. `--force --limit` redraws the same
 first `limit` ids, pinned by `test_force_with_a_limit_redraws_the_same_slice_rather_than_advancing`.
+`--force` skips a row an operator hid or pinned, and `save_photo_attempt` carries the same guard
+because a row can be curated after the walk selected it.
 
 ## GBIF is rejected as a photo fallback, on the evidence
 
@@ -4694,8 +4724,9 @@ silently fuzzy-matches *Stegostoma tigrinum* to *Stegostoma tigrinus* at confide
 images are taxonomic monograph plates with distribution maps stitched underneath rather than
 photographs. There is no AphiaID→GBIF-key route; it goes through a name and inherits every synonym
 problem plus GBIF's own. iNaturalist is rejected for NC licensing. P373 (Commons category) is more
-common than P18 across the register and is the recorded escalation if the no-photo rate becomes the
-complaint — not built, because a category's first member is not a curated lead image.
+common than P18 across the register and is still not the rule's fallback, because a category's first
+member is not a curated lead image. It is built as the operator's photo picker instead, where a
+human choosing among the members is the curation.
 
 ## The life list is a hand-written aggregate, and it lives under `/user/`
 
@@ -5788,9 +5819,10 @@ service `type`) carries an unknown value, which §5.6 reads as absent. A course'
 OPTIONAL and so costs the field rather than the record — see *A course may have no agency, and a
 certification may not*.
 
-Three derivations are allowed: a dive with no `duration` takes its profile's span, and one with no
-`bottom_temperature` its primary recording's coldest sample, as the dive form does, both reported;
-one with no `number` takes the dive form's suggestion, duplicates being legal
+Three derivations are allowed: a dive with no `duration` or `avg_depth` takes its profile's time in
+the water (`divejson.in_water`), the span standing in for a duration where no sample was in the
+water, and one with no `bottom_temperature` its primary recording's coldest sample, as the dive form
+does, all reported; one with no `number` takes the dive form's suggestion, duplicates being legal
 (`DiveNumberingSummary`).
 
 `visibility` is finer in the format (a number, §6.2) than here (whole metres); a fractional value is
@@ -5915,9 +5947,9 @@ Six invalidators run after commit: `invalidate_dive_caches`, `invalidate_certifi
 
 ## The `diver` member's identity and settings are never applied, and its check-in details only as confirmed
 
-A document's owner — name, username, `created_at` — and its preferences under this producer's key
-are never applied: changing a live account's identity or settings as a side effect of a restore is a
-worse surprise than setting them once. The archive's avatar is not restored either.
+A document's owner — name and `created_at` — and its preferences under this producer's key are never
+applied: changing a live account's identity or settings as a side effect of a restore is a worse
+surprise than setting them once. The archive's avatar is not restored either.
 
 The check-in details and the portrait are shown in the preview beside the account's, and the apply
 writes exactly those the diver submits (§6.1's SHOULD NOT): the importer cannot tell a restore from
@@ -6247,15 +6279,15 @@ The earlier dive survives by `starts_before` (`delta_seconds`' rule, `services/d
 `_orders_first` breaking ties by id; the loser is soft-deleted. Same-device records fold into one
 recording; different devices or a NULL start append. The offset is the recordings' delta, never the
 dives'. The gap stays empty: `join_profiles` is not `fill_channels`; pressure joins by `gas_number`;
-markers all stay. Provenance is `merge`, so `should_extract` never re-extracts; files stay.
-`duration`, `max_depth` and `dive_figures` recompute, `None` meaning leave alone; `start_time` and
-the fixes stay, `refresh_tech_scalars` uncalled; the absorbed record's readouts fill the survivor's
-blanks. An `avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write.
-`relabel_gas_numbers` precedes the join, keeping `usage` and filling the survivor's blank cylinder
-members from the absorbed rows it pairs, as an arrival does, an empty absorbed row not appended;
-moved profiles use `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions
-stay, notes append within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not
-reused.
+markers all stay. Provenance is `merge`, so `should_extract` never re-extracts; files stay. A fold's
+`duration` and `avg_depth` are its time in the water; side by side they stand; `max_depth` is the
+deepest reading; `None` means leave alone; `start_time` and the fixes stay, `refresh_tech_scalars`
+uncalled; the absorbed record's readouts fill the survivor's blanks. An `avg_depth` failing
+`ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers` precedes the join,
+keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
+as an arrival does, an empty absorbed row not appended; moved profiles use
+`replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
+within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
@@ -6992,3 +7024,16 @@ where NULL, cast to a date, and a test pins it to `local_day()` for every stored
 the single place a day is displayed or bucketed. Rejected: a day-wide instant window narrowed in
 Python, which pages wrong; and narrowing in the browser, which leaves the trip read's counts no
 server to come from.
+
+## A dive's duration and average depth are its time in the water
+
+`dive.duration` is the time in the water as the computer counts it, surface time before, between and
+after excluded, and `avg_depth` the time-weighted mean over it; the profile keeps every sample. A
+file's stated figure wins. Where none is stated the reader derives both from the samples deeper than
+1.2 m and `ParsedDiveSchema.inferred` names them, so a form takes a same-computer file's stated
+figure over a derived one. Every derivation here - a fold, the planner's missing figures, the
+backfill - calls `divejson.in_water`; match gates still compare spans (`RecordingFacts`), the parse
+included. `backfill_dive_figures` rewrites a stored value only while it equals the whole
+recording's: a duration within 1 s of the primary span, a mean within 0.1 m of the whole-recording
+mean. An imported dive moves only for a device the operator names, since nothing stored tells a
+stated figure from a span.

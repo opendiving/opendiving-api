@@ -212,7 +212,6 @@ class ExportDiver(PublicUUIDSchema):
     """
 
     name: str
-    username: str
     email: str | None = None
     phone: str | None = None
     born_on: date | None = None

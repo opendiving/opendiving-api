@@ -67,10 +67,11 @@ else; what is here is the source, and the notes for working on it.
   **this app queries the register live rather than holding a snapshot of it**, so an instance holds
   whatever WoRMS answered on the days its divers went looking.
 - **Species photos** — a freely licensed photograph per species, chosen from
-  [Wikimedia Commons](https://commons.wikimedia.org/), fetched **once** and stored by this instance
-  itself, so no visitor's browser ever contacts Wikimedia. A species whose candidates cannot be told
-  apart gets no photo rather than a picture of a different animal, and the author, licence and
-  source travel with it so a credit line can be rendered.
+  [Wikimedia Commons](https://commons.wikimedia.org/), fetched and stored by this instance itself,
+  so no visitor's browser ever contacts Wikimedia. A species whose candidates cannot be told apart
+  gets no photo rather than a picture of a different animal, nor does one whose only file is
+  narrower than 500 px; the author, licence and source travel with it so a credit line can be
+  rendered. The operator can hide a photo, pin another file from Commons, or ask the rule again.
 - **Dive-site suggestions** — `GET /dive-sites/suggest` answers from a catalog of real dive sites
   bundled in the image, so the site form can offer "SS Thistlegorm" rather than only the town it is
   near. A geocoder knows where Dahab is, not where the Blue Hole's north entry is. No account, no
@@ -237,18 +238,19 @@ or from any format the converter reads; **invitations**, which exist only where 
 closed registration (`REGISTRATION_MODE`, documented with the rest of the settings in
 `src/.env.example`) — a member sends and revokes their own, and the routes answer 404 on an open
 instance; and **admin**, the operator's own — the queue of people who have asked to be let in,
-inviting or removing them in a batch, and the daily totals of accounts created, sign-ins and active
-accounts — which is the one family gated on `is_superuser` rather than merely on having a token. All
-of those want a bearer token. The ones that don't are **support**, the auth routes themselves, the
-two health checks — `/health` says the process is up, `/health/ready` says Postgres and Redis
-answered, and 503s when they didn't — `POST /invite-requests`, which is how somebody with no account
-asks a closed instance for an invitation, `GET /config`, which tells the web app whether
-registration is open - whether the project itself operates the instance, whether any join link
-exists (`join_links`), and whether a map renderer draws the map tiles (`map_tiles`) - before anyone
-has signed in, `GET /join-channel/{slug}`, which says whether one join link is live,
-`GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>` tag that has no way
-to send a token, and `GET /checkin/{token}` with its `/portrait` and `/certification/{uuid}/front`,
-the check-in page a diver shared as a link, where the token in the path is the credential.
+inviting or removing them in a batch, the daily totals of accounts created, sign-ins and active
+accounts, and the species catalog with its photos to hide, pin or re-fetch — which is the one family
+gated on `is_superuser` rather than merely on having a token. All of those want a bearer token. The
+ones that don't are **support**, the auth routes themselves, the two health checks — `/health` says
+the process is up, `/health/ready` says Postgres and Redis answered, and 503s when they didn't —
+`POST /invite-requests`, which is how somebody with no account asks a closed instance for an
+invitation, `GET /config`, which tells the web app whether registration is open - whether the
+project itself operates the instance, whether any join link exists (`join_links`), and whether a map
+renderer draws the map tiles (`map_tiles`) - before anyone has signed in,
+`GET /join-channel/{slug}`, which says whether one join link is live, `GET /species/{uuid}/photo`,
+which serves a public Commons image to an `<img>` tag that has no way to send a token, and
+`GET /checkin/{token}` with its `/portrait` and `/certification/{uuid}/front`, the check-in page a
+diver shared as a link, where the token in the path is the credential.
 `tests/test_route_authentication.py` is the guard that keeps the *anonymous* half of that list
 honest — it compares the app's real route table against its own allowlist and holds the reason for
 each — but nothing checks this paragraph, so a new route family belongs here by hand.
@@ -308,6 +310,11 @@ curl -X POST http://localhost:8000/api/v1/import/logbook \
 - Re-read stored profiles after a release that moves the `divejson` pin or the extractor version:
   `docker compose exec api python -m src.scripts.backfill_dive_profiles`. Until it runs, every
   profile is served as the previous reader left it.
+- Once, after that: `docker compose exec api python -m src.scripts.backfill_dive_figures --dry-run`,
+  then without `--dry-run`. It rewrites each dive's duration and average depth that still hold the
+  whole recording's figures to its time in the water, and leaves a value a diver typed. A
+  logbook-imported dive moves only for a device named with `--device BRAND [MODEL]`; the script's
+  docstring says how to choose them.
 
 ## Related repositories
 

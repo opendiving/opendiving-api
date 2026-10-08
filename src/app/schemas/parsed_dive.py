@@ -1,7 +1,7 @@
 import math
 import uuid as uuid_pkg
 from datetime import datetime
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -20,6 +20,10 @@ LONGITUDE_LIMIT = 180.0
 # `schemas/logbook_import.py` on the import one - and a device's model string is free text,
 # so it is the one member here a real file can genuinely overrun.
 MODEL_NAME_MAX_LENGTH = 64
+
+# The form fields a reader may derive rather than read off a file - DiveJSON's
+# `extensions.divejson.inferred` list, under the form's names.
+InferredField = Literal["duration", "avg_depth", "max_depth"]
 
 
 class _ParserOutput(BaseModel):
@@ -408,6 +412,11 @@ class ParsedDiveSchema(_ParserOutput):
     entry_type: EntryType | None = None
     boat_name: str | None = None
     tags: Annotated[list[str], Field(default_factory=list)]
+    # Which of the figures above the reader derived from the samples rather than read as the
+    # file states them, in the document's order. A form holding a derived figure takes a later
+    # file's stated one over it when the two files came off one computer, and keeps a stated
+    # figure against a derived one.
+    inferred: Annotated[list[InferredField], Field(default_factory=list)]
 
     # What recorded the file, on the same all-nullable terms as everything else here. Not
     # a form field and not a server-side write either, which makes it the first member on

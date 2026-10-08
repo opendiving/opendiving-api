@@ -78,7 +78,7 @@ from ...schemas.logbook_import import (
     ImportNoteCode,
 )
 from ..dive_files import MAX_DIVE_FILE_SIZE, FileExtraction, extraction_of
-from ..dive_reader import ReadDive, attach_rank, formats_this_build_reads, is_logbook_format
+from ..dive_reader import ReadDive, attach_rank, formats_this_build_reads, inferred_figures, is_logbook_format
 from ..export.archive import DIVEJSON_NAME
 
 if TYPE_CHECKING:
@@ -724,6 +724,7 @@ def _convert_file(source: Source, *, digest: str, name: str, claimed: str, size:
             dive=dive,
             recording=dive.recordings[0] if dive.recordings else None,
             started_at=raw if isinstance(raw, str) else None,
+            inferred=inferred_figures(conversion.document),
         )
         loaded.kept = KeptFile(
             key=digest,

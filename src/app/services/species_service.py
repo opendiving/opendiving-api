@@ -27,22 +27,25 @@ exactly what an on-demand catalog does not do. The lawful bulk route (paging GBI
 copy) is recorded in DECISIONS.md as the escalation, not taken here.
 
 **A third provider, and it is not a third source of names.** Wikimedia Commons is asked for
-one thing only - the credit and the scaled bytes of the photograph a Wikidata item already
-named - and it is asked once per *new* species rather than per keystroke. It never sees
-anything a diver typed. The bytes it returns go into this instance's own blob store - a
-volume or a bucket, on `FILE_STORAGE_BACKEND` - and are served from this instance's own
-API, so no browser ever contacts Wikimedia; see
-`services/species_photos.py`, which owns everything done with the answer.
+the credit and the scaled bytes of a photograph - the one a Wikidata item already named, when
+a *new* species is resolved or the backfill runs, or one an admin chose - and, on an admin's
+request, for the files in a species' Commons category to choose from. Never per keystroke, and
+it never sees anything a diver typed. The bytes it returns go into this instance's own blob
+store - a volume or a bucket, on `FILE_STORAGE_BACKEND` - and are served from this instance's
+own API, so no browser ever contacts Wikimedia; see `services/species_photos.py`, which owns
+everything done with the answer.
 
 Every provider here is throttled instance-wide and every answer is cached, for the reason
 Nominatim's policy makes load-bearing next door: a courtesy that is only observed when
 traffic is low is not one.
 """
 
+import base64
 import json
 import logging
 import re
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 from urllib.parse import quote
 
@@ -192,12 +195,15 @@ _TAXON_NAME_PROPERTY = "P225"
 # read through `_claim_entity_id` and translated by the map below.
 _TAXON_RANK_PROPERTY = "P105"
 # Wikidata's "image" property: the Commons file title of the item's lead image. **The only
-# image property consulted**, deliberately. P181 is a distribution map and P2716 a collage,
-# and rendering either where a photograph belongs is the same failure that made GBIF's media
-# unusable. P373 (Commons category) is more common than P18 across the register and is the
-# recorded escalation if the no-photo rate ever becomes the complaint - it is not built,
-# because a category's first member is not a curated lead image.
+# image property the rule consults**, deliberately. P181 is a distribution map and P2716 a
+# collage, and rendering either where a photograph belongs is the same failure that made GBIF's
+# media unusable.
 _IMAGE_PROPERTY = "P18"
+# Wikidata's "Commons category". More common than P18 across the register, and still not the
+# rule's fallback, because a category's first member is not a curated lead image. It is read
+# for the admin's photo picker instead, where a human choosing among the members *is* the
+# curation - see `photo_candidates`.
+_COMMONS_CATEGORY_PROPERTY = "P373"
 
 # P105's item to the rank string this app ships. **Spelled WoRMS's way wherever WoRMS has a
 # spelling**, so one rank never reaches a client under two names: a client displays this
@@ -350,6 +356,9 @@ class _WikidataEntity:
     # already in the `props=claims` response every caller here makes, so carrying them costs
     # no extra request - which is the whole reason the photo's *identity* is free.
     images: tuple[species_photos.ImageCandidate, ...]
+    # P373, the item's Commons category, without its `Category:` prefix. Read only by the
+    # admin's photo picker.
+    commons_category: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -954,6 +963,7 @@ def _wikidata_entity(qid: str, entity: Any) -> _WikidataEntity | None:
         aliases=tuple(aliases),
         rank=_WIKIDATA_RANK_BY_QID.get(rank_qid) if rank_qid is not None else None,
         images=_image_candidates(claims),
+        commons_category=_claim_value(claims, _COMMONS_CATEGORY_PROPERTY),
     )
 
 
@@ -1515,14 +1525,13 @@ def _wikidata_qids(payload: Any) -> list[str] | None:
     `None` is also what a `None` payload maps to, so the transport failure and the
     application-level failure travel the same path from here on.
 
-    **Only `resolve_species`'s exact-statement lookup reaches this now.** Search asks
-    `generator=search` and reads it with `_wikidata_search_pages`, so the thirty-day cache
-    entry described above is that reader's problem rather than this one's; what is left here is
-    `_wikidata_by_aphia_id`, which collapses `None` and `[]` into "no entity to enrich with"
-    because a resolve degrades to a row without a qid either way. The three outcomes still earn
-    their keep on that path for the middle paragraph's reason - a 200 carrying an error must
-    not read as a QID, or resolve would store a row pointing at whatever came back - and that
-    is what the resolve-path test pins.
+    **Only the exact-statement lookups reach this now** - `_wikidata_by_aphia_id` and the
+    photo's synonym search. Search asks `generator=search` and reads it with
+    `_wikidata_search_pages`, so the thirty-day cache entry described above is that reader's
+    problem rather than this one's. The three outcomes earn their keep here twice: a 200
+    carrying an error must not read as a QID, or resolve would store a row pointing at whatever
+    came back - which the resolve-path test pins - and the photo rule reads `None` as "Wikidata
+    was not asked" and `[]` as "there is no item", which an admin's re-fetch treats differently.
     """
     if not isinstance(payload, dict):
         return None
@@ -2094,11 +2103,16 @@ async def _worms_synonyms(aphia_id: int) -> list[tuple[str, int | None]] | None:
         offset += _WORMS_PAGE_SIZE
 
 
-async def _wikidata_by_aphia_id(aphia_id: int) -> _WikidataEntity | None:
-    """The Wikidata entity for a known AphiaID, or `None`.
+async def _wikidata_by_aphia_id(aphia_id: int) -> tuple[_WikidataEntity | None, bool]:
+    """The Wikidata entity for a known AphiaID or `None`, and whether Wikidata answered.
 
     An exact statement match rather than a text search: the AphiaID is already in hand, so
     there is nothing to disambiguate and no chance of matching the wrong taxon by name.
+
+    **The flag separates "no item" from "the call failed"**, which resolve does not need -
+    it degrades to a row without a qid either way, and ignores it - but the photo rule does:
+    a taxon with no item is the rule declining, while a lookup that failed asked nothing, and
+    an admin's re-fetch must not read the second as the first and clear a good photo.
     """
     payload = await _wikidata(
         {
@@ -2108,13 +2122,13 @@ async def _wikidata_by_aphia_id(aphia_id: int) -> _WikidataEntity | None:
             "srlimit": 1,
         }
     )
-    # `None` and `[]` both mean "no entity to enrich with" on this path - unlike search, resolve
-    # degrades to a row without a qid either way, so the two need no separating here.
     qids = _wikidata_qids(payload)
+    if qids is None:
+        return None, False
     if not qids:
-        return None
-    entities, _ = await _wikidata_entities(qids[:1])
-    return entities[0] if entities else None
+        return None, True
+    entities, complete = await _wikidata_entities(qids[:1])
+    return (entities[0] if entities else None), complete
 
 
 def _name_rows(
@@ -2186,9 +2200,24 @@ _PHOTO_BUDGET_SECONDS = 12.0
 _SYNONYM_ITEM_SEARCH_LIMIT = 8
 
 
+class PhotoOutcome(StrEnum):
+    """Why an attempt ended where it did.
+
+    `declined` is the rule's own answer - nothing to choose from, a choice refused, a file
+    Commons does not have, bytes under the floor. `unavailable` is every way of never really
+    asking - a provider call that failed or was over its cap, bytes that did not arrive or
+    would not decode. The rule's writers stamp both alike; an admin's re-fetch clears a stored
+    photo on the first and refuses to touch it on the second.
+    """
+
+    PHOTO = "photo"
+    DECLINED = "declined"
+    UNAVAILABLE = "unavailable"
+
+
 @dataclass(frozen=True, slots=True)
 class PhotoAttempt:
-    """What one photo attempt produced, and whether it finished at all.
+    """What one photo attempt produced, why, and whether it finished at all.
 
     `completed` is the field that exists to be *false*, and it is the difference between "this
     species has no usable photo" and "we never got to ask". Both look identical downstream - a
@@ -2198,24 +2227,59 @@ class PhotoAttempt:
     """
 
     photo: species_photos.FetchedPhoto | None
-    completed: bool
+    outcome: PhotoOutcome
+    completed: bool = True
+
+    @classmethod
+    def found(cls, photo: species_photos.FetchedPhoto) -> PhotoAttempt:
+        return cls(photo=photo, outcome=PhotoOutcome.PHOTO)
+
+    @classmethod
+    def declined(cls) -> PhotoAttempt:
+        return cls(photo=None, outcome=PhotoOutcome.DECLINED)
+
+    @classmethod
+    def unavailable(cls) -> PhotoAttempt:
+        return cls(photo=None, outcome=PhotoOutcome.UNAVAILABLE)
+
+    @classmethod
+    def timed_out(cls) -> PhotoAttempt:
+        return cls(photo=None, outcome=PhotoOutcome.UNAVAILABLE, completed=False)
+
+
+class CommonsFileMissingError(Exception):
+    """Commons answered, and has no file of that title."""
+
+
+# Wikimedia's Robot Policy for its media hosts: "Always keep a total concurrency of at most 2".
+# **Per process**, and that is accepted rather than overlooked: the api runs several workers,
+# but only the admin's photo picker fetches more than one byte stream at a time, one dialog's
+# request is served by one worker, and a resolve or the backfill fetches one each - so what the
+# instance puts in flight is one admin's dialog plus singletons. A Redis-backed semaphore across
+# processes would be machinery for a second admin who does not exist.
+_MEDIA_LIMITER = anyio.CapacityLimiter(2)
 
 
 async def _commons_imageinfo(file_title: str) -> tuple[str, species_photos.PhotoCredit] | None:
-    """The URL of one Commons file's 500 px rendition and its credit, or `None`.
+    """The URL of one Commons file's 500 px rendition and its credit - `None` when Commons
+    could not be asked, and `CommonsFileMissingError` when it answered that there is no such
+    file. An admin pinning a mistyped title is owed the second, and a re-fetch must not read
+    the first as the rule's answer.
 
     **`iiurlwidth` rather than a hand-built thumbnail URL**, which is what keeps this clear of
     the bucketing trap: Commons serves thumbnails only at 120/250/330/500/960 and refuses
     anything else outright, so asking the API to name the URL means never constructing an
     off-bucket one. 500 is a real bucket, so 500 is what comes back.
 
-    `thumburl` is absent when the source file is *narrower* than the width asked for - Commons
-    does not upscale - and the full-size `url` is the right answer there, because a file under
-    500 px wide is already thumbnail-sized.
+    For a source file *narrower* than the width asked for, Commons does not upscale: `thumburl`
+    is then the unscaled original on `upload.wikimedia.org`, tagged
+    `utm_content=thumbnail_unscaled`, while `thumbwidth` still reports the width asked for. So
+    `thumbwidth` is never read; the floor in `species_photos.process_photo` measures the bytes.
+    `url` remains the fallback should `thumburl` be absent.
 
-    **The two are served from different hosts** - `thumburl` from `thumb.wikimedia.org` and
-    `url` from `upload.wikimedia.org` - and both go through the same fence downstream, which is
-    why `species_photos.PHOTO_BYTE_HOSTS` carries two names. Preferring `thumburl` while the
+    **The two are served from different hosts** - a scaled `thumburl` from `thumb.wikimedia.org`
+    and `url` from `upload.wikimedia.org` - and both go through the same fence downstream, which
+    is why `species_photos.PHOTO_BYTE_HOSTS` carries two names. Preferring `thumburl` while the
     fence knew only the second host is exactly how this pipeline once fetched nothing at all.
     """
     payload = await _commons(
@@ -2233,8 +2297,10 @@ async def _commons_imageinfo(file_title: str) -> tuple[str, species_photos.Photo
     if not isinstance(pages, list) or not pages:
         return None
     page = pages[0]
-    if not isinstance(page, dict) or page.get("missing"):
+    if not isinstance(page, dict):
         return None
+    if page.get("missing") or page.get("invalid"):
+        raise CommonsFileMissingError(file_title)
     infos = page.get("imageinfo")
     if not isinstance(infos, list) or not infos or not isinstance(info := infos[0], dict):
         return None
@@ -2245,14 +2311,19 @@ async def _commons_imageinfo(file_title: str) -> tuple[str, species_photos.Photo
     return url, species_photos.credit_from_imageinfo(info)
 
 
-async def _fetch_photo_bytes(url: str) -> bytes | None:
-    """Fetch the image bytes, or `None` for every way of not getting them.
+async def _fetch_media(url: str, *, claim_slot: bool) -> tuple[bytes, str] | None:
+    """Fetch image bytes and their content type, or `None` for every way of not getting them.
 
     Modelled on `user_pictures.import_google_avatar`: redirects are not followed, the read is
     capped, and the host is checked against an allowlist before anything leaves. The allowlist
     is the SSRF fence and it is hard-coded in `species_photos`, unlike the API endpoint beside
     it, which is a setting. It admits the two hosts one `imageinfo` reply can name and nothing
-    else, so both the thumbnail and the full-size fallback arrive through the same check.
+    else.
+
+    `claim_slot` is off only for the admin picker's previews: a dialog's worth would spend a
+    large share of `SPECIES_COMMONS_RATE_LIMIT_REQUESTS` in one click, and a diver's resolve
+    running beside it would then find the counter spent and store a completed no-photo verdict.
+    Previews are bounded by the dialog's own cap and by one admin's pace instead.
 
     **The `User-Agent` is not optional here.** Wikimedia's policy is the Foundation's and
     applies across its hosts, blocking generic and empty ones; an empty header was measured
@@ -2263,38 +2334,52 @@ async def _fetch_photo_bytes(url: str) -> bytes | None:
     if not species_photos.is_photo_byte_source(url):
         logger.warning("Refusing to fetch species photo bytes from an unexpected host.")
         return None
-    if not await _claim_provider_slot(_PROVIDER_COMMONS):
+    if claim_slot and not await _claim_provider_slot(_PROVIDER_COMMONS):
         logger.warning("Skipping a species photo fetch: this instance is over its Commons rate limit.")
         return None
 
     try:
-        async with httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT) as client:
-            async with client.stream("GET", url, headers={"User-Agent": settings.SPECIES_USER_AGENT}) as response:
-                if response.status_code != 200:
-                    logger.info("A species photo fetch answered %s; the species keeps no photo.", response.status_code)
+        async with (
+            _MEDIA_LIMITER,
+            httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT) as client,
+            client.stream("GET", url, headers={"User-Agent": settings.SPECIES_USER_AGENT}) as response,
+        ):
+            if response.status_code != 200:
+                logger.info("A species photo fetch answered %s; the species keeps no photo.", response.status_code)
+                return None
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > species_photos.MAX_PHOTO_DOWNLOAD_BYTES:
+                    logger.warning("A species photo exceeded %d bytes.", species_photos.MAX_PHOTO_DOWNLOAD_BYTES)
                     return None
-                body = bytearray()
-                async for chunk in response.aiter_bytes():
-                    body.extend(chunk)
-                    if len(body) > species_photos.MAX_PHOTO_DOWNLOAD_BYTES:
-                        logger.warning("A species photo exceeded %d bytes.", species_photos.MAX_PHOTO_DOWNLOAD_BYTES)
-                        return None
+            content_type = response.headers.get("content-type", "")
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
         logger.warning("A species photo fetch failed (%s).", type(exc).__name__)
         return None
-    return bytes(body)
+    return bytes(body), content_type.split(";")[0].strip().lower()
 
 
-async def _wikidata_items_by_aphia_ids(aphia_ids: list[int]) -> list[_WikidataEntity]:
-    """Every Wikidata item carrying any of these AphiaIDs, in **one** search.
+async def _fetch_photo_bytes(url: str) -> bytes | None:
+    """The bytes of a photo the rule or an admin chose, charged to the Commons counter."""
+    fetched = await _fetch_media(url, claim_slot=True)
+    return fetched[0] if fetched is not None else None
+
+
+async def _wikidata_items_by_aphia_ids(aphia_ids: list[int]) -> tuple[list[_WikidataEntity], bool]:
+    """Every Wikidata item carrying any of these AphiaIDs, in **one** search, and whether
+    Wikidata answered all of it.
 
     `haswbstatement` ORs its values inside a single query, verified against the live API, so
     "try a synonym" needs no per-synonym request however long the list is - the flagship case
     has 22 synonym ids and some taxa have 55. Whatever comes back feeds the existing
     four-at-a-time `wbgetentities` chunking.
+
+    The flag is `_wikidata_by_aphia_id`'s, for its reason: a search that failed is not a search
+    that found nothing, and only the second is the rule declining.
     """
     if not aphia_ids:
-        return []
+        return [], True
 
     clause = "|".join(f"{_APHIA_PROPERTY}={aphia_id}" for aphia_id in aphia_ids)
     payload = await _wikidata(
@@ -2306,10 +2391,11 @@ async def _wikidata_items_by_aphia_ids(aphia_ids: list[int]) -> list[_WikidataEn
         }
     )
     qids = _wikidata_qids(payload)
+    if qids is None:
+        return [], False
     if not qids:
-        return []
-    entities, _ = await _wikidata_entities(qids[:_SYNONYM_ITEM_SEARCH_LIMIT])
-    return entities
+        return [], True
+    return await _wikidata_entities(qids[:_SYNONYM_ITEM_SEARCH_LIMIT])
 
 
 def _choose_from_synonym_items(
@@ -2353,17 +2439,54 @@ def _choose_from_synonym_items(
     return None
 
 
+async def fetch_named_photo(file_title: str, *, minimum_width: int | None) -> PhotoAttempt:
+    """One Commons file title, fetched and normalized: the tail of the rule, and the whole of an
+    admin's pin.
+
+    **No catch-all**, unlike `fetch_species_photo`, because the pin has to tell three failures
+    apart and map them to different answers. Commons having no such file raises
+    `CommonsFileMissingError`; bytes the normaliser refuses raise its
+    `UnsupportedPhotoImageError` - `PhotoTooNarrowError` among them, when `minimum_width` is
+    set; and a call that failed or found the counter spent is the `unavailable` attempt
+    returned. The rule passes the floor and the pin passes `None`: an admin who saw the file's
+    width and chose it has overridden the rule.
+    """
+    found = await _commons_imageinfo(file_title)
+    if found is None:
+        return PhotoAttempt.unavailable()
+    url, credit = found
+
+    data = await _fetch_photo_bytes(url)
+    if data is None:
+        return PhotoAttempt.unavailable()
+
+    normalized = await species_photos.process_photo(data, minimum_width=minimum_width)
+    return PhotoAttempt.found(species_photos.fetched_photo(photo=normalized, file=file_title, credit=credit))
+
+
+async def fetch_pinned_photo(file_title: str) -> PhotoAttempt:
+    """`fetch_named_photo` with no floor, under the photo budget: an admin's pin.
+
+    The budget expiring is the `timed_out` attempt. The two refusals `fetch_named_photo` raises
+    propagate, for the route to answer each.
+    """
+    attempt = PhotoAttempt.timed_out()
+    with anyio.move_on_after(_PHOTO_BUDGET_SECONDS) as scope:
+        attempt = await fetch_named_photo(file_title, minimum_width=None)
+    return PhotoAttempt.timed_out() if scope.cancelled_caught else attempt
+
+
 async def fetch_species_photo(
     *,
     scientific_name: str,
     aphia_id: int,
     entity: _WikidataEntity | None,
-    synonym_aphia_ids: list[int],
-) -> species_photos.FetchedPhoto | None:
-    """Choose, fetch and normalize one species photo - or `None` for every way of not having
-    one, which is most of them.
+    synonym_aphia_ids: list[int] | None,
+) -> PhotoAttempt:
+    """Choose, fetch and normalize one species photo - or say why there is none, which is most
+    of the time.
 
-    **`None` is a first-class answer, not a failure**, and the caller stamps
+    **No photo is a first-class answer, not a failure**, and the caller stamps
     `photo_fetched_at` either way. Across the whole register only 11.7% of Wikidata items
     carrying a WoRMS id have a P18 at all, and this rule then refuses some of those on purpose,
     so "no photo" is the ordinary outcome and every surface has to look deliberate without one.
@@ -2373,10 +2496,12 @@ async def fetch_species_photo(
     *Triaenodon obesus* carries a silvertip shark beside a correct photo at equal rank and
     neither title names the taxon, so the rule declines - and a retry that fired there would
     hand it a photo from a synonym's item, undoing the one refusal this design exists to make.
+    `synonym_aphia_ids` is `None` when the synonym list itself failed to load, which makes a
+    retry that would have fired `unavailable` rather than a refusal nothing checked.
 
     Guarded end to end, `import_google_avatar`-style: whatever goes wrong out here, the caller
     is mid-way through an operation the diver asked for and a picture must not be able to fail
-    it.
+    it. Anything the guard swallows is `unavailable`.
     """
     try:
         candidates = species_photos.photograph_candidates(entity.images) if entity is not None else []
@@ -2386,34 +2511,34 @@ async def fetch_species_photo(
             else None
         )
 
-        if file_title is None and not candidates and synonym_aphia_ids:
-            # Gated on there being a *synonym* to try, so the very common "this taxon has no
-            # Wikidata item at all" path costs no second search. The accepted id then rides
-            # along with the synonyms rather than being left out: it is what makes the "prefer
-            # the item holding the accepted id" tie-break reachable, and the accepted item
-            # having no candidates is this branch's own precondition, so it can never win on
-            # its own account.
-            items = await _wikidata_items_by_aphia_ids(list(dict.fromkeys([aphia_id, *synonym_aphia_ids])))
-            file_title = _choose_from_synonym_items(items, scientific_name=scientific_name, accepted_aphia_id=aphia_id)
+        if file_title is None and not candidates:
+            if synonym_aphia_ids is None:
+                return PhotoAttempt.unavailable()
+            if synonym_aphia_ids:
+                # Gated on there being a *synonym* to try, so the very common "this taxon has no
+                # Wikidata item at all" path costs no second search. The accepted id then rides
+                # along with the synonyms rather than being left out: it is what makes the
+                # "prefer the item holding the accepted id" tie-break reachable, and the accepted
+                # item having no candidates is this branch's own precondition, so it can never
+                # win on its own account.
+                items, answered = await _wikidata_items_by_aphia_ids(
+                    list(dict.fromkeys([aphia_id, *synonym_aphia_ids]))
+                )
+                file_title = _choose_from_synonym_items(
+                    items, scientific_name=scientific_name, accepted_aphia_id=aphia_id
+                )
+                if file_title is None and not answered:
+                    return PhotoAttempt.unavailable()
 
         if file_title is None:
-            return None
+            return PhotoAttempt.declined()
 
-        found = await _commons_imageinfo(file_title)
-        if found is None:
-            return None
-        url, credit = found
-
-        data = await _fetch_photo_bytes(url)
-        if data is None:
-            return None
-
-        return species_photos.fetched_photo(
-            data=await species_photos.process_photo(data), file=file_title, credit=credit
-        )
+        return await fetch_named_photo(file_title, minimum_width=species_photos.COMMONS_THUMBNAIL_WIDTH)
+    except CommonsFileMissingError, species_photos.PhotoTooNarrowError:
+        return PhotoAttempt.declined()
     except Exception:
         logger.warning("Could not fetch a species photo for %s; storing the row without one.", aphia_id, exc_info=True)
-        return None
+        return PhotoAttempt.unavailable()
 
 
 async def attempt_species_photo(
@@ -2421,7 +2546,7 @@ async def attempt_species_photo(
     scientific_name: str,
     aphia_id: int,
     entity: _WikidataEntity | None,
-    synonym_aphia_ids: list[int],
+    synonym_aphia_ids: list[int] | None,
 ) -> PhotoAttempt:
     """`fetch_species_photo` under its own timeout scope, reporting whether it finished.
 
@@ -2430,43 +2555,45 @@ async def attempt_species_photo(
     synonym walk with it and turns a slow Commons into a 503 on the only route that fills the
     catalog.
 
-    `cancelled_caught` is how the two `None`s are told apart. Without it a timeout is
+    `cancelled_caught` is how the two kinds of nothing are told apart. Without it a timeout is
     indistinguishable from a completed search that found nothing, and only one of those is worth
     writing down.
     """
-    photo: species_photos.FetchedPhoto | None = None
     # Initialized before the scope, not inside it: `move_on_after` cancels the body wherever it
     # happens to be, so an assignment in there is not guaranteed to have run.
+    attempt = PhotoAttempt.timed_out()
     with anyio.move_on_after(_PHOTO_BUDGET_SECONDS) as scope:
-        photo = await fetch_species_photo(
+        attempt = await fetch_species_photo(
             scientific_name=scientific_name, aphia_id=aphia_id, entity=entity, synonym_aphia_ids=synonym_aphia_ids
         )
-    return PhotoAttempt(photo=photo, completed=not scope.cancelled_caught)
+    return PhotoAttempt.timed_out() if scope.cancelled_caught else attempt
 
 
 async def fetch_photo_for_species(*, scientific_name: str, aphia_id: int) -> PhotoAttempt:
     """`attempt_species_photo` for a species already in the catalog, loading its own inputs.
 
-    The entry point for `src/scripts/backfill_species_photos.py`, which has a stored row rather
-    than the enrichment `resolve_species` happens to be holding. It pays for the two lookups
-    that path gets free - the Wikidata entity and the synonym list - which is the right trade
-    for a script that runs once and paces itself between species.
+    The entry point for `src/scripts/backfill_species_photos.py` and for an admin's re-fetch,
+    which hold a stored row rather than the enrichment `resolve_species` happens to be holding.
+    It pays for the two lookups that path gets free - the Wikidata entity and the synonym list.
 
     A synonym list that failed to arrive degrades to no retry here rather than refusing, which
     is the opposite of what `resolve_species` does with the same `None`. The reason is what the
     list is *for* in each place: there it vets a display name about to be written forever, and
-    here it is a second chance at a photograph that the next run will take again anyway.
+    here it is a second chance at a photograph. A rule that then has nothing to choose from
+    reports `unavailable`, as does one that declined without ever seeing the accepted item
+    because its lookup failed - the backfill stamps either, while a re-fetch leaves the row be.
 
     **A budget that expired while loading those inputs is not an attempt either.** The photo
-    step would then run against no entity and no synonyms and return `None` immediately, which
-    reads downstream as "this species has no photo" - a verdict nothing actually established.
+    step would then run against no entity and no synonyms and decline immediately, which reads
+    downstream as "this species has no photo" - a verdict nothing actually established.
     """
     entity: _WikidataEntity | None = None
+    entity_answered = False
     synonyms: list[tuple[str, int | None]] | None = None
 
     async def load_entity() -> None:
-        nonlocal entity
-        entity = await _wikidata_by_aphia_id(aphia_id)
+        nonlocal entity, entity_answered
+        entity, entity_answered = await _wikidata_by_aphia_id(aphia_id)
 
     async def load_synonyms() -> None:
         nonlocal synonyms
@@ -2477,13 +2604,227 @@ async def fetch_photo_for_species(*, scientific_name: str, aphia_id: int) -> Pho
             tasks.start_soon(load_entity)
             tasks.start_soon(load_synonyms)
     if scope.cancelled_caught:
-        return PhotoAttempt(photo=None, completed=False)
+        return PhotoAttempt.timed_out()
 
-    return await attempt_species_photo(
+    attempt = await attempt_species_photo(
         scientific_name=scientific_name,
         aphia_id=aphia_id,
         entity=entity,
-        synonym_aphia_ids=[synonym_id for _, synonym_id in (synonyms or []) if synonym_id is not None],
+        synonym_aphia_ids=None if synonyms is None else [synonym_id for _, synonym_id in synonyms if synonym_id],
+    )
+    if attempt.outcome is PhotoOutcome.DECLINED and not entity_answered:
+        return PhotoAttempt.unavailable()
+    return attempt
+
+
+# -------------- the admin's photo picker --------------
+
+
+# How many files the picker offers. `extmetadata` is the expensive `imageinfo` property and
+# Commons asks for few titles at a time when it is requested, and two dozen fills a grid of
+# two, three or four columns evenly.
+_CANDIDATE_LIMIT = 24
+
+# How many members of a category are listed before the non-raster ones are dropped. A
+# `categorymembers` page is titles only and costs one light call whatever its length.
+_CATEGORY_MEMBER_LIMIT = 50
+
+# The previews' Commons bucket - a standard thumbnail size, as Wikimedia's media rules require,
+# and half the stored width because these are a grid of choices rather than the photo.
+_PREVIEW_WIDTH = 250
+
+# What one open of the picker may spend, metadata and previews together. Previews still in
+# flight when it runs out come back without one; the rest of the answer stands.
+_CANDIDATE_BUDGET_SECONDS = 20.0
+
+# What a preview may be. The bytes go to the browser as a `data:` URI without being decoded
+# here, so the type is taken from the response and held to raster formats a browser renders.
+_PREVIEW_CONTENT_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+
+
+@dataclass(frozen=True, slots=True)
+class PhotoCandidate:
+    """One Commons file the admin may pin, with the original's size and a preview to judge it
+    by. `preview` is `None` when its bytes did not arrive in time or were not a raster image."""
+
+    file: str
+    width: int | None
+    height: int | None
+    credit: species_photos.PhotoCredit
+    preview: str | None
+    is_current: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PhotoCandidates:
+    """The picker's answer: the Commons category the files came from, and the files."""
+
+    category: str | None
+    candidates: list[PhotoCandidate]
+
+
+def _query_list(payload: Any, key: str) -> list[Any] | None:
+    """`query.<key>` of a Commons answer when it is a list, else `None`."""
+    query = payload.get("query") if isinstance(payload, dict) else None
+    value = query.get(key) if isinstance(query, dict) else None
+    return value if isinstance(value, list) else None
+
+
+async def _category_of_file(file_title: str, *, genus: str | None) -> str | None:
+    """A category to offer when the item names none: one of the current file's own, preferring
+    one that names the genus, since a file is often filed under a place or a photographer
+    beside its taxon."""
+    pages = _query_list(
+        await _commons(
+            {
+                "action": "query",
+                "prop": "categories",
+                "clshow": "!hidden",
+                "cllimit": 50,
+                "titles": f"File:{file_title}",
+            }
+        ),
+        "pages",
+    )
+    if not pages or not isinstance(pages[0], dict):
+        return None
+    names = [
+        title.removeprefix("Category:")
+        for category in pages[0].get("categories") or []
+        if isinstance(category, dict) and isinstance(title := category.get("title"), str)
+    ]
+    if genus:
+        named = [name for name in names if genus.casefold() in name.casefold()]
+        if named:
+            return named[0]
+    return names[0] if names else None
+
+
+async def _category_files(category: str) -> list[str]:
+    """A Commons category's files, in its own sortkey order."""
+    members = _query_list(
+        await _commons(
+            {
+                "action": "query",
+                "list": "categorymembers",
+                "cmtitle": f"Category:{category}",
+                "cmtype": "file",
+                "cmlimit": _CATEGORY_MEMBER_LIMIT,
+            }
+        ),
+        "categorymembers",
+    )
+    return [
+        title for member in members or [] if isinstance(member, dict) and isinstance(title := member.get("title"), str)
+    ]
+
+
+async def _preview_infos(titles: list[str]) -> dict[str, dict[str, Any]]:
+    """One `imageinfo` call for every title: size, URLs and credit, at the preview bucket.
+    Keyed by the normalized title; a file Commons does not have is simply absent."""
+    pages = _query_list(
+        await _commons(
+            {
+                "action": "query",
+                "prop": "imageinfo",
+                "titles": "|".join(f"File:{title}" for title in titles),
+                "iiprop": "size|url|extmetadata",
+                "iiurlwidth": _PREVIEW_WIDTH,
+            }
+        ),
+        "pages",
+    )
+    infos: dict[str, dict[str, Any]] = {}
+    for page in pages or []:
+        if not isinstance(page, dict) or not isinstance(raw := page.get("title"), str):
+            continue
+        entries = page.get("imageinfo")
+        title = species_photos.normalize_file_title(raw)
+        if title is not None and isinstance(entries, list) and entries and isinstance(entries[0], dict):
+            infos[title] = entries[0]
+    return infos
+
+
+async def _preview(info: dict[str, Any]) -> str | None:
+    """A `data:` URI of one file's preview bytes, fetched under the fence and the byte cap but
+    charged to no counter - see `_fetch_media`."""
+    url = info.get("thumburl") or info.get("url")
+    if not isinstance(url, str):
+        return None
+    fetched = await _fetch_media(url, claim_slot=False)
+    if fetched is None or fetched[1] not in _PREVIEW_CONTENT_TYPES:
+        return None
+    data, content_type = fetched
+    return f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+async def photo_candidates(*, wikidata_qid: str | None, photo_file: str | None, genus: str | None) -> PhotoCandidates:
+    """The Commons files an admin may pin for one species, each with a preview.
+
+    Sources in order, de-duplicated: the item's non-deprecated P18 values - what the rule saw -
+    then the file stored now, then the members of the item's P373 category, or of one of the
+    stored file's own categories when the item names none. Non-raster files are dropped and the
+    list is cut at `_CANDIDATE_LIMIT`.
+
+    **Previews travel inline as `data:` URIs** rather than as links: the page's `img-src` admits
+    only this instance, an `<img>` cannot carry the bearer header an authenticated preview
+    route would need, and a hotlinked thumbnail would tell Wikimedia what the admin is looking
+    at. Every metadata call claims its Commons or Wikidata slot like any other, so an exhausted
+    counter degrades the list rather than failing the request.
+    """
+    category: str | None = None
+    infos: dict[str, dict[str, Any]] = {}
+    listed: list[str] = []
+    previews: dict[str, str] = {}
+
+    async def load(title: str) -> None:
+        if (preview := await _preview(infos[title])) is not None:
+            previews[title] = preview
+
+    # Whatever the budget cut off stays at the values above: a list without its previews, or
+    # no list at all.
+    with anyio.move_on_after(_CANDIDATE_BUDGET_SECONDS):
+        titles: list[str] = []
+        if wikidata_qid:
+            entities, _ = await _wikidata_entities([wikidata_qid])
+            if entities:
+                titles += [candidate.file for candidate in entities[0].images]
+                category = entities[0].commons_category
+        if photo_file:
+            titles.append(photo_file)
+            if category is None:
+                category = await _category_of_file(photo_file, genus=genus)
+        if category:
+            titles += await _category_files(category)
+
+        normalized = [title for raw in titles if (title := species_photos.normalize_file_title(raw)) is not None]
+        chosen = list(dict.fromkeys(normalized))[:_CANDIDATE_LIMIT]
+        if chosen:
+            infos = await _preview_infos(chosen)
+        listed = [title for title in chosen if title in infos]
+
+        async with anyio.create_task_group() as tasks:
+            for title in listed:
+                tasks.start_soon(load, title)
+
+    current = species_photos.normalize_file_title(photo_file) if photo_file else None
+    return PhotoCandidates(
+        category=category,
+        candidates=[
+            PhotoCandidate(
+                file=title,
+                width=_int_or_none(infos[title].get("width")),
+                height=_int_or_none(infos[title].get("height")),
+                credit=species_photos.credit_from_imageinfo(infos[title]),
+                preview=previews.get(title),
+                is_current=title == current,
+            )
+            for title in listed
+        ],
     )
 
 
@@ -2583,7 +2924,7 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
 
     async def load_entity() -> None:
         nonlocal entity
-        entity = await _wikidata_by_aphia_id(accepted_id)
+        entity, _ = await _wikidata_by_aphia_id(accepted_id)
 
     with anyio.move_on_after(_ENRICHMENT_BUDGET_SECONDS):
         async with anyio.create_task_group() as tasks:

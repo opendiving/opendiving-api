@@ -22,7 +22,10 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
+
+from divejson import InWater, in_water
 
 from ..core.utils.datetime_offset import split_local_start_time
 from ..schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND, SINGLE_SERIES_CHANNELS, ProfileEventType
@@ -402,3 +405,14 @@ def gate_figures(profile: NormalizedProfile | None) -> tuple[int | None, float |
     duration = round(profile.duration / MILLISECONDS_PER_SECOND)
     depth = profile.depth
     return duration, None if depth is None or not depth.v else max(depth.v) / DEPTH_SCALE
+
+
+def in_water_of(profile: NormalizedProfile | None) -> InWater | None:
+    """A dive's time in the water and its mean depth over that time, from a profile's depth
+    channel: `divejson.in_water`, the one implementation of the rule, over the centimetres a
+    profile holds. `None` where no interval counts, which leaves the caller's figures standing.
+    """
+    depth = None if profile is None else profile.depth
+    if depth is None:
+        return None
+    return in_water(zip(depth.t, (Decimal(value) / DEPTH_SCALE for value in depth.v), strict=True))

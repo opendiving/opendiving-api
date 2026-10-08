@@ -25,9 +25,11 @@ Pure CPU and never on the event loop: every caller on a request path hands these
 
 import logging
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Context, Decimal
+from typing import Any
 
 import divejson
 from divejson import ConverterError, NonConformingOutputError, SourceTooLargeError
@@ -37,7 +39,7 @@ from ..core.utils.datetime_offset import split_local_start_time
 from ..schemas.dive import DiveMode, Salinity
 from ..schemas.dive_profile import TEMPERATURE_SCALE
 from ..schemas.logbook_import import ImportCylinder, ImportDive, ImportDocument, ImportRecording
-from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
+from ..schemas.parsed_dive import DiveMixtureSchema, InferredField, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
 from .dive_profiles import NormalizedProfile
 from .dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS
 from .recording_shape import Drop, ShapedRecording, recording_start, shape_recording
@@ -155,13 +157,35 @@ class ReadDive:
 
     `recording` is `None` for a dive the document gives no recording - a logbook entry with no
     computer behind it, which the form still prefills. `started_at` is the dive's start as the
-    document spells it, which is what the form is handed.
+    document spells it, which is what the form is handed. `inferred` names the dive's figures
+    the reader derived rather than read (`inferred_figures`).
     """
 
     format: str
     dive: ImportDive
     recording: ImportRecording | None
     started_at: str | None
+    inferred: tuple[InferredField, ...] = ()
+
+
+_FIGURES: tuple[InferredField, ...] = ("duration", "avg_depth", "max_depth")
+
+
+def inferred_figures(document: Mapping[str, Any]) -> tuple[InferredField, ...]:
+    """The first dive's figures a document lists under `extensions.divejson.inferred`.
+
+    The list is of JSON Pointers into the whole document, and the form takes one dive, so only
+    `dives/0`'s figures can name anything it shows.
+    """
+    extensions = document.get("extensions")
+    ours = extensions.get("divejson") if isinstance(extensions, Mapping) else None
+    pointers = ours.get("inferred") if isinstance(ours, Mapping) else None
+    if not isinstance(pointers, list):
+        return ()
+    named = {f"dives/0/{figure}": figure for figure in _FIGURES}
+    return tuple(
+        named[pointer.lstrip("/")] for pointer in pointers if isinstance(pointer, str) and pointer.lstrip("/") in named
+    )
 
 
 def _conversion_moment() -> datetime:
@@ -244,6 +268,7 @@ def read_dive_file(content: bytes, *, format: str | None = None) -> ReadDive:
         dive=dive,
         recording=dive.recordings[0] if dive.recordings else None,
         started_at=raw if isinstance(raw, str) else None,
+        inferred=inferred_figures(conversion.document),
     )
 
 
@@ -318,7 +343,8 @@ def prefill(read: ReadDive, shaped: ShapedRecording | None) -> ParsedDiveSchema:
     """The dive form's values for one file: the document's dive, as this app shows it.
 
     A pure function of the document. The dive's `duration`, `max_depth`, `avg_depth` and
-    start pass as the document writes them, and so does the rest of what it states of the
+    start pass as the document writes them, the figures its reader derived named in
+    `inferred`, and so does the rest of what it states of the
     dive - notes, conditions, rating, tags - with no bound applied (`ParsedDiveSchema` says
     why); its cylinders, readouts and ppO₂ limits are rounded to the two decimals the form
     shows; its positions to six places; and `dive_number` is the document's own `number`,
@@ -355,6 +381,7 @@ def prefill(read: ReadDive, shaped: ShapedRecording | None) -> ParsedDiveSchema:
         entry_type=dive.entry_type,
         boat_name=dive.boat_name,
         tags=dive.tags,
+        inferred=list(read.inferred),
         device=ParsedDevice(**{member: device.get(column) for member, column in DEVICE_COLUMNS.items()})
         if device
         else None,
@@ -375,7 +402,9 @@ def prefill(read: ReadDive, shaped: ShapedRecording | None) -> ParsedDiveSchema:
     )
 
 
-def read_prefill(content: bytes) -> tuple[str, ParsedDiveSchema]:
-    """`POST /dive/parse`'s whole read: the format the head claimed, and the form's values."""
+def read_prefill(content: bytes) -> tuple[str, ParsedDiveSchema, NormalizedProfile | None]:
+    """`POST /dive/parse`'s whole read: the format the head claimed, the form's values, and the
+    recording's shaped samples, which the parse-time match takes its figures from."""
     read = read_dive_file(content)
-    return read.format, prefill(read, shape(read))
+    shaped = shape(read)
+    return read.format, prefill(read, shaped), None if shaped is None else shaped.profile

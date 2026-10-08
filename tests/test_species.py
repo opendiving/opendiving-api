@@ -2162,9 +2162,9 @@ class TestResolve:
         }
         entities = {"entities": {"Q1126155": {"claims": claims}}}
         with _registers(wikidata_lookup=WIKIDATA_LOOKUP, wikidata_entities=entities):
-            entity = await species_service._wikidata_by_aphia_id(278400)
+            entity, answered = await species_service._wikidata_by_aphia_id(278400)
 
-        assert entity is not None
+        assert entity is not None and answered
         assert (entity.qid, entity.aphia_id) == ("Q1126155", 278400)
 
     @pytest.mark.asyncio

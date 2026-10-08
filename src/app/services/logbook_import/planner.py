@@ -42,6 +42,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
+from divejson import IN_WATER_DEPTH, InWater
 from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -126,7 +127,7 @@ from ..dive_recordings import (
     load_candidates,
 )
 from ..person_links import Account, accounts_by_uuid, claim_link_slot, link_budget_remaining
-from ..recording_shape import INT32_MAX, Bound, Drop, bounded, finite, gate_figures, shape_recording
+from ..recording_shape import INT32_MAX, Bound, Drop, bounded, finite, gate_figures, in_water_of, shape_recording
 from ..user_pictures import (
     MAX_PICTURE_UPLOAD_SIZE,
     PORTRAIT_FRAME,
@@ -319,6 +320,9 @@ class PlannedRecording:
     duration: int | None = None
     max_depth: float | None = None
     profile: PlannedProfile | None = None
+    # The time in the water over the depth channel as the document states it, before the
+    # point cap: what the dive takes for a duration or an average depth its document omits.
+    in_water: InWater | None = None
     files: list[PlannedFile] = field(default_factory=list)
     # The imported file itself, where it is this recording's file: stored, and the recording
     # derived from its files as the dive form derives one, where `files` - an archive's -
@@ -1169,7 +1173,7 @@ class _Planner:
         diver = self._document.diver
         if diver is None:
             return
-        if diver.name or diver.username or _carries_settings(diver.extensions):
+        if diver.name or _carries_settings(diver.extensions):
             self._note(
                 ImportNoteCode.DIVER_NOT_APPLIED,
                 "The document's own name and settings are not applied: this account keeps its own.",
@@ -2352,16 +2356,28 @@ class _Planner:
         bounded = self._bounded(collection, dive.uuid, dive, _DIVE_BOUNDS)
         recordings = self._plan_recordings(dive)
         # The primary recording's profile, for the dive-level jobs a profile still has: standing
-        # in for an unrecorded duration and an unstated bottom temperature below, and keeping the
-        # skip message honest. Capped, which keeps every channel's extremes (`_downsample_series`).
+        # in for an unrecorded duration, average depth and bottom temperature below, and keeping
+        # the skip message honest. Capped, which keeps every channel's extremes
+        # (`_downsample_series`).
         profile = recordings[0].profile if recordings else None
+        in_water = recordings[0].in_water if recordings else None
 
+        # Derived, and reported as derived - which §5.4 permits and inventing does not. The
+        # profile is the recording of this very dive, so its time in the water is what a
+        # reader with no stated figure takes (`divejson.in_water`), and its span - in
+        # milliseconds, where a dive's duration is whole seconds - stands in only where no
+        # sample was in the water.
         duration = bounded.get("duration")
-        if duration is None and profile is not None:
-            # Derived, and reported as derived - which §5.4 permits and inventing does not.
-            # The profile is the recording of this very dive, so its span is the one number
-            # in the document that can honestly stand for a duration the source never wrote -
-            # in milliseconds, and a dive's duration is whole seconds.
+        if duration is None and in_water is not None and in_water.duration > 0:
+            duration = in_water.duration
+            self._note(
+                ImportNoteCode.VALUE_DERIVED,
+                "This dive records no duration, so its length was taken as the time its own profile spends deeper "
+                f"than {IN_WATER_DEPTH} m.",
+                collection=collection,
+                uuid=dive.uuid,
+            )
+        elif duration is None and profile is not None:
             duration = round(profile.duration / MILLISECONDS_PER_SECOND)
             self._note(
                 ImportNoteCode.VALUE_DERIVED,
@@ -2379,6 +2395,15 @@ class _Planner:
             )
 
         max_depth, avg_depth = bounded.get("max_depth"), bounded.get("avg_depth")
+        if avg_depth is None and dive.avg_depth is None and in_water is not None:
+            avg_depth = float(in_water.avg_depth)
+            self._note(
+                ImportNoteCode.VALUE_DERIVED,
+                "This dive records no average depth, so it was taken as the mean depth of its own profile over the "
+                f"time it spends deeper than {IN_WATER_DEPTH} m.",
+                collection=collection,
+                uuid=dive.uuid,
+            )
         if max_depth is not None and avg_depth is not None and avg_depth > max_depth:
             # A pair rule, so there is no "the bad value": `avg_depth` is the half that goes
             # for the same reason revision `c4d81e6b3f57` clears that one - `max_depth`
@@ -2729,6 +2754,7 @@ class _Planner:
                     duration=duration,
                     max_depth=max_depth,
                     profile=profile,
+                    in_water=None if profile is None else in_water_of(shaped.profile),
                     files=files,
                 )
             )

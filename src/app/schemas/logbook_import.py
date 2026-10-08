@@ -220,7 +220,6 @@ class ImportDiver(_ReadModel):
 
     uuid: uuid_pkg.UUID | None = None
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    username: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
     email: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
     born_on: date | None = None
@@ -718,8 +717,8 @@ class ImportNoteCode(StrEnum):
     # The record imported, but one of its values could not be stored as written.
     VALUE_DROPPED = "value_dropped"
     # A value the document does not state was derived from what it does - a dive's duration
-    # from its profile's span, its bottom temperature from its coldest sample - as spec §5.4
-    # lets a reader that says so. Nothing was lost.
+    # and average depth from its profile's time in the water, its bottom temperature from its
+    # coldest sample - as spec §5.4 lets a reader that says so. Nothing was lost.
     VALUE_DERIVED = "value_derived"
     # A reference names a record the document does not define, or one that was skipped.
     REFERENCE_UNRESOLVED = "reference_unresolved"
