@@ -1,5 +1,5 @@
 import uuid as uuid_pkg
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,6 +19,17 @@ class UserDiveStatsRead(UserDiveStatsBase):
 
     user_uuid: uuid_pkg.UUID
     created_at: datetime
+    dive_site_count: Annotated[
+        int, Field(description="Distinct dive sites the live dives name, at any position", examples=[12])
+    ]
+    first_dive_on: Annotated[
+        date | None,
+        Field(description="The earliest live dive's own local day; null with no dives", examples=["2014-03-08"]),
+    ]
+    last_dive_on: Annotated[
+        date | None,
+        Field(description="The latest live dive's own local day; null with no dives", examples=["2026-10-05"]),
+    ]
 
 
 class UserDiveStatsReadInternal(UserDiveStatsBase):

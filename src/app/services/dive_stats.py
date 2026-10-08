@@ -1,11 +1,14 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from typing import Any, NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.dive import Dive
+from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_species import DiveSpecies
 from ..models.user_dive_stats import UserDiveStats
+from .year_in_review import local_day
 
 
 async def recalculate_dive_stats(db: AsyncSession, user_id: int, commit: bool = True) -> UserDiveStats:
@@ -76,3 +79,45 @@ async def recalculate_dive_stats(db: AsyncSession, user_id: int, commit: bool = 
         await db.refresh(stats)
 
     return stats
+
+
+class SitesAndDiveDays(NamedTuple):
+    dive_site_count: int
+    first_dive_on: date | None
+    last_dive_on: date | None
+
+
+async def sites_and_dive_days(db: AsyncSession, user_id: int) -> SitesAndDiveDays:
+    """The `/user/dive-stats` figures derived on read rather than stored on `user_dive_stats`.
+
+    The site count cannot be stored: a dive's sites change without a dive write - deleting a
+    site cascades its `dive_dive_site` rows and merging two re-points them - and neither path
+    runs `recalculate_dive_stats`. The days could be, but each is one row off
+    `ix_dive_user_id_start_time`, which is less than the columns and backfill would cost.
+
+    Sites are counted as a trip and the life list count them: distinct sites named by a live
+    dive at any position. The first and last days are those of the earliest and latest live
+    dive, each on its own local day through `local_day`, as `/user/dive-activity` buckets it.
+    """
+    dive_site_count = await db.scalar(
+        select(func.count(func.distinct(DiveDiveSite.dive_site_id)))
+        .join(Dive, Dive.id == DiveDiveSite.dive_id)
+        .where(Dive.user_id == user_id, Dive.is_deleted.is_(False))
+    )
+
+    async def day_of_the(*order: Any) -> date | None:
+        row = (
+            await db.execute(
+                select(Dive.start_time, Dive.utc_offset_minutes)
+                .where(Dive.user_id == user_id, Dive.is_deleted.is_(False))
+                .order_by(*order)
+                .limit(1)
+            )
+        ).one_or_none()
+        return None if row is None else local_day(row.start_time, row.utc_offset_minutes)
+
+    return SitesAndDiveDays(
+        dive_site_count=int(dive_site_count or 0),
+        first_dive_on=await day_of_the(Dive.start_time.asc(), Dive.id.asc()),
+        last_dive_on=await day_of_the(Dive.start_time.desc(), Dive.id.desc()),
+    )

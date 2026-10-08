@@ -57,6 +57,7 @@ from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInter
 from ...schemas.user_picture import PictureCrop, PictureCropRequest, PictureKind, PictureRead
 from ...services.dive_activity import dive_activity
 from ...services.dive_gas import gas_use_history
+from ...services.dive_stats import sites_and_dive_days
 from ...services.email_service import (
     send_account_deletion_email,
     send_email_change_confirmation_email,
@@ -731,6 +732,7 @@ async def read_dive_stats(
     A user with no dives logged yet gets zeroed-out stats rather than a 404: every user
     conceptually has stats, the row just hasn't been created.
     """
+    derived = await sites_and_dive_days(db, user_id=current_user["id"])
     stats = await crud_user_dive_stats.get(
         db=db, user_id=current_user["id"], schema_to_select=UserDiveStatsReadInternal, return_as_model=True
     )
@@ -739,11 +741,15 @@ async def read_dive_stats(
         # every user conceptually has stats, they just haven't been created yet.
         # total_dives/max_depth/total_time/species_seen have Pydantic defaults, but mypy's
         # pydantic plugin doesn't recognize defaults declared via `Annotated[..., Field(default=...)]`.
-        return UserDiveStatsRead(user_uuid=current_user["uuid"], created_at=datetime.now(UTC))  # type: ignore[call-arg]
+        return UserDiveStatsRead(  # type: ignore[call-arg]
+            user_uuid=current_user["uuid"], created_at=datetime.now(UTC), **derived._asdict()
+        )
 
     stats = cast(UserDiveStatsReadInternal, stats)
     return UserDiveStatsRead(
-        **{k: v for k, v in stats.model_dump().items() if k != "user_id"}, user_uuid=current_user["uuid"]
+        **{k: v for k, v in stats.model_dump().items() if k != "user_id"},
+        user_uuid=current_user["uuid"],
+        **derived._asdict(),
     )
 
 
