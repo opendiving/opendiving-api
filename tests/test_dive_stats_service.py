@@ -1,11 +1,26 @@
-"""Unit tests for the dive-stats recalculation service."""
+"""The dive-stats service: the stored recalculation, mocked, and the figures derived on read,
+against Postgres."""
 
+from datetime import UTC, date, datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
+from src.app.api.v1 import users as users_module
+from src.app.models.dive import Dive
+from src.app.models.dive_dive_site import DiveDiveSite
+from src.app.models.dive_site import DiveSite
+from src.app.models.user import User
 from src.app.models.user_dive_stats import UserDiveStats
-from src.app.services.dive_stats import recalculate_dive_stats
+from src.app.schemas.user_dive_stats import UserDiveStatsReadInternal
+from src.app.services.dive_stats import SitesAndDiveDays, recalculate_dive_stats, sites_and_dive_days
+from tests.conftest import db_available
+from tests.helpers.generators import create_dive_site
 
 
 def _make_db_mock(aggregate_row: tuple, existing_stats: UserDiveStats | None, species_seen: int = 0):
@@ -100,3 +115,113 @@ class TestRecalculateDiveStats:
 
         db.commit.assert_not_awaited()
         db.refresh.assert_not_awaited()
+
+
+DERIVED = SitesAndDiveDays(dive_site_count=3, first_dive_on=date(2014, 3, 8), last_dive_on=date(2026, 10, 5))
+
+
+class TestTheRoute:
+    """Both branches carry the derived figures: the zeroed one is every diver whose stats row
+    a dive write has not created yet."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "row",
+        [
+            None,
+            UserDiveStatsReadInternal(
+                user_id=1, total_dives=4, max_depth=30.0, total_time=7200, species_seen=2, created_at=datetime.now(UTC)
+            ),
+        ],
+    )
+    async def test_reads_the_derived_figures_beside_the_stored_ones(
+        self, monkeypatch: pytest.MonkeyPatch, row: UserDiveStatsReadInternal | None
+    ) -> None:
+        monkeypatch.setattr(users_module.crud_user_dive_stats, "get", AsyncMock(return_value=row))
+        monkeypatch.setattr(users_module, "sites_and_dive_days", AsyncMock(return_value=DERIVED))
+
+        stats = await users_module.read_dive_stats(MagicMock(), current_user={"id": 1, "uuid": uuid4()}, db=MagicMock())
+
+        assert (stats.dive_site_count, stats.first_dive_on, stats.last_dive_on) == tuple(DERIVED)
+        assert stats.total_dives == (0 if row is None else 4)
+
+
+# ------------------------------------------------------------------ against Postgres
+
+PLUS_7 = timezone(timedelta(hours=7))
+MINUS_10 = timezone(timedelta(hours=-10))
+
+
+def _dive(db: Session, user: User, start: datetime, *, sites: tuple[DiveSite, ...] = (), **columns: Any) -> Dive:
+    """A dive at `start`, its offset the one `start` carries, naming `sites` in order."""
+    offset = start.utcoffset()
+    dive = Dive(
+        user_id=user.id,
+        dive_number=1,
+        start_time=start,
+        utc_offset_minutes=0 if offset is None else int(offset.total_seconds() // 60),
+        duration=1800,
+        notes="",
+        **columns,
+    )
+    db.add(dive)
+    db.commit()
+    db.add_all(DiveDiveSite(dive_id=dive.id, dive_site_id=site.id, position=n) for n, site in enumerate(sites))
+    db.commit()
+    return dive
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestSitesAndDiveDays:
+    @pytest.mark.asyncio
+    async def test_a_logbook_with_no_dives_has_no_sites_and_no_days(self, async_db: AsyncSession, diver: User) -> None:
+        assert await sites_and_dive_days(async_db, user_id=diver.id) == (0, None, None)
+
+    @pytest.mark.asyncio
+    async def test_counts_each_site_a_live_dive_names_once_at_any_position(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        reef, wall, wreck, unvisited, gone = (create_dive_site(db, diver) for _ in range(5))
+        at = datetime(2026, 6, 1, 9, tzinfo=UTC)
+        _dive(db, diver, at, sites=(reef, wall))
+        _dive(db, diver, at, sites=(wall, wreck))
+        _dive(db, diver, at)
+        _dive(db, diver, at, sites=(gone,), is_deleted=True)
+        _dive(db, other_diver, at, sites=(unvisited,))
+
+        assert (await sites_and_dive_days(async_db, user_id=diver.id)).dive_site_count == 3
+
+    @pytest.mark.asyncio
+    async def test_the_days_are_the_end_dives_own_local_ones(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        first = _dive(db, diver, datetime(2014, 3, 8, 0, 30, tzinfo=PLUS_7))
+        last = _dive(db, diver, datetime(2026, 10, 5, 23, 30, tzinfo=MINUS_10))
+        _dive(db, diver, datetime(2020, 1, 1, 9, tzinfo=UTC))
+        _dive(db, diver, datetime(2010, 1, 1, 9, tzinfo=UTC), is_deleted=True)
+        _dive(db, diver, datetime(2027, 1, 1, 9, tzinfo=UTC), is_deleted=True)
+        _dive(db, other_diver, datetime(2000, 1, 1, 9, tzinfo=UTC))
+        assert (first.start_time.astimezone(UTC).date(), last.start_time.astimezone(UTC).date()) == (
+            date(2014, 3, 7),
+            date(2026, 10, 6),
+        )
+
+        derived = await sites_and_dive_days(async_db, user_id=diver.id)
+
+        assert (derived.first_dive_on, derived.last_dive_on) == (date(2014, 3, 8), date(2026, 10, 5))
+
+    @pytest.mark.asyncio
+    async def test_a_dive_with_an_unknown_offset_or_only_a_date_keeps_its_recorded_day(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        wall_clock = _dive(db, diver, datetime(2015, 5, 1, 23, 30, tzinfo=UTC))
+        bare_date = _dive(db, diver, datetime(2025, 5, 1, tzinfo=UTC))
+        for dive, date_only in ((wall_clock, False), (bare_date, True)):
+            db.execute(
+                update(Dive).where(Dive.id == dive.id).values(utc_offset_minutes=None, start_date_only=date_only)
+            )
+        db.commit()
+
+        derived = await sites_and_dive_days(async_db, user_id=diver.id)
+
+        assert (derived.first_dive_on, derived.last_dive_on) == (date(2015, 5, 1), date(2025, 5, 1))
