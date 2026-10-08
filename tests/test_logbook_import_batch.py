@@ -222,7 +222,7 @@ async def _attach(db: AsyncSession, user: User, dive: Dive, content: bytes, name
 async def _on_the_form(db: AsyncSession, sync_db: Session, user: User, files: list[tuple[str, bytes]]) -> Dive:
     """The dive form: the first file's prefill saved as a dive, then each file attached."""
     dive = create_dive(sync_db, user)
-    _, parsed = read_prefill(files[0][1])
+    _, parsed, _ = read_prefill(files[0][1])
     await replace_mixtures_for_dive(
         db=db, dive_id=dive.id, mixtures=[DiveMixtureCreate(**row.model_dump()) for row in parsed.mixtures]
     )

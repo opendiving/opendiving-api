@@ -18,7 +18,7 @@ import pytest
 
 from src.app.core.schemas import NOTES_MAX_LENGTH
 from src.app.schemas.dive_profile import ProfileEventType
-from src.app.services.dive_merge import _Span, dive_figures, merged_notes
+from src.app.services.dive_merge import DiveFigures, dive_figures, merged_notes
 from src.app.services.dive_profiles import (
     NormalizedProfile,
     ProfileEvent,
@@ -87,8 +87,8 @@ class TestFoldingTwoRecordsOntoOneAxis:
         assert not [second for second in folded.depth.t if 180 < second < 223]
 
     def test_the_span_runs_to_the_last_sample_of_the_second_record(self) -> None:
-        """223 plus the second record's own sampled 2 940. **Not** its logged end, which is
-        2 921 and would give 3 144 - a dive claiming a span its own chart runs past."""
+        """223 plus the second record's own sampled 2 940, rather than its logged end of
+        2 921."""
         folded = _folded()
 
         assert folded.duration == RESTART_DELTA + (SECOND_PART_SAMPLES - 1) * 10 == 3163
@@ -283,77 +283,66 @@ class TestWhichDiveSurvives:
         assert not starts_before(noon, 180, noon - timedelta(minutes=180), None)
 
 
+def _folded_in_milliseconds(first: ProfileSeries) -> NormalizedProfile:
+    """The Perdix pair on the axis's real milliseconds, which the time in the water reads."""
+    second = NormalizedProfile(depth=_series(SECOND_PART_SAMPLES, step=10_000, first_value=900))
+    folded = attribute_and_cap(
+        join_profiles(NormalizedProfile(depth=first), shift_profile(second, RESTART_DELTA * 1000))
+    )
+    assert folded is not None
+    return folded
+
+
 class TestTheSurvivingDivesFigures:
-    def _span(self, *, minutes: int = 0, duration: int | None, max_depth_cm: int | None = None) -> _Span:
-        """`duration` is the profile's span, in the axis's milliseconds."""
-        return _Span(
-            start_time=datetime(2026, 9, 8, 12, 0, tzinfo=UTC) + timedelta(minutes=minutes),
-            utc_offset_minutes=180,
-            duration=duration,
-            max_depth_cm=max_depth_cm,
-        )
+    def test_a_fold_counts_the_gap_when_the_computer_died_at_depth(self) -> None:
+        """The Perdix pair: its first record's last sample is 5 m down, so the 43 seconds the
+        computer was off were spent in the water and count - the start delta plus the second
+        record's own time in the water, which here is the whole span."""
+        folded = _folded_in_milliseconds(_series(FIRST_PART_SAMPLES, step=10_000))
 
-    def test_the_span_runs_from_the_earliest_recording_to_the_last_sample(self) -> None:
-        """The folded case: one recording covering 3 163 seconds from its own start - and the
-        dive's duration is whole seconds, the span's milliseconds divided."""
-        duration, _ = dive_figures([self._span(duration=3_163_000)])
+        assert dive_figures([], folded=folded).duration == RESTART_DELTA + (SECOND_PART_SAMPLES - 1) * 10 == 3163
 
-        assert duration == 3163
+    def test_a_fold_leaves_out_the_gap_when_the_diver_had_surfaced(self) -> None:
+        """The module's other reason for a fold, a diver who surfaced to reposition the boat:
+        the first record's last sample is at the surface, so the 43 seconds the computer was
+        off are not time in the water - its own 180 and the second record's 2 940 are."""
+        surfaced = ProfileSeries(t=[index * 10_000 for index in range(FIRST_PART_SAMPLES)], v=[500] * 18 + [0])
 
-    def test_a_second_computers_recording_is_placed_by_its_own_start(self) -> None:
-        """The appended case. The second computer went in two minutes later and surfaced
-        after the first, so the dive runs to *its* last sample rather than to the primary
-        recording's.
-        """
-        duration, _ = dive_figures([self._span(duration=1_800_000), self._span(minutes=2, duration=1_800_000)])
+        figures = dive_figures([], folded=_folded_in_milliseconds(surfaced))
 
-        assert duration == 120 + 1800
+        assert figures.duration == (FIRST_PART_SAMPLES - 1) * 10 + (SECOND_PART_SAMPLES - 1) * 10 == 3120
+
+    def test_a_folds_average_is_the_mean_over_its_time_in_the_water(self) -> None:
+        folded = NormalizedProfile(depth=ProfileSeries(t=[0, 10_000, 20_000, 30_000], v=[100, 1000, 2000, 0]))
+
+        figures = dive_figures([], folded=folded)
+
+        # The first interval starts at 1.0 m and does not count; the next two do.
+        assert figures.duration == 20
+        assert figures.avg_depth == (10 * 15.0 + 10 * 10.0) / 20
+
+    def test_side_by_side_the_dives_own_figures_stand(self) -> None:
+        """Two computers recorded the same time in the water, so the survivor keeps its
+        primary computer's figures rather than any span across the two."""
+        figures = dive_figures([1900, 1904], folded=None)
+
+        assert (figures.duration, figures.avg_depth) == (None, None)
 
     def test_the_deepest_reading_wins_wherever_it_came_from(self) -> None:
-        _, max_depth = dive_figures(
-            [self._span(duration=100, max_depth_cm=1900), self._span(duration=100, max_depth_cm=1904)]
-        )
+        assert dive_figures([1900, None, 1904], folded=None).max_depth == 19.04
 
-        assert max_depth == 19.04
-
-    def test_a_recording_with_no_samples_still_offers_its_depth(self) -> None:
-        """A depth is a reading rather than an instant, so it needs no axis to count - while
-        a record with nothing to place contributes no span."""
-        duration, max_depth = dive_figures(
-            [_Span(start_time=None, utc_offset_minutes=None, duration=None, max_depth_cm=2500)]
-        )
-
-        assert (duration, max_depth) == (None, 25.0)
-
-    def test_nothing_to_read_leaves_both_figures_unanswered(self) -> None:
+    def test_nothing_to_read_leaves_every_figure_unanswered(self) -> None:
         """`None` is the caller's signal to leave the dive's own numbers alone, which is not
         the same as clearing them: a merge of two profile-less recordings must not blank a
         duration the diver typed."""
-        assert dive_figures([]) == (None, None)
+        assert dive_figures([], folded=None) == DiveFigures(duration=None, avg_depth=None, max_depth=None)
 
-    def test_a_wall_clock_recording_is_placed_against_an_instant_one(self) -> None:
-        """Mixed offsets degenerate the whole set to clock faces, which is what the pairwise
-        rule already says for every pair involving the offset-less member. Comparing the
-        columns naively would put these three hours apart and claim a four-hour dive.
-        """
-        duration, _ = dive_figures(
-            [
-                _Span(
-                    start_time=datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC),
-                    utc_offset_minutes=180,
-                    duration=1_800_000,
-                    max_depth_cm=None,
-                ),
-                _Span(
-                    start_time=datetime(2026, 9, 8, 15, 18, 10, tzinfo=UTC),
-                    utc_offset_minutes=None,
-                    duration=1_800_000,
-                    max_depth_cm=None,
-                ),
-            ]
-        )
+    def test_a_fold_never_in_the_water_leaves_the_dives_figures_standing(self) -> None:
+        shallow = NormalizedProfile(depth=ProfileSeries(t=[0, 10_000, 20_000], v=[120, 100, 50]))
 
-        assert duration == 32 + 1800
+        figures = dive_figures([120], folded=shallow)
+
+        assert (figures.duration, figures.avg_depth, figures.max_depth) == (None, None, 1.2)
 
 
 class TestTheNotesTheOtherDiveLeavesBehind:

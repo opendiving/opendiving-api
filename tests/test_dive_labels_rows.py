@@ -121,7 +121,7 @@ async def _attach(db: AsyncSession, diver: User, dive: Dive, content: bytes) -> 
 
 async def _save_the_form(db: AsyncSession, dive: Dive, content: bytes) -> None:
     """The dive's cylinders as the form saves them: the parse's own, unedited."""
-    _, parsed = read_prefill(content)
+    _, parsed, _ = read_prefill(content)
     await replace_mixtures_for_dive(
         db=db, dive_id=dive.id, mixtures=[DiveMixtureCreate(**row.model_dump()) for row in parsed.mixtures]
     )
