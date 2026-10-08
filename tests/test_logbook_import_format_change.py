@@ -20,6 +20,7 @@ from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_site import DiveSite
+from src.app.models.user import User
 from src.app.schemas.logbook_import import ImportNoteCode
 from src.app.services.logbook_import import plan_import, write_import
 from src.app.services.logbook_import.reader import read_as_written
@@ -385,6 +386,28 @@ class TestImportingAcrossTheChange:
         notes = sorted((await async_db.execute(select(Dive.notes).where(Dive.user_id == user.id))).scalars(), key=len)
         assert [len(text) for text in notes] == [20_000, NOTES_MAX_LENGTH]
         assert ImportNoteCode.VALUE_DROPPED in {note.code for note in plan.notes}
+
+    @pytest.mark.asyncio
+    async def test_a_diver_s_username_from_an_earlier_export_is_ignored(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Every export written before the diver lost its handle still carries one. It is an
+        undefined member now (§5.6), read past at any length; the name beside it still earns the
+        note, and the handle alone earns nothing."""
+        user = create_user(db)
+        body = json.loads(_document({"started_at": "2026-08-01T10:00:00+02:00"}))
+        body["diver"] = {"name": "Diver", "username": "x" * 80}
+
+        plan = await _apply(async_db, user.id, json.dumps(body).encode())
+
+        assert ImportNoteCode.DIVER_NOT_APPLIED in {note.code for note in plan.notes}
+        assert (await async_db.execute(select(User.username).where(User.id == user.id))).scalar_one() == user.username
+
+        handle_only = json.loads(_document({"started_at": "2026-08-01T10:00:00+02:00"}))
+        handle_only["diver"] = {"username": "ada"}
+        with await load_one(json.dumps(handle_only).encode(), "logbook.divejson") as loaded:
+            plan = await plan_import(async_db, user_id=user.id, loaded=loaded, resolution_ran=True)
+        assert ImportNoteCode.DIVER_NOT_APPLIED not in {note.code for note in plan.notes}
 
 
 SSRF = b"""<divelog program='subsurface' version='3'>

@@ -378,7 +378,6 @@ def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
     return ExportDiver(
         uuid=user.uuid,
         name=user.name,
-        username=user.username,
         # The check-in email, the address the diver gives out. `user.email` is the sign-in
         # address, which no export carries.
         email=details.email,

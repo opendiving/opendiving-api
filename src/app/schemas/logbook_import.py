@@ -220,7 +220,6 @@ class ImportDiver(_ReadModel):
 
     uuid: uuid_pkg.UUID | None = None
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
-    username: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
     email: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
     born_on: date | None = None

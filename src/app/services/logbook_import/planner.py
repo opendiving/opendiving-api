@@ -1173,7 +1173,7 @@ class _Planner:
         diver = self._document.diver
         if diver is None:
             return
-        if diver.name or diver.username or _carries_settings(diver.extensions):
+        if diver.name or _carries_settings(diver.extensions):
             self._note(
                 ImportNoteCode.DIVER_NOT_APPLIED,
                 "The document's own name and settings are not applied: this account keeps its own.",

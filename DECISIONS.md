@@ -5946,9 +5946,9 @@ Six invalidators run after commit: `invalidate_dive_caches`, `invalidate_certifi
 
 ## The `diver` member's identity and settings are never applied, and its check-in details only as confirmed
 
-A document's owner — name, username, `created_at` — and its preferences under this producer's key
-are never applied: changing a live account's identity or settings as a side effect of a restore is a
-worse surprise than setting them once. The archive's avatar is not restored either.
+A document's owner — name and `created_at` — and its preferences under this producer's key are never
+applied: changing a live account's identity or settings as a side effect of a restore is a worse
+surprise than setting them once. The archive's avatar is not restored either.
 
 The check-in details and the portrait are shown in the preview beside the account's, and the apply
 writes exactly those the diver submits (§6.1's SHOULD NOT): the importer cannot tell a restore from
