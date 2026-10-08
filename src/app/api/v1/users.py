@@ -33,6 +33,7 @@ from ...core.utils.uploads import content_disposition_attachment
 from ...crud.crud_auth_audit_events import record_auth_event
 from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
 from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
+from ...crud.crud_trip_parts import get_places_for_user
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_user_sessions import revoke_session
 from ...crud.crud_users import crud_users
@@ -48,6 +49,7 @@ from ...schemas.email_change import (
     EmailChangeVerifyRequest,
     EmailChangeVerifyResponse,
 )
+from ...schemas.location import LocationRead
 from ...schemas.species import SpeciesLifeListDetail, SpeciesLifeListEntry, SpeciesSuggestResponse
 from ...schemas.storage import StorageUsageRead
 from ...schemas.user import AccountDeletionResponse, UserRead, UserUpdate
@@ -846,6 +848,34 @@ async def read_dive_activity(
     account - no uuid parameter.
     """
     return await _cached_dive_activity(request, user_id=current_user["id"], db=db)
+
+
+# Keyed under `user_{id}_trips:`, the trip list's prefix, for the reason the dive series
+# above sit under the dives': `invalidate_trip_caches()` sweeps it after every write that
+# can change a trip, so this drops with the list and needs no pattern of its own. Same
+# authorization caveat - only ever called with the calling user's own id.
+@cache(key_prefix="user_{user_id}_trips:places", resource_id_name="user_id", expiration=60)
+async def _cached_trip_places(request: Request, user_id: int, db: AsyncSession) -> list[LocationRead]:
+    """Fetches (and caches) a user's trip places. Authorization happens in the route
+    below, before this is reached.
+    """
+    return await get_places_for_user(db=db, user_id=user_id)
+
+
+@router.get("/user/trip-places", response_model=list[LocationRead])
+async def read_trip_places(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> list[LocationRead]:
+    """Every place the caller's trips went, each once, for a map to frame.
+
+    A part with no place, or a place the geocoder gave no position, is left out, and a
+    place on several trips appears once. A caller with no placed trips gets an empty list.
+    The whole set rather than a page of it: a map frames all of it or none. Always the
+    caller's own account - no uuid parameter.
+    """
+    return await _cached_trip_places(request, user_id=current_user["id"], db=db)
 
 
 # Keyed under `user_{id}_dives:` for the same reason as the two series above, and with a
