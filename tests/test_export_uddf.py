@@ -1706,8 +1706,22 @@ class TestPersonNames:
             # `<lastname>` is mandatory but an empty `xs:string` is valid, which says
             # "we don't hold this" rather than asserting a surname nobody gave.
             ("Cher", ("Cher", "")),
-            ("   ", ("ada", "")),
+            # Never the account's username, which is a handle and not a name.
+            ("   ", ("", "")),
         ],
     )
     def test_a_single_stored_name_splits_into_the_two_uddf_wants(self, full_name, expected):
-        assert _person_names(full_name, "ada") == expected
+        assert _person_names(full_name) == expected
+
+    @pytest.mark.asyncio
+    async def test_a_whitespace_only_name_writes_two_empty_elements_the_xsd_accepts(self, schema, monkeypatch):
+        bundle = build_bundle()
+        bundle.user.name = "   "
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        personal = _tree(document).find(f"{UDDF}diver/{UDDF}owner/{UDDF}personal")
+        assert personal is not None
+        assert [(child.tag.removeprefix(UDDF), child.text) for child in personal] == [
+            ("firstname", None),
+            ("lastname", None),
+        ]

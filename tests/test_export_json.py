@@ -270,7 +270,8 @@ class TestTheDeclaredShape:
         document = await _render(build_bundle(), monkeypatch)
         envelope = ExportEnvelope.model_validate(document)
         assert envelope.dives == []
-        assert envelope.diver.username == "ada"
+        # The account's handle is this instance's own, and means nothing to a reader.
+        assert "username" not in document["diver"]
 
     @pytest.mark.asyncio
     async def test_format_and_version_come_first(self, monkeypatch):
