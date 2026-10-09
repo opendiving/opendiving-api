@@ -36,7 +36,8 @@ class DefaultPreset(NamedTuple):
 DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
     DefaultPreset(
         # Keeps the required three plus dive site, maximum depth, rating, tags and notes: where,
-        # how deep, and what it was like - a holiday diver's whole logbook entry. Trip, course,
+        # how deep, and what it was like - a holiday diver's whole logbook entry. The file
+        # import stays too, being the quickest way to fill that entry from a computer. Trip, course,
         # contact and people are hidden because each asks about a record the diver has to have
         # created first, bottom temperature because reading one off a computer is the point at
         # which this stops being the shortest form the app can offer, and the dive's type and
