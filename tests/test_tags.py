@@ -422,6 +422,36 @@ class TestTheDatabase:
         assert await page(dive_type=DiveType.CLOSED_CIRCUIT) == [rebreather_uuid]
 
     @pytest.mark.asyncio
+    async def test_each_list_row_carries_its_tags_in_order(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        wreck, night = create_tag(db, diver, name="wreck"), create_tag(db, diver, name="night")
+        tagged, plain = create_dive(db, diver), create_dive(db, diver)
+        await replace_tags_for_dive(async_db, tagged.id, [night.id, wreck.id])
+        tagged_uuid, plain_uuid, user_id, user_uuid = tagged.uuid, plain.uuid, diver.id, diver.uuid
+
+        result = await dives_module._cached_read_dives.__wrapped__(  # type: ignore[attr-defined]
+            request=None,
+            user_id=user_id,
+            user_uuid=user_uuid,
+            db=async_db,
+            page=1,
+            items_per_page=10,
+            trip_id=None,
+            course_id=None,
+            dive_site_id=None,
+            gear_item_id=None,
+            species_id=None,
+            person_id=None,
+            tag_id=None,
+            dive_type=None,
+            sort=DiveListSort.DATE,
+        )
+
+        tags_by_dive = {row["uuid"]: row["tags"] for row in result["data"]}
+        assert tags_by_dive == {tagged_uuid: ["night", "wreck"], plain_uuid: []}
+
+    @pytest.mark.asyncio
     async def test_the_rating_order_puts_every_unrated_dive_last(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:
