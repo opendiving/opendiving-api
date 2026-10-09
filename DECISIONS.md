@@ -6081,13 +6081,14 @@ Hidden dive-form fields are a `DiveFormField` `StrEnum` in `schemas/dive_form_pr
 a 422. Rejected: opaque strings, where a typo silently un-hides a field. The values are the dive
 resource's own optional fields, pinned from both ends:
 `tests/test_dive_form_presets.py::TestTheVocabularyNamesRealFields` checks a subset (every value
-names an optional field of `DiveCreateRequest`, or of `DiveMixtureCreate` under `mixture.`); the web
-half checks equality against its form schema minus `NON_HIDEABLE_MIXTURE_SCHEMA_KEYS`, the
-authoritative exempt set. API-optional is wider than hideable: `gas_number` has no input,
-`volume`/`oxygen` are exempt because they are what a cylinder is, and `mixture.helium` is hideable
-because no helium means air. A `mixture.` key hides that input on every tank card; `mixtures` hides
-the section. The values are stored data; a rename is a data migration. Storing the hidden set keeps
-a new field visible everywhere and lets "Technical" be `[]`.
+names an optional field of `DiveCreateRequest`, or of `DiveMixtureCreate` under `mixture.`, except
+the section keys in `DIVE_FORM_SECTION_FIELDS`, which must name none); the web half checks equality
+against its form schema minus `NON_HIDEABLE_MIXTURE_SCHEMA_KEYS`, the authoritative exempt set.
+API-optional is wider than hideable: `gas_number` has no input, `volume`/`oxygen` are exempt because
+they are what a cylinder is, and `mixture.helium` is hideable because no helium means air. A
+`mixture.` key hides that input on every tank card; `mixtures` hides the section. The values are
+stored data; a rename is a data migration. Storing the hidden set keeps a new field visible
+everywhere and lets "Technical" be `[]`.
 
 ## `hidden_fields` is canonical on write, so two equal sets are two equal lists
 

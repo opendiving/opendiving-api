@@ -94,8 +94,8 @@ class DiveFormField(StrEnum):
     MIXTURE_ROLE = "mixture.role"
     MIXTURE_USAGE = "mixture.usage"
 
-    # Last because it was added last: anywhere else would leave every stored set out of
-    # canonical order. It hides the dive-computer file import, a section and not a field.
+    # A section key, not a field: it hides the dive-computer file import. Kept after the
+    # field keys so the two kinds read apart.
     FILE_IMPORT = "file_import"
 
 

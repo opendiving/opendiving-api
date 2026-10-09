@@ -195,7 +195,7 @@ class TestTheCanonicalForm:
         assert list(DiveFormField)[-2:] == [DiveFormField.MIXTURE_USAGE, DiveFormField.FILE_IMPORT]
 
     def test_the_file_import_section_sorts_last(self) -> None:
-        """Appended, so every set stored before it existed is still in canonical order."""
+        """The section key follows every field key, per-cylinder ones included."""
         values = [DiveFormField.FILE_IMPORT, DiveFormField.MIXTURE_USAGE, DiveFormField.TRIP_UUID]
 
         assert canonical_hidden_fields(values) == [
