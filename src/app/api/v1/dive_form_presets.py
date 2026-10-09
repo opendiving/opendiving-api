@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import DuplicateValueException
+from ...core.exceptions.http_exceptions import DuplicateValueException, UnprocessableEntityException
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_dive_form_presets import crud_dive_form_presets, dive_form_preset_name_exists
 from ...schemas.dive_form_preset import (
@@ -17,11 +17,12 @@ from ...schemas.dive_form_preset import (
     DiveFormPresetReadInternal,
     DiveFormPresetUpdate,
 )
-from ...services.dive_form_presets import seed_default_presets
+from ...services.dive_form_presets import BUILT_IN_PRESET_NAME, is_built_in_preset_name, seed_default_presets
 
 router = APIRouter(tags=["dive-form-presets"])
 
 _DUPLICATE_NAME = "A dive form preset with this name already exists"
+_BUILT_IN_NAME = f'"{BUILT_IN_PRESET_NAME}" is the name of a built-in dive form preset'
 
 
 async def _get_owned_dive_form_preset(
@@ -59,12 +60,15 @@ async def write_dive_form_preset(
     """Save the current set of hidden dive-form fields under a name.
 
     Preset names are unique per account, case-insensitively, so reusing one is a 422 -
-    the same rule trips, dive sites and gear sets keep.
+    the same rule trips, dive sites and gear sets keep. "All" is a 422 too, being the
+    clients' built-in preset for the empty set.
 
     `hidden_fields` may arrive in any order and with repeats; what is stored is the
     canonical form - `DiveFormField` declaration order, duplicates collapsed - so two equal
     sets are two equal lists. A name the vocabulary does not contain is a 422.
     """
+    if is_built_in_preset_name(preset.name):
+        raise UnprocessableEntityException(_BUILT_IN_NAME)
     if await dive_form_preset_name_exists(db=db, user_id=current_user["id"], name=preset.name):
         raise DuplicateValueException(_DUPLICATE_NAME)
 
@@ -140,7 +144,8 @@ async def patch_dive_form_preset(
 
     `hidden_fields` replaces the preset's set wholesale - this is what "Update with current
     fields" sends - and is stored canonically, exactly as on create. Renaming onto a name
-    the account already holds is a 422, compared case-insensitively.
+    the account already holds is a 422, compared case-insensitively, and so is renaming to
+    "All".
 
     A preset is a snapshot: nothing here touches `user.dive_form_hidden_fields`, so editing
     the preset a diver is currently arranged like does not rearrange their form. Applying it
@@ -148,6 +153,8 @@ async def patch_dive_form_preset(
     """
     preset = await _get_owned_dive_form_preset(db, uuid, current_user)
 
+    if values.name is not None and is_built_in_preset_name(values.name):
+        raise UnprocessableEntityException(_BUILT_IN_NAME)
     if values.name is not None and await dive_form_preset_name_exists(
         db=db, user_id=preset.user_id, name=values.name, exclude_id=preset.id
     ):
@@ -167,9 +174,9 @@ async def erase_dive_form_preset(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Delete a preset. The row really goes, and nothing points at it: a preset is a
-    shortcut for filling in one column, so deleting the one the diver is currently arranged
-    like leaves their form exactly as it is.
+    """Delete a preset. The row really goes, and with it the account's pick if this was the
+    one picked (`user.dive_form_preset_uuid` is `ON DELETE SET NULL`). The form stays as it
+    is: a preset is a shortcut for filling in one column, and that column is not touched.
 
     404 unless the caller owns it, and a second `DELETE` on the same uuid is a 404 too. One
     of the three seeded defaults deleted this way comes back from

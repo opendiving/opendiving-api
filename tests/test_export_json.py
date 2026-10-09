@@ -397,12 +397,14 @@ class TestWhatUddfCannotHold:
                 "renewal_reminder_emails": True,
                 "year_in_review_emails": True,
                 "dive_form_hidden_fields": ["altitude", "mixture.po2_limit"],
+                # By name, the uuid being this instance's: the name is unique in the account.
+                "dive_form_preset_name": "Recreational",
                 "dive_form_presets": [
                     {"name": "Recreational", "hidden_fields": ["altitude", "mixture.po2_limit"]},
-                    # The empty set is written as `[]`, not omitted: "Technical hides
-                    # nothing" is a preset, and a reader that saw no key could not tell it
-                    # from a preset that failed to export.
-                    {"name": "Technical", "hidden_fields": []},
+                    # The empty set is written as `[]`, not omitted: a preset hiding nothing
+                    # is still a preset, and a reader that saw no key could not tell it from
+                    # one that failed to export.
+                    {"name": "Everything", "hidden_fields": []},
                 ],
                 # Every tag, `drift` on no dive among them: a tag is in the account until the
                 # diver deletes it, whether or not a dive still carries it.
@@ -410,6 +412,13 @@ class TestWhatUddfCannotHold:
             }
         }
         assert document["dives"][0]["max_depth"] == 28.4
+
+    @pytest.mark.asyncio
+    async def test_an_account_that_picked_no_preset_writes_no_pick(self, monkeypatch):
+        """Absent rather than null, which is how this format spells "none"."""
+        document = await _render(build_bundle(), monkeypatch)
+
+        assert "dive_form_preset_name" not in document["diver"]["extensions"]["opendiving"]
 
     @pytest.mark.asyncio
     async def test_the_per_cylinder_role_ppo2_limit_and_usage_survive(self, monkeypatch):

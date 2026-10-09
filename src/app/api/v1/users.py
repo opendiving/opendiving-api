@@ -22,6 +22,7 @@ from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
     NotFoundException,
     UnauthorizedException,
+    UnprocessableEntityException,
 )
 from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
 from ...core.utils.cache import cache, delete_keys_by_pattern
@@ -32,6 +33,7 @@ from ...core.utils.request_context import RequestContext
 from ...core.utils.uploads import content_disposition_attachment
 from ...crud.crud_auth_audit_events import record_auth_event
 from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
+from ...crud.crud_dive_form_presets import crud_dive_form_presets
 from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
 from ...crud.crud_trip_parts import get_places_for_user
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
@@ -153,6 +155,9 @@ async def patch_user(
     available", so unthrottled it is a wordlist oracle over who exists. The rest of the
     profile isn't limited.
 
+    `dive_form_preset_uuid` must name one of the caller's own presets, or be null; anything
+    else is a 422. Omitting it leaves it as it is, so a single-field toggle keeps the pick.
+
     The check-in details are not here: `PATCH /user/checkin-details` writes them.
     """
     # Note: `email` is deliberately not part of `UserUpdate` - see
@@ -165,6 +170,11 @@ async def patch_user(
         )
         if await crud_users.exists(db=db, username=values.username):
             raise DuplicateValueException("Username not available")
+
+    if values.dive_form_preset_uuid is not None and not await crud_dive_form_presets.exists(
+        db=db, uuid=values.dive_form_preset_uuid, user_id=current_user["id"]
+    ):
+        raise UnprocessableEntityException("Dive form preset not found.")
 
     await crud_users.update(db=db, object=values, uuid=current_user["uuid"])
     return {"message": "User updated"}

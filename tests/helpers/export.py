@@ -105,7 +105,9 @@ def _with_id[T](row: T, row_id: int) -> T:
     return row
 
 
-def make_user(dive_form_hidden_fields: list[str] | None = None) -> User:
+def make_user(
+    dive_form_hidden_fields: list[str] | None = None, dive_form_preset_uuid: uuid_pkg.UUID | None = None
+) -> User:
     """The account every bundle here belongs to."""
     return _with_id(
         User(
@@ -115,6 +117,7 @@ def make_user(dive_form_hidden_fields: list[str] | None = None) -> User:
             uuid=UUIDS["user"],
             created_at=CREATED_AT,
             dive_form_hidden_fields=dive_form_hidden_fields or [],
+            dive_form_preset_uuid=dive_form_preset_uuid,
         ),
         1,
     )
@@ -223,6 +226,7 @@ def build_bundle(
     item_ids_by_set: dict[int, list[int]] | None = None,
     dive_form_presets: list[DiveFormPreset] | None = None,
     dive_form_hidden_fields: list[str] | None = None,
+    dive_form_preset_uuid: uuid_pkg.UUID | None = None,
     schedules: list[GearServiceSchedule] | None = None,
     service_records: list[GearServiceRecord] | None = None,
     certifications: list[Certification] | None = None,
@@ -264,7 +268,7 @@ def build_bundle(
             (cert_id, info.side.value): "0" * 64 for cert_id, infos in certificate_files.items() for info in infos
         }
     return ExportBundle(
-        user=make_user(dive_form_hidden_fields),
+        user=make_user(dive_form_hidden_fields, dive_form_preset_uuid),
         # Empty by default, because an account that never entered any is the ordinary one.
         checkin_details=checkin_details or CheckinDetailsRead(),
         dives=dives,
@@ -745,13 +749,14 @@ def full_bundle() -> ExportBundle:
         },
         dive_file_sha256={1: "a" * 64},
         cert_file_sha256={(1, "front"): "b" * 64, (1, "back"): "c" * 64},
-        # A non-empty current state and two presets, one of them the empty set: the
-        # `diver` member's extension is the only place these appear, and an all-empty
-        # fixture could not tell "written as `[]`" from "not written at all".
+        # A non-empty current state, the preset it was picked from, and a second preset that
+        # is the empty set: the `diver` member's extension is the only place these appear, and
+        # an all-empty fixture could not tell "written as `[]`" from "not written at all".
         dive_form_hidden_fields=["altitude", "mixture.po2_limit"],
+        dive_form_preset_uuid=UUIDS["dive-form-preset-1"],
         dive_form_presets=[
             make_dive_form_preset(1, "Recreational", ["altitude", "mixture.po2_limit"]),
-            make_dive_form_preset(2, "Technical", []),
+            make_dive_form_preset(2, "Everything", []),
         ],
         contacts=[school, resort, shop],
         people=[jae, lina, sam],

@@ -41,7 +41,8 @@ from src.app.api.v1.dive_form_presets import (
     write_dive_form_preset,
 )
 from src.app.core.db.migrations import alembic_config
-from src.app.core.exceptions.http_exceptions import DuplicateValueException
+from src.app.core.exceptions.http_exceptions import DuplicateValueException, UnprocessableEntityException
+from src.app.crud.crud_users import read_account
 from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.user import User
 from src.app.schemas.dive import DiveCreateRequest
@@ -59,6 +60,7 @@ from src.app.schemas.dive_mixture import DiveMixtureCreate
 from src.app.schemas.user import UserRead, UserUpdate
 from src.app.services.dive_form_presets import (
     DEFAULT_PRESETS,
+    is_built_in_preset_name,
     missing_default_presets,
     seed_default_presets,
 )
@@ -261,8 +263,8 @@ class TestTheCanonicalForm:
         assert everything.hidden_fields == list(DiveFormField)
 
     def test_an_explicit_null_is_rejected(self) -> None:
-        """The column is `NOT NULL`. A preset that hides nothing is `[]`, which is exactly
-        what Technical is - so `null` means nothing the database will take.
+        """The column is `NOT NULL`. A preset that hides nothing is `[]`, so `null` means
+        nothing the database will take.
         """
         with pytest.raises(ValidationError) as exc_info:
             DiveFormPresetUpdate.model_validate({"hidden_fields": None})
@@ -377,6 +379,61 @@ class TestTheUserColumn:
 
         assert "cannot be null" in str(exc_info.value)
 
+    def test_an_untouched_account_has_picked_no_preset(self) -> None:
+        values = UserRead.model_validate(
+            {"uuid": uuid7(), "name": "Ada Lovelace", "username": "ada", "email": "ada@example.com"}
+        )
+
+        assert values.dive_form_preset_uuid is None
+        assert "dive_form_preset_uuid" in values.model_dump()
+
+    @pytest.mark.asyncio
+    async def test_a_pick_the_caller_does_not_own_is_refused_before_anything_is_written(
+        self, mock_db, current_user_dict
+    ) -> None:
+        from src.app.api.v1.users import patch_user
+
+        values = UserUpdate.model_validate({"dive_form_hidden_fields": [], "dive_form_preset_uuid": str(uuid7())})
+
+        with (
+            patch("src.app.api.v1.users.crud_users") as users,
+            patch("src.app.api.v1.users.crud_dive_form_presets") as presets,
+        ):
+            users.update = AsyncMock(return_value=None)
+            presets.exists = AsyncMock(return_value=False)
+
+            with pytest.raises(UnprocessableEntityException):
+                await patch_user(Mock(), values, current_user_dict, mock_db)
+
+            assert awaited_kwargs(presets.exists) == {
+                "db": mock_db,
+                "uuid": values.dive_form_preset_uuid,
+                "user_id": current_user_dict["id"],
+            }
+            users.update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_null_pick_asks_about_no_preset(self, mock_db, current_user_dict) -> None:
+        """The built-in "All" is not a row, so there is nothing to look up."""
+        from src.app.api.v1.users import patch_user
+
+        values = UserUpdate.model_validate({"dive_form_hidden_fields": [], "dive_form_preset_uuid": None})
+
+        with (
+            patch("src.app.api.v1.users.crud_users") as users,
+            patch("src.app.api.v1.users.crud_dive_form_presets") as presets,
+        ):
+            users.update = AsyncMock(return_value=None)
+            presets.exists = AsyncMock()
+
+            await patch_user(Mock(), values, current_user_dict, mock_db)
+
+            presets.exists.assert_not_awaited()
+            assert users.update.call_args.kwargs["object"].model_dump(exclude_unset=True) == {
+                "dive_form_hidden_fields": [],
+                "dive_form_preset_uuid": None,
+            }
+
 
 class TestTheDefaults:
     """The three sets seeded per account, and the rule that adds back what is missing."""
@@ -392,13 +449,21 @@ class TestTheDefaults:
         for preset in DEFAULT_PRESETS:
             assert list(preset.hidden_fields) == canonical_hidden_fields(preset.hidden_fields), preset.name
 
-    def test_technical_hides_nothing(self) -> None:
-        """The empty set, not "every field listed". What is stored is the hidden set, so a
-        field the form gains later is on screen under Technical without anybody editing it.
+    def test_technical_hides_the_rating_and_the_topside_conditions(self) -> None:
+        """Not the empty set, which the clients offer as the built-in "All" - a stored
+        Technical equal to it would be the same form under two names.
         """
         technical = next(preset for preset in DEFAULT_PRESETS if preset.name == "Technical")
 
-        assert technical.hidden_fields == ()
+        assert list(technical.hidden_fields) == [
+            DiveFormField.AIR_TEMPERATURE,
+            DiveFormField.WEATHER,
+            DiveFormField.RATING,
+        ]
+
+    def test_no_default_is_the_empty_set(self) -> None:
+        for preset in DEFAULT_PRESETS:
+            assert preset.hidden_fields, preset.name
 
     def test_basic_keeps_the_fields_a_holiday_diver_fills_in(self) -> None:
         """Pinned as the visible set, which is the shorter list under this preset and the
@@ -460,6 +525,50 @@ class TestTheDefaults:
         missing = missing_default_presets(["Basic", "Recreational", "Tech"])
 
         assert [preset.name for preset in missing] == ["Technical"]
+
+
+class TestTheBuiltInName:
+    """ "All" is the clients' built-in preset for the empty set, and no stored row may take
+    it - compared trimmed and case-insensitively, as the unique name check compares.
+    """
+
+    @pytest.mark.parametrize("name", ["All", "all", "ALL", " All ", "\tall\n"])
+    def test_it_matches_however_it_is_spelled(self, name: str) -> None:
+        assert is_built_in_preset_name(name)
+
+    @pytest.mark.parametrize("name", ["Al l", "Alll", "All water", "Basic"])
+    def test_nothing_else_does(self, name: str) -> None:
+        assert not is_built_in_preset_name(name)
+
+    @pytest.mark.asyncio
+    async def test_create_refuses_it_before_asking_about_duplicates(self, mock_db) -> None:
+        body = DiveFormPresetCreate(name=" all ", hidden_fields=[])
+
+        with patch(
+            "src.app.api.v1.dive_form_presets.dive_form_preset_name_exists", new_callable=AsyncMock
+        ) as name_exists:
+            with pytest.raises(UnprocessableEntityException) as exc_info:
+                await write_dive_form_preset(Mock(), body, _caller(), mock_db)
+
+            name_exists.assert_not_awaited()
+        assert "built-in" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_rename_refuses_it(self, mock_db) -> None:
+        caller = _caller()
+        stored = _internal(user_id=caller["id"])
+
+        with (
+            patch("src.app.api.v1.dive_form_presets._get_owned_dive_form_preset", new_callable=AsyncMock) as get_owned,
+            patch("src.app.api.v1.dive_form_presets.crud_dive_form_presets") as crud,
+        ):
+            get_owned.return_value = stored
+            crud.update = AsyncMock()
+
+            with pytest.raises(UnprocessableEntityException):
+                await patch_dive_form_preset(Mock(), stored.uuid, DiveFormPresetUpdate(name="ALL"), caller, mock_db)
+
+            crud.update.assert_not_awaited()
 
 
 class TestTheRoutes:
@@ -564,6 +673,16 @@ class TestTheSeedAgainstPostgres:
         assert [preset.name for preset in created] == ["Basic", "Recreational", "Technical"]
         stored = await _stored_presets(async_db, diver.id)
         assert stored == {preset.name: list(preset.hidden_fields) for preset in DEFAULT_PRESETS}
+
+    @pytest.mark.asyncio
+    async def test_a_new_accounts_technical_hides_the_rating_and_the_topside_conditions(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        diver = create_user(db)
+
+        await seed_default_presets(async_db, user_id=diver.id)
+
+        assert (await _stored_presets(async_db, diver.id))["Technical"] == ["air_temperature", "weather", "rating"]
 
     @pytest.mark.asyncio
     async def test_running_it_twice_creates_nothing_the_second_time(self, db: Session, async_db: AsyncSession) -> None:
@@ -958,6 +1077,179 @@ class TestTheRoutesAgainstPostgres:
         )
 
         assert created.user_uuid == other_diver.uuid
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["all", " All "])
+    async def test_the_built_in_name_is_refused_on_create(self, name: str, db: Session, async_db: AsyncSession) -> None:
+        diver = create_user(db)
+
+        with pytest.raises(UnprocessableEntityException):
+            await write_dive_form_preset(
+                Mock(),
+                DiveFormPresetCreate(name=name, hidden_fields=[]),
+                _caller(user_id=diver.id, user_uuid=diver.uuid),
+                async_db,
+            )
+
+        assert await _stored_presets(async_db, diver.id) == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["all", " All "])
+    async def test_the_built_in_name_is_refused_on_rename(self, name: str, db: Session, async_db: AsyncSession) -> None:
+        diver = create_user(db)
+        caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
+        created = await write_dive_form_preset(
+            Mock(), DiveFormPresetCreate(name="Warm water", hidden_fields=[]), caller, async_db
+        )
+
+        with pytest.raises(UnprocessableEntityException):
+            await patch_dive_form_preset(Mock(), created.uuid, DiveFormPresetUpdate(name=name), caller, async_db)
+
+        assert list(await _stored_presets(async_db, diver.id)) == ["Warm water"]
+
+
+@pytest.mark.skipif(not db_available(), reason="Requires PostgreSQL")
+class TestThePickAgainstPostgres:
+    """`user.dive_form_preset_uuid`: which preset the diver last applied, so every device
+    names the one picked when two presets hold the same set. Read back through
+    `read_account`, which is what `GET /user` returns.
+    """
+
+    @pytest.mark.asyncio
+    async def test_applying_a_preset_saves_the_pick_and_all_clears_it(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        from src.app.api.v1.users import patch_user
+
+        diver = create_user(db)
+        caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
+        technical = await _seeded_preset(async_db, diver.id, "Technical")
+
+        await patch_user(
+            Mock(),
+            UserUpdate.model_validate(
+                {"dive_form_hidden_fields": technical.hidden_fields, "dive_form_preset_uuid": str(technical.uuid)}
+            ),
+            caller,
+            async_db,
+        )
+        assert (await _account(async_db, diver)).dive_form_preset_uuid == technical.uuid
+
+        await patch_user(
+            Mock(),
+            UserUpdate.model_validate({"dive_form_hidden_fields": [], "dive_form_preset_uuid": None}),
+            caller,
+            async_db,
+        )
+        assert (await _account(async_db, diver)).dive_form_preset_uuid is None
+
+    @pytest.mark.asyncio
+    async def test_toggling_a_field_keeps_the_pick(self, db: Session, async_db: AsyncSession) -> None:
+        """The client names the pick only while its set equals the hidden set, so the server
+        does not have to clear it - and must not, or toggling a field back would lose it.
+        """
+        from src.app.api.v1.users import patch_user
+
+        diver = create_user(db)
+        caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
+        technical = await _seeded_preset(async_db, diver.id, "Technical")
+        await patch_user(
+            Mock(), UserUpdate.model_validate({"dive_form_preset_uuid": str(technical.uuid)}), caller, async_db
+        )
+
+        await patch_user(Mock(), UserUpdate.model_validate({"dive_form_hidden_fields": ["notes"]}), caller, async_db)
+
+        account = await _account(async_db, diver)
+        assert account.dive_form_preset_uuid == technical.uuid
+        assert account.dive_form_hidden_fields == ["notes"]
+
+    @pytest.mark.asyncio
+    async def test_another_divers_preset_is_refused(
+        self, db: Session, async_db: AsyncSession, other_diver: User
+    ) -> None:
+        from src.app.api.v1.users import patch_user
+
+        diver = create_user(db)
+        theirs = await _seeded_preset(async_db, other_diver.id, "Technical")
+
+        with pytest.raises(UnprocessableEntityException):
+            await patch_user(
+                Mock(),
+                UserUpdate.model_validate({"dive_form_preset_uuid": str(theirs.uuid)}),
+                _caller(user_id=diver.id, user_uuid=diver.uuid),
+                async_db,
+            )
+
+        assert (await _account(async_db, diver)).dive_form_preset_uuid is None
+
+    @pytest.mark.asyncio
+    async def test_a_preset_that_does_not_exist_is_refused(self, db: Session, async_db: AsyncSession) -> None:
+        from src.app.api.v1.users import patch_user
+
+        diver = create_user(db)
+
+        with pytest.raises(UnprocessableEntityException):
+            await patch_user(
+                Mock(),
+                UserUpdate.model_validate({"dive_form_preset_uuid": str(uuid7())}),
+                _caller(user_id=diver.id, user_uuid=diver.uuid),
+                async_db,
+            )
+
+    @pytest.mark.asyncio
+    async def test_deleting_the_picked_preset_clears_the_pick_and_leaves_the_form(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        from src.app.api.v1.users import patch_user
+
+        diver = create_user(db)
+        caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
+        technical = await _seeded_preset(async_db, diver.id, "Technical")
+        await patch_user(
+            Mock(),
+            UserUpdate.model_validate(
+                {"dive_form_hidden_fields": technical.hidden_fields, "dive_form_preset_uuid": str(technical.uuid)}
+            ),
+            caller,
+            async_db,
+        )
+
+        await erase_dive_form_preset(Mock(), technical.uuid, caller, async_db)
+
+        account = await _account(async_db, diver)
+        assert account.dive_form_preset_uuid is None
+        assert account.dive_form_hidden_fields == technical.hidden_fields
+
+    @pytest.mark.asyncio
+    async def test_an_account_holding_a_pick_can_be_purged(self, db: Session, async_db: AsyncSession) -> None:
+        """The two keys point at each other, so the purge's raw `DELETE` cascades into the
+        presets while the presets' `SET NULL` points back at the row being deleted.
+        """
+        from src.app.api.v1.users import patch_user
+
+        diver = create_user(db)
+        technical = await _seeded_preset(async_db, diver.id, "Technical")
+        await patch_user(
+            Mock(),
+            UserUpdate.model_validate({"dive_form_preset_uuid": str(technical.uuid)}),
+            _caller(user_id=diver.id, user_uuid=diver.uuid),
+            async_db,
+        )
+
+        await async_db.execute(delete(User).where(User.id == diver.id))
+        await async_db.commit()
+
+        assert await _stored_presets(async_db, diver.id) == {}
+
+
+async def _seeded_preset(async_db: AsyncSession, user_id: int, name: str) -> DiveFormPresetReadInternal:
+    return next(preset for preset in await seed_default_presets(async_db, user_id=user_id) if preset.name == name)
+
+
+async def _account(async_db: AsyncSession, diver: User) -> UserRead:
+    account = await read_account(async_db, uuid=diver.uuid)
+    assert account is not None
+    return UserRead.model_validate(account)
 
 
 async def _stored_presets(async_db: AsyncSession, user_id: int) -> dict[str, list[str]]:

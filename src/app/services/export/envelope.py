@@ -398,7 +398,8 @@ def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
         # The presets are `{name, hidden_fields}` and nothing else: `uuid`, `user_uuid` and
         # `created_at` identify a row in *this* instance, and a document that is going to be
         # read somewhere else has no use for them. Ordered the way `GET /dive-form-presets`
-        # orders them, which is what makes the golden-file test meaningful.
+        # orders them, which is what makes the golden-file test meaningful. The picked preset
+        # travels by name for the same reason; the name is unique within the account.
         extensions={
             DIVEJSON_PRODUCER_KEY: {
                 "units": user.units,
@@ -406,6 +407,10 @@ def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
                 "renewal_reminder_emails": user.renewal_reminder_emails,
                 "year_in_review_emails": user.year_in_review_emails,
                 "dive_form_hidden_fields": list(user.dive_form_hidden_fields),
+                "dive_form_preset_name": next(
+                    (preset.name for preset in bundle.dive_form_presets if preset.uuid == user.dive_form_preset_uuid),
+                    None,
+                ),
                 "dive_form_presets": [
                     {"name": preset.name, "hidden_fields": list(preset.hidden_fields)}
                     for preset in bundle.dive_form_presets

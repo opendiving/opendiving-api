@@ -1,3 +1,4 @@
+import uuid as uuid_pkg
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, ClassVar
@@ -78,6 +79,9 @@ class UserRead(PublicUUIDSchema):
     # reason this lives on the account rather than on the device. Same note as its two
     # neighbours above on what the default is and isn't for.
     dive_form_hidden_fields: Annotated[list[StoredVocabulary], Field(default_factory=list)]
+    # The preset the diver last applied, or null. A client names it only while that preset's
+    # set still equals `dive_form_hidden_fields`, so a toggle since then needs no clearing here.
+    dive_form_preset_uuid: uuid_pkg.UUID | None = None
     # The caller's own record of whether they are this instance's operator, so a client can
     # decide whether to offer the operator's surface at all. Not a disclosure about anybody
     # else: `GET /user` returns the caller's row, and of another account no route returns more
@@ -185,6 +189,13 @@ class UserUpdate(RejectsExplicitNulls):
             max_length=len(DiveFormField),
             description="Dive form fields to keep hidden, in any order - stored canonically, duplicates collapsed",
         ),
+    ]
+
+    # Sent beside `dive_form_hidden_fields` when a preset is applied, and as null for the
+    # clients' built-in "All". Nullable, so it is not in `NON_NULLABLE_FIELDS`.
+    dive_form_preset_uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(default=None, description="The dive form preset last applied - one of the caller's own, or null"),
     ]
 
     @field_validator("dive_form_hidden_fields")
