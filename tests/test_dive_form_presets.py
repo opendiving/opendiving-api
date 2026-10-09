@@ -46,6 +46,7 @@ from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.user import User
 from src.app.schemas.dive import DiveCreateRequest
 from src.app.schemas.dive_form_preset import (
+    DIVE_FORM_SECTION_FIELDS,
     MIXTURE_FIELD_PREFIX,
     DiveFormField,
     DiveFormPresetCreate,
@@ -102,10 +103,17 @@ class TestTheVocabularyNamesRealFields:
     both sides but always shown, exempt by name on the web side - so the API has optional
     fields with no business being hideable, while every hideable field must be one the API
     will accept omitted.
+
+    The section keys in `DIVE_FORM_SECTION_FIELDS` are the one exemption: they hide a part of
+    the form, not a field of the dive, so they are held to the opposite rule instead.
     """
 
     def test_every_value_names_a_field_of_the_create_request(self) -> None:
-        top_level = {value for value in DiveFormField if not value.startswith(MIXTURE_FIELD_PREFIX)}
+        top_level = {
+            value
+            for value in DiveFormField
+            if not value.startswith(MIXTURE_FIELD_PREFIX) and value not in DIVE_FORM_SECTION_FIELDS
+        }
 
         unknown = sorted(value for value in top_level if value not in DiveCreateRequest.model_fields)
 
@@ -128,6 +136,8 @@ class TestTheVocabularyNamesRealFields:
         """
         required = []
         for value in DiveFormField:
+            if value in DIVE_FORM_SECTION_FIELDS:
+                continue
             if value.startswith(MIXTURE_FIELD_PREFIX):
                 field = DiveMixtureCreate.model_fields[value.removeprefix(MIXTURE_FIELD_PREFIX)]
             else:
@@ -136,6 +146,19 @@ class TestTheVocabularyNamesRealFields:
                 required.append(value)
 
         assert not required, f"required on the wire, so not hideable: {required}"
+
+    def test_no_section_key_names_a_field_of_the_dive(self) -> None:
+        """What keeps the exemption honest: a real field listed as a section would skip the
+        required check above, so a section key must name nothing the request accepts.
+        """
+        assert DIVE_FORM_SECTION_FIELDS
+        named = [
+            value
+            for value in DIVE_FORM_SECTION_FIELDS
+            if value in DiveCreateRequest.model_fields or value.startswith(MIXTURE_FIELD_PREFIX)
+        ]
+
+        assert not named, f"section keys that name a field of the dive: {named}"
 
     def test_the_prefix_is_the_only_thing_that_makes_a_key_per_cylinder(self) -> None:
         """`mixtures` hides the whole section and is a top-level key; `mixture.role` hides
@@ -169,7 +192,17 @@ class TestTheCanonicalForm:
             DiveFormField.DIVE_SITE_UUIDS,
             DiveFormField.TYPE,
         ]
-        assert list(DiveFormField)[-1] == DiveFormField.MIXTURE_USAGE
+        assert list(DiveFormField)[-2:] == [DiveFormField.MIXTURE_USAGE, DiveFormField.FILE_IMPORT]
+
+    def test_the_file_import_section_sorts_last(self) -> None:
+        """The section key follows every field key, per-cylinder ones included."""
+        values = [DiveFormField.FILE_IMPORT, DiveFormField.MIXTURE_USAGE, DiveFormField.TRIP_UUID]
+
+        assert canonical_hidden_fields(values) == [
+            DiveFormField.TRIP_UUID,
+            DiveFormField.MIXTURE_USAGE,
+            DiveFormField.FILE_IMPORT,
+        ]
 
     def test_any_input_order_becomes_declaration_order(self) -> None:
         scrambled = [DiveFormField.NOTES, DiveFormField.TRIP_UUID, DiveFormField.ALTITUDE]
@@ -382,6 +415,7 @@ class TestTheDefaults:
             DiveFormField.RATING,
             DiveFormField.TAGS,
             DiveFormField.NOTES,
+            DiveFormField.FILE_IMPORT,
         ]
 
     def test_recreational_hides_water_type_alongside_the_planning_fields(self) -> None:
@@ -777,6 +811,31 @@ class TestTheRoutesAgainstPostgres:
 
         assert page["page"] == 1
         assert page["items_per_page"] <= 100
+
+    @pytest.mark.asyncio
+    async def test_a_preset_hiding_the_file_import_round_trips(self, db: Session, async_db: AsyncSession) -> None:
+        diver = create_user(db)
+        caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
+        body = DiveFormPresetCreate.model_validate({"name": "No import", "hidden_fields": ["file_import", "notes"]})
+
+        created = await write_dive_form_preset(Mock(), body, caller, async_db)
+        read_back = await read_dive_form_preset(Mock(), created.uuid, caller, async_db)
+
+        assert read_back.hidden_fields == ["notes", "file_import"]
+        assert (await _stored_presets(async_db, diver.id))["No import"] == ["notes", "file_import"]
+
+    @pytest.mark.asyncio
+    async def test_patch_user_saves_and_reads_back_the_file_import(self, db: Session, async_db: AsyncSession) -> None:
+        from src.app.api.v1.users import patch_user
+
+        diver = create_user(db)
+        caller = _caller(user_id=diver.id, user_uuid=diver.uuid)
+        values = UserUpdate.model_validate({"dive_form_hidden_fields": ["file_import"]})
+
+        await patch_user(Mock(), values, caller, async_db)
+
+        stored = (await async_db.execute(select(User).where(User.id == diver.id))).scalar_one()
+        assert UserRead.model_validate(stored, from_attributes=True).dive_form_hidden_fields == ["file_import"]
 
     @pytest.mark.asyncio
     async def test_reading_one_back_answers_with_what_was_stored(self, db: Session, async_db: AsyncSession) -> None:

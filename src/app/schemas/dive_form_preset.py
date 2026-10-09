@@ -19,7 +19,9 @@ class DiveFormField(StrEnum):
     honest without a cross-repo test: the api half
     (`tests/test_dive_form_presets.py::TestTheVocabularyNamesRealFields`) asserts every
     value here names a field of `DiveCreateRequest` - or, with the `mixture.` prefix, of
-    `DiveMixtureCreate` - that is *not required* there, and the web half asserts its own
+    `DiveMixtureCreate` - that is *not required* there, except the section keys in
+    `DIVE_FORM_SECTION_FIELDS`, which hide a part of the form rather than a field of the
+    dive and must name *no* field of `DiveCreateRequest`; and the web half asserts its own
     registry equals its form schema's optional keys exactly, minus a short list of keys
     that side exempts by name. API-optional is deliberately wider than what is hideable
     (`gas_number` has no input at all; a cylinder's `volume` and `oxygen` are optional on
@@ -91,6 +93,16 @@ class DiveFormField(StrEnum):
     MIXTURE_END_PRESSURE = "mixture.end_pressure"
     MIXTURE_ROLE = "mixture.role"
     MIXTURE_USAGE = "mixture.usage"
+
+    # A section key, not a field: it hides the dive-computer file import. Kept after the
+    # field keys so the two kinds read apart.
+    FILE_IMPORT = "file_import"
+
+
+# Keys that hide a part of the form rather than a field of the dive, so they name nothing
+# in `DiveCreateRequest`. The vocabulary guard exempts exactly these, and asserts that each
+# really is absent from the request so the exemption cannot cover a real field.
+DIVE_FORM_SECTION_FIELDS: tuple[DiveFormField, ...] = (DiveFormField.FILE_IMPORT,)
 
 
 # The prefix that marks a key as naming a field of every cylinder rather than of the dive.
