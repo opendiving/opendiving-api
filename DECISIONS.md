@@ -6087,8 +6087,8 @@ against its form schema minus `NON_HIDEABLE_MIXTURE_SCHEMA_KEYS`, the authoritat
 API-optional is wider than hideable: `gas_number` has no input, `volume`/`oxygen` are exempt because
 they are what a cylinder is, and `mixture.helium` is hideable because no helium means air. A
 `mixture.` key hides that input on every tank card; `mixtures` hides the section. The values are
-stored data; a rename is a data migration. Storing the hidden set keeps a new field visible
-everywhere and lets "Technical" be `[]`.
+stored data; a rename is a data migration. Storing the hidden set keeps a new field visible under
+every preset.
 
 ## `hidden_fields` is canonical on write, so two equal sets are two equal lists
 
@@ -6168,7 +6168,7 @@ through the app, and leaving them out would make that false. The producer key is
 extension mechanism (spec §5.5), so the DiveJSON spec is untouched and an unrecognising reader must
 not fail. A preset travels as `{name, hidden_fields}` only: `uuid`, `user_uuid` and `created_at`
 identify a row in this instance and mean nothing elsewhere. The empty set is written as `[]` rather
-than omitted, so "Technical hides nothing" is distinguishable from a failed export.
+than omitted, so a preset hiding nothing is distinguishable from a failed export.
 
 ## `PROJECT_OPERATED` is the first setting that knows who runs the instance, and it selects copy only
 

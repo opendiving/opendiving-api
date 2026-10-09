@@ -206,7 +206,7 @@ class DiveFormPresetUpdate(RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
 
     # Both columns are `NOT NULL`. A preset that hides nothing is the empty list, never
-    # null - which is what "Technical" is.
+    # null.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "hidden_fields")
 
     name: Annotated[str | None, Field(default=None, min_length=1, max_length=255)]

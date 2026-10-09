@@ -91,11 +91,31 @@ DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
             DiveFormField.MIXTURE_USAGE,
         ),
     ),
-    # The empty set, deliberately - what is stored is the hidden set, so "everything" is
-    # "nothing hidden" and a field the form gains later is on screen under this preset
-    # without anybody editing it.
-    DefaultPreset(name="Technical", hidden_fields=()),
+    DefaultPreset(
+        # Everything but the rating and the topside conditions - the air temperature and the
+        # weather describe the surface, and a technical log is about the dive. Not the empty
+        # set, which the clients offer as the built-in "All": a stored row equal to it would
+        # be a second name for the same form. A field the form gains later is still on screen
+        # here without anybody editing it, the hidden set being what is stored.
+        name="Technical",
+        hidden_fields=(
+            DiveFormField.AIR_TEMPERATURE,
+            DiveFormField.WEATHER,
+            DiveFormField.RATING,
+        ),
+    ),
 )
+
+# The clients' built-in preset for the empty hidden set, every field shown. It is not a row, so
+# a stored preset under its name would put two of it in the menu; create and rename refuse it.
+BUILT_IN_PRESET_NAME = "All"
+
+
+def is_built_in_preset_name(name: str) -> bool:
+    """Whether `name` is the built-in's, compared the way the unique name check compares:
+    trimmed and case-insensitively.
+    """
+    return name.strip().lower() == BUILT_IN_PRESET_NAME.lower()
 
 
 def missing_default_presets(existing_names: Iterable[str]) -> list[DefaultPreset]:

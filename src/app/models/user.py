@@ -1,4 +1,7 @@
-from sqlalchemy import JSON, Boolean, Index, Integer, String, func
+import uuid as uuid_pkg
+
+from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, func
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -68,6 +71,22 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # is client-side and invisible to Alembic, so only `server_default` gives the migration
     # adding this NOT NULL column a value for the rows already in the table.
     dive_form_hidden_fields: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
+
+    # The preset the diver last applied, so every device names the one they picked rather
+    # than the first whose set matches - two presets may hold the same set. A pointer, not a
+    # binding: toggling a field leaves it alone, and a client names it only while its set still
+    # equals the column above. Null is nothing picked. Only `PATCH /user` writes it, and that
+    # is where "one of the caller's own presets" is checked; the key cannot say so.
+    #
+    # On the preset's public `uuid` rather than its `id`, so `get_current_user` carries it as
+    # `UserRead` publishes it, with no join. `use_alter` because `dive_form_preset.user_id`
+    # points back at this table.
+    dive_form_preset_uuid: Mapped[uuid_pkg.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("dive_form_preset.uuid", ondelete="SET NULL", use_alter=True),
+        default=None,
+        index=True,
+    )
 
     # Bookkeeping the worker alone reads, on no schema that crosses the wire: the calendar
     # year `send_year_in_review` last sent this diver a review of. Null is "never sent".

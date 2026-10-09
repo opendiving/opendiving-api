@@ -15,7 +15,8 @@ class DiveFormPreset(Base, PublicUUIDMixin, TimestampMixin):
     one-off "show me altitude just this once" never edits a preset, and a diver who has
     deleted every preset still has somewhere to toggle. Nothing else in the app reads these
     rows - they are a shortcut for filling in one column, the same relationship `GearSet`
-    has to a dive's gear list.
+    has to a dive's gear list. `user.dive_form_preset_uuid` remembers which one was applied
+    last, for naming it, and is cleared when it is deleted.
 
     Every account is seeded with three of these at registration (see
     `services/dive_form_presets.py`), as ordinary rows rather than as anything the code
@@ -39,8 +40,7 @@ class DiveFormPreset(Base, PublicUUIDMixin, TimestampMixin):
     #
     # **What is stored is the hidden set, never the visible set.** A field the form gains
     # later is visible under every existing preset until somebody hides it, which is the
-    # right default for a new optional input - and it is what makes "Technical" the empty
-    # list rather than a list that goes stale.
+    # right default for a new optional input, and no preset goes stale by leaving it out.
     #
     # `default_factory` rather than `default=[]`, because a bare mutable default would be
     # shared by every instance; `server_default` is what backfills the DDL, the same
