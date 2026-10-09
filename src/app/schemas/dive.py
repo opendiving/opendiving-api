@@ -552,6 +552,7 @@ class DiveListItem(DiveRead):
         int,
         Field(ge=0, description="How many recordings the dive holds, as the dive page lists them; 0 when it has none"),
     ]
+    tags: Annotated[list[str], Field(default_factory=list, description="The dive's tags, in the diver's order")]
 
 
 class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
@@ -959,9 +960,9 @@ class DiveReadWithMixtures(DiveRead):
     # had - never a summary of the person: a client resolves names from `GET /people`, so
     # renaming a person reaches no cached dive.
     people: PeopleRead
-    # Here for `sightings`' reason. Names rather than references, unlike `people`, so a client
-    # renders chips without a second list per dive page - which is why a tag's rename and
-    # delete drop the diver's dive caches.
+    # Names rather than references, unlike `people`, so a client renders chips without a second
+    # list per dive page - which is why a tag's rename and delete drop the diver's dive caches.
+    # `DiveListItem` carries it too, for the dive card's chips, loaded once per page.
     tags: Annotated[list[str], Field(default_factory=list, description="The dive's tags, in the diver's order")]
     # **`source_file` and `profile` are gone**, and `recordings` replaces both. A dive had
     # at most one of each while a dive had at most one record; it now has an ordered list of
