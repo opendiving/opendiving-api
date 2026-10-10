@@ -6,6 +6,8 @@ arrays. How a file's samples come to be a `NormalizedProfile` is `test_dive_read
 """
 
 import logging
+import random
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -38,6 +40,7 @@ from src.app.services.dive_profiles import (
     attribute_and_cap,
     derive_depth_outline,
     derive_gas_attribution,
+    dive_end_time,
     downsample,
     fill_channels,
     get_gas_attribution_for_dives,
@@ -50,6 +53,9 @@ from src.app.services.dive_profiles import (
     to_read_schema,
     to_recording_read_schema,
 )
+from src.app.services.recording_shape import in_water_of
+
+FIXTURES = Path(__file__).parent / "fixtures" / "dive_files"
 
 
 def _series(seconds: list[float], values: list[int]) -> ProfileSeries:
@@ -211,6 +217,88 @@ class TestDeriveDepthOutline:
     )
     def test_nothing_to_draw_is_none(self, depth: ProfileSeries | None):
         assert derive_depth_outline(depth) is None
+
+    def test_it_stops_where_the_dive_ends(self):
+        """The surface stretch a computer records after the dive is left out of the card."""
+        depth = _series([0, 1, 2, 3, 4, 5, 6, 7, 8], [0, 500, 1200, 1000, 300, 50, 40, 30, 20])
+
+        outline = derive_depth_outline(depth, points=5)
+
+        assert outline is not None
+        assert (outline.span, outline.values) == (5000, [0, 500, 1200, 1000, 300])
+        assert outline == derive_depth_outline(_series([0, 1, 2, 3, 4, 5], depth.v[:6]), points=5)
+
+    def test_a_channel_that_never_goes_under_is_drawn_whole(self):
+        outline = derive_depth_outline(_series([0, 1, 2, 3], [0, 100, 120, 30]), points=3)
+
+        assert outline is not None
+        assert (outline.span, outline.values) == (3000, [0, 100, 120])
+
+    def test_the_deepest_reading_can_lie_past_the_end_only_as_the_final_sample(self):
+        """`dive_end_time` keys on intervals, and the last sample starts none: a final reading
+        deeper than any other, after one no deeper than the threshold, is not drawn."""
+        depth = _series([0, 1, 2, 3, 4], [0, 800, 100, 50, 900])
+
+        outline = derive_depth_outline(depth, points=2)
+
+        assert outline is not None
+        assert (outline.span, max(outline.values)) == (2000, 800)
+
+
+class TestDiveEndTime:
+    """Where the dive ends on the axis: the end of the last interval `divejson.in_water` counts."""
+
+    def test_a_suunto_ocean_fit_ends_its_dive_before_its_surface_delay(self):
+        """The Ocean records on at the surface for five minutes by default after the dive."""
+        profile = attribute_and_cap(extract_file((FIXTURES / "suunto-ocean.fit").read_bytes(), "fit").profile)
+
+        assert profile is not None
+        assert (dive_end_time(profile.depth), profile.duration) == (4_010_000, 4_301_000)
+
+    def test_a_mid_dive_surfacing_stays_inside_the_dive(self):
+        depth = _series([0, 10, 20, 30, 40, 50, 60, 70], [0, 1500, 50, 40, 1400, 100, 30, 20])
+
+        assert dive_end_time(depth) == 50_000
+
+    def test_a_recording_that_ends_under_water_ends_its_dive_at_its_last_sample(self):
+        assert dive_end_time(_series([0, 10, 20], [0, 1800, 1500])) == 20_000
+
+    def test_a_sample_at_exactly_the_threshold_starts_no_counted_interval(self):
+        """1.2 m is not deeper than 1.2 m, so the interval it starts is surface time."""
+        assert dive_end_time(_series([0, 10, 20, 30], [0, 500, 120, 0])) == 20_000
+        assert dive_end_time(_series([0, 10, 20], [0, 120, 0])) is None
+        assert dive_end_time(_series([0, 10, 20], [0, 121, 0])) == 20_000
+
+    @pytest.mark.parametrize(
+        "depth",
+        [
+            None,
+            ProfileSeries(t=[], v=[]),
+            ProfileSeries(t=[0], v=[3000]),
+            ProfileSeries(t=[0, 10_000, 20_000], v=[0, 100, 50]),
+            ProfileSeries(t=[0, 10_000, 20_000], v=[0, 50, 3000]),
+        ],
+        ids=["no depth channel", "no readings", "one reading", "never under", "deep only at the last sample"],
+    )
+    def test_no_counted_interval_is_none(self, depth: ProfileSeries | None):
+        assert dive_end_time(depth) is None
+
+    def test_it_is_none_exactly_where_in_water_is_and_the_cut_keeps_every_counted_interval(self):
+        """The rule's two properties, over random channels around the threshold."""
+        rng = random.Random(20261010)
+        for _ in range(500):
+            count = rng.randint(0, 12)
+            t = sorted(rng.sample(range(1, 100_000), count))
+            v = [rng.choice([0, 60, 119, 120, 121, 500, 3000]) for _ in range(count)]
+            depth = ProfileSeries(t=t, v=v)
+            whole = in_water_of(NormalizedProfile(depth=depth))
+
+            end = dive_end_time(depth)
+
+            assert (end is None) == (whole is None), (t, v)
+            if end is not None:
+                kept = t.index(end) + 1
+                assert in_water_of(NormalizedProfile(depth=ProfileSeries(t=t[:kept], v=v[:kept]))) == whole, (t, v)
 
 
 def _switch(t: float, gas_number: int | None) -> ProfileEvent:
@@ -753,6 +841,26 @@ class TestProvenance:
         assert read.provenance is ProfileProvenance.MERGE
         assert read.depth.values == [3000]
         assert "provenance" not in to_read_schema(loaded).model_dump()
+
+    def test_the_recording_route_says_where_the_dive_ends_and_the_formats_object_does_not(self):
+        data = {"depth": {"t": [0, 10_000, 20_000, 30_000], "v": [0, 1800, 50, 0]}}
+        loaded = LoadedProfile(duration=30_000, data=data, parser_key="fit")
+
+        read = to_recording_read_schema(loaded)
+
+        assert (read.dive_end_time, read.duration, read.depth.times[-1]) == (20_000, 30_000, 30_000)
+        assert "dive_end_time" not in to_read_schema(loaded).model_dump()
+
+    @pytest.mark.parametrize(
+        "data",
+        [{"temperature": {"t": [0, 10_000], "v": [219, 218]}}, {"depth": {"t": [0, 10_000], "v": [0, 100]}}],
+        ids=["no depth channel", "never under"],
+    )
+    def test_the_dive_end_is_null_where_no_interval_counts(self, data: dict):
+        read = to_recording_read_schema(LoadedProfile(duration=10_000, data=data, parser_key="fit"))
+
+        assert read.dive_end_time is None
+        assert "dive_end_time" in read.model_dump()
 
 
 class TestGetGasAttributionForDives:

@@ -1687,9 +1687,12 @@ async def read_dive_profile(
     value rides `recordings[].profile` on `GET /dive/{uuid}`, so a client that has the dive
     read already need not fetch the samples to ask.
 
+    `dive_end_time` says where the dive ends on the axis, short of `duration` by the minutes
+    a computer goes on recording at the surface. The samples run to `duration` all the same.
+
     Deliberately *not* `@cache`d, and for a sharper reason than the file route above. A
-    profile's samples change only when its row is rewritten, and its `ETag` is the row's own
-    identity, which every rewrite renews - the ideal `ETag` case and the worst Redis case:
+    profile's samples change only when its row is rewritten, and its `ETag` carries the row's
+    own identity, which every rewrite renews - the ideal `ETag` case and the worst Redis case:
     every dive cache key lives under `user_{id}_dive*` and `invalidate_dive_caches` sweeps
     the lot on every dive edit and every dive-site or gear rename - none of which can change
     a profile. Caching it would mean evicting and refetching tens of KB per dive for nothing.

@@ -24,6 +24,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated
 
+from divejson import IN_WATER_DEPTH
 from pydantic import BaseModel, Field
 
 # The profile axis's unit: a series' `times`, a profile's `duration` and an event's `time` are
@@ -201,7 +202,8 @@ class GasAttribution(BaseModel):
 
 
 class DepthOutline(BaseModel):
-    """A recording's depth curve at a dive card's resolution, on each `GET /dives` row.
+    """A recording's depth curve up to the dive's end, at a dive card's resolution, on each
+    `GET /dives` row.
 
     Also the shape of `dive_profile.depth_outline`, validated on the way back out of JSONB as
     `GasAttribution` is. Evenly spaced rather than timed, so the values and the span are the
@@ -210,14 +212,18 @@ class DepthOutline(BaseModel):
 
     span: Annotated[
         int,
-        Field(gt=0, description="Milliseconds from the recording's first depth reading to its last"),
+        Field(
+            gt=0,
+            description="Milliseconds from the recording's first depth reading to where the dive ends - the "
+            "profile's `dive_end_time` - or to its last depth reading where the profile has no such end",
+        ),
     ]
     values: Annotated[
         list[int],
         Field(
             description=f"Integer centimeters (scale {DEPTH_SCALE}): value `i` is the deepest reading in the `i`th of "
             "`len(values)` equal slices of `span`, or the straight line between its neighbours for a slice no reading "
-            "falls in, so the deepest value is the recording's maximum depth"
+            "falls in"
         ),
     ]
 
@@ -405,7 +411,7 @@ class DiveProfileRead(BaseModel):
 
 class RecordingProfileRead(DiveProfileRead):
     """What `GET /dive/{uuid}/recording/{rid}/profile` serves: the format's profile object
-    plus the one thing about it that is this application's fact rather than the format's.
+    plus the two things about it that are this application's facts rather than the format's.
 
     A subclass rather than a member on `DiveProfileRead`, and rather than a second set of
     profile models: every member name is still declared once, so a future channel or a
@@ -421,6 +427,15 @@ class RecordingProfileRead(DiveProfileRead):
             description="Where these samples came from: `file` (read from this recording's stored files, and "
             "read from them again whenever this app's reader moves on), `divejson_import` (supplied by an "
             "imported document) or `merge` (two recordings' samples folded onto one axis)."
+        ),
+    ]
+    dive_end_time: Annotated[
+        int | None,
+        Field(
+            description="Where the dive ends, in milliseconds on this profile's axis: the end of the last interval "
+            f"that starts at a depth sample deeper than {IN_WATER_DEPTH} m, short of `duration` by the time the "
+            "computer went on recording at the surface. Null where no such interval exists. Nothing in the profile "
+            "is cut to it.",
         ),
     ]
 

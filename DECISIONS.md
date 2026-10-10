@@ -1131,11 +1131,14 @@ every dive edit and every dive-site or gear rename, none of which can change a p
 
 The ETag is the row's `uuid`, renewed by every write of samples (`store_profile`,
 `replace_profile_samples`), not the key the samples are a function of: relabelling a sibling
-recording changes its samples and not its key. `get_profile_version` runs before the payload loads,
-so a conditional request costs one narrow query. The 304 is a bare `Response`, bypassing
-`response_model`. The endpoint sets `Cache-Control: private, max-age=300`, which
-`ClientCacheMiddleware` never overrides. `v` is declared and ignored so the contract is visible; the
-client varies it with the profile's `uuid` and `updated_at`.
+recording changes its samples and not its key. Beside it is `PROFILE_READ_VERSION`, bumped when what
+the route computes on read (`dive_end_time`) changes: that changes the body under an unchanged row,
+and a browser revalidating the previous build's ETag would get a 304 and keep the old body.
+`get_profile_version` runs before the payload loads, so a conditional request costs one narrow
+query. The 304 is a bare `Response`, bypassing `response_model`. The endpoint sets
+`Cache-Control: private, max-age=300`, which `ClientCacheMiddleware` never overrides. `v` is
+declared and ignored so the contract is visible; the client varies it with the profile's `uuid` and
+`updated_at`.
 
 `DiveProfileInfo` goes on `DiveReadWithMixtures`, never `DiveRead` — the inheritance trap
 `source_file` documents. `get_profile_infos_for_dives` is batched like `get_file_infos_for_dives`.

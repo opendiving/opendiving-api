@@ -374,9 +374,9 @@ class ExportDive(PublicUUIDSchema):
     API serves, so the document alone can redraw every curve without re-parsing the files.
     It is `DiveProfileRead`, the base of what `GET /dive/{uuid}/recording/{rid}/profile`
     returns: one profile vocabulary on both surfaces, rather than a second set of models
-    that could drift. That route serves `RecordingProfileRead`, which adds a `provenance`
-    the format has no core member for and which therefore cannot ride the document's
-    `profile` object - the schema closes it.
+    that could drift. That route serves `RecordingProfileRead`, which adds `provenance` and
+    `dive_end_time`, which the format has no core member for and which therefore cannot ride
+    the document's `profile` object - the schema closes it.
     """
 
     number: int

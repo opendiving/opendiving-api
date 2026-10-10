@@ -585,8 +585,8 @@ class TestTheProfileVocabulary:
     """One profile vocabulary across the app: `GET /dive/{uuid}/recording/{rid}/profile` and this document
     both serve `DiveProfileRead`, whose member names are the format's.
 
-    The route serves a subclass of it carrying the profile's provenance, which is where the
-    one vocabulary stops: the schema's `profile` object is `additionalProperties: false`, so
+    The route serves a subclass of it carrying the profile's provenance and where its dive
+    ends, which is where the one vocabulary stops: the schema's `profile` object is `additionalProperties: false`, so
     a member DiveJSON has no slot for makes every document invalid rather than merely
     verbose. The exact-set assertion below is what holds the line.
     """

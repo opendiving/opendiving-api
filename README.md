@@ -315,6 +315,10 @@ curl -X POST http://localhost:8000/api/v1/import/logbook \
   whole recording's figures to its time in the water, and leaves a value a diver typed. A
   logbook-imported dive moves only for a device named with `--device BRAND [MODEL]`; the script's
   docstring says how to choose them.
+- Once, after the release that ends the dive-card outline at the dive's end:
+  `docker compose exec api python -m src.scripts.backfill_depth_outlines --dry-run`, then without
+  `--dry-run`. It rewrites each stored outline from its profile's samples and nothing else; until it
+  runs, the dive list draws the outlines stored before.
 
 ## Related repositories
 
