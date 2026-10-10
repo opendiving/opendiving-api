@@ -317,7 +317,8 @@ class RecordingExtraction:
 
     One object rather than several returns because they are read together everywhere and every
     one of them is *the first file that recorded it* - only the unit differs. The profile
-    takes each channel whole from the earliest file carrying it; the scalars take each
+    takes each channel whole from the earliest file carrying it, a FIT file counting after
+    every other (`extract_recording` says why); the scalars take each
     reading likewise; the device likewise; and the cylinders take each *member* of each
     cylinder likewise, which is one level finer because a Suunto's two exports of one dive
     split the pressures and the gas fraction between them. `unreadable` says at least one
@@ -377,14 +378,17 @@ def extract_recording(
     JSON labels the one cylinder that carried a transmitter, and the pair has to come out the
     same either way round.
 
-    **Order is attach order, with every FIT file moved last.** The caller guarantees attach
-    order (`ORDER BY dive_file.id`), because "the first file that recorded it" is meaningless
-    without one. FIT records temperature in whole degrees, which no format is coarser than,
-    and at the profile's stored scales it is no finer on any other channel - so the file
-    beside it holds the reading worth taking, whichever of the two arrived first. A file
-    recorded under a format this build no longer reads, or which stopped reading, sets
-    `unreadable` and contributes nothing - it is not silently treated as a file that said
-    nothing, because those two facts lead to opposite repairs.
+    **Order is attach order** and the caller guarantees it (`ORDER BY dive_file.id`), because
+    "the first file that recorded it" is meaningless without one - **except that a FIT file's
+    channels fill after every other file's.** FIT records temperature in whole degrees, which
+    no format is coarser than, and at the profile's stored scales it is no finer on any other
+    channel, so a pair's profile takes the other file's whichever arrived first. Only the
+    channels: the scalars, the device and the cylinders stay in attach order, because the
+    stored fills (`fill_tech_scalars`) keep the first-attached file's readings and an outright
+    re-derivation has to agree with them. A file recorded under a format this build no longer
+    reads, or which stopped reading, sets `unreadable` and contributes nothing - it is not
+    silently treated as a file that said nothing, because those two facts lead to opposite
+    repairs.
 
     `known` maps a digest to an extraction the caller already has, and exists for exactly one
     caller: the attach path has just read the incoming file to decide which recording it
@@ -392,7 +396,9 @@ def extract_recording(
     """
     result = RecordingExtraction()
     origin = None if start_time is None else (start_time, utc_offset_minutes)
-    for file in sorted(files, key=lambda file: file.parser_key == "fit"):
+    profiles: list[NormalizedProfile | None] = []
+    fit_profiles: list[NormalizedProfile | None] = []
+    for file in files:
         extraction = (known or {}).get(file.sha256)
         if extraction is None:
             if not reads(file.parser_key):
@@ -409,8 +415,8 @@ def extract_recording(
             result.mixtures, [] if extraction.parsed is None else extraction.parsed.mixtures
         )
         placed = apply_gas_mapping(_placed(extraction.profile, extraction.start, origin), labels)
+        (fit_profiles if file.parser_key == "fit" else profiles).append(placed)
         result = RecordingExtraction(
-            profile=fill_channels(result.profile, placed),
             # `|` with the stored side second is the fill: a key already carrying a value
             # keeps it, and one carrying `None` is overwritten by a later file's reading.
             scalars={
@@ -423,13 +429,16 @@ def extract_recording(
             unreadable=result.unreadable,
         )
 
+    profile = None
+    for placed in [*profiles, *fit_profiles]:
+        profile = fill_channels(profile, placed)
     # Attributed and capped **once, here**, over the filled channels - which is why every
     # `FileExtraction.profile` above is shaped and nothing more. Attribution reads the gas
     # switches back against the depth channel and after a fill those two may have come from
     # different files, so it has to be derived from the merged result; and it has to be derived
     # *before* the cap, because `downsample` keeps each bucket's extremes and throws the rest
     # away.
-    return replace(result, profile=attribute_and_cap(result.profile))
+    return replace(result, profile=attribute_and_cap(profile))
 
 
 async def store_tech_scalars(
@@ -973,7 +982,8 @@ async def store_recording_file(
     )
     existing_files = [] if matched is None else await load_recording_files(db, recording_id=matched.id)
     # Appended last, which is where `ORDER BY dive_file.id` will put it once the row lands -
-    # and attach order is the whole of what "the first file that recorded it" means.
+    # and attach order is what "the first file that recorded it" means, a FIT file's channels
+    # apart (`extract_recording`).
     files = [*existing_files, incoming_file]
     # Released a *second* time, because the two reads above reopened a transaction the first
     # release had closed and nothing has been written yet. Without this the connection sits
@@ -1535,8 +1545,9 @@ async def load_recording_files(
     """Every file of one recording, in attach order, with its bytes.
 
     **Attach order is `dive_file.id`** - a later upload takes a higher sequence value - and
-    it is the whole of what "the first file that recorded it" means. Every caller of
-    `extract_recording` gets its input from here so that ordering is stated once.
+    it is what "the first file that recorded it" means, a FIT file's channels apart, which
+    `extract_recording` fills last. Every caller of `extract_recording` gets its input from
+    here so that attach order is stated once.
 
     `held` reads the bytes of a row whose object is not in the store yet, by storage key:
     logbook import names every file it stores in rows first and writes the objects once the
