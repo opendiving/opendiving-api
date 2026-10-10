@@ -103,8 +103,8 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
 
     # Idempotency key for extraction. `source_sha256` is what these samples came out of;
     # together with `extractor_version` and `reader_version` it is the whole test for "is this
-    # profile still current" (`should_extract`). The ETag the read endpoint serves is the
-    # row's own `uuid` instead, which every write of samples renews. For a recording holding
+    # profile still current" (`should_extract`). The ETag the read endpoint serves is built on
+    # the row's own `uuid` instead, which every write of samples renews. For a recording holding
     # one file it is that file's own `sha256`; for one holding several it is the SHA-256 over
     # their digests concatenated in attach order, so a second file arriving invalidates the
     # profile the first produced.

@@ -416,7 +416,7 @@ class TestTheBackfillRelabels:
     async def test_a_sibling_relabelled_without_new_bytes_gets_a_new_etag_and_nothing_else_does(
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
     ) -> None:
-        """The ETag is the row's identity, which every write of samples renews. A sibling whose
+        """The ETag carries the row's identity, which every write of samples renews. A sibling whose
         channel the primary's renumbering rewrites reads no bytes, so a key made of what the
         samples are a function of could not move - and a client would draw its old labels
         against the renumbered cylinders."""

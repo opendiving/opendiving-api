@@ -12,7 +12,8 @@ is a list of objects rather than an integer, so the round trip is worth a test o
 lives in a `WHERE` clause, so a mocked session could only assert the SQL that was written
 rather than the rows it comes back with - which is exactly the difference that let the
 digest term go missing. So is the choice of which recording's `depth_outline` a list row
-carries, which is a `DISTINCT ON` ordered by ordinal.
+carries, which is a `DISTINCT ON` ordered by ordinal, and the outline backfill, whose paging
+and scoping are `WHERE` clauses too.
 
 Same skip-if-unreachable guard and same write-real-rows-and-leave-them convention as
 `test_dive_check_constraints.py`; see the note there.
@@ -20,11 +21,15 @@ Same skip-if-unreachable guard and same write-real-rows-and-leave-them conventio
 
 import hashlib
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import Response
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio.session import AsyncSession
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, undefer
+from starlette.requests import Request
 from uuid6 import uuid7
 
 from src.app.api.v1 import dives as dives_module
@@ -39,7 +44,9 @@ from src.app.services.dive_profiles import (
     READER_VERSION,
     NormalizedProfile,
     ProfileSeries,
+    backfill_depth_outlines,
     backfill_profiles,
+    derive_depth_outline,
     get_depth_outlines_for_dives,
     get_gas_attribution_for_dives,
     replace_profile_samples,
@@ -369,3 +376,143 @@ class TestTheDepthOutline:
 
         assert rows[hand_logged.uuid] is None
         assert rows[dive.uuid] is not None and max(rows[dive.uuid]["values"]) == 900
+
+
+# A dive and the minutes the computer recorded at the surface after it: the dive ends at 40 s.
+SURFACE_STRETCH = NormalizedProfile(
+    depth=ProfileSeries(t=[0, 10_000, 20_000, 30_000, 40_000, 100_000, 200_000], v=[0, 900, 1800, 600, 50, 30, 20])
+)
+
+
+async def _stored_row(async_db: AsyncSession, recording: DiveRecording) -> DiveProfile:
+    stmt = (
+        select(DiveProfile)
+        .where(DiveProfile.recording_id == recording.id)
+        .options(undefer(DiveProfile.data))
+        .execution_options(populate_existing=True)
+    )
+    return (await async_db.execute(stmt)).scalar_one()
+
+
+class TestTheProfileRoute:
+    def _request(self, if_none_match: str | None) -> Request:
+        headers = [] if if_none_match is None else [(b"if-none-match", if_none_match.encode())]
+        return Request({"type": "http", "method": "GET", "headers": headers})
+
+    async def _read(
+        self, monkeypatch: pytest.MonkeyPatch, async_db: AsyncSession, dive: Dive, recording: DiveRecording, etag: str
+    ) -> Response:
+        monkeypatch.setattr(dives_module, "_get_owned_dive", AsyncMock(return_value=SimpleNamespace(id=dive.id)))
+        response = await dives_module.read_dive_profile(
+            request=self._request(etag),
+            uuid=dive.uuid,
+            rid=recording.uuid,
+            current_user={"id": dive.user_id},
+            db=async_db,
+        )
+        assert isinstance(response, Response)
+        return response
+
+    @pytest.mark.asyncio
+    async def test_an_etag_the_previous_build_issued_gets_the_body_that_says_where_the_dive_ends(
+        self, monkeypatch: pytest.MonkeyPatch, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        """The row is not rewritten, so an ETag of its `uuid` alone would answer 304 and a
+        browser would keep a body with no `dive_end_time` in it."""
+        await _store(async_db, recording, SURFACE_STRETCH)
+        row = await _stored_row(async_db, recording)
+
+        fresh = await self._read(monkeypatch, async_db, dive, recording, f'"{row.uuid}"')
+
+        assert fresh.status_code == 200
+        assert b'"dive_end_time":40000' in fresh.body
+        assert b'"duration":200000' in fresh.body
+        current = fresh.headers["etag"]
+        assert current != f'"{row.uuid}"'
+        assert (await self._read(monkeypatch, async_db, dive, recording, current)).status_code == 304
+
+
+class TestTheOutlineBackfill:
+    @pytest.fixture(autouse=True)
+    def invalidated(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+        """No Redis here; a run's invalidation is recorded rather than sent."""
+        dropped = AsyncMock()
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", dropped)
+        return dropped
+
+    async def _stale(self, async_db: AsyncSession, recording: DiveRecording) -> dict:
+        """What a build that drew the whole channel stored: the outline over the surface stretch."""
+        uncut = {"span": 200_000, "values": [0, 1800, 20]}
+        await async_db.execute(
+            update(DiveProfile).where(DiveProfile.recording_id == recording.id).values(depth_outline=uncut)
+        )
+        await async_db.commit()
+        return uncut
+
+    @pytest.mark.asyncio
+    async def test_it_rewrites_a_stale_outline_and_nothing_else(
+        self, async_db: AsyncSession, dive: Dive, recording: DiveRecording, invalidated: AsyncMock
+    ) -> None:
+        await _store(async_db, recording, SURFACE_STRETCH)
+        await self._stale(async_db, recording)
+        before = await _stored_row(async_db, recording)
+        identity, data, duration = before.uuid, dict(before.data), before.duration
+
+        report = await backfill_depth_outlines(async_db, user_id=dive.user_id)
+
+        after = await _stored_row(async_db, recording)
+        expected = derive_depth_outline(SURFACE_STRETCH.depth)
+        assert expected is not None and expected.span == 40_000
+        assert (report.examined, report.rewritten) == (1, 1)
+        assert after.depth_outline == expected.model_dump()
+        assert (after.uuid, after.data, after.duration) == (identity, data, duration)
+        invalidated.assert_awaited_once_with(dive.user_id)
+
+    @pytest.mark.asyncio
+    async def test_a_second_run_and_a_current_outline_find_nothing(
+        self, db: Session, async_db: AsyncSession, dive: Dive, recording: DiveRecording, invalidated: AsyncMock
+    ) -> None:
+        await _store(async_db, recording, SURFACE_STRETCH)
+        await _store(async_db, _second_recording(db, dive, 1), SURFACE_STRETCH)
+        await self._stale(async_db, recording)
+
+        first = await backfill_depth_outlines(async_db, user_id=dive.user_id)
+        second = await backfill_depth_outlines(async_db, user_id=dive.user_id)
+
+        assert (first.examined, first.rewritten) == (2, 1)
+        assert (second.examined, second.rewritten) == (2, 0)
+        invalidated.assert_awaited_once_with(dive.user_id)
+
+    @pytest.mark.asyncio
+    async def test_a_dry_run_counts_and_writes_nothing(
+        self, async_db: AsyncSession, dive: Dive, recording: DiveRecording, invalidated: AsyncMock
+    ) -> None:
+        await _store(async_db, recording, SURFACE_STRETCH)
+        uncut = await self._stale(async_db, recording)
+
+        report = await backfill_depth_outlines(async_db, user_id=dive.user_id, dry_run=True)
+
+        assert (report.rewritten, report.dry_run) == (1, True)
+        assert (await _stored_row(async_db, recording)).depth_outline == uncut
+        invalidated.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_user_id_confines_it_to_that_account(
+        self, db: Session, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        other = create_user(db)
+        their_dive = Dive(user_id=other.id, dive_number=1, start_time=datetime.now(UTC), duration=1800, notes="")
+        db.add(their_dive)
+        db.commit()
+        theirs = DiveRecording(dive_id=their_dive.id, user_id=other.id, ordinal=0, start_time=their_dive.start_time)
+        db.add(theirs)
+        db.commit()
+        await _store(async_db, recording, SURFACE_STRETCH)
+        await _store(async_db, theirs, SURFACE_STRETCH)
+        await self._stale(async_db, recording)
+        uncut = await self._stale(async_db, theirs)
+
+        report = await backfill_depth_outlines(async_db, user_id=dive.user_id)
+
+        assert (report.examined, report.rewritten) == (1, 1)
+        assert (await _stored_row(async_db, theirs)).depth_outline == uncut

@@ -106,6 +106,14 @@ logger = logging.getLogger(__name__)
 # `backfill_profiles` re-reads it, which an operator runs after the release that moves it.
 PROFILE_EXTRACTOR_VERSION = 9
 
+# The profile route's ETag is the row's `uuid` and this, because part of the body is computed on
+# read rather than stored: a change to that part changes the body under an unchanged row, and a
+# browser revalidating an ETag the previous build issued would be answered 304 and keep the old
+# body. Bumped with any change to what `to_recording_read_schema` computes.
+#
+# 2: `dive_end_time`. Version 1 was the bare `uuid`.
+PROFILE_READ_VERSION = 2
+
 # The reader's version, stored beside the extractor's: a profile read from stored bytes is a
 # function of those bytes, of this and of `PROFILE_EXTRACTOR_VERSION`, and the row records all
 # three. It names the package and moves with every pin bump whether or not a reader changed,
@@ -281,9 +289,10 @@ class NormalizedProfile:
     def duration(self) -> int:
         """Elapsed milliseconds covered by the longest channel.
 
-        Not the dive's `duration`: this is the span of what the file actually recorded,
-        which is what the chart's x axis has to cover. `dive.duration` is the diver's
-        record and may have been hand-edited.
+        Not the dive's `duration`: this is the span of what the file actually recorded, the
+        minutes a computer goes on logging at the surface after the dive included.
+        `dive.duration` is the diver's record and may have been hand-edited, and where the
+        dive ends on this axis is `dive_end_time`'s answer.
         """
         return max((series.t[-1] for series in self._all_series()), default=0)
 
@@ -368,7 +377,7 @@ def with_channels(
 
 @dataclass(frozen=True, slots=True)
 class LoadedProfile:
-    """A stored profile's series plus the span the chart's x axis has to cover.
+    """A stored profile's series plus its span, the profile's own `duration`.
 
     `parser_key` rides along because the recording profile route publishes its provenance
     and `load_profile` has the whole row in hand anyway - asking for it separately would be
@@ -448,6 +457,15 @@ class BackfillReport:
     skipped: int = 0
     no_samples: int = 0
     failed: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class OutlineBackfillReport:
+    """What one run of `backfill_depth_outlines` did, or would do under `dry_run`."""
+
+    examined: int
+    rewritten: int
+    dry_run: bool
 
 
 # ---------------------------------------------------------------- pure, DB-free
@@ -692,9 +710,41 @@ def downsample(
     )
 
 
+# `divejson.IN_WATER_DEPTH` in the depth channel's integer centimetres, exact: the threshold is
+# divejson's, and this is its unit conversion rather than a second copy of the number.
+_IN_WATER_DEPTH_CM = divejson.IN_WATER_DEPTH * DEPTH_SCALE
+
+
+def dive_end_time(depth: ProfileSeries | None) -> int | None:
+    """Where the dive ends on the recording's axis: the end of the last interval divejson's
+    `in_water` counts, so `None` exactly where it counts none.
+
+    The time of the sample after the last one, other than the final sample, strictly deeper
+    than `divejson.IN_WATER_DEPTH`. A computer goes on recording at the surface for minutes
+    after the dive in case the diver descends again, and this is where that stretch begins; a
+    recording that ends under water ends its dive at its last sample. Mid-dive surfacings stay
+    before it, since only the last deep stretch decides it. Computed on read rather than
+    stored, because the stored samples already determine it.
+    """
+    if depth is None:
+        return None
+    for index in range(len(depth.t) - 2, -1, -1):
+        if depth.v[index] > _IN_WATER_DEPTH_CM:
+            return depth.t[index + 1]
+    return None
+
+
+def _stored_depth(series: Mapping[str, Any] | None) -> ProfileSeries | None:
+    return None if not series else ProfileSeries(t=list(series["t"]), v=list(series["v"]))
+
+
 def derive_depth_outline(depth: ProfileSeries | None, points: int = DEPTH_OUTLINE_POINTS) -> DepthOutline | None:
-    """The depth channel at a dive card's resolution: the deepest reading in each of `points`
-    equal slices of its span, so the outline reaches the recording's maximum depth.
+    """The depth channel up to the dive's end, at a dive card's resolution: the deepest reading
+    in each of `points` equal slices of that span.
+
+    Cut at `dive_end_time`, as the profile chart is, so a card does not draw the minutes the
+    computer went on recording at the surface. A channel with no end - no interval counts -
+    is drawn whole, to its last reading.
 
     Sliced on time rather than on index, as `_downsample_series` buckets. A slice no reading
     falls in - a sampling interval longer than a slice, or a sensor dropout - takes the
@@ -706,6 +756,10 @@ def derive_depth_outline(depth: ProfileSeries | None, points: int = DEPTH_OUTLIN
     """
     if depth is None or len(depth.t) < 2 or depth.t[-1] <= depth.t[0]:
         return None
+    end = dive_end_time(depth)
+    if end is not None:
+        kept = bisect_right(depth.t, end)
+        depth = ProfileSeries(t=depth.t[:kept], v=depth.v[:kept])
     start, span = depth.t[0], depth.t[-1] - depth.t[0]
 
     deepest: dict[int, int] = {}
@@ -1124,7 +1178,7 @@ async def store_profile(
             # Spelled out rather than left to `PublicUUIDMixin`'s `default_factory`: that
             # is a dataclass-level default applied when the ORM constructs an instance,
             # and this Core-level INSERT never constructs one. A fresh one per write is also
-            # what makes it the profile's ETag - see `get_profile_version`.
+            # what moves the profile's ETag - see `get_profile_version`.
             uuid=uuid7(),
             created_at=datetime.now(UTC),
         )
@@ -1179,7 +1233,7 @@ async def replace_profile_samples(db: AsyncSession, *, recording_id: int, profil
 
     Also the rewrite that keeps a dive's other recordings pointing at its cylinders when a
     primary's labels renumber them (`dive_files.label_cylinders`). **The row's `uuid` is
-    minted afresh** either way, because it is the profile's ETag: samples that changed under
+    minted afresh** either way, because the profile's ETag carries it: samples that changed under
     an unchanged ETag would be served from a client's cache against cylinders that moved.
     """
     attributed = replace(profile, gas_attribution=derive_gas_attribution(profile))
@@ -1216,12 +1270,13 @@ async def get_profile_version(db: AsyncSession, *, recording_id: int) -> str | N
     inserts a fresh row and `replace_profile_samples` mints a fresh one. Not the key the
     samples are a function of - `(source digest, extractor version, reader version)` - because
     a relabel changes the samples without changing the key, when a dive's other recordings are
-    renumbered onto a primary's labels. Lets the read route answer a conditional request after
-    one narrow query rather than decoding tens of KB of JSONB only to discard it.
+    renumbered onto a primary's labels. Beside it `PROFILE_READ_VERSION`, for the part of the
+    body computed on read rather than stored. Lets the read route answer a conditional request
+    after one narrow query rather than decoding tens of KB of JSONB only to discard it.
     """
     stmt = select(DiveProfile.uuid).where(DiveProfile.recording_id == recording_id)
     identity = (await db.execute(stmt)).scalar_one_or_none()
-    return None if identity is None else str(identity)
+    return None if identity is None else f"{identity}-r{PROFILE_READ_VERSION}"
 
 
 async def load_profile(db: AsyncSession, *, recording_id: int) -> LoadedProfile | None:
@@ -1314,14 +1369,19 @@ def _published_event_type(stored: str) -> ProfileEventType | None:
 
 
 def to_recording_read_schema(loaded: LoadedProfile) -> RecordingProfileRead:
-    """The recording profile route's shape: the format's object plus where it came from.
+    """The recording profile route's shape: the format's object plus where it came from and
+    where the dive ends on its axis.
 
     Widens `to_read_schema`'s result rather than mapping the payload a second time, so the
     stored-to-wire mapping above stays the only one. `vars()` on a Pydantic model is exactly
     its field values - these models declare no extras - which is what keeps a channel added
     to `DiveProfileRead` from needing an edit here as well.
     """
-    return RecordingProfileRead(**vars(to_read_schema(loaded)), provenance=provenance_of(loaded.parser_key))
+    return RecordingProfileRead(
+        **vars(to_read_schema(loaded)),
+        provenance=provenance_of(loaded.parser_key),
+        dive_end_time=dive_end_time(_stored_depth((loaded.data or {}).get("depth"))),
+    )
 
 
 async def delete_profile_for_recording(db: AsyncSession, *, recording_id: int, commit: bool = True) -> bool:
@@ -1689,3 +1749,66 @@ async def backfill_profiles(
             await invalidate_dive_caches(user_id)
 
     return BackfillReport(examined=examined, extracted=extracted, skipped=skipped, no_samples=no_samples, failed=failed)
+
+
+async def backfill_depth_outlines(
+    db: AsyncSession, *, user_id: int | None = None, dry_run: bool = False
+) -> OutlineBackfillReport:
+    """Re-derive every stored `depth_outline` from its row's samples, rewriting those that differ.
+
+    For the rows a change to `derive_depth_outline` leaves stale, which no other path rewrites:
+    the outline is a function of the stored `data`, so neither the extractor version nor the
+    reader's moves and `backfill_profiles` - which re-reads files, and never a profile a
+    document or a merge supplied - selects none of them. This one reads the depth channel of
+    every row, whatever its provenance, and writes the outline column alone: not `uuid`, so no
+    profile's ETag moves, and not a sample.
+
+    Paged by id rather than loading the table, committing per page. Every user whose rows it
+    rewrote has their dive caches invalidated after the last commit, since `GET /dives` serves
+    the outline; see `src/scripts/backfill_depth_outlines.py` for why that needs a live Redis
+    pool.
+    """
+    examined = rewritten = 0
+    touched_user_ids: set[int] = set()
+    after = 0
+
+    while True:
+        stmt = (
+            select(
+                DiveProfile.id,
+                DiveProfile.depth_outline,
+                DiveProfile.data["depth"].label("depth"),
+                DiveRecording.user_id,
+            )
+            .join(DiveRecording, DiveRecording.id == DiveProfile.recording_id)
+            .where(DiveProfile.id > after)
+            .order_by(DiveProfile.id)
+            .limit(_BACKFILL_BATCH_SIZE)
+        )
+        if user_id is not None:
+            stmt = stmt.where(DiveRecording.user_id == user_id)
+        rows = list(await db.execute(stmt))
+        if not rows:
+            break
+        after = rows[-1].id
+
+        for row in rows:
+            examined += 1
+            outline = derive_depth_outline(_stored_depth(row.depth))
+            derived = None if outline is None else outline.model_dump()
+            if derived == row.depth_outline:
+                continue
+            rewritten += 1
+            touched_user_ids.add(row.user_id)
+            if not dry_run:
+                await db.execute(update(DiveProfile).where(DiveProfile.id == row.id).values(depth_outline=derived))
+        if not dry_run:
+            await db.commit()
+
+    if not dry_run:
+        from .cache_invalidation import invalidate_dive_caches
+
+        for touched in touched_user_ids:
+            await invalidate_dive_caches(touched)
+
+    return OutlineBackfillReport(examined=examined, rewritten=rewritten, dry_run=dry_run)
