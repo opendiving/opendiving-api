@@ -16,6 +16,7 @@ import uuid as uuid_pkg
 from dataclasses import astuple
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatch
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1616,6 +1617,48 @@ class TestEachFileIsPlacedOnTheRecordingsStart:
         assert extraction.profile.depth is not None and extraction.profile.temperature is not None
         assert extraction.profile.depth.t == [160]
         assert extraction.profile.temperature.t == [2000]
+
+
+class TestAFitFilesChannelsFillLast:
+    """One Suunto Ocean dive's two exports, whose exit fixes differ by about nine metres."""
+
+    @staticmethod
+    def _fixture(name: str, parser_key: str) -> LoadedDiveFile:
+        content = (Path(__file__).parent / "fixtures" / "dive_files" / name).read_bytes()
+        return LoadedDiveFile(
+            data=content,
+            content_type=FORMAT_CONTENT_TYPES[parser_key],
+            original_filename=name,
+            sha256=_digest(content),
+            parser_key=parser_key,
+        )
+
+    def _read(self, *names: str) -> RecordingExtraction:
+        files = {
+            "fit": self._fixture("suunto-ocean-2026.fit", "fit"),
+            "json": self._fixture("suunto-ocean-2026.json", "suunto_json"),
+        }
+        # The recording's stored start, which every real recording has: without one the axis
+        # would count from whichever file came first, and the comparison would be of two axes.
+        start = extract_file(files["fit"].data, "fit").start
+        assert start is not None
+        return extract_recording([files[name] for name in names], start_time=start[0], utc_offset_minutes=start[1])
+
+    def test_the_profile_is_the_jsons_whichever_was_attached_first(self) -> None:
+        """The FIT's temperature is whole degrees."""
+        fit_first, json_first, json_alone = self._read("fit", "json"), self._read("json", "fit"), self._read("json")
+
+        assert fit_first.profile == json_first.profile
+        assert fit_first.profile is not None and json_alone.profile is not None
+        assert fit_first.profile.temperature == json_alone.profile.temperature
+
+    def test_the_fixes_stay_the_first_attached_files(self) -> None:
+        """What `fill_tech_scalars` keeps on a stored dive, so an outright re-derivation agrees."""
+        fit_first, json_first = self._read("fit", "json"), self._read("json", "fit")
+
+        assert fit_first.scalars["exit_latitude"] == self._read("fit").scalars["exit_latitude"]
+        assert json_first.scalars["exit_latitude"] == self._read("json").scalars["exit_latitude"]
+        assert fit_first.scalars["exit_latitude"] != json_first.scalars["exit_latitude"]
 
 
 class TestTheReadoutFieldsAreTheRecordings:

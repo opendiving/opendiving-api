@@ -265,7 +265,11 @@ class TestTheBackfillAgainstTheRows:
         self, volume: Any, async_db: AsyncSession, db: Session, diver: User
     ) -> None:
         """The motivating dive: its FIT was attached first and its JSON second, both on one
-        recording."""
+        recording.
+
+        The pair's depth channel is the JSON's, and this JSON is reduced to five depth samples
+        whose mean is 9.67 m, where the whole export's agrees with the FIT's. So the stored mean
+        is set to the reduced file's, keeping it the one the old readers wrote."""
         dive = await _ocean_fit_dive(async_db, db, diver)
         await _attach(async_db, diver, dive, "suunto-ocean-2026.json", "suunto_json")
         assert (
@@ -273,6 +277,7 @@ class TestTheBackfillAgainstTheRows:
                 select(DiveRecording.id).where(DiveRecording.dive_id == dive.id, DiveRecording.ordinal == 1)
             )
         ) is None
+        await _set(async_db, dive, avg_depth=9.67)
 
         await backfill_dive_figures(async_db, user_id=diver.id)
 

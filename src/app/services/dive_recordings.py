@@ -1041,7 +1041,7 @@ async def get_file_infos_for_recordings(
 
     `id` orders them, which is attach order by construction - a later upload gets a higher
     sequence value - and it is what the fill rule means by "the first file that recorded
-    it".
+    it", a FIT file's profile channels apart.
     """
     if not recording_ids:
         return {}

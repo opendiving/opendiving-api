@@ -6233,14 +6233,15 @@ dive; import applies same-recording then strict, never loose.
 Everything a file says about a recording comes from the first file that recorded it:
 `fill_device_fields`, `fill_gate_figures`, `fill_start`, `fill_tech_scalars`, `fill_channels`,
 `fill_dive_mixtures`; `git grep -n "def fill_" -- src/app/services` is the list. Rejected: later
-wins, losing corrections. Profiles fill by channel, never by sample. Fills are a `COALESCE` per
-column except `fill_start`, whose two columns hold one value (filling a NULL `utc_offset_minutes`
-also converts the stored wall clock to an instant), and the dive's cylinders, which fill by the
-labelling's pairs (*A dive's cylinders fill from whichever recording pairs with them*). Gate figures
-are the exception: every re-derivation rewrites them (`store_gate_figures`). The dive's scalars are
-the primary recording's. `rederive_recording` requires a `RecordingChange`: `CREATED` and `REMOVED`
-write readouts and scalars outright, `JOINED` and `REREAD` fill them; `_repeat_upload` and the
-backfill pass `REREAD`, `delete_dive_file` `REMOVED`.
+wins, losing corrections. Profiles fill by channel, never by sample, a FIT file's channels last
+(`extract_recording`). Fills are a `COALESCE` per column except `fill_start`, whose two columns hold
+one value (filling a NULL `utc_offset_minutes` also converts the stored wall clock to an instant),
+and the dive's cylinders, which fill by the labelling's pairs (*A dive's cylinders fill from
+whichever recording pairs with them*). Gate figures are the exception: every re-derivation rewrites
+them (`store_gate_figures`). The dive's scalars are the primary recording's. `rederive_recording`
+requires a `RecordingChange`: `CREATED` and `REMOVED` write readouts and scalars outright, `JOINED`
+and `REREAD` fill them; `_repeat_upload` and the backfill pass `REREAD`, `delete_dive_file`
+`REMOVED`.
 
 ## A profile has one of three provenances, and a recording need not have a file
 
