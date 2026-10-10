@@ -317,13 +317,13 @@ class RecordingExtraction:
 
     One object rather than several returns because they are read together everywhere and every
     one of them is *the first file that recorded it* - only the unit differs. The profile
-    takes each channel whole from the earliest file carrying it, a FIT file counting after
-    every other (`extract_recording` says why); the scalars take each
+    takes each channel whole from the earliest file carrying it; the scalars take each
     reading likewise; the device likewise; and the cylinders take each *member* of each
     cylinder likewise, which is one level finer because a Suunto's two exports of one dive
-    split the pressures and the gas fraction between them. `unreadable` says at least one
-    file could not be re-read at all, which is a reader regression the backfill counts rather
-    than swallows.
+    split the pressures and the gas fraction between them. Only the channels count a FIT
+    file after every other, for the reason `extract_recording` gives. `unreadable` says at
+    least one file could not be re-read at all, which is a reader regression the backfill
+    counts rather than swallows.
     """
 
     profile: NormalizedProfile | None = None
