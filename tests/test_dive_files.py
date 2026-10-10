@@ -16,6 +16,7 @@ import uuid as uuid_pkg
 from dataclasses import astuple
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatch
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1616,6 +1617,33 @@ class TestEachFileIsPlacedOnTheRecordingsStart:
         assert extraction.profile.depth is not None and extraction.profile.temperature is not None
         assert extraction.profile.depth.t == [160]
         assert extraction.profile.temperature.t == [2000]
+
+
+class TestAFitFileIsReadLast:
+    @staticmethod
+    def _fixture(name: str, parser_key: str) -> LoadedDiveFile:
+        content = (Path(__file__).parent / "fixtures" / "dive_files" / name).read_bytes()
+        return LoadedDiveFile(
+            data=content,
+            content_type=FORMAT_CONTENT_TYPES[parser_key],
+            original_filename=name,
+            sha256=_digest(content),
+            parser_key=parser_key,
+        )
+
+    def test_a_pair_reads_the_same_whichever_was_attached_first(self) -> None:
+        """One Suunto Ocean dive's two exports. The FIT's temperature is whole degrees, so the
+        pair's is the JSON's either way round - and so is everything else the fold decides."""
+        fit = self._fixture("suunto-ocean-2026.fit", "fit")
+        export = self._fixture("suunto-ocean-2026.json", "suunto_json")
+
+        fit_first = extract_recording([fit, export], start_time=None, utc_offset_minutes=None)
+        json_first = extract_recording([export, fit], start_time=None, utc_offset_minutes=None)
+        json_alone = extract_recording([export], start_time=None, utc_offset_minutes=None)
+
+        assert fit_first == json_first
+        assert fit_first.profile is not None and json_alone.profile is not None
+        assert fit_first.profile.temperature == json_alone.profile.temperature
 
 
 class TestTheReadoutFieldsAreTheRecordings:

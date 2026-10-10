@@ -99,10 +99,12 @@ logger = logging.getLogger(__name__)
 #    a free label and maps onto it, where its channels used to keep a label naming nothing.
 # 8: a second computer's `gas_attribution` mapped onto the dive's labels with its channels,
 #    where it kept its own file's numbering.
+# 9: a recording's FIT files read after its others, so a FIT and JSON pair takes the JSON's
+#    temperature, finer than FIT's whole degrees, whichever was attached first.
 #
 # A profile stored before a bump stays valid and is served as it is until
 # `backfill_profiles` re-reads it, which an operator runs after the release that moves it.
-PROFILE_EXTRACTOR_VERSION = 8
+PROFILE_EXTRACTOR_VERSION = 9
 
 # The reader's version, stored beside the extractor's: a profile read from stored bytes is a
 # function of those bytes, of this and of `PROFILE_EXTRACTOR_VERSION`, and the row records all

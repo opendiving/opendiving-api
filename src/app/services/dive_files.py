@@ -377,11 +377,14 @@ def extract_recording(
     JSON labels the one cylinder that carried a transmitter, and the pair has to come out the
     same either way round.
 
-    **Order is attach order** and the caller guarantees it (`ORDER BY dive_file.id`), because
-    "the first file that recorded it" is meaningless without one. A file recorded under a
-    format this build no longer reads, or which stopped reading, sets `unreadable` and
-    contributes nothing - it is not silently treated as a file that said nothing, because
-    those two facts lead to opposite repairs.
+    **Order is attach order, with every FIT file moved last.** The caller guarantees attach
+    order (`ORDER BY dive_file.id`), because "the first file that recorded it" is meaningless
+    without one. FIT records temperature in whole degrees, which no format is coarser than,
+    and at the profile's stored scales it is no finer on any other channel - so the file
+    beside it holds the reading worth taking, whichever of the two arrived first. A file
+    recorded under a format this build no longer reads, or which stopped reading, sets
+    `unreadable` and contributes nothing - it is not silently treated as a file that said
+    nothing, because those two facts lead to opposite repairs.
 
     `known` maps a digest to an extraction the caller already has, and exists for exactly one
     caller: the attach path has just read the incoming file to decide which recording it
@@ -389,7 +392,7 @@ def extract_recording(
     """
     result = RecordingExtraction()
     origin = None if start_time is None else (start_time, utc_offset_minutes)
-    for file in files:
+    for file in sorted(files, key=lambda file: file.parser_key == "fit"):
         extraction = (known or {}).get(file.sha256)
         if extraction is None:
             if not reads(file.parser_key):
