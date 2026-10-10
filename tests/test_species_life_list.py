@@ -39,7 +39,7 @@ from src.app.core.db.database import async_get_db
 from src.app.core.setup import create_application
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_species import DiveSpecies
-from src.app.schemas.species import SpeciesLifeListDetail
+from src.app.schemas.species import SpeciesLifeListEntry
 from src.app.services.dive_stats import recalculate_dive_stats
 from src.app.services.species_life_list import species_life_list, species_life_list_detail
 from tests.conftest import db_available
@@ -101,6 +101,7 @@ def _row(name: str) -> dict[str, Any]:
         "rank": "Species",
         "photo_sha256": None,
         "dive_count": 1,
+        "dive_site_count": 0,
         "first_seen": datetime(2026, 1, 2, 9, 0, tzinfo=UTC).isoformat(),
         "last_seen": datetime(2026, 1, 2, 9, 0, tzinfo=UTC).isoformat(),
     }
@@ -246,6 +247,7 @@ class TestTheRoute:
             "rank": "Species",
             "photo_sha256": "a" * 64,
             "dive_count": 3,
+            "dive_site_count": 2,
             "first_seen": datetime(2026, 1, 2, 9, 0, tzinfo=UTC).isoformat(),
             "last_seen": datetime(2026, 3, 4, 9, 0, tzinfo=UTC).isoformat(),
         }
@@ -257,6 +259,7 @@ class TestTheRoute:
         assert body["total_count"] == 1
         assert body["data"][0]["photo_sha256"] == "a" * 64
         assert body["data"][0]["dive_count"] == 3
+        assert body["data"][0]["dive_site_count"] == 2
 
     def test_it_takes_no_user_uuid(self, life_list_app: Any) -> None:
         """Always the caller's own account, like the rest of `/user/...`. There is no uuid to
@@ -659,7 +662,7 @@ def _detail_path(species_uuid: Any) -> str:
 
 class TestTheDetailRoute:
     def test_it_answers_the_entry_with_its_site_count(self, client: TestClient) -> None:
-        detail = SpeciesLifeListDetail(**{**_row("Amphiprion ocellaris"), "dive_count": 4}, dive_site_count=2)
+        detail = SpeciesLifeListEntry(**{**_row("Amphiprion ocellaris"), "dive_count": 4, "dive_site_count": 2})
         with patch.object(users_module, "species_life_list_detail", AsyncMock(return_value=detail)) as service:
             response = client.get(_detail_path(detail.uuid))
 
@@ -681,7 +684,7 @@ class TestTheDetailRoute:
     def test_each_species_gets_its_own_entry_under_the_dive_sweep(self, client: TestClient, redis: _FakeRedis) -> None:
         """Under `user_{id}_dives:` so a dive write drops it with the list it must agree with,
         and keyed by the species so one page cannot serve another's figures."""
-        first, second = (SpeciesLifeListDetail(**_row(name), dive_site_count=1) for name in ("one", "two"))
+        first, second = (SpeciesLifeListEntry(**_row(name)) for name in ("one", "two"))
         with patch.object(users_module, "species_life_list_detail", AsyncMock(side_effect=[first, second])):
             client.get(_detail_path(first.uuid))
             answered = client.get(_detail_path(second.uuid)).json()
@@ -692,7 +695,7 @@ class TestTheDetailRoute:
 
 
 @pytest.mark.skipif(not db_available(), reason="requires a database")
-class TestTheDetailAggregate:
+class TestTheSiteCount:
     def _log(self, db: Session, diver: Any, species: Any, *sites: Any, is_deleted: bool = False) -> Any:
         dive = create_dive(db, diver, is_deleted=is_deleted)
         db.add(DiveSpecies(dive_id=dive.id, species_id=species.id, position=0))
@@ -744,6 +747,53 @@ class TestTheDetailAggregate:
         assert (detail.dive_count, detail.dive_site_count) == (1, 0)
 
     @pytest.mark.asyncio
+    async def test_every_list_row_carries_its_own_site_count(self, db: Session, async_db: AsyncSession) -> None:
+        """Two sites, one site across two dives, and none at all, read off one page - and the
+        multi-site dive moves neither the total nor the order."""
+        diver = create_user(db)
+        two_sites, one_site, no_site = create_species(db), create_species(db), create_species(db)
+        north, south = create_dive_site(db, diver), create_dive_site(db, diver)
+        for day, species, sites in (
+            (1, no_site, ()),
+            (2, one_site, (north,)),
+            (3, one_site, (north,)),
+            (4, two_sites, (north, south)),
+        ):
+            dive = self._log(db, diver, species, *sites)
+            dive.start_time = datetime(2026, 6, day, 9, 0, tzinfo=UTC)
+        db.commit()
+
+        page = await species_life_list(async_db, user_id=diver.id, offset=0, limit=10)
+
+        assert page["total_count"] == 3
+        assert [(row["uuid"], row["dive_count"], row["dive_site_count"]) for row in page["data"]] == [
+            (two_sites.uuid, 1, 2),
+            (one_site.uuid, 2, 1),
+            (no_site.uuid, 1, 0),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_under_the_site_filter_a_multi_site_dive_counts_all_its_sites(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The count is over the narrowed dives, not narrowed to the one site: at least 1, and
+        2 for a dive that also names a second site. A dive elsewhere adds nothing."""
+        diver = create_user(db)
+        drifted, stayed = create_species(db), create_species(db)
+        north, south, elsewhere = (create_dive_site(db, diver) for _ in range(3))
+        self._log(db, diver, drifted, north, south)
+        self._log(db, diver, stayed, north)
+        self._log(db, diver, stayed, elsewhere)
+
+        page = await species_life_list(async_db, user_id=diver.id, offset=0, limit=10, dive_site_id=north.id)
+
+        assert page["total_count"] == 2
+        assert {row["uuid"]: (row["dive_count"], row["dive_site_count"]) for row in page["data"]} == {
+            drifted.uuid: (1, 2),
+            stayed.uuid: (1, 1),
+        }
+
+    @pytest.mark.asyncio
     async def test_it_is_none_exactly_when_the_list_leaves_the_species_out(
         self, db: Session, async_db: AsyncSession
     ) -> None:
@@ -775,5 +825,5 @@ class TestTheDetailAggregate:
         detail = await species_life_list_detail(async_db, user_id=diver.id, species_uuid=species.uuid)
 
         assert detail is not None
-        assert detail.model_dump(exclude={"dive_site_count"}) == listed
+        assert detail.model_dump() == listed
         assert detail.dive_site_count == 3
