@@ -211,7 +211,7 @@ class SpeciesLifeListEntry(PublicUUIDSchema):
     """One row of `GET /user/species` - a species this diver has logged, and their history
     with it.
 
-    Not a `SpeciesRead` with extras: the three aggregate fields are facts about *this
+    Not a `SpeciesRead` with extras: the four aggregate fields are facts about *this
     caller's* logbook rather than about the taxon, which is the whole reason this route lives
     under `/user/` rather than under the ownerless `/species/`. The taxon half is deliberately
     the same subset `SpeciesInfo` carries, plus the digest, so a card renders without a second
@@ -227,17 +227,20 @@ class SpeciesLifeListEntry(PublicUUIDSchema):
     rank: Annotated[str, Field(max_length=64, examples=["Species"])]
     photo_sha256: Annotated[str | None, Field(default=None, max_length=64)]
     dive_count: Annotated[int, Field(ge=1, examples=[7], description="How many live dives recorded this species")]
+    dive_site_count: Annotated[
+        int,
+        Field(
+            ge=0,
+            examples=[3],
+            description=(
+                "Distinct dive sites those dives name, at any position; 0 when none names a site. Under"
+                " `dive_site_uuid` it counts over the narrowed dives, so it is at least 1, and more where"
+                " one of them names several sites"
+            ),
+        ),
+    ]
     first_seen: DiveLocalStartTime
     last_seen: DiveLocalStartTime
-
-
-class SpeciesLifeListDetail(SpeciesLifeListEntry):
-    """`GET /user/species/{uuid}` - one species' life-list entry, with the same figures the
-    list carries for it, plus the sites."""
-
-    dive_site_count: Annotated[
-        int, Field(ge=0, examples=[3], description="Distinct dive sites those dives name, at any position")
-    ]
 
 
 class SpeciesResolveRequest(BaseModel):

@@ -52,7 +52,7 @@ from ...schemas.email_change import (
     EmailChangeVerifyResponse,
 )
 from ...schemas.location import LocationRead
-from ...schemas.species import SpeciesLifeListDetail, SpeciesLifeListEntry, SpeciesSuggestResponse
+from ...schemas.species import SpeciesLifeListEntry, SpeciesSuggestResponse
 from ...schemas.storage import StorageUsageRead
 from ...schemas.user import AccountDeletionResponse, UserRead, UserUpdate
 from ...schemas.user_dive_stats import UserDiveStatsRead, UserDiveStatsReadInternal
@@ -958,8 +958,8 @@ async def read_species_life_list(
 ) -> dict:
     """Every species the caller has ever logged, most recently seen first.
 
-    One row per taxon rather than per sighting: `dive_count`, `first_seen` and `last_seen` are
-    that diver's whole history with it, and `photo_sha256` is non-null when there is a photo to
+    One row per taxon rather than per sighting: `dive_count`, `dive_site_count`, `first_seen` and
+    `last_seen` are that diver's whole history with it, and `photo_sha256` is non-null when there is a photo to
     render (build `/species/{uuid}/photo?v=<digest>` from it - that route needs no token).
 
     Counts **live** dives only, so soft-deleting a dive drops its species from this list when it
@@ -1066,7 +1066,7 @@ SPECIES_LIFE_LIST_DETAIL_CACHE_KEY_PREFIX = "user_{user_id}_dives:species:{speci
 @cache(key_prefix=SPECIES_LIFE_LIST_DETAIL_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
 async def _cached_species_life_list_detail(
     request: Request, user_id: int, db: AsyncSession, species_uuid: uuid_pkg.UUID
-) -> SpeciesLifeListDetail:
+) -> SpeciesLifeListEntry:
     """Fetches (and caches) one species' entry for the caller. The 404 raises before anything
     is stored, so a first sighting shows at once rather than after the TTL."""
     detail = await species_life_list_detail(db=db, user_id=user_id, species_uuid=species_uuid)
@@ -1075,16 +1075,15 @@ async def _cached_species_life_list_detail(
     return detail
 
 
-@router.get("/user/species/{uuid}", response_model=SpeciesLifeListDetail)
+@router.get("/user/species/{uuid}", response_model=SpeciesLifeListEntry)
 async def read_species_life_list_detail(
     request: Request,
     uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-) -> SpeciesLifeListDetail:
+) -> SpeciesLifeListEntry:
     """The caller's history with one species: its `GET /user/species` row, with the same
-    figures, plus `dive_site_count` - the distinct sites those dives name at any position, as
-    a site's summary counts its dives.
+    figures.
 
     404 when no live dive of the caller's records the species, whether or not the catalog
     holds it: exactly the species the life list leaves out. The uuid is the catalog's, which
