@@ -106,13 +106,15 @@ logger = logging.getLogger(__name__)
 # `backfill_profiles` re-reads it, which an operator runs after the release that moves it.
 PROFILE_EXTRACTOR_VERSION = 9
 
-# The profile route's ETag is the row's `uuid` and this, because part of the body is computed on
-# read rather than stored: a change to that part changes the body under an unchanged row, and a
-# browser revalidating an ETag the previous build issued would be answered 304 and keep the old
-# body. Bumped with any change to what `to_recording_read_schema` computes.
+# The profile route's ETag is the row's `uuid` and this, because a body can change under an
+# unchanged row: a browser revalidating an ETag the previous build issued would be answered 304
+# and keep the old body. Bumped with any change to what `to_recording_read_schema` computes, and
+# with any migration that rewrites stored samples in place.
 #
 # 2: `dive_end_time`. Version 1 was the bare `uuid`.
-PROFILE_READ_VERSION = 2
+# 3: temperature readings in hundredths of a degree, multiplied in place by revision
+#    `f3a9c1d27b64`.
+PROFILE_READ_VERSION = 3
 
 # The reader's version, stored beside the extractor's: a profile read from stored bytes is a
 # function of those bytes, of this and of `PROFILE_EXTRACTOR_VERSION`, and the row records all
@@ -200,7 +202,7 @@ MAX_LABEL_CHARS = 120
 _SUMMARY_COLUMNS: Mapping[str, tuple[tuple[str, Callable[[list[int]], int]], ...]] = {
     "depth": (("max_depth_cm", max),),
     "ceiling": (("max_ceiling_cm", max),),
-    "temperature": (("min_temperature_c10", min), ("max_temperature_c10", max)),
+    "temperature": (("min_temperature_c100", min), ("max_temperature_c100", max)),
     "ndl": (("min_ndl_s", min),),
     "tts": (("max_tts_s", max),),
     "ppo2": (("max_ppo2_bar100", max),),
@@ -1270,9 +1272,10 @@ async def get_profile_version(db: AsyncSession, *, recording_id: int) -> str | N
     inserts a fresh row and `replace_profile_samples` mints a fresh one. Not the key the
     samples are a function of - `(source digest, extractor version, reader version)` - because
     a relabel changes the samples without changing the key, when a dive's other recordings are
-    renumbered onto a primary's labels. Beside it `PROFILE_READ_VERSION`, for the part of the
-    body computed on read rather than stored. Lets the read route answer a conditional request
-    after one narrow query rather than decoding tens of KB of JSONB only to discard it.
+    renumbered onto a primary's labels. Beside it `PROFILE_READ_VERSION`, for a body that changes
+    under an unchanged row - computed on read, or rewritten in place by a migration. Lets the
+    read route answer a conditional request after one narrow query rather than decoding tens of
+    KB of JSONB only to discard it.
     """
     stmt = select(DiveProfile.uuid).where(DiveProfile.recording_id == recording_id)
     identity = (await db.execute(stmt)).scalar_one_or_none()
@@ -1474,8 +1477,8 @@ async def get_profile_infos_for_recordings(
             channels=channels,
             max_depth=_scaled(row.max_depth_cm, DEPTH_SCALE),
             max_ceiling=_scaled(row.max_ceiling_cm, CEILING_SCALE),
-            min_temperature=_scaled(row.min_temperature_c10, TEMPERATURE_SCALE),
-            max_temperature=_scaled(row.max_temperature_c10, TEMPERATURE_SCALE),
+            min_temperature=_scaled(row.min_temperature_c100, TEMPERATURE_SCALE),
+            max_temperature=_scaled(row.max_temperature_c100, TEMPERATURE_SCALE),
             min_pressure=_scaled(row.min_pressure_bar10, PRESSURE_SCALE),
             max_pressure=_scaled(row.max_pressure_bar10, PRESSURE_SCALE),
             updated_at=row.updated_at,

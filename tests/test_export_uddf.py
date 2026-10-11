@@ -409,9 +409,9 @@ class TestUnitConversions:
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
         # 24.9 C stored on the dive -> 24.9 + 273.15
         assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}lowesttemperature") == "298.05"
-        # 181 tenths of a degree in the profile = 18.1 C -> 291.25 K
+        # 1812 hundredths of a degree in the profile = 18.12 C -> 291.27 K
         temperatures = [e.text for e in _tree(document).iter(f"{UDDF}temperature")]
-        assert temperatures == ["298.05", "291.25"]
+        assert temperatures == ["298.08", "291.27"]
 
     @pytest.mark.asyncio
     async def test_pressures_are_pascal(self, monkeypatch):
@@ -1178,7 +1178,7 @@ class TestWaypoints:
         closest-wins produces 22.0 C."""
         profile = {
             "depth": {"t": [0, 10_000, 20_000], "v": [0, 1000, 2000]},
-            "temperature": {"t": [6_000, 9_000], "v": [999, 220]},
+            "temperature": {"t": [6_000, 9_000], "v": [9990, 2200]},
         }
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
@@ -1194,7 +1194,7 @@ class TestWaypoints:
         move, which is the failure the tolerance exists to prevent rather than an
         application of it.
         """
-        profile = {"depth": {"t": [0, 1_800_000], "v": [0, 3000]}, "temperature": {"t": [890_000], "v": [220]}}
+        profile = {"depth": {"t": [0, 1_800_000], "v": [0, 3000]}, "temperature": {"t": [890_000], "v": [2200]}}
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
@@ -1206,7 +1206,7 @@ class TestWaypoints:
         """`_nearest` alone would put a surface-interval reading on the last in-water
         waypoint, as if it had been taken there - the one way snapping could invent data
         rather than merely move it. Both ends clamp, so both ends are checked."""
-        profile = {**OFF_GRID_PROFILE, "temperature": {"t": [second], "v": [300]}}
+        profile = {**OFF_GRID_PROFILE, "temperature": {"t": [second], "v": [3000]}}
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
@@ -1225,7 +1225,7 @@ class TestWaypoints:
         """
         profile = {
             "depth": {"t": [0, 10_000, 20_000, 1_820_000, 1_830_000], "v": [0, 1000, 2000, 800, 0]},
-            "temperature": {"t": [12_000, 900_000, 1_825_000], "v": [240, 999, 220]},
+            "temperature": {"t": [12_000, 900_000, 1_825_000], "v": [2400, 9990, 2200]},
         }
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
@@ -1243,7 +1243,10 @@ class TestWaypoints:
         a dive that plunges to the surface and back on every sample; the readings are in
         `logbook.divejson` either way.
         """
-        profile = {"temperature": {"t": [0, 60_000], "v": [249, 181]}, "events": [{"t": 30_000, "type": "safety_stop"}]}
+        profile = {
+            "temperature": {"t": [0, 60_000], "v": [2493, 1812]},
+            "events": [{"t": 30_000, "type": "safety_stop"}],
+        }
         document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: profile}, monkeypatch)
         schema.validate(document)
         assert _dive(_tree(document), 1).find(f"{UDDF}samples") is None
@@ -1640,7 +1643,7 @@ class TestDiveMode:
         channel - which emits no `<samples>` at all - loses the mode with it. It survives
         in `logbook.divejson`, which carries the recording rather than the waypoints."""
         document = await _render(
-            full_bundle(), {PRIMARY_RECORDING_ID: {"temperature": {"t": [0], "v": [250]}}}, monkeypatch
+            full_bundle(), {PRIMARY_RECORDING_ID: {"temperature": {"t": [0], "v": [2500]}}}, monkeypatch
         )
         assert list(_tree(document).iter(f"{UDDF}samples")) == []
         assert list(_tree(document).iter(f"{UDDF}divemode")) == []

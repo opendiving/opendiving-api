@@ -317,7 +317,7 @@ class TestTheDepthOutline:
         self, db: Session, async_db: AsyncSession, dive: Dive, recording: DiveRecording
     ) -> None:
         """No falling through to a later recording's: the card draws what the dive page does."""
-        await _store(async_db, recording, NormalizedProfile(temperature=ProfileSeries(t=[0, 100], v=[219, 218])))
+        await _store(async_db, recording, NormalizedProfile(temperature=ProfileSeries(t=[0, 100], v=[2190, 2180])))
         await _store(
             async_db, _second_recording(db, dive, 1), NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 900]))
         )

@@ -12,7 +12,7 @@ the tests widen that element for their XSD pass alone.
 
 **UDDF is SI throughout, and our storage is not.** Depths are meters (ours already are),
 times seconds where the profile axis holds milliseconds, temperatures **Kelvin** where we
-hold tenths of a degree Celsius, pressures **Pascal** where we hold tenths of a bar and plain bar, and tank
+hold hundredths of a degree Celsius, pressures **Pascal** where we hold tenths of a bar and plain bar, and tank
 volumes **cubic meters** where a diver says "twelve litres". Every one of those
 conversions is a one-liner with a unit test carrying a hand-computed expectation, because
 a silently wrong factor of 100 000 produces a file that validates perfectly and is

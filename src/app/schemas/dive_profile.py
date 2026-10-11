@@ -37,9 +37,13 @@ MILLISECONDS_PER_SECOND = 1000
 # the frontend's `PROFILE_CHANNELS`) rather than travelling per-response: they are part
 # of the format, not of a particular dive. Integers rather than floats because a float
 # round-trip reintroduces `20.600000000000023`-class noise several thousand times per
-# dive, and all three resolutions comfortably exceed any dive computer's real precision.
+# dive. Not every one is as fine as its sources: some computers state a tank pressure in
+# millibar, held here in tenths of a bar.
 DEPTH_SCALE = 100  # centimeters
-TEMPERATURE_SCALE = 10  # tenths of a degree Celsius
+# Hundredths of a degree Celsius, the grain a Suunto Ocean states its readings in (0.01 K).
+# Declared here rather than imported from `divejson`: the stored rows are in this scale and
+# only a migration of them may move it, where a pin bump would move a borrowed constant alone.
+TEMPERATURE_SCALE = 100
 PRESSURE_SCALE = 10  # tenths of a bar
 
 # The deco ceiling is a depth, and it is deliberately **not** given a scale of its own:
@@ -337,7 +341,9 @@ class DiveProfileRead(BaseModel):
     ]
     temperature: Annotated[
         DiveProfileSeries | None,
-        Field(default=None, description=f"Water temperature in tenths of a degree Celsius (scale {TEMPERATURE_SCALE})"),
+        Field(
+            default=None, description=f"Water temperature in hundredths of a degree Celsius (scale {TEMPERATURE_SCALE})"
+        ),
     ]
     pressures: Annotated[
         list[DiveProfilePressureSeries],

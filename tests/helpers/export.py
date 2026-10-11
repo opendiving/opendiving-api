@@ -772,7 +772,7 @@ def full_bundle() -> ExportBundle:
 
 
 # The profile the `trimix` dive carries, in the stored integer scales on a millisecond axis:
-# depth in cm, temperature in 0.1 C, pressure in 0.1 bar, ndl and tts in seconds, ppO2 in
+# depth in cm, temperature in 0.01 C, pressure in 0.1 bar, ndl and tts in seconds, ppO2 in
 # 0.01 bar, CNS in 0.1 % and both gradient factors in whole percent. Every reading lands on a depth sample
 # - the ordinary case, where `uddf.py::_waypoints` has nothing to snap. `OFF_GRID_PROFILE`
 # below is the one that disagrees.
@@ -784,7 +784,7 @@ def full_bundle() -> ExportBundle:
 TRIMIX_PROFILE: dict[str, Any] = {
     "depth": {"t": [0, 30000, 60000, 90000], "v": [0, 1800, 5200, 300]},
     "ceiling": {"t": [60000, 90000], "v": [600, 300]},
-    "temperature": {"t": [0, 60000], "v": [249, 181]},
+    "temperature": {"t": [0, 60000], "v": [2493, 1812]},
     # A no-decompression clock that runs out: 5940 is a Shearwater's display maximum, and
     # the 0 at 60 s is the moment the dive became a decompression dive - the reading the
     # ceiling beside it is the consequence of.
@@ -820,7 +820,7 @@ TRIMIX_PROFILE: dict[str, Any] = {
 # and the switch at 24 -> 30, because a switch is never moved backwards.
 OFF_GRID_PROFILE: dict[str, Any] = {
     "depth": {"t": [0, 10000, 20000, 30000], "v": [0, 1000, 2000, 1500]},
-    "temperature": {"t": [4000, 12000, 13000, 27000], "v": [250, 240, 999, 220]},
+    "temperature": {"t": [4000, 12000, 13000, 27000], "v": [2500, 2400, 9990, 2200]},
     "pressure": [{"gas_number": 1, "t": [15000], "v": [2000]}],
     "events": [
         {"t": 7000, "type": "safety_stop"},
