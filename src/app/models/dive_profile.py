@@ -49,7 +49,7 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
 
         {"depth":       {"t": [160, 10160, 20160], "v": [139, 372, 632]},
          "ceiling":     {"t": [20160],             "v": [300]},
-         "temperature": {"t": [0, 1000, 2000],     "v": [219, 219, 218]},
+         "temperature": {"t": [0, 1000, 2000],     "v": [2193, 2191, 2186]},
          "ndl":         {"t": [160, 10160],        "v": [5940, 1260]},
          "gradient_factor": {"t": [20160],         "v": [64]},
          "pressure":    [{"gas_number": 1, "t": [160, 10160], "v": [2052, 2041]}],
@@ -57,7 +57,7 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
 
     `t` is integer elapsed milliseconds from the recording's start (`dive_recording.start_time`),
     so a first reading keeps the offset its file states; `v` is integer-scaled (depth and
-    ceiling in cm, temperature in 0.1 C, pressure in 0.1 bar, ndl and tts in seconds, ppO2
+    ceiling in cm, temperature in 0.01 C, pressure in 0.1 bar, ndl and tts in seconds, ppO2
     in 0.01 bar, CNS in 0.1 %, both gradient factors in whole percent) so a float round-trip
     can't reintroduce `20.600000000000023`-class noise several thousand times per dive.
     There are no nulls inside a series - a sensor dropout is a gap in `t`, which the chart
@@ -122,7 +122,7 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # Summary, deliberately *not* inside `data`: this is what answers "does this dive
     # have a profile, and which curves would a chart draw" for the dive detail response,
     # without decoding tens of KB of JSONB. Stored in the same integer scales as the
-    # series (`_c10` is 0.1 C, `_bar10` is 0.1 bar) and converted to display units on the
+    # series (`_c100` is 0.01 C, `_bar10` is 0.1 bar) and converted to display units on the
     # way out.
     # Milliseconds, and named for the wire member it feeds - `profile.duration` (DiveJSON
     # spec §6.4) - rather than carrying a unit suffix of its own, so storage and the
@@ -154,8 +154,8 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # against the depth axis. NULL means the dive never had a decompression obligation,
     # which is the same test the `ceiling` channel's presence is derived from.
     max_ceiling_cm: Mapped[int | None] = mapped_column(Integer, default=None)
-    min_temperature_c10: Mapped[int | None] = mapped_column(Integer, default=None)
-    max_temperature_c10: Mapped[int | None] = mapped_column(Integer, default=None)
+    min_temperature_c100: Mapped[int | None] = mapped_column(Integer, default=None)
+    max_temperature_c100: Mapped[int | None] = mapped_column(Integer, default=None)
     min_pressure_bar10: Mapped[int | None] = mapped_column(Integer, default=None)
     max_pressure_bar10: Mapped[int | None] = mapped_column(Integer, default=None)
 
