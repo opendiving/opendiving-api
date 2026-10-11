@@ -749,7 +749,7 @@ async def read_dive_stats(
     if stats is None:
         # No dives logged yet - return zeroed-out stats rather than 404, since
         # every user conceptually has stats, they just haven't been created yet.
-        # total_dives/max_depth/total_time/species_seen have Pydantic defaults, but mypy's
+        # total_dives/max_depth/total_submerged_time/species_seen have Pydantic defaults, but mypy's
         # pydantic plugin doesn't recognize defaults declared via `Annotated[..., Field(default=...)]`.
         return UserDiveStatsRead(  # type: ignore[call-arg]
             user_uuid=current_user["uuid"], created_at=datetime.now(UTC), **derived._asdict()

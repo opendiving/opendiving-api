@@ -126,7 +126,7 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # way out.
     # Milliseconds, and named for the wire member it feeds - `profile.duration` (DiveJSON
     # spec §6.4) - rather than carrying a unit suffix of its own, so storage and the
-    # published format speak one word. Not the dive's own `duration`, which is a column on another
+    # published format speak one word. Not the dive's own `submerged_time`, which is a column on another
     # table and a different quantity: the diver's logged length, which may have been
     # hand-edited.
     duration: Mapped[int] = mapped_column(Integer)

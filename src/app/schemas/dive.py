@@ -232,7 +232,13 @@ class DiveBase(BaseModel):
             "on a dive whose source recorded the day and no time of day: never place it at midnight.",
         ),
     ]
-    duration: Annotated[int, Field(examples=[2048], description="Dive duration in seconds")]
+    submerged_time: Annotated[
+        int,
+        Field(
+            examples=[2048],
+            description="The dive computer's time in the water, in seconds, surface time excluded",
+        ),
+    ]
 
     max_depth: Annotated[float | None, Field(default=None)]
     avg_depth: Annotated[float | None, Field(default=None)]
@@ -813,7 +819,7 @@ class DiveTankGasUse(BaseModel):
 
 
 class DiveGasUse(BaseModel):
-    """Surface-normalized gas consumption for a dive, derived from its duration, average
+    """Surface-normalized gas consumption for a dive, derived from its submerged time, average
     depth and cylinder pressures - see `services/dive_gas.py` for the arithmetic and for
     the (deliberately strict) conditions under which it's derivable at all.
 
@@ -830,7 +836,7 @@ class DiveGasUse(BaseModel):
 
     On a dive whose cylinders are *all* flagged as breathed in parallel - a sidemount pair
     or independent doubles - they are the whole dive again: the litres of every cylinder,
-    over the dive's own duration and average depth. `tanks` is then empty and both seconds
+    over the dive's own submerged time and average depth. `tanks` is then empty and both seconds
     fields are null, because that derivation needs no attribution and so has none to report.
     """
 
@@ -874,7 +880,7 @@ class DiveGasUse(BaseModel):
             examples=[2355],
             description="Seconds of the dive the figures above account for, when they come from `tanks`. Null "
             "whenever the whole dive is accounted for and there is no fraction to report: a single-cylinder dive, "
-            "and a flagged parallel set summed over the dive's own duration.",
+            "and a flagged parallel set summed over the dive's own submerged time.",
         ),
     ]
     duration: Annotated[
@@ -883,10 +889,9 @@ class DiveGasUse(BaseModel):
             default=None,
             examples=[4619],
             description="What `attributed_seconds` is a fraction of, in seconds: the span the dive's profile recorded, "
-            "which is "
-            "what the attribution ran over. Deliberately not the dive's own `duration`, which is the diver's record "
-            "and may have been edited - the two halves of the fraction have to come from the same place to be worth "
-            "anything. Null alongside `attributed_seconds`.",
+            "which is what the attribution ran over. Deliberately not the dive's own `submerged_time`, which is the "
+            "diver's record and may have been edited - the two halves of the fraction have to come from the same place "
+            "to be worth anything. Null alongside `attributed_seconds`.",
         ),
     ]
 
@@ -1249,13 +1254,13 @@ class DiveCreateRequest(DiveCreate):
 class DiveUpdate(RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
 
-    # `dive_number`, `start_time`, `duration` and `notes` map to `NOT NULL` columns (see
+    # `dive_number`, `start_time`, `submerged_time` and `notes` map to `NOT NULL` columns (see
     # `models/dive.py`), so an explicit null is refused by `RejectsExplicitNulls` rather
     # than reaching the driver. `start_time` was the worst of them: `patch_dive`'s guard
     # was `if values.start_time is not None`, so an explicit null skipped the split-and-store
     # branch, still reached the database from `model_dump`, and left `utc_offset_minutes`
     # describing the *previous* start time.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("dive_number", "start_time", "duration", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("dive_number", "start_time", "submerged_time", "notes")
 
     dive_number: Annotated[int | None, Field(examples=[5], default=None)]
     # The permissive spelling, unlike `DiveCreate`'s. An update may **preserve** an unknown
@@ -1271,7 +1276,14 @@ class DiveUpdate(RejectsExplicitNulls):
             default=None,
         ),
     ]
-    duration: Annotated[int | None, Field(examples=[2048], description="Dive duration in seconds", default=None)]
+    submerged_time: Annotated[
+        int | None,
+        Field(
+            examples=[2048],
+            description="The dive computer's time in the water, in seconds, surface time excluded",
+            default=None,
+        ),
+    ]
     max_depth: Annotated[float | None, Field(default=None)]
     avg_depth: Annotated[float | None, Field(default=None)]
     bottom_temperature: Annotated[float | None, Field(default=None)]
@@ -1345,7 +1357,14 @@ class DiveUpdateInternal(BaseModel):
 
     dive_number: Annotated[int | None, Field(examples=[5], default=None)]
     start_time: Annotated[datetime | None, Field(examples=[datetime.now()], default=None)]
-    duration: Annotated[int | None, Field(examples=[2048], description="Dive duration in seconds", default=None)]
+    submerged_time: Annotated[
+        int | None,
+        Field(
+            examples=[2048],
+            description="The dive computer's time in the water, in seconds, surface time excluded",
+            default=None,
+        ),
+    ]
     max_depth: Annotated[float | None, Field(default=None)]
     avg_depth: Annotated[float | None, Field(default=None)]
     bottom_temperature: Annotated[float | None, Field(default=None)]

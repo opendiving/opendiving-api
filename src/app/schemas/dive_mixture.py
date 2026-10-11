@@ -44,7 +44,7 @@ class TankUsage(StrEnum):
 
     - `parallel` - a sidemount pair or independent doubles, breathed alternately at the
       same depth. Their litres are additive against the dive's own average depth and
-      duration, which is what `compute_parallel_gas_use` does with them.
+      submerged time, which is what `compute_parallel_gas_use` does with them.
     - `staged` - a bottle breathed at its own depth. Deliberately documentary today: it
       changes no arithmetic, because summing it against the whole dive's average depth is
       the exact misattribution the multi-cylinder refusal exists to prevent. It is the

@@ -25,7 +25,7 @@ Where it differs from the API's own read shapes, and why:
   with `""` standing for "the diver wrote nothing", so this app cannot tell a blank note
   from no note, and emitting `""` would claim the stronger of the two.
 - **Nothing is re-scaled or re-unitised.** Depths meters, pressures bar, temperatures
-  Celsius, a dive's duration seconds and the profile axis milliseconds - which is the
+  Celsius, a dive's submerged time seconds and the profile axis milliseconds - which is the
   format's own canonical system (spec §5.1), so the app's wire values travel unchanged. The
   embedded profile keeps the integer scales `GET /dive/{uuid}/recording/{rid}/profile` uses,
   which the spec fixes too. The diver's `units`
@@ -395,7 +395,7 @@ class ExportDive(PublicUUIDSchema):
     # `exported_at` on the envelope is the one member that must always carry one, and it is
     # generated rather than recorded.
     started_at: DiveLocalStartTime
-    duration: Annotated[int, Field(description="Dive duration in seconds, as logged")]
+    submerged_time: Annotated[int, Field(description="Time in the water in seconds, as logged")]
     notes: str | None = None
     max_depth: float | None = None
     avg_depth: Annotated[

@@ -238,12 +238,12 @@ _LONGITUDE_LIMIT = 180.0
 # inside the column.
 _MAX_DIVE_COUNT = 1_000_000
 
-# A single dive's length: `user_dive_stats.total_time` is `SUM(dive.duration)` over every
+# A single dive's length: `user_dive_stats.total_submerged_time` is `SUM(dive.submerged_time)` over every
 # dive the account holds, including ones this import never touched. A year is far past
 # saturation diving, which is where the longest logged excursions come from and which runs
 # in weeks. The sum is `BigInteger` as well now - the ceiling here is what makes the
 # overflow implausible, the width is what makes it impossible.
-_MAX_DIVE_DURATION_SECONDS = 366 * 24 * 60 * 60
+_MAX_SUBMERGED_TIME_SECONDS = 366 * 24 * 60 * 60
 
 
 class Action(StrEnum):
@@ -321,7 +321,7 @@ class PlannedRecording:
     max_depth: float | None = None
     profile: PlannedProfile | None = None
     # The time in the water over the depth channel as the document states it, before the
-    # point cap: what the dive takes for a duration or an average depth its document omits.
+    # point cap: what the dive takes for a submerged time or an average depth its document omits.
     in_water: InWater | None = None
     files: list[PlannedFile] = field(default_factory=list)
     # The imported file itself, where it is this recording's file: stored, and the recording
@@ -521,9 +521,9 @@ _DIVE_BOUNDS: tuple[Bound, ...] = (
         f"a dive number must be between 0 and {_MAX_DIVE_COUNT}",
     ),
     Bound(
-        "duration",
-        lambda value: 0 < value <= _MAX_DIVE_DURATION_SECONDS,
-        "a dive's duration must be greater than zero and shorter than a year",
+        "submerged_time",
+        lambda value: 0 < value <= _MAX_SUBMERGED_TIME_SECONDS,
+        "a dive time must be greater than zero and shorter than a year",
     ),
     Bound("max_depth", lambda value: value > 0, "a maximum depth must be greater than zero"),
     Bound("avg_depth", lambda value: value > 0, "an average depth must be greater than zero"),
@@ -2356,7 +2356,7 @@ class _Planner:
         bounded = self._bounded(collection, dive.uuid, dive, _DIVE_BOUNDS)
         recordings = self._plan_recordings(dive)
         # The primary recording's profile, for the dive-level jobs a profile still has: standing
-        # in for an unrecorded duration, average depth and bottom temperature below, and keeping
+        # in for an unrecorded submerged time, average depth and bottom temperature below, and keeping
         # the skip message honest. Capped, which keeps every channel's extremes
         # (`_downsample_series`).
         profile = recordings[0].profile if recordings else None
@@ -2365,32 +2365,32 @@ class _Planner:
         # Derived, and reported as derived - which §5.4 permits and inventing does not. The
         # profile is the recording of this very dive, so its time in the water is what a
         # reader with no stated figure takes (`divejson.in_water`), and its span - in
-        # milliseconds, where a dive's duration is whole seconds - stands in only where no
+        # milliseconds, where a dive's submerged time is whole seconds - stands in only where no
         # sample was in the water.
-        duration = bounded.get("duration")
-        if duration is None and in_water is not None and in_water.duration > 0:
-            duration = in_water.duration
+        submerged_time = bounded.get("submerged_time")
+        if submerged_time is None and in_water is not None and in_water.submerged_time > 0:
+            submerged_time = in_water.submerged_time
             self._note(
                 ImportNoteCode.VALUE_DERIVED,
-                "This dive records no duration, so its length was taken as the time its own profile spends deeper "
+                "This dive records no dive time, so its length was taken as the time its own profile spends deeper "
                 f"than {IN_WATER_DEPTH} m.",
                 collection=collection,
                 uuid=dive.uuid,
             )
-        elif duration is None and profile is not None:
-            duration = round(profile.duration / MILLISECONDS_PER_SECOND)
+        elif submerged_time is None and profile is not None:
+            submerged_time = round(profile.duration / MILLISECONDS_PER_SECOND)
             self._note(
                 ImportNoteCode.VALUE_DERIVED,
-                "This dive records no duration, so its length was taken from the span of its own profile.",
+                "This dive records no dive time, so its length was taken from the span of its own profile.",
                 collection=collection,
                 uuid=dive.uuid,
             )
-        if duration is None or duration <= 0:
+        if submerged_time is None or submerged_time <= 0:
             self._not_writing_the_file()
             return self._skip(
                 collection,
                 dive.uuid,
-                "A dive needs a duration, and this one carries neither a duration nor a profile to take one from. "
+                "A dive needs a dive time, and this one carries neither a dive time nor a profile to take one from. "
                 "Nothing was invented for it.",
             )
 
@@ -2450,7 +2450,7 @@ class _Planner:
             "start_time": start_time,
             "utc_offset_minutes": offset_minutes,
             "start_date_only": date_only,
-            "duration": int(duration),
+            "submerged_time": int(submerged_time),
             "notes": self._notes_text("dives", dive.uuid, dive.notes),
             "max_depth": max_depth,
             "avg_depth": avg_depth,
@@ -2500,7 +2500,7 @@ class _Planner:
                 self._keep_on_match(already)
                 return PlannedRecord(action=Action.SKIP, source_uuid=dive.uuid, uuid=record.uuid)
         if stated_temperature is None and temperature is not None:
-            # The dive form's default, derived and reported as the duration is - here, where the
+            # The dive form's default, derived and reported as the submerged time is - here, where the
             # dive is known to be written, since a match writes no dive's temperature.
             self._note(
                 ImportNoteCode.VALUE_DERIVED,

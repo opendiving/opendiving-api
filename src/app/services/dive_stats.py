@@ -40,10 +40,10 @@ async def recalculate_dive_stats(db: AsyncSession, user_id: int, commit: bool = 
             # the two forms are equivalent here.
             func.count(),
             func.max(Dive.max_depth),
-            func.coalesce(func.sum(Dive.duration), 0),
+            func.coalesce(func.sum(Dive.submerged_time), 0),
         ).where(Dive.user_id == user_id, Dive.is_deleted.is_(False))
     )
-    total_dives, max_depth, total_time = result.one()
+    total_dives, max_depth, total_submerged_time = result.one()
 
     species_seen = await db.scalar(
         select(func.count(func.distinct(DiveSpecies.species_id)))
@@ -59,14 +59,14 @@ async def recalculate_dive_stats(db: AsyncSession, user_id: int, commit: bool = 
             user_id=user_id,
             total_dives=total_dives,
             max_depth=float(max_depth or 0),
-            total_time=int(total_time),
+            total_submerged_time=int(total_submerged_time),
             species_seen=int(species_seen or 0),
         )
         db.add(stats)
     else:
         stats.total_dives = total_dives
         stats.max_depth = float(max_depth or 0)
-        stats.total_time = int(total_time)
+        stats.total_submerged_time = int(total_submerged_time)
         # Set on this branch too, which is the one nearly every real write takes - the
         # insert above only ever runs once per account. Updating only the insert would
         # leave every diver who already has a stats row at whatever `species_seen` was

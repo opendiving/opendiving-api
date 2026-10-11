@@ -61,7 +61,7 @@ DIVES_HEADER = (
     "date",
     "time",
     "utc_offset",
-    "duration_seconds",
+    "submerged_time_seconds",
     "type",
     "rating",
     # By name, `;`-joined in the diver's order; `tags.csv` has the uuids.
@@ -186,7 +186,7 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
     day, clock = (local.date(), local.strftime("%H:%M:%S")) if isinstance(local, datetime) else (local, "")
     mixtures = bundle.mixtures_by_dive[dive.id]
     gas_use = resolve_gas_use(
-        duration=dive.duration,
+        submerged_time=dive.submerged_time,
         avg_depth=dive.avg_depth,
         mixtures=mixtures,
         attribution=bundle.attribution_by_dive.get(dive.id),
@@ -202,7 +202,7 @@ def _dive_row(bundle: ExportBundle, dive: Dive) -> tuple[Any, ...]:
         day.isoformat(),
         clock,
         _utc_offset(dive.utc_offset_minutes),
-        dive.duration,
+        dive.submerged_time,
         dive.type,
         dive.rating,
         "; ".join(tag.name for tag in bundle.tags_for(dive)),

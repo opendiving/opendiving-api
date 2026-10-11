@@ -377,7 +377,7 @@ class ImportDive(_ReadModel):
     # endpoint created - see `core/utils/datetime_offset.py`. A bare date reads as a `date`,
     # which the planner stores as the date-only state.
     started_at: ImportStart
-    duration: int | None = None
+    submerged_time: int | None = None
     notes: str | None = None
     max_depth: float | None = None
     avg_depth: float | None = None
@@ -716,8 +716,8 @@ class ImportNoteCode(StrEnum):
     READ_AS_WRITTEN = "read_as_written"
     # The record imported, but one of its values could not be stored as written.
     VALUE_DROPPED = "value_dropped"
-    # A value the document does not state was derived from what it does - a dive's duration
-    # and average depth from its profile's time in the water, its bottom temperature from its
+    # A value the document does not state was derived from what it does - a dive's submerged
+    # time and average depth from its profile's time in the water, its bottom temperature from its
     # coldest sample - as spec §5.4 lets a reader that says so. Nothing was lost.
     VALUE_DERIVED = "value_derived"
     # A reference names a record the document does not define, or one that was skipped.
@@ -1003,7 +1003,7 @@ class ImportDiveReport(BaseModel):
             "where it records none, a bare date where it states no time",
         ),
     ]
-    duration: Annotated[int | None, Field(default=None, description="Seconds")]
+    submerged_time: Annotated[int | None, Field(default=None, description="Seconds")]
     max_depth: Annotated[float | None, Field(default=None, description="Metres")]
     device: Annotated[
         RecordingDevice | None,

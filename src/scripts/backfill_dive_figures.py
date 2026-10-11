@@ -1,4 +1,4 @@
-"""Rewrite the dives whose duration and average depth are still the whole recording's.
+"""Rewrite the dives whose submerged time and average depth are still the whole recording's.
 
 Run once, after `backfill_dive_profiles`, from the API container:
 
@@ -80,7 +80,7 @@ async def main() -> None:
     for rewrite in report.rewrites:
         changes = ", ".join(
             f"{name} {change[0]} -> {change[1]}"
-            for name, change in (("duration", rewrite.duration), ("avg_depth", rewrite.avg_depth))
+            for name, change in (("submerged_time", rewrite.submerged_time), ("avg_depth", rewrite.avg_depth))
             if change is not None
         )
         logger.info(

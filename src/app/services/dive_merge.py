@@ -100,7 +100,7 @@ class _Recording:
 class DiveFigures:
     """What a merge writes over the surviving dive's figures, `None` meaning leave it alone."""
 
-    duration: int | None
+    submerged_time: int | None
     avg_depth: float | None
     max_depth: float | None
 
@@ -111,11 +111,11 @@ class DiveFigures:
 def dive_figures(depths_cm: Sequence[int | None], *, folded: NormalizedProfile | None) -> DiveFigures:
     """The surviving dive's figures, by the branch the merge took.
 
-    **A fold's `duration` and `avg_depth` are the time in the water over the folded samples**
+    **A fold's `submerged_time` and `avg_depth` are the time in the water over the folded samples**
     (`in_water_of`), so the stretch between the two records counts when the first one's last
     sample is deeper than the threshold - a computer that died at depth - and not when the
     diver had surfaced. Neither the sampled span, which counts that surface stretch, nor the
-    two dives' durations summed, which drop the in-water one.
+    two dives' submerged times summed, which drop the in-water one.
 
     **Side by side - `folded` is `None` - both stand.** Two computers recorded the same time in
     the water, and the surviving dive's figures are its primary computer's. So do a fold's
@@ -127,9 +127,9 @@ def dive_figures(depths_cm: Sequence[int | None], *, folded: NormalizedProfile |
     in_water = in_water_of(folded)
     depths = [depth for depth in depths_cm if depth is not None]
     return DiveFigures(
-        # The table's `duration > 0`: a stretch in the water shorter than half a second rounds
+        # The table's `submerged_time > 0`: a stretch in the water shorter than half a second rounds
         # to nothing, and the diver's figure stands rather than a zero the row would refuse.
-        duration=in_water.duration if in_water is not None and in_water.duration > 0 else None,
+        submerged_time=in_water.submerged_time if in_water is not None and in_water.submerged_time > 0 else None,
         avg_depth=None if in_water is None else float(in_water.avg_depth),
         max_depth=max(depths) / DEPTH_SCALE if depths else None,
     )
@@ -221,7 +221,7 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     values: dict[str, object] = {
         "notes": merged_notes(survivor.notes, absorbed.notes, dive_number=absorbed.dive_number)
     }
-    for column in ("duration", "avg_depth", "max_depth"):
+    for column in ("submerged_time", "avg_depth", "max_depth"):
         if (value := getattr(figures, column)) is not None:
             values[column] = value
     await db.execute(update(Dive).where(Dive.id == survivor.id).values(**values))
