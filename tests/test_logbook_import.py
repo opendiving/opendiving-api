@@ -398,7 +398,7 @@ class TestTheRoundTrip:
             assert len(re_exported[collection]) == len(original[collection]), collection
 
         source_dive, restored_dive = original["dives"][0], re_exported["dives"][0]
-        for member in ("number", "started_at", "duration", "max_depth", "avg_depth", "created_at"):
+        for member in ("number", "started_at", "submerged_time", "max_depth", "avg_depth", "created_at"):
             assert restored_dive.get(member) == source_dive.get(member), member
         assert len(restored_dive["site_uuids"]) == 2
         assert restored_dive["cylinders"] == source_dive["cylinders"]
@@ -1579,7 +1579,7 @@ class TestTheOffsetUnknownState:
         from src.app.schemas.dive import DiveCreate, DiveRead
 
         with pytest.raises(ValidationError):
-            DiveCreate(dive_number=1, start_time=datetime(2026, 4, 17, 11, 49), duration=60)
+            DiveCreate(dive_number=1, start_time=datetime(2026, 4, 17, 11, 49), submerged_time=60)
         # And the read shape serves what is stored - a bare date included.
         assert DiveRead.model_fields["start_time"].annotation == datetime | date
 
@@ -2725,7 +2725,9 @@ def _dive_document(dive: dict[str, Any], **document: Any) -> bytes:
         {
             "format": "divejson",
             "version": "1.0",
-            "dives": [{"uuid": str(uuid7()), "started_at": "2026-06-01T09:00:00+02:00", "duration": 1800, **dive}],
+            "dives": [
+                {"uuid": str(uuid7()), "started_at": "2026-06-01T09:00:00+02:00", "submerged_time": 1800, **dive}
+            ],
             **document,
         }
     ).encode()
@@ -3028,18 +3030,35 @@ class TestNothingInventedNothingFatal:
         assert recording.surface_pressure_bar == 0.44
 
     @pytest.mark.asyncio
-    async def test_a_dive_with_no_duration_and_no_profile_is_skipped_not_invented(
+    async def test_a_dive_with_no_submerged_time_and_no_profile_is_skipped_not_invented(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
         _, document = seeded
         parsed = json.loads(document)
-        del parsed["dives"][0]["duration"]
+        del parsed["dives"][0]["submerged_time"]
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
 
         assert _counts(plan)["dives"] == (0, 0, 0, 1)
         assert ImportNoteCode.RECORD_SKIPPED in _codes(plan)
+
+    @pytest.mark.asyncio
+    async def test_a_dive_carrying_duration_is_read_with_it_ignored(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """What this app exported before the member was `submerged_time`: the old key is an
+        unknown member, ignored like any other, so a dive with no profile has no figure and is
+        skipped as one that never stated it."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["duration"] = parsed["dives"][0].pop("submerged_time")
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (0, 0, 0, 1)
+        assert any("Nothing was invented for it." in note.message for note in plan.notes)
 
     @pytest.mark.asyncio
     async def test_a_cylinder_with_no_mix_is_stored_with_its_mix_absent(
@@ -4413,12 +4432,12 @@ class TestNumbersWiderThanTheColumn:
         assert [str(dive) for dive in plan.unnumbered_dives] == [parsed["dives"][0]["uuid"]]
 
     @pytest.mark.asyncio
-    async def test_an_unstorable_duration_skips_the_dive_rather_than_the_logbook(
+    async def test_an_unstorable_submerged_time_skips_the_dive_rather_than_the_logbook(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
         _, document = seeded
         parsed = json.loads(document)
-        parsed["dives"][0]["duration"] = self.HUGE
+        parsed["dives"][0]["submerged_time"] = self.HUGE
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
@@ -4476,21 +4495,21 @@ class TestNumbersThatOnlyOverflowOnceAddedUp:
     arithmetic in a tile nobody was looking at. Each is closed at its inputs.
     """
 
-    MAX_DURATION = 366 * 24 * 60 * 60
+    MAX_SUBMERGED_TIME = 366 * 24 * 60 * 60
     MAX_COUNT = 1_000_000
 
     @pytest.mark.asyncio
     async def test_two_year_long_dives_sum_without_refusing_the_import(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
-        """`user_dive_stats.total_time` is `SUM(dive.duration)` over the whole account, so
-        two dives each inside `dive.duration`'s own bound overflowed a 32-bit column."""
+        """`user_dive_stats.total_submerged_time` is `SUM(dive.submerged_time)` over the whole account, so
+        two dives each inside `dive.submerged_time`'s own bound overflowed a 32-bit column."""
         from src.app.models.user_dive_stats import UserDiveStats
 
         _, document = seeded
         parsed = json.loads(document)
         first = parsed["dives"][0]
-        first["duration"] = self.MAX_DURATION
+        first["submerged_time"] = self.MAX_SUBMERGED_TIME
         second = dict(first)
         second["uuid"] = str(uuid7())
         second["started_at"] = "2027-06-01T09:00:00+00:00"
@@ -4505,13 +4524,13 @@ class TestNumbersThatOnlyOverflowOnceAddedUp:
             .scalars()
             .one()
         )
-        assert stats.total_time == 2 * self.MAX_DURATION
+        assert stats.total_submerged_time == 2 * self.MAX_SUBMERGED_TIME
 
     @pytest.mark.asyncio
     async def test_a_dive_longer_than_a_year_is_skipped(self, seeded: Any, db: Session, async_db: AsyncSession) -> None:
         _, document = seeded
         parsed = json.loads(document)
-        parsed["dives"][0]["duration"] = self.MAX_DURATION + 1
+        parsed["dives"][0]["submerged_time"] = self.MAX_SUBMERGED_TIME + 1
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
@@ -4557,7 +4576,7 @@ class TestTheIntegerColumnCensus:
     # (table, column) -> why it cannot carry an unstorable number.
     ACCOUNTED: dict[tuple[str, str], str] = {
         ("dive", "dive_number"): "bounded in `_DIVE_BOUNDS`",
-        ("dive", "duration"): "bounded in `_DIVE_BOUNDS`",
+        ("dive", "submerged_time"): "bounded in `_DIVE_BOUNDS`",
         ("dive", "visibility"): "bounded in `_DIVE_BOUNDS`",
         ("dive", "altitude"): "bounded in `_DIVE_BOUNDS`, to the model's own -450..6500",
         ("dive", "rating"): "bounded in `_DIVE_BOUNDS`, to the model's own 1..5",
@@ -4734,7 +4753,7 @@ class TestTheIntegerColumnCensus:
             (model.__table__.name, column.name)
             for model in written
             for column in model.__table__.columns
-            # `BigInteger` is excluded rather than overlooked: `user_dive_stats.total_time`
+            # `BigInteger` is excluded rather than overlooked: `user_dive_stats.total_submerged_time`
             # widened precisely because it sums a bounded column, and a 64-bit column is not
             # reachable by any number a document can carry.
             if isinstance(column.type, Integer) and not isinstance(column.type, BigInteger)
@@ -4842,7 +4861,7 @@ class TestTheImportGates:
                     "uuid": str(uuid7()),
                     "number": 1,
                     "started_at": "2026-09-08T15:17:38+03:00",
-                    "duration": 3051,
+                    "submerged_time": 3051,
                     "max_depth": 19.04,
                     "recordings": [recording],
                     "created_at": "2026-09-09T10:00:00+00:00",
@@ -4859,7 +4878,7 @@ class TestTheImportGates:
         dive = create_dive(db, user)
         dive.start_time = self.START
         dive.utc_offset_minutes = 180
-        dive.duration = 3051
+        dive.submerged_time = 3051
         dive.max_depth = 19.04
         recording = create_dive_recording(db, user, dive)
         recording.start_time = self.START

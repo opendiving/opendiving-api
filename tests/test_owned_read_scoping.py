@@ -132,7 +132,7 @@ class TestTheDiveReadsScopeThatLookup:
             dive_number=1,
             start_time=datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
             utc_offset_minutes=120,
-            duration=1800,
+            submerged_time=1800,
             notes="",
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
         ).model_dump()

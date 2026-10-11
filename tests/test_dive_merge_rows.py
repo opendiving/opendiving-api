@@ -181,7 +181,9 @@ async def _profile(db: AsyncSession, recording_id: int) -> Any:
 async def _row(db: AsyncSession, dive: Dive) -> Any:
     return (
         await db.execute(
-            select(Dive.duration, Dive.avg_depth, Dive.max_depth, Dive.notes, Dive.is_deleted).where(Dive.id == dive.id)
+            select(Dive.submerged_time, Dive.avg_depth, Dive.max_depth, Dive.notes, Dive.is_deleted).where(
+                Dive.id == dive.id
+            )
         )
     ).one()
 
@@ -328,7 +330,7 @@ class TestOneComputersTwoRecordsFoldIntoOne:
         await _merge(async_db, diver, first, second)
 
         row = await _row(async_db, first)
-        assert row.duration == 3163
+        assert row.submerged_time == 3163
         assert row.avg_depth == round((180 * 5.0 + 43 * (5.0 + 19.04) / 2 + 2940 * 19.04) / 3163, 2)
         assert row.max_depth == 19.04
 
@@ -353,7 +355,7 @@ class TestOneComputersTwoRecordsFoldIntoOne:
 
         await _merge(async_db, diver, first, second)
 
-        assert (await _row(async_db, first)).duration == 180 + 2940
+        assert (await _row(async_db, first)).submerged_time == 180 + 2940
 
     @pytest.mark.asyncio
     async def test_the_later_dive_is_soft_deleted(
@@ -413,7 +415,7 @@ class TestTwoDifferentComputers:
         its primary computer's and no span across the two replaces them. The maximum is still
         the deepest either reached."""
         first = _dive_at(
-            db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214, duration=2400, avg_depth=4.0
+            db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214, submerged_time=2400, avg_depth=4.0
         )
         second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 18, 10, tzinfo=UTC), number=215)
         await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(5)), filename="a.json")
@@ -428,7 +430,7 @@ class TestTwoDifferentComputers:
         await _merge(async_db, diver, first, second)
 
         row = await _row(async_db, first)
-        assert (row.duration, row.avg_depth, row.max_depth) == (2400, 4.0, 9.0)
+        assert (row.submerged_time, row.avg_depth, row.max_depth) == (2400, 4.0, 9.0)
 
     @pytest.mark.asyncio
     async def test_the_appended_recording_keeps_its_own_samples_and_start(
@@ -878,7 +880,7 @@ class TestTheSurvivingDiveReadsBackWhole:
         result = await _merge(async_db, diver, first, second)
 
         assert result.dive.uuid == first.uuid
-        assert result.dive.duration == 3163
+        assert result.dive.submerged_time == 3163
         assert len(result.dive.recordings) == 1
         assert result.dive.recordings[0].profile is not None
         assert result.dive.recordings[0].profile.duration == 3_163_000
@@ -968,12 +970,12 @@ class TestADiveWithNothingToReSeedFrom:
     async def test_a_merge_of_two_sample_less_records_leaves_the_diver_figures_alone(
         self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
     ) -> None:
-        """`ck_dive_duration_positive` is one reason and the diver is the other: a merge that
+        """`ck_dive_submerged_time_positive` is one reason and the diver is the other: a merge that
         found no samples has nothing to say about how long the dive was, and writing a zero
         would be the row refusing the write rather than the merge admitting it learned
         nothing.
         """
-        first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214, duration=2400)
+        first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214, submerged_time=2400)
         second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 21, 38, tzinfo=UTC), number=215)
         await _attach(async_db, diver, first, _export(start=FIRST_START), filename="a.json")
         await _attach(async_db, diver, second, _export(start=SECOND_START), filename="b.json")
@@ -981,7 +983,7 @@ class TestADiveWithNothingToReSeedFrom:
         await _merge(async_db, diver, first, second)
 
         row = await _row(async_db, first)
-        assert row.duration == 2400
+        assert row.submerged_time == 2400
         recording = (await _recordings(async_db, first))[0]
         assert await async_db.scalar(select(DiveProfile.id).where(DiveProfile.recording_id == recording.id)) is None
 
@@ -1037,4 +1039,4 @@ class TestTheTimeSpanWhenTheGapIsLonger:
         recording = (await _recordings(async_db, first))[0]
         times = (await _profile(async_db, recording.id)).data["depth"]["t"]
         assert times[3] == 30 * 60 * 1000
-        assert (await _row(async_db, first)).duration == 30 * 60 + 20
+        assert (await _row(async_db, first)).submerged_time == 30 * 60 + 20

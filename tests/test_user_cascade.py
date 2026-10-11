@@ -148,7 +148,9 @@ class TestDeletingAUserTakesEverythingWithIt:
         db.add_all(
             [
                 certification,
-                UserDiveStats(user_id=diver.id, total_dives=1, max_depth=18.0, total_time=1800, species_seen=0),
+                UserDiveStats(
+                    user_id=diver.id, total_dives=1, max_depth=18.0, total_submerged_time=1800, species_seen=0
+                ),
                 DiveDiveSite(dive_id=dive.id, dive_site_id=site.id),
                 GearSetItem(gear_set_id=gear_set.id, gear_item_id=item.id),
                 DivePerson(dive_id=dive.id, person_id=person.id, role="buddy"),

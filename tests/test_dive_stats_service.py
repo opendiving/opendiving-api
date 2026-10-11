@@ -25,7 +25,7 @@ from tests.helpers.generators import create_dive_site
 
 def _make_db_mock(aggregate_row: tuple, existing_stats: UserDiveStats | None, species_seen: int = 0):
     """Build a mock AsyncSession whose `execute` calls return the given aggregate
-    row (count, max_depth, total_time) first, then the existing stats row.
+    row (count, max_depth, total_submerged_time) first, then the existing stats row.
 
     `species_seen` comes back from `db.scalar` rather than `db.execute`: it is a second,
     separate query over `dive_species` (see the service's docstring for why it is not a
@@ -59,7 +59,7 @@ class TestRecalculateDiveStats:
         assert added_stats.user_id == 1
         assert added_stats.total_dives == 3
         assert added_stats.max_depth == 40.0
-        assert added_stats.total_time == 5400
+        assert added_stats.total_submerged_time == 5400
         assert added_stats.species_seen == 0
         assert stats is added_stats
         db.commit.assert_awaited_once()
@@ -67,7 +67,9 @@ class TestRecalculateDiveStats:
 
     @pytest.mark.asyncio
     async def test_updates_existing_stats_row(self):
-        existing_stats = UserDiveStats(user_id=1, total_dives=1, max_depth=10.0, total_time=1000, species_seen=5)
+        existing_stats = UserDiveStats(
+            user_id=1, total_dives=1, max_depth=10.0, total_submerged_time=1000, species_seen=5
+        )
         db = _make_db_mock(aggregate_row=(4, 55.5, 7200), existing_stats=existing_stats, species_seen=2)
 
         stats = await recalculate_dive_stats(db, user_id=1)
@@ -76,7 +78,7 @@ class TestRecalculateDiveStats:
         assert stats is existing_stats
         assert stats.total_dives == 4
         assert stats.max_depth == 55.5
-        assert stats.total_time == 7200
+        assert stats.total_submerged_time == 7200
         # **This branch, not just the insert.** `species_seen` used to be preserved here
         # because nothing derived it; now it is derived, and this is the branch nearly every
         # real write takes - the insert above only ever runs once per account. A change that
@@ -105,7 +107,7 @@ class TestRecalculateDiveStats:
 
         assert stats.total_dives == 0
         assert stats.max_depth == 0.0
-        assert stats.total_time == 0
+        assert stats.total_submerged_time == 0
 
     @pytest.mark.asyncio
     async def test_skips_commit_when_commit_is_false(self):
@@ -130,7 +132,12 @@ class TestTheRoute:
         [
             None,
             UserDiveStatsReadInternal(
-                user_id=1, total_dives=4, max_depth=30.0, total_time=7200, species_seen=2, created_at=datetime.now(UTC)
+                user_id=1,
+                total_dives=4,
+                max_depth=30.0,
+                total_submerged_time=7200,
+                species_seen=2,
+                created_at=datetime.now(UTC),
             ),
         ],
     )
@@ -160,7 +167,7 @@ def _dive(db: Session, user: User, start: datetime, *, sites: tuple[DiveSite, ..
         dive_number=1,
         start_time=start,
         utc_offset_minutes=0 if offset is None else int(offset.total_seconds() // 60),
-        duration=1800,
+        submerged_time=1800,
         notes="",
         **columns,
     )

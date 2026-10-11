@@ -291,7 +291,7 @@ async def _dive(db: AsyncSession, dive_id: int) -> dict[str, Any]:
         .order_by(DiveMixture.id)
     )
     return {
-        "dive": (dive.dive_number, dive.start_time, dive.utc_offset_minutes, dive.duration, dive.max_depth),
+        "dive": (dive.dive_number, dive.start_time, dive.utc_offset_minutes, dive.submerged_time, dive.max_depth),
         "fixes": (dive.entry_latitude, dive.entry_longitude, dive.exit_latitude, dive.exit_longitude),
         "cylinders": [dict(row._mapping) for row in cylinders],
         "recordings": [await _recording(db, recording) for recording in list(recordings)],
@@ -1416,7 +1416,7 @@ def _logbook_of(*dives: dict[str, Any]) -> bytes:
         {
             "format": "divejson",
             "version": "1.0",
-            "dives": [{"uuid": str(uuid_pkg.uuid4()), "duration": 1800, **dive} for dive in dives],
+            "dives": [{"uuid": str(uuid_pkg.uuid4()), "submerged_time": 1800, **dive} for dive in dives],
         }
     ).encode()
 
@@ -1592,7 +1592,7 @@ class TestAFileLandsAsTheFormShowsIt:
     async def test_an_unstated_bottom_temperature_is_the_coldest_sample(
         self, volume: Any, async_db: AsyncSession, db: Session, name: str, coldest: float
     ) -> None:
-        """And says it was taken, as a derived duration is."""
+        """And says it was taken, as a derived submerged time is."""
         diver = create_user(db)
 
         report = await _import(async_db, diver, [(name, _fixture(name))])

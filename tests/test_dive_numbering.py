@@ -107,7 +107,9 @@ class TestSuggestDiveNumber:
         """09:00+02:00 is 07:00 UTC, so this dive precedes the 08:00 UTC one - a
         comparison against the wall-clock hour would put it after."""
         create_dive_log(db, diver, (1, 0))
-        db.add(Dive(user_id=diver.id, dive_number=2, start_time=log_day(1).replace(hour=8), duration=1800, notes=""))
+        db.add(
+            Dive(user_id=diver.id, dive_number=2, start_time=log_day(1).replace(hour=8), submerged_time=1800, notes="")
+        )
         db.commit()
 
         suggestion = await suggest_dive_number(

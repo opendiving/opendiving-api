@@ -17,8 +17,10 @@ from src.app.services.year_in_review import (
 )
 
 
-def _dive(dive_id: int, *, max_depth: float | None = 20.0, duration: int = 2400) -> ReviewedDive:
-    return ReviewedDive(id=dive_id, uuid=uuid7(), day=date(2025, 3, dive_id), max_depth=max_depth, duration=duration)
+def _dive(dive_id: int, *, max_depth: float | None = 20.0, submerged_time: int = 2400) -> ReviewedDive:
+    return ReviewedDive(
+        id=dive_id, uuid=uuid7(), day=date(2025, 3, dive_id), max_depth=max_depth, submerged_time=submerged_time
+    )
 
 
 class TestReviewedYear:
@@ -55,7 +57,7 @@ class TestTheDivesOwnLocalDay:
 
 class TestSummarizeYear:
     def test_counts_and_time_underwater(self) -> None:
-        review = summarize_year(2025, [_dive(1, duration=1800), _dive(2, duration=3000)], [], [])
+        review = summarize_year(2025, [_dive(1, submerged_time=1800), _dive(2, submerged_time=3000)], [], [])
 
         assert review.dives == 2
         assert review.seconds_underwater == 4800
@@ -74,7 +76,7 @@ class TestSummarizeYear:
         assert review.longest is not None
 
     def test_the_longest_dive_and_its_first_site(self) -> None:
-        short, long = _dive(1, duration=1800), _dive(2, duration=4200)
+        short, long = _dive(1, submerged_time=1800), _dive(2, submerged_time=4200)
         sites = [(2, 10, "Blue Hole"), (2, 11, "The Arch"), (1, 12, "Lighthouse")]
 
         review = summarize_year(2025, [short, long], sites, [])

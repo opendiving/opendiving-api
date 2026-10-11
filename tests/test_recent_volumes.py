@@ -117,7 +117,7 @@ def _day(day: int) -> datetime:
 
 
 def _dive(db: Session, user: User, start: datetime, *volumes: float | None, is_deleted: bool = False) -> Dive:
-    dive = Dive(user_id=user.id, dive_number=1, start_time=start, duration=1800, notes="", is_deleted=is_deleted)
+    dive = Dive(user_id=user.id, dive_number=1, start_time=start, submerged_time=1800, notes="", is_deleted=is_deleted)
     db.add(dive)
     db.commit()
     db.add_all(DiveMixture(dive_id=dive.id, volume=volume) for volume in volumes)

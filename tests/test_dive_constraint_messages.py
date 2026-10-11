@@ -19,7 +19,7 @@ def _integrity_error(constraint_name: str) -> IntegrityError:
 
     Mirrors the shape of the message asyncpg/psycopg produce for a check
     constraint violation, e.g.:
-    'new row for relation "dive" violates check constraint "ck_dive_duration_positive"'
+    'new row for relation "dive" violates check constraint "ck_dive_submerged_time_positive"'
     """
     orig = Exception(f'new row for relation "dive" violates check constraint "{constraint_name}"')
     return IntegrityError("INSERT ...", {}, orig)
@@ -34,8 +34,8 @@ class TestFkErrorDetail:
         exc = IntegrityError("INSERT ...", {}, Exception('violates foreign key constraint "dive_site_id_fkey"'))
         assert _fk_error_detail(exc) == "Dive site not found."
 
-    def test_duration_must_be_positive(self):
-        assert _fk_error_detail(_integrity_error("ck_dive_duration_positive")) == "Duration must be positive."
+    def test_submerged_time_must_be_positive(self):
+        assert _fk_error_detail(_integrity_error("ck_dive_submerged_time_positive")) == "Dive time must be positive."
 
     def test_visibility_must_be_non_negative(self):
         assert (

@@ -240,7 +240,7 @@ class TestADayIsNoStartToMatchOn:
             avg_depth=None,
             bottom_temperature=None,
             dive_number=None,
-            duration=1800,
+            submerged_time=1800,
             max_depth=20.0,
             start_time=started_at,
             mixtures=[],
@@ -257,7 +257,7 @@ class TestADayIsNoStartToMatchOn:
             avg_depth=None,
             bottom_temperature=None,
             dive_number=None,
-            duration=1800,
+            submerged_time=1800,
             max_depth=20.0,
             start_time="2026-09-01T00:00:00",
             mixtures=[],
@@ -285,12 +285,12 @@ class TestTheParseMatchesOnTheRecordingsOwnFigures:
         return body
 
     def test_an_ocean_fit_is_still_the_second_file_of_its_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The FIT's dive duration is its time in the water, 3 063 s, while its samples run
+        """The FIT's submerged time is its time in the water, 3 063 s, while its samples run
         the span its JSON's recording stores."""
         body = self._matches(monkeypatch)
 
-        assert body["duration"] == 3063
-        assert body["inferred"] == ["duration", "avg_depth"]
+        assert body["submerged_time"] == 3063
+        assert body["inferred"] == ["submerged_time", "avg_depth"]
         assert [match["same_recording"] for match in body["matches"]] == [True]
 
     def test_the_span_clause_now_applies_to_a_parsed_file(self, monkeypatch: pytest.MonkeyPatch) -> None:

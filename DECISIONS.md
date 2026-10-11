@@ -40,14 +40,15 @@ fails every request.
 ## Domain `CheckConstraint`s need a manual `ALTER TABLE` on existing DBs
 
 `DiveMixture` (`oxygen`/`helium` 0–100, `oxygen + helium <= 100`, `volume > 0`,
-`end_pressure <= start_pressure`) and `Dive` (`duration > 0`, `visibility >= 0`, `max_depth > 0`,
-`avg_depth > 0`) declare `CheckConstraint`s in `__table_args__` as DB-level backstops for validation
-that otherwise lives only in the web app's Zod schemas (`lib/validations/dive.ts`). Postgres treats
-a `CHECK` evaluating to `NULL` as satisfied, so the explicit `<col> IS NULL OR ...` on nullable
-columns is for clarity. Autogenerate picks a `CheckConstraint` up like any other change. A database
-stamped before migrations existed may lack them; `alembic check` names the missing ones
-(`ck_dive_mixture_volume_positive`, `ck_dive_mixture_oxygen_range`, `ck_dive_mixture_helium_range`,
-`ck_dive_mixture_oxygen_helium_sum`, `ck_dive_mixture_pressure_order`, `ck_dive_duration_positive`,
+`end_pressure <= start_pressure`) and `Dive` (`submerged_time > 0`, `visibility >= 0`,
+`max_depth > 0`, `avg_depth > 0`) declare `CheckConstraint`s in `__table_args__` as DB-level
+backstops for validation that otherwise lives only in the web app's Zod schemas
+(`lib/validations/dive.ts`). Postgres treats a `CHECK` evaluating to `NULL` as satisfied, so the
+explicit `<col> IS NULL OR ...` on nullable columns is for clarity. Autogenerate picks a
+`CheckConstraint` up like any other change. A database stamped before migrations existed may lack
+them; `alembic check` names the missing ones (`ck_dive_mixture_volume_positive`,
+`ck_dive_mixture_oxygen_range`, `ck_dive_mixture_helium_range`, `ck_dive_mixture_oxygen_helium_sum`,
+`ck_dive_mixture_pressure_order`, `ck_dive_submerged_time_positive`,
 `ck_dive_visibility_non_negative`, `ck_dive_max_depth_positive`, `ck_dive_avg_depth_positive`) — add
 them by hand and let `alembic upgrade head` bring their text forward; revision `d3b1700eb489` drops
 and recreates the `dive_mixture` ones by name. A violation surfaces as
@@ -252,14 +253,14 @@ never `DiveCreate`/`DiveUpdate`/`DiveRead`.
 
 `services/dive_stats.py`'s `recalculate_dive_stats` reruns `COUNT`/`MAX`/`SUM` over all of a user's
 non-deleted dives on every create, update and delete, synchronously — O(n) per write. Incremental
-counters (O(1) `total_dives`/`total_time`) are rejected: more complexity than per-user counts in the
-thousands justify, and read-modify-write counters need row locking, where a full recompute converges
-under concurrent writers by construction. Instead `ix_dive_user_id_stats` —
-`(user_id) INCLUDE (max_depth, duration) WHERE is_deleted = false` — makes the aggregate an
-index-only scan. `max_depth`/`duration` are `INCLUDE`d, not key columns; they are never filtered or
-sorted on. The aggregate uses `func.count()` (`COUNT(*)`), not `func.count(Dive.id)`: `id` is not in
-the index, so counting it forces a heap fetch per row and defeats the covering index; only then does
-`EXPLAIN (ANALYZE, BUFFERS)` show `Index Only Scan using ix_dive_user_id_stats` with
+counters (O(1) `total_dives`/`total_submerged_time`) are rejected: more complexity than per-user
+counts in the thousands justify, and read-modify-write counters need row locking, where a full
+recompute converges under concurrent writers by construction. Instead `ix_dive_user_id_stats` —
+`(user_id) INCLUDE (max_depth, submerged_time) WHERE is_deleted = false` — makes the aggregate an
+index-only scan. `max_depth`/`submerged_time` are `INCLUDE`d, not key columns; they are never
+filtered or sorted on. The aggregate uses `func.count()` (`COUNT(*)`), not `func.count(Dive.id)`:
+`id` is not in the index, so counting it forces a heap fetch per row and defeats the covering index;
+only then does `EXPLAIN (ANALYZE, BUFFERS)` show `Index Only Scan using ix_dive_user_id_stats` with
 `Heap Fetches: 0`. Revisit if a bulk-import endpoint lands (recompute once per batch).
 
 ## The Arq worker runs one job: purging expired `token_blacklist` rows
@@ -1003,8 +1004,8 @@ rewrite.
 ## Gas use is computed on read, never stored, and deliberately refuses multi-tank dives
 
 `compute_gas_use()` in `services/dive_gas.py` derives `gas_used`, `rmv` and `sac_bar_per_min` from
-`duration`, `avg_depth` and the one mixture's pressures; `_to_public_dive_with_mixtures()` attaches
-it as `gas_use`, the formula's one call site.
+`submerged_time`, `avg_depth` and the one mixture's pressures; `_to_public_dive_with_mixtures()`
+attaches it as `gas_use`, the formula's one call site.
 
 Computed, not denormalized like `user_dive_stats` or `gear_item.dive_count`: it is arithmetic on
 loaded columns, and storing it would need a recalculation hook on every mixture replace. Safe to
@@ -1994,7 +1995,7 @@ becomes
   `surface_pressure_bar` and `po2_limit` two-sided; `cns_start`, `cns_end`, `otu_start`, `otu_end`,
   `gas_number` at `< 0`; `avg_depth`, `max_depth` at `<= 0`. Scope: bounded and reader-reachable,
   but the dive's own members the form validates (the comment above them on `ParsedDiveSchema`).
-  `ck_dive_mixture_oxygen_helium_sum`, `ck_dive_mixture_pressure_order`, `duration`, `volume`,
+  `ck_dive_mixture_oxygen_helium_sum`, `ck_dive_mixture_pressure_order`, `submerged_time`, `volume`,
   `oxygen` and `helium` stay unguarded.
 - The `noop` branch's writes and commit share one `try`/`rollback`, since a `CHECK` raises from
   `execute()` (`TestReExtractionFailureDoesNotFailTheRequest`).
@@ -4942,9 +4943,9 @@ arise, and two flagged 11.1 L rows agree with one 22.2 L row to the litre.
 
 Guards: at least two cylinders, all flagged `parallel` (a pair plus an unflagged or `staged` bottle
 returns `None`, the short-numerator trap Subsurface's `calculate_airuse()` also refuses); the dive's
-own average depth and duration; both pressures on every cylinder; a total drop above zero, summed
-rather than per row, since a carried-but-untouched cylinder (`_pressure_used`) adds zero litres to a
-still-correct denominator (`ck_dive_mixture_pressure_order` bars negatives).
+own average depth and submerged time; both pressures on every cylinder; a total drop above zero,
+summed rather than per row, since a carried-but-untouched cylinder (`_pressure_used`) adds zero
+litres to a still-correct denominator (`ck_dive_mixture_pressure_order` bars negatives).
 
 `tanks` is empty, both seconds fields null: rates need time-on-gas, and litres alone would
 half-populate `DiveTankGasUse` against `DiveGasUse`'s whole-object-or-nothing rule.
@@ -5705,10 +5706,8 @@ The column is `dive_profile.duration`. The JSONB `dive_profile.data` keeps its c
 every profile row to save one function, on an encoding only `services/dive_profiles.py` reads.
 
 `DiveProfileInfo.duration` and `DiveGasUse.duration` share the name for consistency; neither is on
-the wire.
-
-`DIVES_HEADER` in `services/export/tabular.py` and `tests/fixtures/export/dives.csv` keep a
-`duration_seconds` column: it writes `dive.duration`, a different quantity.
+the wire. The dive's own figure is `submerged_time`, a different quantity, and so is
+`DIVES_HEADER`'s `submerged_time_seconds` column in `services/export/tabular.py`.
 
 ## A dive's average depth cannot exceed its maximum, and nothing can store one that does
 
@@ -5816,14 +5815,14 @@ meaning the diver wrote nothing), the booleans `rented`, `archived` and `active`
 `dive_count_at_start` (0).
 
 Otherwise the record is skipped and reported: a course with no `status` (§6.17), a service record
-with no `dive_count_at_service`, a dive with no `duration` and no profile, a species with no
+with no `dive_count_at_service`, a dive with no `submerged_time` and no profile, a species with no
 `aphia_id`, and a record whose REQUIRED closed-vocabulary member (a certification's `agency`, a
 service `type`) carries an unknown value, which §5.6 reads as absent. A course's `agency` is
 OPTIONAL and so costs the field rather than the record — see *A course may have no agency, and a
 certification may not*.
 
-Three derivations are allowed: a dive with no `duration` or `avg_depth` takes its profile's time in
-the water (`divejson.in_water`), the span standing in for a duration where no sample was in the
+Three derivations are allowed: a dive with no `submerged_time` or `avg_depth` takes its profile's
+time in the water (`divejson.in_water`), the span standing in for it where no sample was in the
 water, and one with no `bottom_temperature` its primary recording's coldest sample, as the dive form
 does, all reported; one with no `number` takes the dive form's suggestion, duplicates being legal
 (`DiveNumberingSummary`).
@@ -6032,8 +6031,8 @@ each bounded in the planner or excluded with a reason.
 Derived columns are closed at their inputs, since `recalculate_dive_stats` and
 `recalculate_service_schedule` know nothing of import: `next_due_at_dive_count` sums
 `dive_count_at_start` and `interval_dives`, both capped at `_MAX_DIVE_COUNT` (a million);
-`user_dive_stats.total_time` sums `dive.duration` over every dive the account holds, so a per-dive
-cap of a year cannot bound it and the column is `BigInteger`.
+`user_dive_stats.total_submerged_time` sums `dive.submerged_time` over every dive the account holds,
+so a per-dive cap of a year cannot bound it and the column is `BigInteger`.
 
 ## The two remaps are two codes, because they differ in what happened to other records
 
@@ -6285,12 +6284,12 @@ The earlier dive survives by `starts_before` (`delta_seconds`' rule, `services/d
 recording; different devices or a NULL start append. The offset is the recordings' delta, never the
 dives'. The gap stays empty: `join_profiles` is not `fill_channels`; pressure joins by `gas_number`;
 markers all stay. Provenance is `merge`, so `should_extract` never re-extracts; files stay. A fold's
-`duration` and `avg_depth` are its time in the water; side by side they stand; `max_depth` is the
-deepest reading; `None` means leave alone; `start_time` and the fixes stay, `refresh_tech_scalars`
-uncalled; the absorbed record's readouts fill the survivor's blanks. An `avg_depth` failing
-`ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers` precedes the join,
-keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
-as an arrival does, an empty absorbed row not appended; moved profiles use
+`submerged_time` and `avg_depth` are its time in the water; side by side they stand; `max_depth` is
+the deepest reading; `None` means leave alone; `start_time` and the fixes stay,
+`refresh_tech_scalars` uncalled; the absorbed record's readouts fill the survivor's blanks. An
+`avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers`
+precedes the join, keeping `usage` and filling the survivor's blank cylinder members from the
+absorbed rows it pairs, as an arrival does, an empty absorbed row not appended; moved profiles use
 `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
 within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
 
@@ -6861,7 +6860,7 @@ primary's, two spellings of one fact.
 document's `times` pass as the reader wrote them: counted from its recording's `started_at` (§6.5),
 so a first reading keeps the offset it states. `extract_recording` shifts each file by its start's
 signed offset from the recording's stored start, on `delta_seconds`' clock, clamping a reading
-before zero to it. `ndl`/`tts` values, a dive's `duration`, `dive_recording.duration` and
+before zero to it. `ndl`/`tts` values, a dive's `submerged_time`, `dive_recording.duration` and
 `GasAttribution.seconds` stay seconds. Rows stored before the change keep whole-second resolution
 and their first-reading origin, multiplied, until `src/scripts/backfill_dive_profiles.py` re-derives
 the file-backed ones; a `merge` profile keeps its origin for good. *Rejected:* the first reading as
@@ -7042,15 +7041,24 @@ the single place a day is displayed or bucketed. Rejected: a day-wide instant wi
 Python, which pages wrong; and narrowing in the browser, which leaves the trip read's counts no
 server to come from.
 
-## A dive's duration and average depth are its time in the water
+## A dive's submerged time and average depth are its time in the water
 
-`dive.duration` is the time in the water as the computer counts it, surface time before, between and
-after excluded, and `avg_depth` the time-weighted mean over it; the profile keeps every sample. A
-file's stated figure wins. Where none is stated the reader derives both from the samples deeper than
-1.2 m and `ParsedDiveSchema.inferred` names them, so a form takes a same-computer file's stated
-figure over a derived one. Every derivation here - a fold, the planner's missing figures, the
+`dive.submerged_time` is the time in the water as the computer counts it, surface time before,
+between and after excluded, and `avg_depth` the time-weighted mean over it; the profile keeps every
+sample. A file's stated figure wins. Where none is stated the reader derives both from the samples
+deeper than 1.2 m and `ParsedDiveSchema.inferred` names them, so a form takes a same-computer file's
+stated figure over a derived one. Every derivation here - a fold, the planner's missing figures, the
 backfill - calls `divejson.in_water`; match gates still compare spans (`RecordingFacts`), the parse
 included. `backfill_dive_figures` rewrites a stored value only while it equals the whole
-recording's: a duration within 1 s of the primary span, a mean within 0.1 m of the whole-recording
-mean. An imported dive moves only for a device the operator names, since nothing stored tells a
-stated figure from a span.
+recording's: a submerged time within 1 s of the primary span, a mean within 0.1 m of the
+whole-recording mean. An imported dive moves only for a device the operator names, since nothing
+stored tells a stated figure from a span.
+
+## A dive's figure is keyed `submerged_time` and labelled "Dive time"
+
+The member, the column and every name that holds the figure say `submerged_time`, DiveJSON's member:
+beside `started_at`, `duration` reads as end minus start, which it is not, and the profile has a
+`duration` of its own. What a diver reads - the constraint's message, the importer's notes - says
+"dive time", the word the computer shows on the wrist. *Rejected:* "submerged time" on screen, which
+no vendor prints, and "bottom time", which means two different things to a PADI diver and a Garmin
+one.

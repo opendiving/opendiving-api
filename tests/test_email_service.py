@@ -593,7 +593,7 @@ class TestSendYearInReviewEmail:
         uuid=UUID("0199aaaa-0000-7000-8000-000000000001"),
         day=date(2026, 3, 14),
         max_depth=30.52,
-        duration=2400,
+        submerged_time=2400,
         site_name="Blue Hole",
     )
     LONGEST = ReviewedDive(
@@ -601,7 +601,7 @@ class TestSendYearInReviewEmail:
         uuid=UUID("0199aaaa-0000-7000-8000-000000000002"),
         day=date(2026, 8, 2),
         max_depth=12.0,
-        duration=4260,
+        submerged_time=4260,
         site_name=None,
     )
 
@@ -680,7 +680,12 @@ class TestSendYearInReviewEmail:
     @pytest.mark.asyncio
     async def test_the_site_name_is_escaped(self):
         deepest = ReviewedDive(
-            id=1, uuid=self.DEEPEST.uuid, day=self.DEEPEST.day, max_depth=30.0, duration=60, site_name="<b>Reef</b>"
+            id=1,
+            uuid=self.DEEPEST.uuid,
+            day=self.DEEPEST.day,
+            max_depth=30.0,
+            submerged_time=60,
+            site_name="<b>Reef</b>",
         )
         body = (await self._sent(self._review(deepest=deepest))).get_content()
 

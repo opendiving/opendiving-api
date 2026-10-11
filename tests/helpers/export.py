@@ -144,7 +144,7 @@ def make_dive(row_id: int, uuid: uuid_pkg.UUID, **overrides: Any) -> Dive:
         # exported string back can tell the combined form from the stored instant.
         "start_time": datetime(2026, 6, 1, 6, 15, tzinfo=UTC),
         "utc_offset_minutes": 120,
-        "duration": 2700,
+        "submerged_time": 2700,
         "notes": "",
     }
     defaults.update(overrides)
@@ -586,7 +586,7 @@ def full_bundle() -> ExportBundle:
         exit_latitude=27.731500,
         exit_longitude=34.259000,
     )
-    bare = make_dive(3, UUIDS["dive-bare"], dive_number=3, duration=1200)
+    bare = make_dive(3, UUIDS["dive-bare"], dive_number=3, submerged_time=1200)
 
     # Two species, deliberately unalike, because the pair is what the writers have to tell
     # apart: one species-rank row with a common name, and one family-rank row with none - the

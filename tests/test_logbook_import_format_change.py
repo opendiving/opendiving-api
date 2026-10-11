@@ -46,7 +46,7 @@ def _pre_change_export(**dive: Any) -> dict[str, Any]:
                 "uuid": _DIVE_UUID,
                 "number": 7,
                 "started_at": "2026-08-01T10:00:00+02:00",
-                "duration": 3000,
+                "submerged_time": 3000,
                 "water_type": "en13319",
                 "cns_start": 3.0,
                 "cns_end": 9.0,
@@ -317,7 +317,7 @@ def _document(dive: dict[str, Any]) -> bytes:
         "format": "divejson",
         "version": "1.0",
         "exported_at": "2026-09-09T10:00:00+00:00",
-        "dives": [{"uuid": str(uuid_pkg.uuid4()), "number": 1, "duration": 1800, **dive}],
+        "dives": [{"uuid": str(uuid_pkg.uuid4()), "number": 1, "submerged_time": 1800, **dive}],
     }
     return json.dumps(body).encode()
 
@@ -351,7 +351,7 @@ class TestImportingAcrossTheChange:
 
     @pytest.mark.asyncio
     async def test_the_axis_is_read_in_milliseconds(self, db: Session, async_db: AsyncSession) -> None:
-        """And a dive's duration derived from the span is whole seconds of it."""
+        """And a dive's submerged time derived from the span is whole seconds of it."""
         user = create_user(db)
         document = _document(
             {
@@ -362,7 +362,7 @@ class TestImportingAcrossTheChange:
             }
         )
         body = json.loads(document)
-        del body["dives"][0]["duration"]
+        del body["dives"][0]["submerged_time"]
 
         await _apply(async_db, user.id, json.dumps(body).encode())
 
@@ -373,7 +373,7 @@ class TestImportingAcrossTheChange:
         assert data["depth"]["t"] == [160, 2_940_160]
         assert recording.duration == 2940
         dive = (await async_db.execute(select(Dive).where(Dive.user_id == user.id))).scalar_one()
-        assert dive.duration == 2940
+        assert dive.submerged_time == 2940
 
     @pytest.mark.asyncio
     async def test_each_recordings_readouts_and_salinity_are_its_own(self, db: Session, async_db: AsyncSession) -> None:
