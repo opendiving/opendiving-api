@@ -17,7 +17,7 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # provided it with (see `utc_offset_minutes` below) - Postgres normalizes any
     # timezone-aware value written to a `timestamptz` column to UTC internally anyway.
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    duration: Mapped[int] = mapped_column(Integer)
+    submerged_time: Mapped[int] = mapped_column(Integer)
     notes: Mapped[str] = mapped_column(Text)
 
     # The UTC offset (in minutes, e.g. 120 for "+02:00") that `start_time` was originally
@@ -130,7 +130,7 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
         return (
             # Mirrors the frontend's Zod validation (`lib/validations/dive.ts`) at the DB
             # layer, so direct API calls or bugs can't insert nonsensical dive data.
-            CheckConstraint("duration > 0", name="ck_dive_duration_positive"),
+            CheckConstraint("submerged_time > 0", name="ck_dive_submerged_time_positive"),
             CheckConstraint("visibility IS NULL OR visibility >= 0", name="ck_dive_visibility_non_negative"),
             CheckConstraint("max_depth IS NULL OR max_depth > 0", name="ck_dive_max_depth_positive"),
             CheckConstraint("avg_depth IS NULL OR avg_depth > 0", name="ck_dive_avg_depth_positive"),
@@ -223,8 +223,8 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
                 postgresql_where=cls.is_deleted.is_(False),
             ),
             # Serves `services.dive_stats.recalculate_dive_stats`'s
-            # `COUNT`/`MAX(max_depth)`/`SUM(duration)` aggregate, run after every dive
-            # create/update/delete. `max_depth`/`duration` are `INCLUDE`d (not index key
+            # `COUNT`/`MAX(max_depth)`/`SUM(submerged_time)` aggregate, run after every dive
+            # create/update/delete. `max_depth`/`submerged_time` are `INCLUDE`d (not index key
             # columns) purely so Postgres can answer the aggregate as an index-only scan
             # instead of a heap fetch per matching dive - they aren't used for filtering or
             # ordering, so they don't need to be part of the index's sort key.
@@ -232,6 +232,6 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
                 "ix_dive_user_id_stats",
                 "user_id",
                 postgresql_where=cls.is_deleted.is_(False),
-                postgresql_include=["max_depth", "duration"],
+                postgresql_include=["max_depth", "submerged_time"],
             ),
         )

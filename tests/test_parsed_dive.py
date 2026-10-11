@@ -47,7 +47,7 @@ def _dive(**overrides: Any) -> ParsedDiveSchema:
         "avg_depth": None,
         "bottom_temperature": None,
         "dive_number": None,
-        "duration": None,
+        "submerged_time": None,
         "max_depth": None,
         "start_time": None,
         "mixtures": [],
@@ -195,7 +195,7 @@ class TestReadingsThatAreNotReadings:
             avg_depth=12.5,
             bottom_temperature=8.0,
             dive_number=41,
-            duration=2400,
+            submerged_time=2400,
             max_depth=27.3,
             start_time="2026-06-03T12:15:00",
             mixtures=[mixture],
@@ -204,7 +204,7 @@ class TestReadingsThatAreNotReadings:
         )
 
         assert (mixture.gas_number, mixture.role) == (0, GasRole.BOTTOM)
-        assert (dive.dive_number, dive.duration, dive.start_time) == (41, 2400, "2026-06-03T12:15:00")
+        assert (dive.dive_number, dive.submerged_time, dive.start_time) == (41, 2400, "2026-06-03T12:15:00")
         assert (dive.avg_depth, dive.max_depth, dive.bottom_temperature) == (12.5, 27.3, 8.0)
         assert dive.cns_start == 0.0
         assert dive.mixtures == [mixture]
@@ -283,7 +283,7 @@ class TestTheDevice:
         echoing the parse response straight back gets a 422 rather than a silently dropped
         member."""
         assert "device" not in DiveCreate.model_fields
-        valid = {"dive_number": 1, "duration": 1800, "start_time": "2026-04-17T11:49:23+02:00"}
+        valid = {"dive_number": 1, "submerged_time": 1800, "start_time": "2026-04-17T11:49:23+02:00"}
         assert DiveCreate(**valid).dive_number == 1
 
         with pytest.raises(ValidationError) as raised:

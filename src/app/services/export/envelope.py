@@ -585,7 +585,7 @@ def _dive(
         # where only the day was recorded. That is also the format's rule (spec §5.2), which
         # is where it came from.
         started_at=combine_dive_start_time(dive.start_time, dive.utc_offset_minutes, dive.start_date_only),
-        duration=dive.duration,
+        submerged_time=dive.submerged_time,
         notes=_text(dive.notes),
         max_depth=dive.max_depth,
         avg_depth=dive.avg_depth,

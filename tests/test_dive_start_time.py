@@ -144,7 +144,7 @@ class TestDiveStartTimeValidation:
     """
 
     def _dive_kwargs(self, start_time: str) -> dict:
-        return {"dive_number": 1, "start_time": start_time, "duration": 1800}
+        return {"dive_number": 1, "start_time": start_time, "submerged_time": 1800}
 
     def test_create_accepts_offset_aware_iso_string(self) -> None:
         dive = DiveCreate(**self._dive_kwargs("2021-04-04T10:04:47.910+02:00"))

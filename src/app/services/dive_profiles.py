@@ -291,9 +291,9 @@ class NormalizedProfile:
     def duration(self) -> int:
         """Elapsed milliseconds covered by the longest channel.
 
-        Not the dive's `duration`: this is the span of what the file actually recorded, the
+        Not the dive's `submerged_time`: this is the span of what the file actually recorded, the
         minutes a computer goes on logging at the surface after the dive included.
-        `dive.duration` is the diver's record and may have been hand-edited, and where the
+        `dive.submerged_time` is the diver's record and may have been hand-edited, and where the
         dive ends on this axis is `dive_end_time`'s answer.
         """
         return max((series.t[-1] for series in self._all_series()), default=0)
@@ -398,7 +398,7 @@ class ProfileGasAttribution:
 
     The two travel together because they are the two halves of one fraction: "these
     figures cover 39 of the 77 minutes recorded" is only falsifiable if both numbers come
-    off the same profile row. The dive's own `duration` is the diver's record and may have
+    off the same profile row. The dive's own `submerged_time` is the diver's record and may have
     been edited, which would make the fraction say whatever the edit said.
 
     `duration` is the profile's full span, in the axis's milliseconds, rather than the depth

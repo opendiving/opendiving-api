@@ -1,4 +1,4 @@
-"""A logbook dive that states no duration or no average depth takes its profile's time in the
+"""A logbook dive that states no submerged time or no average depth takes its profile's time in the
 water, as a reader with no stated figure does - the span only where no sample was in the water.
 """
 
@@ -61,28 +61,41 @@ def _derived(plan: Any) -> list[str]:
 
 class TestADiveWithNoStatedFigures:
     @pytest.mark.asyncio
-    async def test_its_duration_and_average_are_its_time_in_the_water(
+    async def test_its_submerged_time_and_average_are_its_time_in_the_water(
         self, db: Session, async_db: AsyncSession
     ) -> None:
         user = create_user(db)
 
         plan, dive = await _imported(async_db, user.id)
 
-        assert (dive.duration, dive.avg_depth) == (IN_WATER, MEAN)
+        assert (dive.submerged_time, dive.avg_depth) == (IN_WATER, MEAN)
         assert [message for message in _derived(plan) if "1.2 m" in message] == [
-            "This dive records no duration, so its length was taken as the time its own profile spends deeper "
+            "This dive records no dive time, so its length was taken as the time its own profile spends deeper "
             "than 1.2 m.",
             "This dive records no average depth, so it was taken as the mean depth of its own profile over the "
             "time it spends deeper than 1.2 m.",
         ]
 
     @pytest.mark.asyncio
+    async def test_a_dive_carrying_duration_takes_its_profiles_figure(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The member's old name is an unknown member, ignored, so a dive this app exported before
+        the rename states no figure and takes its profile's, as any such dive does."""
+        user = create_user(db)
+
+        plan, dive = await _imported(async_db, user.id, duration=2100)
+
+        assert dive.submerged_time == IN_WATER
+        assert "This dive records no dive time" in _derived(plan)[0]
+
+    @pytest.mark.asyncio
     async def test_a_stated_figure_is_kept_beside_a_derived_one(self, db: Session, async_db: AsyncSession) -> None:
         user = create_user(db)
 
-        plan, dive = await _imported(async_db, user.id, duration=2100, avg_depth=12.5)
+        plan, dive = await _imported(async_db, user.id, submerged_time=2100, avg_depth=12.5)
 
-        assert (dive.duration, dive.avg_depth) == (2100, 12.5)
+        assert (dive.submerged_time, dive.avg_depth) == (2100, 12.5)
         assert not [message for message in _derived(plan) if "1.2 m" in message]
 
     @pytest.mark.asyncio
@@ -97,7 +110,7 @@ class TestADiveWithNoStatedFigures:
             async_db, user.id, profile={"depth": {"times": [0, 600_000, 1_200_000], "values": [100, 120, 0]}}
         )
 
-        assert (dive.duration, dive.avg_depth) == (1200, None)
+        assert (dive.submerged_time, dive.avg_depth) == (1200, None)
         assert _derived(plan) == [
-            "This dive records no duration, so its length was taken from the span of its own profile."
+            "This dive records no dive time, so its length was taken from the span of its own profile."
         ]

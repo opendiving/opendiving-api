@@ -9,7 +9,7 @@ field being *omitted* and being sent as an explicit `null`:
   the whole thing rests on one `model_fields_set` branch that had no test. `course_uuid`
   is the same field with the same branch, added later, and gets the same coverage rather
   than being trusted to the symmetry.
-* `dive_number`/`start_time`/`duration`/`notes` are `NOT NULL`, so an explicit null is
+* `dive_number`/`start_time`/`submerged_time`/`notes` are `NOT NULL`, so an explicit null is
   simply invalid, and used to surface as a 422 reading "Invalid reference: a related
   record does not exist." - a foreign-key message for a not-null problem.
 
@@ -286,7 +286,7 @@ class TestTheSightingRules:
             ]
         }
         if schema is DiveCreateRequest:
-            body |= {"dive_number": 1, "start_time": START_TIME.isoformat(), "duration": 1800}
+            body |= {"dive_number": 1, "start_time": START_TIME.isoformat(), "submerged_time": 1800}
 
         with pytest.raises(ValidationError) as caught:
             schema.model_validate(body)
@@ -322,7 +322,7 @@ class TestTheSightingRules:
 
 
 class TestNonNullableFields:
-    """`dive_number`, `start_time`, `duration` and `notes` map to `NOT NULL` columns, so
+    """`dive_number`, `start_time`, `submerged_time` and `notes` map to `NOT NULL` columns, so
     an explicit null is refused by the schema with a message naming the field - rather
     than surviving into the UPDATE and coming back as a foreign-key error.
 
@@ -353,7 +353,7 @@ class TestNonNullableFields:
 
     @pytest.mark.asyncio
     async def test_an_untouched_start_time_leaves_the_offset_alone(self, captured: dict[str, Any]) -> None:
-        await _patch(DiveUpdateRequest.model_validate({"duration": 2048}))
+        await _patch(DiveUpdateRequest.model_validate({"submerged_time": 2048}))
 
         assert "start_time" not in captured["update_data"]
         assert "utc_offset_minutes" not in captured["update_data"]
@@ -378,7 +378,7 @@ class TestMixtureFieldsAreClosed:
             body |= {
                 "dive_number": 1,
                 "start_time": START_TIME.isoformat(),
-                "duration": 2048,
+                "submerged_time": 2048,
             }
 
         with pytest.raises(ValidationError) as exc_info:
@@ -387,6 +387,21 @@ class TestMixtureFieldsAreClosed:
         message = str(exc_info.value)
         assert "name" in message
         assert "extra_forbidden" in message
+
+    @pytest.mark.parametrize("request_schema", [DiveCreateRequest, DiveUpdateRequest])
+    def test_a_dive_carrying_duration_is_refused_by_name(self, request_schema: type[BaseModel]) -> None:
+        """A dive's time in the water is `submerged_time`, and nothing reads `duration` as it: a
+        client still sending the old name is told, rather than saving a dive without its figure."""
+        body: dict[str, Any] = {"duration": 2048}
+        if request_schema is DiveCreateRequest:
+            body |= {"dive_number": 1, "start_time": START_TIME.isoformat(), "submerged_time": 2048}
+
+        with pytest.raises(ValidationError) as exc_info:
+            request_schema.model_validate(body)
+
+        assert [(error["type"], error["loc"]) for error in exc_info.value.errors()] == [
+            ("extra_forbidden", ("duration",))
+        ]
 
     def test_the_surviving_mixture_fields_still_validate(self) -> None:
         values = DiveUpdateRequest.model_validate(
@@ -447,7 +462,7 @@ class TestWaterTypeAndAltitude:
             {
                 "dive_number": 1,
                 "start_time": START_TIME.isoformat(),
-                "duration": 2048,
+                "submerged_time": 2048,
                 "water_type": "brackish",
                 "altitude": 372,
             }
@@ -461,7 +476,7 @@ class TestWaterTypeAndAltitude:
             {
                 "dive_number": 1,
                 "start_time": START_TIME.isoformat(),
-                "duration": 2048,
+                "submerged_time": 2048,
             }
         )
 
@@ -479,7 +494,7 @@ class TestWaterTypeAndAltitude:
             body |= {
                 "dive_number": 1,
                 "start_time": START_TIME.isoformat(),
-                "duration": 2048,
+                "submerged_time": 2048,
             }
 
         with pytest.raises(ValidationError) as exc_info:

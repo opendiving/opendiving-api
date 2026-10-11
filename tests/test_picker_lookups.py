@@ -150,7 +150,7 @@ def _bound(day: int) -> datetime:
 
 
 def _dive(db: Session, user: User, start: datetime, **columns: Any) -> Dive:
-    dive = Dive(user_id=user.id, dive_number=1, start_time=start, duration=1800, notes="", **columns)
+    dive = Dive(user_id=user.id, dive_number=1, start_time=start, submerged_time=1800, notes="", **columns)
     db.add(dive)
     db.commit()
     return dive

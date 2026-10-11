@@ -47,7 +47,7 @@ def _current_user() -> dict[str, Any]:
 
 
 def _dive_body(**members: Any) -> dict[str, Any]:
-    return {"dive_number": 1, "start_time": "2026-06-01T09:00:00+02:00", "duration": 1800, **members}
+    return {"dive_number": 1, "start_time": "2026-06-01T09:00:00+02:00", "submerged_time": 1800, **members}
 
 
 class TestTheWriteSchema:
@@ -106,7 +106,7 @@ class TestTheWriteSchema:
                 "user_uuid": uuid7(),
                 "dive_number": 1,
                 "start_time": "2026-06-01T09:00:00+02:00",
-                "duration": 1800,
+                "submerged_time": 1800,
                 "created_at": datetime(2026, 6, 1, tzinfo=UTC),
                 "type": "frobnicator",
                 "current": "frobnicator",
@@ -460,7 +460,12 @@ class TestTheDatabase:
         start = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
         rows = [
             Dive(
-                user_id=diver.id, dive_number=n, start_time=start + timedelta(days=n), duration=1800, notes="", rating=r
+                user_id=diver.id,
+                dive_number=n,
+                start_time=start + timedelta(days=n),
+                submerged_time=1800,
+                notes="",
+                rating=r,
             )
             for n, r in ((1, None), (2, 3), (3, 5), (4, None), (5, 3))
         ]

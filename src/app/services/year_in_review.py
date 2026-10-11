@@ -63,7 +63,7 @@ class ReviewedDive:
     uuid: UUID
     day: date
     max_depth: float | None
-    duration: int
+    submerged_time: int
     site_name: str | None = None
 
 
@@ -108,11 +108,13 @@ def summarize_year(
     return YearInReview(
         year=year,
         dives=len(dives),
-        seconds_underwater=sum(dive.duration for dive in dives),
+        seconds_underwater=sum(dive.submerged_time for dive in dives),
         deepest=named(
             max((dive for dive in dives if dive.max_depth is not None), key=attrgetter("max_depth"), default=None)
         ),
-        longest=named(max((dive for dive in dives if dive.duration > 0), key=attrgetter("duration"), default=None)),
+        longest=named(
+            max((dive for dive in dives if dive.submerged_time > 0), key=attrgetter("submerged_time"), default=None)
+        ),
         dive_sites=len({site_id for _, site_id, _ in sites}),
         species=len(this_year),
         first_species=len(this_year - before),
@@ -124,7 +126,7 @@ async def year_in_review(db: AsyncSession, user_id: int, year: int) -> YearInRev
     window_start, window_end = year_window(year)
     rows = (
         await db.execute(
-            select(Dive.id, Dive.uuid, Dive.start_time, Dive.utc_offset_minutes, Dive.max_depth, Dive.duration)
+            select(Dive.id, Dive.uuid, Dive.start_time, Dive.utc_offset_minutes, Dive.max_depth, Dive.submerged_time)
             .where(
                 Dive.user_id == user_id,
                 Dive.is_deleted.is_(False),
@@ -140,7 +142,7 @@ async def year_in_review(db: AsyncSession, user_id: int, year: int) -> YearInRev
             uuid=row.uuid,
             day=day,
             max_depth=row.max_depth,
-            duration=row.duration,
+            submerged_time=row.submerged_time,
         )
         for row in rows
         if (day := local_day(row.start_time, row.utc_offset_minutes)).year == year

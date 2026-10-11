@@ -43,7 +43,7 @@ class DiveFormField(StrEnum):
     leaves every stored set out of canonical order until a migration rewrites it.
 
     Fields that cannot be hidden are deliberately absent, and for two different reasons.
-    `dive_number`, `start_time` and `duration` the form requires. A cylinder's `volume`
+    `dive_number`, `start_time` and `submerged_time` the form requires. A cylinder's `volume`
     and `oxygen` it does not - they became blank-able when a cylinder was allowed to record
     a mix with no vessel - but the web side shows both always and exempts each by name from
     the registry its equality check reads, on the ground that they are what a cylinder

@@ -168,7 +168,7 @@ class ReadDive:
     inferred: tuple[InferredField, ...] = ()
 
 
-_FIGURES: tuple[InferredField, ...] = ("duration", "avg_depth", "max_depth")
+_FIGURES: tuple[InferredField, ...] = ("submerged_time", "avg_depth", "max_depth")
 
 
 def inferred_figures(document: Mapping[str, Any]) -> tuple[InferredField, ...]:
@@ -342,7 +342,7 @@ def bottom_temperature(stated: float | None, profile: NormalizedProfile | None) 
 def prefill(read: ReadDive, shaped: ShapedRecording | None) -> ParsedDiveSchema:
     """The dive form's values for one file: the document's dive, as this app shows it.
 
-    A pure function of the document. The dive's `duration`, `max_depth`, `avg_depth` and
+    A pure function of the document. The dive's `submerged_time`, `max_depth`, `avg_depth` and
     start pass as the document writes them, the figures its reader derived named in
     `inferred`, and so does the rest of what it states of the
     dive - notes, conditions, rating, tags - with no bound applied (`ParsedDiveSchema` says
@@ -363,7 +363,7 @@ def prefill(read: ReadDive, shaped: ShapedRecording | None) -> ParsedDiveSchema:
         avg_depth=dive.avg_depth,
         bottom_temperature=bottom_temperature(dive.bottom_temperature, None if shaped is None else shaped.profile),
         dive_number=dive.number,
-        duration=dive.duration,
+        submerged_time=dive.submerged_time,
         max_depth=dive.max_depth,
         start_time=read.started_at,
         mixtures=[_mixture(cylinder) for cylinder in dive.cylinders],

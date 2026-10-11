@@ -64,7 +64,7 @@ def _dive(db: Session, user: User, *, number: int, deleted: bool = False) -> Div
         dive_number=number,
         start_time=datetime(2026, 6, number, 6, 15, tzinfo=UTC),
         utc_offset_minutes=120,
-        duration=1800,
+        submerged_time=1800,
         notes="",
         is_deleted=deleted,
     )

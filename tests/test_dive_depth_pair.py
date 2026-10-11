@@ -37,7 +37,7 @@ def _create(**overrides: Any) -> DiveCreateRequest:
     body: dict[str, Any] = {
         "dive_number": 1,
         "start_time": START_TIME,
-        "duration": 1800,
+        "submerged_time": 1800,
     }
     body.update(overrides)
     return DiveCreateRequest.model_validate(body)

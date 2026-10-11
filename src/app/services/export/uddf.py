@@ -1226,7 +1226,7 @@ def _dive_element(
     if dive.rating is not None:
         # Doubled onto `ratingvalueType`'s 1 to 10, which a reader halves back exactly.
         _sub(_sub(after, "rating"), "ratingvalue", str(2 * dive.rating))
-    _sub(after, "diveduration", _num(dive.duration))
+    _sub(after, "diveduration", _num(dive.submerged_time))
     _optional(after, "averagedepth", dive.avg_depth)
     return element
 

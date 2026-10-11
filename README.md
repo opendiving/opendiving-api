@@ -311,8 +311,8 @@ curl -X POST http://localhost:8000/api/v1/import/logbook \
   `docker compose exec api python -m src.scripts.backfill_dive_profiles`. Until it runs, every
   profile is served as the previous reader left it.
 - Once, after that: `docker compose exec api python -m src.scripts.backfill_dive_figures --dry-run`,
-  then without `--dry-run`. It rewrites each dive's duration and average depth that still hold the
-  whole recording's figures to its time in the water, and leaves a value a diver typed. A
+  then without `--dry-run`. It rewrites each dive's submerged time and average depth that still hold
+  the whole recording's figures to its time in the water, and leaves a value a diver typed. A
   logbook-imported dive moves only for a device named with `--device BRAND [MODEL]`; the script's
   docstring says how to choose them.
 - Once, after the release that ends the dive-card outline at the dive's end:

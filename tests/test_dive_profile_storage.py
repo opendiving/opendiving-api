@@ -63,7 +63,7 @@ def dive(db: Session) -> Dive:
     """A dive row to hang a recording off, with an owner of its own so nothing this test
     leaves behind can collide with a later run's `dive_number`."""
     owner: User = create_user(db)
-    row = Dive(user_id=owner.id, dive_number=1, start_time=datetime.now(UTC), duration=1800, notes="")
+    row = Dive(user_id=owner.id, dive_number=1, start_time=datetime.now(UTC), submerged_time=1800, notes="")
     db.add(row)
     db.commit()
     return row
@@ -350,7 +350,7 @@ class TestTheDepthOutline:
     ) -> None:
         owner = db.get(User, dive.user_id)
         assert owner is not None
-        hand_logged = Dive(user_id=owner.id, dive_number=2, start_time=datetime.now(UTC), duration=1800, notes="")
+        hand_logged = Dive(user_id=owner.id, dive_number=2, start_time=datetime.now(UTC), submerged_time=1800, notes="")
         db.add(hand_logged)
         db.commit()
         await _store(async_db, recording, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 900])))
@@ -501,7 +501,7 @@ class TestTheOutlineBackfill:
         self, db: Session, async_db: AsyncSession, dive: Dive, recording: DiveRecording
     ) -> None:
         other = create_user(db)
-        their_dive = Dive(user_id=other.id, dive_number=1, start_time=datetime.now(UTC), duration=1800, notes="")
+        their_dive = Dive(user_id=other.id, dive_number=1, start_time=datetime.now(UTC), submerged_time=1800, notes="")
         db.add(their_dive)
         db.commit()
         theirs = DiveRecording(dive_id=their_dive.id, user_id=other.id, ordinal=0, start_time=their_dive.start_time)

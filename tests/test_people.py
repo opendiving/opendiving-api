@@ -669,7 +669,7 @@ class TestTheHostsCarryReferences:
                     {
                         "dive_number": 1,
                         "start_time": "2026-06-01T09:00:00+02:00",
-                        "duration": 1800,
+                        "submerged_time": 1800,
                         "people": [{"person_uuid": str(theirs.uuid), "role": "buddy"}],
                     }
                 ),

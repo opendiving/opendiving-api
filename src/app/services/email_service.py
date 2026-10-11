@@ -546,7 +546,7 @@ async def send_year_in_review_email(email: str, review: YearInReview, units: str
     if review.deepest is not None and review.deepest.max_depth is not None:
         items.append(_highlight("Deepest", _depth_text(review.deepest.max_depth, units), review.deepest))
     if review.longest is not None:
-        items.append(_highlight("Longest", _duration_text(review.longest.duration), review.longest))
+        items.append(_highlight("Longest", _duration_text(review.longest.submerged_time), review.longest))
     if review.dive_sites:
         items.append(f"<li>{_plural(review.dive_sites, 'dive site')}</li>")
     if review.species:

@@ -61,7 +61,7 @@ class TestComputeGasUse:
     """
 
     def test_computes_the_worked_example(self) -> None:
-        result = compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture()])
+        result = compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture()])
 
         assert result is not None
         assert result.gas_used == 1800.0
@@ -71,7 +71,7 @@ class TestComputeGasUse:
     def test_computes_a_second_independent_example(self) -> None:
         # 11.1 L (S80), 210 -> 70 bar over 40 min at 12 m: 1554 L / (2.2 x 40) = 17.66.
         result = compute_gas_use(
-            duration=40 * 60,
+            submerged_time=40 * 60,
             avg_depth=12.0,
             mixtures=[_mixture(volume=11.1, start_pressure=210.0, end_pressure=70.0)],
         )
@@ -85,8 +85,8 @@ class TestComputeGasUse:
         ambient pressure is half the surface-equivalent rate. 10 m is 2 bar ambient,
         30 m is 4 bar.
         """
-        shallow = compute_gas_use(duration=30 * 60, avg_depth=10.0, mixtures=[_mixture()])
-        deep = compute_gas_use(duration=30 * 60, avg_depth=30.0, mixtures=[_mixture()])
+        shallow = compute_gas_use(submerged_time=30 * 60, avg_depth=10.0, mixtures=[_mixture()])
+        deep = compute_gas_use(submerged_time=30 * 60, avg_depth=30.0, mixtures=[_mixture()])
 
         assert shallow is not None and deep is not None
         assert deep.rmv == round(shallow.rmv / 2, 2)
@@ -97,10 +97,14 @@ class TestComputeGasUse:
         and why both are returned.
         """
         small = compute_gas_use(
-            duration=40 * 60, avg_depth=20.0, mixtures=[_mixture(volume=10.0, start_pressure=200.0, end_pressure=80.0)]
+            submerged_time=40 * 60,
+            avg_depth=20.0,
+            mixtures=[_mixture(volume=10.0, start_pressure=200.0, end_pressure=80.0)],
         )
         large = compute_gas_use(
-            duration=40 * 60, avg_depth=20.0, mixtures=[_mixture(volume=15.0, start_pressure=200.0, end_pressure=120.0)]
+            submerged_time=40 * 60,
+            avg_depth=20.0,
+            mixtures=[_mixture(volume=15.0, start_pressure=200.0, end_pressure=120.0)],
         )
 
         assert small is not None and large is not None
@@ -112,12 +116,12 @@ class TestComputeGasUse:
         """RMV is a volume rate, so nitrox and trimix consume identically. If this ever
         starts failing, someone has confused it with gas *density* or narcotic depth.
         """
-        air = compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture()])
+        air = compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture()])
 
         trimix = _mixture()
         trimix.oxygen = 21.0
         trimix.helium = 35.0
-        mixed = compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[trimix])
+        mixed = compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[trimix])
 
         assert air is not None and mixed is not None
         assert air.rmv == mixed.rmv
@@ -126,7 +130,7 @@ class TestComputeGasUse:
         """Matches the precision the rest of the dive API already exposes (see the web
         app's DECISIONS.md on 2-decimal mixture values).
         """
-        result = compute_gas_use(duration=37 * 60, avg_depth=13.7, mixtures=[_mixture()])
+        result = compute_gas_use(submerged_time=37 * 60, avg_depth=13.7, mixtures=[_mixture()])
 
         assert result is not None
         # Non-null on this path by construction - only the multi-cylinder one has no
@@ -140,7 +144,7 @@ class TestComputeGasUse:
         the rounded figure - a rounding error in the numerator would propagate.
         """
         result = compute_gas_use(
-            duration=33 * 60,
+            submerged_time=33 * 60,
             avg_depth=17.3,
             mixtures=[_mixture(volume=11.1, start_pressure=203.0, end_pressure=61.0)],
         )
@@ -156,7 +160,7 @@ class TestComputeGasUseReturnsNone:
     """
 
     def test_when_there_are_no_mixtures(self) -> None:
-        assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[]) is None
+        assert compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[]) is None
 
     def test_when_there_is_more_than_one_mixture(self) -> None:
         """Multi-tank is unsupported until a dive records how the cylinders were
@@ -166,21 +170,21 @@ class TestComputeGasUseReturnsNone:
         back_gas = _mixture()
         deco = _mixture(volume=11.1, start_pressure=200.0, end_pressure=140.0)
 
-        assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[back_gas, deco]) is None
+        assert compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[back_gas, deco]) is None
 
     def test_when_average_depth_is_missing(self) -> None:
-        assert compute_gas_use(duration=45 * 60, avg_depth=None, mixtures=[_mixture()]) is None
+        assert compute_gas_use(submerged_time=45 * 60, avg_depth=None, mixtures=[_mixture()]) is None
 
     def test_when_average_depth_is_zero_or_negative(self) -> None:
-        assert compute_gas_use(duration=45 * 60, avg_depth=0.0, mixtures=[_mixture()]) is None
-        assert compute_gas_use(duration=45 * 60, avg_depth=-3.0, mixtures=[_mixture()]) is None
+        assert compute_gas_use(submerged_time=45 * 60, avg_depth=0.0, mixtures=[_mixture()]) is None
+        assert compute_gas_use(submerged_time=45 * 60, avg_depth=-3.0, mixtures=[_mixture()]) is None
 
     def test_when_either_pressure_is_missing(self) -> None:
-        assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(start_pressure=None)]) is None
-        assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(end_pressure=None)]) is None
+        assert compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture(start_pressure=None)]) is None
+        assert compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture(end_pressure=None)]) is None
         assert (
             compute_gas_use(
-                duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(start_pressure=None, end_pressure=None)]
+                submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture(start_pressure=None, end_pressure=None)]
             )
             is None
         )
@@ -191,18 +195,18 @@ class TestComputeGasUseReturnsNone:
         """
         assert (
             compute_gas_use(
-                duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(start_pressure=200.0, end_pressure=200.0)]
+                submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture(start_pressure=200.0, end_pressure=200.0)]
             )
             is None
         )
 
-    def test_when_duration_or_volume_is_non_positive(self) -> None:
+    def test_when_submerged_time_or_volume_is_non_positive(self) -> None:
         """Both are `CHECK`-constrained positive in the database, so this is belt and
         braces - but it's the branch that keeps a zero out of the denominator.
         """
-        assert compute_gas_use(duration=0, avg_depth=18.0, mixtures=[_mixture()]) is None
-        assert compute_gas_use(duration=-60, avg_depth=18.0, mixtures=[_mixture()]) is None
-        assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(volume=0.0)]) is None
+        assert compute_gas_use(submerged_time=0, avg_depth=18.0, mixtures=[_mixture()]) is None
+        assert compute_gas_use(submerged_time=-60, avg_depth=18.0, mixtures=[_mixture()]) is None
+        assert compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture(volume=0.0)]) is None
 
     def test_when_the_cylinder_size_was_never_recorded(self) -> None:
         """The new refusal, and the one the browser has to phrase: an average depth, both
@@ -215,10 +219,10 @@ class TestComputeGasUseReturnsNone:
         """
         mix_only = _mixture(volume=None, start_pressure=200.0, end_pressure=50.0)
 
-        assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[mix_only]) is None
+        assert compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[mix_only]) is None
         # And the same cylinder with a size does produce the worked figure, so nothing but
         # the volume is doing the refusing.
-        assert compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture()]) is not None
+        assert compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture()]) is not None
 
 
 def _attributed(gas_number: int, *, seconds: int, mean_depth_cm: int) -> GasAttribution:
@@ -523,7 +527,7 @@ class TestComputeParallelGasUse:
 
     def test_computes_dive_276(self) -> None:
         result = compute_parallel_gas_use(
-            duration=59 * 60,
+            submerged_time=59 * 60,
             avg_depth=22.6,
             mixtures=[
                 _parallel(volume=11.1, start_pressure=200.0, end_pressure=110.0),
@@ -542,7 +546,7 @@ class TestComputeParallelGasUse:
         `DiveTankGasUse`. The empty list is the sentinel a client already reads.
         """
         result = compute_parallel_gas_use(
-            duration=59 * 60, avg_depth=22.6, mixtures=[_parallel(volume=11.1), _parallel(volume=11.1)]
+            submerged_time=59 * 60, avg_depth=22.6, mixtures=[_parallel(volume=11.1), _parallel(volume=11.1)]
         )
 
         assert result is not None
@@ -557,7 +561,7 @@ class TestComputeParallelGasUse:
         cost the diver a number they already had.
         """
         pair = compute_parallel_gas_use(
-            duration=59 * 60,
+            submerged_time=59 * 60,
             avg_depth=22.6,
             mixtures=[
                 _parallel(volume=11.1, start_pressure=200.0, end_pressure=110.0),
@@ -565,7 +569,7 @@ class TestComputeParallelGasUse:
             ],
         )
         manifolded = compute_gas_use(
-            duration=59 * 60,
+            submerged_time=59 * 60,
             avg_depth=22.6,
             mixtures=[_mixture(volume=22.2, start_pressure=200.0, end_pressure=107.5)],
         )
@@ -583,7 +587,7 @@ class TestComputeParallelGasUse:
         amounts of gas - the equal-size constraint Shearwater and Garmin both impose.
         """
         result = compute_parallel_gas_use(
-            duration=59 * 60,
+            submerged_time=59 * 60,
             avg_depth=22.6,
             mixtures=[
                 _parallel(volume=11.1, start_pressure=200.0, end_pressure=110.0),
@@ -603,7 +607,7 @@ class TestComputeParallelGasUse:
         exactly what a manifolded pair sharing one gauge would have shown.
         """
         result = compute_parallel_gas_use(
-            duration=59 * 60,
+            submerged_time=59 * 60,
             avg_depth=22.6,
             mixtures=[
                 _parallel(volume=11.1, start_pressure=200.0, end_pressure=15.0),
@@ -617,12 +621,12 @@ class TestComputeParallelGasUse:
 
     def test_no_plausibility_ceiling_is_applied(self) -> None:
         """`MAX_PLAUSIBLE_RMV` guards the per-tank path's segmentation errors. This path
-        divides by the dive's own duration and depth, so there is nothing to segment
+        divides by the dive's own submerged_time and depth, so there is nothing to segment
         wrongly - and applying it here would let one 24 L manifolded row return a figure
         where the same dive as two flagged 12 L rows returned `None`.
         """
         result = compute_parallel_gas_use(
-            duration=60,
+            submerged_time=60,
             avg_depth=10.0,
             mixtures=[
                 _parallel(volume=12.0, start_pressure=200.0, end_pressure=0.0),
@@ -644,10 +648,10 @@ class TestComputeParallelGasUseReturnsNone:
         """A lone cylinder flagged parallel is `compute_gas_use`'s dive, not this one -
         the dispatcher never routes it here, and the function refuses it on its own too.
         """
-        assert compute_parallel_gas_use(duration=59 * 60, avg_depth=22.6, mixtures=[_parallel()]) is None
+        assert compute_parallel_gas_use(submerged_time=59 * 60, avg_depth=22.6, mixtures=[_parallel()]) is None
 
     def test_when_there_are_no_mixtures(self) -> None:
-        assert compute_parallel_gas_use(duration=59 * 60, avg_depth=22.6, mixtures=[]) is None
+        assert compute_parallel_gas_use(submerged_time=59 * 60, avg_depth=22.6, mixtures=[]) is None
 
     def test_when_a_cylinder_is_unflagged(self) -> None:
         """A pair plus a bottle nobody has answered for. Summing the flagged rows alone
@@ -656,7 +660,9 @@ class TestComputeParallelGasUseReturnsNone:
         """
         assert (
             compute_parallel_gas_use(
-                duration=59 * 60, avg_depth=22.6, mixtures=[_parallel(volume=11.1), _parallel(volume=11.1), _mixture()]
+                submerged_time=59 * 60,
+                avg_depth=22.6,
+                mixtures=[_parallel(volume=11.1), _parallel(volume=11.1), _mixture()],
             )
             is None
         )
@@ -667,7 +673,7 @@ class TestComputeParallelGasUseReturnsNone:
         """
         assert (
             compute_parallel_gas_use(
-                duration=59 * 60,
+                submerged_time=59 * 60,
                 avg_depth=22.6,
                 mixtures=[
                     _parallel(volume=11.1),
@@ -686,7 +692,10 @@ class TestComputeParallelGasUseReturnsNone:
             _parallel(volume=11.1, start_pressure=None),
             _parallel(volume=11.1, end_pressure=None),
         ):
-            assert compute_parallel_gas_use(duration=59 * 60, avg_depth=22.6, mixtures=[_parallel(), partial]) is None
+            assert (
+                compute_parallel_gas_use(submerged_time=59 * 60, avg_depth=22.6, mixtures=[_parallel(), partial])
+                is None
+            )
 
     def test_when_nothing_came_out_of_any_cylinder(self) -> None:
         """Every cylinder as full as it went down: an unbreathed set or a typo, not a
@@ -697,7 +706,7 @@ class TestComputeParallelGasUseReturnsNone:
             _parallel(start_pressure=210.0, end_pressure=210.0),
         ]
 
-        assert compute_parallel_gas_use(duration=59 * 60, avg_depth=22.6, mixtures=untouched) is None
+        assert compute_parallel_gas_use(submerged_time=59 * 60, avg_depth=22.6, mixtures=untouched) is None
 
     def test_when_average_depth_is_missing_or_nonsensical(self) -> None:
         """`avg_depth` is this path's only depth - there is no profile behind it to fall
@@ -705,18 +714,20 @@ class TestComputeParallelGasUseReturnsNone:
         """
         pair = [_parallel(volume=11.1), _parallel(volume=11.1)]
 
-        assert compute_parallel_gas_use(duration=59 * 60, avg_depth=None, mixtures=pair) is None
-        assert compute_parallel_gas_use(duration=59 * 60, avg_depth=0.0, mixtures=pair) is None
-        assert compute_parallel_gas_use(duration=59 * 60, avg_depth=-1.0, mixtures=pair) is None
+        assert compute_parallel_gas_use(submerged_time=59 * 60, avg_depth=None, mixtures=pair) is None
+        assert compute_parallel_gas_use(submerged_time=59 * 60, avg_depth=0.0, mixtures=pair) is None
+        assert compute_parallel_gas_use(submerged_time=59 * 60, avg_depth=-1.0, mixtures=pair) is None
 
-    def test_when_the_duration_or_a_volume_is_not_positive(self) -> None:
+    def test_when_the_submerged_time_or_a_volume_is_not_positive(self) -> None:
         """Re-checked here for the same reason `compute_gas_use` re-checks them: this is a
         pure function that tests and future callers can reach with unsaved input, and a
         zero in the denominator would raise rather than return a wrong number.
         """
-        assert compute_parallel_gas_use(duration=0, avg_depth=22.6, mixtures=[_parallel(), _parallel()]) is None
+        assert compute_parallel_gas_use(submerged_time=0, avg_depth=22.6, mixtures=[_parallel(), _parallel()]) is None
         assert (
-            compute_parallel_gas_use(duration=59 * 60, avg_depth=22.6, mixtures=[_parallel(), _parallel(volume=0.0)])
+            compute_parallel_gas_use(
+                submerged_time=59 * 60, avg_depth=22.6, mixtures=[_parallel(), _parallel(volume=0.0)]
+            )
             is None
         )
 
@@ -726,7 +737,7 @@ class TestComputeParallelGasUseReturnsNone:
         covers the whole dive, reporting an RMV that is too *low* rather than none."""
         assert (
             compute_parallel_gas_use(
-                duration=59 * 60,
+                submerged_time=59 * 60,
                 avg_depth=22.6,
                 mixtures=[_parallel(volume=11.1), _parallel(volume=None)],
             )
@@ -742,7 +753,7 @@ class TestComputeParallelGasUseReturnsNone:
         """
         assert (
             compute_parallel_gas_use(
-                duration=59 * 60,
+                submerged_time=59 * 60,
                 avg_depth=22.6,
                 mixtures=[_parallel(volume=None), _parallel(volume=None)],
             )
@@ -760,10 +771,10 @@ class TestResolveGasUse:
         attribution = _attribution(_attributed(1, seconds=600, mean_depth_cm=3000))
 
         result = resolve_gas_use(
-            duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1)], attribution=attribution
+            submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1)], attribution=attribution
         )
 
-        assert result == compute_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1)])
+        assert result == compute_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1)])
         # In particular the profile's own mean depth does not get to override the dive's
         # `avg_depth`, which is the diver's record and may have been edited.
         assert result.rmv == 14.29
@@ -776,7 +787,9 @@ class TestResolveGasUse:
         parallel fallback rescues a dive only where the diver said it was a parallel set.
         """
         assert (
-            resolve_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1), _mixture(gas_number=2)])
+            resolve_gas_use(
+                submerged_time=45 * 60, avg_depth=18.0, mixtures=[_mixture(gas_number=1), _mixture(gas_number=2)]
+            )
             is None
         )
 
@@ -785,7 +798,7 @@ class TestResolveGasUse:
         pressures, no profile and therefore no gas switches to attribute anything from.
         """
         result = resolve_gas_use(
-            duration=59 * 60,
+            submerged_time=59 * 60,
             avg_depth=22.6,
             mixtures=[
                 _parallel(volume=11.1, start_pressure=200.0, end_pressure=110.0),
@@ -808,7 +821,7 @@ class TestResolveGasUse:
             _attributed(2, seconds=2400, mean_depth_cm=1200),
         )
 
-        result = resolve_gas_use(duration=45 * 60, avg_depth=18.0, mixtures=mixtures, attribution=attribution)
+        result = resolve_gas_use(submerged_time=45 * 60, avg_depth=18.0, mixtures=mixtures, attribution=attribution)
 
         assert result == compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution)
         assert result is not None
@@ -828,7 +841,7 @@ class TestResolveGasUse:
 
         assert compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution) is None
 
-        result = resolve_gas_use(duration=59 * 60, avg_depth=22.6, mixtures=mixtures, attribution=attribution)
+        result = resolve_gas_use(submerged_time=59 * 60, avg_depth=22.6, mixtures=mixtures, attribution=attribution)
 
         assert result is not None
         assert result.gas_used == 2053.5
@@ -839,7 +852,7 @@ class TestResolveGasUse:
         """
         assert (
             resolve_gas_use(
-                duration=59 * 60,
+                submerged_time=59 * 60,
                 avg_depth=22.6,
                 mixtures=[_parallel(volume=11.1), _mixture(volume=11.1, usage=TankUsage.STAGED)],
             )
@@ -848,7 +861,7 @@ class TestResolveGasUse:
 
     def test_a_multi_cylinder_dive_with_attribution_is_computed_per_tank(self):
         result = resolve_gas_use(
-            duration=45 * 60,
+            submerged_time=45 * 60,
             avg_depth=18.0,
             mixtures=[_mixture(gas_number=1), _mixture(gas_number=2)],
             attribution=_attribution(

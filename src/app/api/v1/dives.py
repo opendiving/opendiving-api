@@ -154,7 +154,7 @@ router = APIRouter(tags=["dives"])
 
 
 _DIVE_CONSTRAINT_MESSAGES = {
-    "ck_dive_duration_positive": "Duration must be positive.",
+    "ck_dive_submerged_time_positive": "Dive time must be positive.",
     "ck_dive_visibility_non_negative": "Visibility must be zero or positive.",
     "ck_dive_max_depth_positive": "Max depth must be positive.",
     "ck_dive_avg_depth_positive": "Average depth must be positive.",
@@ -412,7 +412,7 @@ def _to_public_dive_with_mixtures(
         # compute before caching, unlike gear service status: nothing about it depends
         # on when it's read.
         gas_use=resolve_gas_use(
-            duration=data["duration"],
+            submerged_time=data["submerged_time"],
             avg_depth=data["avg_depth"],
             mixtures=mixtures,
             attribution=attribution,
@@ -590,7 +590,7 @@ async def write_dive(
     order, each with the role the person had; one named twice keeps the first. `tags` are
     names in the diver's order: each is trimmed and is the diver's tag it matches once both
     are case-folded, or a new one, and two that fold to one keep the first spelling.
-    Values the DB's domain constraints reject (a non-positive duration, a mixture over 100%)
+    Values the DB's domain constraints reject (a non-positive submerged time, a mixture over 100%)
     also come back as 422 with the offending field named.
     """
     trip_id: int | None = None

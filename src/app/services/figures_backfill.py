@@ -1,9 +1,9 @@
-"""The data path for dives whose `duration` and `avg_depth` hold the whole recording's figures.
+"""The data path for dives whose `submerged_time` and `avg_depth` hold the whole recording's figures.
 
 A dive's figures are its time in the water and the mean depth over that time. A stored row can
 hold the recording's whole span and its whole-recording mean instead, the end-of-dive delay at
 the surface included, and nothing records whether a diver typed either. So the test is on the
-value: a `duration` within a second of the primary
+value: a `submerged_time` within a second of the primary
 recording's span, and an `avg_depth` within 0.1 m of the time-weighted mean over its stored
 samples, read as untouched; anything else is the diver's and stays.
 
@@ -74,7 +74,7 @@ class FigureRewrite:
     user_id: int
     # Where the new figures came from: `files`, `merge`, `document` or `samples`.
     source: str
-    duration: tuple[int, int] | None
+    submerged_time: tuple[int, int] | None
     avg_depth: tuple[float, float] | None
 
 
@@ -113,7 +113,7 @@ def stated_over_derived(parsed: Sequence[ParsedDiveSchema]) -> tuple[int | None,
     file's stated one; a stated figure stays. One recording is one computer, so the form's
     same-device condition always holds here.
     """
-    figures: dict[str, tuple[int | float | None, bool]] = {"duration": (None, False), "avg_depth": (None, False)}
+    figures: dict[str, tuple[int | float | None, bool]] = {"submerged_time": (None, False), "avg_depth": (None, False)}
     for file in parsed:
         for name, (value, derived) in figures.items():
             incoming = getattr(file, name)
@@ -122,12 +122,12 @@ def stated_over_derived(parsed: Sequence[ParsedDiveSchema]) -> tuple[int | None,
             stated = name not in file.inferred
             if value is None or (derived and stated):
                 figures[name] = (incoming, not stated)
-    duration, avg_depth = figures["duration"][0], figures["avg_depth"][0]
-    return (None if duration is None else int(duration)), (None if avg_depth is None else float(avg_depth))
+    submerged_time, avg_depth = figures["submerged_time"][0], figures["avg_depth"][0]
+    return (None if submerged_time is None else int(submerged_time)), (None if avg_depth is None else float(avg_depth))
 
 
-def untouched_duration(stored: int, span_ms: int | None) -> bool:
-    """Whether a stored duration is the whole-recording one the old readers wrote."""
+def untouched_submerged_time(stored: int, span_ms: int | None) -> bool:
+    """Whether a stored submerged time is the whole-recording one the old readers wrote."""
     return span_ms is not None and abs(stored * MILLISECONDS_PER_SECOND - span_ms) <= SPAN_TOLERANCE_MS
 
 
@@ -142,10 +142,10 @@ def untouched_avg_depth(stored: float | None, whole_mean: Decimal | None) -> boo
 async def backfill_dive_figures(
     db: AsyncSession, *, devices: Sequence[Device] = (), user_id: int | None = None, dry_run: bool = False
 ) -> FiguresBackfillReport:
-    """Rewrite every live dive's untouched `duration` and `avg_depth` to its time in the water.
+    """Rewrite every live dive's untouched `submerged_time` and `avg_depth` to its time in the water.
 
     A dive is examined when its primary recording's stored profile carries depth samples. A
-    figure is rewritten when it is untouched (`untouched_duration`, `untouched_avg_depth`) and
+    figure is rewritten when it is untouched (`untouched_submerged_time`, `untouched_avg_depth`) and
     differs from the new one, and an average only where it stays within the dive's maximum.
     `devices` names the primary devices whose document-supplied dives may be rewritten; any
     other document-supplied dive stays as stored. `user_id` confines the run to one account.
@@ -159,7 +159,7 @@ async def backfill_dive_figures(
             Dive.id,
             Dive.uuid,
             Dive.user_id,
-            Dive.duration,
+            Dive.submerged_time,
             Dive.avg_depth,
             Dive.max_depth,
             DiveRecording.id.label("recording_id"),
@@ -183,12 +183,12 @@ async def backfill_dive_figures(
             continue
         examined += 1
 
-        duration_open = untouched_duration(row.duration, stored.duration)
+        submerged_time_open = untouched_submerged_time(row.submerged_time, stored.duration)
         avg_open = untouched_avg_depth(row.avg_depth, whole_recording_mean(stored.profile))
-        if not (duration_open or avg_open):
+        if not (submerged_time_open or avg_open):
             continue
 
-        new_duration: int | None
+        new_submerged_time: int | None
         new_avg: float | None
         if stored.parser_key == IMPORT_PARSER_KEY:
             if Device(row.device_brand, row.device_model) not in named:
@@ -216,18 +216,21 @@ async def backfill_dive_figures(
                 logger.warning("Skipping dive %s: a stored file could not be re-read", row.uuid)
                 failed += 1
                 continue
-            new_duration, new_avg = stated_over_derived([each for each in parsed if each is not None])
+            new_submerged_time, new_avg = stated_over_derived([each for each in parsed if each is not None])
         else:
             in_water = in_water_of(stored.profile)
-            new_duration = None if in_water is None else in_water.duration
+            new_submerged_time = None if in_water is None else in_water.submerged_time
             new_avg = None if in_water is None else float(in_water.avg_depth)
 
         rewrite = FigureRewrite(
             dive_uuid=row.uuid,
             user_id=row.user_id,
             source=source,
-            duration=(row.duration, new_duration)
-            if duration_open and new_duration is not None and new_duration > 0 and new_duration != row.duration
+            submerged_time=(row.submerged_time, new_submerged_time)
+            if submerged_time_open
+            and new_submerged_time is not None
+            and new_submerged_time > 0
+            and new_submerged_time != row.submerged_time
             else None,
             avg_depth=(row.avg_depth, new_avg)
             if avg_open
@@ -236,13 +239,13 @@ async def backfill_dive_figures(
             and (row.max_depth is None or new_avg <= row.max_depth)
             else None,
         )
-        if rewrite.duration is None and rewrite.avg_depth is None:
+        if rewrite.submerged_time is None and rewrite.avg_depth is None:
             continue
 
         if not dry_run:
             values: dict[str, object] = {}
-            if rewrite.duration is not None:
-                values["duration"] = rewrite.duration[1]
+            if rewrite.submerged_time is not None:
+                values["submerged_time"] = rewrite.submerged_time[1]
             if rewrite.avg_depth is not None:
                 values["avg_depth"] = rewrite.avg_depth[1]
             try:

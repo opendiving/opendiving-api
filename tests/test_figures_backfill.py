@@ -39,7 +39,7 @@ from src.app.services.figures_backfill import (
     backfill_dive_figures,
     stated_over_derived,
     untouched_avg_depth,
-    untouched_duration,
+    untouched_submerged_time,
     whole_recording_mean,
 )
 from tests.conftest import db_available
@@ -48,12 +48,12 @@ from tests.helpers.generators import create_dive, create_dive_recording, create_
 FIXTURES = Path(__file__).parent / "fixtures" / "dive_files"
 
 
-def _parsed(duration: int | None, avg_depth: float | None, *inferred: str) -> ParsedDiveSchema:
+def _parsed(submerged_time: int | None, avg_depth: float | None, *inferred: str) -> ParsedDiveSchema:
     return ParsedDiveSchema(
         avg_depth=avg_depth,
         bottom_temperature=None,
         dive_number=None,
-        duration=duration,
+        submerged_time=submerged_time,
         max_depth=None,
         start_time=None,
         mixtures=[],
@@ -63,14 +63,14 @@ def _parsed(duration: int | None, avg_depth: float | None, *inferred: str) -> Pa
 
 class TestWhatReadsAsUntouched:
     @pytest.mark.parametrize(("stored", "span_ms"), [(3814, 3_814_000), (3815, 3_814_000), (3813, 3_814_000)])
-    def test_a_duration_within_a_second_of_the_span(self, stored: int, span_ms: int) -> None:
+    def test_a_submerged_time_within_a_second_of_the_span(self, stored: int, span_ms: int) -> None:
         """Inclusive: the old FIT reader's session time rounds up past the last sample, so
         most sit exactly a second over."""
-        assert untouched_duration(stored, span_ms)
+        assert untouched_submerged_time(stored, span_ms)
 
     @pytest.mark.parametrize("stored", [3812, 3816, 3424])
-    def test_any_other_duration_is_the_divers(self, stored: int) -> None:
-        assert not untouched_duration(stored, 3_814_000)
+    def test_any_other_submerged_time_is_the_divers(self, stored: int) -> None:
+        assert not untouched_submerged_time(stored, 3_814_000)
 
     def test_a_mean_within_a_tenth_of_the_whole_recordings(self) -> None:
         assert untouched_avg_depth(9.6, Decimal("9.605"))
@@ -90,19 +90,22 @@ class TestTheFilesOrder:
 
     def test_a_later_files_stated_figure_replaces_a_derived_one(self) -> None:
         """The motivating pair: the FIT derived both, the JSON states both."""
-        assert stated_over_derived([_parsed(3440, 10.6, "duration", "avg_depth"), _parsed(3424, 10.62)]) == (
+        assert stated_over_derived([_parsed(3440, 10.6, "submerged_time", "avg_depth"), _parsed(3424, 10.62)]) == (
             3424,
             10.62,
         )
 
     def test_a_stated_figure_is_never_replaced(self) -> None:
-        assert stated_over_derived([_parsed(3424, 10.62), _parsed(3440, 10.6, "duration", "avg_depth")]) == (
+        assert stated_over_derived([_parsed(3424, 10.62), _parsed(3440, 10.6, "submerged_time", "avg_depth")]) == (
             3424,
             10.62,
         )
 
     def test_a_derived_figure_stays_when_nothing_later_states_one(self) -> None:
-        assert stated_over_derived([_parsed(3440, 10.6, "duration"), _parsed(3500, None, "duration")]) == (3440, 10.6)
+        assert stated_over_derived([_parsed(3440, 10.6, "submerged_time"), _parsed(3500, None, "submerged_time")]) == (
+            3440,
+            10.6,
+        )
 
     def test_a_blank_takes_the_next_files_figure(self) -> None:
         assert stated_over_derived([_parsed(3424, None), _parsed(3440, 10.6, "avg_depth")]) == (3424, 10.6)
@@ -162,8 +165,8 @@ async def _set(db: AsyncSession, dive: Dive, **values: Any) -> None:
 
 
 async def _figures(db: AsyncSession, dive: Dive) -> tuple[int, float | None]:
-    row = (await db.execute(select(Dive.duration, Dive.avg_depth).where(Dive.id == dive.id))).one()
-    return row.duration, row.avg_depth
+    row = (await db.execute(select(Dive.submerged_time, Dive.avg_depth).where(Dive.id == dive.id))).one()
+    return row.submerged_time, row.avg_depth
 
 
 async def _ocean_fit_dive(db: AsyncSession, sync_db: Session, diver: User, *, past_span_ms: int = 1000) -> Dive:
@@ -171,7 +174,7 @@ async def _ocean_fit_dive(db: AsyncSession, sync_db: Session, diver: User, *, pa
     past the samples' span, and the session's whole-recording mean of 9.49 m."""
     dive = create_dive(sync_db, diver, max_depth=19.04)
     await _attach(db, diver, dive, "suunto-ocean-2026.fit", "fit")
-    await _set(db, dive, duration=round((await _span_ms(db, dive) + past_span_ms) / 1000), avg_depth=9.49)
+    await _set(db, dive, submerged_time=round((await _span_ms(db, dive) + past_span_ms) / 1000), avg_depth=9.49)
     return dive
 
 
@@ -206,7 +209,7 @@ async def _sampled_dive(
     )
     whole_mean = whole_recording_mean(profile)
     assert whole_mean is not None
-    await _set(db, dive, duration=2340, avg_depth=round(float(whole_mean), 2))
+    await _set(db, dive, submerged_time=2340, avg_depth=round(float(whole_mean), 2))
     return dive
 
 
@@ -237,15 +240,15 @@ class TestTheBackfillAgainstTheRows:
 
         report = await backfill_dive_figures(async_db, user_id=diver.id, dry_run=True)
 
-        assert [rewrite.duration for rewrite in report.rewrites] == [(before[0], 3063)]
+        assert [rewrite.submerged_time for rewrite in report.rewrites] == [(before[0], 3063)]
         assert await _figures(async_db, dive) == before
 
     @pytest.mark.asyncio
-    async def test_a_typed_duration_stays_while_the_untouched_mean_moves(
+    async def test_a_typed_submerged_time_stays_while_the_untouched_mean_moves(
         self, volume: Any, async_db: AsyncSession, db: Session, diver: User
     ) -> None:
         dive = await _ocean_fit_dive(async_db, db, diver)
-        await _set(async_db, dive, duration=3600)
+        await _set(async_db, dive, submerged_time=3600)
 
         await backfill_dive_figures(async_db, user_id=diver.id)
 
@@ -290,7 +293,7 @@ class TestTheBackfillAgainstTheRows:
         """A D5's JSON states its whole logged period, which the reader keeps."""
         dive = create_dive(db, diver, max_depth=46.29)
         await _attach(async_db, diver, dive, "suunto-d5.json", "suunto_json")
-        await _set(async_db, dive, duration=4683, avg_depth=17.79)
+        await _set(async_db, dive, submerged_time=4683, avg_depth=17.79)
 
         report = await backfill_dive_figures(async_db, user_id=diver.id)
 
@@ -352,6 +355,8 @@ class TestTheBackfillAgainstTheRows:
 
         await backfill_dive_figures(async_db, user_id=diver.id)
 
-        total = await async_db.scalar(select(UserDiveStats.total_time).where(UserDiveStats.user_id == diver.id))
+        total = await async_db.scalar(
+            select(UserDiveStats.total_submerged_time).where(UserDiveStats.user_id == diver.id)
+        )
         assert total == (await _figures(async_db, dive))[0] == IN_WATER[0]
         invalidated.assert_awaited_once_with(diver.id)

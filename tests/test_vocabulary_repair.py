@@ -159,7 +159,7 @@ class TestTheSodaRepair:
             user_id=owner.id,
             dive_number=1,
             start_time=datetime.now(UTC),
-            duration=1800,
+            submerged_time=1800,
             notes="",
             water_type="soda",
         )
@@ -179,7 +179,7 @@ class TestTheSodaRepair:
             user_id=owner.id,
             dive_number=2,
             start_time=datetime.now(UTC),
-            duration=1800,
+            submerged_time=1800,
             notes="",
             water_type="brackish",
         )

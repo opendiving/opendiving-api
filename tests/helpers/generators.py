@@ -351,7 +351,7 @@ def create_dive(
             course_id=course.id if course is not None else None,
             dive_number=1,
             start_time=datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
-            duration=1800,
+            submerged_time=1800,
             max_depth=max_depth,
             notes="",
             is_deleted=is_deleted,
@@ -405,7 +405,7 @@ def create_dive_log(
             user_id=user.id,
             dive_number=dive_number,
             start_time=log_day(day),
-            duration=1800,
+            submerged_time=1800,
             notes="",
             **overrides,
         )

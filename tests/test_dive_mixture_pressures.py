@@ -293,7 +293,7 @@ class TestTheRouteRefusesBeforeTheDatabase:
             json={
                 "dive_number": 1,
                 "start_time": START_TIME,
-                "duration": 2048,
+                "submerged_time": 2048,
                 "mixtures": [{"volume": 11.1, "oxygen": 21.0, "helium": 0.0, "start_pressure": 0}],
             },
         )
@@ -325,4 +325,6 @@ class TestTheRouteRefusesBeforeTheDatabase:
         with pytest.raises(ValidationError):
             DiveUpdateRequest.model_validate(body)
         with pytest.raises(ValidationError):
-            DiveCreateRequest.model_validate(body | {"dive_number": 1, "start_time": START_TIME, "duration": 2048})
+            DiveCreateRequest.model_validate(
+                body | {"dive_number": 1, "start_time": START_TIME, "submerged_time": 2048}
+            )

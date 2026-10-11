@@ -300,7 +300,7 @@ class TestTheSurvivingDivesFigures:
         record's own time in the water, which here is the whole span."""
         folded = _folded_in_milliseconds(_series(FIRST_PART_SAMPLES, step=10_000))
 
-        assert dive_figures([], folded=folded).duration == RESTART_DELTA + (SECOND_PART_SAMPLES - 1) * 10 == 3163
+        assert dive_figures([], folded=folded).submerged_time == RESTART_DELTA + (SECOND_PART_SAMPLES - 1) * 10 == 3163
 
     def test_a_fold_leaves_out_the_gap_when_the_diver_had_surfaced(self) -> None:
         """The module's other reason for a fold, a diver who surfaced to reposition the boat:
@@ -310,7 +310,7 @@ class TestTheSurvivingDivesFigures:
 
         figures = dive_figures([], folded=_folded_in_milliseconds(surfaced))
 
-        assert figures.duration == (FIRST_PART_SAMPLES - 1) * 10 + (SECOND_PART_SAMPLES - 1) * 10 == 3120
+        assert figures.submerged_time == (FIRST_PART_SAMPLES - 1) * 10 + (SECOND_PART_SAMPLES - 1) * 10 == 3120
 
     def test_a_folds_average_is_the_mean_over_its_time_in_the_water(self) -> None:
         folded = NormalizedProfile(depth=ProfileSeries(t=[0, 10_000, 20_000, 30_000], v=[100, 1000, 2000, 0]))
@@ -318,7 +318,7 @@ class TestTheSurvivingDivesFigures:
         figures = dive_figures([], folded=folded)
 
         # The first interval starts at 1.0 m and does not count; the next two do.
-        assert figures.duration == 20
+        assert figures.submerged_time == 20
         assert figures.avg_depth == (10 * 15.0 + 10 * 10.0) / 20
 
     def test_side_by_side_the_dives_own_figures_stand(self) -> None:
@@ -326,7 +326,7 @@ class TestTheSurvivingDivesFigures:
         primary computer's figures rather than any span across the two."""
         figures = dive_figures([1900, 1904], folded=None)
 
-        assert (figures.duration, figures.avg_depth) == (None, None)
+        assert (figures.submerged_time, figures.avg_depth) == (None, None)
 
     def test_the_deepest_reading_wins_wherever_it_came_from(self) -> None:
         assert dive_figures([1900, None, 1904], folded=None).max_depth == 19.04
@@ -334,15 +334,15 @@ class TestTheSurvivingDivesFigures:
     def test_nothing_to_read_leaves_every_figure_unanswered(self) -> None:
         """`None` is the caller's signal to leave the dive's own numbers alone, which is not
         the same as clearing them: a merge of two profile-less recordings must not blank a
-        duration the diver typed."""
-        assert dive_figures([], folded=None) == DiveFigures(duration=None, avg_depth=None, max_depth=None)
+        submerged_time the diver typed."""
+        assert dive_figures([], folded=None) == DiveFigures(submerged_time=None, avg_depth=None, max_depth=None)
 
     def test_a_fold_never_in_the_water_leaves_the_dives_figures_standing(self) -> None:
         shallow = NormalizedProfile(depth=ProfileSeries(t=[0, 10_000, 20_000], v=[120, 100, 50]))
 
         figures = dive_figures([120], folded=shallow)
 
-        assert (figures.duration, figures.avg_depth, figures.max_depth) == (None, None, 1.2)
+        assert (figures.submerged_time, figures.avg_depth, figures.max_depth) == (None, None, 1.2)
 
 
 class TestTheNotesTheOtherDiveLeavesBehind:

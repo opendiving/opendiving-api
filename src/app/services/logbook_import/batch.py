@@ -161,7 +161,7 @@ class _Dives:
                         Dive.start_time,
                         Dive.utc_offset_minutes,
                         Dive.start_date_only,
-                        Dive.duration,
+                        Dive.submerged_time,
                         Dive.max_depth,
                     ).where(Dive.id.in_(ids))
                 )
@@ -193,14 +193,14 @@ class _Dives:
                     "start_time": combine_dive_start_time(
                         stored.start_time, stored.utc_offset_minutes, stored.start_date_only
                     ),
-                    "duration": stored.duration,
+                    "submerged_time": stored.submerged_time,
                     "max_depth": stored.max_depth,
                     "device": devices.get(stored.id),
                 }
             elif row.source is not None:
                 figures = {
                     "start_time": row.source.started_at,
-                    "duration": row.source.duration,
+                    "submerged_time": row.source.submerged_time,
                     "max_depth": row.source.max_depth,
                     "device": _documented_device(row.source),
                 }

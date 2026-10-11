@@ -853,7 +853,7 @@ class TestSendRenewalReminders:
 
 
 def _review(year: int = 2025) -> YearInReview:
-    dive = ReviewedDive(id=1, uuid=uuid7(), day=date(year, 5, 1), max_depth=20.0, duration=2400)
+    dive = ReviewedDive(id=1, uuid=uuid7(), day=date(year, 5, 1), max_depth=20.0, submerged_time=2400)
     return YearInReview(
         year=year,
         dives=1,
@@ -1072,7 +1072,7 @@ class TestSendYearInReviewAgainstPostgres:
 
     @staticmethod
     def _dive(db: Session, diver: User, start_time: datetime, **columns: Any) -> Dive:
-        values: dict[str, Any] = {"duration": 2400, "max_depth": 18.0, **columns}
+        values: dict[str, Any] = {"submerged_time": 2400, "max_depth": 18.0, **columns}
         dive = Dive(user_id=diver.id, dive_number=1, start_time=start_time, notes="", **values)
         db.add(dive)
         db.commit()
@@ -1087,7 +1087,9 @@ class TestSendYearInReviewAgainstPostgres:
     async def test_the_review_and_its_mark(self, db: Session, diver: User) -> None:
         # 00:30 on 1 January in Bangkok, stored in the year before: a dive of this year.
         self._dive(db, diver, datetime(self.YEAR - 1, 12, 31, 17, 30, tzinfo=UTC), utc_offset_minutes=420)
-        deepest = self._dive(db, diver, datetime(self.YEAR, 6, 1, 9, 0, tzinfo=UTC), max_depth=31.0, duration=3000)
+        deepest = self._dive(
+            db, diver, datetime(self.YEAR, 6, 1, 9, 0, tzinfo=UTC), max_depth=31.0, submerged_time=3000
+        )
         # 03:00 on 1 January of the next year in Bangkok, stored in this one: not this year's.
         self._dive(db, diver, datetime(self.YEAR, 12, 31, 20, 0, tzinfo=UTC), utc_offset_minutes=420, max_depth=40.0)
         self._dive(db, diver, datetime(self.YEAR, 7, 1, 9, 0, tzinfo=UTC), max_depth=50.0, is_deleted=True)

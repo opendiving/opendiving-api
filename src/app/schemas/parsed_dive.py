@@ -23,7 +23,7 @@ MODEL_NAME_MAX_LENGTH = 64
 
 # The form fields a reader may derive rather than read off a file - DiveJSON's
 # `extensions.divejson.inferred` list, under the form's names.
-InferredField = Literal["duration", "avg_depth", "max_depth"]
+InferredField = Literal["submerged_time", "avg_depth", "max_depth"]
 
 
 class _ParserOutput(BaseModel):
@@ -383,7 +383,7 @@ class ParsedDiveSchema(_ParserOutput):
     avg_depth: float | None
     bottom_temperature: float | None
     dive_number: int | None
-    duration: int | None
+    submerged_time: int | None
     max_depth: float | None
     start_time: str | None
     mixtures: list[DiveMixtureSchema]

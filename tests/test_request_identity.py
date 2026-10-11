@@ -251,7 +251,7 @@ def _install_dive(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         dive_number=1,
         start_time=datetime(2026, 6, 1, 7, tzinfo=UTC),
         utc_offset_minutes=120,
-        duration=1800,
+        submerged_time=1800,
         created_at=CREATED_AT,
     ).model_dump()
     for name in ("replace_mixtures_for_dive", "replace_dive_sites_for_dive", "replace_gear_items_for_dive"):
@@ -350,7 +350,7 @@ CREATE_ROUTES = (
     CreateRoute("/course", {"name": "Advanced Nitrox", "agency": "tdi"}, _install_course),
     CreateRoute(
         "/dive",
-        {"dive_number": 1, "start_time": START_TIME, "duration": 1800, "notes": ""},
+        {"dive_number": 1, "start_time": START_TIME, "submerged_time": 1800, "notes": ""},
         _install_dive,
     ),
     CreateRoute("/dive-site", {"name": "Blue Hole"}, _install_dive_site),
@@ -466,7 +466,7 @@ LIST_ROUTES = (
         "/dives",
         dives_module,
         "_cached_read_dives",
-        _PUBLIC_ROW | {"dive_number": 1, "start_time": START_TIME, "duration": 1800, "recording_count": 0},
+        _PUBLIC_ROW | {"dive_number": 1, "start_time": START_TIME, "submerged_time": 1800, "recording_count": 0},
     ),
     ListRoute("/dive-sites", dive_sites_module, "_cached_read_dive_sites", _PUBLIC_ROW | {"name": "Blue Hole"}),
     ListRoute(

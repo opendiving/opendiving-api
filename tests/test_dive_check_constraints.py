@@ -41,7 +41,7 @@ def _make_dive(user_id: int, **overrides: Any) -> Dive:
         "user_id": user_id,
         "dive_number": 1,
         "start_time": datetime.now(UTC),
-        "duration": 1800,
+        "submerged_time": 1800,
         "notes": "",
     }
     defaults.update(overrides)
@@ -76,14 +76,14 @@ def _assert_rejected(db: Session, obj: Any) -> None:
 
 
 class TestDiveCheckConstraints:
-    def test_zero_duration_is_rejected(self, db: Session, dive_owner: User) -> None:
-        _assert_violates(db, _make_dive(dive_owner.id, duration=0), "ck_dive_duration_positive")
+    def test_zero_submerged_time_is_rejected(self, db: Session, dive_owner: User) -> None:
+        _assert_violates(db, _make_dive(dive_owner.id, submerged_time=0), "ck_dive_submerged_time_positive")
 
-    def test_negative_duration_is_rejected(self, db: Session, dive_owner: User) -> None:
-        _assert_violates(db, _make_dive(dive_owner.id, duration=-5), "ck_dive_duration_positive")
+    def test_negative_submerged_time_is_rejected(self, db: Session, dive_owner: User) -> None:
+        _assert_violates(db, _make_dive(dive_owner.id, submerged_time=-5), "ck_dive_submerged_time_positive")
 
-    def test_positive_duration_is_allowed(self, db: Session, dive_owner: User) -> None:
-        db.add(_make_dive(dive_owner.id, duration=1))
+    def test_positive_submerged_time_is_allowed(self, db: Session, dive_owner: User) -> None:
+        db.add(_make_dive(dive_owner.id, submerged_time=1))
         db.commit()
 
     def test_negative_visibility_is_rejected(self, db: Session, dive_owner: User) -> None:

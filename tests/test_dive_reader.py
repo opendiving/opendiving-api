@@ -97,7 +97,7 @@ class TestTheReader:
 
     def test_a_non_conforming_conversion_is_the_converters_bug(self, monkeypatch) -> None:
         def non_conforming(*args: object, **kwargs: object) -> Conversion:
-            issue = Issue(path="dives[0].duration", message="-1 is less than the minimum of 0")
+            issue = Issue(path="dives[0].submerged_time", message="-1 is less than the minimum of 0")
             raise NonConformingOutputError([issue])
 
         monkeypatch.setattr(divejson, "convert", non_conforming)
@@ -168,13 +168,13 @@ class TestThePrefill:
         assert [row.gas_number for row in read_prefill(_fixture("suunto-ocean-2026.json"))[1].mixtures] == [0]
         assert [row.gas_number for row in read_prefill(_fixture("suunto-ocean-2026.fit"))[1].mixtures] == [None]
 
-    def test_the_ocean_json_keeps_its_in_water_time_as_the_duration(self) -> None:
-        """`DiveTime`'s 3 051 s, not the longer `Duration` beside it - and the dive's duration
+    def test_the_ocean_json_keeps_its_in_water_time_as_the_submerged_time(self) -> None:
+        """`DiveTime`'s 3 051 s, not the longer `Duration` beside it - and the dive's submerged_time
         stays the document's, where the recording's gate figures are the samples'."""
-        assert read_prefill(_fixture("suunto-ocean-2026.json"))[1].duration == 3051
+        assert read_prefill(_fixture("suunto-ocean-2026.json"))[1].submerged_time == 3051
 
     @pytest.mark.parametrize(
-        ("name", "duration", "avg_depth"),
+        ("name", "submerged_time", "avg_depth"),
         [
             ("suunto-ocean.fit", 4010, 20.84),
             ("suunto-ocean-2026.fit", 3063, 10.73),
@@ -182,14 +182,14 @@ class TestThePrefill:
         ],
     )
     def test_a_suunto_fit_derives_its_time_in_the_water_and_says_so(
-        self, name: str, duration: int, avg_depth: float
+        self, name: str, submerged_time: int, avg_depth: float
     ) -> None:
         """The Suunto app's FIT states no figure for the dive, only the activity's, so the reader
         derives both from the samples and the form is told which they are."""
         _, parsed, _ = read_prefill(_fixture(name))
 
-        assert (parsed.duration, parsed.avg_depth) == (duration, avg_depth)
-        assert parsed.inferred == ["duration", "avg_depth"]
+        assert (parsed.submerged_time, parsed.avg_depth) == (submerged_time, avg_depth)
+        assert parsed.inferred == ["submerged_time", "avg_depth"]
 
     @pytest.mark.parametrize("name", ["suunto-ocean-2026.json", "suunto-d5.json", "nitrox-deco.xml"])
     def test_a_file_that_states_its_figures_names_none_derived(self, name: str) -> None:
@@ -202,14 +202,20 @@ class TestThePrefill:
         document = {
             "extensions": {
                 "divejson": {
-                    "inferred": ["/dives/0/avg_depth", "dives/0/duration", "dives/1/duration", "dives/0/notes", 7]
+                    "inferred": [
+                        "/dives/0/avg_depth",
+                        "dives/0/submerged_time",
+                        "dives/1/submerged_time",
+                        "dives/0/notes",
+                        7,
+                    ]
                 }
             }
         }
 
-        assert dive_reader.inferred_figures(document) == ("avg_depth", "duration")
+        assert dive_reader.inferred_figures(document) == ("avg_depth", "submerged_time")
         assert dive_reader.inferred_figures({}) == ()
-        assert dive_reader.inferred_figures({"extensions": {"divejson": {"inferred": "dives/0/duration"}}}) == ()
+        assert dive_reader.inferred_figures({"extensions": {"divejson": {"inferred": "dives/0/submerged_time"}}}) == ()
 
     def test_a_stated_bottom_temperature_is_the_documents(self) -> None:
         assert read_prefill(_fixture("nitrox-deco.xml"))[1].bottom_temperature == 25.0

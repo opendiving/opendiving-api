@@ -1132,7 +1132,7 @@ class TestAbsence:
             "uuid",
             "number",
             "started_at",
-            "duration",
+            "submerged_time",
             "site_uuids",
             "gear_uuids",
             "sightings",

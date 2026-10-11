@@ -5,7 +5,7 @@ its own, so the rules can be tested exhaustively without a database (see
 `tests/test_dive_gas.py`). Same split as `services/gear_service.py`.
 
 Three derivations, and `resolve_gas_use` is the one entry point that picks between them.
-`compute_gas_use` handles a single cylinder off the dive's own duration and average depth.
+`compute_gas_use` handles a single cylinder off the dive's own submerged time and average depth.
 `compute_multi_tank_gas_use` handles several, off `dive_profile.gas_attribution` - which
 gas was breathed for how long and how deep, read out of the dive computer's own gas
 switches. The second is what the first's multi-cylinder refusal was always waiting for:
@@ -59,7 +59,7 @@ METERS_PER_BAR = 10.0
 
 def compute_gas_use(
     *,
-    duration: int,
+    submerged_time: int,
     avg_depth: float | None,
     mixtures: Sequence[DiveMixtureRead],
 ) -> DiveGasUse | None:
@@ -95,8 +95,8 @@ def compute_gas_use(
       wasn't breathed - that's an unused pony bottle or a typo, not a diver with a
       0 L/min consumption rate.
 
-    `duration` is already `CHECK`-constrained positive at the database level
-    (`ck_dive_duration_positive`), as is a recorded `volume`
+    `submerged_time` is already `CHECK`-constrained positive at the database level
+    (`ck_dive_submerged_time_positive`), as is a recorded `volume`
     (`ck_dive_mixture_volume_positive`, which passes on a NULL like every `CHECK` does)
     and the pressure ordering (`ck_dive_mixture_pressure_order`, so the drop can never
     come out negative). They're re-checked here anyway - this is a pure function that also
@@ -111,7 +111,7 @@ def compute_gas_use(
         return None
     if mixture.start_pressure is None or mixture.end_pressure is None:
         return None
-    if duration <= 0 or mixture.volume is None or mixture.volume <= 0:
+    if submerged_time <= 0 or mixture.volume is None or mixture.volume <= 0:
         return None
 
     pressure_used = mixture.start_pressure - mixture.end_pressure
@@ -126,7 +126,7 @@ def compute_gas_use(
     # diver would have breathed doing the same thing at the surface" - the whole point
     # of the metric, and why a deep dive and a shallow one become comparable.
     ambient_pressure = 1 + avg_depth / METERS_PER_BAR
-    surface_minutes = ambient_pressure * (duration / 60)
+    surface_minutes = ambient_pressure * (submerged_time / 60)
 
     return DiveGasUse(
         gas_used=round(gas_used, 2),
@@ -228,12 +228,12 @@ def _tank_arithmetic(mixture: DiveMixtureRead, attributed: GasAttribution) -> _T
 # a false positive costs a dive every figure it had, including the honest ones.
 #
 # Deliberately not applied to `compute_gas_use`: a single cylinder is divided by the dive's
-# own duration, so there is no segmentation to go wrong, and adding a ceiling there would
+# own submerged time, so there is no segmentation to go wrong, and adding a ceiling there would
 # change a long-standing figure - which is exactly what the split between the derivations
 # exists to prevent.
 #
 # **And not to `compute_parallel_gas_use` either**, for the same reason rather than a new
-# one: a flagged pair is divided by the whole dive's duration and the whole dive's average
+# one: a flagged pair is divided by the whole dive's submerged time and the whole dive's average
 # depth, so it has no per-tank stretches to have segmented wrongly. The ceiling would also
 # break the equivalence that path is built on - the same physical pair logged as one
 # manifolded row would return a figure where two honest flagged rows returned `None`.
@@ -259,7 +259,7 @@ def compute_multi_tank_gas_use(
     dive computer recorded (see `services/dive_profiles.py::derive_gas_attribution`), and
     each tank is normalized against *its own* time and mean depth instead of the dive's.
 
-    Takes no `duration` or `avg_depth` for exactly that reason - neither enters the
+    Takes no `submerged_time` or `avg_depth` for exactly that reason - neither enters the
     arithmetic. What it takes instead is the join, on `gas_number`:
 
     - **A duplicate `gas_number` among the mixtures refuses the whole dive.** The number is
@@ -360,7 +360,7 @@ def compute_multi_tank_gas_use(
 
 def compute_parallel_gas_use(
     *,
-    duration: int,
+    submerged_time: int,
     avg_depth: float | None,
     mixtures: Sequence[DiveMixtureRead],
 ) -> DiveGasUse | None:
@@ -382,7 +382,7 @@ def compute_parallel_gas_use(
       numerator while the whole dive stayed in the denominator, quietly reporting an RMV
       that is too *low*. Same honesty rule the multi-tank path applies, and the one
       Subsurface applies to its own airuse sum.
-    - **An average depth and a duration**, both of them the dive's own. This path has no
+    - **An average depth and a submerged time**, both of them the dive's own. This path has no
       profile behind it and wants none - it is the rescue for dives that have no usable
       attribution at all.
     - **Both pressures on every cylinder.** One missing pressure anywhere refuses the
@@ -428,7 +428,7 @@ def compute_parallel_gas_use(
     # string - which silently turned every flagged sidemount pair back into "not parallel".
     if any(mixture.usage != TankUsage.PARALLEL for mixture in mixtures):
         return None
-    if avg_depth is None or avg_depth <= 0 or duration <= 0:
+    if avg_depth is None or avg_depth <= 0 or submerged_time <= 0:
         return None
     if any(mixture.volume is None or mixture.volume <= 0 for mixture in mixtures):
         return None
@@ -450,7 +450,7 @@ def compute_parallel_gas_use(
 
     gas_used = sum(drop * volume for drop, volume in zip(drops, volumes, strict=True))
     ambient_pressure = 1 + avg_depth / METERS_PER_BAR
-    surface_minutes = ambient_pressure * (duration / 60)
+    surface_minutes = ambient_pressure * (submerged_time / 60)
 
     pooled_sac = (sum(drops) / len(drops)) / surface_minutes if len(set(volumes)) == 1 else None
 
@@ -466,7 +466,7 @@ def compute_parallel_gas_use(
 
 def resolve_gas_use(
     *,
-    duration: int,
+    submerged_time: int,
     avg_depth: float | None,
     mixtures: Sequence[DiveMixtureRead],
     attribution: ProfileGasAttribution | None = None,
@@ -498,11 +498,11 @@ def resolve_gas_use(
     so the rule lives in one place.
     """
     if len(mixtures) == 1:
-        return compute_gas_use(duration=duration, avg_depth=avg_depth, mixtures=mixtures)
+        return compute_gas_use(submerged_time=submerged_time, avg_depth=avg_depth, mixtures=mixtures)
     attributed = compute_multi_tank_gas_use(mixtures=mixtures, attribution=attribution or ProfileGasAttribution())
     if attributed is not None:
         return attributed
-    return compute_parallel_gas_use(duration=duration, avg_depth=avg_depth, mixtures=mixtures)
+    return compute_parallel_gas_use(submerged_time=submerged_time, avg_depth=avg_depth, mixtures=mixtures)
 
 
 async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoint]:
@@ -535,7 +535,7 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
             Dive.start_time,
             Dive.utc_offset_minutes,
             Dive.start_date_only,
-            Dive.duration,
+            Dive.submerged_time,
             Dive.avg_depth,
         )
         .where(Dive.user_id == user_id, Dive.is_deleted.is_(False))
@@ -570,7 +570,7 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
             continue
 
         gas_use = resolve_gas_use(
-            duration=dive.duration,
+            submerged_time=dive.submerged_time,
             avg_depth=dive.avg_depth,
             mixtures=mixtures_by_dive[dive.id],
             attribution=attribution_by_dive.get(dive.id),

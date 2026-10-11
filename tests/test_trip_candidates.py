@@ -130,7 +130,7 @@ def _dive(
         start_time=start,
         utc_offset_minutes=offset or 0,
         trip_id=None if trip is None else trip.id,
-        duration=1800,
+        submerged_time=1800,
         notes="",
         **columns,
     )

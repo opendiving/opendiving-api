@@ -2905,7 +2905,7 @@ class TestWriteDiveEmbedsSightings:
             {
                 "dive_number": 1,
                 "start_time": "2026-06-01T09:00:00+02:00",
-                "duration": 1800,
+                "submerged_time": 1800,
                 "notes": "",
                 "sightings": [{"species_uuid": str(value), "count": 2} for value in species_uuids],
             }

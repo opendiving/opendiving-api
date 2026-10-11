@@ -45,7 +45,7 @@ Drop = Callable[[str], None]
 
 # Postgres `Integer` is 32-bit, and **the format puts no ceiling on any of its integer
 # members** - a dive's `number` is a bare `{"type": "integer"}` in the published schema, and
-# `duration`, `visibility`, the profile's own `duration` and every `values` entry carry
+# `submerged_time`, `visibility`, the profile's own `duration` and every `values` entry carry
 # only a minimum. So a *conforming* document can hold a number this app's columns cannot,
 # and a converter with a unit bug (a duration in microseconds, a depth in micrometres) is
 # exactly how one arrives. Unbounded, that is SQLSTATE 22003 raised from the middle of the

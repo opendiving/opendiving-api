@@ -448,7 +448,7 @@ class TestAgainstPostgres:
         token = await _mint(http, sign_in, diver, {"total_dives": 40, "max_depth": None, "last_dive_on": "2031-02-14"})
 
         create_dive(db, diver)
-        db.add(UserDiveStats(user_id=diver.id, total_dives=41, max_depth=55.0, total_time=60, species_seen=0))
+        db.add(UserDiveStats(user_id=diver.id, total_dives=41, max_depth=55.0, total_submerged_time=60, species_seen=0))
         db.commit()
 
         summary = (await http.get(f"/api/v1/checkin/{token}")).json()

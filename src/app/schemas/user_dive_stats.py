@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class UserDiveStatsBase(BaseModel):
     total_dives: Annotated[int, Field(default=0, examples=[42])]
     max_depth: Annotated[float, Field(default=0, examples=[30.5])]
-    total_time: Annotated[int, Field(default=0, description="Total dive time in seconds", examples=[36000])]
+    total_submerged_time: Annotated[int, Field(default=0, description="Total dive time in seconds", examples=[36000])]
     species_seen: Annotated[int, Field(default=0, examples=[0])]
 
 
@@ -53,7 +53,7 @@ class UserDiveStatsUpdate(BaseModel):
 
     total_dives: Annotated[int | None, Field(default=None)]
     max_depth: Annotated[float | None, Field(default=None)]
-    total_time: Annotated[int | None, Field(default=None)]
+    total_submerged_time: Annotated[int | None, Field(default=None)]
     species_seen: Annotated[int | None, Field(default=None)]
 
 
