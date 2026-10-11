@@ -192,7 +192,7 @@ class TestShiftingAProfile:
         shifted = shift_profile(
             NormalizedProfile(
                 depth=ProfileSeries(t=[0, 10], v=[100, 200]),
-                temperature=ProfileSeries(t=[5], v=[280]),
+                temperature=ProfileSeries(t=[5], v=[2800]),
                 pressure=[ProfilePressureSeries(gas_number=1, t=[0], v=[2000])],
                 events=[ProfileEvent(t=7, type=ProfileEventType.BOOKMARK)],
             ),
@@ -220,7 +220,7 @@ class TestReadingAStoredProfileBack:
         original = NormalizedProfile(
             depth=ProfileSeries(t=[0, 10], v=[100, 200]),
             ceiling=ProfileSeries(t=[10], v=[300]),
-            temperature=ProfileSeries(t=[0], v=[281]),
+            temperature=ProfileSeries(t=[0], v=[2810]),
             pressure=[ProfilePressureSeries(gas_number=2, t=[0], v=[2000])],
             events=[ProfileEvent(t=5, type=ProfileEventType.GAS_SWITCH, gas_number=2, label="EAN50")],
         )

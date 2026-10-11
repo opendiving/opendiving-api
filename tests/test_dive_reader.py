@@ -218,7 +218,7 @@ class TestThePrefill:
         ("name", "coldest"),
         [
             ("suunto-d5.json", 18.2),
-            ("suunto-ocean-2026.json", 29.2),
+            ("suunto-ocean-2026.json", 29.16),
             ("suunto-ocean-2026.fit", 28.0),
         ],
     )

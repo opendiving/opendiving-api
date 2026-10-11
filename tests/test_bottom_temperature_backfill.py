@@ -1,88 +1,80 @@
-"""Revision `53ea55b922e5`'s backfill, run against a live Postgres: a dive with no bottom
-temperature takes its primary recording's coldest sample, as an import of it now would.
+"""Revision `53ea55b922e5`'s backfill run for real, against a database of its own at the revision
+below it (`tests/helpers/migrations.py`): a dive with no bottom temperature takes its primary
+recording's coldest sample, as an import of it then would. Its SQL names `min_temperature_c10`,
+which a later revision renames, so it runs on the schema it was written against.
 
-The revision's own SQL, loaded by path as `test_vocabulary_repair.py` loads its revision's.
 Automatically skipped if no database is reachable - see `test_dive_check_constraints.py`.
 """
 
-import importlib.util
-from typing import cast
+from collections.abc import Iterator
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy import Engine, text
 
-from src.app.core.db.migrations import MIGRATIONS_PATH
-from src.app.models.dive import Dive
-from src.app.models.dive_profile import DiveProfile
-from src.app.models.user import User
 from tests.conftest import db_available
-from tests.helpers.generators import create_dive, create_dive_recording, create_user
+from tests.helpers.migrations import migrate, scratch_database, template_database
 
-pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
+pytestmark = [
+    pytest.mark.skipif(not db_available(), reason="No database connection available"),
+    pytest.mark.xdist_group(__name__),
+]
 
-_REVISION = "53ea55b922e5_an_imported_dive_takes_its_bottom_"
+_REVISION = "53ea55b922e5"
+_BELOW = "cf3c73ed02f4"
 
-
-def _backfill(db: Session) -> None:
-    spec = importlib.util.spec_from_file_location(_REVISION, MIGRATIONS_PATH / "versions" / f"{_REVISION}.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    db.execute(text(cast(str, module.BACKFILL)))
-    db.commit()
-
-
-def _dive(db: Session, user: User, *, coldest: int | None, ordinal: int = 0, stated: float | None = None) -> Dive:
-    """A dive whose recording at `ordinal` has a profile whose coldest sample is `coldest` tenths."""
-    dive = create_dive(db, user)
-    dive.bottom_temperature = stated
-    if ordinal:
-        create_dive_recording(db, user, dive)
-    db.add(
-        DiveProfile(
-            recording_id=create_dive_recording(db, user, dive, ordinal=ordinal).id,
-            dive_id=dive.id,
-            source_sha256="b" * 64,
-            parser_key="suunto_json",
-            extractor_version=3,
-            duration=1800,
-            depth_sample_count=2,
-            data={},
-            min_temperature_c10=coldest,
-        )
-    )
-    db.commit()
-    return dive
+# Dive 1 has no temperature and a primary profile at 28.2 C; dive 2 states its own; dive 3's primary
+# has no temperature channel; dive 4's coldest reading is on its second recording alone.
+SEED = """
+INSERT INTO "user" (id, name, username, email, is_superuser, is_deleted, uuid, created_at)
+VALUES (1, 'Seed', 'seed', 'seed@example.com', false, false, gen_random_uuid(), now());
+INSERT INTO dive (id, user_id, dive_number, start_time, utc_offset_minutes, duration, notes, uuid, created_at,
+                  is_deleted, bottom_temperature)
+VALUES (1, 1, 1, '2025-01-01 10:00:00+00', 0, 3000, '', gen_random_uuid(), now(), false, NULL),
+       (2, 1, 2, '2025-01-02 10:00:00+00', 0, 3000, '', gen_random_uuid(), now(), false, 25.0),
+       (3, 1, 3, '2025-01-03 10:00:00+00', 0, 3000, '', gen_random_uuid(), now(), false, NULL),
+       (4, 1, 4, '2025-01-04 10:00:00+00', 0, 3000, '', gen_random_uuid(), now(), false, NULL);
+INSERT INTO dive_recording (id, dive_id, user_id, ordinal, uuid, created_at)
+VALUES (1, 1, 1, 0, gen_random_uuid(), now()),
+       (2, 2, 1, 0, gen_random_uuid(), now()),
+       (3, 3, 1, 0, gen_random_uuid(), now()),
+       (4, 4, 1, 0, gen_random_uuid(), now()),
+       (5, 4, 1, 1, gen_random_uuid(), now());
+INSERT INTO dive_profile (dive_id, recording_id, source_sha256, parser_key, extractor_version, duration,
+                          depth_sample_count, data, min_temperature_c10, uuid, created_at)
+VALUES (1, 1, repeat('b', 64), 'suunto_json', 3, 1800, 2, '{}', 282, gen_random_uuid(), now()),
+       (2, 2, repeat('b', 64), 'suunto_json', 3, 1800, 2, '{}', 282, gen_random_uuid(), now()),
+       (3, 3, repeat('b', 64), 'suunto_json', 3, 1800, 2, '{}', NULL, gen_random_uuid(), now()),
+       (4, 4, repeat('b', 64), 'suunto_json', 3, 1800, 2, '{}', NULL, gen_random_uuid(), now()),
+       (4, 5, repeat('b', 64), 'suunto_json', 3, 1800, 2, '{}', 282, gen_random_uuid(), now())
+"""
 
 
-def _stored(db: Session, dive: Dive) -> float | None:
-    db.refresh(dive)
-    return dive.bottom_temperature
+@pytest.fixture(scope="module")
+def below() -> Iterator[str]:
+    with template_database(_BELOW) as template:
+        yield template
 
 
-class TestTheBackfill:
-    def test_a_dive_with_none_takes_its_primary_recordings_coldest_sample(self, db: Session) -> None:
-        user = create_user(db)
-        dive = _dive(db, user, coldest=282)
+@pytest.fixture
+def scratch(below: str) -> Iterator[tuple[str, Engine]]:
+    with scratch_database("bottom", below) as database:
+        yield database
 
-        _backfill(db)
 
-        assert _stored(db, dive) == 282 / 10
+def _bottom_temperatures(engine: Engine) -> dict[int, float | None]:
+    with engine.connect() as connection:
+        return {
+            row.id: row.bottom_temperature
+            for row in connection.execute(text("SELECT id, bottom_temperature FROM dive"))
+        }
 
-    def test_a_stated_temperature_is_left_alone(self, db: Session) -> None:
-        user = create_user(db)
-        dive = _dive(db, user, coldest=282, stated=25.0)
 
-        _backfill(db)
+def test_only_a_dive_with_none_takes_its_primary_recordings_coldest_sample(scratch: tuple[str, Engine]) -> None:
+    name, engine = scratch
+    with engine.begin() as connection:
+        for statement in SEED.split(";\n"):
+            connection.execute(text(statement))
 
-        assert _stored(db, dive) == 25.0
+    migrate(name, "upgrade", _REVISION)
 
-    @pytest.mark.parametrize(("coldest", "ordinal"), [(None, 0), (282, 1)], ids=["no channel", "a second recording"])
-    def test_nothing_else_fills_it(self, db: Session, coldest: int | None, ordinal: int) -> None:
-        user = create_user(db)
-        dive = _dive(db, user, coldest=coldest, ordinal=ordinal)
-
-        _backfill(db)
-
-        assert _stored(db, dive) is None
+    assert _bottom_temperatures(engine) == {1: 282 / 10, 2: 25.0, 3: None, 4: None}

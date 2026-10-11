@@ -444,7 +444,7 @@ class TestDeriveGasAttribution:
     def test_a_profile_with_no_depth_channel_attributes_nothing(self):
         """A pressure-and-temperature-only export has no depth for a mean to be taken of,
         and every figure downstream is normalized against depth."""
-        profile = NormalizedProfile(temperature=_series([0, 100], [260, 259]), events=[_switch(0, 1)])
+        profile = NormalizedProfile(temperature=_series([0, 100], [2600, 2590]), events=[_switch(0, 1)])
 
         assert derive_gas_attribution(profile) == []
 
@@ -654,7 +654,7 @@ class TestTheDecompressionChannels:
         puts it - and what a chart stacks its curves in."""
         profile = NormalizedProfile(
             depth=_series([0], [3000]),
-            temperature=_series([0], [219]),
+            temperature=_series([0], [2190]),
             pressure=[ProfilePressureSeries(gas_number=1, t=[0], v=[2052])],
             ndl=_series([0], [5940]),
             gradient_factor=_series([0], [64]),
@@ -753,7 +753,7 @@ class TestToReadSchema:
         profile = NormalizedProfile(
             depth=ProfileSeries(t=[0, 10], v=[3000, 2400]),
             ceiling=ProfileSeries(t=[10], v=[300]),
-            temperature=ProfileSeries(t=[0], v=[219]),
+            temperature=ProfileSeries(t=[0], v=[2190]),
             pressure=[ProfilePressureSeries(gas_number=1, t=[0], v=[2052])],
             events=[
                 ProfileEvent(t=0, type=ProfileEventType.GAS_SWITCH, gas_number=1),
@@ -853,7 +853,7 @@ class TestProvenance:
 
     @pytest.mark.parametrize(
         "data",
-        [{"temperature": {"t": [0, 10_000], "v": [219, 218]}}, {"depth": {"t": [0, 10_000], "v": [0, 100]}}],
+        [{"temperature": {"t": [0, 10_000], "v": [2190, 2180]}}, {"depth": {"t": [0, 10_000], "v": [0, 100]}}],
         ids=["no depth channel", "never under"],
     )
     def test_the_dive_end_is_null_where_no_interval_counts(self, data: dict):

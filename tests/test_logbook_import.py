@@ -1105,7 +1105,7 @@ class TestTheDecompressionMembersRoundTrip:
                 "profile": {
                     "duration": 10,
                     "depth": {"times": [0, 10], "values": [0, 5200]},
-                    "temperature": {"times": [0], "values": [-15]},
+                    "temperature": {"times": [0], "values": [-150]},
                 }
             }
         ]
@@ -1115,7 +1115,7 @@ class TestTheDecompressionMembersRoundTrip:
 
         imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
         profile = await self._profile(async_db, imported.id)
-        assert profile.data["temperature"]["v"] == [-15]
+        assert profile.data["temperature"]["v"] == [-150]
 
     @pytest.mark.asyncio
     async def test_an_event_with_no_type_reads_back_as_unclassified(
@@ -4579,8 +4579,8 @@ class TestTheIntegerColumnCensus:
         ("dive_profile", "event_count"): "a count, capped by `MAX_EVENTS`",
         ("dive_profile", "max_depth_cm"): "an extreme of a channel `shape_series` bounds",
         ("dive_profile", "max_ceiling_cm"): "an extreme of a channel `shape_series` bounds",
-        ("dive_profile", "min_temperature_c10"): "an extreme of a channel `shape_series` bounds",
-        ("dive_profile", "max_temperature_c10"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "min_temperature_c100"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_temperature_c100"): "an extreme of a channel `shape_series` bounds",
         ("dive_profile", "min_pressure_bar10"): "an extreme of a channel `shape_series` bounds",
         ("dive_profile", "max_pressure_bar10"): "an extreme of a channel `shape_series` bounds",
         ("dive_profile", "min_ndl_s"): "an extreme of a channel `shape_series` bounds",

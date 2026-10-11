@@ -858,5 +858,5 @@ async def write_divejson(
 
     for key, records in _collections(bundle, paths):
         yield _encode(key) + b": " + _encode_collection(records) + b",\n"
-    # Last, where the format's own member order puts it: the marker `read_as_written` keys on.
+    # Last, where the format's own member order puts it: the markers `read_as_written` keys on.
     yield b'"extensions": ' + _encode(EXPORT_EXTENSIONS) + b"\n}\n"

@@ -43,6 +43,7 @@ import codecs
 import hashlib
 import json
 import logging
+import math
 import re
 import shutil
 import tempfile
@@ -52,6 +53,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import IntEnum
+from fractions import Fraction
 from functools import partial
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, cast
 
@@ -61,13 +63,14 @@ from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from ...core.utils.uploads import safe_filename
-from ...schemas.dive_profile import MILLISECONDS_PER_SECOND
+from ...schemas.dive_profile import MILLISECONDS_PER_SECOND, TEMPERATURE_SCALE
 from ...schemas.export import (
     DIVEJSON_FORMAT,
     DIVEJSON_PRODUCER_KEY,
     DIVEJSON_VERSION,
     PROFILE_AXIS_MARKER,
     PROFILE_AXIS_MILLISECONDS,
+    PROFILE_TEMPERATURE_SCALE_MARKER,
 )
 from ...schemas.logbook_import import (
     ConversionConverter,
@@ -337,10 +340,16 @@ class ReaderNote:
     uuid: str | None = None
 
 
-# `divejson convert` names itself with this constant; its releases before this one wrote the
-# profile axis in seconds and the readouts on the dive, under the same member names.
+# `divejson convert` names itself with this constant; its releases before the first of these
+# wrote the profile axis in seconds and the readouts on the dive, and before the second the
+# temperature channel in tenths of a degree, under the same member names.
 _CONVERTER_GENERATOR = "divejson convert"
 _CONVERTER_MILLISECONDS_SINCE = (0, 13, 0)
+_CONVERTER_HUNDREDTHS_SINCE = (0, 24, 0)
+# The temperature scale DiveJSON fixes (§5.1), which a document no writer this app knows
+# produced is read at, and the tenths a known writer wrote before the format moved.
+_FORMAT_TEMPERATURE_SCALE = 100
+_TENTHS = 10
 _RELEASE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 _READOUTS = ("surface_pressure", "cns_start", "cns_end", "otu_start", "otu_end")
 
@@ -366,17 +375,89 @@ def _written_before_the_axis_moved(raw: dict[str, Any]) -> bool:
     generator name is a constant and whose releases below `_CONVERTER_MILLISECONDS_SINCE`
     wrote seconds; the version compares as a tuple, `0.9.0` being below `0.13.0`.
     """
-    producer = _members(raw, "extensions").get(DIVEJSON_PRODUCER_KEY)
-    marked = isinstance(producer, dict) and producer.get(PROFILE_AXIS_MARKER) == PROFILE_AXIS_MILLISECONDS
-    if DIVEJSON_PRODUCER_KEY in _members(_members(raw, "diver"), "extensions") and not marked:
+    marked = _producer_marker(raw, PROFILE_AXIS_MARKER) == PROFILE_AXIS_MILLISECONDS
+    if _is_own(raw) and not marked:
         return True
+    release = _converter_release(raw)
+    return release is not None and release < _CONVERTER_MILLISECONDS_SINCE
 
+
+def _producer_marker(raw: dict[str, Any], name: str) -> Any:
+    producer = _members(raw, "extensions").get(DIVEJSON_PRODUCER_KEY)
+    return producer.get(name) if isinstance(producer, dict) else None
+
+
+def _is_own(raw: dict[str, Any]) -> bool:
+    """Whether this app wrote `raw`: every export of it writes its producer key on the diver."""
+    return DIVEJSON_PRODUCER_KEY in _members(_members(raw, "diver"), "extensions")
+
+
+def _converter_release(raw: dict[str, Any]) -> tuple[int, ...] | None:
+    """The published converter's release that wrote `raw`, or `None` where it did not."""
     generator = _members(raw, "generator")
     version = generator.get("version")
     release = _RELEASE.match(version) if isinstance(version, str) else None
     if generator.get("name") != _CONVERTER_GENERATOR or release is None:
-        return False
-    return tuple(int(part or 0) for part in release.groups()) < _CONVERTER_MILLISECONDS_SINCE
+        return None
+    return tuple(int(part or 0) for part in release.groups())
+
+
+def _temperature_scale(raw: dict[str, Any]) -> int:
+    """The scale `raw`'s profile temperatures are written in.
+
+    This app's export states it at the root, read wherever it is a positive integer - this runs
+    before anything validates the document. A document of this app's with no such marker, and the
+    published converter's output below `_CONVERTER_HUNDREDTHS_SINCE`, are tenths. Anything else
+    carries no signal and is read at the format's scale.
+    """
+    marker = _producer_marker(raw, PROFILE_TEMPERATURE_SCALE_MARKER)
+    if isinstance(marker, int) and not isinstance(marker, bool) and marker > 0:
+        return marker
+    if _is_own(raw):
+        return _TENTHS
+    release = _converter_release(raw)
+    if release is not None and release < _CONVERTER_HUNDREDTHS_SINCE:
+        return _TENTHS
+    return _FORMAT_TEMPERATURE_SCALE
+
+
+def _half_away_from_zero(value: Fraction) -> int:
+    whole = math.floor(abs(value) + Fraction(1, 2))
+    return whole if value >= 0 else -whole
+
+
+def _temperatures_as_written(raw: dict[str, Any]) -> list[ReaderNote]:
+    """Every profile's temperature readings, rescaled in place from the scale `raw` is written in
+    to this app's, each rounded once."""
+    scale = _temperature_scale(raw)
+    if scale == TEMPERATURE_SCALE:
+        return []
+    dives = 0
+    for dive in _list(raw, "dives"):
+        rescaled = False
+        for recording in _list(dive, "recordings"):
+            series = _members(_members(recording, "profile"), "temperature")
+            values = series.get("values")
+            if not isinstance(values, list):
+                continue
+            series["values"] = [
+                _half_away_from_zero(Fraction(value * TEMPERATURE_SCALE, scale))
+                if isinstance(value, int) and not isinstance(value, bool)
+                else value
+                for value in values
+            ]
+            rescaled = True
+        dives += rescaled
+    if not dives:
+        return []
+    message = (
+        "This logbook was written before DiveJSON's profile temperatures became hundredths of a degree, so the "
+        f"temperatures of {dives} dive(s) were read in tenths, as written."
+        if scale == _TENTHS
+        else f"This logbook states its profile temperatures in 1/{scale} of a degree, so the temperatures of {dives} "
+        "dive(s) were read at that scale."
+    )
+    return [ReaderNote(ImportNoteCode.READ_AS_WRITTEN, message, collection="dives")]
 
 
 def _in_milliseconds(profile: dict[str, Any]) -> None:
@@ -424,8 +505,9 @@ def read_as_written(raw: dict[str, Any]) -> list[ReaderNote]:
     """Read a document written before the format moved, as its writer meant it.
 
     Rewrites `raw` in place into the current shape and says what it read, one report line
-    per kind: a dive's `species_uuids` as sightings, whoever wrote it; and for a writer this
-    app knows, the profile axis in seconds, multiplied; the readouts on the dive, onto its
+    per kind: a dive's `species_uuids` as sightings, whoever wrote it; a profile's temperature
+    readings at the scale `_temperature_scale` finds them in; and for a writer this app knows,
+    the profile axis in seconds, multiplied; the readouts on the dive, onto its
     first recording - minting one where the dive has none, a recording of readouts alone;
     `water_type: "en13319"` onto that recording's `salinity`, dropped where the dive has
     neither a recording nor a readout to carry it; and a cylinder's `po2_limit` as
@@ -433,9 +515,9 @@ def read_as_written(raw: dict[str, Any]) -> list[ReaderNote]:
     writer produced is not looked at: without this every old spelling would vanish silently,
     the importer ignoring what it does not know (§5.6).
     """
-    sightings = _sightings_from_species_uuids(raw)
+    whoever = _sightings_from_species_uuids(raw) + _temperatures_as_written(raw)
     if not _written_before_the_axis_moved(raw):
-        return sightings
+        return whoever
 
     axes = readouts = salinities = limits = 0
     notes: list[ReaderNote] = []
@@ -504,7 +586,7 @@ def read_as_written(raw: dict[str, Any]) -> list[ReaderNote]:
         )
         if count
     ]
-    return sightings + summary + notes
+    return whoever + summary + notes
 
 
 # What a document written before a dive site's `location` became an object looks like from

@@ -232,13 +232,16 @@ class TestConformance:
 
 class TestTheFormatChange:
     @pytest.mark.asyncio
-    async def test_the_document_marks_its_axis_as_milliseconds(self, monkeypatch):
+    async def test_the_document_marks_its_axis_and_its_temperature_scale(self, monkeypatch):
         """Under this producer's key at the root, last - what this app's own reader keys on to
-        tell its exports from the ones written in seconds before the axis moved."""
+        tell its exports from the ones written in seconds before the axis moved, and in tenths
+        before temperatures moved to hundredths."""
         document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
 
         assert list(document)[-1] == "extensions"
-        assert document["extensions"] == {"opendiving": {"profile_axis": "milliseconds"}}
+        assert document["extensions"] == {
+            "opendiving": {"profile_axis": "milliseconds", "profile_temperature_scale": 100}
+        }
         _assert_conforms(document)
 
     @pytest.mark.asyncio
@@ -750,12 +753,12 @@ class TestTheRecordingsModeAndDecoModel:
 
     @pytest.mark.asyncio
     async def test_the_samples_keep_the_stored_integer_scales(self, monkeypatch):
-        """Depth in centimeters, temperature in tenths of a degree - the scales are part of
+        """Depth in centimeters, temperature in hundredths of a degree - the scales are part of
         the format (spec §5.1), chosen so a round trip cannot introduce float noise."""
         document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
         profile = document["dives"][1]["recordings"][0]["profile"]
         assert profile["depth"]["values"] == [0, 1800, 5200, 300]
-        assert profile["temperature"] == {"times": [0, 60_000], "values": [249, 181]}
+        assert profile["temperature"] == {"times": [0, 60_000], "values": [2493, 1812]}
 
     @pytest.mark.asyncio
     async def test_a_merged_profile_exports_without_its_provenance(self, monkeypatch):

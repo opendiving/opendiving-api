@@ -1,6 +1,7 @@
 """Logbook import across the format change: the millisecond axis, the readouts and salinity
-on the recording, a date-only dive, the notes cap - and a document a known writer produced
-before any of it, read the way that writer meant it (`reader.read_as_written`).
+on the recording, temperatures in hundredths, a date-only dive, the notes cap - and a document
+a known writer produced before any of it, read the way that writer meant it
+(`reader.read_as_written`).
 """
 
 import copy
@@ -200,6 +201,104 @@ class TestReadAsWritten:
 
         assert read_as_written(document) == []
         assert document["dives"][0]["sightings"] == []
+
+
+def _with_temperatures(document: dict[str, Any], *values: Any, scale: Any = None) -> dict[str, Any]:
+    """`document` on the millisecond axis, its first recording reading `values` - and, where
+    `scale` is given, carrying it as this app's temperature scale marker."""
+    marker: dict[str, Any] = {"profile_axis": "milliseconds"}
+    if scale is not None:
+        marker["profile_temperature_scale"] = scale
+    document["extensions"] = {"opendiving": marker}
+    document["dives"][0]["recordings"][0]["profile"]["temperature"] = {
+        "times": list(range(0, 1000 * len(values), 1000)),
+        "values": list(values),
+    }
+    return document
+
+
+def _temperatures(document: dict[str, Any]) -> Any:
+    return document["dives"][0]["recordings"][0]["profile"]["temperature"]["values"]
+
+
+class TestTemperaturesAsWritten:
+    """A document's temperatures read at the scale its writer used (`reader._temperature_scale`)."""
+
+    def test_this_apps_export_from_before_the_marker_is_read_in_tenths(self) -> None:
+        document = _with_temperatures(_pre_change_export(), 267, 271, -15)
+
+        notes = read_as_written(document)
+
+        assert _temperatures(document) == [2670, 2710, -150]
+        assert document["dives"][0]["recordings"][0]["profile"]["depth"]["times"] == [0, 60, 2940]
+        assert [(note.code, note.message) for note in notes] == [
+            (
+                ImportNoteCode.READ_AS_WRITTEN,
+                "This logbook was written before DiveJSON's profile temperatures became hundredths of a degree, so "
+                "the temperatures of 1 dive(s) were read in tenths, as written.",
+            )
+        ]
+
+    def test_this_apps_export_at_its_own_scale_is_left_alone(self) -> None:
+        document = _with_temperatures(_pre_change_export(), 2669, 2711, scale=100)
+        before = copy.deepcopy(document)
+
+        assert read_as_written(document) == []
+        assert document == before
+
+    def test_another_stated_scale_is_read_at_it_and_rounded_once_half_away_from_zero(self) -> None:
+        document = _with_temperatures(_pre_change_export(), 26693, 26695, -15, scale=1000)
+
+        [note] = read_as_written(document)
+
+        assert _temperatures(document) == [2669, 2670, -2]
+        assert "1/1000 of a degree" in note.message
+
+    @pytest.mark.parametrize("scale", ["hundredths", 0, -100, True, 100.0], ids=repr)
+    def test_a_marker_that_is_not_a_positive_integer_is_no_marker(self, scale: Any) -> None:
+        """Read before anything validates the document, so a malformed marker cannot scale it."""
+        document = _with_temperatures(_pre_change_export(), 267, scale=scale)
+
+        read_as_written(document)
+
+        assert _temperatures(document) == [2670]
+
+    def test_a_document_no_known_writer_produced_is_read_in_hundredths(self) -> None:
+        document = _with_temperatures(_pre_change_export(), 2669)
+        del document["diver"], document["extensions"]
+
+        assert read_as_written(document) == []
+        assert _temperatures(document) == [2669]
+
+    @pytest.mark.parametrize(
+        ("version", "expected"), [("0.9.0", [2670]), ("0.23.4", [2670]), ("0.24.0", [267]), ("1.0", [267])]
+    )
+    def test_the_converters_documents_are_keyed_on_its_version(self, version: str, expected: list[int]) -> None:
+        document = _with_temperatures(_pre_change_export(), 267)
+        del document["diver"], document["extensions"]
+        document["generator"] = {"name": "divejson convert", "version": version}
+
+        read_as_written(document)
+
+        assert _temperatures(document) == expected
+
+    def test_a_pre_axis_export_has_both_read_as_written(self) -> None:
+        """A document from before the axis moved is from before temperatures moved too."""
+        document = _with_temperatures(_pre_change_export(), 267)
+        del document["extensions"]
+
+        notes = read_as_written(document)
+
+        assert _temperatures(document) == [2670]
+        assert document["dives"][0]["recordings"][0]["profile"]["depth"]["times"] == [0, 60_000, 2_940_000]
+        assert sum("hundredths" in note.message for note in notes) == 1
+
+    def test_a_value_that_is_not_an_integer_is_left_for_validation(self) -> None:
+        document = _with_temperatures(_pre_change_export(), 267, "warm", True, 26.7)
+
+        read_as_written(document)
+
+        assert _temperatures(document) == [2670, "warm", True, 26.7]
 
 
 pytestmark_db = pytest.mark.skipif(not db_available(), reason="No database connection available")
@@ -408,6 +507,48 @@ class TestImportingAcrossTheChange:
         with await load_one(json.dumps(handle_only).encode(), "logbook.divejson") as loaded:
             plan = await plan_import(async_db, user_id=user.id, loaded=loaded, resolution_ran=True)
         assert ImportNoteCode.DIVER_NOT_APPLIED not in {note.code for note in plan.notes}
+
+
+@pytestmark_db
+class TestImportingTemperatures:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("marker", "written", "stored"),
+        [({}, [267, 271], [2670, 2710]), ({"profile_temperature_scale": 100}, [2669, 2711], [2669, 2711])],
+        ids=["before the marker", "at the marker"],
+    )
+    async def test_this_apps_export_lands_at_the_scale_it_was_written_in(
+        self, db: Session, async_db: AsyncSession, marker: dict[str, int], written: list[int], stored: list[int]
+    ) -> None:
+        """An export from before the marker is multiplied and says so; one carrying it round-trips."""
+        user = create_user(db)
+        profile = {
+            "duration": 2000,
+            "depth": {"times": [0, 1000, 2000], "values": [0, 1800, 0]},
+            "temperature": {"times": [0, 1000], "values": written},
+        }
+        body = json.loads(_document({"started_at": "2026-08-01T10:00:00+02:00", "recordings": [{"profile": profile}]}))
+        body["diver"] = {"name": "Diver", "extensions": {"opendiving": {"units": "metric"}}}
+        body["extensions"] = {"opendiving": {"profile_axis": "milliseconds", **marker}}
+
+        plan = await _apply(async_db, user.id, json.dumps(body).encode())
+
+        row = (
+            await async_db.execute(
+                select(DiveProfile.data, DiveProfile.min_temperature_c100, DiveProfile.max_temperature_c100)
+                .join(Dive)
+                .where(Dive.user_id == user.id)
+            )
+        ).one()
+        assert (row.data["temperature"]["v"], row.min_temperature_c100, row.max_temperature_c100) == (
+            stored,
+            min(stored),
+            max(stored),
+        )
+        bottom = (await async_db.execute(select(Dive.bottom_temperature).where(Dive.user_id == user.id))).scalar_one()
+        assert bottom == min(stored) / 100
+        read = [note.message for note in plan.notes if note.code is ImportNoteCode.READ_AS_WRITTEN]
+        assert sum("hundredths" in message for message in read) == (not marker)
 
 
 SSRF = b"""<divelog program='subsurface' version='3'>

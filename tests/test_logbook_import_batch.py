@@ -1555,7 +1555,7 @@ def _profiled(**dive: Any) -> dict[str, Any]:
     """One dive for `_logbook_of`, whose profile reads 26.2, 21.4 and 23.0 degrees."""
     profile = {
         "depth": {"times": [0, 60_000, 1_740_000], "values": [0, 1800, 0]},
-        "temperature": {"times": [0, 60_000, 1_740_000], "values": [262, 214, 230]},
+        "temperature": {"times": [0, 60_000, 1_740_000], "values": [2620, 2140, 2300]},
     }
     return {"started_at": "2026-08-01T10:00:00+02:00", "recordings": [{"profile": profile}], **dive}
 
@@ -1610,7 +1610,7 @@ class TestAFileLandsAsTheFormShowsIt:
 
         report = await _import(async_db, diver, PAIR)
 
-        assert await _bottom_temperature(async_db, diver) == 29.2
+        assert await _bottom_temperature(async_db, diver) == 29.16
         assert _temperature_notes(report) == 1
 
     @pytest.mark.asyncio

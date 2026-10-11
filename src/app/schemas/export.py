@@ -39,7 +39,8 @@ Where it differs from the API's own read shapes, and why:
 - **Whatever the format has no core member for rides `extensions.opendiving`** (spec
   §5.5): the diver's account preferences, which parser read a stored dive-computer file,
   the crop this app frames the portrait with, the account a person is linked to, and at
-  the document's root the axis marker (`EXPORT_EXTENSIONS`). A writer may not invent core
+  the document's root the markers of the profile's axis unit and temperature scale
+  (`EXPORT_EXTENSIONS`). A writer may not invent core
   members, so this is the sanctioned slot.
 
 The one derived value in here is `archive_path`, which is a fact about the zip rather than
@@ -69,7 +70,7 @@ from .dive import (
     Weather,
 )
 from .dive_mixture import GasRole, TankUsage
-from .dive_profile import DiveProfileRead
+from .dive_profile import TEMPERATURE_SCALE, DiveProfileRead
 from .gear_item import GearType
 from .gear_service import ServiceKind
 from .person import PersonRole
@@ -92,13 +93,21 @@ DIVEJSON_EXTENSION = "divejson"
 # a reader that learned to understand our entries keeps understanding them.
 DIVEJSON_PRODUCER_KEY = "opendiving"
 
-# The document root's `extensions`: which unit this writer's profile axis is in. Every export
-# before the axis moved to milliseconds wrote seconds under the same member names and no
-# marker, so this app's importer reads a markerless document of its own in seconds -
-# `services/logbook_import/reader.py`, `read_as_written`.
+# The document root's `extensions`: which unit this writer's profile axis is in, and which
+# scale its temperature readings are. Every export before the axis moved to milliseconds wrote
+# seconds under the same member names and no axis marker, and every one before temperatures
+# moved to hundredths wrote tenths with no scale marker, so this app's importer reads a document
+# of its own by the markers it carries - `services/logbook_import/reader.py`, `read_as_written`.
+# The scale marker is the stored scale itself, which is what the export writes.
 PROFILE_AXIS_MARKER = "profile_axis"
 PROFILE_AXIS_MILLISECONDS = "milliseconds"
-EXPORT_EXTENSIONS: dict[str, Any] = {DIVEJSON_PRODUCER_KEY: {PROFILE_AXIS_MARKER: PROFILE_AXIS_MILLISECONDS}}
+PROFILE_TEMPERATURE_SCALE_MARKER = "profile_temperature_scale"
+EXPORT_EXTENSIONS: dict[str, Any] = {
+    DIVEJSON_PRODUCER_KEY: {
+        PROFILE_AXIS_MARKER: PROFILE_AXIS_MILLISECONDS,
+        PROFILE_TEMPERATURE_SCALE_MARKER: TEMPERATURE_SCALE,
+    }
+}
 
 # Every `extensions` member: producer key to that producer's payload. Typed loosely on
 # purpose - the spec allows any JSON value under a key, and a reader must not fail on

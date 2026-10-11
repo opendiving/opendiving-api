@@ -1043,7 +1043,7 @@ re-running the function, so call it only with the calling user's own id.
 
 ```json
 {"depth":       {"t": [0, 10, 20], "v": [139, 372, 632]},
- "temperature": {"t": [0, 1, 2],   "v": [219, 219, 218]},
+ "temperature": {"t": [0, 1, 2],   "v": [2193, 2191, 2186]},
  "pressure":    [{"gas_number": 1, "t": [0, 10], "v": [2052, 2041]}]}
 ```
 
@@ -1053,8 +1053,8 @@ channel's timestamps are monotonic, the export's union is not.
 Not row-per-sample: profiles are only ever fetched whole. JSONB, not packed `bytea`:
 `SELECT data->'depth' FROM dive_profile` beats a 3x saving on a TOASTed column.
 
-Values are integers (centimetres, tenths of a degree, tenths of a bar) as the reader wrote them; the
-scale lives in `schemas/dive_profile.py` and the web app's `PROFILE_CHANNELS`. `t` is integer
+Values are integers (centimetres, hundredths of a degree, tenths of a bar) as the reader wrote them;
+the scale lives in `schemas/dive_profile.py` and the web app's `PROFILE_CHANNELS`. `t` is integer
 milliseconds from the recording's start, strictly increasing per channel. A dropout is a gap in `t`,
 never a null. Pressure is a list keyed by `gas_number`, a label not an index.
 
@@ -1132,13 +1132,13 @@ every dive edit and every dive-site or gear rename, none of which can change a p
 The ETag is the row's `uuid`, renewed by every write of samples (`store_profile`,
 `replace_profile_samples`), not the key the samples are a function of: relabelling a sibling
 recording changes its samples and not its key. Beside it is `PROFILE_READ_VERSION`, bumped when what
-the route computes on read (`dive_end_time`) changes: that changes the body under an unchanged row,
-and a browser revalidating the previous build's ETag would get a 304 and keep the old body.
-`get_profile_version` runs before the payload loads, so a conditional request costs one narrow
-query. The 304 is a bare `Response`, bypassing `response_model`. The endpoint sets
-`Cache-Control: private, max-age=300`, which `ClientCacheMiddleware` never overrides. `v` is
-declared and ignored so the contract is visible; the client varies it with the profile's `uuid` and
-`updated_at`.
+the route computes on read (`dive_end_time`) changes, or a migration rewrites stored samples in
+place: either changes the body under an unchanged row, and a browser revalidating the previous
+build's ETag would get a 304 and keep the old body. `get_profile_version` runs before the payload
+loads, so a conditional request costs one narrow query. The 304 is a bare `Response`, bypassing
+`response_model`. The endpoint sets `Cache-Control: private, max-age=300`, which
+`ClientCacheMiddleware` never overrides. `v` is declared and ignored so the contract is visible; the
+client varies it with the profile's `uuid` and `updated_at`.
 
 `DiveProfileInfo` goes on `DiveReadWithMixtures`, never `DiveRead` — the inheritance trap
 `source_file` documents. `get_profile_infos_for_dives` is batched like `get_file_infos_for_dives`.
@@ -6878,6 +6878,18 @@ document with the producer key on its diver and no marker is one of its own from
 tuple, are the other. `reader.read_as_written` rewrites both into the current shape and reports each
 kind it read. *Rejected:* keying on this app's `generator.name`, which is the configurable
 `APP_NAME`, or on its `generator.version`, which an edge build shares with the release before it.
+
+## A document's temperatures are read at the scale its writer used
+
+DiveJSON's temperature channel moved from tenths to hundredths of a degree with its member names and
+integer type unchanged, so a document written before it reads ten times too cold, silently.
+`reader.read_as_written` rescales a profile's temperatures to `TEMPERATURE_SCALE`, rounding once,
+half away from zero. This app's export states its scale at the root as
+`extensions.opendiving.profile_temperature_scale`, read wherever it is a positive integer, so a
+marker that moves with the constant stays true; its own document without one is tenths, as is
+`divejson convert` output below 0.24.0. Anything else carries no signal and is read as hundredths.
+*Rejected:* a word marker (`"hundredths"`) like `profile_axis`, which a reader must map back to a
+number.
 
 ## Notes are capped at 100 000, and an import reads any length
 
