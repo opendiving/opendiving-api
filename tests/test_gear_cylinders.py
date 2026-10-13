@@ -223,6 +223,31 @@ class TestRelabelCarriesTheLink:
         assert cylinders is None
 
 
+class TestARecordingAttach:
+    @pytest.mark.asyncio
+    async def test_recounts_the_owner_s_gear_and_drops_its_caches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The re-derivation rewrites the dive's cylinders, and the vessels they link are what
+        a gear item's figures count."""
+        owner = {"id": 7, "uuid": uuid7()}
+        file_uuid = uuid7()
+        recording = MagicMock(files=[MagicMock(uuid=file_uuid)])
+        recount = AsyncMock()
+        monkeypatch.setattr(dives_module, "_get_owned_dive", AsyncMock(return_value=MagicMock(id=3)))
+        monkeypatch.setattr(
+            dives_module, "store_recording_file", AsyncMock(return_value=MagicMock(file_uuid=file_uuid))
+        )
+        monkeypatch.setattr(dives_module, "get_recordings_for_dives", AsyncMock(return_value={3: [recording]}))
+        monkeypatch.setattr(dives_module, "recalculate_gear_dive_counts", recount)
+
+        await dives_module.write_dive_recording(
+            request=MagicMock(), uuid=uuid7(), current_user=owner, db=MagicMock(), file=MagicMock(), file_token="t"
+        )
+
+        recount.assert_awaited_once()
+        assert recount.await_args is not None and recount.await_args.kwargs["user_id"] == 7
+        dives_module.invalidate_gear_caches.assert_awaited_once_with(7)  # type: ignore[attr-defined]
+
+
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestTheLinkThroughTheRoutes:
     @pytest.mark.asyncio

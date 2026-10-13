@@ -85,8 +85,6 @@ async def get_gear_item_types_for_user(
 ) -> dict[uuid_pkg.UUID, tuple[int, str | None]]:
     """`(id, type)` for each of the user's items among `gear_item_uuids`; another user's
     item, or one that does not exist, is simply absent."""
-    if not gear_item_uuids:
-        return {}
     result = await db.execute(
         select(GearItem.uuid, GearItem.id, GearItem.type).where(
             GearItem.uuid.in_(gear_item_uuids), GearItem.user_id == user_id

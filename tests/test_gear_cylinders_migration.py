@@ -82,7 +82,7 @@ class TestTheUpgrade:
         migrate(name, "upgrade", _REVISION)
 
         with engine.connect() as connection:
-            times = dict(connection.execute(text("SELECT id, dive_time FROM gear_item")).tuples().all())
+            times: dict[int, int] = dict(connection.execute(text("SELECT id, dive_time FROM gear_item")).tuples().all())
         assert times == {1: 2700 + 3600, 2: 0, 3: 9999}
 
     def test_the_snapshots_count_the_dives_created_at_or_before_the_row(self, scratch: tuple[str, Engine]) -> None:
@@ -103,7 +103,9 @@ class TestTheUpgrade:
         migrate(name, "upgrade", _REVISION)
 
         with engine.connect() as connection:
-            presets = dict(connection.execute(text("SELECT name, hidden_fields FROM dive_form_preset")).tuples().all())
+            presets: dict[str, list[str]] = dict(
+                connection.execute(text("SELECT name, hidden_fields FROM dive_form_preset")).tuples().all()
+            )
             account = connection.scalar(text('SELECT dive_form_hidden_fields FROM "user" WHERE id = 1'))
         with_vessel = [*BASIC[:2], "mixture.gear_item_uuid", *BASIC[2:]]
         assert presets == {"Basic": with_vessel, "Plain": PLAIN}
@@ -134,5 +136,7 @@ class TestTheDowngrade:
 
         assert _scalar(engine, "SELECT count(*) FROM gear_service_schedule") == 0
         with engine.connect() as connection:
-            presets = dict(connection.execute(text("SELECT name, hidden_fields FROM dive_form_preset")).tuples().all())
+            presets: dict[str, list[str]] = dict(
+                connection.execute(text("SELECT name, hidden_fields FROM dive_form_preset")).tuples().all()
+            )
         assert presets == {"Basic": BASIC, "Plain": PLAIN}
