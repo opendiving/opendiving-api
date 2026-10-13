@@ -721,6 +721,7 @@ class TestFilesFollowTheirBytes:
 
         plan = await _apply(async_db, destination.id, _zip_of(document, {member: content}), filename="logbook.zip")
         monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_gear_caches", AsyncMock())
 
         assert plan.files_restored == 1
         restored = select(DiveProfile.parser_key, DiveProfile.reader_version).where(
