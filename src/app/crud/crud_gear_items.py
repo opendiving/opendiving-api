@@ -25,6 +25,9 @@ GEAR_ITEM_INFO_COLUMNS = (
     GearItem.type,
     GearItem.rented,
     GearItem.is_archived,
+    GearItem.volume,
+    GearItem.working_pressure,
+    GearItem.material,
 )
 
 
@@ -37,6 +40,9 @@ def gear_item_info_from_row(row: Any) -> GearItemInfo:
         type=row.type,
         rented=row.rented,
         is_archived=row.is_archived,
+        volume=row.volume,
+        working_pressure=row.working_pressure,
+        material=row.material,
     )
 
 
@@ -72,6 +78,21 @@ async def resolve_gear_item_ids_for_user(
     if mapping.keys() != unique_uuids:
         return None
     return mapping
+
+
+async def get_gear_item_types_for_user(
+    db: AsyncSession, gear_item_uuids: set[uuid_pkg.UUID], user_id: int
+) -> dict[uuid_pkg.UUID, tuple[int, str | None]]:
+    """`(id, type)` for each of the user's items among `gear_item_uuids`; another user's
+    item, or one that does not exist, is simply absent."""
+    if not gear_item_uuids:
+        return {}
+    result = await db.execute(
+        select(GearItem.uuid, GearItem.id, GearItem.type).where(
+            GearItem.uuid.in_(gear_item_uuids), GearItem.user_id == user_id
+        )
+    )
+    return {row.uuid: (row.id, row.type) for row in result}
 
 
 async def get_gear_item_uuids_by_id(db: AsyncSession, gear_item_ids: list[int]) -> dict[int, uuid_pkg.UUID]:

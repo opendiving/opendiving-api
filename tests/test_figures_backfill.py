@@ -127,6 +127,7 @@ def invalidated(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """No Redis here; a run's invalidation is recorded rather than sent."""
     dropped = AsyncMock()
     monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", dropped)
+    monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_gear_caches", AsyncMock())
     return dropped
 
 

@@ -12,10 +12,12 @@ from ...core.exceptions.http_exceptions import DuplicateValueException, NotFound
 from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.search import search_clause, search_multi
-from ...crud.crud_gear_items import crud_gear_items, gear_item_name_exists
+from ...crud.crud_dive_mixtures import set_volume_of_linked_cylinders
+from ...crud.crud_gear_items import GEAR_ITEM_INFO_COLUMNS, crud_gear_items, gear_item_name_exists
 from ...crud.crud_gear_service_schedules import get_schedules_for_gear_item, get_schedules_for_gear_items
 from ...crud.crud_lookups import get_lookup_page
 from ...models.dive_gear_item import DiveGearItem
+from ...models.dive_mixture import DiveMixture
 from ...models.gear_item import GearItem
 from ...schemas.gear_item import (
     GearItemCreate,
@@ -24,6 +26,7 @@ from ...schemas.gear_item import (
     GearItemRead,
     GearItemReadInternal,
     GearItemUpdate,
+    GearType,
 )
 from ...schemas.gear_service import GearServiceScheduleInfo
 from ...schemas.lookup import LookupUntil, lookup_bound
@@ -214,7 +217,8 @@ async def read_gear_items(
 
 # Under the gear prefix, so `invalidate_gear_caches` drops the lookup with the list.
 _LOOKUP_CACHE_KEY_PREFIX = (
-    "user_{user_id}_gear_items:page_{page}:items_per_page:{items_per_page}:search_{search}:lookup:until_{until}"
+    "user_{user_id}_gear_items:page_{page}:items_per_page:{items_per_page}:search_{search}:type_{type}"
+    ":lookup:until_{until}"
 )
 
 
@@ -226,6 +230,7 @@ async def _cached_lookup_gear_items(
     page: int,
     items_per_page: int,
     search: str | None,
+    type: GearType | None,
     until: datetime | None,
 ) -> dict:
     """Fetches (and caches) a page of `GET /gear-items/lookup`, under the gear prefix so that
@@ -234,12 +239,17 @@ async def _cached_lookup_gear_items(
     conditions: tuple[Any, ...] = (GearItem.user_id == user_id, GearItem.is_archived.is_(False))
     if search:
         conditions += (search_clause(GearItem, GEAR_ITEM_SEARCH_COLUMNS, search),)
+    if type is not None:
+        conditions += (GearItem.type == type,)
     data = await get_lookup_page(
         db,
         model=GearItem,
-        columns=(GearItem.uuid, GearItem.name, GearItem.brand, GearItem.type, GearItem.rented, GearItem.is_archived),
+        columns=GEAR_ITEM_INFO_COLUMNS,
         conditions=conditions,
         used_by=DiveGearItem.gear_item_id,
+        # A vessel picked on the last dive's tank and never listed in its gear is still the
+        # item the diver used last.
+        also_used_by=DiveMixture.gear_item_id,
         user_id=user_id,
         bound=until,
         offset=compute_offset(page, items_per_page),
@@ -262,10 +272,14 @@ async def lookup_gear_items(
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on name or brand"),
     ] = None,
+    type: Annotated[
+        GearType | None, Query(description="Only items of this type - a tank's picker asks for cylinders")
+    ] = None,
 ) -> dict:
     """The caller's gear in service as a picker lists it: what a dive embeds of an item, the
     item on a dive at or before `until` most recently first, then items no such dive used,
-    newest created first.
+    newest created first. A dive uses an item by listing it in its gear or by linking it as a
+    cylinder's vessel.
 
     Archived items are never listed: a picker offers kit still in service. `search` matches
     what `GET /gear-items` matches. Out-of-range pagination is clamped.
@@ -279,6 +293,7 @@ async def lookup_gear_items(
         page=page,
         items_per_page=items_per_page,
         search=(search or "").strip().lower() or None,
+        type=type,
         until=lookup_bound(until),
     )
 
@@ -331,6 +346,10 @@ async def patch_gear_item(
 ) -> dict[str, str]:
     """Partial update, including archiving/unarchiving via `is_archived` - `archived_at`
     is derived here rather than accepted from the caller.
+
+    A changed `volume` is written to every dive cylinder linked to the item in the same
+    transaction, so a tank linked to its vessel never disagrees with it after a correction.
+    Clearing the volume leaves the tanks' figures standing: there is nothing to write.
     """
     db_gear_item = await _get_owned_gear_item(db, uuid, current_user)
 
@@ -351,10 +370,14 @@ async def patch_gear_item(
         update_data["archived_at"] = datetime.now(UTC) if values.is_archived else None
 
     if update_data:
-        await crud_gear_items.update(db=db, object=update_data, uuid=uuid)
+        await crud_gear_items.update(db=db, object=update_data, uuid=uuid, commit=False)
+        if values.volume is not None and values.volume != db_gear_item.volume:
+            await set_volume_of_linked_cylinders(db, gear_item_id=db_gear_item.id, volume=values.volume)
+        await db.commit()
         await invalidate_gear_caches(db_gear_item.user_id)
-        # Dive reads embed this item's name/brand/type/rented/is_archived, so a rename
-        # (or an archive) makes every cached dive that uses it stale.
+        # Dive reads embed this item's name/brand/type/rented/is_archived and its vessel's
+        # facts, and a changed capacity rewrites the linked tanks' volumes, so every cached
+        # dive that uses it is stale.
         await invalidate_dive_caches(db_gear_item.user_id)
 
     return {"message": "Gear item updated"}

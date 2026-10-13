@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -45,14 +45,19 @@ class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin):
     # `OTHER` usable more than once on the same item ("bladder check" / "zip wax")
     # without inventing a new enum member for every one-off.
     label: Mapped[str | None] = mapped_column(String(120), default=None)
-    # The two interval arms. At least one must be set (see the CheckConstraint below);
-    # when both are, whichever threshold trips first wins.
+    # The three interval arms. At least one must be set (see the CheckConstraint below);
+    # when more than one is, whichever threshold trips first wins. `interval_hours` counts
+    # hours of diving - the item's `dive_time` - not clock hours.
     interval_months: Mapped[int | None] = mapped_column(Integer, default=None)
     interval_dives: Mapped[int | None] = mapped_column(Integer, default=None)
+    interval_hours: Mapped[int | None] = mapped_column(Integer, default=None)
     # The item's lifetime `dive_count` when this rule was created - the dive-count
     # counterpart of `starts_on`. Snapshotted server-side by `write_gear_service_schedule`
     # from the `GearItem` row it already fetched, never accepted from the client.
     dive_count_at_start: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # The item's `dive_time` (seconds) when this rule was created, the hours arm's baseline,
+    # snapshotted the same way. Every seconds column here is `BigInteger`, as `dive_time` is.
+    dive_time_at_start: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
 
     # Pause reminders without losing the rule. Distinct from `gear_item.is_archived`,
     # which silences every schedule on the item at once, and from deleting the rule,
@@ -69,18 +74,21 @@ class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin):
     # changes the item's counter and therefore the *displayed* status, but never has to
     # write to this table. See DECISIONS.md.
     next_due_at_dive_count: Mapped[int | None] = mapped_column(Integer, default=None)
+    # The hours arm's threshold, in seconds of `dive_time`: `baseline + 3600 * interval_hours`.
+    next_due_at_dive_time: Mapped[int | None] = mapped_column(BigInteger, default=None)
 
     # ---- notify state for the digest job (`core.worker.functions.send_gear_service_digests`) ----
     # Together these make a reminder fire once per threshold crossing rather than every
     # single day. The job compares `(notified_stage, notified_for_due_on,
-    # notified_for_due_at_dive_count)` against the schedule's current
-    # `(status, next_due_on, next_due_at_dive_count)` and only sends when they differ,
-    # so moving the due date (by logging a service or editing the interval) re-arms the
-    # reminder automatically. `recalculate_service_schedule` clears all four whenever it
-    # moves `next_due_*`, which is why the two can't drift apart.
+    # notified_for_due_at_dive_count, notified_for_due_at_dive_time)` against the schedule's
+    # current `(status, next_due_on, next_due_at_dive_count, next_due_at_dive_time)` and only
+    # sends when they differ, so moving the due date (by logging a service or editing the
+    # interval) re-arms the reminder automatically. `recalculate_service_schedule` clears all
+    # five whenever it moves `next_due_*`, which is why the two can't drift apart.
     notified_stage: Mapped[str | None] = mapped_column(String(16), default=None)
     notified_for_due_on: Mapped[date | None] = mapped_column(Date, default=None)
     notified_for_due_at_dive_count: Mapped[int | None] = mapped_column(Integer, default=None)
+    notified_for_due_at_dive_time: Mapped[int | None] = mapped_column(BigInteger, default=None)
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
     @declared_attr.directive
@@ -93,7 +101,7 @@ class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin):
             # generating nothing forever. Mirrored in `GearServiceScheduleBase`'s
             # validator and in the frontend's Zod schema.
             CheckConstraint(
-                "interval_months IS NOT NULL OR interval_dives IS NOT NULL",
+                "interval_months IS NOT NULL OR interval_dives IS NOT NULL OR interval_hours IS NOT NULL",
                 name="ck_gear_service_schedule_has_an_interval",
             ),
             CheckConstraint(
@@ -103,6 +111,10 @@ class GearServiceSchedule(Base, PublicUUIDMixin, TimestampMixin):
             CheckConstraint(
                 "interval_dives IS NULL OR interval_dives > 0",
                 name="ck_gear_service_schedule_interval_dives_positive",
+            ),
+            CheckConstraint(
+                "interval_hours IS NULL OR interval_hours > 0",
+                name="ck_gear_service_schedule_interval_hours_positive",
             ),
             # One rule per (item, kind, label). COALESCE maps a NULL label to '' so two
             # label-less "service" rules on the same item are duplicates, exactly how

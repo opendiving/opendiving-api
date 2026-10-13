@@ -100,7 +100,9 @@ from src.app.services.logbook_import import planner as planner_module
 from src.app.services.logbook_import import reader as import_reader
 from src.app.services.logbook_import.planner import (
     _DIVE_BOUNDS,
+    _GEAR_BOUNDS,
     _MIXTURE_BOUNDS,
+    _SCHEDULE_BOUNDS,
     _SIGHTING_BOUNDS,
     _SITE_BOUNDS,
 )
@@ -4255,6 +4257,8 @@ class TestTheBoundsCensus:
             "ck_dive_recording_deco_gf_low_within_high",
             # `split_dive_start_time` never pairs the date-only flag with an offset.
             "ck_dive_start_date_only_has_no_offset",
+            # `_plan_schedule` skips a schedule its bounds leave with no interval.
+            "ck_gear_service_schedule_has_an_interval",
         }
     )
     # There used to be a third exclusion here, for the three `dive_mixture` bounds whose
@@ -4280,7 +4284,15 @@ class TestTheBoundsCensus:
     def test_every_bound_the_document_can_reach_has_a_guard(self) -> None:
         guarded = {
             bound.field
-            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, READOUT_BOUNDS, _SIGHTING_BOUNDS, _SITE_BOUNDS)
+            for bounds in (
+                _DIVE_BOUNDS,
+                _MIXTURE_BOUNDS,
+                READOUT_BOUNDS,
+                _SIGHTING_BOUNDS,
+                _SITE_BOUNDS,
+                _GEAR_BOUNDS,
+                _SCHEDULE_BOUNDS,
+            )
             for bound in bounds
         }
         # Column names, mapped onto the wire names the planner reads them under.
@@ -4288,7 +4300,15 @@ class TestTheBoundsCensus:
         unguarded = []
         # `tuple[Any, ...]` because `Model.__table__` is typed `FromClause` on a precisely
         # typed class, and only `Table` carries `.constraints`.
-        models: tuple[Any, ...] = (Dive, DiveMixture, DiveRecording, DiveSpecies, DiveSite)
+        models: tuple[Any, ...] = (
+            Dive,
+            DiveMixture,
+            DiveRecording,
+            DiveSpecies,
+            DiveSite,
+            GearItem,
+            GearServiceSchedule,
+        )
         for model in models:
             table = model.__table__
             for constraint in table.constraints:
@@ -4589,6 +4609,7 @@ class TestTheIntegerColumnCensus:
         ("dive_mixture", "id"): "the sequence's",
         ("dive_mixture", "dive_id"): "resolved from a row this import wrote",
         ("dive_mixture", "gas_number"): "bounded in `_MIXTURE_BOUNDS`",
+        ("dive_mixture", "gear_item_id"): "resolved from a row this import wrote, or one the caller already had",
         ("dive_profile", "id"): "the sequence's",
         ("dive_profile", "recording_id"): "resolved from a row this import wrote",
         ("dive_profile", "dive_id"): "resolved from a row this import wrote",
@@ -4611,8 +4632,9 @@ class TestTheIntegerColumnCensus:
         ("gear_service_schedule", "id"): "the sequence's",
         ("gear_service_schedule", "user_id"): "the caller's",
         ("gear_service_schedule", "gear_item_id"): "resolved from a row this import wrote",
-        ("gear_service_schedule", "interval_months"): "bounded in `_plan_schedule`",
-        ("gear_service_schedule", "interval_dives"): "bounded in `_plan_schedule`",
+        ("gear_service_schedule", "interval_months"): "bounded in `_SCHEDULE_BOUNDS`",
+        ("gear_service_schedule", "interval_dives"): "bounded in `_SCHEDULE_BOUNDS`",
+        ("gear_service_schedule", "interval_hours"): "bounded in `_SCHEDULE_BOUNDS`",
         ("gear_service_schedule", "dive_count_at_start"): "bounded by `_Planner._count`",
         ("gear_service_schedule", "next_due_at_dive_count"): "derived by `recalculate_service_schedule`",
         (

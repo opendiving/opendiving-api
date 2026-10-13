@@ -154,12 +154,23 @@ class TestGearType:
 
     def test_the_vocabulary_matches_divejson_1_0s_order(self) -> None:
         """The members and their order are DiveJSON 1.0's `gear_item.type` enum, so a
-        category cannot simply be appended - it goes where the format puts it. These are
-        the four the app gained last, each pinned against the neighbours that fix its
-        position; the format is the source of truth for the rest (see DECISIONS.md)."""
+        category cannot simply be appended - it goes where the format puts it. Each member
+        the app gained after its first vocabulary is pinned against the neighbours that fix
+        its position; the format is the source of truth for the rest (see DECISIONS.md)."""
         values = [t.value for t in GearType]
         assert values[values.index("smb") : values.index("reel")] == ["smb", "mirror", "whistle"]
         assert values[values.index("knife") : values.index("compass")] == ["knife", "line_cutter", "shears"]
+        assert values[values.index("regulator") : values.index("computer") + 1] == [
+            "regulator",
+            "rebreather",
+            "computer",
+        ]
+        assert values[values.index("computer") : values.index("cylinder") + 1] == [
+            "computer",
+            "transmitter",
+            "cylinder",
+        ]
+        assert values[values.index("light") : values.index("smb") + 1] == ["light", "scooter", "smb"]
 
 
 class TestGearSchemas:
@@ -253,7 +264,11 @@ class TestRecalculateGearDiveCounts:
         await recalculate_gear_dive_counts(db, user_id=42)
 
         statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
-        assert statement.startswith("UPDATE gear_item SET dive_count=")
+        assert "UPDATE gear_item SET dive_count=" in statement
+        assert "dive_time=(SELECT coalesce(sum(uses.submerged_time), 0)" in statement
+        # A dive names an item through its gear list or a cylinder's vessel, once either way.
+        assert " UNION SELECT dive_mixture.dive_id" in statement
+        assert "dive_mixture.gear_item_id IS NOT NULL" in statement
         assert "gear_item.user_id = 42" in statement
         # Soft-deleted dives must not contribute to any item's count.
         assert "dive.is_deleted IS false" in statement

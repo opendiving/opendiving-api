@@ -264,7 +264,7 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view", "create", "update"},
     )
 
-    # `last_service_on`/`next_due_on`/`next_due_at_dive_count` and the `notified_*`
+    # `last_service_on`, the `next_due_*` thresholds and the `notified_*`
     # fields are derived (see `services.gear_service.recalculate_service_schedule`), so
     # editing them here only sticks until the next schedule or record write.
     admin.add_view(

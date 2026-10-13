@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import Date, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Date, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -41,6 +41,9 @@ class GearServiceRecord(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # rows whose dive is newer than `serviced_on` - can't be compared against a stored
     # threshold and would need a per-item aggregate on every read. See DECISIONS.md.
     dive_count_at_service: Mapped[int] = mapped_column(Integer)
+    # The item's `dive_time` (seconds) at the same moment - the hours arm's baseline,
+    # snapshotted the same way and carrying the same lifetime-counter caveat.
+    dive_time_at_service: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
 
     # `ON DELETE SET NULL`, not CASCADE: deleting a servicing *rule* must never delete
     # the receipts. Nullable in its own right too - a record can be logged with no rule

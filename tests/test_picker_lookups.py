@@ -35,12 +35,14 @@ from src.app.models.course_person import CoursePerson
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_gear_item import DiveGearItem
+from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_person import DivePerson
 from src.app.models.trip_part import TripPart
 from src.app.models.trip_person import TripPerson
 from src.app.models.user import User
 from src.app.schemas.dive import DiveLocalStartTime
 from src.app.schemas.dive_site import DiveSiteListSort
+from src.app.schemas.gear_item import GearType
 from src.app.schemas.lookup import LookupUntil, LookupUuids, lookup_bound
 from tests.conftest import db_available
 from tests.helpers.generators import (
@@ -101,7 +103,8 @@ class TestTheCacheKeys:
     def test_the_key_sits_under_the_sweep_that_drops_the_list(self, module: Any) -> None:
         prefix = module._LOOKUP_CACHE_KEY_PREFIX
         key = _format_prefix(
-            prefix, {"user_id": 7, "page": 1, "items_per_page": 25, "search": None, "until": lookup_bound(None)}
+            prefix,
+            {"user_id": 7, "page": 1, "items_per_page": 25, "search": None, "type": None, "until": lookup_bound(None)},
         )
 
         assert prefix.endswith(":lookup:until_{until}")
@@ -362,8 +365,14 @@ def _use_gear(db: Session, dive: Dive, item: Any) -> None:
     _join(db, DiveGearItem(dive_id=dive.id, gear_item_id=item.id, position=0))
 
 
-async def _lookup_gear(async_db: AsyncSession, user: User, search: str | None, bound: datetime | None) -> list[Any]:
-    return await _page(gear_items_module._cached_lookup_gear_items, async_db, user, search, bound)
+async def _lookup_gear(
+    async_db: AsyncSession, user: User, search: str | None, bound: datetime | None, gear_type: GearType | None = None
+) -> list[Any]:
+    result = await gear_items_module._cached_lookup_gear_items.__wrapped__(  # type: ignore[attr-defined]
+        None, user_id=user.id, db=async_db, page=1, items_per_page=50, search=search, type=gear_type, until=bound
+    )
+    rows: list[dict[str, Any]] = result["data"]
+    return rows
 
 
 async def _list_gear(async_db: AsyncSession, user: User, term: str) -> set[Any]:
@@ -441,7 +450,7 @@ RESOURCES = [
         _lookup_gear,
         _list_gear,
         _gear_searchable,
-        frozenset({"uuid", "name", "brand", "type", "rented", "is_archived"}),
+        frozenset({"uuid", "name", "brand", "type", "rented", "is_archived", "volume", "working_pressure", "material"}),
     ),
 ]
 
@@ -534,6 +543,33 @@ class TestTheSpecifics:
         rows = await _lookup_gear(async_db, diver, None, None)
 
         assert [row["uuid"] for row in rows] == [kept.uuid]
+
+    @pytest.mark.asyncio
+    async def test_a_vessel_linked_on_a_tank_is_a_use(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        """A cylinder picked on the last dive's tank and never listed in its gear is still the
+        item that dive used: the order joins both columns naming an item on a dive."""
+        listed, linked = create_gear_item(db, diver), create_gear_item(db, diver)
+        _use_gear(db, _dive(db, diver, _bound(1)), listed)
+        _join(db, DiveMixture(dive_id=_dive(db, diver, _bound(5)).id, gear_item_id=linked.id))
+
+        rows = await _lookup_gear(async_db, diver, None, None)
+
+        assert [row["uuid"] for row in rows] == [linked.uuid, listed.uuid]
+
+    @pytest.mark.asyncio
+    async def test_the_type_filter_lists_one_type_with_its_vessel_facts(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        create_gear_item(db, diver)
+        cylinder = create_gear_item(db, diver)
+        cylinder.type, cylinder.volume, cylinder.working_pressure, cylinder.material = "cylinder", 12.0, 232.0, "steel"
+        db.commit()
+
+        rows = await _lookup_gear(async_db, diver, None, None, GearType.CYLINDER)
+
+        assert [(row["uuid"], row["volume"], row["working_pressure"], row["material"]) for row in rows] == [
+            (cylinder.uuid, 12.0, 232.0, "steel")
+        ]
 
     @pytest.mark.asyncio
     async def test_the_rows_carry_what_the_picker_shows(self, db: Session, async_db: AsyncSession, diver: User) -> None:

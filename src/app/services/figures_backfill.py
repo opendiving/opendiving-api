@@ -40,6 +40,7 @@ from .blob_store import BlobMissingError
 from .dive_files import LoadedDiveFile, extract_file, load_recording_files
 from .dive_profiles import IMPORT_PARSER_KEY, MERGE_PARSER_KEY, NormalizedProfile, load_stored_profile
 from .dive_stats import recalculate_dive_stats
+from .gear_stats import recalculate_gear_dive_counts
 from .recording_shape import in_water_of
 
 logger = logging.getLogger(__name__)
@@ -265,11 +266,14 @@ async def backfill_dive_figures(
     if not dry_run:
         for user_id in sorted(touched_user_ids):
             await recalculate_dive_stats(db=db, user_id=user_id, commit=False)
+            # A gear item's dive time sums the submerged times this just rewrote.
+            await recalculate_gear_dive_counts(db=db, user_id=user_id, commit=False)
         await db.commit()
-        from .cache_invalidation import invalidate_dive_caches
+        from .cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 
         for user_id in touched_user_ids:
             await invalidate_dive_caches(user_id)
+            await invalidate_gear_caches(user_id)
 
     return FiguresBackfillReport(
         devices=tuple(devices), dry_run=dry_run, examined=examined, failed=failed, rewrites=rewrites

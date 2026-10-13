@@ -490,6 +490,20 @@ async def fill_tech_scalars(db: AsyncSession, *, dive_id: int, scalars: dict[str
 IncomingCylinder = DiveMixtureSchema | DiveMixtureRead
 
 
+class LinkedCylinder(DiveMixtureSchema):
+    """A logbook document's cylinder arriving at a dive the caller already holds, carrying the
+    vessel it links as the stored item's uuid. A file's own cylinders never link one."""
+
+    gear_item_uuid: uuid_pkg.UUID | None = None
+
+
+def incoming_link(cylinder: IncomingCylinder) -> uuid_pkg.UUID | None:
+    """The vessel an incoming cylinder links, whichever shape it arrived in."""
+    if isinstance(cylinder, DiveMixtureRead):
+        return None if cylinder.gear_item is None else cylinder.gear_item.uuid
+    return getattr(cylinder, "gear_item_uuid", None)
+
+
 @dataclass(frozen=True, slots=True)
 class CylinderPair:
     """One of the dive's rows and the incoming cylinder the labelling paired it with.
@@ -587,9 +601,7 @@ def fill_from_pair(pair: CylinderPair, *, trust_position: bool) -> dict[str, flo
     arrival still takes the rest, since the recording's re-derivation carries what it wrote.
     """
     row, incoming = pair.row, pair.incoming
-    if not (trust_position or pair.settled or _records_nothing_else(row, incoming)):
-        return {}
-    if _mixes_disagree(row, incoming):
+    if not pair_may_fill(pair, trust_position=trust_position):
         return {}
     values: dict[str, float] = {
         name: reading
@@ -601,6 +613,15 @@ def fill_from_pair(pair: CylinderPair, *, trust_position: bool) -> dict[str, flo
         if incoming.end_pressure is not None:
             values["end_pressure"] = incoming.end_pressure
     return values if _fill_is_storable(row, values) else {}
+
+
+def pair_may_fill(pair: CylinderPair, *, trust_position: bool) -> bool:
+    """Whether a pair may fill the row's blanks at all - `fill_from_pair`'s gate, which a blank
+    vessel link passes through too."""
+    row, incoming = pair.row, pair.incoming
+    if not (trust_position or pair.settled or _records_nothing_else(row, incoming)):
+        return False
+    return not _mixes_disagree(row, incoming)
 
 
 def _records_nothing_else(row: DiveMixtureRead, incoming: IncomingCylinder) -> bool:
@@ -650,12 +671,20 @@ def relabel_gas_numbers(
     **`fill` says this is an arrival** - `rederive_recording`'s rule - and each pair then
     fills on `fill_from_pair`'s terms, a guessed pair bounded. Not on every re-derivation:
     a value the diver cleared would come back on the next backfill.
+
+    **A cylinder's vessel link travels on the same terms**: a pair fills a blank link at an
+    arrival and never replaces one, and an appended cylinder keeps its own. A vessel is one
+    gas supply, so a link the dive's cylinders already carry is not taken a second time: the
+    second cylinder keeps its gas and loses the link, rather than the table's unique index
+    refusing the whole merge or import.
     """
     pairs, unmatched = pair_cylinders(parsed, stored)
 
+    linked = {link for row in stored if (link := incoming_link(row)) is not None}
     next_free = max((row.gas_number for row in stored if row.gas_number is not None), default=0) + 1
     mapping: dict[int, int] = {}
     changes: dict[int, dict[str, float | int]] = {}
+    links: dict[int, uuid_pkg.UUID] = {}
     for pair in pairs:
         row, incoming = pair.row, pair.incoming
         change: dict[str, float | int] = dict(fill_from_pair(pair, trust_position=False)) if fill else {}
@@ -667,6 +696,16 @@ def relabel_gas_numbers(
             mapping[incoming.gas_number] = label
         if change:
             changes[row.id] = change
+        link = incoming_link(incoming)
+        if (
+            fill
+            and row.gear_item is None
+            and link is not None
+            and link not in linked
+            and pair_may_fill(pair, trust_position=False)
+        ):
+            links[row.id] = link
+            linked.add(link)
 
     appended: list[DiveMixtureCreate] = []
     for incoming in unmatched:
@@ -677,12 +716,23 @@ def relabel_gas_numbers(
         cylinder = (
             as_create(incoming) if isinstance(incoming, DiveMixtureRead) else DiveMixtureCreate(**incoming.model_dump())
         )
-        appended.append(cylinder.model_copy(update={"gas_number": next_free}))
+        update: dict[str, object] = {"gas_number": next_free}
+        if cylinder.gear_item_uuid is not None:
+            if cylinder.gear_item_uuid in linked:
+                update["gear_item_uuid"] = None
+            else:
+                linked.add(cylinder.gear_item_uuid)
+        appended.append(cylinder.model_copy(update=update))
         next_free += 1
 
-    if not changes and not appended:
+    if not changes and not links and not appended:
         return mapping, None
-    return mapping, [*(as_create(row.model_copy(update=changes.get(row.id, {}))) for row in stored), *appended]
+    rows = [as_create(row.model_copy(update=changes.get(row.id, {}))) for row in stored]
+    rows = [
+        row.model_copy(update={"gear_item_uuid": links[stored_row.id]}) if stored_row.id in links else row
+        for row, stored_row in zip(rows, stored, strict=True)
+    ]
+    return mapping, [*rows, *appended]
 
 
 def apply_gas_mapping(profile: NormalizedProfile | None, mapping: dict[int, int]) -> NormalizedProfile | None:
@@ -1354,7 +1404,7 @@ async def label_cylinders(
     no label given one: `gas_number` is dive-scoped, and a second computer numbers its tanks
     its own way.
     """
-    from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
+    from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive, vessel_ids_for_dive
 
     if not mixtures:
         return profile
@@ -1363,7 +1413,13 @@ async def label_cylinders(
     if ordinal != 0:
         mapping, cylinders = relabel_gas_numbers(mixtures, stored, fill=fill)
         if cylinders is not None:
-            await replace_mixtures_for_dive(db=db, dive_id=dive_id, mixtures=cylinders, commit=False)
+            await replace_mixtures_for_dive(
+                db=db,
+                dive_id=dive_id,
+                mixtures=cylinders,
+                commit=False,
+                gear_item_ids=await vessel_ids_for_dive(db, cylinders, dive_id=dive_id),
+            )
         return apply_gas_mapping(profile, mapping)
 
     if fill:

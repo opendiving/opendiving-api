@@ -35,9 +35,11 @@ from src.app.schemas.gear_service import (
 from src.app.services.gear_service import (
     SERVICE_DUE_SOON_DAYS,
     SERVICE_DUE_SOON_DIVES,
+    SERVICE_DUE_SOON_HOURS,
     SERVICE_OVERDUE_RENAG_DAYS,
     add_months,
     dives_since,
+    hours_of_diving,
     next_due_from,
     recalculate_service_schedule,
     service_status,
@@ -80,33 +82,67 @@ class TestNextDueFrom:
     """
 
     def test_time_only_rule_has_no_dive_threshold(self) -> None:
-        due_on, due_at = next_due_from(
-            baseline_on=date(2026, 1, 1), baseline_dive_count=40, interval_months=12, interval_dives=None
+        due_on, due_at, _ = next_due_from(
+            baseline_on=date(2026, 1, 1),
+            baseline_dive_count=40,
+            baseline_dive_time=0,
+            interval_months=12,
+            interval_dives=None,
+            interval_hours=None,
         )
         assert due_on == date(2027, 1, 1)
         assert due_at is None
 
     def test_dive_only_rule_has_no_due_date(self) -> None:
-        due_on, due_at = next_due_from(
-            baseline_on=date(2026, 1, 1), baseline_dive_count=40, interval_months=None, interval_dives=100
+        due_on, due_at, _ = next_due_from(
+            baseline_on=date(2026, 1, 1),
+            baseline_dive_count=40,
+            baseline_dive_time=0,
+            interval_months=None,
+            interval_dives=100,
+            interval_hours=None,
         )
         assert due_on is None
         assert due_at == 140
 
     def test_both_arms_are_computed_independently(self) -> None:
-        due_on, due_at = next_due_from(
-            baseline_on=date(2026, 1, 1), baseline_dive_count=40, interval_months=12, interval_dives=100
+        due_on, due_at, due_at_time = next_due_from(
+            baseline_on=date(2026, 1, 1),
+            baseline_dive_count=40,
+            baseline_dive_time=2700,
+            interval_months=12,
+            interval_dives=100,
+            interval_hours=1,
         )
         assert due_on == date(2027, 1, 1)
         assert due_at == 140
+        assert due_at_time == 6300
 
     def test_the_dive_threshold_is_absolute_not_remaining(self) -> None:
         # 40 dives done, service every 100 -> due at lifetime dive 140, a number that
         # never has to be rewritten when the diver logs another dive.
-        _, due_at = next_due_from(
-            baseline_on=date(2026, 1, 1), baseline_dive_count=40, interval_months=None, interval_dives=100
+        _, due_at, _ = next_due_from(
+            baseline_on=date(2026, 1, 1),
+            baseline_dive_count=40,
+            baseline_dive_time=0,
+            interval_months=None,
+            interval_dives=100,
+            interval_hours=None,
         )
         assert due_at == 140
+
+    def test_the_hours_threshold_is_seconds_of_dive_time_and_exact(self) -> None:
+        # 45 minutes in the water when the rule began, service every 50 hours of diving.
+        due_on, due_at, due_at_time = next_due_from(
+            baseline_on=date(2026, 1, 1),
+            baseline_dive_count=1,
+            baseline_dive_time=2700,
+            interval_months=None,
+            interval_dives=None,
+            interval_hours=50,
+        )
+        assert (due_on, due_at) == (None, None)
+        assert due_at_time == 2700 + 50 * 3600
 
 
 class TestServiceStatus:
@@ -118,7 +154,9 @@ class TestServiceStatus:
         defaults = {
             "next_due_on": None,
             "next_due_at_dive_count": None,
+            "next_due_at_dive_time": None,
             "dive_count": 0,
+            "dive_time": 0,
             "today": self.TODAY,
         }
         return service_status(**{**defaults, **overrides})
@@ -160,6 +198,30 @@ class TestServiceStatus:
         )
         assert self._status(next_due_at_dive_count=140, dive_count=140 - SERVICE_DUE_SOON_DIVES - 1) is ServiceStatus.OK
 
+    def test_hours_arm_far_from_the_threshold_is_ok(self) -> None:
+        assert self._status(next_due_at_dive_time=180_000, dive_time=3600) is ServiceStatus.OK
+
+    def test_hours_arm_at_or_past_the_threshold_is_overdue(self) -> None:
+        assert self._status(next_due_at_dive_time=180_000, dive_time=180_000) is ServiceStatus.OVERDUE
+        assert self._status(next_due_at_dive_time=180_000, dive_time=180_001) is ServiceStatus.OVERDUE
+
+    def test_hours_arm_boundaries_compare_seconds(self) -> None:
+        window = SERVICE_DUE_SOON_HOURS * 3600
+        assert self._status(next_due_at_dive_time=180_000, dive_time=180_000 - window) is ServiceStatus.DUE_SOON
+        assert self._status(next_due_at_dive_time=180_000, dive_time=180_000 - window - 1) is ServiceStatus.OK
+
+    def test_the_hours_arm_alone_can_make_a_schedule_overdue(self) -> None:
+        assert (
+            self._status(
+                next_due_on=self.TODAY + timedelta(days=300),
+                next_due_at_dive_count=140,
+                dive_count=10,
+                next_due_at_dive_time=6300,
+                dive_time=7200,
+            )
+            is ServiceStatus.OVERDUE
+        )
+
     def test_the_more_urgent_arm_wins(self) -> None:
         # Time is fine, dives have blown past the threshold.
         assert (
@@ -199,6 +261,17 @@ class TestDivesSince:
         assert dives_since(dive_count=35, baseline_dive_count=40) == 0
 
 
+class TestHoursOfDiving:
+    """A remainder of dive time shown as whole hours, rounded up, as the web app rounds it."""
+
+    def test_under_an_hour_reads_as_one(self) -> None:
+        assert hours_of_diving(2400) == 1
+
+    def test_a_whole_hour_is_itself_and_a_second_past_it_is_the_next(self) -> None:
+        assert hours_of_diving(3600) == 1
+        assert hours_of_diving(3601) == 2
+
+
 class TestShouldNotify:
     """The digest must fire once per threshold crossing, not once per day."""
 
@@ -210,13 +283,25 @@ class TestShouldNotify:
             "status": ServiceStatus.DUE_SOON,
             "next_due_on": self.DUE_ON,
             "next_due_at_dive_count": None,
+            "next_due_at_dive_time": None,
             "notified_stage": None,
             "notified_for_due_on": None,
             "notified_for_due_at_dive_count": None,
+            "notified_for_due_at_dive_time": None,
             "notified_at": None,
             "now": self.NOW,
         }
         return should_notify(**{**defaults, **overrides})
+
+    def test_a_moved_hours_threshold_re_arms_the_reminder(self) -> None:
+        notified = {
+            "next_due_on": None,
+            "notified_stage": "due_soon",
+            "notified_for_due_at_dive_time": 6300,
+            "notified_at": self.NOW,
+        }
+        assert self._should(**notified, next_due_at_dive_time=6300) is False
+        assert self._should(**notified, next_due_at_dive_time=10800) is True
 
     def test_never_notifies_about_a_healthy_schedule(self) -> None:
         assert self._should(status=ServiceStatus.OK) is False
@@ -468,8 +553,10 @@ class TestRecalculateServiceSchedule:
         schedule = MagicMock()
         schedule.starts_on = date(2026, 1, 1)
         schedule.dive_count_at_start = 40
+        schedule.dive_time_at_start = 2700
         schedule.interval_months = 12
         schedule.interval_dives = 100
+        schedule.interval_hours = None
         for key, value in overrides.items():
             setattr(schedule, key, value)
         return schedule
@@ -491,6 +578,7 @@ class TestRecalculateServiceSchedule:
         latest = MagicMock()
         latest.serviced_on = date(2026, 3, 14)
         latest.dive_count_at_service = 62
+        latest.dive_time_at_service = 7200
         db = self._db(self._schedule(), latest_record=latest)
 
         await recalculate_service_schedule(db, schedule_id=3)
@@ -499,6 +587,18 @@ class TestRecalculateServiceSchedule:
         assert values["last_service_on"] == date(2026, 3, 14)
         assert values["next_due_on"] == date(2027, 3, 14)
         assert values["next_due_at_dive_count"] == 162
+        assert values["next_due_at_dive_time"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_hours_arm_counts_from_the_schedule_snapshot_then_the_latest_record(self) -> None:
+        db = self._db(self._schedule(interval_hours=1), latest_record=None)
+        await recalculate_service_schedule(db, schedule_id=3)
+        assert db.execute.await_args_list[2].args[0].compile().params["next_due_at_dive_time"] == 6300
+
+        latest = MagicMock(serviced_on=date(2026, 3, 14), dive_count_at_service=62, dive_time_at_service=7200)
+        db = self._db(self._schedule(interval_hours=1), latest_record=latest)
+        await recalculate_service_schedule(db, schedule_id=3)
+        assert db.execute.await_args_list[2].args[0].compile().params["next_due_at_dive_time"] == 10800
 
     @pytest.mark.asyncio
     async def test_clears_the_notify_state_in_the_same_statement(self) -> None:
@@ -512,6 +612,7 @@ class TestRecalculateServiceSchedule:
         assert values["notified_stage"] is None
         assert values["notified_for_due_on"] is None
         assert values["notified_for_due_at_dive_count"] is None
+        assert values["notified_for_due_at_dive_time"] is None
         assert values["notified_at"] is None
 
     @pytest.mark.asyncio

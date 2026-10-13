@@ -89,8 +89,9 @@ def volume(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
 @pytest.fixture(autouse=True)
 def no_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     """A backfill run ends by dropping the touched accounts' dive caches, and there is no
-    Redis here to drop them in."""
+    Redis here to drop them in - its gear caches too, whose figures follow the dives."""
     monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+    monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_gear_caches", AsyncMock())
 
 
 @pytest.fixture

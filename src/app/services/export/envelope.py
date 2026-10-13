@@ -87,7 +87,7 @@ from ...schemas.export import (
     ExportTrip,
     ExportTripPart,
 )
-from ...schemas.gear_item import GearType
+from ...schemas.gear_item import CylinderMaterial, GearType
 from ...schemas.gear_service import ServiceKind
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LocationRead, location_from_row
 from ...schemas.person import PersonRole
@@ -333,6 +333,7 @@ def _mixture(mixture: DiveMixtureRead) -> ExportCylinder:
         gas_number=mixture.gas_number,
         role=_sayable(mixture.role, GasRole),
         usage=_sayable(mixture.usage, TankUsage),
+        gear_uuid=None if mixture.gear_item is None else mixture.gear_item.uuid,
     )
 
 
@@ -717,7 +718,11 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     rented=item.rented,
                     archived=item.is_archived,
                     archived_at=item.archived_at,
+                    volume=item.volume,
+                    working_pressure=item.working_pressure,
+                    material=_sayable(item.material, CylinderMaterial),
                     dive_count=item.dive_count,
+                    dive_time=item.dive_time,
                     created_at=item.created_at,
                 )
                 for item in bundle.gear_items
@@ -751,11 +756,14 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     starts_on=schedule.starts_on,
                     interval_months=schedule.interval_months,
                     interval_dives=schedule.interval_dives,
+                    interval_hours=schedule.interval_hours,
                     dive_count_at_start=schedule.dive_count_at_start,
+                    dive_time_at_start=schedule.dive_time_at_start,
                     active=schedule.is_active,
                     last_service_on=schedule.last_service_on,
                     next_due_on=schedule.next_due_on,
                     next_due_at_dive_count=schedule.next_due_at_dive_count,
+                    next_due_at_dive_time=schedule.next_due_at_dive_time,
                     created_at=schedule.created_at,
                 )
                 for schedule in bundle.schedules
@@ -780,6 +788,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     type=record.kind,
                     serviced_on=record.serviced_on,
                     dive_count_at_service=record.dive_count_at_service,
+                    dive_time_at_service=record.dive_time_at_service,
                     label=record.label,
                     performed_by=record.performed_by,
                     contact_uuid=None if (contact := bundle.contact_for(record)) is None else contact.uuid,

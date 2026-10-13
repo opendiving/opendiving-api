@@ -39,7 +39,12 @@ from ...crud.crud_dive_gear_items import (
     get_gear_items_for_dive,
     replace_gear_items_for_dive,
 )
-from ...crud.crud_dive_mixtures import get_mixtures_for_dive, get_recent_volumes, replace_mixtures_for_dive
+from ...crud.crud_dive_mixtures import (
+    get_linked_gear_item_ids,
+    get_mixtures_for_dive,
+    get_recent_volumes,
+    replace_mixtures_for_dive,
+)
 from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
 from ...crud.crud_dive_species import (
     StoredSighting,
@@ -55,7 +60,7 @@ from ...crud.crud_dives import (
     with_person,
     with_tag,
 )
-from ...crud.crud_gear_items import resolve_gear_item_ids_for_user
+from ...crud.crud_gear_items import get_gear_item_types_for_user, resolve_gear_item_ids_for_user
 from ...crud.crud_people import get_people_for_dives, replace_people_for_dive, resolve_person_ids_for_user
 from ...crud.crud_species import resolve_species_ids
 from ...crud.crud_tags import get_tags_for_dives, replace_tags_for_dive, resolve_tag_id_for_user, resolve_tag_ids
@@ -85,9 +90,9 @@ from ...schemas.dive import (
     SightingWrite,
     validate_depth_pair,
 )
-from ...schemas.dive_mixture import DiveMixtureRead, RecentVolumes
+from ...schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, RecentVolumes
 from ...schemas.dive_profile import RecordingProfileRead
-from ...schemas.gear_item import GearItemInfo
+from ...schemas.gear_item import GearItemInfo, GearType
 from ...schemas.lookup import LookupUntil, lookup_bound
 from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
 from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
@@ -255,6 +260,9 @@ _MIXTURE_CONSTRAINT_MESSAGES = {
     "ck_dive_mixture_end_pressure_range": "End pressure must be between 0 and 350 bar.",
     "ck_dive_mixture_po2_limit_range": "Gas ppO2 limit must be between 0.4 and 2.0 bar.",
     "ck_dive_mixture_gas_number_non_negative": "Gas number cannot be negative.",
+    # Behind `DiveCreateRequest`'s own refusal of a repeated vessel, and the item's delete.
+    "ux_dive_mixture_dive_id_gear_item_id": "A gear item can be linked from one cylinder per dive.",
+    "dive_mixture_gear_item_id_fkey": "Gear item not found.",
 }
 
 
@@ -303,6 +311,34 @@ def _mixture_error_detail(exc: IntegrityError) -> str:
         if constraint in msg:
             return detail
     return "Invalid gas mixture."
+
+
+async def _resolve_vessels(
+    db: AsyncSession, mixtures: list[DiveMixtureCreate], *, owner_id: int, dive_id: int | None
+) -> dict[uuid_pkg.UUID, int]:
+    """The ids of the vessels a request's cylinders link, refusing one that is not the
+    caller's and one the request newly links that is typed as something other than a
+    cylinder.
+
+    A link is "already carried" when the dive's stored cylinders link the item before this
+    write, on any tank (none for a create): rows keep no identity across the replace, so it
+    is judged by item, never by position. A carried link passes whatever the item's type is now, so retyping a
+    vessel never blocks a save of the dives that link it; an untyped item passes, since the
+    format cannot require the type.
+    """
+    uuids = {mixture.gear_item_uuid for mixture in mixtures if mixture.gear_item_uuid is not None}
+    if not uuids:
+        return {}
+    kinds = await get_gear_item_types_for_user(db, uuids, user_id=owner_id)
+    if kinds.keys() != uuids:
+        raise UnprocessableEntityException("Gear item not found.")
+    carried = set() if dive_id is None else await get_linked_gear_item_ids(db, dive_id)
+    for item_uuid, (item_id, item_type) in kinds.items():
+        if item_id not in carried and item_type is not None and item_type != GearType.CYLINDER:
+            raise UnprocessableEntityException(
+                f"Gear item {item_uuid} is not a cylinder; a tank links a gear item of type cylinder."
+            )
+    return {item_uuid: item_id for item_uuid, (item_id, _) in kinds.items()}
 
 
 async def _link_updates(db: AsyncSession, values: DiveUpdateRequest, owner_id: int) -> dict[str, int | None]:
@@ -623,6 +659,8 @@ async def write_dive(
         raise UnprocessableEntityException("Gear item not found.")
     gear_item_ids = [gear_id_by_uuid[u] for u in dive.gear_item_uuids]
 
+    vessel_ids = await _resolve_vessels(db, dive.mixtures, owner_id=current_user["id"], dive_id=None)
+
     sightings = await _resolve_sightings(db, dive.sightings)
     people = await resolve_people_references(db, dive.people, user_id=current_user["id"])
     # Created in this transaction, so a dive that fails to write leaves no new tag behind.
@@ -660,7 +698,9 @@ async def write_dive(
         raise UnprocessableEntityException(_fk_error_detail(e)) from e
 
     try:
-        await replace_mixtures_for_dive(db=db, dive_id=created_dive.id, mixtures=dive.mixtures)
+        await replace_mixtures_for_dive(
+            db=db, dive_id=created_dive.id, mixtures=dive.mixtures, gear_item_ids=vessel_ids
+        )
     except IntegrityError as e:
         await db.rollback()
         raise UnprocessableEntityException(_mixture_error_detail(e)) from e
@@ -1294,6 +1334,12 @@ async def patch_dive(
             raise UnprocessableEntityException("Gear item not found.")
         gear_item_ids = [gear_id_by_uuid[u] for u in values.gear_item_uuids]
 
+    vessel_ids = (
+        {}
+        if values.mixtures is None
+        else await _resolve_vessels(db, values.mixtures, owner_id=owner_id, dive_id=db_dive.id)
+    )
+
     sightings = None if values.sightings is None else await _resolve_sightings(db, values.sightings)
 
     people = None if values.people is None else await resolve_people_references(db, values.people, user_id=owner_id)
@@ -1311,7 +1357,7 @@ async def patch_dive(
 
     if values.mixtures is not None:
         try:
-            await replace_mixtures_for_dive(db=db, dive_id=dive_id, mixtures=values.mixtures)
+            await replace_mixtures_for_dive(db=db, dive_id=dive_id, mixtures=values.mixtures, gear_item_ids=vessel_ids)
         except IntegrityError as e:
             await db.rollback()
             raise UnprocessableEntityException(_mixture_error_detail(e)) from e
@@ -1571,9 +1617,13 @@ async def write_dive_recording(
         # names the field so the file can be reported.
         raise UnprocessableEntityException(_recording_error_detail(exc)) from exc
 
+    # The re-derivation rewrites the dive's cylinders, which name the vessels a gear item's
+    # figures count.
+    await recalculate_gear_dive_counts(db=db, user_id=current_user["id"])
     # Dive reads embed every recording, its files' metadata *and* the summary of the profile
     # extracted from them, so they're now stale.
     await invalidate_dive_caches(current_user["id"])
+    await invalidate_gear_caches(current_user["id"])
 
     # Read back after the write rather than returned from it: the response is the *recording*
     # - its device, its files, its profile summary - and assembling that is this layer's job

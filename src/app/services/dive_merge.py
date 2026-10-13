@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from ..core.schemas import NOTES_MAX_LENGTH
-from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
+from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive, vessel_ids_for_dive
 from ..crud.crud_dives import crud_dives
 from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
@@ -211,7 +211,13 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     _refuse_a_depth_the_dive_contradicts(survivor, figures)
 
     if cylinders is not None:
-        await replace_mixtures_for_dive(db=db, dive_id=survivor.id, mixtures=cylinders, commit=False)
+        await replace_mixtures_for_dive(
+            db=db,
+            dive_id=survivor.id,
+            mixtures=cylinders,
+            commit=False,
+            gear_item_ids=await vessel_ids_for_dive(db, cylinders, dive_id=survivor.id),
+        )
 
     if fold is not None:
         await _write_fold(db, fold, dive_id=survivor.id)

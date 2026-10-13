@@ -128,7 +128,7 @@ from ...schemas.dive_profile import (
     TEMPERATURE_SCALE,
     ProfileEventType,
 )
-from ...schemas.gear_item import GearType
+from ...schemas.gear_item import CylinderMaterial, GearType
 from ...schemas.person import PersonRole
 from ...schemas.trip import TripPartRead
 from ..dive_profiles import load_profile
@@ -180,9 +180,13 @@ _EQUIPMENT_ELEMENT: dict[GearType, str] = {
     GearType.BOOTS: "boots",
     GearType.BCD: "buoyancycontroldevice",
     GearType.REGULATOR: "regulator",
+    GearType.REBREATHER: "rebreather",
     GearType.COMPUTER: "divecomputer",
+    # A pressure transmitter has no element in UDDF's equipment vocabulary.
+    GearType.TRANSMITTER: "variouspieces",
     GearType.CYLINDER: "tank",
     GearType.LIGHT: "light",
+    GearType.SCOOTER: "scooter",
     GearType.SMB: "variouspieces",
     GearType.MIRROR: "variouspieces",
     GearType.WHISTLE: "variouspieces",
@@ -206,7 +210,9 @@ _EQUIPMENT_ORDER = (
     "knife",
     "light",
     "mask",
+    "rebreather",
     "regulator",
+    "scooter",
     "suit",
     "tank",
     "variouspieces",
@@ -507,6 +513,13 @@ def _equipment_element(bundle: ExportBundle) -> ET.Element | None:
                 _sub(_sub(piece, "notes"), "para", item.notes)
             if tag == "suit" and gear_type in _SUIT_TYPE:
                 _sub(piece, "suittype", _SUIT_TYPE[gear_type])
+            if tag == "tank":
+                # After `<notes>` for the suit's reason, `tankType`'s sequence being material
+                # then volume. A stored material outside the vocabulary has no UDDF spelling.
+                if item.material in set(CylinderMaterial):
+                    _sub(piece, "tankmaterial", item.material)
+                if item.volume is not None:
+                    _sub(piece, "tankvolume", _num(item.volume / LITRES_PER_CUBIC_METRE))
     return equipment
 
 
@@ -1192,6 +1205,13 @@ def _dive_element(
             continue
         tank = _sub(element, "tankdata")
         _sub(tank, "link", ref=mix_ids[_mix_key(mixture)])
+        if mixture.gear_item is not None:
+            # The vessel, after the mix. Its own `<tank>` states its volume too, and UDDF would
+            # have it stated there alone; the cylinder's is repeated below, which UDDF allows
+            # as an override, because the readers this export serves - Subsurface's import,
+            # divelogs.de's - take a cylinder's size from `<tankdata>` and follow no
+            # equipment link.
+            _sub(tank, "link", ref=_uddf_id("gear", mixture.gear_item.uuid))
         # `<tankvolume>` is `minOccurs="0"` where `<tankpressurebegin>` above is not, so a
         # cylinder whose size nobody recorded is omitted rather than skipped - the same
         # answer the mandatory element gets, in the form this optional one allows. This is

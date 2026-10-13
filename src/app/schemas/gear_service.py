@@ -36,7 +36,8 @@ class ServiceStatus(StrEnum):
     Deliberately **not** a stored column and **not** a field on any read schema: it's a
     function of today's date (and the item's live dive count), so a cached response
     carrying it would be wrong the next morning. The API returns only clock-stable
-    facts - `next_due_on`, `next_due_at_dive_count`, `last_service_on` - and this is
+    facts - `next_due_on`, `next_due_at_dive_count`, `next_due_at_dive_time`,
+    `last_service_on` - and this is
     derived from them by whoever is displaying them: the browser
     (`lib/gear-service.ts`) for the UI, and `services.gear_service.service_status` for
     the digest job, which has no browser. See DECISIONS.md.
@@ -48,6 +49,15 @@ class ServiceStatus(StrEnum):
 
 
 LABEL_MAX_LENGTH = 120
+
+# The hours interval's ceiling, a million as the import caps the dive interval: the threshold
+# is `dive_time_at_start + 3600 * interval_hours`, so an unbounded interval could overflow its
+# column into a 500. The other two carry a floor alone, as they always have.
+INTERVAL_HOURS_MAX = 1_000_000
+
+NEEDS_AN_INTERVAL = "A service schedule needs an interval in months, in dives or in hours of diving"
+
+_INTERVAL_HOURS_DESCRIPTION = "Service every N hours of diving - the item's summed dive time, not clock hours"
 
 
 # -------------------- schedule --------------------
@@ -70,15 +80,18 @@ class GearServiceScheduleBase(BaseModel):
     interval_dives: Annotated[
         int | None, Field(default=None, gt=0, examples=[100], description="Service every N dives")
     ]
+    interval_hours: Annotated[
+        int | None, Field(default=None, gt=0, examples=[50], description=_INTERVAL_HOURS_DESCRIPTION)
+    ]
 
     @model_validator(mode="after")
     def require_an_interval(self) -> Self:
-        """A schedule with neither interval set could never become due, so it would sit
-        in the table producing nothing. Mirrors `ck_gear_service_schedule_has_an_interval`
-        and the frontend's Zod refine.
+        """A schedule with no interval set could never become due, so it would sit in the
+        table producing nothing. Mirrors `ck_gear_service_schedule_has_an_interval` and the
+        frontend's Zod refine.
         """
-        if self.interval_months is None and self.interval_dives is None:
-            raise ValueError("A service schedule needs an interval in months, in dives, or both")
+        if self.interval_months is None and self.interval_dives is None and self.interval_hours is None:
+            raise ValueError(NEEDS_AN_INTERVAL)
         return self
 
 
@@ -98,9 +111,11 @@ class GearServiceScheduleInfo(PublicUUIDSchema):
     label: str | None = None
     interval_months: int | None = None
     interval_dives: int | None = None
+    interval_hours: int | None = None
     last_service_on: date | None = None
     next_due_on: date | None = None
     next_due_at_dive_count: int | None = None
+    next_due_at_dive_time: int | None = None
     is_active: bool = True
 
 
@@ -117,9 +132,15 @@ class GearServiceScheduleRead(GearServiceScheduleBase, PublicUUIDSchema):
     gear_item_uuid: uuid_pkg.UUID
     is_active: bool = True
     dive_count_at_start: int = 0
+    dive_time_at_start: Annotated[
+        int, Field(default=0, description="The item's dive time when this rule began, in seconds")
+    ]
     last_service_on: date | None = None
     next_due_on: date | None = None
     next_due_at_dive_count: int | None = None
+    next_due_at_dive_time: Annotated[
+        int | None, Field(default=None, description="The item's dive time, in seconds, at which service falls due")
+    ]
     created_at: datetime
 
 
@@ -135,12 +156,15 @@ class GearServiceScheduleReadInternal(GearServiceScheduleBase, PublicUUIDSchema)
     gear_item_id: int
     is_active: bool = True
     dive_count_at_start: int = 0
+    dive_time_at_start: int = 0
     last_service_on: date | None = None
     next_due_on: date | None = None
     next_due_at_dive_count: int | None = None
+    next_due_at_dive_time: int | None = None
     notified_stage: str | None = None
     notified_for_due_on: date | None = None
     notified_for_due_at_dive_count: int | None = None
+    notified_for_due_at_dive_time: int | None = None
     notified_at: datetime | None = None
     created_at: datetime
 
@@ -149,15 +173,19 @@ class GearServiceScheduleCreate(GearServiceScheduleBase):
     """Ownership is derived from the item the schedule hangs off, which `gear_item_uuid`
     names: the caller cannot reach another account's item through it.
 
-    `dive_count_at_start` and every derived/notify field are absent on purpose - the
-    route snapshots the former from the item and `recalculate_service_schedule` owns the
-    rest, so `extra="forbid"` turns an attempt to set them into a 422 rather than a
-    silently-ignored key.
+    The two snapshots and every derived/notify field are absent on purpose - the route
+    snapshots the former from the item and `recalculate_service_schedule` owns the rest, so
+    `extra="forbid"` turns an attempt to set them into a 422 rather than a silently-ignored
+    key.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     gear_item_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the gear item this schedule is for")]
+    interval_hours: Annotated[
+        int | None,
+        Field(default=None, gt=0, le=INTERVAL_HOURS_MAX, examples=[50], description=_INTERVAL_HOURS_DESCRIPTION),
+    ]
 
 
 class GearServiceScheduleCreateInternal(GearServiceScheduleBase):
@@ -166,6 +194,7 @@ class GearServiceScheduleCreateInternal(GearServiceScheduleBase):
     user_id: int
     gear_item_id: int
     dive_count_at_start: int = 0
+    dive_time_at_start: int = 0
     is_active: bool = True
 
 
@@ -190,6 +219,7 @@ class GearServiceScheduleUpdate(RejectsExplicitNulls):
     starts_on: Annotated[date | None, Field(default=None)]
     interval_months: Annotated[int | None, Field(default=None, gt=0)]
     interval_dives: Annotated[int | None, Field(default=None, gt=0)]
+    interval_hours: Annotated[int | None, Field(default=None, gt=0, le=INTERVAL_HOURS_MAX)]
     is_active: Annotated[bool | None, Field(default=None, description="Set to pause/resume reminders")]
 
 
@@ -201,9 +231,11 @@ class GearServiceScheduleUpdateInternal(GearServiceScheduleUpdate):
     last_service_on: date | None = None
     next_due_on: date | None = None
     next_due_at_dive_count: int | None = None
+    next_due_at_dive_time: int | None = None
     notified_stage: str | None = None
     notified_for_due_on: date | None = None
     notified_for_due_at_dive_count: int | None = None
+    notified_for_due_at_dive_time: int | None = None
     notified_at: datetime | None = None
     updated_at: datetime
 
@@ -241,6 +273,9 @@ class GearServiceRecordRead(GearServiceRecordBase, PublicUUIDSchema):
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact - the shop - that did the work")
     ]
     dive_count_at_service: int = 0
+    dive_time_at_service: Annotated[
+        int, Field(default=0, description="The item's dive time when the service was done, in seconds")
+    ]
     created_at: datetime
 
 
@@ -253,6 +288,7 @@ class GearServiceRecordReadInternal(GearServiceRecordBase, PublicUUIDSchema):
     gear_service_schedule_id: int | None = None
     contact_id: int | None = None
     dive_count_at_service: int = 0
+    dive_time_at_service: int = 0
     created_at: datetime
 
 
@@ -262,7 +298,8 @@ class GearServiceRecordCreate(GearServiceRecordBase):
     automatically, so "log the annual service" from the item page satisfies the rule
     without the diver picking anything.
 
-    `dive_count_at_service` is absent - the route snapshots it from the gear item.
+    `dive_count_at_service` and `dive_time_at_service` are absent - the route snapshots
+    them from the gear item.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -284,14 +321,15 @@ class GearServiceRecordCreateInternal(GearServiceRecordBase):
     gear_service_schedule_id: int | None = None
     contact_id: int | None = None
     dive_count_at_service: int = 0
+    dive_time_at_service: int = 0
 
 
 class GearServiceRecordUpdate(RejectsExplicitNulls):
     """Partial update. Changing `serviced_on` moves the schedule's due date, so the
     route re-runs `recalculate_service_schedule` for the affected schedule.
 
-    `dive_count_at_service` isn't editable: it's a snapshot of a moment that has already
-    passed, and letting it be rewritten would silently shift a dive-based due threshold.
+    The two snapshots aren't editable: each is of a moment that has already passed, and
+    letting one be rewritten would silently shift a dive- or hours-based due threshold.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -349,10 +387,12 @@ class GearServiceDueItem(BaseModel):
     last_service_on: date | None = None
     next_due_on: date | None = None
     next_due_at_dive_count: int | None = None
+    next_due_at_dive_time: int | None = None
     gear_item_uuid: uuid_pkg.UUID
     gear_item_name: str
     gear_item_brand: str | None = None
     gear_item_dive_count: int = 0
+    gear_item_dive_time: Annotated[int, Field(default=0, description="The item's dive time, in seconds")]
 
 
 class GearServiceDueResponse(BaseModel):

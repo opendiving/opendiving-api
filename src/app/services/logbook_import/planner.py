@@ -75,7 +75,7 @@ from ...schemas.contact import ADDRESS_FIELDS, CONTACT_ADDRESS_PREFIX, canonical
 from ...schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ...schemas.dive_site import ExternalId, canonical_entry_types, canonical_external_ids, canonical_other_names
 from ...schemas.export import DIVEJSON_PRODUCER_KEY
-from ...schemas.gear_item import GearType
+from ...schemas.gear_item import CylinderMaterial, GearType
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
 from ...schemas.logbook_import import (
     ImportCertification,
@@ -227,7 +227,7 @@ _LONGITUDE_LIMIT = 180.0
 # **A column's width is not the bound where a derived column adds the values up.** Two
 # imported numbers each inside `Integer` can sum past it, and the write that fails is then
 # the *derived* one, in the middle of the apply transaction - a whole logbook refused over
-# an arithmetic overflow in a tile. Two derivations do that here, and each gets a ceiling
+# an arithmetic overflow in a tile. Each derivation that can do that here gets a ceiling
 # on its inputs rather than a check on its output, because the output is computed by code
 # that knows nothing about import.
 #
@@ -244,6 +244,11 @@ _MAX_DIVE_COUNT = 1_000_000
 # in weeks. The sum is `BigInteger` as well now - the ceiling here is what makes the
 # overflow implausible, the width is what makes it impossible.
 _MAX_SUBMERGED_TIME_SECONDS = 366 * 24 * 60 * 60
+
+# A gear item's dive time, in seconds: `next_due_at_dive_time` is `dive_time_at_start + 3600 *
+# interval_hours`, so a stated snapshot is capped at a million hours - the dive interval's
+# million again - below its column's width, as the count's is, and the sum still fits.
+_MAX_DIVE_TIME_SECONDS = _MAX_DIVE_COUNT * 3600
 
 
 class Action(StrEnum):
@@ -539,6 +544,33 @@ _SITE_BOUNDS: tuple[Bound, ...] = (
     Bound("depth_from", lambda value: value >= 0, "a depth cannot be negative"),
     Bound("depth_to", lambda value: value >= 0, "a depth cannot be negative"),
     Bound("altitude", lambda value: -450 <= value <= 6500, "altitude must be between -450 and 6500 metres"),
+)
+
+# A vessel's facts, from `models/gear_item.py`: the mixture's volume and start-pressure bands.
+_GEAR_BOUNDS: tuple[Bound, ...] = (
+    Bound("volume", lambda value: value > 0, "a cylinder volume must be greater than zero"),
+    Bound(
+        "working_pressure",
+        lambda value: 0 < value <= 350,
+        "a working pressure must be above 0 and at most 350 bar",
+    ),
+)
+
+# A schedule's intervals, from `models/gear_service_schedule.py`. The dive and hours intervals
+# are capped at `_MAX_DIVE_COUNT` rather than at the column's width, because
+# `recalculate_service_schedule` adds each to its snapshot and writes the sum.
+_SCHEDULE_BOUNDS: tuple[Bound, ...] = (
+    Bound("interval_months", lambda value: 0 < value <= INT32_MAX, f"a month interval must be 1 to {INT32_MAX}"),
+    Bound(
+        "interval_dives",
+        lambda value: 0 < value <= _MAX_DIVE_COUNT,
+        f"a dive interval must be 1 to {_MAX_DIVE_COUNT}",
+    ),
+    Bound(
+        "interval_hours",
+        lambda value: 0 < value <= _MAX_DIVE_COUNT,
+        f"an hours interval must be 1 to {_MAX_DIVE_COUNT}",
+    ),
 )
 
 # A sighting's count, from `models/dive_species.py`, with the column's width as its ceiling:
@@ -1067,6 +1099,26 @@ class _Planner:
         if course.agency is not None or course.agency_other is not None:
             self._dropped("courses", record_uuid, "The agency this course claimed named nobody, and was dropped")
         return None, None
+
+    def _dive_time(self, collection: str, record_uuid: uuid_pkg.UUID, value: int | None) -> int | None:
+        """A stated dive-time snapshot, in seconds, as `_count` takes a count - except that an
+        absent one stays absent, for the writer to reconstruct (`reconstruct_dive_time_snapshots`)."""
+        if value is None:
+            return None
+        if not 0 <= value <= _MAX_DIVE_TIME_SECONDS:
+            self._dropped(collection, record_uuid, "A dive time this app cannot store was dropped")
+            return 0
+        return value
+
+    def _reconstructed_dive_time(self, collection: str, record_uuid: uuid_pkg.UUID, what: str) -> None:
+        """Report a time snapshot the document does not state, which the writer derives."""
+        self._note(
+            ImportNoteCode.VALUE_DERIVED,
+            f"This {what} states no dive time for the gear item, so it was reconstructed from the item's dives "
+            "created at or before it.",
+            collection=collection,
+            uuid=record_uuid,
+        )
 
     def _count(self, collection: str, record_uuid: uuid_pkg.UUID, value: int | None) -> int:
         """A lifetime dive-count snapshot, as an `Integer` column can hold it.
@@ -1892,6 +1944,11 @@ class _Planner:
             # later minor version rather than a mistake.
             self._dropped("gear", item.uuid, f"The gear type {gear_type!r} is not one this app knows, and was dropped")
             gear_type = None
+        material = item.material
+        if material is not None and material not in {member.value for member in CylinderMaterial}:
+            self._dropped("gear", item.uuid, f"The material {material!r} is not one this app knows, and was dropped")
+            material = None
+        vessel = self._bounded("gear", item.uuid, item, _GEAR_BOUNDS)
         record.values = {
             "user_id": self._user_id,
             "name": item.name,
@@ -1901,10 +1958,14 @@ class _Planner:
             "rented": bool(item.rented),
             "is_archived": bool(item.archived),
             "archived_at": item.archived_at if item.archived else None,
-            # `dive_count` is derived (spec §5.7) and recomputed after the write, never
-            # imported: the destination's view of which dives used this item is the only
-            # thing that can make it true.
+            "volume": vessel.get("volume"),
+            "working_pressure": vessel.get("working_pressure"),
+            "material": material,
+            # `dive_count` and `dive_time` are derived (spec §5.7) and recomputed after the
+            # write, never imported: the destination's view of which dives used this item is
+            # the only thing that can make them true.
             "dive_count": 0,
+            "dive_time": 0,
             "created_at": self._created_at(item.created_at),
         }
         return record
@@ -1982,17 +2043,8 @@ class _Planner:
             return self._skip(collection, schedule.uuid, "A service schedule needs a kind this app recognizes.")
         if schedule.starts_on is None:
             return self._skip(collection, schedule.uuid, "A service schedule needs the date its clock starts from.")
-        months, dives = schedule.interval_months, schedule.interval_dives
-        if months is not None and not 0 < months <= INT32_MAX:
-            self._dropped(collection, schedule.uuid, "A month interval this app cannot store was dropped")
-            months = None
-        # Capped at `_MAX_DIVE_COUNT` rather than at the column's width, because
-        # `recalculate_service_schedule` adds it to `dive_count_at_start` and writes the sum
-        # into a column of the same width.
-        if dives is not None and not 0 < dives <= _MAX_DIVE_COUNT:
-            self._dropped(collection, schedule.uuid, "A dive interval this app cannot store was dropped")
-            dives = None
-        if months is None and dives is None:
+        intervals = self._bounded(collection, schedule.uuid, schedule, _SCHEDULE_BOUNDS)
+        if not intervals:
             # `ck_gear_service_schedule_has_an_interval`: a rule with no interval can never
             # become due, so it would sit in the table generating nothing forever.
             return self._skip(collection, schedule.uuid, "A service schedule needs at least one interval to be due on.")
@@ -2031,8 +2083,9 @@ class _Planner:
             "kind": schedule.type.value,
             "label": schedule.label,
             "starts_on": schedule.starts_on,
-            "interval_months": months,
-            "interval_dives": dives,
+            "interval_months": intervals.get("interval_months"),
+            "interval_dives": intervals.get("interval_dives"),
+            "interval_hours": intervals.get("interval_hours"),
             # A *snapshot*, not a derived member (spec §5.7): "the item's lifetime count
             # when this rule began" has no recomputation procedure, and recomputing it
             # against the destination's live counter is the reset-every-baseline failure the
@@ -2042,11 +2095,21 @@ class _Planner:
             "is_active": True if schedule.active is None else bool(schedule.active),
             "created_at": self._created_at(schedule.created_at),
         }
-        # `last_service_on`, `next_due_on` and `next_due_at_dive_count` are derived (spec
-        # §5.7) and deliberately absent here: `recalculate_service_schedule` writes them
-        # from the records this import just created, which is the only view of them that can
-        # be true on this instance.
-        record.children = {"gear_uuid": gear_uuid}
+        # The time snapshot is imported as recorded where the document states it. Absent, it
+        # is not read as 0: a document written before the format had it - the app's own
+        # earlier exports first - would give a later hours arm the item's whole life. The
+        # writer reconstructs it instead, from the item's dives created at or before the
+        # schedule, as the revision that added the column filled the stored ones.
+        dive_time_at_start = self._dive_time(collection, schedule.uuid, schedule.dive_time_at_start)
+        if dive_time_at_start is None:
+            self._reconstructed_dive_time(collection, schedule.uuid, "service schedule")
+        else:
+            record.values["dive_time_at_start"] = dive_time_at_start
+        # `last_service_on` and the `next_due_*` thresholds are derived (spec §5.7) and
+        # deliberately absent here: `recalculate_service_schedule` writes them from the
+        # records this import just created, which is the only view of them that can be true
+        # on this instance.
+        record.children = {"gear_uuid": gear_uuid, "reconstruct_dive_time": dive_time_at_start is None}
         return record
 
     async def _plan_service_records(self) -> None:
@@ -2093,7 +2156,17 @@ class _Planner:
             "notes": self._notes_text("gear_service_records", service.uuid, service.notes),
             "created_at": self._created_at(service.created_at),
         }
+        # Unlike the count, an absent time snapshot neither skips the record nor reads as 0:
+        # skipping would drop every service record of every document written before the
+        # format had it, and 0 would make an hours arm ignore the service. Reconstructed by
+        # the writer on the schedule's terms.
+        dive_time_at_service = self._dive_time(collection, service.uuid, service.dive_time_at_service)
+        if dive_time_at_service is None:
+            self._reconstructed_dive_time(collection, service.uuid, "service record")
+        else:
+            record.values["dive_time_at_service"] = dive_time_at_service
         record.children = {
+            "reconstruct_dive_time": dive_time_at_service is None,
             "gear_uuid": gear_uuid,
             "contact_uuid": self._reference(collection, service.uuid, "contacts", service.contact_uuid),
             # Absent when the record predates its rule or the rule was deleted - history
@@ -2652,6 +2725,7 @@ class _Planner:
         """
         converted = self._loaded.conversion is not None
         rows: list[dict[str, Any]] = []
+        linked: set[uuid_pkg.UUID] = set()
         for index, source in enumerate(dive.cylinders):
             cylinder = source.model_copy(
                 update={name: two_places(getattr(source, name)) for name in _ROUNDED_CYLINDER_MEMBERS}
@@ -2688,9 +2762,34 @@ class _Planner:
                     "gas_number": bounded.get("gas_number"),
                     "role": None if cylinder.role is None else cylinder.role.value,
                     "usage": None if cylinder.usage is None else cylinder.usage.value,
+                    "gear_item_uuid": self._vessel(dive.uuid, index, cylinder.gear_uuid, linked),
                 }
             )
         return rows
+
+    def _vessel(
+        self, dive_uuid: uuid_pkg.UUID, index: int, gear_uuid: uuid_pkg.UUID | None, linked: set[uuid_pkg.UUID]
+    ) -> uuid_pkg.UUID | None:
+        """A cylinder's vessel, resolved to the gear record's canonical source uuid.
+
+        Kept whatever the resolved item's type is: a restore of a link that stood, as a dive
+        edit carrying one is. Two document uuids can resolve to one row (the alias branch), so
+        a vessel already linked on this dive's cylinders leaves the second cylinder its gas and
+        drops its link, with a note, rather than letting the unique index refuse the import.
+        """
+        canonical = self._reference("dives", dive_uuid, "gear", gear_uuid)
+        if canonical is None:
+            return None
+        if canonical in linked:
+            self._dropped(
+                "dives",
+                dive_uuid,
+                f"Cylinder {index + 1} links a gear item another of the dive's cylinders already links, "
+                "so it was imported without the link",
+            )
+            return None
+        linked.add(canonical)
+        return canonical
 
     def _plan_profile(
         self, dive_uuid: uuid_pkg.UUID, source: ImportProfile, shaped: NormalizedProfile
