@@ -266,6 +266,11 @@ class TestTheLinkThroughTheRoutes:
         assert item is not None and (item.dive_count, item.dive_time) == (1, 2700)
         assert (await async_db.scalars(select(Dive.uuid).where(with_gear_item(vessel_id)))).all() == [created.uuid]
 
+        await dives_module.erase_dive(request=MagicMock(), uuid=created.uuid, current_user=_as(diver), db=async_db)
+
+        item = await async_db.get(GearItem, vessel_id, populate_existing=True)
+        assert item is not None and (item.dive_count, item.dive_time) == (0, 0)
+
     @pytest.mark.asyncio
     async def test_a_vessel_also_listed_in_the_gear_counts_its_dive_once(
         self, db: Session, async_db: AsyncSession, diver: User

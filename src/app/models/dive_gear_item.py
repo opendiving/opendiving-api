@@ -20,8 +20,8 @@ class DiveGearItem(Base):
     # already serves lookups filtered by dive_id alone, plus satisfies the ORDER BY position
     # used by get_gear_items_for_dive/get_gear_items_for_dives without an extra index.
     dive_id: Mapped[int] = mapped_column(ForeignKey("dive.id", ondelete="CASCADE"))
-    # Indexed for `recalculate_gear_dive_counts`'s per-item COUNT and for filtering
-    # `GET /dives?gear_item_uuid=...`; not a leading column of any other index here.
+    # Indexed for filtering `GET /dives?gear_item_uuid=...` and for the item delete's cascade;
+    # not a leading column of any other index here.
     gear_item_id: Mapped[int] = mapped_column(ForeignKey("gear_item.id", ondelete="CASCADE"), index=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
 

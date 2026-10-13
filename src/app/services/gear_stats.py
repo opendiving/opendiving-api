@@ -35,24 +35,38 @@ async def recalculate_gear_dive_counts(db: AsyncSession, user_id: int, commit: b
         select(DiveMixture.dive_id, DiveMixture.gear_item_id, Dive.submerged_time)
         .join(Dive, Dive.id == DiveMixture.dive_id)
         .where(*live, DiveMixture.gear_item_id.is_not(None)),
-    ).cte("uses")
-
-    count_for_item = select(func.count()).where(uses.c.gear_item_id == GearItem.id).scalar_subquery()
-    time_for_item = (
-        select(func.coalesce(func.sum(uses.c.submerged_time), 0))
-        .where(uses.c.gear_item_id == GearItem.id)
-        .scalar_subquery()
+    ).subquery("uses")
+    # One pass over the user's links, then a left join so an item no live dive uses gets 0.
+    sums = (
+        select(
+            uses.c.gear_item_id,
+            func.count().label("dives"),
+            func.sum(uses.c.submerged_time).label("seconds"),
+        )
+        .group_by(uses.c.gear_item_id)
+        .subquery("sums")
+    )
+    fresh = (
+        select(
+            GearItem.id,
+            func.coalesce(sums.c.dives, 0).label("dive_count"),
+            func.coalesce(sums.c.seconds, 0).label("dive_time"),
+        )
+        .outerjoin(sums, sums.c.gear_item_id == GearItem.id)
+        .where(GearItem.user_id == user_id)
+        .subquery("fresh")
     )
 
     await db.execute(
         update(GearItem)
         .where(
-            GearItem.user_id == user_id,
+            GearItem.id == fresh.c.id,
             or_(
-                GearItem.dive_count.is_distinct_from(count_for_item), GearItem.dive_time.is_distinct_from(time_for_item)
+                GearItem.dive_count.is_distinct_from(fresh.c.dive_count),
+                GearItem.dive_time.is_distinct_from(fresh.c.dive_time),
             ),
         )
-        .values(dive_count=count_for_item, dive_time=time_for_item)
+        .values(dive_count=fresh.c.dive_count, dive_time=fresh.c.dive_time)
     )
 
     if commit:

@@ -264,8 +264,10 @@ class TestRecalculateGearDiveCounts:
         await recalculate_gear_dive_counts(db, user_id=42)
 
         statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
-        assert "UPDATE gear_item SET dive_count=" in statement
-        assert "dive_time=(SELECT coalesce(sum(uses.submerged_time), 0)" in statement
+        assert statement.startswith("UPDATE gear_item SET dive_count=fresh.dive_count, dive_time=fresh.dive_time")
+        # One pass over the links, left-joined so an item no live dive uses reads 0.
+        assert "GROUP BY uses.gear_item_id" in statement
+        assert "FROM gear_item LEFT OUTER JOIN" in statement
         # A dive names an item through its gear list or a cylinder's vessel, once either way.
         assert " UNION SELECT dive_mixture.dive_id" in statement
         assert "dive_mixture.gear_item_id IS NOT NULL" in statement
