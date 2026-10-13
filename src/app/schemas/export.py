@@ -71,7 +71,7 @@ from .dive import (
 )
 from .dive_mixture import GasRole, TankUsage
 from .dive_profile import TEMPERATURE_SCALE, DiveProfileRead
-from .gear_item import GearType
+from .gear_item import CylinderMaterial, GearType
 from .gear_service import ServiceKind
 from .person import PersonRole
 
@@ -309,6 +309,7 @@ class ExportCylinder(BaseModel):
     gas_number: int | None = None
     role: GasRole | None = None
     usage: TankUsage | None = None
+    gear_uuid: uuid_pkg.UUID | None = None
 
 
 class ExportRecording(BaseModel):
@@ -610,7 +611,11 @@ class ExportGearItem(PublicUUIDSchema):
     rented: bool
     archived: bool
     archived_at: datetime | None = None
+    volume: float | None = None
+    working_pressure: float | None = None
+    material: CylinderMaterial | None = None
     dive_count: int
+    dive_time: int
     created_at: datetime
 
 
@@ -628,11 +633,14 @@ class ExportGearServiceSchedule(PublicUUIDSchema):
     starts_on: date
     interval_months: int | None = None
     interval_dives: int | None = None
+    interval_hours: int | None = None
     dive_count_at_start: int
+    dive_time_at_start: int
     active: bool
     last_service_on: date | None = None
     next_due_on: date | None = None
     next_due_at_dive_count: int | None = None
+    next_due_at_dive_time: int | None = None
     created_at: datetime
 
 
@@ -642,6 +650,7 @@ class ExportGearServiceRecord(PublicUUIDSchema):
     type: ServiceKind
     serviced_on: date
     dive_count_at_service: int
+    dive_time_at_service: int
     label: str | None = None
     performed_by: str | None = None
     contact_uuid: uuid_pkg.UUID | None = None

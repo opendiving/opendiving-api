@@ -1,6 +1,18 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -58,6 +70,19 @@ class GearItem(Base, PublicUUIDMixin, TimestampMixin):
     # gear list view shows it for every row, so computing it per request would mean a
     # join + GROUP BY on every page load of a cache miss.
     dive_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # The summed `dive.submerged_time` of the same dives, in seconds - the figure an hours
+    # service arm counts against, maintained by the same recount. `BigInteger` for
+    # `user_dive_stats.total_submerged_time`'s reason: a sum of a column the caller supplies.
+    dive_time: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+
+    # The vessel's own facts, meaningful on a `cylinder` and allowed on any type, as the
+    # format allows them. A dive's cylinder links the item (`dive_mixture.gear_item_id`)
+    # rather than repeating them per dive. `volume` is litres of water capacity,
+    # `working_pressure` the bar it is rated to - never what was in it. `material` is a
+    # stored vocabulary (`CylinderMaterial`) with no `CHECK`, as `type` is.
+    volume: Mapped[float | None] = mapped_column(Float, default=None)
+    working_pressure: Mapped[float | None] = mapped_column(Float, default=None)
+    material: Mapped[str | None] = mapped_column(String(16), default=None)
 
     @declared_attr.directive
     @classmethod
@@ -84,5 +109,11 @@ class GearItem(Base, PublicUUIDMixin, TimestampMixin):
                 "ix_gear_item_user_id_name",
                 "user_id",
                 "name",
+            ),
+            CheckConstraint("volume IS NULL OR volume > 0", name="ck_gear_item_volume_positive"),
+            # The mixture's start-pressure band: a vessel rated above 350 bar is a unit error.
+            CheckConstraint(
+                "working_pressure IS NULL OR (working_pressure > 0 AND working_pressure <= 350)",
+                name="ck_gear_item_working_pressure_range",
             ),
         )

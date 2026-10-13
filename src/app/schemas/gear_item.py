@@ -45,9 +45,12 @@ class GearType(StrEnum):
     BOOTS = "boots"
     BCD = "bcd"
     REGULATOR = "regulator"
+    REBREATHER = "rebreather"
     COMPUTER = "computer"
+    TRANSMITTER = "transmitter"
     CYLINDER = "cylinder"
     LIGHT = "light"
+    SCOOTER = "scooter"
     SMB = "smb"
     MIRROR = "mirror"
     WHISTLE = "whistle"
@@ -60,6 +63,22 @@ class GearType(StrEnum):
     OTHER = "other"
 
 
+class CylinderMaterial(StrEnum):
+    """What a cylinder is made of - DiveJSON 1.0's `gear_item.material`, which takes UDDF's
+    `tankmaterial` spellings in that order. No DB `CHECK`, as `GearType` has none."""
+
+    STEEL = "steel"
+    ALUMINIUM = "aluminium"
+    CARBON = "carbon"
+
+
+# A vessel's facts, unbounded here and bounded on the write shapes: the read shapes inherit
+# this base, and a bound on it would validate stored rows on the way out (`DiveMixtureBase`).
+_VOLUME_DESCRIPTION = "Litres of water capacity - a manifolded twinset's combined. Meaningful on a cylinder."
+_WORKING_PRESSURE_DESCRIPTION = "Bar the vessel is rated to, never what was in it. Meaningful on a cylinder."
+_MATERIAL_DESCRIPTION = "What the vessel is made of. Meaningful on a cylinder."
+
+
 class GearItemBase(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=255, examples=["MK25 EVO / S620Ti"])]
     brand: Annotated[str | None, Field(default=None, max_length=255, examples=["Scubapro"])]
@@ -69,6 +88,14 @@ class GearItemBase(BaseModel):
     ]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
     rented: Annotated[bool, Field(default=False, description="Whether this item is rented rather than owned")]
+    volume: Annotated[float | None, Field(default=None, examples=[12.0], description=_VOLUME_DESCRIPTION)]
+    working_pressure: Annotated[
+        float | None, Field(default=None, examples=[232.0], description=_WORKING_PRESSURE_DESCRIPTION)
+    ]
+    material: Annotated[
+        CylinderMaterial | None,
+        Field(default=None, examples=[CylinderMaterial.STEEL], description=_MATERIAL_DESCRIPTION),
+    ]
 
 
 class GearItemInfo(PublicUUIDSchema):
@@ -76,7 +103,8 @@ class GearItemInfo(PublicUUIDSchema):
     `uuid`. Lives here rather than in `dive.py`/`gear_set.py` because both embed it.
 
     `is_archived` is included so the UI can flag gear that a dive/set still references
-    but which no longer shows up in the dive form's picker.
+    but which no longer shows up in the dive form's picker. The vessel's facts ride along so
+    a dive's tank reads its vessel off the row it already holds.
     """
 
     name: str
@@ -87,6 +115,9 @@ class GearItemInfo(PublicUUIDSchema):
     type: StoredVocabulary | None = None
     rented: bool = False
     is_archived: bool = False
+    volume: float | None = None
+    working_pressure: float | None = None
+    material: StoredVocabulary | None = None
 
 
 class GearItemRead(GearItemBase, PublicUUIDSchema):
@@ -97,11 +128,23 @@ class GearItemRead(GearItemBase, PublicUUIDSchema):
     # Overrides `GearItemBase.type`, which stays `GearType` for the writes that base
     # actually validates.
     type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    material: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     user_uuid: uuid_pkg.UUID
     is_archived: bool = False
     archived_at: datetime | None = None
-    dive_count: Annotated[int, Field(default=0, description="Number of the owner's dives this item was used on")]
+    dive_count: Annotated[
+        int,
+        Field(
+            default=0,
+            description="Number of the owner's dives this item was used on - listed in a dive's gear or linked "
+            "from one of its cylinders, counted once either way",
+        ),
+    ]
+    dive_time: Annotated[
+        int,
+        Field(default=0, description="Summed time in the water of those dives, in seconds - what an hours rule counts"),
+    ]
     # This item's servicing rules, embedded so the gear list can badge "service due"
     # without a request per row. Carries due dates and thresholds only, never a computed
     # status - see `ServiceStatus` in `schemas/gear_service.py`.
@@ -119,23 +162,38 @@ class GearItemReadInternal(GearItemBase, PublicUUIDSchema):
     """
 
     type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    material: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     id: int
     user_id: int
     is_archived: bool = False
     archived_at: datetime | None = None
     dive_count: int = 0
+    dive_time: int = 0
     created_at: datetime
+
+
+# The bounds every write shape carries, with the `CHECK`s on `gear_item` behind them: the
+# mixture's volume and start-pressure bands, for the same vessel seen from the dive.
+VesselVolume = Annotated[float | None, Field(default=None, gt=0, examples=[12.0], description=_VOLUME_DESCRIPTION)]
+VesselWorkingPressure = Annotated[
+    float | None, Field(default=None, gt=0, le=350, examples=[232.0], description=_WORKING_PRESSURE_DESCRIPTION)
+]
 
 
 class GearItemCreate(GearItemBase):
     model_config = ConfigDict(extra="forbid")
+
+    volume: VesselVolume
+    working_pressure: VesselWorkingPressure
 
 
 class GearItemCreateInternal(GearItemBase):
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
+    volume: VesselVolume
+    working_pressure: VesselWorkingPressure
 
 
 class GearItemUpdate(RejectsExplicitNulls):
@@ -156,6 +214,11 @@ class GearItemUpdate(RejectsExplicitNulls):
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
     rented: Annotated[bool | None, Field(default=None)]
     is_archived: Annotated[bool | None, Field(default=None, description="Set to archive/unarchive this item")]
+    # Clearable, so absent from `NON_NULLABLE_FIELDS`. A changed `volume` is written through
+    # to every dive cylinder linked to the item (`patch_gear_item`).
+    volume: VesselVolume
+    working_pressure: VesselWorkingPressure
+    material: Annotated[CylinderMaterial | None, Field(default=None, description=_MATERIAL_DESCRIPTION)]
 
 
 class GearItemUpdateInternal(GearItemUpdate):
@@ -165,11 +228,15 @@ class GearItemUpdateInternal(GearItemUpdate):
 
 class GearItemLookupItem(PublicUUIDSchema):
     """One row of `GET /gear-items/lookup`: `GearItemInfo`'s members, which a picker stores
-    for its label and its Rented and Archived badges. Its own class rather than that one, so
-    the dive's embedded shape can grow without widening every lookup row."""
+    for its label and its Rented and Archived badges, and a cylinder picker for the capacity
+    a pick copies. Its own class rather than that one, so the dive's embedded shape can grow
+    without widening every lookup row."""
 
     name: str
     brand: str | None = None
     type: StoredVocabulary | None = None
     rented: bool = False
     is_archived: bool = False
+    volume: float | None = None
+    working_pressure: float | None = None
+    material: StoredVocabulary | None = None

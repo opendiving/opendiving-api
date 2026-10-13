@@ -87,6 +87,9 @@ class DiveFormField(StrEnum):
     TAGS = "tags"
     NOTES = "notes"
 
+    # First among the per-cylinder keys, and it has to stay there: revision `e41fcd2a6308`
+    # inserted it into every stored set before the set's first of them.
+    MIXTURE_GEAR_ITEM = "mixture.gear_item_uuid"
     MIXTURE_PO2_LIMIT = "mixture.po2_limit"
     MIXTURE_HELIUM = "mixture.helium"
     MIXTURE_START_PRESSURE = "mixture.start_pressure"

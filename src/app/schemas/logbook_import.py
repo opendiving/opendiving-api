@@ -345,6 +345,7 @@ class ImportCylinder(_ReadModel):
     gas_number: int | None = None
     role: Annotated[GasRole | None, _unknown_is_absent(GasRole), Field(default=None)]
     usage: Annotated[TankUsage | None, _unknown_is_absent(TankUsage), Field(default=None)]
+    gear_uuid: uuid_pkg.UUID | None = None
 
 
 class ImportPersonReference(_ReadModel):
@@ -532,8 +533,13 @@ class ImportGearItem(_ReadModel):
     rented: bool | None = None
     archived: bool | None = None
     archived_at: datetime | None = None
+    volume: float | None = None
+    working_pressure: float | None = None
+    # A string for `type`'s reason: a value outside `CylinderMaterial` reads as absent.
+    material: str | None = None
     # Derived (spec §5.7): read so the report can say it was, recomputed on import.
     dive_count: int | None = None
+    dive_time: int | None = None
     created_at: datetime | None = None
 
 
@@ -553,14 +559,19 @@ class ImportGearServiceSchedule(_ReadModel):
     starts_on: date | None = None
     interval_months: int | None = None
     interval_dives: int | None = None
+    interval_hours: int | None = None
     # A snapshot, not a derived member (spec §5.7): imported as recorded, because no
     # recomputation procedure exists for "the item's lifetime count when this rule began".
     dive_count_at_start: int | None = None
+    # The time twin, imported as recorded where stated; where absent it is reconstructed
+    # after the write from the item's dives created at or before the schedule.
+    dive_time_at_start: int | None = None
     active: bool | None = None
     # Derived (spec §5.7) - recomputed by `recalculate_service_schedule` after the write.
     last_service_on: date | None = None
     next_due_on: date | None = None
     next_due_at_dive_count: int | None = None
+    next_due_at_dive_time: int | None = None
     created_at: datetime | None = None
 
 
@@ -571,6 +582,8 @@ class ImportGearServiceRecord(_ReadModel):
     type: Annotated[ServiceKind | None, _unknown_is_absent(ServiceKind), Field(default=None)]
     serviced_on: date | None = None
     dive_count_at_service: int | None = None
+    # Reconstructed where absent, as the schedule's `dive_time_at_start` is.
+    dive_time_at_service: int | None = None
     label: Annotated[str | None, Field(default=None, max_length=_LABEL_MAX)]
     performed_by: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     contact_uuid: uuid_pkg.UUID | None = None

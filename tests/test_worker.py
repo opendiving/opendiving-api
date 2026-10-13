@@ -404,14 +404,17 @@ def _row(**overrides):
         "label": None,
         "next_due_on": date(2026, 8, 20),
         "next_due_at_dive_count": None,
+        "next_due_at_dive_time": None,
         "notified_stage": None,
         "notified_for_due_on": None,
         "notified_for_due_at_dive_count": None,
+        "notified_for_due_at_dive_time": None,
         "notified_at": None,
         "gear_item_uuid": uuid7(),
         "name": "MK25 EVO",
         "brand": "Scubapro",
         "dive_count": 40,
+        "dive_time": 0,
     }
     return SimpleNamespace(**{**defaults, **overrides})
 
@@ -477,6 +480,21 @@ class TestDueText:
     def test_singularizes_one_dive(self) -> None:
         row = _row(next_due_on=None, next_due_at_dive_count=140, dive_count=139)
         assert "due in 1 dive" in _due_text(row, ServiceStatus.DUE_SOON, self.TODAY)
+
+    def test_reports_an_hours_only_schedule_rounded_up(self) -> None:
+        # 45 minutes in, due at 1 h 45 min: an hour of diving left, not "0".
+        row = _row(next_due_on=None, next_due_at_dive_time=6300, dive_time=2700)
+        assert "due in 1 hour of diving" in _due_text(row, ServiceStatus.DUE_SOON, self.TODAY)
+
+    def test_reports_the_hours_arm_when_that_is_the_one_that_ran_out(self) -> None:
+        row = _row(next_due_on=date(2027, 3, 1), next_due_at_dive_time=6300, dive_time=6300 + 2 * 3600 + 60)
+        text = _due_text(row, ServiceStatus.OVERDUE, self.TODAY)
+        assert "overdue by 3 hours of diving" in text
+        assert "2027" not in text
+
+    def test_the_dive_arm_reads_before_the_hours_arm(self) -> None:
+        row = _row(next_due_on=None, next_due_at_dive_count=140, dive_count=135, next_due_at_dive_time=9000)
+        assert "due in 5 dives" in _due_text(row, ServiceStatus.DUE_SOON, self.TODAY)
 
     def test_includes_the_kind_and_its_label(self) -> None:
         row = _row(kind=ServiceKind.VISUAL_INSPECTION.value, label="Stage 1")
@@ -605,9 +623,10 @@ class TestSendGearServiceDigests:
         assert "gear_item.is_deleted" not in statement
         assert "gear_service_schedule.is_deleted" not in statement
         assert '"user".gear_service_emails IS true' in statement
-        # Both interval arms are pre-filtered on.
+        # Every interval arm is pre-filtered on.
         assert "gear_service_schedule.next_due_on <=" in statement
         assert "gear_item.dive_count >= gear_service_schedule.next_due_at_dive_count" in statement
+        assert "gear_item.dive_time >= gear_service_schedule.next_due_at_dive_time" in statement
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")

@@ -487,6 +487,33 @@ def _one_sighting_per_species(sightings: list[SightingWrite] | None) -> list[Sig
     return sightings
 
 
+def _one_cylinder_per_vessel(mixtures: list[DiveMixtureCreate] | None) -> list[DiveMixtureCreate] | None:
+    """Refuse a gear item linked from two cylinders, naming it: a vessel is one gas supply,
+    so a dive names it once - the format's rule, and the table's unique index."""
+    linked: set[uuid_pkg.UUID] = set()
+    for mixture in mixtures or []:
+        if mixture.gear_item_uuid is None:
+            continue
+        if mixture.gear_item_uuid in linked:
+            raise ValueError(
+                f"Gear item {mixture.gear_item_uuid} is linked from two cylinders; a dive names a vessel once"
+            )
+        linked.add(mixture.gear_item_uuid)
+    return mixtures
+
+
+Mixtures = Annotated[
+    list[DiveMixtureCreate],
+    AfterValidator(_one_cylinder_per_vessel),
+    Field(default_factory=list, description="The cylinders breathed from, each vessel linked at most once"),
+]
+MixturesUpdate = Annotated[
+    list[DiveMixtureCreate] | None,
+    AfterValidator(_one_cylinder_per_vessel),
+    Field(default=None, description="Replaces the cylinders wholesale. Omit to leave them."),
+]
+
+
 Sightings = Annotated[
     list[SightingWrite],
     AfterValidator(_one_sighting_per_species),
@@ -1237,7 +1264,7 @@ class DiveCreateInternal(DiveBase):
 class DiveCreateRequest(DiveCreate):
     """Request body for creating a dive, including its gas mixtures, dive site(s) and gear."""
 
-    mixtures: Annotated[list[DiveMixtureCreate], Field(default_factory=list)]
+    mixtures: Mixtures
     dive_site_uuids: Annotated[
         list[uuid_pkg.UUID],
         Field(default_factory=list, description="Public ids of the dive sites visited, in the order visited"),
@@ -1338,7 +1365,7 @@ class DiveUpdateRequest(DiveUpdate):
     ones are replaced with the given list.
     """
 
-    mixtures: Annotated[list[DiveMixtureCreate] | None, Field(default=None)]
+    mixtures: MixturesUpdate
     dive_site_uuids: Annotated[
         list[uuid_pkg.UUID] | None,
         Field(default=None, description="Public ids of the dive sites visited, in the order visited"),

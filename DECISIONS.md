@@ -508,10 +508,13 @@ a join plus `GROUP BY` on every cache miss. It is stored on `gear_item` and refr
 the same "recompute from scratch, never increment" approach as `recalculate_dive_stats` (see
 "recalculate_dive_stats's aggregate is backed by a covering index").
 
-It is a single `UPDATE ... SET dive_count = (correlated COUNT subquery)` over the user's items,
-guarded by `WHERE dive_count IS DISTINCT FROM (...)` so the common case — editing a dive without
-touching its gear — does not rewrite every row the user owns. Only non-deleted dives count, so
-soft-deleting a dive decrements its gear's counts on the next recalculation.
+A dive uses an item when the item is in its gear list or is one of its cylinders' vessel
+(`dive_mixture.gear_item_id`), and counts once either way. `dive_time` sums those dives'
+`submerged_time` in the same statement — `BigInteger`, being a sum of a caller-supplied column. It
+is a single `UPDATE ... SET dive_count, dive_time` over a `UNION` of the two `(dive, item)` sources,
+guarded by `IS DISTINCT FROM` so the common case — editing a dive without touching its gear — does
+not rewrite every row the user owns. Only non-deleted dives count, so soft-deleting a dive takes it
+off its gear's figures on the next recalculation.
 
 The admin panel's `GearItem` view can edit `dive_count`, but the value only survives until the
 owner's next dive mutation.
@@ -564,9 +567,9 @@ type the enum — see *"A stored vocabulary is read back as a string"*.
 ## Renaming a dive site or gear item invalidates that user's dive caches
 
 A dive's cached representation embeds summaries of other resources — its dive sites' names,
-locations and positions (`DiveSiteInfo`) and its gear items' names/brands/types (`GearItemInfo`) —
-in both `_cached_read_dives` and the single-dive read. Renaming a site, dragging its marker or
-renaming a gear item therefore stales every cached dive referencing it.
+locations and positions (`DiveSiteInfo`) and its gear items' names/brands/types and its vessels'
+facts (`GearItemInfo`) — in both `_cached_read_dives` and the single-dive read. Renaming a site,
+dragging its marker or renaming a gear item therefore stales every cached dive referencing it.
 
 The single-dive key is user-scoped, `user_{user_id}_dive:{uuid}`, so
 `services/cache_invalidation.py` can sweep by pattern; `dive_sites.py`/`gear_items.py` call
@@ -630,21 +633,23 @@ cylinder with no reminder — which is why `kind`/`label` are **copied** onto th
 rather than read through `gear_service_schedule_id`, and why that FK is `ON DELETE SET NULL` rather
 than `CASCADE`: deleting a reminder must never throw away the receipts.
 
-## A service interval is months OR dives, whichever trips first
+## A service interval is months, dives or hours of diving, whichever trips first
 
-`interval_months` and `interval_dives` are two independent thresholds on one rule, not alternatives:
-regulator servicing is specified as "annually or every 100 dives, whichever comes first".
-`ck_gear_service_schedule_has_an_interval` requires at least one — a rule with neither could never
-come due.
+`interval_months`, `interval_dives` and `interval_hours` are independent thresholds on one rule, not
+alternatives: regulator servicing is specified as "annually or every 100 dives, whichever comes
+first". Hours count the item's `dive_time`, not clock hours.
+`ck_gear_service_schedule_has_an_interval` requires at least one — a rule with none could never come
+due.
 
-Unlike `GearItem.type`, these get DB-level `CheckConstraint`s, alongside `interval_months > 0` /
-`interval_dives > 0`: they are domain invariants rather than a duplicated list, mirrored in
-`GearServiceScheduleBase`'s `require_an_interval` validator and the frontend's Zod refine.
+Unlike `GearItem.type`, these get DB-level `CheckConstraint`s, alongside each interval's `> 0`: they
+are domain invariants rather than a duplicated list, mirrored in `GearServiceScheduleBase`'s
+`require_an_interval` validator and the frontend's Zod refine. `interval_hours` alone also carries a
+Pydantic ceiling of a million, because its threshold adds `3600 ×` it to a snapshot.
 
-`services.gear_service.recalculate_service_schedule` derives both due fields from one baseline — the
+`services.gear_service.recalculate_service_schedule` derives every due field from one baseline — the
 latest non-deleted record for the schedule, ordered `(serviced_on DESC, id DESC)`, falling back to
-`starts_on`/`dive_count_at_start` when the item has never been serviced. The `id` tie-break keeps
-two services entered for the same day from resolving arbitrarily.
+`starts_on` and the schedule's two snapshots when the item has never been serviced. The `id`
+tie-break keeps two services entered for the same day from resolving arbitrarily.
 
 `add_months` is hand-rolled with `calendar.monthrange` clamping rather than `dateutil`: "serviced 31
 August, again in 6 months" must land on 28 February, not overflow into March.
@@ -653,7 +658,8 @@ August, again in 6 months" must land on 28 February, not overflow into March.
 
 A dive-based threshold needs a baseline dive count; `dive_count_at_start` (schedule) and
 `dive_count_at_service` (record) are snapshots of `gear_item.dive_count` taken server-side at write
-time. Neither is in the `Create` schema — both are `extra="forbid"` — because a caller able to set
+time, and `dive_time_at_start`/`dive_time_at_service` the same of `gear_item.dive_time` for the
+hours arm. None is in the `Create` schema — both are `extra="forbid"` — because a caller able to set
 them could move their own due threshold.
 
 As snapshots of a lifetime counter they carry two accepted inaccuracies:
@@ -665,9 +671,9 @@ As snapshots of a lifetime counter they carry two accepted inaccuracies:
   `services.gear_service.dives_since` clamps at 0 (as does `divesSince` in the web app's
   `lib/gear-service.ts`); "-3 dives since service" is nonsense to display and worse to compare.
 
-## `next_due_on`/`next_due_at_dive_count` are stored; `ServiceStatus` deliberately is not
+## The `next_due_*` thresholds are stored; `ServiceStatus` deliberately is not
 
-The two due fields are denormalized onto the schedule and recalculated on write — "recompute from
+The three due fields are denormalized onto the schedule and recalculated on write — "recompute from
 scratch, never increment", as `recalculate_dive_stats` and `recalculate_gear_dive_counts` do.
 Storing `next_due_on` makes the digest job's `WHERE next_due_on <= today + 30` an indexed scan
 (`ix_gear_service_schedule_next_due_on`) rather than a Python filter over every schedule.
@@ -675,8 +681,8 @@ Storing `next_due_on` makes the digest job's `WHERE next_due_on <= today + 30` a
 `ServiceStatus` (ok / due_soon / overdue) is **never** stored and never computed inside a
 `@cache`-decorated read. It is a function of today's date; the single-gear-item cache uses the
 decorator's 3600s default and the list 60s, and either would serve yesterday's countdown. The API
-returns only clock-stable facts (`next_due_on`, `next_due_at_dive_count`, `last_service_on`, the
-item's `dive_count`), each a pure function of stored data.
+returns only clock-stable facts (`next_due_on`, `next_due_at_dive_count`, `next_due_at_dive_time`,
+`last_service_on`, the item's `dive_count` and `dive_time`), each a pure function of stored data.
 
 The same reasoning gives `GET /gear-service-due` **no `within_days` parameter**: a server-side
 horizon would bake today's date into the cached response. It returns every active schedule (capped
@@ -691,8 +697,9 @@ deliberate: the browser needs it for every badge, and the digest job needs it wi
 ask.
 
 The constants are named identically on both sides (`SERVICE_DUE_SOON_DAYS = 30`,
-`SERVICE_DUE_SOON_DIVES = 10`) so one `grep SERVICE_DUE_SOON` finds the pair. Change one and you
-must change the other; both have the same truth-table tests.
+`SERVICE_DUE_SOON_DIVES = 10`, `SERVICE_DUE_SOON_HOURS = 10`) so one `grep SERVICE_DUE_SOON` finds
+the trio. An hours remainder is compared in seconds and shown as whole hours rounded up, on both
+sides. Change one and you must change the other; both have the same truth-table tests.
 
 ## A dive moves `gear_item.dive_count`, but never `next_due_at_dive_count`
 
@@ -700,7 +707,8 @@ must change the other; both have the same truth-table tests.
 count. It depends only on snapshots, so logging, editing or deleting a dive changes what the status
 displays as without any write to `gear_service_schedule`: the comparison
 `dive_count >= next_due_at_dive_count` happens at read time (browser) and query time (cron).
-`services/gear_stats.py` is therefore untouched by servicing.
+`next_due_at_dive_time` is the same against `dive_time`. `services/gear_stats.py` is therefore
+untouched by servicing.
 
 Storing "dives remaining" instead would force a write to every one of a user's schedules on every
 dive mutation and couple two recalculation services together, for no gain.
@@ -744,14 +752,13 @@ these routes must start calling it.
 so the gear list badges every row without an N+1. `GearItemInfo` stays lean: it is embedded in every
 dive and gear set.
 
-## The service digest fires once per threshold, tracked in four columns on the schedule
+## The service digest fires once per threshold, tracked in five columns on the schedule
 
 `send_gear_service_digests` runs daily but sends only when `should_notify` finds the schedule's
-current `(status, next_due_on, next_due_at_dive_count)` differs from the stored
-`(notified_stage, notified_for_due_on, notified_for_due_at_dive_count)`: one email per stage change,
-per logged service, per moved due date. `recalculate_service_schedule` clears all four notify
-columns **in the same statement** that moves `next_due_*`, so a reminder is always armed for the
-stored due date.
+current status and `next_due_*` thresholds differ from the stored `notified_stage` and
+`notified_for_due_*` columns: one email per stage change, per logged service, per moved due date.
+`recalculate_service_schedule` clears all five notify columns **in the same statement** that moves
+`next_due_*`, so a reminder is always armed for the stored due date.
 
 A permanently overdue schedule would go silent; `SERVICE_OVERDUE_RENAG_DAYS` (90) re-sends
 quarterly, overdue-only.
@@ -760,9 +767,9 @@ One email per user, never per item. Send first, mark second: a delivery failure 
 the mark, so the worst case is a duplicate, not a lost reminder. No `run_at_startup=True`, unlike
 `purge_expired_tokens`: a worker restart must never blast out reminders.
 
-The query's `OR` is half indexable (the date arm uses `ix_gear_service_schedule_next_due_on`; the
-dive arm compares `gear_item.dive_count` against a schedule column), fine at a handful of schedules
-per user since `should_notify` decides.
+Only the date arm of the query's `OR` is indexable (`ix_gear_service_schedule_next_due_on`); the
+dive and hours arms compare a `gear_item` column against a schedule column, fine at a handful of
+schedules per user since `should_notify` decides.
 
 ## The digest's mark is an ORM bulk UPDATE by primary key, and must carry no `WHERE`
 
@@ -1904,9 +1911,10 @@ into a 500, and `services/export/envelope.py` rebuilds a `DiveMixtureBase` per m
 export breaks on the same row. `_ParserOutput`'s docstring records a stored `NaN` doing exactly
 that.
 
-So `start_pressure` and `end_pressure` are redeclared on `DiveMixtureCreate` (which
-`DiveMixtureCreateInternal` inherits, covering the admin create path) and on `DiveMixtureUpdate`.
-`TestTheReadSchemaStaysUnbounded` fails the moment someone hoists them to `Base`.
+So `start_pressure` and `end_pressure` are redeclared on `_DiveMixtureWrite` (which both
+`DiveMixtureCreate` and the admin's `DiveMixtureCreateInternal` inherit, the two differing only in
+naming the vessel by uuid or by id) and on `DiveMixtureUpdate`. `TestTheReadSchemaStaysUnbounded`
+fails the moment someone hoists them to `Base`.
 
 The web side's `toDiveMixtureInput` keeps its `??` rather than coercing a stored 0 to `""`: a 0 from
 a database the `ALTER` never reached must surface as a legible form error, not a 500 and not a
@@ -2229,17 +2237,20 @@ through — a mapping this repo would get quietly wrong; `species.csv` carries t
 contact and the policy number (no elements; `<membership memberid>` is not a policy); the portrait
 (`<owner>` has no image element, and its one route to an image, `<notes><link>` to `<mediadata>`,
 carries no role); a dive's tags, waves, weather and boat name; a site's tags, external ids, water
-type and entry types.
+type and entry types; a gear item's working pressure and dive time.
 
 Lossy, on the `divejson` package writer's tables: `type` goes out as `<apparatus>`, `semi_closed` as
 `rebreather`, which reads back `closed_circuit`, and `freedive` and `snorkel` not at all;
 `entry_type` as `<platform>`, a plain `boat` and a `pool` not at all, since UDDF's boats are each a
 kind of boat. The rating is doubled onto `<ratingvalue>`'s 1-10.
 
-Allowed: `po2_limit` maps to `<mix><maximumpo2>`, so `_MixKey` includes it;
-`informationbeforedive/link` is `maxOccurs="unbounded"`, so every site goes out in visit order; a
-site's other names are `<aliasname>`s, its altitude `<geography><altitude>`, and its depth range
-`<sitedata>`'s `<maximumdepth>` and `<minimumdepth>`.
+Allowed: `po2_limit` maps to `<mix><maximumpo2>`, so `_MixKey` includes it; a cylinder's vessel is a
+second `<tankdata><link>` to its `<tank>`, which carries `<tankmaterial>` and `<tankvolume>`, and
+the `<tankdata>` keeps its own `<tankvolume>` as UDDF's override, since Subsurface's and
+divelogs.de's importers read a cylinder's size there alone; `informationbeforedive/link` is
+`maxOccurs="unbounded"`, so every site goes out in visit order; a site's other names are
+`<aliasname>`s, its altitude `<geography><altitude>`, and its depth range `<sitedata>`'s
+`<maximumdepth>` and `<minimumdepth>`.
 
 Forced: `<greatestdepth>` is mandatory and `Dive.max_depth` is not — deepest profile sample, then
 `0`; `<tankpressurebegin>` is mandatory in `tankdataType`, so a cylinder without one is skipped, its
@@ -5654,7 +5665,8 @@ slot; rejected: `variouspieces` for both (loses the grouping) or splitting by ph
 `mirror` and `whistle` go to `variouspieces`. `camera` declines `cameraType`, which extends
 `ID_TYPE` and has no `<name>`, and goes to `<variouspieces>` with its name. The collapse costs only
 the sub-category, and no tested reader imports the kit list under `<diver><owner><equipment>` beyond
-Subsurface's `divecomputer`. Never emitted: `compressor`, `scooter`, `rebreather`, `watch`.
+Subsurface's `divecomputer`. `rebreather` and `scooter` are their own elements; `transmitter` has
+none and goes to `<variouspieces>`.
 
 ## There is no `Course.cost`, and money is a cross-cutting concern this app has not designed yet
 
@@ -5814,6 +5826,12 @@ Where a column's default already means "not recorded", absence takes it: `notes`
 meaning the diver wrote nothing), the booleans `rented`, `archived` and `active`, and a schedule's
 `dive_count_at_start` (0).
 
+A schedule's or a service record's absent `dive_time_at_*` is the exception, being neither: 0 would
+make a later hours arm count the item's whole life, and skipping would drop every record of every
+document written before the format had it. It is reconstructed after the write — the summed
+`submerged_time` of the item's dives created at or before the row, the import restoring each
+`created_at` — and reported, the figure the revision adding the columns filled stored rows with.
+
 Otherwise the record is skipped and reported: a course with no `status` (§6.17), a service record
 with no `dive_count_at_service`, a dive with no `submerged_time` and no profile, a species with no
 `aphia_id`, and a record whose REQUIRED closed-vocabulary member (a certification's `agency`, a
@@ -5821,11 +5839,11 @@ service `type`) carries an unknown value, which §5.6 reads as absent. A course'
 OPTIONAL and so costs the field rather than the record — see *A course may have no agency, and a
 certification may not*.
 
-Three derivations are allowed: a dive with no `submerged_time` or `avg_depth` takes its profile's
+Four derivations are allowed: a dive with no `submerged_time` or `avg_depth` takes its profile's
 time in the water (`divejson.in_water`), the span standing in for it where no sample was in the
 water, and one with no `bottom_temperature` its primary recording's coldest sample, as the dive form
-does, all reported; one with no `number` takes the dive form's suggestion, duplicates being legal
-(`DiveNumberingSummary`).
+does, and a schedule or record with no `dive_time_at_*` the reconstruction above, all reported; one
+with no `number` takes the dive form's suggestion, duplicates being legal (`DiveNumberingSummary`).
 
 `visibility` is finer in the format (a number, §6.2) than here (whole metres); a fractional value is
 dropped and reported, not rounded.
@@ -5929,15 +5947,16 @@ attempt.
 ## An import recomputes what is derived, imports what is a snapshot, and drops the caches afterwards
 
 Recomputable aggregates are recomputed, never imported (spec §5.7): `UserDiveStats` through
-`recalculate_dive_stats`, `GearItem.dive_count` through `recalculate_gear_dive_counts`, a schedule's
-`last_service_on`/`next_due_on`/`next_due_at_dive_count` through `recalculate_service_schedule` —
-after the service records, being a function of them — and the profile summary family `store_profile`
-derives.
+`recalculate_dive_stats`, `GearItem.dive_count`/`dive_time` through `recalculate_gear_dive_counts`,
+a schedule's `last_service_on` and `next_due_*` through `recalculate_service_schedule` — after the
+service records, being a function of them — and the profile summary family `store_profile` derives.
 
 Server-set snapshots import verbatim, since no recomputation procedure exists and recomputing
 against the destination's live counters would reset every baseline:
-`GearServiceSchedule.dive_count_at_start` and `GearServiceRecord.dive_count_at_service`. Classify a
-new column by whether a recomputation procedure exists, not by its comment's wording.
+`GearServiceSchedule.dive_count_at_start`/`dive_time_at_start` and
+`GearServiceRecord.dive_count_at_service`/`dive_time_at_service`, the time pair where the document
+states it (see *Where the format is optional and this app is not*). Classify a new column by whether
+a recomputation procedure exists, not by its comment's wording.
 
 `created_at` imports from the document; `updated_at` is minted by the write.
 
@@ -6023,7 +6042,7 @@ is a bare `{"type": "integer"}`), so a conforming document (a converter with a u
 hold a number a column cannot, and unbounded that is SQLSTATE 22003 mid-transaction, a whole logbook
 refused; the `CheckConstraint` census cannot see it.
 
-Every reachable integer is bounded in `_DIVE_BOUNDS`, `_MIXTURE_BOUNDS`, `_plan_schedule`,
+Every reachable integer is bounded in `_DIVE_BOUNDS`, `_MIXTURE_BOUNDS`, `_SCHEDULE_BOUNDS`,
 `_Planner._count` and `shape_series`/`_plan_profile` (sample extremes become `Integer` summary
 columns). A second census enumerates `Integer` columns on every table an import writes and requires
 each bounded in the planner or excluded with a reason.
@@ -6031,6 +6050,8 @@ each bounded in the planner or excluded with a reason.
 Derived columns are closed at their inputs, since `recalculate_dive_stats` and
 `recalculate_service_schedule` know nothing of import: `next_due_at_dive_count` sums
 `dive_count_at_start` and `interval_dives`, both capped at `_MAX_DIVE_COUNT` (a million);
+`next_due_at_dive_time` sums `dive_time_at_start`, capped at a million hours in seconds, and
+`3600 × interval_hours`, the interval capped at a million, into a `BigInteger`;
 `user_dive_stats.total_submerged_time` sums `dive.submerged_time` over every dive the account holds,
 so a per-dive cap of a year cannot bound it and the column is `BigInteger`.
 
@@ -6360,7 +6381,7 @@ invariant nothing enforces, and Pydantic fails the whole response: one `gear_ser
 outside `ServiceKind` 500s `GET /gear-items` and `GET /gear-service-due` through
 `GearServiceScheduleInfo`.
 
-Applied to every stored vocabulary — `gear_item.type`, `dive.water_type`,
+Applied to every stored vocabulary — `gear_item.type`, `dive.water_type`, `gear_item.material`,
 `dive_mixture.role`/`usage`, `course.agency`/`status`, `certification.agency`, `user.units`,
 `user.dive_form_hidden_fields`, `dive_form_preset.hidden_fields`; derive the list, never trust it.
 `user.units` is the one a schema sweep misses, since `get_current_user` validates through `UserRead`

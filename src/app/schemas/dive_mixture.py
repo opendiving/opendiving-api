@@ -1,9 +1,11 @@
+import uuid as uuid_pkg
 from enum import StrEnum
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.schemas import StoredVocabulary
+from .gear_item import GearItemInfo
 
 
 class GasRole(StrEnum):
@@ -168,7 +170,9 @@ class DiveMixtureBase(BaseModel):
     ]
 
 
-class DiveMixtureCreate(DiveMixtureBase):
+class _DiveMixtureWrite(DiveMixtureBase):
+    """The bounds both write shapes carry: the API's create and CRUDAdmin's."""
+
     model_config = ConfigDict(extra="forbid")
 
     start_pressure: Annotated[
@@ -198,8 +202,25 @@ class DiveMixtureCreate(DiveMixtureBase):
     ]
 
 
-class DiveMixtureCreateInternal(DiveMixtureCreate):
+class DiveMixtureCreate(_DiveMixtureWrite):
+    gear_item_uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(
+            default=None,
+            description="Public id of the diver's gear item this cylinder is - the vessel whose capacity, rating "
+            "and material live on that item. A dive names a vessel on one cylinder at most. Setting or changing a "
+            "link needs an item whose type is `cylinder` or unset; a link the dive already carries is kept whatever "
+            "the item's type is now. Omitted or null for a rental or a vessel never recorded.",
+        ),
+    ]
+
+
+class DiveMixtureCreateInternal(_DiveMixtureWrite):
+    """CRUDAdmin's create, which spreads its fields into the model: the internal id, not the
+    public uuid the API resolves."""
+
     dive_id: int
+    gear_item_id: int | None = None
 
 
 class DiveMixtureRead(DiveMixtureBase):
@@ -211,6 +232,11 @@ class DiveMixtureRead(DiveMixtureBase):
     usage: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
     id: int
+    # The linked vessel, filled by `crud_dive_mixtures` from a join rather than by
+    # `model_validate` over the row, which carries only the id.
+    gear_item: Annotated[
+        GearItemInfo | None, Field(default=None, description="The diver's gear item this cylinder is, if linked")
+    ]
 
 
 def as_create(row: DiveMixtureRead) -> DiveMixtureCreate:
@@ -228,12 +254,15 @@ def as_create(row: DiveMixtureRead) -> DiveMixtureCreate:
     the field is optional, the row is not, and no write path could have produced the value in
     the first place. One function rather than four rebuilds, so the next caller inherits the
     rule instead of rediscovering it.
+
+    The linked vessel is carried as its uuid, so every rebuild through here keeps its link.
     """
-    fields = row.model_dump(exclude={"id", "role", "usage"})
+    fields = row.model_dump(exclude={"id", "role", "usage", "gear_item"})
     return DiveMixtureCreate(
         **fields,
         role=row.role if row.role in set(GasRole) else None,
         usage=row.usage if row.usage in set(TankUsage) else None,
+        gear_item_uuid=row.gear_item.uuid if row.gear_item is not None else None,
     )
 
 

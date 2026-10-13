@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_gear_item import DiveGearItem
+from ..models.dive_mixture import DiveMixture
 from ..models.dive_person import DivePerson
 from ..models.dive_species import DiveSpecies
 from ..models.dive_tag import DiveTag
@@ -99,7 +100,12 @@ def at_dive_site(dive_site_id: int) -> ColumnElement[bool]:
 
 
 def with_gear_item(gear_item_id: int) -> ColumnElement[bool]:
-    return Dive.id.in_(select(DiveGearItem.dive_id).where(DiveGearItem.gear_item_id == gear_item_id))
+    """The dives using the item, on the recount's terms: in the gear list or as a cylinder's
+    vessel, so the filter returns exactly the dives `gear_item.dive_count` counts."""
+    return or_(
+        Dive.id.in_(select(DiveGearItem.dive_id).where(DiveGearItem.gear_item_id == gear_item_id)),
+        Dive.id.in_(select(DiveMixture.dive_id).where(DiveMixture.gear_item_id == gear_item_id)),
+    )
 
 
 def showing_species(species_id: int) -> ColumnElement[bool]:

@@ -44,7 +44,7 @@ from src.app.models.contact import Contact
 from src.app.models.gear_item import GearItem
 from src.app.schemas.checkin_details import CheckinDetailsRead, EmergencyContact, InsurancePolicy
 from src.app.schemas.dive import DiveMode
-from src.app.schemas.gear_item import GearType
+from src.app.schemas.gear_item import GearItemInfo, GearType
 from src.app.schemas.location import LocationRead
 from src.app.schemas.trip import TripPartRead
 from src.app.services.dive_profiles import LoadedProfile
@@ -1660,7 +1660,7 @@ class TestDeterminism:
 class TestEquipmentMapping:
     def test_every_gear_type_has_a_uddf_element(self):
         """`_EQUIPMENT_ELEMENT` is looked up unguarded, and `full_bundle` only exercises
-        three of the twenty-four categories - so an enum member added without a home here
+        three of the categories - so an enum member added without a home here
         would first surface as a 500 on a diver's download."""
         assert set(_EQUIPMENT_ELEMENT) == set(GearType)
 
@@ -1688,6 +1688,50 @@ class TestEquipmentMapping:
         knives = _tree(document).findall(f".//{UDDF}knife/{UDDF}name")
         assert [e.text for e in knives] == ["Z-Knife", "Trilobite", "Piranha"]
         assert _tree(document).find(f".//{UDDF}variouspieces") is None
+
+    @pytest.mark.asyncio
+    async def test_a_rebreather_and_a_scooter_are_themselves_and_a_transmitter_rides_variouspieces(
+        self, schema, monkeypatch
+    ):
+        """UDDF names the first two, in `equipmentType`'s alphabetical sequence, and has no
+        element for a pressure transmitter."""
+        bundle = build_bundle(
+            gear_items=[
+                _gear("Pod", GearType.TRANSMITTER),
+                _gear("Seacraft", GearType.SCOOTER),
+                _gear("JJ-CCR", GearType.REBREATHER),
+            ]
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        tree = _tree(document)
+        assert _text(tree, f".//{UDDF}rebreather/{UDDF}name") == "JJ-CCR"
+        assert _text(tree, f".//{UDDF}scooter/{UDDF}name") == "Seacraft"
+        assert _text(tree, f".//{UDDF}variouspieces/{UDDF}name") == "Pod"
+
+    @pytest.mark.asyncio
+    async def test_a_linked_cylinder_states_its_volume_on_both_elements(self, schema, monkeypatch):
+        """The vessel's `<tank>` carries its material then its volume after its notes; the
+        dive's `<tankdata>` links the mix, then the vessel, and keeps its own volume, since
+        the readers this export serves take a cylinder's size from `<tankdata>` alone."""
+        vessel = _gear("Steel 12", GearType.CYLINDER)
+        vessel.notes, vessel.volume, vessel.working_pressure, vessel.material = "Faber", 12.0, 232.0, "steel"
+        dive = make_dive(1, uuid7())
+        tank = mixture(start_pressure=200.0, gear_item=GearItemInfo(uuid=vessel.uuid, name=vessel.name))
+        bundle = build_bundle(dives=[dive], mixtures_by_dive={dive.id: [tank]}, gear_items=[vessel])
+
+        document = await _render(bundle, monkeypatch=monkeypatch)
+
+        schema.validate(_for_the_xsd(document))
+        tree = _tree(document)
+        piece = tree.find(f".//{UDDF}tank")
+        assert piece is not None
+        assert [child.tag.removeprefix(UDDF) for child in piece][-3:] == ["notes", "tankmaterial", "tankvolume"]
+        assert (_text(piece, f"{UDDF}tankmaterial"), _text(piece, f"{UDDF}tankvolume")) == ("steel", "0.012")
+        tankdata = _dive(tree, 0).find(f".//{UDDF}tankdata")
+        assert tankdata is not None
+        assert [link.get("ref") for link in tankdata.findall(f"{UDDF}link")][1] == piece.get("id")
+        assert _text(tankdata, f"{UDDF}tankvolume") == "0.012"
 
     @pytest.mark.asyncio
     async def test_a_mirror_and_a_whistle_land_in_variouspieces(self, schema, monkeypatch):

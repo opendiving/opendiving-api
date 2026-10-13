@@ -9,15 +9,20 @@ of its own - so the rules can be tested exhaustively without a database (see
 feature: status depends on today's date, so it can't be a cached API field (see
 `ServiceStatus`' docstring), which leaves the browser deriving it for the UI and this
 module deriving it for the digest job, which has no browser. The constants below are
-named identically on both sides so one `grep SERVICE_DUE_SOON` finds the pair.
+named identically on both sides so one `grep SERVICE_DUE_SOON` finds the trio.
 """
 
 import calendar
+import math
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..models.dive import Dive
+from ..models.dive_gear_item import DiveGearItem
+from ..models.dive_mixture import DiveMixture
 from ..models.gear_service_record import GearServiceRecord
 from ..models.gear_service_schedule import GearServiceSchedule
 from ..schemas.gear_service import ServiceKind, ServiceStatus
@@ -51,6 +56,8 @@ def service_kind_label(kind: str) -> str:
 SERVICE_DUE_SOON_DAYS = 30
 # The dive-count equivalent - about one trip's worth of diving.
 SERVICE_DUE_SOON_DIVES = 10
+# The hours-of-diving equivalent, the dive figure's twin. Compared in seconds of `dive_time`.
+SERVICE_DUE_SOON_HOURS = 10
 # How long the digest waits before nagging again about something that is still overdue.
 SERVICE_OVERDUE_RENAG_DAYS = 90
 
@@ -74,38 +81,51 @@ def next_due_from(
     *,
     baseline_on: date,
     baseline_dive_count: int,
+    baseline_dive_time: int,
     interval_months: int | None,
     interval_dives: int | None,
-) -> tuple[date | None, int | None]:
-    """Compute a schedule's `(next_due_on, next_due_at_dive_count)` from its baseline.
+    interval_hours: int | None,
+) -> tuple[date | None, int | None, int | None]:
+    """Compute a schedule's `(next_due_on, next_due_at_dive_count, next_due_at_dive_time)`
+    from its baseline.
 
     Each arm is independent and returns `None` when its interval isn't in use, so a
-    time-only rule has no dive threshold and vice versa. When both are set they're two
+    time-only rule has no dive threshold and vice versa. When more than one is set they're
     separate thresholds and whichever trips first wins - that comparison happens in
     `service_status`, not here.
 
-    `next_due_at_dive_count` is an *absolute threshold* rather than a remaining count,
-    which is what keeps it independent of the item's live `dive_count`: logging a dive
-    changes what the status displays as, but never requires a write to this table.
+    The dive and hours thresholds are *absolute* rather than remaining figures, which is what
+    keeps them independent of the item's live `dive_count` and `dive_time`: logging a dive
+    changes what the status displays as, but never requires a write to this table. The hours
+    threshold is in seconds of `dive_time`, exact, with no rounding anywhere but the screen.
     """
     next_due_on = add_months(baseline_on, interval_months) if interval_months is not None else None
     next_due_at_dive_count = baseline_dive_count + interval_dives if interval_dives is not None else None
-    return next_due_on, next_due_at_dive_count
+    next_due_at_dive_time = baseline_dive_time + 3600 * interval_hours if interval_hours is not None else None
+    return next_due_on, next_due_at_dive_count, next_due_at_dive_time
+
+
+def hours_of_diving(seconds: int) -> int:
+    """A remainder of `dive_time`, shown as whole hours rounded up - so forty minutes left
+    reads "1 hour of diving" rather than "0". The web app rounds the same way."""
+    return math.ceil(seconds / 3600)
 
 
 def service_status(
     *,
     next_due_on: date | None,
     next_due_at_dive_count: int | None,
+    next_due_at_dive_time: int | None,
     dive_count: int,
+    dive_time: int,
     today: date,
 ) -> ServiceStatus:
-    """How urgent a schedule is, given today's date and the item's live dive count.
+    """How urgent a schedule is, given today's date and the item's live dive count and time.
 
-    Both arms are evaluated and the more urgent verdict wins, which is what implements
-    "annually *or* every 100 dives, whichever comes first". A schedule with neither
-    threshold set is `OK` - it can't become due (and the DB `CheckConstraint` means it
-    shouldn't exist in the first place).
+    Every arm is evaluated and the most urgent verdict wins, which is what implements
+    "annually *or* every 100 dives, whichever comes first". A schedule with no threshold
+    set is `OK` - it can't become due (and the DB `CheckConstraint` means it shouldn't
+    exist in the first place).
     """
     statuses = []
 
@@ -119,6 +139,12 @@ def service_status(
         if dive_count >= next_due_at_dive_count:
             statuses.append(ServiceStatus.OVERDUE)
         elif next_due_at_dive_count - dive_count <= SERVICE_DUE_SOON_DIVES:
+            statuses.append(ServiceStatus.DUE_SOON)
+
+    if next_due_at_dive_time is not None:
+        if dive_time >= next_due_at_dive_time:
+            statuses.append(ServiceStatus.OVERDUE)
+        elif next_due_at_dive_time - dive_time <= SERVICE_DUE_SOON_HOURS * 3600:
             statuses.append(ServiceStatus.DUE_SOON)
 
     if ServiceStatus.OVERDUE in statuses:
@@ -143,25 +169,29 @@ def should_notify(
     status: ServiceStatus,
     next_due_on: date | None,
     next_due_at_dive_count: int | None,
+    next_due_at_dive_time: int | None,
     notified_stage: str | None,
     notified_for_due_on: date | None,
     notified_for_due_at_dive_count: int | None,
+    notified_for_due_at_dive_time: int | None,
     notified_at: datetime | None,
     now: datetime,
 ) -> bool:
     """Whether the digest should include this schedule on this run.
 
     The rule is "fire once per threshold crossing, not once per day": send only when the
-    schedule's current `(status, next_due_on, next_due_at_dive_count)` differs from what
-    was last notified about. That single comparison covers every case worth covering:
+    schedule's current `(status, next_due_on, next_due_at_dive_count, next_due_at_dive_time)`
+    differs from what was last notified about. That single comparison covers every case
+    worth covering:
 
     - entering `due_soon`, then later entering `overdue`, each fire exactly once;
     - logging a service moves `next_due_*` and clears the notify state (see
       `recalculate_service_schedule`), which re-arms the reminder for the next cycle;
     - editing an interval moves the due date, so the stored tuple no longer matches and
       the diver is told about the new one;
-    - a dive-based interval tripping fires even though nothing wrote to the schedule,
-      because `status` is recomputed against the item's live `dive_count` every run.
+    - a dive- or hours-based interval tripping fires even though nothing wrote to the
+      schedule, because `status` is recomputed against the item's live `dive_count` and
+      `dive_time` every run.
 
     The one exception is a schedule that stays `overdue` indefinitely: the tuple never
     changes, so it would go silent forever. `SERVICE_OVERDUE_RENAG_DAYS` re-sends
@@ -170,10 +200,11 @@ def should_notify(
     if status is ServiceStatus.OK:
         return False
 
-    if (notified_stage, notified_for_due_on, notified_for_due_at_dive_count) != (
+    if (notified_stage, notified_for_due_on, notified_for_due_at_dive_count, notified_for_due_at_dive_time) != (
         status.value,
         next_due_on,
         next_due_at_dive_count,
+        next_due_at_dive_time,
     ):
         return True
 
@@ -193,7 +224,8 @@ async def recalculate_service_schedule(db: AsyncSession, schedule_id: int, commi
     creating, editing or deleting one of its records.
 
     The baseline is the latest non-deleted record for this schedule, falling back to the
-    schedule's own `starts_on`/`dive_count_at_start` when it has never been serviced.
+    schedule's own `starts_on`/`dive_count_at_start`/`dive_time_at_start` when it has never
+    been serviced.
     Records are ordered by `(serviced_on DESC, id DESC)` - the `id` tie-break matters
     because two services entered for the same day would otherwise pick arbitrarily.
 
@@ -209,7 +241,11 @@ async def recalculate_service_schedule(db: AsyncSession, schedule_id: int, commi
 
     latest = (
         await db.execute(
-            select(GearServiceRecord.serviced_on, GearServiceRecord.dive_count_at_service)
+            select(
+                GearServiceRecord.serviced_on,
+                GearServiceRecord.dive_count_at_service,
+                GearServiceRecord.dive_time_at_service,
+            )
             .where(
                 GearServiceRecord.gear_service_schedule_id == schedule_id,
                 GearServiceRecord.is_deleted.is_(False),
@@ -223,16 +259,20 @@ async def recalculate_service_schedule(db: AsyncSession, schedule_id: int, commi
         last_service_on: date | None = latest.serviced_on
         baseline_on = latest.serviced_on
         baseline_dive_count = latest.dive_count_at_service
+        baseline_dive_time = latest.dive_time_at_service
     else:
         last_service_on = None
         baseline_on = schedule.starts_on
         baseline_dive_count = schedule.dive_count_at_start
+        baseline_dive_time = schedule.dive_time_at_start
 
-    next_due_on, next_due_at_dive_count = next_due_from(
+    next_due_on, next_due_at_dive_count, next_due_at_dive_time = next_due_from(
         baseline_on=baseline_on,
         baseline_dive_count=baseline_dive_count,
+        baseline_dive_time=baseline_dive_time,
         interval_months=schedule.interval_months,
         interval_dives=schedule.interval_dives,
+        interval_hours=schedule.interval_hours,
     )
 
     await db.execute(
@@ -242,12 +282,54 @@ async def recalculate_service_schedule(db: AsyncSession, schedule_id: int, commi
             last_service_on=last_service_on,
             next_due_on=next_due_on,
             next_due_at_dive_count=next_due_at_dive_count,
+            next_due_at_dive_time=next_due_at_dive_time,
             notified_stage=None,
             notified_for_due_on=None,
             notified_for_due_at_dive_count=None,
+            notified_for_due_at_dive_time=None,
             notified_at=None,
         )
     )
 
     if commit:
         await db.commit()
+
+
+async def reconstruct_dive_time_snapshots(
+    db: AsyncSession, *, schedule_ids: Sequence[int], record_ids: Sequence[int]
+) -> None:
+    """Fill the time snapshot of rows an import wrote without one, uncommitted.
+
+    The figure the live path would have snapshotted when the row was written: the summed
+    `submerged_time` of the owner's live dives using the row's item - in its gear list or as a
+    cylinder's vessel, counted once - created at or before the row. An import restores every
+    row's `created_at` as recorded, so this reads the document's own timeline.
+    """
+    for model, column, ids in (
+        (GearServiceSchedule, GearServiceSchedule.dive_time_at_start, schedule_ids),
+        (GearServiceRecord, GearServiceRecord.dive_time_at_service, record_ids),
+    ):
+        if not ids:
+            continue
+        listed = (
+            select(DiveGearItem.id)
+            .where(DiveGearItem.dive_id == Dive.id, DiveGearItem.gear_item_id == model.gear_item_id)
+            .correlate_except(DiveGearItem)
+        )
+        vessel = (
+            select(DiveMixture.id)
+            .where(DiveMixture.dive_id == Dive.id, DiveMixture.gear_item_id == model.gear_item_id)
+            .correlate_except(DiveMixture)
+        )
+        total = (
+            select(func.coalesce(func.sum(Dive.submerged_time), 0))
+            .where(
+                Dive.user_id == model.user_id,
+                Dive.is_deleted.is_(False),
+                Dive.created_at <= model.created_at,
+                or_(listed.exists(), vessel.exists()),
+            )
+            .correlate(model)
+            .scalar_subquery()
+        )
+        await db.execute(update(model).where(model.id.in_(ids)).values({column: total}))

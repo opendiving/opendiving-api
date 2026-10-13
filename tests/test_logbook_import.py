@@ -100,7 +100,9 @@ from src.app.services.logbook_import import planner as planner_module
 from src.app.services.logbook_import import reader as import_reader
 from src.app.services.logbook_import.planner import (
     _DIVE_BOUNDS,
+    _GEAR_BOUNDS,
     _MIXTURE_BOUNDS,
+    _SCHEDULE_BOUNDS,
     _SIGHTING_BOUNDS,
     _SITE_BOUNDS,
 )
@@ -719,6 +721,7 @@ class TestFilesFollowTheirBytes:
 
         plan = await _apply(async_db, destination.id, _zip_of(document, {member: content}), filename="logbook.zip")
         monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_gear_caches", AsyncMock())
 
         assert plan.files_restored == 1
         restored = select(DiveProfile.parser_key, DiveProfile.reader_version).where(
@@ -3354,6 +3357,29 @@ class TestDerivedState:
         assert schedule.last_service_on == record.serviced_on
 
     @pytest.mark.asyncio
+    async def test_a_vessel_fact_or_a_time_snapshot_this_app_cannot_store_goes_alone(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """An unknown material, a working pressure past the band and a time snapshot past a
+        million hours each cost the member, never the record."""
+        _, document = seeded
+        body = json.loads(document)
+        body["gear"][0].update(material="titanium", working_pressure=400.0, volume=12.0)
+        body["gear_service_schedules"][0]["dive_time_at_start"] = 3600 * 1_000_000 + 1
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(body).encode())
+
+        item = (await async_db.execute(select(GearItem).where(GearItem.user_id == destination.id))).scalar_one()
+        schedule = (
+            await async_db.execute(select(GearServiceSchedule).where(GearServiceSchedule.user_id == destination.id))
+        ).scalar_one()
+        assert (item.material, item.working_pressure, item.volume) == (None, None, 12.0)
+        assert schedule.dive_time_at_start == 0
+        dropped = " ".join(note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED)
+        assert all(word in dropped for word in ("titanium", "working_pressure", "dive time"))
+
+    @pytest.mark.asyncio
     async def test_the_snapshots_import_as_recorded(self, seeded: Any, db: Session, async_db: AsyncSession) -> None:
         """`dive_count_at_start` and `dive_count_at_service` are historical facts with no
         recomputation procedure (spec §5.7), so recomputing them against the destination's
@@ -4255,6 +4281,8 @@ class TestTheBoundsCensus:
             "ck_dive_recording_deco_gf_low_within_high",
             # `split_dive_start_time` never pairs the date-only flag with an offset.
             "ck_dive_start_date_only_has_no_offset",
+            # `_plan_schedule` skips a schedule its bounds leave with no interval.
+            "ck_gear_service_schedule_has_an_interval",
         }
     )
     # There used to be a third exclusion here, for the three `dive_mixture` bounds whose
@@ -4280,7 +4308,15 @@ class TestTheBoundsCensus:
     def test_every_bound_the_document_can_reach_has_a_guard(self) -> None:
         guarded = {
             bound.field
-            for bounds in (_DIVE_BOUNDS, _MIXTURE_BOUNDS, READOUT_BOUNDS, _SIGHTING_BOUNDS, _SITE_BOUNDS)
+            for bounds in (
+                _DIVE_BOUNDS,
+                _MIXTURE_BOUNDS,
+                READOUT_BOUNDS,
+                _SIGHTING_BOUNDS,
+                _SITE_BOUNDS,
+                _GEAR_BOUNDS,
+                _SCHEDULE_BOUNDS,
+            )
             for bound in bounds
         }
         # Column names, mapped onto the wire names the planner reads them under.
@@ -4288,7 +4324,15 @@ class TestTheBoundsCensus:
         unguarded = []
         # `tuple[Any, ...]` because `Model.__table__` is typed `FromClause` on a precisely
         # typed class, and only `Table` carries `.constraints`.
-        models: tuple[Any, ...] = (Dive, DiveMixture, DiveRecording, DiveSpecies, DiveSite)
+        models: tuple[Any, ...] = (
+            Dive,
+            DiveMixture,
+            DiveRecording,
+            DiveSpecies,
+            DiveSite,
+            GearItem,
+            GearServiceSchedule,
+        )
         for model in models:
             table = model.__table__
             for constraint in table.constraints:
@@ -4589,6 +4633,7 @@ class TestTheIntegerColumnCensus:
         ("dive_mixture", "id"): "the sequence's",
         ("dive_mixture", "dive_id"): "resolved from a row this import wrote",
         ("dive_mixture", "gas_number"): "bounded in `_MIXTURE_BOUNDS`",
+        ("dive_mixture", "gear_item_id"): "resolved from a row this import wrote, or one the caller already had",
         ("dive_profile", "id"): "the sequence's",
         ("dive_profile", "recording_id"): "resolved from a row this import wrote",
         ("dive_profile", "dive_id"): "resolved from a row this import wrote",
@@ -4611,8 +4656,9 @@ class TestTheIntegerColumnCensus:
         ("gear_service_schedule", "id"): "the sequence's",
         ("gear_service_schedule", "user_id"): "the caller's",
         ("gear_service_schedule", "gear_item_id"): "resolved from a row this import wrote",
-        ("gear_service_schedule", "interval_months"): "bounded in `_plan_schedule`",
-        ("gear_service_schedule", "interval_dives"): "bounded in `_plan_schedule`",
+        ("gear_service_schedule", "interval_months"): "bounded in `_SCHEDULE_BOUNDS`",
+        ("gear_service_schedule", "interval_dives"): "bounded in `_SCHEDULE_BOUNDS`",
+        ("gear_service_schedule", "interval_hours"): "bounded in `_SCHEDULE_BOUNDS`",
         ("gear_service_schedule", "dive_count_at_start"): "bounded by `_Planner._count`",
         ("gear_service_schedule", "next_due_at_dive_count"): "derived by `recalculate_service_schedule`",
         (
@@ -5028,6 +5074,50 @@ class TestTheImportGates:
             )
         ).all()
         assert [tuple(row) for row in rows] == [(32.0, 200.0, 60.0, 0), (50.0, 190.0, 100.0, 1)]
+
+    @pytest.mark.asyncio
+    async def test_an_attached_documents_vessel_fills_a_blank_link_and_rides_an_appended_tank(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The document's links name its own gear uuids; translated to the rows this import
+        matched or wrote for them, a paired tank's blank link fills from one and an appended
+        tank keeps the other."""
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        db.add(DiveMixture(dive_id=dive.id, gas_number=0, oxygen=32.0, helium=0.0))
+        db.commit()
+        back, deco = str(uuid7()), str(uuid7())
+        recording = {
+            "device": {"brand": "Shearwater Research, Inc", "model": "Perdix 3", "serial": "D9772626"},
+            "started_at": "2026-09-08T15:18:08+03:00",
+            "profile": {"duration": 2_940_000, "depth": {"times": [0, 2_940_000], "values": [0, 1900]}},
+        }
+        body = json.loads(
+            self._document(
+                recording,
+                cylinders=[
+                    {"gas_number": 1, "oxygen": 32.0, "helium": 0.0, "start_pressure": 200.0, "gear_uuid": back},
+                    {"gas_number": 2, "oxygen": 50.0, "helium": 0.0, "start_pressure": 190.0, "gear_uuid": deco},
+                ],
+            )
+        )
+        body["gear"] = [
+            {"uuid": back, "name": "Back 12", "type": "cylinder", "created_at": "2026-09-01T00:00:00+00:00"},
+            {"uuid": deco, "name": "Deco 7", "type": "cylinder", "created_at": "2026-09-01T00:00:00+00:00"},
+        ]
+
+        plan = await _apply(async_db, user.id, json.dumps(body).encode())
+
+        assert ImportNoteCode.RECORDING_ATTACHED in _codes(plan)
+        items = await async_db.execute(select(GearItem.id, GearItem.name).where(GearItem.user_id == user.id))
+        names = {row.id: row.name for row in items}
+        rows = (
+            await async_db.execute(
+                select(DiveMixture.oxygen, DiveMixture.gear_item_id)
+                .where(DiveMixture.dive_id == dive.id)
+                .order_by(DiveMixture.id)
+            )
+        ).all()
+        assert [(oxygen, names.get(vessel)) for oxygen, vessel in rows] == [(32.0, "Back 12"), (50.0, "Deco 7")]
 
     @pytest.mark.asyncio
     async def test_a_fill_onto_a_secondary_recording_writes_nothing_of_the_dives(

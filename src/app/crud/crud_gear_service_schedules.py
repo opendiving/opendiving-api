@@ -28,9 +28,11 @@ SERVICE_SCHEDULE_INFO_COLUMNS = (
     GearServiceSchedule.label,
     GearServiceSchedule.interval_months,
     GearServiceSchedule.interval_dives,
+    GearServiceSchedule.interval_hours,
     GearServiceSchedule.last_service_on,
     GearServiceSchedule.next_due_on,
     GearServiceSchedule.next_due_at_dive_count,
+    GearServiceSchedule.next_due_at_dive_time,
     GearServiceSchedule.is_active,
 )
 
@@ -43,9 +45,11 @@ def service_schedule_info_from_row(row: Any) -> GearServiceScheduleInfo:
         label=row.label,
         interval_months=row.interval_months,
         interval_dives=row.interval_dives,
+        interval_hours=row.interval_hours,
         last_service_on=row.last_service_on,
         next_due_on=row.next_due_on,
         next_due_at_dive_count=row.next_due_at_dive_count,
+        next_due_at_dive_time=row.next_due_at_dive_time,
         is_active=row.is_active,
     )
 
@@ -153,10 +157,12 @@ async def get_due_overview_for_user(
             GearServiceSchedule.last_service_on,
             GearServiceSchedule.next_due_on,
             GearServiceSchedule.next_due_at_dive_count,
+            GearServiceSchedule.next_due_at_dive_time,
             GearItem.uuid.label("gear_item_uuid"),
             GearItem.name.label("gear_item_name"),
             GearItem.brand.label("gear_item_brand"),
             GearItem.dive_count.label("gear_item_dive_count"),
+            GearItem.dive_time.label("gear_item_dive_time"),
         )
         .join(GearItem, GearItem.id == GearServiceSchedule.gear_item_id)
         .where(

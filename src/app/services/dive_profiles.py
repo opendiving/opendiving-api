@@ -74,6 +74,7 @@ from ..schemas.dive_profile import (
     RecordingProfileRead,
 )
 from .blob_store import BlobMissingError
+from .gear_stats import recalculate_gear_dive_counts
 
 logger = logging.getLogger(__name__)
 
@@ -1742,14 +1743,19 @@ async def backfill_profiles(
             pending = 0
 
     if not dry_run:
+        # The re-derivation rewrites a dive's cylinders, so a gear item's figures follow it as
+        # they follow any other rewrite of them.
+        for user_id in sorted(touched_user_ids):
+            await recalculate_gear_dive_counts(db=db, user_id=user_id, commit=False)
         await db.commit()
         # Cached dive reads embed `profile`, the readouts and the mixtures, and every dive
         # this run touched is now serving stale ones. See the script for why this needs a
         # live Redis pool.
-        from .cache_invalidation import invalidate_dive_caches
+        from .cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 
         for user_id in touched_user_ids:
             await invalidate_dive_caches(user_id)
+            await invalidate_gear_caches(user_id)
 
     return BackfillReport(examined=examined, extracted=extracted, skipped=skipped, no_samples=no_samples, failed=failed)
 

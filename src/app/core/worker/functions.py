@@ -38,6 +38,8 @@ from ...services.email_service import (
 from ...services.gear_service import (
     SERVICE_DUE_SOON_DAYS,
     SERVICE_DUE_SOON_DIVES,
+    SERVICE_DUE_SOON_HOURS,
+    hours_of_diving,
     service_kind_label,
     service_status,
     should_notify,
@@ -640,11 +642,12 @@ async def purge_deleted_accounts(ctx: dict[Any, Any]) -> str:
 def _due_text(row: Any, status: ServiceStatus, today: date) -> str:
     """One line of the digest, phrased from whichever interval arm is the urgent one.
 
-    A schedule can have both a date and a dive threshold, and only one of them is
+    A schedule can have a date, a dive and an hours threshold, and only one of them is
     usually the reason it turned up here - saying "due 1 Mar" about a regulator that has
     actually run out of dives would be worse than useless. So the overdue arm wins when
-    the schedule is overdue, and otherwise the calendar is reported if it has a date at
-    all (which is the arm divers think in).
+    the schedule is overdue, the dive arm before the hours arm, and otherwise the calendar
+    is reported if it has a date at all (which is the arm divers think in). Hours are
+    compared in seconds and shown rounded up (`hours_of_diving`).
     """
     kind = service_kind_label(row.kind)
     detail = f"{kind} ({row.label})" if row.label else kind
@@ -652,10 +655,16 @@ def _due_text(row: Any, status: ServiceStatus, today: date) -> str:
     date_overdue = row.next_due_on is not None and today >= row.next_due_on
     dives_remaining = row.next_due_at_dive_count - row.dive_count if row.next_due_at_dive_count is not None else None
     dives_overdue = dives_remaining is not None and dives_remaining <= 0
+    time_remaining = row.next_due_at_dive_time - row.dive_time if row.next_due_at_dive_time is not None else None
+    time_overdue = time_remaining is not None and time_remaining <= 0
 
     if status is ServiceStatus.OVERDUE and dives_overdue and not date_overdue:
         over_by = -dives_remaining  # type: ignore[operator]  # dives_overdue implies not None
         return f"{detail} overdue by {over_by} dive{'' if over_by == 1 else 's'}"
+
+    if status is ServiceStatus.OVERDUE and time_overdue and not date_overdue:
+        hours = hours_of_diving(-time_remaining)  # type: ignore[operator]  # time_overdue implies not None
+        return f"{detail} overdue by {hours} hour{'' if hours == 1 else 's'} of diving"
 
     if date_overdue:
         return f"{detail} overdue since {row.next_due_on:%-d %b %Y}"
@@ -665,6 +674,10 @@ def _due_text(row: Any, status: ServiceStatus, today: date) -> str:
 
     if dives_remaining is not None:
         return f"{detail} due in {dives_remaining} dive{'' if dives_remaining == 1 else 's'}"
+
+    if time_remaining is not None:
+        hours = hours_of_diving(time_remaining)
+        return f"{detail} due in {hours} hour{'' if hours == 1 else 's'} of diving"
 
     return detail
 
@@ -703,14 +716,17 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
                     GearServiceSchedule.label,
                     GearServiceSchedule.next_due_on,
                     GearServiceSchedule.next_due_at_dive_count,
+                    GearServiceSchedule.next_due_at_dive_time,
                     GearServiceSchedule.notified_stage,
                     GearServiceSchedule.notified_for_due_on,
                     GearServiceSchedule.notified_for_due_at_dive_count,
+                    GearServiceSchedule.notified_for_due_at_dive_time,
                     GearServiceSchedule.notified_at,
                     GearItem.uuid.label("gear_item_uuid"),
                     GearItem.name,
                     GearItem.brand,
                     GearItem.dive_count,
+                    GearItem.dive_time,
                 )
                 .join(GearItem, GearItem.id == GearServiceSchedule.gear_item_id)
                 .join(User, User.id == GearServiceSchedule.user_id)
@@ -721,8 +737,8 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
                     User.gear_service_emails.is_(True),
                     # A cheap pre-filter only - `should_notify` below makes the real
                     # decision. The date arm is served by
-                    # `ix_gear_service_schedule_next_due_on`; the dive arm compares two
-                    # tables and can't be indexed, so this is a scan of the (small)
+                    # `ix_gear_service_schedule_next_due_on`; the dive and hours arms compare
+                    # two tables and can't be indexed, so this is a scan of the (small)
                     # schedule table. Materializing "dives remaining" onto the row would
                     # fix that, at the cost of writing to every schedule on every dive -
                     # see DECISIONS.md for why that trade wasn't taken.
@@ -731,6 +747,11 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
                         and_(
                             GearServiceSchedule.next_due_at_dive_count.is_not(None),
                             GearItem.dive_count >= GearServiceSchedule.next_due_at_dive_count - SERVICE_DUE_SOON_DIVES,
+                        ),
+                        and_(
+                            GearServiceSchedule.next_due_at_dive_time.is_not(None),
+                            GearItem.dive_time
+                            >= GearServiceSchedule.next_due_at_dive_time - SERVICE_DUE_SOON_HOURS * 3600,
                         ),
                     ),
                 )
@@ -743,16 +764,20 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
         status = service_status(
             next_due_on=row.next_due_on,
             next_due_at_dive_count=row.next_due_at_dive_count,
+            next_due_at_dive_time=row.next_due_at_dive_time,
             dive_count=row.dive_count,
+            dive_time=row.dive_time,
             today=today,
         )
         if not should_notify(
             status=status,
             next_due_on=row.next_due_on,
             next_due_at_dive_count=row.next_due_at_dive_count,
+            next_due_at_dive_time=row.next_due_at_dive_time,
             notified_stage=row.notified_stage,
             notified_for_due_on=row.notified_for_due_on,
             notified_for_due_at_dive_count=row.notified_for_due_at_dive_count,
+            notified_for_due_at_dive_time=row.notified_for_due_at_dive_time,
             notified_at=row.notified_at,
             now=now,
         ):
@@ -762,7 +787,9 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
         bucket["email"] = row.email
         label = f"{row.brand} {row.name}" if row.brand else row.name
         bucket["lines"].append((label, _due_text(row, status, today), str(row.gear_item_uuid)))
-        bucket["marks"].append((row.schedule_id, status.value, row.next_due_on, row.next_due_at_dive_count))
+        bucket["marks"].append(
+            (row.schedule_id, status.value, row.next_due_on, row.next_due_at_dive_count, row.next_due_at_dive_time)
+        )
 
     if not by_user:
         logging.info("No gear service reminders to send")
@@ -794,9 +821,10 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
                     "notified_stage": stage,
                     "notified_for_due_on": due_on,
                     "notified_for_due_at_dive_count": due_at_dive_count,
+                    "notified_for_due_at_dive_time": due_at_dive_time,
                     "notified_at": now,
                 }
-                for schedule_id, stage, due_on, due_at_dive_count in bucket["marks"]
+                for schedule_id, stage, due_on, due_at_dive_count, due_at_dive_time in bucket["marks"]
             ]
             if marks:
                 await db.execute(update(GearServiceSchedule), marks)

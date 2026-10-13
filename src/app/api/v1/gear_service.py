@@ -42,6 +42,7 @@ from ...crud.crud_gear_service_schedules import (
 )
 from ...schemas.gear_item import GearItemReadInternal
 from ...schemas.gear_service import (
+    NEEDS_AN_INTERVAL,
     GearServiceDueResponse,
     GearServiceRecordCreate,
     GearServiceRecordCreateInternal,
@@ -80,7 +81,7 @@ def _to_public_schedule(
     """
     data = db_schedule if isinstance(db_schedule, dict) else db_schedule.model_dump()
     hidden = {"id", "user_id", "gear_item_id", "notified_stage", "notified_for_due_on"}
-    hidden |= {"notified_for_due_at_dive_count", "notified_at"}
+    hidden |= {"notified_for_due_at_dive_count", "notified_for_due_at_dive_time", "notified_at"}
     return GearServiceScheduleRead(
         **{k: v for k, v in data.items() if k not in hidden},
         user_uuid=user_uuid,
@@ -164,12 +165,13 @@ async def write_gear_service_schedule(
         # dive-based interval counts up from, so a caller able to set it could move
         # their own due threshold arbitrarily.
         dive_count_at_start=db_gear_item.dive_count,
+        dive_time_at_start=db_gear_item.dive_time,
     )
     created = await crud_gear_service_schedules.create(
         db=db, object=schedule_internal, schema_to_select=GearServiceScheduleReadInternal, return_as_model=True
     )
     # A brand-new schedule has no records, so this derives the first due date straight
-    # from `starts_on`/`dive_count_at_start`.
+    # from `starts_on` and the two snapshots.
     await recalculate_service_schedule(db=db, schedule_id=created.id)
     await invalidate_gear_caches(current_user["id"])
 
@@ -332,8 +334,9 @@ async def patch_gear_service_schedule(
     """Partial update.
 
     The at-least-one-interval invariant can't live on `GearServiceScheduleUpdate` - a
-    patch that sets only `interval_dives` says nothing about `interval_months` - so it's
-    checked here against the merged result instead.
+    patch that sets only `interval_dives` says nothing about the other two - so it's
+    checked here against the merged result instead. An hours arm added here counts from the
+    item's dive time when the rule was created, which is what `dive_time_at_start` holds.
     """
     schedule = await resolve_schedule_for_user(db=db, schedule_uuid=uuid, user_id=current_user["id"])
     if schedule is None:
@@ -343,10 +346,11 @@ async def patch_gear_service_schedule(
     if not update_data:
         return {"message": "Service schedule updated"}
 
-    effective_months = update_data.get("interval_months", schedule.interval_months)
-    effective_dives = update_data.get("interval_dives", schedule.interval_dives)
-    if effective_months is None and effective_dives is None:
-        raise UnprocessableEntityException("A service schedule needs an interval in months, in dives, or both")
+    if all(
+        update_data.get(arm, getattr(schedule, arm)) is None
+        for arm in ("interval_months", "interval_dives", "interval_hours")
+    ):
+        raise UnprocessableEntityException(NEEDS_AN_INTERVAL)
 
     effective_kind = update_data.get("kind", schedule.kind)
     effective_label = update_data.get("label", schedule.label)
@@ -436,9 +440,11 @@ async def write_gear_service_record(
         gear_item_id=db_gear_item.id,
         gear_service_schedule_id=schedule.id if schedule is not None else None,
         contact_id=contact_id,
-        # Snapshot of the item's lifetime dive count at the moment of service - the
-        # baseline the next dive-based threshold is measured from. Never client-supplied.
+        # Snapshots of the item's lifetime dive count and dive time at the moment of
+        # service - the baselines the next dive and hours thresholds are measured from.
+        # Never client-supplied.
         dive_count_at_service=db_gear_item.dive_count,
+        dive_time_at_service=db_gear_item.dive_time,
     )
     try:
         created = await crud_gear_service_records.create(
@@ -671,8 +677,9 @@ async def patch_gear_service_record(
     """Partial update. Correcting a `serviced_on` date moves the schedule's next due
     date, so the linked rule is recalculated afterwards.
 
-    `dive_count_at_service` isn't editable - it records a moment that has already
-    passed, and rewriting it would silently shift a dive-based threshold. Passing `null`
+    `dive_count_at_service` and `dive_time_at_service` aren't editable - each records a
+    moment that has already passed, and rewriting one would silently shift a dive- or
+    hours-based threshold. Passing `null`
     for `contact_uuid` unlinks the shop, which is distinct from omitting the key; a contact
     that isn't the caller's own is a 422.
     """

@@ -185,8 +185,9 @@ def volume(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
 @pytest.fixture(autouse=True)
 def no_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     """A backfill run ends by dropping the touched accounts' dive caches, and there is no
-    Redis here to drop them in."""
+    Redis here to drop them in - its gear caches too, whose figures follow the dives."""
     monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+    monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_gear_caches", AsyncMock())
 
 
 async def _import(db: AsyncSession, user: User, files: list[tuple[str, bytes]], *, apply: bool = True) -> BatchReport:
@@ -1375,6 +1376,7 @@ class TestAClearedValueStaysCleared:
         self, volume: Any, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch, action: str
     ) -> None:
         monkeypatch.setattr(dives_module, "invalidate_dive_caches", AsyncMock())
+        monkeypatch.setattr(dives_module, "invalidate_gear_caches", AsyncMock())
         diver = create_user(db)
         await _import(async_db, diver, self.FILES)
         [dive_id] = await _dive_ids(async_db, diver)

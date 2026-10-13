@@ -38,6 +38,7 @@ from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_species import DiveSpecies
 from src.app.models.dive_tag import DiveTag
+from src.app.models.gear_item import GearItem
 from src.app.models.user import User
 from src.app.schemas.dive import DiveMergeRequest
 from src.app.services import blob_store
@@ -740,6 +741,74 @@ class TestWhatElseMoves:
             .all()
         )
         assert [(row.oxygen, row.gas_number) for row in rows] == [(21.0, 0), (50.0, 1)]
+
+    @staticmethod
+    def _vessel(db: Session, diver: User) -> GearItem:
+        vessel = create_gear_item(db, diver)
+        vessel.type = "cylinder"
+        db.commit()
+        return vessel
+
+    @staticmethod
+    async def _tanks(async_db: AsyncSession, dive: Dive) -> list[tuple[Any, ...]]:
+        rows = await async_db.execute(
+            select(DiveMixture.oxygen, DiveMixture.gear_item_id)
+            .where(DiveMixture.dive_id == dive.id)
+            .order_by(DiveMixture.id)
+        )
+        return [tuple(row) for row in rows]
+
+    @pytest.mark.asyncio
+    async def test_the_other_dives_vessel_fills_a_blank_link(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """A vessel picked on the absorbed half reaches the survivor's paired tank, which has
+        none - otherwise the absorbed half's soft-delete would take the dive off its count."""
+        first, second = await _two_halves(async_db, db, diver)
+        vessel = self._vessel(db, diver)
+        db.add_all(
+            [
+                DiveMixture(dive_id=first.id, gas_number=0, oxygen=21.0, helium=0.0, start_pressure=200.0),
+                DiveMixture(
+                    dive_id=second.id,
+                    gas_number=0,
+                    oxygen=21.0,
+                    helium=0.0,
+                    start_pressure=120.0,
+                    gear_item_id=vessel.id,
+                ),
+            ]
+        )
+        db.commit()
+        vessel_id = vessel.id
+
+        await _merge(async_db, diver, first, second)
+
+        assert await self._tanks(async_db, first) == [(21.0, vessel_id)]
+        item = await async_db.get(GearItem, vessel_id, populate_existing=True)
+        assert item is not None and item.dive_count == 1
+
+    @pytest.mark.asyncio
+    async def test_an_appended_tank_naming_a_vessel_the_dive_has_keeps_its_gas_alone(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """Two records of one dive linking one vessel on unpaired tanks: the appended one
+        keeps its gas and loses the link rather than the unique index refusing the merge."""
+        first, second = await _two_halves(async_db, db, diver)
+        vessel = self._vessel(db, diver)
+        db.add_all(
+            [
+                DiveMixture(dive_id=first.id, gas_number=0, oxygen=21.0, helium=0.0, gear_item_id=vessel.id),
+                DiveMixture(dive_id=second.id, gas_number=0, oxygen=21.0, helium=0.0),
+                DiveMixture(dive_id=second.id, gas_number=1, oxygen=50.0, helium=0.0, gear_item_id=vessel.id),
+            ]
+        )
+        db.commit()
+        vessel_id = vessel.id
+
+        await _merge(async_db, diver, first, second)
+
+        assert await self._tanks(async_db, first) == [(21.0, vessel_id), (50.0, None)]
 
     @pytest.mark.asyncio
     async def test_the_other_dives_tank_fills_this_ones_blanks_and_an_empty_one_is_not_appended(

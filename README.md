@@ -78,8 +78,9 @@ else; what is here is the source, and the notes for working on it.
   key and no outbound call: the file ships with the app, and picking a suggestion makes a dive site
   of your own that you can rename, move and annotate, which keeps the record's OpenStreetMap or
   Wikidata entry. A suggestion you already hold names your site.
-- **Gear** — items, gear sets with default weights, service **schedules** (by months and/or dives),
-  service history, a due-soon endpoint, and a scheduled email reminder digest.
+- **Gear** — items, a cylinder's capacity, working pressure and material on the item and a dive's
+  tank linked to it, gear sets with default weights, service **schedules** (by months, dives or
+  hours of diving), service history, a due-soon endpoint, and a scheduled email reminder digest.
 - **Certifications** — c-card records with front/back card images, and an email when a card or one
   of the diver's insurance policies is about to expire and again when it has.
 - **Year in review** — each January, an email with the diver's previous year in figures.

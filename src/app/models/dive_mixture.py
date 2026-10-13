@@ -1,4 +1,4 @@
-from sqlalchemy import CheckConstraint, Float, ForeignKey, Integer, String
+from sqlalchemy import CheckConstraint, Float, ForeignKey, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -48,6 +48,12 @@ class DiveMixture(Base):
     # Null means "not recorded", which is every row until a diver says otherwise: no file
     # format this app parses carries the distinction.
     usage: Mapped[str | None] = mapped_column(String(20), default=None)
+    # The diver's gear item this cylinder is - the vessel whose capacity, rating and material
+    # live on that row. `SET NULL`: deleting the vessel unlinks the dives and keeps their gas.
+    # Null for a rental, or a vessel the diver never recorded.
+    gear_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("gear_item.id", ondelete="SET NULL"), default=None, index=True
+    )
 
     __table_args__ = (
         # A DB-level backstop for the same bounds the API schemas and the web form apply,
@@ -103,4 +109,13 @@ class DiveMixture(Base):
         # to match. A 1-based floor would have forced the mixture to carry a number its
         # own curve doesn't have, breaking the join it exists for. See DECISIONS.md.
         CheckConstraint("gas_number IS NULL OR gas_number >= 0", name="ck_dive_mixture_gas_number_non_negative"),
+        # A vessel is one gas supply, so it appears once among a dive's cylinders - the format's
+        # own rule, seen from the table.
+        Index(
+            "ux_dive_mixture_dive_id_gear_item_id",
+            "dive_id",
+            "gear_item_id",
+            unique=True,
+            postgresql_where=text("gear_item_id IS NOT NULL"),
+        ),
     )

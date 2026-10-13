@@ -43,7 +43,7 @@ from uuid6 import uuid7
 from ...crud.crud_checkin_details import write_checkin_details
 from ...crud.crud_dive_dive_sites import replace_dive_sites_for_dive
 from ...crud.crud_dive_gear_items import replace_gear_items_for_dive
-from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive
+from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive, vessel_ids_for_dive
 from ...crud.crud_dive_species import replace_species_for_dive
 from ...crud.crud_gear_set_items import replace_gear_items_for_set
 from ...crud.crud_people import (
@@ -79,6 +79,7 @@ from ..certification_files import UnsupportedCardFileError, sniff_content_type
 from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
 from ..dive_files import (
     TECH_SCALAR_FIELDS,
+    LinkedCylinder,
     RecordingChange,
     apply_gas_mapping,
     delete_files_for_dive,
@@ -109,7 +110,7 @@ from ..dive_recordings import (
     recording_start,
 )
 from ..dive_stats import recalculate_dive_stats
-from ..gear_service import recalculate_service_schedule
+from ..gear_service import recalculate_service_schedule, reconstruct_dive_time_snapshots
 from ..gear_stats import recalculate_gear_dive_counts
 from ..user_pictures import write_imported_portrait
 from .planner import (
@@ -174,6 +175,9 @@ class _Writer:
         # the ones it merely hung a new service record on. The second kind is what a
         # "recalculate what I created" reading misses; see `_recalculate`.
         self._schedule_ids: list[int] = []
+        # Schedules and records whose document stated no dive-time snapshot.
+        self._reconstruct_schedule_ids: list[int] = []
+        self._reconstruct_record_ids: list[int] = []
         # Tag name -> row id, for every name the plan's dives and tag list carry.
         self._tag_ids: dict[str, int] = {}
 
@@ -191,6 +195,15 @@ class _Writer:
 
     def _ids_for(self, collection: str, source_uuids: list[uuid_pkg.UUID]) -> list[int]:
         return [row_id for row_id in (self._id(collection, one) for one in source_uuids) if row_id is not None]
+
+    def _vessel_ids(self, mixtures: list[DiveMixtureCreate]) -> dict[uuid_pkg.UUID, int]:
+        """A planned dive's cylinder links, whose `gear_item_uuid` the planner resolved to the
+        gear record's source uuid, mapped to the rows this import wrote or matched for them."""
+        return {
+            source: row_id
+            for mixture in mixtures
+            if (source := mixture.gear_item_uuid) is not None and (row_id := self._id("gear", source)) is not None
+        }
 
     async def _write_row(self, collection: str, model: Any, record: PlannedRecord) -> int:
         """Insert a new row, or bring a soft-deleted one back and overwrite it.
@@ -443,7 +456,10 @@ class _Writer:
             if gear_item_id is None:
                 continue
             record.values["gear_item_id"] = gear_item_id
-            self._stale_schedule(await self._write_row("gear_service_schedules", GearServiceSchedule, record))
+            schedule_id = await self._write_row("gear_service_schedules", GearServiceSchedule, record)
+            if record.children.get("reconstruct_dive_time"):
+                self._reconstruct_schedule_ids.append(schedule_id)
+            self._stale_schedule(schedule_id)
 
     async def _write_service_records(self) -> None:
         for record in self._plan.writable("gear_service_records"):
@@ -454,7 +470,9 @@ class _Writer:
             schedule_id = self._id("gear_service_schedules", record.children.get("schedule_uuid"))
             record.values["gear_service_schedule_id"] = schedule_id
             record.values["contact_id"] = self._contact_id(record)
-            await self._write_row("gear_service_records", GearServiceRecord, record)
+            record_id = await self._write_row("gear_service_records", GearServiceRecord, record)
+            if record.children.get("reconstruct_dive_time"):
+                self._reconstruct_record_ids.append(record_id)
             # **Whether or not this import wrote that schedule.** A record attached to a rule
             # the caller already had moves its due dates exactly as one attached to a rule
             # this import created does, and `api/v1/gear_service.py` recalculates on every
@@ -521,11 +539,13 @@ class _Writer:
             record.values["contact_id"] = self._contact_id(record)
             dive_id = await self._write_row("dives", Dive, record)
 
+            mixtures = [DiveMixtureCreate(**row) for row in record.children.get("mixtures") or []]
             await replace_mixtures_for_dive(
                 db=self._db,
                 dive_id=dive_id,
-                mixtures=[DiveMixtureCreate(**row) for row in record.children.get("mixtures") or []],
+                mixtures=mixtures,
                 commit=False,
+                gear_item_ids=self._vessel_ids(mixtures),
             )
             await replace_dive_sites_for_dive(
                 db=self._db,
@@ -774,18 +794,41 @@ class _Writer:
         stored_mixtures = await get_mixtures_for_dive(db=self._db, dive_id=match.dive_id)
         planned = match.recording
         if planned.kept is None and match.mixtures:
+            # The document's links are source uuids; the dive's stored rows link by the items'
+            # own, so each is translated to its row's before the pairing compares them.
+            vessels = await self._stored_uuids([row.get("gear_item_uuid") for row in match.mixtures])
             mapping, cylinders = relabel_gas_numbers(
-                [DiveMixtureSchema(**row) for row in match.mixtures], stored_mixtures, fill=True
+                [
+                    LinkedCylinder(**{**row, "gear_item_uuid": vessels.get(row.get("gear_item_uuid"))})
+                    for row in match.mixtures
+                ],
+                stored_mixtures,
+                fill=True,
             )
             if planned.profile is not None:
                 remapped = apply_gas_mapping(planned.profile.profile, mapping)
                 if remapped is not None:
                     planned = replace(planned, profile=replace(planned.profile, profile=remapped))
             if cylinders is not None:
-                await replace_mixtures_for_dive(db=self._db, dive_id=match.dive_id, mixtures=cylinders, commit=False)
+                await replace_mixtures_for_dive(
+                    db=self._db,
+                    dive_id=match.dive_id,
+                    mixtures=cylinders,
+                    commit=False,
+                    gear_item_ids=await vessel_ids_for_dive(self._db, cylinders, dive_id=match.dive_id),
+                )
         record = PlannedRecord(action=Action.CREATE, source_uuid=match.source_uuid, uuid=match.source_uuid)
         recording_id = await self._write_recording(record, match.dive_id, planned, ordinal=ordinal)
         return await self._files_on(recording_id)
+
+    async def _stored_uuids(self, sources: list[uuid_pkg.UUID | None]) -> dict[uuid_pkg.UUID | None, uuid_pkg.UUID]:
+        """The public uuid of the gear row each source uuid was written or matched to."""
+        ids = {source: row_id for source in sources if (row_id := self._id("gear", source)) is not None}
+        if not ids:
+            return {}
+        rows = await self._db.execute(select(GearItem.id, GearItem.uuid).where(GearItem.id.in_(set(ids.values()))))
+        uuid_by_id = {row.id: row.uuid for row in rows}
+        return {source: uuid_by_id[row_id] for source, row_id in ids.items() if row_id in uuid_by_id}
 
     async def _files_on(self, recording_id: int) -> int:
         return int(
@@ -934,6 +977,10 @@ class _Writer:
         """
         await recalculate_dive_stats(self._db, user_id=self._user_id, commit=False)
         await recalculate_gear_dive_counts(self._db, user_id=self._user_id, commit=False)
+        # Before the schedules: an hours arm's baseline is a time snapshot this fills.
+        await reconstruct_dive_time_snapshots(
+            self._db, schedule_ids=self._reconstruct_schedule_ids, record_ids=self._reconstruct_record_ids
+        )
         for schedule_id in self._schedule_ids:
             await recalculate_service_schedule(self._db, schedule_id, commit=False)
 
