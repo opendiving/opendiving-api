@@ -19,7 +19,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.schemas import NOTES_MAX_LENGTH, POSTGRES_INTEGER_MAX, PublicUUIDSchema
-from .dive import DiveLocalStartTime
+from .dive import Abundance, DiveLocalStartTime
 
 # The source that supplied a search result. `catalog` means the row already exists locally
 # and so carries a `uuid` a dive can reference immediately; the other two mean the diver has
@@ -435,6 +435,9 @@ class DiveSpeciesBase(BaseModel):
         int | None,
         Field(default=None, ge=1, le=POSTGRES_INTEGER_MAX, description="How many were counted; empty is not counted"),
     ]
+    abundance: Annotated[
+        Abundance | None, Field(default=None, description="How many were seen, as a band; empty when counted")
+    ]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
 
@@ -455,6 +458,9 @@ class DiveSpeciesUpdate(BaseModel):
     count: Annotated[
         int | None,
         Field(default=None, ge=1, le=POSTGRES_INTEGER_MAX, description="How many were counted; empty is not counted"),
+    ]
+    abundance: Annotated[
+        Abundance | None, Field(default=None, description="How many were seen, as a band; empty when counted")
     ]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 

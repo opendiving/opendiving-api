@@ -361,7 +361,7 @@ async def _ordered_ids_by_dive(
     db: AsyncSession, dive_ids: list[int]
 ) -> tuple[dict[int, list[int]], dict[int, list[int]], dict[int, list[StoredSighting]]]:
     """The site, gear and species links for a set of dives, as ordered integer ids - each
-    sighting with its count and note beside the id.
+    sighting with its count or band and its note beside the id.
 
     The existing `get_dive_sites_for_dives`/`get_gear_items_for_dives`/
     `get_species_for_dives` return the *summaries* a dive response embeds, which would mean
@@ -392,12 +392,12 @@ async def _ordered_ids_by_dive(
         gear[row.dive_id].append(row.gear_item_id)
 
     sighting_rows = await db.execute(
-        select(DiveSpecies.dive_id, DiveSpecies.species_id, DiveSpecies.count, DiveSpecies.notes)
+        select(DiveSpecies.dive_id, DiveSpecies.species_id, DiveSpecies.count, DiveSpecies.abundance, DiveSpecies.notes)
         .where(DiveSpecies.dive_id.in_(dive_ids))
         .order_by(DiveSpecies.dive_id, DiveSpecies.position)
     )
-    for dive_id, species_id, count, notes in sighting_rows:
-        sightings[dive_id].append(StoredSighting(species_id=species_id, count=count, notes=notes))
+    for dive_id, species_id, count, abundance, notes in sighting_rows:
+        sightings[dive_id].append(StoredSighting(species_id=species_id, count=count, abundance=abundance, notes=notes))
 
     return sites, gear, sightings
 

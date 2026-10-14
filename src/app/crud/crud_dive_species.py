@@ -12,7 +12,7 @@ from ..schemas.dive import SightingRead
 # The columns making up a `SightingRead` - the species' summary, then the sighting's own - in
 # the order `sighting_from_row` unpacks them. Kept here rather than in `crud_species.py`
 # - unlike gear, whose columns are shared with the gear-set join - this join table is the
-# only reader. The sighting's two are labelled because a result row is a tuple, and
+# only reader. The sighting's own are labelled because a result row is a tuple, and
 # `row.count` is the tuple's own method.
 SIGHTING_COLUMNS = (
     Species.uuid,
@@ -23,16 +23,19 @@ SIGHTING_COLUMNS = (
     # and the client builds the URL. See `SpeciesInfo.photo_sha256`.
     Species.photo_sha256,
     DiveSpecies.count.label("sighting_count"),
+    DiveSpecies.abundance.label("sighting_abundance"),
     DiveSpecies.notes.label("sighting_notes"),
 )
 
 
 @dataclass(frozen=True, slots=True)
 class StoredSighting:
-    """One sighting as the join table stores it: the catalog row, the count, the note."""
+    """One sighting as the join table stores it: the catalog row, the count or the band, the
+    note."""
 
     species_id: int
     count: int | None = None
+    abundance: str | None = None
     notes: str = ""
 
 
@@ -45,6 +48,7 @@ def sighting_from_row(row: Any) -> SightingRead:
         rank=row.rank,
         photo_sha256=row.photo_sha256,
         count=row.sighting_count,
+        abundance=row.sighting_abundance,
         notes=row.sighting_notes,
     )
 
@@ -112,6 +116,7 @@ async def replace_species_for_dive(
                 species_id=sighting.species_id,
                 position=position,
                 count=sighting.count,
+                abundance=sighting.abundance,
                 notes=sighting.notes,
             )
         )
