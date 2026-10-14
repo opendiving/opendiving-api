@@ -479,23 +479,39 @@ async def _move_links(db: AsyncSession, *, from_dive_id: int, to_dive_id: int, d
 async def _fold_sightings(db: AsyncSession, *, from_dive_id: int, to_dive_id: int, dive_number: int) -> None:
     """Complete each sighting both dives record from the other dive's, before it is left behind.
 
-    Two records of one dive counted the same animals, so the surviving dive's count stands
-    rather than the two being summed, and the other's fills one it lacks - as the absorbed
-    recording's readouts fill the surviving one's blanks. The other's note joins under its
-    dive's number, as the dives' own notes do (`merged_notes`).
+    Two records of one dive counted the same animals, so the surviving dive's quantity stands
+    rather than the two being summed - its count or its band, whichever it carries - and only a
+    sighting carrying neither takes the other's, as the absorbed recording's readouts fill the
+    surviving one's blanks. The other's note joins under its dive's number, as the dives' own
+    notes do (`merged_notes`).
     """
     absorbed = aliased(DiveSpecies)
     rows = await db.execute(
-        select(DiveSpecies.id, DiveSpecies.count, DiveSpecies.notes, absorbed.count, absorbed.notes)
+        select(
+            DiveSpecies.id,
+            DiveSpecies.count,
+            DiveSpecies.abundance,
+            DiveSpecies.notes,
+            absorbed.count,
+            absorbed.abundance,
+            absorbed.notes,
+        )
         .join(absorbed, (absorbed.species_id == DiveSpecies.species_id) & (absorbed.dive_id == from_dive_id))
         .where(DiveSpecies.dive_id == to_dive_id)
     )
-    for row_id, count, notes, absorbed_count, absorbed_notes in rows.all():
-        folded_count = count if count is not None else absorbed_count
+    for row_id, count, abundance, notes, absorbed_count, absorbed_abundance, absorbed_notes in rows.all():
+        # A row carries at most one of the two (`ck_dive_species_count_or_abundance`), so the
+        # pair is taken whole from whichever dive answers.
+        if count is None and abundance is None:
+            folded_count, folded_abundance = absorbed_count, absorbed_abundance
+        else:
+            folded_count, folded_abundance = count, abundance
         folded_notes = merged_notes(notes, absorbed_notes, dive_number=dive_number)
-        if (folded_count, folded_notes) != (count, notes):
+        if (folded_count, folded_abundance, folded_notes) != (count, abundance, notes):
             await db.execute(
-                update(DiveSpecies).where(DiveSpecies.id == row_id).values(count=folded_count, notes=folded_notes)
+                update(DiveSpecies)
+                .where(DiveSpecies.id == row_id)
+                .values(count=folded_count, abundance=folded_abundance, notes=folded_notes)
             )
 
 

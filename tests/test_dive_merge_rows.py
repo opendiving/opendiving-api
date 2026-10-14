@@ -640,6 +640,42 @@ class TestWhatElseMoves:
         ]
 
     @pytest.mark.asyncio
+    async def test_a_sighting_keeps_this_dives_band_or_count_and_takes_the_others_only_where_it_has_neither(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """The surviving dive's quantity stands whichever member it is, so a band is never
+        overwritten by the other dive's count nor a count by its band; a sighting with
+        neither takes the other's band."""
+        first, second = await _two_halves(async_db, db, diver)
+        grouper, jack, wrasse = create_species(db), create_species(db), create_species(db)
+        db.add_all(
+            [
+                DiveSpecies(dive_id=first.id, species_id=grouper.id, position=0, abundance="abundant"),
+                DiveSpecies(dive_id=first.id, species_id=jack.id, position=1),
+                DiveSpecies(dive_id=first.id, species_id=wrasse.id, position=2, count=6),
+                DiveSpecies(dive_id=second.id, species_id=grouper.id, position=0, count=40),
+                DiveSpecies(dive_id=second.id, species_id=jack.id, position=1, abundance="many"),
+                DiveSpecies(dive_id=second.id, species_id=wrasse.id, position=2, abundance="few"),
+            ]
+        )
+        db.commit()
+
+        await _merge(async_db, diver, first, second)
+
+        rows = (
+            await async_db.execute(
+                select(DiveSpecies.species_id, DiveSpecies.count, DiveSpecies.abundance)
+                .where(DiveSpecies.dive_id == first.id)
+                .order_by(DiveSpecies.position)
+            )
+        ).all()
+        assert [tuple(row) for row in rows] == [
+            (grouper.id, None, "abundant"),
+            (jack.id, None, "many"),
+            (wrasse.id, 6, None),
+        ]
+
+    @pytest.mark.asyncio
     async def test_the_other_dives_people_arrive_and_a_shared_one_keeps_this_dives_role(
         self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
     ) -> None:

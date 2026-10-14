@@ -98,6 +98,13 @@ class TestFkErrorDetail:
             == "A sighting's count must be at least 1."
         )
 
+    def test_a_sighting_carries_a_count_or_a_band(self):
+        """A backstop under `SightingWrite`, which refuses the pair first."""
+        assert (
+            _fk_error_detail(_integrity_error("ck_dive_species_count_or_abundance"))
+            == "A sighting carries a count or an abundance band, not both."
+        )
+
     def test_unknown_violation_falls_back_to_generic_message(self):
         exc = IntegrityError("INSERT ...", {}, Exception("some other constraint"))
         assert _fk_error_detail(exc) == "Invalid reference: a related record does not exist."

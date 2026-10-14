@@ -529,8 +529,9 @@ class TestDiveRecordingCheckConstraints:
 
 
 class TestDiveSpeciesCheckConstraints:
-    """A sighting's count, against the real database. `SightingWrite` and the importer's
-    planner both refuse a count below one before it gets here; this is the backstop."""
+    """A sighting's count and band, against the real database. `SightingWrite` and the
+    importer's planner both refuse a count below one, and a count beside a band, before
+    either gets here; this is the backstop."""
 
     @pytest.fixture
     def dive(self, db: Session, dive_owner: User) -> Generator[Dive, Any]:
@@ -552,4 +553,18 @@ class TestDiveSpeciesCheckConstraints:
     def test_one_and_no_count_are_both_stored(self, db: Session, dive: Dive) -> None:
         db.add(DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=0, count=1))
         db.add(DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=1))
+        db.commit()
+
+    def test_a_count_beside_a_band_is_rejected(self, db: Session, dive: Dive) -> None:
+        _assert_violates(
+            db,
+            DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=0, count=3, abundance="few"),
+            "ck_dive_species_count_or_abundance",
+        )
+
+    def test_a_band_alone_is_stored_and_its_vocabulary_is_not_checked(self, db: Session, dive: Dive) -> None:
+        """On `dive.current`'s terms: the write schemas hold the vocabulary, and the read
+        widens to a string."""
+        db.add(DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=0, abundance="many"))
+        db.add(DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=1, abundance="teeming"))
         db.commit()

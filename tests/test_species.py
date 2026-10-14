@@ -50,7 +50,7 @@ from src.app.api.v1.species import read_species
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.setup import create_application
-from src.app.crud.crud_dive_species import StoredSighting, replace_species_for_dive
+from src.app.crud.crud_dive_species import StoredSighting, get_species_for_dive, replace_species_for_dive
 from src.app.models.dive_species import DiveSpecies
 from src.app.models.species import Species
 from src.app.models.species_name import SpeciesName
@@ -2637,15 +2637,19 @@ class TestReplaceJoinRows:
         await replace_species_for_dive(
             db,
             dive_id=5,
-            sightings=[StoredSighting(9, count=3, notes="Under the ledge"), StoredSighting(4), StoredSighting(7)],
+            sightings=[
+                StoredSighting(9, count=3, notes="Under the ledge"),
+                StoredSighting(4, abundance="many"),
+                StoredSighting(7),
+            ],
         )
 
         added = [call.args[0] for call in db.add.call_args_list]
         assert all(isinstance(row, DiveSpecies) for row in added)
-        assert [(row.species_id, row.position, row.count, row.notes) for row in added] == [
-            (9, 0, 3, "Under the ledge"),
-            (4, 1, None, ""),
-            (7, 2, None, ""),
+        assert [(row.species_id, row.position, row.count, row.abundance, row.notes) for row in added] == [
+            (9, 0, 3, None, "Under the ledge"),
+            (4, 1, None, "many", ""),
+            (7, 2, None, None, ""),
         ]
         db.commit.assert_awaited_once()
 
@@ -2729,7 +2733,28 @@ class TestConstraints:
         db.commit()
 
         row = db.query(DiveSpecies).filter(DiveSpecies.dive_id == dive.id).one()
-        assert (row.count, row.notes) == (None, "")
+        assert (row.count, row.abundance, row.notes) == (None, None, "")
+
+    @pytest.mark.asyncio
+    async def test_a_dives_read_carries_each_sightings_band_and_one_it_cannot_name(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The column has no `CHECK` on its vocabulary, so a band no schema admits reads
+        back as its string rather than failing the whole dive."""
+        user = create_user(db)
+        dive = create_dive(db, user)
+        db.add(DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=0, abundance="many"))
+        db.add(DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=1, abundance="teeming"))
+        db.add(DiveSpecies(dive_id=dive.id, species_id=create_species(db).id, position=2, count=4))
+        db.commit()
+
+        read = await get_species_for_dive(async_db, dive.id)
+
+        assert [(sighting.count, sighting.abundance) for sighting in read] == [
+            (None, "many"),
+            (None, "teeming"),
+            (4, None),
+        ]
 
     def test_a_species_cannot_carry_the_same_name_twice_for_one_kind(self, db: Session):
         species = create_species(db)

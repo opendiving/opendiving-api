@@ -2669,6 +2669,10 @@ class _Planner:
         """A dive's sightings, each naming its catalog row, with the count bounded and the
         note cut at the cap.
 
+        **A sighting carrying a count and a band keeps the count.** The format forbids the
+        pair, but a reader never validates, and the count is the finer fact; the band is
+        reported dropped. A count the bound drops leaves the band standing.
+
         The one reference kind that resolves to something the caller does not own, and the
         one that can legitimately come back short: a species the catalog cannot be made to
         hold is skipped, and the dive imports without it. Never the other way round.
@@ -2706,6 +2710,14 @@ class _Planner:
                 continue
             listed.add(aphia_id)
             count = self._bounded("dives", dive.uuid, sighting, _SIGHTING_BOUNDS).get("count")
+            abundance = sighting.abundance
+            if count is not None and abundance is not None:
+                self._dropped(
+                    "dives",
+                    dive.uuid,
+                    "A value for `abundance` was dropped: a sighting carries a count or a band, and the count was kept",
+                )
+                abundance = None
             notes = self._notes_text("dives", dive.uuid, sighting.notes)
             row_id = self._species_row_by_uuid.get(sighting.species_uuid)
             if row_id is None:
@@ -2714,7 +2726,7 @@ class _Planner:
                 # sighting was not imported" here would contradict that in the same report -
                 # while every dive naming a new species spent a note against the cap.
                 continue
-            sightings.append(StoredSighting(species_id=row_id, count=count, notes=notes))
+            sightings.append(StoredSighting(species_id=row_id, count=count, abundance=abundance, notes=notes))
         return sightings
 
     def _plan_cylinders(self, dive: ImportDive) -> list[dict[str, Any]]:

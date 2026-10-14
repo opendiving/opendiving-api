@@ -32,6 +32,7 @@ import divejson
 import pytest
 from divejson.converter import site_members
 
+from src.app.crud.crud_dive_species import StoredSighting
 from src.app.models.certification import Certification
 from src.app.models.course import Course
 from src.app.models.gear_item import GearItem
@@ -1047,8 +1048,9 @@ class TestReferences:
         enforces.
 
         Each sighting carries what the diver recorded and nothing else: a count where they
-        counted, a note where they wrote one. A sighting with neither is the species alone -
-        seen, not counted - rather than a count of one or an empty note (spec §5.4).
+        counted, a band where they read one, a note where they wrote one. A sighting with
+        neither is the species alone - seen, not counted - rather than a count of one or an
+        empty note (spec §5.4).
         """
         document = await _render(full_bundle(), monkeypatch)
 
@@ -1056,12 +1058,27 @@ class TestReferences:
             {"species_uuid": str(UUIDS["species-clownfish"]), "count": 2, "notes": "A pair in one anemone."},
             {"species_uuid": str(UUIDS["species-manta"])},
         ]
+        assert document["dives"][1]["sightings"] == [
+            {"species_uuid": str(UUIDS["species-clownfish"]), "abundance": "many"}
+        ]
+        assert not _issues(document)
         # The dive with no sightings says so as an empty list rather than by omitting it -
         # an absent collection and an empty one mean the same thing (spec §4).
         assert document["dives"][2]["sightings"] == []
         defined = {species["uuid"] for species in document["species"]}
         for dive in document["dives"]:
             assert {sighting["species_uuid"] for sighting in dive["sightings"]} <= defined
+
+    @pytest.mark.asyncio
+    async def test_a_stored_band_outside_the_format_is_left_out(self, monkeypatch):
+        """No `CHECK` stops one being stored, so the writer drops the band and keeps the
+        sighting, seen and not counted."""
+        bundle = full_bundle()
+        bundle.sightings_by_dive[2] = [StoredSighting(species_id=1, abundance="teeming")]
+
+        document = await _render(bundle, monkeypatch)
+
+        assert document["dives"][1]["sightings"] == [{"species_uuid": str(UUIDS["species-clownfish"])}]
 
     @pytest.mark.asyncio
     async def test_a_species_carries_the_identifier_that_means_something_elsewhere(self, monkeypatch):

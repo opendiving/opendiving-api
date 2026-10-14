@@ -1,4 +1,4 @@
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -13,8 +13,10 @@ class DiveSpecies(Base):
     rather than diffing it, as the gear join's crud does. The unique constraint below is
     DiveJSON's one-sighting-per-species rule seen from the table.
 
-    `count` is null for *seen, not counted* - never `1`, which is a count - and `notes` is
-    empty for no note, the app's spelling of absent on every notes column. Size, life stage
+    `count` is null for *seen, not counted* - never `1`, which is a count - and `abundance`
+    is the diver's band (`few`, `many`, `abundant`) where there is no number: a sighting holds
+    at most one of the two, and neither is seen, not counted. `notes` is empty for no note, the
+    app's spelling of absent on every notes column. Size, life stage
     and sex are additive columns here when they are wanted.
 
     **Both cascades are dormant, for different reasons.** `Dive` is soft-deleted, so no
@@ -37,6 +39,8 @@ class DiveSpecies(Base):
     species_id: Mapped[int] = mapped_column(ForeignKey("species.id", ondelete="CASCADE"), index=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
     count: Mapped[int | None] = mapped_column(Integer, default=None)
+    # No CHECK on the vocabulary, on `dive.current`'s terms: the write schemas hold it.
+    abundance: Mapped[str | None] = mapped_column(String(16), default=None)
     # The server default is what fills the outgoing build's inserts while a deploy overlaps
     # it: that build writes no note and knows no column to write one into.
     notes: Mapped[str] = mapped_column(Text, default="", server_default="")
@@ -45,4 +49,5 @@ class DiveSpecies(Base):
         UniqueConstraint("dive_id", "species_id", name="ux_dive_species_dive_id_species_id"),
         Index("ix_dive_species_dive_id_position", "dive_id", "position"),
         CheckConstraint("count IS NULL OR count >= 1", name="ck_dive_species_count_positive"),
+        CheckConstraint("count IS NULL OR abundance IS NULL", name="ck_dive_species_count_or_abundance"),
     )

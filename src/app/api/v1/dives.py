@@ -184,8 +184,9 @@ _DIVE_CONSTRAINT_MESSAGES = {
     # carrying one depth against a stored other half is checked before the write, and a
     # concurrent edit between that check and the UPDATE lands here.
     "ck_dive_avg_depth_within_max": "Average depth cannot be greater than max depth.",
-    # A backstop: `SightingWrite` bounds the count before anything is written.
+    # Backstops: `SightingWrite` bounds the count and refuses the pair before anything is written.
     "ck_dive_species_count_positive": "A sighting's count must be at least 1.",
+    "ck_dive_species_count_or_abundance": "A sighting carries a count or an abundance band, not both.",
 }
 
 
@@ -213,7 +214,10 @@ async def _resolve_sightings(db: AsyncSession, sightings: list[SightingWrite]) -
     if species_id_by_uuid is None:
         raise UnprocessableEntityException("Species not found.")
     return [
-        StoredSighting(species_id=species_id_by_uuid[s.species_uuid], count=s.count, notes=s.notes) for s in sightings
+        StoredSighting(
+            species_id=species_id_by_uuid[s.species_uuid], count=s.count, abundance=s.abundance, notes=s.notes
+        )
+        for s in sightings
     ]
 
 
@@ -622,7 +626,8 @@ async def write_dive(
     and only because the catalog is global: a species uuid needs to exist, but it belongs to
     nobody, so there is no ownership to fail. Dive sites keep the order given; index 0 is the
     primary site, and sightings keep the order they were spotted in, each with an optional
-    count and note - a species named twice is a 422 naming it. `people` keeps the diver's
+    count or abundance band and a note - a species named twice is a 422 naming it, and so is
+    a sighting carrying both a count and a band. `people` keeps the diver's
     order, each with the role the person had; one named twice keeps the first. `tags` are
     names in the diver's order: each is trimmed and is the diver's tag it matches once both
     are case-folded, or a new one, and two that fold to one keep the first spelling.
