@@ -77,7 +77,7 @@ from ...crud.crud_authentication_requests import (
     register_failed_code_attempt,
 )
 from ...crud.crud_daily_totals import count_account_created
-from ...crud.crud_invitations import accept_invitations
+from ...crud.crud_invitations import accept_invitations, record_invite_link_sign_up
 from ...crud.crud_invite_requests import delete_invite_requests
 from ...crud.crud_user_sessions import live_session_for, revoke_session
 from ...crud.crud_users import crud_users
@@ -185,10 +185,10 @@ async def _start_onboarding_or_sign_in(
     outcome, which mints no tokens and signs nobody in. That is why `AuthenticatedUser`
     carries the provider: it is the one thing this site cannot work out for itself.
 
-    `via` is the join-channel slug the identity arrived through, if any. It matters only on
-    the onboarding branch, where it can admit an uninvited address and is signed into the
-    onboarding token for the completion to count; an existing account signing in through a
-    join link is simply signed in.
+    `via` is the join-channel slug or the member's invite-link token the identity arrived
+    through, if any. It matters only on the onboarding branch, where it can admit an
+    uninvited address and is signed into the onboarding token for the completion to count;
+    an existing account signing in through either kind of link is simply signed in.
     """
     if isinstance(outcome, AuthenticatedUser):
         tokens = await issue_tokens(response, outcome.user["uuid"], db=db, context=context, user_id=outcome.user["id"])
@@ -283,14 +283,15 @@ async def request_email_link(
     code, let alone their link. It is not an oracle either way: a row is minted for every
     address, so the id is a fresh random value whether or not an account exists.
 
-    `via`, the join-channel slug of the page the form was on, is stored on the row for the
-    link and the code to hand the gate. One that names no live channel is refused (403) on
-    an invite-only instance before anything is written, and dropped on an open one - which
-    says whether a public link is live, and nothing about the address.
+    `via`, the join-channel slug or invite-link token of the page the form was on, is stored
+    on the row for the link and the code to hand the gate. One that names neither a live
+    channel nor a member's current link is refused (403) on an invite-only instance before
+    anything is written, and dropped on an open one - which says whether a link is live, and
+    nothing about the address or about any account.
     """
     email = body.email.lower()
-    # First, so a dead join link costs nothing: no row, no audit event, no rate-limit charge.
-    via = refuse_a_stale_join_link(body.via)
+    # First, so a dead link costs nothing: no row, no audit event, no rate-limit charge.
+    via = await refuse_a_stale_join_link(db, body.via)
 
     await enforce_rate_limit(
         f"auth:email-request:email:{email}",
@@ -700,13 +701,16 @@ async def complete_profile(
     gate below by construction.
 
     **On an `invite`-mode instance this refuses (403) an address with no live
-    invitation**, unless the onboarding token carries a live join-channel slug, and creates
-    nothing. The check is `services.registration_gate.admit_or_refuse` and it runs *below*
+    invitation**, unless the onboarding token carries a live join-channel slug or the token
+    of a member's live invite link, and creates nothing. The check is
+    `services.registration_gate.admit_or_refuse` and it runs *below*
     `release_read_transaction`, inside the transaction that inserts the row, for the reason
     spelled out at that call - the helper rolls back, so a check above it decides nothing.
     The first account on an empty instance is admitted in either mode and is created with
     `is_superuser = true`. The same transaction adds one to the day's count under the door
-    the gate named and drops any pending invite request for the address.
+    the gate named and drops any pending invite request for the address - and, where a
+    member's invite link admitted it, gives that member the accepted invitation row their
+    Invitations card lists it by.
 
     Rate limited per-IP because the username check below is an availability oracle:
     someone holding a single onboarding token could otherwise walk a wordlist through
@@ -760,8 +764,8 @@ async def complete_profile(
         # transaction, which is what makes a revocation or a mode flip committed between
         # verification and completion honoured, and what makes "account created" and
         # "invitation accepted" a single commit.
-        source = await admit_or_refuse(db, email=token_data.email, via=token_data.via)
-        bootstrap = source == AccountSource.BOOTSTRAP
+        admission = await admit_or_refuse(db, email=token_data.email, via=token_data.via)
+        bootstrap = admission.source == AccountSource.BOOTSTRAP
 
         user_fields = {
             "name": body.name,
@@ -792,6 +796,14 @@ async def complete_profile(
         # The default tags, on the same terms. The other two writers seed none, and have no
         # restore to reach for: a tag is typed into being wherever one is used.
         await seed_default_tags(db, user_id=created_user.id)
+        if admission.invite_link_owner_id is not None:
+            # Before `accept_invitations`, so a live typed invitation from the same member is
+            # the row that statement stamps rather than one this writes beside it. After the
+            # `User` row is built, so the row's `accepted_at` is never earlier than the
+            # account's `created_at`, which is what the listing's name lookup is bounded by.
+            await record_invite_link_sign_up(
+                db, email=token_data.email.lower(), inviter_id=admission.invite_link_owner_id
+            )
         # In the same transaction as the account, which is the whole invariant: an address
         # whose account exists must have no live invitation left, or the gate would admit
         # it a second time. Every live invitation for it, not one - two members may each
@@ -804,7 +816,7 @@ async def complete_profile(
         await delete_invite_requests(db, emails=[token_data.email.lower()], commit=False)
         # The day's count for the door the gate named, and nothing about the account: the
         # total names no one, and the slug is kept nowhere else.
-        await count_account_created(db, source=source, now=datetime.now(UTC))
+        await count_account_created(db, source=admission.source, now=datetime.now(UTC))
         # "Registration-request completion", in the same transaction as the account it
         # records - so an account that fails to be created leaves no event saying it was.
         # One event for the whole act: the provider row above gets none of its own, because

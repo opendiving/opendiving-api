@@ -310,7 +310,7 @@ class TestTheBootstrapExemption:
             await self._hide_every_account(session)
 
             with _mode(mode):
-                assert await admit_or_refuse(session, email=unique_email()) == AccountSource.BOOTSTRAP
+                assert (await admit_or_refuse(session, email=unique_email())).source == AccountSource.BOOTSTRAP
 
             await session.rollback()
 
@@ -372,7 +372,7 @@ class TestTheBootstrapExemption:
             async with empty_instance() as session:
                 await self._hide_every_account(session)
                 try:
-                    bootstrap = await admit_or_refuse(session, email=email) == AccountSource.BOOTSTRAP
+                    bootstrap = (await admit_or_refuse(session, email=email)).source == AccountSource.BOOTSTRAP
                 except ForbiddenException:
                     await session.rollback()
                     return "refused"

@@ -1,10 +1,14 @@
-"""Invitations into a closed instance: the member's three routes, and the stranger's one.
+"""Invitations into a closed instance: the member's invitation routes and their invite link,
+and the stranger's two - asking for an invitation, and resolving a member's link.
 
 **In `open` mode the feature is absent rather than idle.** Every route here answers `404`,
 which is what lets the web's settings card remove itself without knowing the mode - the
 same self-hiding the sessions and passkeys cards already do on a 404 from their own list
 route. Keeping invitations as an "invite a friend" feature on an open instance would be
 more states to explain on the privacy page for something nobody has asked for.
+
+**The invite-link resolver takes no rate limiter**: its token has 128 bits, which no
+guessing reaches, the check-in routes' argument.
 
 The operator's own routes are next door in `api.v1.admin`, behind `get_current_superuser`.
 The gate that reads these rows is `services.registration_gate`.
@@ -13,9 +17,10 @@ The gate that reads these rows is `services.registration_gate`.
 import logging
 import uuid as uuid_pkg
 from datetime import UTC, datetime
-from typing import Annotated, Any, cast
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +38,7 @@ from ...crud.crud_invitations import (
     account_exists_for,
     crud_invitations,
     invitations_created_since,
+    list_invitations_from,
     live_invitation_from,
 )
 from ...crud.crud_invite_requests import delete_invite_requests, record_invite_request
@@ -45,8 +51,10 @@ from ...schemas.invitation import (
     InvitationReadInternal,
     InvitationRevokedResponse,
 )
+from ...schemas.invite_link import InviteLinkInviter, InviteLinkRead, InviteLinkRemovedResponse
 from ...schemas.invite_request import InviteRequestAccepted, InviteRequestSubmission
 from ...services.email_service import send_invitation_email
+from ...services.invite_links import live_invite_link, read_invite_link, remove_invite_link, replace_invite_link
 from ...services.registration_gate import registration_is_invite_only
 
 router = APIRouter(tags=["invitations"])
@@ -135,6 +143,9 @@ async def read_invitations(
     only grows - five a day, indefinitely - so it takes the pagination convention and its
     clamp.
 
+    A row somebody created by following the caller's invite link carries no address, and
+    names that person's account by its current name instead (`InvitationRead`).
+
     Not Redis-cached. Nothing embeds these rows, the list changes on the caller's own
     actions and on an invitee accepting, and an invitation shown as pending after it has
     been accepted is a wrong answer rather than a stale one.
@@ -146,30 +157,20 @@ async def read_invitations(
 
     page, items_per_page = clamp_pagination(page, items_per_page)
 
-    # `schema_to_select` is the crud alias's own select schema, so the rows come back
-    # carrying the internal ids; the public shape is built from them below rather than left
-    # to `response_model` to strip. Explicit, because "the response model will drop it" is
-    # exactly the reasoning that puts an internal id on the wire the day somebody adds a
-    # route that reuses this helper without one.
-    rows = cast(
-        dict[str, Any],
-        await crud_invitations.get_multi(
-            db=db,
-            offset=compute_offset(page, items_per_page),
-            limit=items_per_page,
-            schema_to_select=InvitationReadInternal,
-            sort_columns=["created_at"],
-            sort_orders=["desc"],
-            user_id=current_user["id"],
-        ),
+    rows = await list_invitations_from(
+        db, user_id=current_user["id"], offset=compute_offset(page, items_per_page), limit=items_per_page
     )
+    # The public shape is built field by field rather than left to `response_model`, and a
+    # link row's address is dropped here: the inviter never typed it and was never given it.
     rows["data"] = [
         InvitationRead(
             uuid=row["uuid"],
-            email=row["email"],
+            email=None if row["from_invite_link"] else row["email"],
             created_at=row["created_at"],
             accepted_at=row["accepted_at"],
             revoked_at=row["revoked_at"],
+            from_invite_link=row["from_invite_link"],
+            member_name=row["member_name"],
         ).model_dump()
         for row in rows["data"]
     ]
@@ -198,8 +199,9 @@ async def create_invitation(
       invited them too, and each of you sees your own row.
     - **429** - either the throttle below or your quota. `INVITATIONS_PER_USER` per
       `INVITATIONS_WINDOW_DAYS`, counted over rows you created in the trailing window with
-      revoked ones included, so the bound is on invitation emails you have caused to be
-      sent. Superusers are exempt from the quota, not from the throttle.
+      revoked ones included, so the bound is on invitations you have made - by address, or
+      by somebody signing up through your invite link. Superusers are exempt from the
+      quota, not from the throttle.
     - **422** - a malformed address, from `EmailStr`.
 
     Creating an invitation **deletes any pending request row for the address**, in the same
@@ -240,14 +242,17 @@ async def create_invitation(
         raise HTTPException(status_code=409, detail="You have already invited that address.")
 
     if not current_user["is_superuser"]:
-        sent = await invitations_created_since(
+        made = await invitations_created_since(
             db, user_id=current_user["id"], window_days=settings.INVITATIONS_WINDOW_DAYS
         )
-        if sent >= settings.INVITATIONS_PER_USER:
+        if made >= settings.INVITATIONS_PER_USER:
             window = _window_phrase(settings.INVITATIONS_WINDOW_DAYS)
             raise HTTPException(
                 status_code=429,
-                detail=f"You can send {settings.INVITATIONS_PER_USER} invitations {window}. Try again later.",
+                detail=(
+                    f"You can make {settings.INVITATIONS_PER_USER} invitations {window}, by address or through "
+                    "your invite link. Try again later."
+                ),
             )
 
     created = await crud_invitations.create(
@@ -321,6 +326,117 @@ async def revoke_invitation(
         await db.commit()
 
     return InvitationRevokedResponse()
+
+
+@router.get("/user/invite-link", response_model=InviteLinkRead)
+async def read_own_invite_link(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> InviteLinkRead:
+    """The caller's invite link, or 404 when they have none.
+
+    The token is in the answer every time, unlike a check-in link's: the Invitations card
+    shows the same link and QR code on every visit, which is why it is stored in clear. The
+    404 is the status open mode answers too, on purpose - the card reads "no link yet" from
+    it only once the invitations list has said the feature is here.
+    """
+    _require_invite_mode()
+
+    link = await read_invite_link(db, user_id=current_user["id"])
+    if link is None:
+        raise NotFoundException("No invite link")
+    return InviteLinkRead(token=link.token, created_at=link.created_at)
+
+
+@router.post("/user/invite-link", response_model=InviteLinkRead, status_code=201)
+async def make_invite_link(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> InviteLinkRead:
+    """Make the caller's invite link, or reset it: a fresh token either way.
+
+    Whoever follows `/join?via=<token>` may create an account here, counted as the caller's
+    invitation and charged to their `INVITATIONS_PER_USER` quota. A reset replaces the token
+    in place, so the previous one stops resolving and stops admitting at this commit.
+
+    No rate limiter: minting is authenticated, and a member pressing it repeatedly churns one
+    row of their own.
+    """
+    _require_invite_mode()
+
+    token, created_at = await replace_invite_link(db, user_id=current_user["id"])
+    await record_auth_event(
+        db,
+        event_type=AuthEventType.INVITE_LINK_CREATED,
+        context=RequestContext.from_request(request),
+        user_id=current_user["id"],
+        commit=False,
+    )
+    await db.commit()
+    return InviteLinkRead(token=token, created_at=created_at)
+
+
+@router.delete("/user/invite-link", response_model=InviteLinkRemovedResponse)
+async def erase_invite_link(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> InviteLinkRemovedResponse:
+    """Remove the caller's invite link: it stops resolving and admitting at once. Succeeds
+    with nothing to remove too, as revoking a session twice does.
+
+    The rows it already produced stay - each is an account the caller let in.
+    """
+    _require_invite_mode()
+
+    if await remove_invite_link(db, user_id=current_user["id"]):
+        await record_auth_event(
+            db,
+            event_type=AuthEventType.INVITE_LINK_REMOVED,
+            context=RequestContext.from_request(request),
+            user_id=current_user["id"],
+            commit=False,
+        )
+        await db.commit()
+    return InviteLinkRemovedResponse()
+
+
+def _no_such_invite_link() -> JSONResponse:
+    """Returned rather than raised, so it carries `private, no-store`: a raised 404 reaches
+    `ClientCacheMiddleware` unlabelled, and it labels a credential-free `GET` publicly
+    cacheable."""
+    return JSONResponse(
+        status_code=404,
+        content={"detail": "This invite link is not active."},
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+@router.get(
+    "/invite-link/{token}",
+    response_model=InviteLinkInviter,
+    responses={404: {"description": "Unknown, reset or removed, a deleted owner, or an open instance: one answer"}},
+)
+async def resolve_invite_link(
+    token: str, response: Response, db: Annotated[AsyncSession, Depends(async_get_db)]
+) -> InviteLinkInviter | JSONResponse:
+    """Whose invite link this is, **without authentication** - the join page asks before it
+    paints the sign-in form, titled by the inviter's name.
+
+    The token is the credential. Every refusal - an unknown token, a reset or removed one,
+    an owner who has asked for their account to be deleted, an open-mode instance - is one
+    identical 404, and both answers set `private, no-store`, so a reset stops the old link
+    resolving at the next request rather than whenever a shared cache lets go. Answers for
+    one token and lists nothing.
+    """
+    if not registration_is_invite_only():
+        return _no_such_invite_link()
+    link = await live_invite_link(db, token=token)
+    if link is None:
+        return _no_such_invite_link()
+    response.headers["Cache-Control"] = "private, no-store"
+    return InviteLinkInviter(inviter_name=link.owner_name)
 
 
 def _window_phrase(days: int) -> str:

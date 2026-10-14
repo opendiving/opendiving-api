@@ -223,9 +223,10 @@ class RegistrationMode(Enum):
     """Who may create an account on this instance.
 
     `open` is what this app did before the setting existed: any address that proves it owns
-    itself gets an account. `invite` admits only an address someone already invited - plus
-    the very first account on an empty instance, which is the operator's own and is admitted
-    in *both* modes (see `services.registration_gate`).
+    itself gets an account. `invite` admits only an address someone already invited, or
+    whoever follows a member's invite link - plus the very first account on an empty
+    instance, which is the operator's own and is admitted in *both* modes (see
+    `services.registration_gate`).
 
     Declared as an `Enum` for the reason `EnvironmentOption` is: pydantic rejects a value
     that is not one of these at `Settings()`, which is import time, so a typo names itself
@@ -254,6 +255,7 @@ class AccountSource(StrEnum):
 # What a join-channel slug may be. The request bodies and the setting's own validator both
 # accept exactly this, so a value that cannot be configured cannot be sent; the resolve
 # route takes any segment and answers one outside it with the same 404 as an unknown slug.
+# A member's invite-link token rides the same `via` field, and is generated to fit it.
 JOIN_CHANNEL_SLUG_PATTERN = r"^[a-z0-9-]{1,32}$"
 JOIN_CHANNEL_LABEL_MAX_LENGTH = 40
 

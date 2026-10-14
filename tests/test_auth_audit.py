@@ -525,10 +525,15 @@ class TestTheNamedExclusions:
         from src.app.api.v1.auth import complete_profile
         from src.app.core.schemas import OnboardingTokenData
         from src.app.schemas.auth import ProfileCompletionRequest
+        from src.app.services.registration_gate import Admission
 
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as verify,
-            patch("src.app.api.v1.auth.admit_or_refuse", new_callable=AsyncMock, return_value=AccountSource.INVITATION),
+            patch(
+                "src.app.api.v1.auth.admit_or_refuse",
+                new_callable=AsyncMock,
+                return_value=Admission(AccountSource.INVITATION),
+            ),
             patch("src.app.api.v1.auth.accept_invitations", new_callable=AsyncMock, return_value=2) as accepted,
             patch("src.app.api.v1.auth.crud_users") as users,
             patch("src.app.api.v1.auth.crud_authentication_providers") as providers,

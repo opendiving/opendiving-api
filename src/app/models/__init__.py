@@ -28,6 +28,7 @@ from .gear_service_schedule import GearServiceSchedule
 from .gear_set import GearSet
 from .gear_set_item import GearSetItem
 from .invitation import Invitation
+from .invite_link import InviteLink
 from .invite_request import InviteRequest
 from .map_tile import MapTile
 from .person import Person

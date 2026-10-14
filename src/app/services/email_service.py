@@ -122,10 +122,10 @@ def _refuse_to_log_credential_outside_local(what: str) -> None:
 
     For two of the three that call it - `send_magic_link_email` and
     `send_email_change_confirmation_email` - the reason is literal: the URL they would log
-    *is* a live single-use auth token. `send_invitation_email` carries no token at all (an
-    invitation is an allow-list entry, not a credential) and takes this shape for the other
-    half of the argument below: the consequence of a silent failure. Its own docstring says
-    so.
+    *is* a live single-use auth token. `send_invitation_email` carries no token at all (a
+    typed invitation is an allow-list entry, not a credential) and takes this shape for the
+    other half of the argument below: the consequence of a silent failure. Its own docstring
+    says so.
 
     That fallback is a local-development convenience, and a good one - it's how you sign
     in without configuring a relay. But for the two credential-carrying senders the URL it
@@ -202,10 +202,11 @@ async def send_magic_link_email(email: str, magic_link_url: str, code: str) -> N
 async def send_invitation_email(email: str, inviter_name: str) -> None:
     """Tells `email` that `inviter_name` has invited them to this instance.
 
-    **Carries no token and no query parameter**, because an invitation is an allow-list
-    entry rather than a bearer credential: signing in already proves ownership of the
-    address, so the invitee simply signs in *with this address* and the gate lets them
-    through. What the mail therefore has to say is precisely that, which is why the address
+    **Carries no token and no query parameter**, because a typed invitation - the only kind
+    that sends this mail - is an allow-list entry rather than a bearer credential: signing in
+    already proves ownership of the address, so the invitee simply signs in *with this
+    address* and the gate lets them through. A member's invite link is the forwardable kind,
+    and nothing is mailed for it. What the mail therefore has to say is precisely that, which is why the address
     is in the body rather than only in the `To:` header - a person who forwards this to
     their other mailbox needs to know which one was invited.
 

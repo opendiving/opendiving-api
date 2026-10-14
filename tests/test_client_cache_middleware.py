@@ -190,14 +190,15 @@ class TestTheRealAuthRoutes:
                 assert route.methods == {"POST"}, f"{route.path} is no longer POST-only - re-check its caching"
 
     def test_the_token_carrying_gets_set_their_own_cache_control(self):
-        """These two are GETs, so the method check alone doesn't save them."""
+        """These are GETs, so the method check alone doesn't save them."""
         import inspect
 
         from src.app.api.v1.auth import check_email_link
+        from src.app.api.v1.invitations import resolve_invite_link
         from src.app.api.v1.users import check_email_change_link
 
-        for endpoint in (check_email_link, check_email_change_link):
+        for endpoint in (check_email_link, check_email_change_link, resolve_invite_link):
             source = inspect.getsource(endpoint)
             assert 'Cache-Control"] = "private, no-store"' in source, (
-                f"{endpoint.__name__} takes a token in its query string and must opt out of public caching"
+                f"{endpoint.__name__} takes a token in its URL and must opt out of public caching"
             )
