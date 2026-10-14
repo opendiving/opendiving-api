@@ -51,6 +51,7 @@ from .checkin_details import CheckinDetailsUpdate, EmergencyContact, InsurancePo
 from .contact import ADDRESS_POSTCODE_MAX, CONTACT_EMAIL_MAX, CONTACT_WEBSITE_MAX, ContactRole
 from .course import CourseStatus
 from .dive import (
+    Abundance,
     Current,
     DecoAlgorithm,
     DiveMode,
@@ -360,10 +361,12 @@ _People = Annotated[list[ImportPersonReference], Field(default_factory=list), _C
 
 class ImportSighting(_ReadModel):
     """One species seen on one dive (spec §6.3a). The count is read as written and bounded by
-    the planner, and the note is cut at this app's cap there."""
+    the planner, which also drops a band written beside a count, and the note is cut at this
+    app's cap there. A band outside the vocabulary reads as absent (§5.6)."""
 
     species_uuid: uuid_pkg.UUID
     count: int | None = None
+    abundance: Annotated[Abundance | None, _unknown_is_absent(Abundance), Field(default=None)]
     notes: str | None = None
 
 

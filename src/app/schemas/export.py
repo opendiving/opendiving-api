@@ -58,6 +58,7 @@ from .certification import CertificationAgency
 from .contact import ContactRole
 from .course import CourseStatus
 from .dive import (
+    Abundance,
     Current,
     DecoAlgorithm,
     DiveLocalStartTime,
@@ -359,11 +360,12 @@ class ExportRecording(BaseModel):
 
 
 class ExportSighting(BaseModel):
-    """One species seen on one dive (spec §6.3a). An absent `count` is seen, not counted, and
-    an empty note is written as absence, as on every record."""
+    """One species seen on one dive (spec §6.3a). An absent `count` is seen, not counted, unless
+    `abundance` gives the band, and an empty note is written as absence, as on every record."""
 
     species_uuid: uuid_pkg.UUID
     count: int | None = None
+    abundance: Abundance | None = None
     notes: str | None = None
 
 
