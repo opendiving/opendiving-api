@@ -4,7 +4,9 @@ The internal/public split is `user_session`'s: `InvitationReadInternal` mirrors 
 for server-side lookups - including the ownership check `fetch_owned_or_raise` runs on
 `DELETE /user/invitation/{uuid}`, which needs the `user_id` its `OwnedRow` protocol asks
 for - and `InvitationRead` is what an inviter sees. There is no secret to withhold on the
-way out: an invitation is an allow-list entry, not a token (see `models/invitation.py`).
+way out: a typed invitation is an allow-list entry, not a token (see `models/invitation.py`),
+and the one invitation secret there is, a member's invite-link token, lives on its own table
+and is in none of these.
 """
 
 from datetime import datetime
@@ -57,16 +59,24 @@ class InvitationReadInternal(PublicUUIDSchema):
 class InvitationRead(PublicUUIDSchema):
     """One row of `GET /user/invitations`.
 
-    The address is here because the inviter typed it and needs to recognise the row; the
-    two stamps are what the card renders as pending / accepted on a date / revoked. There
-    is no "status" field: three nullable timestamps say more than one enum would, and the
-    client already has to render the date.
+    On a typed row the address is here because the inviter typed it and needs to recognise
+    the row; the two stamps are what the card renders as pending / accepted on a date /
+    revoked. There is no "status" field: three nullable timestamps say more than one enum
+    would, and the client already has to render the date.
+
+    **A row with `from_invite_link` carries no address.** Somebody signed up through the
+    inviter's link with an address the inviter never typed and was never given, so the row
+    names them by `member_name` instead: the current name of the account that sign-up
+    created, or `null` once no account matches - after that person changes their address,
+    say. On a typed row `member_name` is always `null`.
     """
 
-    email: EmailStr
+    email: EmailStr | None
     created_at: datetime
     accepted_at: datetime | None = None
     revoked_at: datetime | None = None
+    from_invite_link: bool = False
+    member_name: str | None = None
 
 
 class InvitationCreateRequest(BaseModel):

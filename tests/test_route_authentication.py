@@ -102,6 +102,11 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "Answers for one slug and never lists the others, and a live link is public by design - it is "
         "posted where anyone can follow it."
     ),
+    ("GET", "/api/v1/invite-link/{token}"): (
+        "Tells the join page whose invite link it was opened with, before anyone has signed in. Answers "
+        "for one token and lists nothing; the token has 128 bits, and a live link is one its owner chose "
+        "to hand out. Every dead token is one 404, and both answers are `private, no-store`."
+    ),
     # 6. The caller holds a check-in link a diver shared, and the token in the path is the
     # credential: a desk opens the page with no account, and its `<img>` tags carry nothing.
     ("GET", "/api/v1/checkin/{token}"): (

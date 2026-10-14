@@ -5264,10 +5264,11 @@ exposes these.
 
 ## Auth audit: Membership is a rule, and the exclusions are half of it
 
-A site emits an event when it (a) commits a row to an auth table, (b) mints a session, onboarding or
-restore token, (c) revokes a credential at its owner's request, (d) ends, revokes or detects the
-replay of a session at the caller's request, or (e) logs a `WARNING` for a failure the code deems
-rare and meaningful — its own criterion, and how the passkey counter regression qualifies.
+A site emits an event when it (a) commits a row to an auth table, (b) mints a session, onboarding,
+restore or invite-link token, (c) revokes a credential at its owner's request, (d) ends, revokes or
+detects the replay of a session at the caller's request, or (e) logs a `WARNING` for a failure the
+code deems rare and meaningful — its own criterion, and how the passkey counter regression
+qualifies.
 
 Excluded, following the *Nothing is logged* bullet of *"A refresh token is only as alive as its
 account"*: ordinary refresh rotations (`last_used_at` records liveness), session-cap evictions,
@@ -5498,25 +5499,37 @@ qualifier: disclosure timing does not turn on who runs the instance. Test: does 
 
 ## An invitation is an allow-list entry, not a bearer token
 
-`invitation` carries no secret; the invitee is admitted because they signed in with the invited
-address. Rejected: a shareable redeemable code (Mastodon, Lemmy, Mealie, Bluesky PDS). Sign-in
-already proves ownership of the address via magic link, code or Google's `email_verified`, so a
-token would add a redemption surface through `/auth/verify` and `/onboarding` while proving nothing
-new; Plausible and Ghost bind the same way. Losing forwardability is the feature: a closed beta
-keyed on addresses keeps "who was invited" coupled to "who signed up". No per-invitation expiry; the
-90-day retention sweep bounds the address. Revocation stamps `revoked_at` rather than deleting, so
-the quota stays a bound on emails sent.
+A typed `invitation` carries no secret; the invitee is admitted because they signed in with the
+invited address. Rejected: a shareable redeemable code (Mastodon, Lemmy, Mealie, Bluesky PDS).
+Sign-in already proves ownership of the address via magic link, code or Google's `email_verified`,
+so a token would add a redemption surface through `/auth/verify` and `/onboarding` while proving
+nothing new; Plausible and Ghost bind the same way. Losing forwardability is the feature: a closed
+beta keyed on addresses keeps "who was invited" coupled to "who signed up". No per-invitation
+expiry; the 90-day retention sweep bounds the address. Revocation stamps `revoked_at` rather than
+deleting, so the quota stays a bound on invitations made. The one forwardable kind is a member's
+invite link, below, which a sign-up through records here as an accepted row.
 
-## A check-in link is a bearer token, where an invitation is not
+## A check-in link is a bearer token, where a typed invitation is not
 
 `POST /user/checkin-link` mints a secret that shows the diver's check-in page to whoever holds it.
-The invitation rejected a forwardable secret because forwarding was what it had to prevent; here
-forwarding to a desk is the feature. What bounds it instead: only `hash_token` of it is stored, it
-is returned once, it lives `CHECKIN_LINK_TTL` (24 hours), minting revokes the diver's other links
+The typed invitation rejected a forwardable secret because forwarding was what it had to prevent;
+here forwarding to a desk is the feature. What bounds it instead: only `hash_token` of it is stored,
+it is returned once, it lives `CHECKIN_LINK_TTL` (24 hours), minting revokes the diver's other links
 under a lock on their row, and a deletion request kills it at once. Unknown, expired, revoked and
 deleted-diver tokens get one 404, carrying `private, no-store` like every response there. No rate
 limit: the token has 256 bits. *Rejected:* a week's life, and redacting the policy number and the
 emergency contact's phone, the two things a desk asks for.
+
+## An invite link is a bearer token stored in clear, where a check-in link is hashed
+
+`invite_link.token` is kept readable because the Invitations card shows the same link and QR code on
+every visit, and a hash cannot be shown again. What the token admits is bounded instead: a stranger
+to an invite-only instance, counted as the member's invitation and charged to their quota, until the
+member's Reset replaces it in place or Remove deletes it. Anyone who can read the table can already
+read every member's address, which is worse. 128 bits from `secrets.token_hex(16)`, so it fits
+`via`'s slug pattern and column. *Rejected:* hash-at-rest with show-once, right for a link that
+lives a day and wrong for a standing one; a token derived by HMAC from the account and `SECRET_KEY`,
+which ties every link to a key a self-hoster may rotate.
 
 ## The registration gate sits below `release_read_transaction`, and that is the whole design
 
@@ -5566,7 +5579,8 @@ after the address is proven.
 inviter created in the trailing window, revoked and accepted included; Redis is not consulted. The
 rate limiter fails open on a Redis outage and its counters are flushed locally — right for pacing a
 sign-in form, wrong for a bound on who enters a closed instance. Revoked rows count so the quota
-bounds emails sent rather than live invitations; a revoke cannot refill the bucket. A rate rather
+bounds invitations made rather than live ones; a revoke cannot refill the bucket. A sign-up through
+the member's invite link writes an accepted row, so it draws on the same allowance. A rate rather
 than a lifetime allotment (Lemmy's `max_invites_per_user_allowed` shape rejected): five today, five
 more tomorrow. Superusers are exempt structurally — the count is never taken for them.
 

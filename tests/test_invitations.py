@@ -242,30 +242,32 @@ class TestRequestAnInvite:
 class TestReadInvitations:
     """`GET /user/invitations` - the contract the web client's settings card is built against."""
 
-    @pytest.mark.asyncio
-    async def test_it_pages_the_callers_own_rows_newest_first(self, mock_db) -> None:
+    @staticmethod
+    def _row(**overrides: Any) -> dict[str, Any]:
         row = {
-            "id": 1,
             "uuid": uuid7(),
-            "user_id": CALLER["id"],
             "email": "friend@example.com",
             "created_at": datetime.now(UTC),
             "accepted_at": None,
             "revoked_at": None,
+            "from_invite_link": False,
+            "member_name": None,
         }
+        return {**row, **overrides}
+
+    @pytest.mark.asyncio
+    async def test_it_pages_the_callers_own_rows(self, mock_db) -> None:
+        row = self._row()
 
         with (
             _mode(RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.crud_invitations") as crud,
+            patch("src.app.api.v1.invitations.list_invitations_from", new_callable=AsyncMock) as listed,
         ):
-            crud.get_multi = AsyncMock(return_value={"data": [row], "total_count": 1})
+            listed.return_value = {"data": [row], "total_count": 1}
 
-            page = await read_invitations(CALLER, mock_db, page=1, items_per_page=10)
+            page = await read_invitations(CALLER, mock_db, page=2, items_per_page=10)
 
-        asked = crud.get_multi.await_args.kwargs
-        assert asked["user_id"] == CALLER["id"]
-        assert asked["sort_columns"] == ["created_at"]
-        assert asked["sort_orders"] == ["desc"]
+        assert awaited_kwargs(listed) == {"user_id": CALLER["id"], "offset": 10, "limit": 10}
         assert page["total_count"] == 1
         assert page["data"] == [
             {
@@ -274,28 +276,46 @@ class TestReadInvitations:
                 "created_at": row["created_at"],
                 "accepted_at": None,
                 "revoked_at": None,
+                "from_invite_link": False,
+                "member_name": None,
             }
         ]
 
     @pytest.mark.asyncio
+    async def test_a_link_row_carries_the_members_name_and_never_the_address(self, mock_db) -> None:
+        """The inviter never typed the address a link sign-up used, so the handler drops it
+        even though the row holds it."""
+        row = self._row(accepted_at=datetime.now(UTC), from_invite_link=True, member_name="Grace Reef")
+
+        with (
+            _mode(RegistrationMode.INVITE),
+            patch(
+                "src.app.api.v1.invitations.list_invitations_from",
+                new_callable=AsyncMock,
+                return_value={"data": [row], "total_count": 1},
+            ),
+        ):
+            page = await read_invitations(CALLER, mock_db)
+
+        assert page["data"][0]["email"] is None
+        assert page["data"][0]["member_name"] == "Grace Reef"
+        assert page["data"][0]["from_invite_link"] is True
+
+    @pytest.mark.asyncio
     async def test_no_internal_id_reaches_the_response(self, mock_db) -> None:
-        """The rows come back carrying `id` and `user_id` because `schema_to_select` is the
-        crud alias's own select schema. The handler builds the public shape rather than
-        leaving `response_model` to strip them - a route that reused this helper without one
-        would otherwise put a sequential id on the wire."""
-        row = {
-            "id": 4242,
-            "uuid": uuid7(),
-            "user_id": CALLER["id"],
-            "email": "friend@example.com",
-            "created_at": datetime.now(UTC),
-            "accepted_at": None,
-            "revoked_at": None,
-        }
+        """The handler builds the public shape field by field rather than leaving
+        `response_model` to strip whatever the query returned - a route that reused the
+        helper without one would otherwise put a sequential id on the wire."""
+        row = {**self._row(), "id": 4242, "user_id": CALLER["id"]}
 
-        with _mode(RegistrationMode.INVITE), patch("src.app.api.v1.invitations.crud_invitations") as crud:
-            crud.get_multi = AsyncMock(return_value={"data": [row], "total_count": 1})
-
+        with (
+            _mode(RegistrationMode.INVITE),
+            patch(
+                "src.app.api.v1.invitations.list_invitations_from",
+                new_callable=AsyncMock,
+                return_value={"data": [row], "total_count": 1},
+            ),
+        ):
             page = await read_invitations(CALLER, mock_db)
 
         assert "id" not in page["data"][0]
@@ -305,12 +325,15 @@ class TestReadInvitations:
     async def test_the_pagination_is_clamped(self, mock_db) -> None:
         """`clamp_pagination`, like every list route: these arrive off the query string, so
         `?items_per_page=999999999` is a request for the caller's whole table."""
-        with _mode(RegistrationMode.INVITE), patch("src.app.api.v1.invitations.crud_invitations") as crud:
-            crud.get_multi = AsyncMock(return_value={"data": [], "total_count": 0})
+        with (
+            _mode(RegistrationMode.INVITE),
+            patch("src.app.api.v1.invitations.list_invitations_from", new_callable=AsyncMock) as listed,
+        ):
+            listed.return_value = {"data": [], "total_count": 0}
 
             page = await read_invitations(CALLER, mock_db, page=-3, items_per_page=999_999)
 
-        assert crud.get_multi.await_args.kwargs["limit"] == 100
+        assert awaited_kwargs(listed)["limit"] == 100
         assert page["page"] == 1
         assert page["items_per_page"] == 100
 

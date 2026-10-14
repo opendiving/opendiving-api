@@ -10,15 +10,20 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     """One member's invitation of one email address into a closed instance.
 
-    **An allow-list entry keyed on the address, not a bearer token.** Signing in already
-    proves ownership of an address - a magic link delivered to it, the code printed in the
-    same email, or Google's `email_verified` claim - so a token carried in the invitation
-    email would prove nothing the sign-in does not, and would add a redemption surface
-    (generation, hashing, single use, carriage through `/auth/verify` into `/onboarding`)
-    that an allow-list does not need. The invitee simply signs in with the address that was
-    invited, which is the binding Plausible uses and, in effect, Ghost's. What it costs is
-    forwardability: an invitation cannot be handed to somebody else, which is the point.
-    There is correspondingly **no secret on this row** - nothing here to hash.
+    **A typed invitation is an allow-list entry keyed on the address, not a bearer token.**
+    Signing in already proves ownership of an address - a magic link delivered to it, the
+    code printed in the same email, or Google's `email_verified` claim - so a token carried
+    in the invitation email would prove nothing the sign-in does not, and would add a
+    redemption surface (generation, hashing, single use, carriage through `/auth/verify`
+    into `/onboarding`) that an allow-list does not need. The invitee simply signs in with
+    the address that was invited, which is the binding Plausible uses and, in effect,
+    Ghost's. What it costs is forwardability: a typed invitation cannot be handed to
+    somebody else, which is the point. There is correspondingly **no secret on this row** -
+    nothing here to hash.
+
+    The forwardable exception is the member's invite link (`models.invite_link`), whose
+    token is the secret and lives on that table. A sign-up through it is recorded here as an
+    already-accepted row with `from_invite_link` set, so the member's list shows it.
 
     Deliberately not a third `purpose` on `AuthenticationRequest`. That table's rows are
     swept seven days after their own expiry and are deleted by address on an account purge
@@ -32,7 +37,7 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     A **live** invitation is one whose `revoked_at` is `NULL`; that is the whole predicate
     the gate asks. Revoking stamps the column rather than deleting the row, so the quota -
     counted over rows created in the trailing window - stays an honest bound on how many
-    invitation emails one account has caused to be sent.
+    invitations one account has made, by address or through its invite link.
 
     No `expires_at`, and the absence is a decision: a beta invitee slow to act should not
     have to be re-invited within the week. What bounds the address instead is the retention
@@ -45,9 +50,9 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
 
     id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, primary_key=True, init=False)
 
-    # The invited address, lowercased on every write (`api.v1.invitations`, and the admin
-    # batch route). Indexed because the gate reads by it on every account creation, and the
-    # account purge deletes by it.
+    # The invited address, lowercased on every write (`api.v1.invitations`, the admin batch
+    # route, and an invite-link sign-up's row in `POST /auth/complete`). Indexed because the
+    # gate reads by it on every account creation, and the account purge deletes by it.
     email: Mapped[str] = mapped_column(String(50), index=True)
 
     # The inviter. `CASCADE` for the reason every other FK into `user.id` carries it: the
@@ -77,3 +82,10 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     # swept, so leaving it set would keep "this address asked to be let in" for the life of
     # the account. It is a fact about a pending invitation only.
     from_invite_request: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+    # Whether this row records a sign-up through the inviter's invite link rather than an
+    # address they typed. Written true, already accepted, by `POST /auth/complete` and by
+    # nothing else. The inviter never typed the address, so `GET /user/invitations` shows
+    # them the new member's name instead of it. Unlike the flag above it is a fact about an
+    # accepted row, and so is never cleared.
+    from_invite_link: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")

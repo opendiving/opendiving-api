@@ -155,6 +155,7 @@ class TestTheSignInRequest:
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
             patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock) as audited,
             patch("src.app.api.v1.auth.send_magic_link_email", new_callable=AsyncMock) as sent,
+            patch("src.app.services.registration_gate.invite_link_exists", new_callable=AsyncMock, return_value=False),
         ):
             requests.count = AsyncMock(return_value=0)
             requests.create = AsyncMock(return_value=Mock(uuid=uuid7()))
@@ -335,6 +336,7 @@ class TestTheAdvisoryGate:
         with (
             _channels(),
             _mode(RegistrationMode.INVITE),
+            patch("src.app.services.registration_gate.live_invite_link", new_callable=AsyncMock, return_value=None),
             patch(
                 "src.app.services.registration_gate.live_invitation_exists", new_callable=AsyncMock, return_value=False
             ),
@@ -349,6 +351,7 @@ class TestTheAdvisoryGate:
         with (
             _channels(),
             _mode(RegistrationMode.INVITE),
+            patch("src.app.services.registration_gate.live_invite_link", new_callable=AsyncMock, return_value=None),
             patch(
                 "src.app.services.registration_gate.live_invitation_exists", new_callable=AsyncMock, return_value=True
             ),
@@ -398,7 +401,7 @@ class TestTheAuthoritativeGate:
         async with sessions() as session:
             try:
                 with _channels(), _mode(mode):
-                    return await admit_or_refuse(session, email=email, via=via)
+                    return (await admit_or_refuse(session, email=email, via=via)).source
             finally:
                 await session.rollback()
 

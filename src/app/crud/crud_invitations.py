@@ -1,8 +1,8 @@
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 from fastcrud import FastCRUD
-from sqlalchemy import CursorResult, func, select, update
+from sqlalchemy import CursorResult, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import AccountSource
@@ -19,6 +19,47 @@ CRUDInvitation = FastCRUD[
     InvitationReadInternal,
 ]
 crud_invitations = CRUDInvitation(Invitation)
+
+
+async def list_invitations_from(db: AsyncSession, *, user_id: int, offset: int, limit: int) -> dict[str, Any]:
+    """One page of an inviter's rows, newest first, in `get_multi`'s `{data, total_count}`
+    shape - each row carrying, on a link row only, the name of the account it admitted.
+
+    That account is the one whose `lower(email)` is the row's address **and whose
+    `created_at` is no later than the row's `accepted_at`**: the row is written in the
+    transaction that creates the account, after its insert. The accepted row keeps the
+    address admissible, so once the joiner moves to another address somebody else may sign
+    up with this one - and that person never opened the link, so the time bound keeps them
+    off the inviter's card. A correlated subquery taking the newest such account rather than
+    a join, because `lower(User.email)` is not unique and a join could repeat a row.
+    """
+    member_name = (
+        select(User.name)
+        .where(func.lower(User.email) == Invitation.email, User.created_at <= Invitation.accepted_at)
+        .order_by(User.created_at.desc())
+        .limit(1)
+        .correlate(Invitation)
+        .scalar_subquery()
+    )
+    rows = (
+        await db.execute(
+            select(
+                Invitation.uuid,
+                Invitation.email,
+                Invitation.created_at,
+                Invitation.accepted_at,
+                Invitation.revoked_at,
+                Invitation.from_invite_link,
+                case((Invitation.from_invite_link, member_name), else_=None).label("member_name"),
+            )
+            .where(Invitation.user_id == user_id)
+            .order_by(Invitation.created_at.desc(), Invitation.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    ).mappings()
+    total = await db.scalar(select(func.count()).select_from(Invitation).where(Invitation.user_id == user_id))
+    return {"data": [dict(row) for row in rows], "total_count": int(total or 0)}
 
 
 async def live_invitation_exists(db: AsyncSession, *, email: str) -> bool:
@@ -80,11 +121,13 @@ async def live_invitation_from(db: AsyncSession, *, email: str, user_id: int) ->
 
 
 async def invitations_created_since(db: AsyncSession, *, user_id: int, window_days: int) -> int:
-    """How many invitations this account has caused to be sent in the trailing window.
+    """How many invitations this account has made in the trailing window, by address or
+    through its invite link.
 
     **Revoked rows are counted**, which is the point of counting rows rather than live
-    invitations: the quota bounds emails sent, and revoking one after the send does not
-    unsend it. Accepted ones count too, for the same reason.
+    invitations: the quota bounds invitations made, and revoking one after the send does not
+    unsend it. Accepted ones count too, for the same reason - which is how a sign-up through
+    the member's link, recorded as an accepted row, is charged to the same allowance.
 
     Counted from the table rather than from the Redis rate limiter, because that limiter
     fails open on a Redis outage by design (`DECISIONS.md` §"Rate limiting fails open on a
@@ -136,6 +179,32 @@ async def accept_invitations(db: AsyncSession, *, email: str, commit: bool = Fal
     if commit:
         await db.commit()
     return accepted
+
+
+async def record_invite_link_sign_up(db: AsyncSession, *, email: str, inviter_id: int) -> None:
+    """Give the member whose invite link admitted `email` the accepted row that records it.
+
+    Called inside `POST /auth/complete`'s creating transaction, after the `User` row is built
+    and before `accept_invitations`, and commits nothing. Where the member had already typed
+    a live invitation to this address, nothing is written: that row is stamped accepted by
+    `accept_invitations` and stays a typed row showing the address they typed, so the member
+    ends with exactly one accepted row for it either way.
+
+    `accepted_at` is taken here rather than passed in, so it is never earlier than the new
+    account's `created_at` - the bound `GET /user/invitations` uses to name the account a link
+    row admitted.
+    """
+    if await live_invitation_from(db, email=email, user_id=inviter_id):
+        return
+    db.add(
+        Invitation(
+            email=email,
+            user_id=inviter_id,
+            accepted_at=datetime.now(UTC),
+            from_invite_link=True,
+        )
+    )
+    await db.flush()
 
 
 async def account_exists_for(db: AsyncSession, *, email: str) -> bool:

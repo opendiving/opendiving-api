@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from ..core.config import JOIN_CHANNEL_SLUG_PATTERN
 
 # -------------- email magic link --------------
-# The join-channel slug a sign-in arrived through, from `/join?via=<slug>`. Optional on
+# The join-channel slug a sign-in arrived through, from `/join?via=<slug>`, or the token of
+# a member's invite link, which rides the same field and fits the same pattern. Optional on
 # both doors that can create an account; the format is the setting's own, so a value no
 # operator could configure is a 422 rather than a stale link.
 JoinVia = Annotated[str | None, Field(pattern=JOIN_CHANNEL_SLUG_PATTERN, examples=["scubaboard"])]

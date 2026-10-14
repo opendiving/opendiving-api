@@ -49,6 +49,7 @@ from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
+from src.app.models.invite_link import InviteLink
 from src.app.models.person import Person
 from src.app.models.tag import Tag
 from src.app.models.trip import Trip
@@ -106,12 +107,12 @@ class TestDeletingAUserTakesEverythingWithIt:
     that hang off those - then a single `DELETE`.
 
     Most of them are the ten `48781087b2b3` had to redeclare. The rest are tables added
-    since - `course`, then `user_session`, `auth_audit_event`, `contact`, `checkin_link` and
-    `person` - each of which declared `ON DELETE CASCADE` from the outset, which is exactly the case the
-    metadata sweep above cannot distinguish from a table that got it right by accident, so they
-    are seeded here too. (No count in this sentence on purpose: the previous one said "eleven"
-    and was one model away from being wrong, which `DECISIONS.md` §"The counts in the prose go
-    stale too" is about.)
+    since - `course`, then `user_session`, `auth_audit_event`, `contact`, `checkin_link`,
+    `person` and `invite_link` - each of which declared `ON DELETE CASCADE` from the outset,
+    which is exactly the case the metadata sweep above cannot distinguish from a table that got
+    it right by accident, so they are seeded here too. (No count in this sentence on purpose:
+    the previous one said "eleven" and was one model away from being wrong, which
+    `DECISIONS.md` §"The counts in the prose go stale too" is about.)
 
     Second-order coverage is not decoration. `certification_file`, `dive_file`,
     `dive_dive_site`, `gear_set_item`, `trip_part` and the three `*_person` tables are the
@@ -171,6 +172,7 @@ class TestDeletingAUserTakesEverythingWithIt:
                     max_depth=18.0,
                     last_dive_on=None,
                 ),
+                InviteLink(user_id=diver.id, token=uuid7().hex),
                 # The *account-tied* audit row, which is the one the cascade is responsible
                 # for. Its user-less sibling carries no FK to follow and is erased by the
                 # purge's by-email arm instead - pinned in
@@ -238,6 +240,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             GearServiceRecord,
             GearServiceSchedule,
             GearSet,
+            InviteLink,
             Person,
             Tag,
             Trip,
