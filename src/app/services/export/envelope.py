@@ -42,6 +42,7 @@ from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.contact import ContactRole, address_from_row
 from ...schemas.course import CourseStatus
 from ...schemas.dive import (
+    Abundance,
     Current,
     DecoAlgorithm,
     DiveMode,
@@ -614,7 +615,12 @@ def _dive(
         site_uuids=[site.uuid for site in bundle.sites_for(dive)],
         gear_uuids=[item.uuid for item in bundle.gear_for(dive)],
         sightings=[
-            ExportSighting(species_uuid=species.uuid, count=sighting.count, notes=_text(sighting.notes))
+            ExportSighting(
+                species_uuid=species.uuid,
+                count=sighting.count,
+                abundance=_sayable(sighting.abundance, Abundance),
+                notes=_text(sighting.notes),
+            )
             for species, sighting in bundle.sightings_for(dive)
         ],
         people=_people(bundle.people_for(dive)),
