@@ -38,6 +38,7 @@ REGISTRY_MAX = 255
 
 WIKIDATA = "wikidata"
 OPENSTREETMAP = "openstreetmap"
+WORMS = "worms"
 
 # The identifier's form under each registry the format names, as its schema holds it. Any
 # other registry's identifier is carried as written.
@@ -47,6 +48,7 @@ _IDENTIFIER_FORMS: dict[str, tuple[re.Pattern[str], str]] = {
         re.compile(r"(node|way|relation)/[1-9][0-9]*"),
         "the element type, a slash and the element's number, e.g. node/313862678",
     ),
+    WORMS: (re.compile(r"[1-9][0-9]*"), "the AphiaID's digits with no leading zero, e.g. 127160"),
 }
 
 DEPTH_RANGE_MESSAGE = "depth_from must not be greater than depth_to"
@@ -97,7 +99,7 @@ class ExternalId(BaseModel):
     without the `extensions` this app stores nowhere.
 
     An open list rather than a member per registry: a registry is named as a producer key
-    is, the two the format names hold their identifiers to its form, and any other is
+    is, the ones the format names hold their identifiers to its form, and any other is
     carried as written. Two sites may share an entry - a registry's object can be coarser
     than a diver's sites - so nothing makes one unique across a logbook.
     """

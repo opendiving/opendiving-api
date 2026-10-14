@@ -5,8 +5,9 @@ is never a source this app creates catalog rows from: `Species` is a global, own
 table filled one WoRMS pick at a time, so an importer writing to it from a document would
 make every authenticated caller a writer to a table every account shares - and it could not
 even be done honestly, because `status` is `NOT NULL` and the format has no member for it.
-The interchange identity is the AphiaID (spec §6.11), and this is the sanctioned way to
-turn one into a row: the same `resolve_species` call `POST /species/resolve` makes.
+A reader matches a species on its `worms` entry, an AphiaID (spec §6.11), and this is the
+sanctioned way to turn one into a row: the same `resolve_species` call `POST /species/resolve`
+makes.
 
 **Three reasons it runs here rather than anywhere else.** It cannot run during preview,
 which stores nothing. It cannot run inside the apply transaction, because `resolve_species`

@@ -1042,17 +1042,35 @@ class TestReferences:
 
     @pytest.mark.asyncio
     async def test_a_species_carries_the_identifier_that_means_something_elsewhere(self, monkeypatch):
-        """The uuids are this instance's; `aphia_id` is the World Register of Marine
-        Species' own, and the format names it the interchange identity a reader matches
-        its catalog on."""
+        """The uuids are this instance's; the `worms` entry is the World Register of Marine
+        Species' AphiaID, which the format names the entry a reader matches its catalog on,
+        and the `wikidata` entry links onward where the catalog holds an item."""
         document = await _render(full_bundle(), monkeypatch)
         clownfish, morays = document["species"]
 
-        assert (clownfish["aphia_id"], clownfish["common_name"]) == (278400, "ocellaris clownfish")
-        assert clownfish["wikidata_qid"] == "Q1126155"
+        assert clownfish["external_ids"] == [
+            {"registry": "worms", "identifier": "278400"},
+            {"registry": "wikidata", "identifier": "Q1126155"},
+        ]
+        assert clownfish["common_name"] == "ocellaris clownfish"
+        assert morays["external_ids"] == [{"registry": "worms", "identifier": "125230"}]
+        assert not {"aphia_id", "wikidata_qid"} & (clownfish.keys() | morays.keys())
         # A family-rank sighting with no common name: both facts survive, so a reader does
         # not render "Muraenidae" as though the diver identified a species.
         assert (morays["rank"], "common_name" in morays) == ("Family", False)
+
+    @pytest.mark.asyncio
+    async def test_a_wikidata_item_off_its_form_is_left_out_rather_than_written(self, monkeypatch):
+        """The register only ever stores an item id of Wikidata's form, but CRUDAdmin's species
+        view takes one typed by hand, and one bad value must not make the export
+        non-conforming."""
+        bundle = full_bundle()
+        bundle.species[0].wikidata_qid = "q1126155"
+
+        document = await _render(bundle, monkeypatch)
+
+        _assert_conforms(document)
+        assert document["species"][0]["external_ids"] == [{"registry": "worms", "identifier": "278400"}]
 
     @pytest.mark.asyncio
     async def test_no_internal_integer_id_leaks(self, monkeypatch):

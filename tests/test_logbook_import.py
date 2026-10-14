@@ -220,6 +220,16 @@ def _codes(plan: Any) -> set[ImportNoteCode]:
     return {note.code for note in plan.notes}
 
 
+def _worms(species: dict[str, Any]) -> int:
+    """The AphiaID a species' one `worms` entry names, as the export wrote it."""
+    [identifier] = [entry["identifier"] for entry in species["external_ids"] if entry["registry"] == "worms"]
+    return int(identifier)
+
+
+def _name_in_worms(species: dict[str, Any], aphia_id: int) -> None:
+    species["external_ids"] = [{"registry": "worms", "identifier": str(aphia_id)}]
+
+
 def _seed_logbook(db: Session) -> Any:
     """One diver with something in every collection the envelope carries.
 
@@ -1187,15 +1197,15 @@ class TestSpeciesLinks:
     apply will agree with."""
 
     @pytest.mark.asyncio
-    async def test_a_species_already_in_the_catalog_links_by_aphia_id(
+    async def test_a_species_already_in_the_catalog_links_by_its_worms_entry(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
-        """Never by uuid: a uuid means nothing across instances, an AphiaID names the same
-        animal everywhere (spec §6.11). The destination gets the *catalog's* row, whatever
-        uuid the document called it."""
+        """Never by uuid: a uuid means nothing across instances, a `worms` entry names the
+        same animal everywhere (spec §6.11). The destination gets the *catalog's* row,
+        whatever uuid the document called it."""
         _, document = seeded
         parsed = json.loads(document)
-        aphia_id = parsed["species"][0]["aphia_id"]
+        aphia_id = _worms(parsed["species"][0])
         parsed["species"][0]["uuid"] = str(uuid7())
         parsed["dives"][0]["sightings"] = [{"species_uuid": parsed["species"][0]["uuid"]}]
         destination = create_user(db)
@@ -1220,7 +1230,7 @@ class TestSpeciesLinks:
         species."""
         _, document = seeded
         parsed = json.loads(document)
-        parsed["species"][0]["aphia_id"] = 900_000_000 + int(uuid7().hex[-6:], 16)
+        _name_in_worms(parsed["species"][0], 900_000_000 + int(uuid7().hex[-6:], 16))
         destination = create_user(db)
 
         plan = await _preview(async_db, destination.id, json.dumps(parsed).encode())
@@ -1237,7 +1247,7 @@ class TestSpeciesLinks:
         """The apply's answer, where the lookup really has run and come back empty."""
         _, document = seeded
         parsed = json.loads(document)
-        parsed["species"][0]["aphia_id"] = 900_000_000 + int(uuid7().hex[-6:], 16)
+        _name_in_worms(parsed["species"][0], 900_000_000 + int(uuid7().hex[-6:], 16))
         destination = create_user(db)
 
         plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
@@ -1251,6 +1261,61 @@ class TestSpeciesLinks:
             .scalars()
             .all()
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "external_ids",
+        [
+            pytest.param([{"registry": "inaturalist", "identifier": "47178"}], id="another registry alone"),
+            pytest.param([{"registry": "worms", "identifier": "urn:lsid:marinespecies.org:taxname:127160"}], id="lsid"),
+            pytest.param([{"registry": "worms", "identifier": "0127160"}], id="leading zero"),
+            pytest.param(
+                [{"registry": "worms", "identifier": "127160"}, {"registry": "worms", "identifier": "154712"}],
+                id="two worms entries",
+            ),
+            pytest.param([{"registry": "worms", "identifier": str(2**31)}], id="past the column"),
+            pytest.param([], id="none"),
+        ],
+    )
+    async def test_a_species_with_no_single_worms_entry_is_skipped_and_its_sighting_dropped(
+        self, seeded: Any, db: Session, async_db: AsyncSession, external_ids: list[dict[str, str]]
+    ) -> None:
+        """The `worms` entry is the one identity this app matches on, and it must name one
+        AphiaID the catalog column can hold: two would be two WoRMS records, and which one a
+        list the format calls unordered put first decides nothing. The dive imports."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["species"][0]["external_ids"] = external_ids
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert _counts(plan)["species"] == (0, 0, 0, 1)
+        assert any("WoRMS entry" in note.message for note in plan.notes if note.collection == "species")
+        assert await self._sightings(async_db, destination.id) == []
+
+    @pytest.mark.asyncio
+    async def test_an_export_carrying_aphia_id_on_its_species_keeps_its_dives_and_drops_their_sightings(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """A logbook exported before species carried `external_ids` names each by `aphia_id`,
+        a member the format no longer has. It is ignored like any unknown member, never read
+        as a `worms` entry, so the species takes the skip path."""
+        _, document = seeded
+        parsed = json.loads(document)
+        species = parsed["species"][0]
+        species["aphia_id"] = _worms(species)
+        species["wikidata_qid"] = "Q1126155"
+        del species["external_ids"]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert _counts(plan)["species"] == (0, 0, 0, 1)
+        assert ImportNoteCode.SPECIES_UNRESOLVED in _codes(plan)
+        assert await self._sightings(async_db, destination.id) == []
 
     @staticmethod
     async def _sightings(db: AsyncSession, user_id: int) -> list[tuple[int, int | None, str]]:
@@ -1269,7 +1334,7 @@ class TestSpeciesLinks:
         _, document = seeded
         parsed = json.loads(document)
         catalog_id = (
-            (await async_db.execute(select(Species.id).where(Species.aphia_id == parsed["species"][0]["aphia_id"])))
+            (await async_db.execute(select(Species.id).where(Species.aphia_id == _worms(parsed["species"][0]))))
             .scalars()
             .one()
         )
@@ -1334,10 +1399,10 @@ class TestSpeciesLinks:
     async def test_a_species_named_twice_keeps_the_first_sighting_and_reports_the_second(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
-        """Twice by one uuid, and once more through a second species record carrying the same
-        AphiaID - both the format's rule broken, both reaching one catalog row. Kept whole
-        rather than folded: the document is one record the format refuses, not two records
-        of one dive."""
+        """Twice by one uuid, which breaks the format's rule, and once more through a second
+        species record carrying the same `worms` entry - one taxon, which the format leaves to
+        the reader, and this app reads a dive as recording it once. Both reach one catalog
+        row, and the first sighting is kept whole rather than folded with the others."""
         _, document = seeded
         parsed = json.loads(document)
         species = parsed["species"][0]
@@ -1371,7 +1436,7 @@ class TestSpeciesLinks:
         _, document = seeded
         parsed = json.loads(document)
         species = parsed["species"][0]
-        species["aphia_id"] = 900_000_000 + int(uuid7().hex[-6:], 16)
+        _name_in_worms(species, 900_000_000 + int(uuid7().hex[-6:], 16))
         parsed["dives"][0]["sightings"] = [{"species_uuid": species["uuid"]}, {"species_uuid": species["uuid"]}]
         destination = create_user(db)
 
@@ -4696,7 +4761,7 @@ class TestTheIntegerColumnCensus:
         },
         ("dive_species", "id"): "the sequence's",
         ("dive_species", "dive_id"): "resolved from a row this import wrote",
-        ("dive_species", "species_id"): "a catalog row, found by the document's AphiaID",
+        ("dive_species", "species_id"): "a catalog row, found by the species' worms entry",
         ("dive_species", "position"): "the list index, not the document's",
         ("dive_species", "count"): "bounded in `_SIGHTING_BOUNDS`, to 1..the column's own width",
         ("tag", "id"): "the sequence's",
