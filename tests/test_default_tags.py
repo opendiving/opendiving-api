@@ -1,4 +1,4 @@
-"""The tags every account starts with: the registration seed and the revision's backfill.
+"""The tags every account starts with: the registration seed and the revisions' backfills.
 
 `tests/test_auth.py` asserts the seed is called inside the account transaction; this is where
 the rows are asserted to arrive, against Postgres.
