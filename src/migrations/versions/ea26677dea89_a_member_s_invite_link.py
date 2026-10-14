@@ -1,7 +1,7 @@
 """a member's invite link
 
 Revision ID: ea26677dea89
-Revises: e41fcd2a6308
+Revises: 7025991d9229
 Create Date: 2026-10-14 08:42:50.000000
 
 A new table, `invite_link`, one row per member holding the token their link carries; and
@@ -17,7 +17,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "ea26677dea89"
-down_revision: str | None = "e41fcd2a6308"
+down_revision: str | None = "7025991d9229"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
