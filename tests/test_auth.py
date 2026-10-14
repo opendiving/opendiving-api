@@ -1128,6 +1128,7 @@ class TestCompleteProfile:
             patch("src.app.api.v1.auth.crud_users") as mock_users,
             patch("src.app.api.v1.auth.crud_authentication_providers") as mock_providers,
             patch("src.app.api.v1.auth.seed_default_presets", new_callable=AsyncMock) as mock_seed,
+            patch("src.app.api.v1.auth.seed_default_tags", new_callable=AsyncMock) as mock_seed_tags,
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock) as mock_blacklist,
         ):
             mock_verify.return_value = token_data
@@ -1160,9 +1161,12 @@ class TestCompleteProfile:
             # really arrive, against Postgres.
             mock_seed.assert_awaited_once()
             assert mock_seed.await_args.kwargs == {"user_id": 42, "commit": False}
+            mock_seed_tags.assert_awaited_once()
+            assert mock_seed_tags.await_args.kwargs == {"user_id": 42}
             # Two commits, and which is which is the assertion: the account transaction -
-            # user, provider link, the three presets and the account-created audit event,
-            # all `commit=False` above so they land together - and then the session
+            # user, provider link, the three presets, the default tags and the
+            # account-created audit event, all `commit=False` above so they land together -
+            # and then the session
             # `issue_tokens` mints. A third would mean something inside the account
             # transaction had started committing on its own, which is exactly what the
             # `commit=False` kwargs above exist to prevent.
@@ -1185,6 +1189,7 @@ class TestCompleteProfile:
             patch("src.app.api.v1.auth.crud_users") as mock_users,
             patch("src.app.api.v1.auth.crud_authentication_providers") as mock_providers,
             patch("src.app.api.v1.auth.seed_default_presets", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.seed_default_tags", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.import_google_avatar", new_callable=AsyncMock) as mock_import,
             patch("src.app.api.v1.auth.seed_google_avatar", new_callable=AsyncMock) as mock_seed,
