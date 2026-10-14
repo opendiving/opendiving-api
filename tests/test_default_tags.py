@@ -19,7 +19,8 @@ from src.app.services.default_tags import DEFAULT_TAGS, seed_default_tags
 from tests.conftest import db_available
 from tests.helpers.generators import create_tag, create_user
 
-BACKFILL_REVISION = "7025991d9229"
+# Every revision that backfilled default tags, each against its own frozen copy.
+BACKFILL_REVISIONS = ("7025991d9229", "f3f873a94d1c")
 
 
 async def _stored_names(async_db: AsyncSession, user_id: int) -> list[str]:
@@ -27,13 +28,22 @@ async def _stored_names(async_db: AsyncSession, user_id: int) -> list[str]:
     return list(rows.scalars())
 
 
-def _backfill_module() -> Any:
-    return ScriptDirectory.from_config(alembic_config()).get_revision(BACKFILL_REVISION).module
+@pytest.fixture(params=BACKFILL_REVISIONS)
+def revision(request: pytest.FixtureRequest) -> Any:
+    return ScriptDirectory.from_config(alembic_config()).get_revision(request.param).module
 
 
 def test_no_two_defaults_are_one_tag() -> None:
     """Two that fold to one would seed a single row, and the list would promise one more."""
     assert len({tag_key(name) for name in DEFAULT_TAGS}) == len(DEFAULT_TAGS)
+
+
+def test_every_default_reaches_the_accounts_that_predate_it() -> None:
+    """A word added to the live list without a revision of its own would reach new accounts
+    only."""
+    script = ScriptDirectory.from_config(alembic_config())
+    backfilled = {name for rev in BACKFILL_REVISIONS for name in script.get_revision(rev).module._DEFAULT_TAGS}
+    assert backfilled == set(DEFAULT_TAGS)
 
 
 @pytest.mark.skipif(not db_available(), reason="Requires PostgreSQL")
@@ -65,46 +75,50 @@ class TestTheSeed:
 
 @pytest.mark.skipif(not db_available(), reason="Requires PostgreSQL")
 class TestTheBackfill:
-    """The revision's data step, driven directly: `conftest.py` migrates to head before any
+    """Each revision's data step, driven directly: `conftest.py` migrates to head before any
     test body runs, so no account can exist "before the revision"."""
 
     @pytest.mark.asyncio
-    async def test_an_account_gets_the_frozen_defaults_it_lacks(self, db: Session, async_db: AsyncSession) -> None:
+    async def test_an_account_gets_the_frozen_defaults_it_lacks(
+        self, revision: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        frozen = revision._DEFAULT_TAGS
+        held = frozen[0].capitalize()
         diver = create_user(db)
-        create_tag(db, diver, name="Night")
+        create_tag(db, diver, name=held)
 
-        written = _backfill_module()._backfill_default_tags(db.connection())
+        written = revision._backfill_default_tags(db.connection())
         db.commit()
 
-        frozen = _backfill_module()._DEFAULT_TAGS
         assert written >= len(frozen) - 1
         names = await _stored_names(async_db, diver.id)
-        assert "Night" in names
+        assert held in names
         assert {tag_key(name) for name in names} == {tag_key(name) for name in frozen}
 
     @pytest.mark.asyncio
-    async def test_the_rows_carry_a_uuid_and_a_timestamp(self, db: Session, async_db: AsyncSession) -> None:
+    async def test_the_rows_carry_a_uuid_and_a_timestamp(
+        self, revision: Any, db: Session, async_db: AsyncSession
+    ) -> None:
         """Neither column has a server default, and a migration constructs no models."""
         diver = create_user(db)
 
-        _backfill_module()._backfill_default_tags(db.connection())
+        revision._backfill_default_tags(db.connection())
         db.commit()
 
         rows = (await async_db.execute(select(Tag).where(Tag.user_id == diver.id))).scalars().all()
-        assert len(rows) == len(_backfill_module()._DEFAULT_TAGS)
+        assert len(rows) == len(revision._DEFAULT_TAGS)
         assert all(row.uuid is not None and row.created_at is not None for row in rows)
         assert len({row.uuid for row in rows}) == len(rows)
 
     @pytest.mark.asyncio
     async def test_a_second_run_writes_nothing_for_an_account_it_already_seeded(
-        self, db: Session, async_db: AsyncSession
+        self, revision: Any, db: Session, async_db: AsyncSession
     ) -> None:
         diver = create_user(db)
-        backfill = _backfill_module()._backfill_default_tags
 
-        backfill(db.connection())
+        revision._backfill_default_tags(db.connection())
         db.commit()
-        backfill(db.connection())
+        revision._backfill_default_tags(db.connection())
         db.commit()
 
-        assert len(await _stored_names(async_db, diver.id)) == len(_backfill_module()._DEFAULT_TAGS)
+        assert len(await _stored_names(async_db, diver.id)) == len(revision._DEFAULT_TAGS)
