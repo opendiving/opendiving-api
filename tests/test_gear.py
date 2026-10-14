@@ -160,6 +160,7 @@ class TestGearType:
         values = [t.value for t in GearType]
         assert values[values.index("smb") : values.index("reel")] == ["smb", "mirror", "whistle"]
         assert values[values.index("knife") : values.index("compass")] == ["knife", "line_cutter", "shears"]
+        assert values[values.index("bcd") : values.index("regulator") + 1] == ["bcd", "backplate", "wing", "regulator"]
         assert values[values.index("regulator") : values.index("computer") + 1] == [
             "regulator",
             "rebreather",

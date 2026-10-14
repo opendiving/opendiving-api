@@ -163,11 +163,12 @@ _INDENT = "  "
 # `namedType`, so it has no `<name>` element and could only carry a nameless body/lens
 # breakdown we don't record. A camera keeps its name as a `<variouspieces>` instead.
 #
-# `knife` is the one deliberate collapse: `equipmentType` has no cutting-tool slot other
-# than that one, so `line_cutter` and `shears` join `knife` there rather than scattering
-# a diver's cutting tools into `<variouspieces>` beside the SMB and the camera. Three of
-# our categories therefore render as one element - see DECISIONS.md for why that is
-# cheap here.
+# Two deliberate collapses. `equipmentType` has no cutting-tool slot other than `knife`,
+# so `line_cutter` and `shears` join `knife` there rather than scattering a diver's
+# cutting tools into `<variouspieces>` beside the SMB and the camera. And a wing is a
+# buoyancy control device, so it shares `bcd`'s element, which names the broader kind and
+# says nothing false about it; a reader brings it back as `bcd`. See DECISIONS.md for why
+# both are cheap here.
 _EQUIPMENT_ELEMENT: dict[GearType, str] = {
     GearType.MASK: "mask",
     GearType.SNORKEL: "variouspieces",
@@ -179,6 +180,9 @@ _EQUIPMENT_ELEMENT: dict[GearType, str] = {
     GearType.GLOVES: "gloves",
     GearType.BOOTS: "boots",
     GearType.BCD: "buoyancycontroldevice",
+    # Nor does a backplate.
+    GearType.BACKPLATE: "variouspieces",
+    GearType.WING: "buoyancycontroldevice",
     GearType.REGULATOR: "regulator",
     GearType.REBREATHER: "rebreather",
     GearType.COMPUTER: "divecomputer",

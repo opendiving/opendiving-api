@@ -1674,8 +1674,8 @@ class TestEquipmentMapping:
         """`equipmentType` has exactly one cutting-tool element, so `line_cutter` and
         `shears` join `knife` in it rather than falling into `<variouspieces>` beside the
         SMB and the camera. Three of our categories collapse onto one element and the
-        distinction is not recoverable from the file - which costs nothing, because no
-        reader imports a UDDF kit list back (see DECISIONS.md)."""
+        distinction is not recoverable from the file - which costs only the sub-category,
+        since a reader brings each back as a knife (see DECISIONS.md)."""
         bundle = build_bundle(
             gear_items=[
                 _gear("Z-Knife", GearType.KNIFE),
@@ -1708,6 +1708,24 @@ class TestEquipmentMapping:
         assert _text(tree, f".//{UDDF}rebreather/{UDDF}name") == "JJ-CCR"
         assert _text(tree, f".//{UDDF}scooter/{UDDF}name") == "Seacraft"
         assert _text(tree, f".//{UDDF}variouspieces/{UDDF}name") == "Pod"
+
+    @pytest.mark.asyncio
+    async def test_a_wing_is_a_buoyancy_control_device_and_a_backplate_rides_variouspieces(self, schema, monkeypatch):
+        """A wing is the broader kind's element shared with the BCD, which says nothing false
+        about it; UDDF has no element for a plate."""
+        bundle = build_bundle(
+            gear_items=[
+                _gear("Steel backplate", GearType.BACKPLATE),
+                _gear("Doubles wing", GearType.WING),
+                _gear("Jacket", GearType.BCD),
+            ]
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        tree = _tree(document)
+        bcds = tree.findall(f".//{UDDF}buoyancycontroldevice/{UDDF}name")
+        assert [e.text for e in bcds] == ["Doubles wing", "Jacket"]
+        assert _text(tree, f".//{UDDF}variouspieces/{UDDF}name") == "Steel backplate"
 
     @pytest.mark.asyncio
     async def test_a_linked_cylinder_states_its_volume_on_both_elements(self, schema, monkeypatch):

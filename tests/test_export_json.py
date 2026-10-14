@@ -41,6 +41,7 @@ from src.app.models.trip import Trip
 from src.app.models.user_picture import UserPicture
 from src.app.schemas.checkin_details import CheckinDetailsRead, EmergencyContact, InsurancePolicy
 from src.app.schemas.export import DIVEJSON_FORMAT, DIVEJSON_VERSION, ExportCourse, ExportEnvelope
+from src.app.schemas.gear_item import GearType
 from src.app.schemas.location import LocationRead
 from src.app.schemas.trip import TripPartRead
 from src.app.schemas.user_picture import PictureKind
@@ -158,6 +159,28 @@ class TestConformance:
         exported = document["trips"][0]
         assert len(exported["parts"]) == len(parts)
         assert "starts_on" not in exported
+
+    @pytest.mark.asyncio
+    async def test_every_gear_type_is_one_the_installed_schema_admits(self, monkeypatch):
+        """The `divejson` floor's half for the gear vocabulary: a member `GearType` gained
+        before the release that names it would be written through and rejected here."""
+        items = [
+            _with_id(
+                GearItem(
+                    user_id=1,
+                    name=gear_type.value,
+                    type=gear_type.value,
+                    uuid=uuid_pkg.UUID(f"019f0000-0000-7000-8000-{800 + row_id:012d}"),
+                    created_at=CREATED_AT,
+                ),
+                row_id,
+            )
+            for row_id, gear_type in enumerate(GearType, start=1)
+        ]
+        document = await _render(build_bundle(gear_items=items), monkeypatch)
+
+        assert [g["type"] for g in document["gear"]] == [t.value for t in GearType]
+        _assert_conforms(document)
 
     @pytest.mark.asyncio
     async def test_an_archive_layout_stays_conforming(self, monkeypatch):
