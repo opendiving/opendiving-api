@@ -121,6 +121,16 @@ class Current(StrEnum):
     EXTREME = "extreme"
 
 
+class Abundance(StrEnum):
+    """How many were seen, as a band where there is no count (DiveJSON §6.3a): `few` is 2 to 10,
+    `many` 11 to 100, `abundant` 101 and more. One animal is a count of 1, never a band. On
+    `WaterType`'s terms otherwise."""
+
+    FEW = "few"
+    MANY = "many"
+    ABUNDANT = "abundant"
+
+
 class Waves(StrEnum):
     """What the surface was like - a quarry has waves too, where a sea state would not."""
 
@@ -445,6 +455,12 @@ class SightingRead(SpeciesInfo):
     """
 
     count: Annotated[int | None, Field(default=None, description="How many were counted; null is seen, not counted")]
+    # A string rather than `Abundance`: the column carries no CHECK, so one unrecognised row
+    # must not fail the whole dive read. See *"A stored vocabulary is read back as a string"*.
+    abundance: Annotated[
+        StoredVocabulary | None,
+        Field(default=None, description="How many were seen, as a band, where there is no count"),
+    ]
     notes: Annotated[str, Field(default="", description="What the diver wrote about this sighting")]
 
 
@@ -452,7 +468,8 @@ class SightingWrite(BaseModel):
     """One species seen on a dive, on the way in - DiveJSON's Sighting.
 
     An absent `count` is *seen, not counted*, which is not `1`, and zero is not a sighting.
-    The format puts no ceiling on it, so the column's width is the only one here.
+    The format puts no ceiling on it, so the column's width is the only one here. `abundance`
+    is the band where there is no number, and a sighting carries at most one of the two.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -468,9 +485,23 @@ class SightingWrite(BaseModel):
             examples=[3],
         ),
     ]
+    abundance: Annotated[
+        Abundance | None,
+        Field(
+            default=None,
+            description="How many were seen, as a band, where there is no count; never sent with `count`",
+            examples=[Abundance.MANY],
+        ),
+    ]
     notes: Annotated[
         str, Field(default="", max_length=NOTES_MAX_LENGTH, description="What the diver wrote about this sighting")
     ]
+
+    @model_validator(mode="after")
+    def _check_count_or_abundance(self) -> Self:
+        if self.count is not None and self.abundance is not None:
+            raise ValueError("A sighting carries a count or an abundance band, not both")
+        return self
 
 
 def _one_sighting_per_species(sightings: list[SightingWrite] | None) -> list[SightingWrite] | None:

@@ -671,10 +671,10 @@ def full_bundle() -> ExportBundle:
         site_ids_by_dive={1: [1, 2], 2: [2]},
         gear_ids_by_dive={1: [1, 2, 3], 2: [1]},
         # The air dive counted its clownfish and wrote about them and only saw the morays; the
-        # trimix dive saw clownfish and recorded nothing else about them.
+        # trimix dive put its clownfish in a band and wrote nothing about them.
         sightings_by_dive={
             1: [StoredSighting(species_id=1, count=2, notes="A pair in one anemone."), StoredSighting(species_id=2)],
-            2: [StoredSighting(species_id=1)],
+            2: [StoredSighting(species_id=1, abundance="many")],
         },
         recordings_by_dive={
             # A recording of readouts alone - a computer's own figures with no device, samples

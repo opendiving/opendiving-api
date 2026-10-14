@@ -218,17 +218,17 @@ class TestSpeciesReplacement:
                 {
                     "sightings": [
                         {"species_uuid": str(first), "count": 3, "notes": "Hunting over the sand"},
-                        {"species_uuid": str(second)},
+                        {"species_uuid": str(second), "abundance": "many"},
                     ]
                 }
             )
         )
 
-        # Resolved to internal ids, in order, each keeping its count and note: the public uuid
-        # must never reach the column.
+        # Resolved to internal ids, in order, each keeping its count or band and its note: the
+        # public uuid must never reach the column.
         assert captured["sightings"] == [
             StoredSighting(species_id=100, count=3, notes="Hunting over the sand"),
-            StoredSighting(species_id=101),
+            StoredSighting(species_id=101, abundance="many"),
         ]
 
     @pytest.mark.asyncio
@@ -302,6 +302,24 @@ class TestTheSightingRules:
         with pytest.raises(ValidationError):
             DiveUpdateRequest.model_validate({"sightings": [{"species_uuid": str(uuid7()), "count": count}]})
 
+    def test_a_count_and_a_band_together_are_refused(self) -> None:
+        """Two answers to one question; the format forbids the pair, and the message names it."""
+        with pytest.raises(ValidationError) as caught:
+            DiveUpdateRequest.model_validate(
+                {"sightings": [{"species_uuid": str(uuid7()), "count": 3, "abundance": "few"}]}
+            )
+
+        [error] = caught.value.errors()
+        assert error["loc"] == ("sightings", 0)
+        assert "a count or an abundance band, not both" in error["msg"]
+
+    def test_a_band_outside_the_vocabulary_is_refused(self) -> None:
+        with pytest.raises(ValidationError) as caught:
+            DiveUpdateRequest.model_validate({"sightings": [{"species_uuid": str(uuid7()), "abundance": "lots"}]})
+
+        [error] = caught.value.errors()
+        assert error["loc"] == ("sightings", 0, "abundance")
+
     def test_an_absent_count_and_note_read_as_seen_and_nothing_written(self) -> None:
         """Seen, not counted - never `1` - and the empty note every notes column spells
         absence with."""
@@ -309,7 +327,7 @@ class TestTheSightingRules:
 
         assert body.sightings is not None
         [sighting] = body.sightings
-        assert (sighting.count, sighting.notes) == (None, "")
+        assert (sighting.count, sighting.abundance, sighting.notes) == (None, None, "")
 
     def test_a_sighting_takes_no_member_it_does_not_define(self) -> None:
         with pytest.raises(ValidationError):

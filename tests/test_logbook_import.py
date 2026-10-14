@@ -1380,6 +1380,84 @@ class TestSpeciesLinks:
             f"A value for `count` was dropped: a sighting's count must be between 1 and {2**31 - 1}"
         ]
 
+    @staticmethod
+    async def _quantities(db: AsyncSession, user_id: int) -> list[tuple[int | None, str | None]]:
+        dive = (await db.execute(select(Dive).where(Dive.user_id == user_id))).scalars().one()
+        rows = await db.execute(
+            select(DiveSpecies.count, DiveSpecies.abundance)
+            .where(DiveSpecies.dive_id == dive.id)
+            .order_by(DiveSpecies.position)
+        )
+        return [(count, abundance) for count, abundance in rows]
+
+    @pytest.mark.asyncio
+    async def test_a_band_arrives_with_the_sighting(self, seeded: Any, db: Session, async_db: AsyncSession) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        sighting = parsed["dives"][0]["sightings"][0]
+        del sighting["count"]
+        sighting["abundance"] = "many"
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert await self._quantities(async_db, destination.id) == [(None, "many")]
+        assert ImportNoteCode.VALUE_DROPPED not in _codes(plan)
+
+    @pytest.mark.asyncio
+    async def test_a_band_outside_the_vocabulary_reads_as_absent(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """A later minor version may add a band (§5.6); the sighting stays, seen and not counted."""
+        _, document = seeded
+        parsed = json.loads(document)
+        sighting = parsed["dives"][0]["sightings"][0]
+        del sighting["count"]
+        sighting["abundance"] = "teeming"
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert await self._quantities(async_db, destination.id) == [(None, None)]
+
+    @pytest.mark.asyncio
+    async def test_a_sighting_carrying_a_count_and_a_band_keeps_the_count(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The format forbids the pair and a reader never validates; the count is the finer
+        fact, so the band goes with a line and the sighting keeps its note."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["sightings"][0]["abundance"] = "few"
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        [(_, count, notes)] = await self._sightings(async_db, destination.id)
+        assert (count, notes) == (3, "On the cleaning station.")
+        assert await self._quantities(async_db, destination.id) == [(3, None)]
+        assert [note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED] == [
+            "A value for `abundance` was dropped: a sighting carries a count or a band, and the count was kept"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_count_the_column_cannot_hold_leaves_the_band_beside_it_standing(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        sighting = parsed["dives"][0]["sightings"][0]
+        sighting["count"] = 0
+        sighting["abundance"] = "few"
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert await self._quantities(async_db, destination.id) == [(None, "few")]
+        assert [note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED] == [
+            f"A value for `count` was dropped: a sighting's count must be between 1 and {2**31 - 1}"
+        ]
+
     @pytest.mark.asyncio
     async def test_a_note_past_the_cap_is_cut_with_a_line(
         self, seeded: Any, db: Session, async_db: AsyncSession
@@ -4346,6 +4424,8 @@ class TestTheBoundsCensus:
             "ck_dive_recording_deco_gf_low_within_high",
             # `split_dive_start_time` never pairs the date-only flag with an offset.
             "ck_dive_start_date_only_has_no_offset",
+            # `_plan_sightings` drops a band written beside a count.
+            "ck_dive_species_count_or_abundance",
             # `_plan_schedule` skips a schedule its bounds leave with no interval.
             "ck_gear_service_schedule_has_an_interval",
         }
