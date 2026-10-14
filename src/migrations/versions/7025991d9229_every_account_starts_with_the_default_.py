@@ -10,7 +10,7 @@ presets were, so one restored is not the only account without them. Skipped when
 SQL offline, where there is nothing to read.
 
 Revision ID: 7025991d9229
-Revises: e41fcd2a6308
+Revises: 671e5dc854e0
 Create Date: 2026-10-14 11:41:15.181562
 
 """
@@ -23,7 +23,7 @@ from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
 revision: str = "7025991d9229"
-down_revision: str | None = "e41fcd2a6308"
+down_revision: str | None = "671e5dc854e0"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
