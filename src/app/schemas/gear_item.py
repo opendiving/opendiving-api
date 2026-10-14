@@ -44,6 +44,8 @@ class GearType(StrEnum):
     GLOVES = "gloves"
     BOOTS = "boots"
     BCD = "bcd"
+    BACKPLATE = "backplate"
+    WING = "wing"
     REGULATOR = "regulator"
     REBREATHER = "rebreather"
     COMPUTER = "computer"

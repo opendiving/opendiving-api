@@ -5663,10 +5663,12 @@ and both are asserted at import so a category without a home fails in CI rather 
 in a diver's download. `line_cutter` and `shears` join `knife` in `<knife>`, the only cutting-tool
 slot; rejected: `variouspieces` for both (loses the grouping) or splitting by physical form.
 `mirror` and `whistle` go to `variouspieces`. `camera` declines `cameraType`, which extends
-`ID_TYPE` and has no `<name>`, and goes to `<variouspieces>` with its name. The collapse costs only
-the sub-category, and no tested reader imports the kit list under `<diver><owner><equipment>` beyond
-Subsurface's `divecomputer`. `rebreather` and `scooter` are their own elements; `transmitter` has
-none and goes to `<variouspieces>`.
+`ID_TYPE` and has no `<name>`, and goes to `<variouspieces>` with its name. `wing` shares `bcd`'s
+`<buoyancycontroldevice>`, which names the broader kind. Each collapse costs only the sub-category:
+this app's own import reads the kit list under `<diver><owner><equipment>` through the `divejson`
+package's reader, which brings a line cutter or shears back as `knife` and a wing as `bcd`.
+`rebreather` and `scooter` are their own elements; `transmitter` and `backplate` have none and go to
+`<variouspieces>`.
 
 ## There is no `Course.cost`, and money is a cross-cutting concern this app has not designed yet
 
