@@ -40,11 +40,14 @@ dependencies = [
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
     #
-    # 0.25.0 is the floor because it is the first release whose readers write a dive's time in
-    # the water as `submerged_time` and whose `in_water` returns `InWater.submerged_time`, the
-    # names the dive form, the merge, the backfill and the importer read; resolved lower, every
-    # file read states no figure and the export fails the schema the export tests validate
-    # against. The floor still carries what 0.24.0's did: the profile's temperature channel in
+    # 0.27.0 is the floor because it is the first release whose schema gives a species
+    # `external_ids` with a `worms` entry and refuses `aphia_id`, the shape the export writes;
+    # resolved lower, the export fails the schema the export tests validate against. The floor
+    # still carries what 0.26.0's did: a cylinder's `gear_uuid` and a gear item's vessel facts
+    # and `dive_time`, which the export writes; what 0.25.0's did: readers that write a dive's
+    # time in the water as `submerged_time` and an `in_water` returning
+    # `InWater.submerged_time`, the names the dive form, the merge, the backfill and the
+    # importer read; what 0.24.0's did: the profile's temperature channel in
     # hundredths of a degree, the scale `TEMPERATURE_SCALE` divides by; what 0.23.0's did: a diver with no `username`, which its validator
     # refuses; what 0.22.0's did: `in_water` and `IN_WATER_DEPTH`, which the app imports; what
     # 0.21.0's did: Suunto JSON and FIT readers that take a dive's entry and exit at the fix
