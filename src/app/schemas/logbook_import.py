@@ -73,7 +73,6 @@ from .person import PERSON_EMAIL_MAX, PersonRole
 _NAME_MAX = 255
 _LABEL_MAX = 120
 _SHORT_MAX = 64
-_QID_MAX = 32
 _SHA256_LENGTH = 64
 # §6.4b's own bounds on a device's members, and the widths of `dive_recording`'s columns.
 _DEVICE_MAX = 64
@@ -469,8 +468,8 @@ class ImportCourse(_ReadModel):
 
 
 class ImportExternalId(_ReadModel):
-    """A site's registry entry (spec §6.10a), as written - its `extensions` ignored, this app
-    storing them nowhere."""
+    """A record's registry entry - a site's or a species' (spec §6.10a) - as written, its
+    `extensions` ignored, this app storing them nowhere."""
 
     registry: str
     identifier: Annotated[str, Field(max_length=_IDENTIFIER_MAX)]
@@ -507,17 +506,17 @@ class ImportDiveSite(_ReadModel):
 
 
 class ImportSpecies(_ReadModel):
-    """The one collection that never becomes rows of the caller's. `aphia_id` is the
-    interchange identity (spec §6.11) and the only member this importer acts on - the rest
-    is a snapshot for human readers, and creating a catalog row from it is what design
-    decision 7 forbids."""
+    """The one collection that never becomes rows of the caller's. The `worms` entry in
+    `external_ids` is what a reader matches on (spec §6.11) and the only one this importer
+    acts on - the rest is a snapshot for human readers, and creating a catalog row from it
+    is what design decision 7 forbids."""
 
     uuid: uuid_pkg.UUID
-    aphia_id: int | None = None
+    # Shape only: the planner picks the one `worms` entry and holds it to the registry's form.
+    external_ids: Annotated[list[ImportExternalId], Field(default_factory=list), _Collection]
     scientific_name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     common_name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     rank: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
-    wikidata_qid: Annotated[str | None, Field(default=None, max_length=_QID_MAX)]
     created_at: datetime | None = None
 
 

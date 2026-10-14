@@ -544,7 +544,8 @@ class ExportCourse(PublicUUIDSchema):
 
 
 class ExportExternalId(BaseModel):
-    """A site's entry in a registry outside the logbook (spec §6.10a)."""
+    """A record's entry in a registry outside the logbook - a site's or a species' (spec
+    §6.10a)."""
 
     registry: str
     identifier: str
@@ -587,19 +588,18 @@ class ExportSpecies(PublicUUIDSchema):
     self-contained - a reader resolving a sighting's `species_uuid` finds every one of them
     defined here.
 
-    `aphia_id` is the field that matters outside this database, and the format says so:
-    the uuids are this instance's, the AphiaID is the World Register of Marine Species'
-    own identifier and the interchange identity a reader matches its own catalog on (spec
-    §6.11). `wikidata_qid` does the same job for anything that would rather start from
-    Wikidata. The record is a snapshot for human readers, never a source a reader creates
-    catalog rows from.
+    `external_ids` is the member that matters outside this database, and the format says
+    so: the uuids are this instance's, while the `worms` entry - the World Register of
+    Marine Species' AphiaID - is what a reader matches its own catalog on (spec §6.11). The
+    `wikidata` entry links onward for anything that would rather start from Wikidata. The
+    record is a snapshot for human readers, never a source a reader creates catalog rows
+    from.
     """
 
-    aphia_id: int
+    external_ids: list[ExportExternalId]
     scientific_name: str
     common_name: str | None = None
     rank: str
-    wikidata_qid: str | None = None
     created_at: datetime
 
 

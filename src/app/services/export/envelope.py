@@ -36,6 +36,7 @@ from ...models.course import Course
 from ...models.dive import Dive
 from ...models.dive_site import DiveSite
 from ...models.person import Person
+from ...models.species import Species
 from ...models.trip import Trip
 from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.contact import ContactRole, address_from_row
@@ -52,6 +53,7 @@ from ...schemas.dive import (
     Weather,
 )
 from ...schemas.dive_mixture import DiveMixtureRead, GasRole, TankUsage
+from ...schemas.dive_site import WIKIDATA, WORMS, identifier_problem
 from ...schemas.export import (
     DIVEJSON_FORMAT,
     DIVEJSON_PRODUCER_KEY,
@@ -671,6 +673,20 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
     return exported
 
 
+def _species_external_ids(species: Species) -> list[ExportExternalId]:
+    """The catalog row's registry columns as the format's list, the WoRMS entry first.
+
+    The item id is left out where it is not of Wikidata's form: the register only ever
+    writes one that is, but CRUDAdmin's species view takes it typed by hand, and one bad
+    value there must not make the whole export non-conforming.
+    """
+    entries = [ExportExternalId(registry=WORMS, identifier=str(species.aphia_id))]
+    qid = species.wikidata_qid
+    if qid is not None and identifier_problem(WIKIDATA, qid) is None:
+        entries.append(ExportExternalId(registry=WIKIDATA, identifier=qid))
+    return entries
+
+
 def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple[str, list[Any]]]:
     """Everything after `dives`, in the order `ExportEnvelope` declares it.
 
@@ -696,11 +712,10 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
             [
                 ExportSpecies(
                     uuid=species.uuid,
-                    aphia_id=species.aphia_id,
+                    external_ids=_species_external_ids(species),
                     scientific_name=species.scientific_name,
                     common_name=species.common_name,
                     rank=species.rank,
-                    wikidata_qid=species.wikidata_qid,
                     created_at=species.created_at,
                 )
                 for species in bundle.species

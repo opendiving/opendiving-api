@@ -158,8 +158,9 @@ async def write_dive_site(
     `other_names`, `external_ids` and `entry_types` are stored conforming rather than
     refused: another name the name or an earlier one already says is dropped, compared
     trimmed and case-folded, and a repeated registry entry or entry type is kept once. An
-    `external_ids` entry under `wikidata` or `openstreetmap` must have that registry's
-    identifier form; any other registry is stored as sent. `depth_from` above `depth_to` is
+    `external_ids` entry under a registry the format names - `wikidata`, `openstreetmap`,
+    `worms` - must have that registry's identifier form; any other registry is stored as
+    sent. `depth_from` above `depth_to` is
     a 422. `tags` are by name, each matched to the diver's tag of that name or created, as a
     dive's are.
     """

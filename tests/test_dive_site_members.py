@@ -82,6 +82,7 @@ class TestTheWriteSchema:
             ("openstreetmap", "node/313862678"),
             ("openstreetmap", "way/1"),
             ("openstreetmap", "relation/42"),
+            ("worms", "127160"),
             # A registry the format names no form for is carried as written.
             ("wrecksite.eu", "10021"),
             ("x", "anything at all"),
@@ -103,6 +104,8 @@ class TestTheWriteSchema:
             ("openstreetmap", "313862678"),
             ("openstreetmap", "node/0"),
             ("openstreetmap", "area/12"),
+            ("worms", "0127160"),
+            ("worms", "urn:lsid:marinespecies.org:taxname:127160"),
             ("OpenStreetMap", "node/1"),
             ("-osm", "node/1"),
             ("osm", ""),

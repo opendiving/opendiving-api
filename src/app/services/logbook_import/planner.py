@@ -73,7 +73,14 @@ from ...models.user import User
 from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, CertificationAgency, CertificationSide
 from ...schemas.contact import ADDRESS_FIELDS, CONTACT_ADDRESS_PREFIX, canonical_roles, check_website
 from ...schemas.dive_profile import MILLISECONDS_PER_SECOND
-from ...schemas.dive_site import ExternalId, canonical_entry_types, canonical_external_ids, canonical_other_names
+from ...schemas.dive_site import (
+    WORMS,
+    ExternalId,
+    canonical_entry_types,
+    canonical_external_ids,
+    canonical_other_names,
+    identifier_problem,
+)
 from ...schemas.export import DIVEJSON_PRODUCER_KEY
 from ...schemas.gear_item import CylinderMaterial, GearType
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
@@ -633,6 +640,21 @@ def _site_external_ids(site: ImportDiveSite) -> tuple[list[ExternalId], list[str
                 "and was dropped"
             )
     return canonical_external_ids(kept), refused
+
+
+def _worms_aphia_id(species: ImportSpecies) -> int | None:
+    """The AphiaID a species' `worms` entry names, or `None` where it names none this app
+    can key its catalog on.
+
+    Exactly one entry, of the registry's form and within the `Integer` column's range. Two
+    would be two WoRMS records, and picking one would let the link depend on an order the
+    format calls meaningless; entries under any other registry this app stores nowhere.
+    """
+    entries = [entry for entry in species.external_ids if entry.registry == WORMS]
+    if len(entries) != 1 or identifier_problem(WORMS, entries[0].identifier) is not None:
+        return None
+    aphia_id = int(entries[0].identifier)
+    return aphia_id if aphia_id <= INT32_MAX else None
 
 
 def _key(*parts: str | None) -> tuple[str, ...]:
@@ -1863,13 +1885,13 @@ class _Planner:
         """The one collection that never becomes rows of the caller's.
 
         `Species` is a global, ownerless catalog filled one WoRMS pick at a time, so import
-        matches it by AphiaID (spec §6.11) and creates nothing from the document's own
+        matches it on the species' `worms` entry (spec §6.11) and creates nothing from the document's own
         snapshot - which it could not do honestly anyway: `status` is `NOT NULL` and the
         format has no member for it, so creation would have to invent one, in direct
         contradiction of §5.4. A species the catalog does not hold goes to the pre-pass,
         and one WoRMS cannot answer for is skipped with the sighting links that named it.
         """
-        wanted = {species.aphia_id for species in self._document.species if species.aphia_id is not None}
+        wanted = set(unresolved_aphia_ids(self._document.species))
         catalog: dict[int, int] = {}
         if wanted:
             rows = await self._db.execute(select(Species.aphia_id, Species.id).where(Species.aphia_id.in_(wanted)))
@@ -1881,17 +1903,18 @@ class _Planner:
             self._species_by_uuid[species.uuid] = species
 
     def _plan_one_species(self, species: ImportSpecies, catalog: dict[int, int]) -> PlannedRecord:
-        if species.aphia_id is None:
+        aphia_id = _worms_aphia_id(species)
+        if aphia_id is None:
             return self._skip(
                 "species",
                 species.uuid,
-                "This sighting carries no AphiaID, which is the only identity this app can match a species on, so "
-                "it could not be linked to the catalog.",
+                "This species carries no single WoRMS entry holding an AphiaID, which is the only identity this app "
+                "can match a species on, so it could not be linked to the catalog.",
             )
-        row_id = catalog.get(species.aphia_id)
+        row_id = catalog.get(aphia_id)
         if row_id is not None:
             self._species_row_by_uuid[species.uuid] = row_id
-            action = Action.CREATE if species.aphia_id in self._newly_resolved else Action.LINK
+            action = Action.CREATE if aphia_id in self._newly_resolved else Action.LINK
             return PlannedRecord(action=action, source_uuid=species.uuid, uuid=species.uuid, row_id=row_id)
 
         if self._resolution_ran:
@@ -2651,11 +2674,12 @@ class _Planner:
         hold is skipped, and the dive imports without it. Never the other way round.
 
         **The first sighting of a species is kept and any other is reported.** A document
-        naming one species twice on a dive, or two species records sharing an AphiaID, breaks
-        the format's one-sighting-per-species rule; folding the two, as a merge does, would
-        invent a sighting neither record holds and hide the defect. Keyed on the AphiaID,
-        which every sighting reaching that check carries and which preview can see before
-        the pre-pass has found a row.
+        naming one species twice on a dive breaks the format's one-sighting-per-species rule.
+        Two species records sharing a `worms` entry break no rule - they are one taxon, and
+        collapsing their sightings to one is this app's reading of a dive, which the format
+        leaves to the reader. Folding the two, as a merge does, would invent a sighting
+        neither record holds. Keyed on the AphiaID, which every sighting reaching that check
+        carries and which preview can see before the pre-pass has found a row.
         """
         sightings: list[StoredSighting] = []
         listed: set[int | None] = set()
@@ -2671,7 +2695,8 @@ class _Planner:
                 )
                 continue
             species = self._species_by_uuid[sighting.species_uuid]
-            if species.aphia_id in listed:
+            aphia_id = _worms_aphia_id(species)
+            if aphia_id in listed:
                 self._dropped(
                     "dives",
                     dive.uuid,
@@ -2679,7 +2704,7 @@ class _Planner:
                     "dive records each species once, and the first was kept",
                 )
                 continue
-            listed.add(species.aphia_id)
+            listed.add(aphia_id)
             count = self._bounded("dives", dive.uuid, sighting, _SIGHTING_BOUNDS).get("count")
             notes = self._notes_text("dives", dive.uuid, sighting.notes)
             row_id = self._species_row_by_uuid.get(sighting.species_uuid)
@@ -3196,7 +3221,7 @@ def portrait_change(plan: ImportPlan) -> tuple[int, int]:
 
 
 def unresolved_aphia_ids(document_species: Iterable[ImportSpecies]) -> list[int]:
-    """The AphiaIDs a document names, in document order and without repeats.
+    """The AphiaIDs a document's `worms` entries name, in document order and without repeats.
 
     What the species pre-pass is handed. Derived from the document rather than from a plan
     because the pre-pass runs *before* the plan that apply writes from - resolving first is
@@ -3204,6 +3229,7 @@ def unresolved_aphia_ids(document_species: Iterable[ImportSpecies]) -> list[int]
     """
     seen: list[int] = []
     for species in document_species:
-        if species.aphia_id is not None and species.aphia_id not in seen:
-            seen.append(species.aphia_id)
+        aphia_id = _worms_aphia_id(species)
+        if aphia_id is not None and aphia_id not in seen:
+            seen.append(aphia_id)
     return seen

@@ -5834,10 +5834,10 @@ document written before the format had it. It is reconstructed after the write �
 
 Otherwise the record is skipped and reported: a course with no `status` (§6.17), a service record
 with no `dive_count_at_service`, a dive with no `submerged_time` and no profile, a species with no
-`aphia_id`, and a record whose REQUIRED closed-vocabulary member (a certification's `agency`, a
-service `type`) carries an unknown value, which §5.6 reads as absent. A course's `agency` is
-OPTIONAL and so costs the field rather than the record — see *A course may have no agency, and a
-certification may not*.
+single `worms` entry, and a record whose REQUIRED closed-vocabulary member (a certification's
+`agency`, a service `type`) carries an unknown value, which §5.6 reads as absent. A course's
+`agency` is OPTIONAL and so costs the field rather than the record — see *A course may have no
+agency, and a certification may not*.
 
 Four derivations are allowed: a dive with no `submerged_time` or `avg_depth` takes its profile's
 time in the water (`divejson.in_water`), the span standing in for it where no sample was in the
@@ -5924,13 +5924,15 @@ Content types are not the document's: a card image's is sniffed, a dive file's c
 `FORMAT_CONTENT_TYPES` via its format id. A stored file's uuid is not preserved;
 `ux_dive_file_user_id_sha256` enforces identity.
 
-## Species import by AphiaID, resolved before the transaction opens, and never created from the document
+## Species import by the `worms` entry, resolved before the transaction opens, and never created from the document
 
 `Species` is a global, ownerless catalog; creating rows from a document would make every caller a
 writer to a shared table, and `status` is `NOT NULL` with no format member (§5.4). Import matches on
-`aphia_id` (§6.11) and calls the same `resolve_species` as `POST /species/resolve` for an unknown
-AphiaID. An unmatched species is skipped and its sighting links dropped and reported — never the
-dive.
+the species' one `worms` entry in `external_ids` (§6.11), the AphiaID the catalog is keyed on, and
+calls the same `resolve_species` as `POST /species/resolve` for an unknown AphiaID. A species with
+none, with two, or with one off the form or past the `Integer` column is unmatched; it is skipped
+and its sighting links dropped and reported — never the dive. A `wikidata` entry is written and
+never read back, and a document carrying the retired `aphia_id` member reads as one with no entry.
 
 It runs as a batch before the apply transaction: preview stores nothing, and `resolve_species`
 manages its own transaction around the outbound call. The worst case is two
