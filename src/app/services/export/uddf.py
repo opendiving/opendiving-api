@@ -180,7 +180,7 @@ _EQUIPMENT_ELEMENT: dict[GearType, str] = {
     GearType.GLOVES: "gloves",
     GearType.BOOTS: "boots",
     GearType.BCD: "buoyancycontroldevice",
-    # Nor does a backplate.
+    # A backplate has no element in UDDF's equipment vocabulary.
     GearType.BACKPLATE: "variouspieces",
     GearType.WING: "buoyancycontroldevice",
     GearType.REGULATOR: "regulator",

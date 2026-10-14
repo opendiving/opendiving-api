@@ -40,10 +40,11 @@ dependencies = [
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
     #
-    # 0.27.0 is the floor because it is the first release whose schema gives a species
-    # `external_ids` with a `worms` entry and refuses `aphia_id`, the shape the export writes;
-    # resolved lower, the export fails the schema the export tests validate against. The floor
-    # still carries what 0.26.0's did: a cylinder's `gear_uuid` and a gear item's vessel facts
+    # 0.28.0 is the floor because it is the first release whose schema admits a gear item
+    # typed `backplate` or `wing`, which `GearType` holds and the export writes; resolved
+    # lower, the export fails the schema the export tests validate against. The floor still
+    # carries what 0.27.0's did: a species' `external_ids` with a `worms` entry, refusing
+    # `aphia_id`, the shape the export writes; what 0.26.0's did: a cylinder's `gear_uuid` and a gear item's vessel facts
     # and `dive_time`, which the export writes; what 0.25.0's did: readers that write a dive's
     # time in the water as `submerged_time` and an `in_water` returning
     # `InWater.submerged_time`, the names the dive form, the merge, the backfill and the
