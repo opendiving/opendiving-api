@@ -847,7 +847,7 @@ class TestAgainstPostgres:
     @pytest.mark.asyncio
     async def test_the_quota_counts_revoked_rows_inside_the_window(self, db: Session, diver: User) -> None:
         """Counting rows rather than live invitations is what makes the quota a bound on
-        emails sent: revoking one after the send does not unsend it."""
+        invitations made: revoking one after the send does not unsend it."""
         from src.app.crud.crud_invitations import invitations_created_since
 
         rows = [
