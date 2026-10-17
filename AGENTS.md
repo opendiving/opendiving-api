@@ -45,9 +45,8 @@ matching the wrapping by hand.
 
 - **Schema changes**: every one ships an Alembic revision. `alembic upgrade head` runs in the API's
   lifespan (`core/setup.py`), so a schema change reaches a database — yours or a self-hoster's — by
-  the container starting, and nothing else. `create_all()` is gone entirely: the test suite used to
-  build its schema that way, and now migrates its own database (`tests/conftest.py`) like everything
-  else. To change the schema:
+  the container starting, and nothing else. Nothing calls `create_all()`: the test suite migrates
+  its own database (`tests/conftest.py`) like everything else. To change the schema:
 
   1. Add the field to the model in `src/app/models/` and the schema in `src/app/schemas/`.
   2. `cd src && uv run alembic revision --autogenerate -m "what changed"`, then **read the generated
@@ -155,9 +154,9 @@ something to look up, not to restate it.
   single resources singular and keyed by public uuid (`/dive/{uuid}`).
 - Methods: GET (read), POST (create), PATCH (partial update), DELETE (remove). PUT only for
   idempotent whole-slot replace — currently `PUT /certification/{uuid}/file/{side}`,
-  `PUT /user/avatar` and `PUT /user/portrait`. Attaching a dive-computer export is **not** one of
-  them: a dive holds an ordered list of recordings and each holds a list of files, so there is no
-  slot to replace and `POST /dive/{uuid}/recordings` appends.
+  `PUT /user/avatar`, `PUT /user/portrait` and `PUT /admin/species/{uuid}/photo`. Attaching a
+  dive-computer export is **not** one of them: a dive holds an ordered list of recordings and each
+  holds a list of files, so there is no slot to replace and `POST /dive/{uuid}/recordings` appends.
 - Response: the resource schema directly (`response_model=DiveRead`) — no envelope. Success is
   signalled by the status code.
 - Errors: FastAPI's `{ "detail": "message" }`; 422 returns `detail` as an array of per-field

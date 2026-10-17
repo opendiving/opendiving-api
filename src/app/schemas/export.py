@@ -7,8 +7,8 @@ normative statement of the shape. What lives here is the writer's half of the
 reference implementation: every member below is defined in `spec/divejson.md` §§4-6, and
 the JSON Schema the `divejson` package publishes plus the beyond-schema rules in that
 spec's §3 are what `tests/test_export_json.py` holds this to, through
-`divejson.validate_document` - the reference validator itself, no longer a copy of it kept
-in this repository.
+`divejson.validate_document` - the reference validator itself, not a copy of it kept in
+this repository.
 
 It replaced the app's own `opendiving-export` format rather than sitting beside it: two
 JSON shapes for one logbook is two things to keep in step forever, and the public one
@@ -187,8 +187,8 @@ class ExportStoredFile(PublicUUIDSchema):
 
     A dive-computer file hangs off a **recording** rather than off the dive, and a recording
     may carry several: the same computer exported twice in two formats is one record in two
-    spellings. Each keeps its own `uuid`, which is what makes them addressable across a
-    round trip and what §3's uuid-uniqueness rule is checked against.
+    spellings. Each carries its own `uuid`, which §3's uuid-uniqueness rule is checked
+    against; an import mints a fresh one rather than keeping it.
     """
 
     original_filename: str
@@ -738,9 +738,9 @@ class ExportEnvelope(BaseModel):
     at a time so a thousand-dive log with its profiles never sits in memory whole, which
     means this model would drift out of step with the real output if nothing checked it.
     `tests/test_export_json.py` closes that gap by validating the streamed bytes against
-    this model *and* against the vendored JSON Schema and the spec's beyond-schema rules -
-    so it is the app's statement of the format, kept honest by a test rather than by being
-    on the write path.
+    this model *and* against the `divejson` package's JSON Schema and the spec's
+    beyond-schema rules - so it is the app's statement of the format, kept honest by a test
+    rather than by being on the write path.
     """
 
     format: str = DIVEJSON_FORMAT

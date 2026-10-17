@@ -143,7 +143,8 @@ class UserUpdate(RejectsExplicitNulls):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Every field here maps to a `NOT NULL` column. Neither picture is here at all - each is
+    # Every field listed maps to a `NOT NULL` column; `dive_form_preset_uuid`, the one
+    # nullable field below, is not listed. Neither picture is here at all - each is
     # written by its own routes under `/user/avatar` and `/user/portrait`, which own the blobs
     # beside the row, and a PATCH that could null a key while leaving the file in the store
     # is exactly the orphan this app has a sweeper for.
@@ -240,12 +241,12 @@ class UserDelete(BaseModel):
     """FastCRUD's soft-delete payload - both columns, which is what makes `deleted_at` the
     deletion clock `purge_deleted_accounts` counts from.
 
-    There is deliberately no `UserRestoreDeleted` beside it any more. It carried
-    `is_deleted` alone, so restoring through it would have cleared the flag and left the
-    clock set - `is_deleted = false, deleted_at = <a date>` looks alive but is a row nothing
-    reconciles, and the mirror state (`true`, `NULL`) is the never-purge one the job warns
-    about. `POST /auth/restore` clears both in one statement under a row lock; a schema that
-    can only clear one is a trap wearing the right name.
+    There is deliberately no `UserRestoreDeleted` beside it. One carrying `is_deleted`
+    alone would clear the flag and leave the clock set - `is_deleted = false,
+    deleted_at = <a date>` looks alive but is a row nothing reconciles, and the mirror
+    state (`true`, `NULL`) is the never-purge one the job warns about. `POST /auth/restore`
+    clears both in one statement under a row lock; a schema that can only clear one is a
+    trap wearing the right name.
     """
 
     model_config = ConfigDict(extra="forbid")

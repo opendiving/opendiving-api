@@ -30,10 +30,10 @@ class WorkerSettings:
         cron(purge_expired_tokens, minute=0, run_at_startup=True),
         # Same shape as the sweep above, and for the same reason: both are idempotent
         # housekeeping that deletes only rows already past their own expiry, so a
-        # restart loop costs nothing but a no-op DELETE. Two tiny statements against
-        # different tables don't contend, so they share the hour mark.
+        # restart loop costs nothing but a no-op DELETE. Tiny statements against
+        # different tables don't contend, so the sweeps share the hour mark.
         cron(purge_expired_authentication_requests, minute=0, run_at_startup=True),
-        # Both new sweeps join the same hour mark on the same criterion the comment above
+        # These two join the same hour mark on the same criterion the comment above
         # states: idempotent housekeeping that deletes only rows already past their own
         # expiry (or, for a session, revoked and last used before today), so a restart loop
         # costs a no-op `DELETE`. Neither destroys anything a diver could ask for back - a
@@ -61,12 +61,12 @@ class WorkerSettings:
         # again by the next map that asks for it.
         cron(purge_unserved_map_tiles, minute=0, run_at_startup=True),
         # Hourly, so `ACCOUNT_DELETION_GRACE_DAYS=0` behaves the way an operator setting
-        # it to zero expects, and at :30 so it doesn't contend with the two sweeps on the
+        # it to zero expects, and at :30 so it doesn't contend with the sweeps on the
         # hour mark. No `run_at_startup`, and that is the difference that matters: those
-        # two delete rows already past their own expiry, this one destroys logbooks, and a
+        # delete rows past an absolute cutoff, this one destroys logbooks, and a
         # restart loop must never be what decides an account's fate a few minutes early.
         cron(purge_deleted_accounts, minute=30),
-        # Deliberately no `run_at_startup` here, unlike the two purges above: those are
+        # Deliberately no `run_at_startup` here, unlike the sweeps above: those are
         # idempotent housekeeping, this one sends email, and a worker restart must never
         # blast a round of reminders out. Once a day is plenty - `should_notify` means
         # most runs send nothing at all.

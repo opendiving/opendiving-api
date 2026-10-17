@@ -137,8 +137,9 @@ async def invite_batch(
     is a thing the operator can act on.
 
     Sends are sequential and inline. The worker runs crons only (`DECISIONS.md` §"The Arq
-    worker now does one real thing"), and a one-off operator action of at most
-    `MAX_ADDRESSES_PER_BATCH` addresses does not justify this app's first queued job.
+    worker runs crons only, and nothing in the API enqueues"), and a one-off operator
+    action of at most `MAX_ADDRESSES_PER_BATCH` addresses does not justify this app's first
+    queued job.
 
     No quota check: superusers are exempt from `INVITATIONS_PER_USER`, and this route
     cannot be reached by anybody else.

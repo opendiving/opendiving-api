@@ -178,7 +178,7 @@ services:
   # an inbox. Point `SMTP_HOST=mailpit`, `SMTP_PORT=1025`, `SMTP_TLS_MODE=none` at it
   # (see src/.env.example), and comment `SMTP_HOST` back out when you're done.
   mailpit:
-    # Mailpit publishes no bare-major tag, so `v1.30` is the widest pin available.
+    # Mailpit publishes no bare-major tag, so a minor pin is the widest available.
     image: axllent/mailpit:v1.31
     restart: unless-stopped
     profiles: ["mail"]

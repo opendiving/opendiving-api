@@ -23,7 +23,7 @@ def split_csv(raw: str | None) -> list[str]:
     `str | None` rather than `list[str]`: for a complex field type pydantic-settings
     parses the environment variable itself and expects JSON, so `TRUSTED_PROXY_IPS=
     172.16.0.0/12` fails validation at startup no matter what `cast=` does at the field.
-    Shared so the three of them agree on what "empty" and "spaces after the comma" mean.
+    Shared so all of them agree on what "empty" and "spaces after the comma" mean.
     """
     return [entry.strip() for entry in (raw or "").split(",") if entry.strip()]
 
@@ -32,9 +32,9 @@ def _installed_version() -> str | None:
     """This distribution's version, from `pyproject.toml` by way of the installed
     metadata.
 
-    `APP_VERSION` used to be duplicated into `src/.env.example`, which meant a released
-    image reported whatever version the operator's own `.env` happened to carry - the
-    template's, usually, frozen at whenever they copied it. Reading it here makes
+    `APP_VERSION` is not in `src/.env.example`: a copy there would make a released image
+    report whatever version the operator's own `.env` happened to carry - the template's,
+    usually, frozen at whenever they copied it. Reading it here makes
     `pyproject.toml` the single source, and the setting an override rather than the
     definition. It reaches `/api/v1/health`, the JSON export's `generator` block and the
     UDDF `<version>` element, all of which are how someone reports a bug against a
@@ -450,10 +450,10 @@ class ContactSettings(BaseSettings):
     # `CONTACT_FORM_` names stay: running instances already set `CONTACT_FORM_EMAIL`, and a
     # rename would be a manual step for every operator.
     #
-    # No default, for the same reason `EMAIL_FROM_ADDRESS` has none. It used to default to
-    # the address for *this project's* own deployment, so a self-hosted instance quietly
-    # routed its users' support mail - password trouble, lost dives, whatever they typed -
-    # to an inbox belonging to strangers who can neither see that server nor help them.
+    # No default, for the same reason `EMAIL_FROM_ADDRESS` has none. A default of this
+    # project's own address would quietly route a self-hosted instance's support mail -
+    # sign-in trouble, lost dives, whatever they typed - to an inbox belonging to
+    # strangers who can neither see that server nor help them.
     # There is no address we can guess that is right for somebody else's install, so unset
     # means the endpoint answers 503 (`api.v1.support`) rather than delivering somewhere.
     CONTACT_FORM_EMAIL: str | None = config("CONTACT_FORM_EMAIL", default=None)
@@ -1049,9 +1049,8 @@ class CRUDAdminSettings(BaseSettings):
     CRUD_ADMIN_REDIS_HOST: str = config("CRUD_ADMIN_REDIS_HOST", default="localhost")
     CRUD_ADMIN_REDIS_PORT: int = config("CRUD_ADMIN_REDIS_PORT", default=6379)
     CRUD_ADMIN_REDIS_DB: int = config("CRUD_ADMIN_REDIS_DB", default=0)
-    # `default=None`, like every other optional setting here. It used to default to the
-    # *string* "None", which `admin.initialize` then had to compare against and translate
-    # back - a sentinel that silently becomes a real password the moment anyone writes
+    # `default=None`, like every other optional setting here, rather than the *string*
+    # "None" - a sentinel that silently becomes a real password the moment anyone writes
     # CRUD_ADMIN_REDIS_PASSWORD="None" meaning it literally.
     CRUD_ADMIN_REDIS_PASSWORD: str | None = config("CRUD_ADMIN_REDIS_PASSWORD", default=None)
 
@@ -1080,11 +1079,8 @@ def configure_logging(level: str) -> None:
     """Point the root logger at stderr at `level`.
 
     Called by both entrypoints - `core.setup` for the API, `core.worker.functions` for the
-    worker - because there is no third place both of them already import. `core.logger`
-    used to be that place, and was imported by nothing at all: it configured a rotating
-    file handler that never existed in any running process, while `core.setup` had to pin
-    the httpx logger by hand with a comment explaining that a hazard guarded only in dead
-    configuration is not guarded. This module owns `LOG_LEVEL`, so it owns applying it.
+    worker - because there is no third place both of them already import. This module
+    owns `LOG_LEVEL`, so it owns applying it.
 
     stderr rather than stdout because that is `basicConfig`'s default stream and there is
     no reason to fight it: both are captured identically by `docker compose logs` and by
@@ -1142,16 +1138,16 @@ class Settings(
         with a published key is compromised in exactly the way a production one is, and
         the local instance is the one whose `.env` came straight from the template.
 
-        The message names `.env` and not `src/.env.example`, which is what it used to name.
-        This refusal has a *second* audience the template path does not describe: the front
-        door's `example.env` ships `change-me-openssl-rand-hex-32`, the same string this
-        module lists as a placeholder, and its by-hand install downloads that file straight
-        to `.env` and tells the operator to replace six values in it. Someone who starts the
-        stack a step early meets this error with no `src/` tree anywhere on the machine, so
-        the old text sent them to a file they could not open. `.env` is the file both of
-        them are editing. (The `install.sh` path generates the key before writing `.env`, so
-        it never reaches here - which is why the by-hand install is the case that decides
-        the wording rather than an edge of it.)
+        The message names `.env` and not `src/.env.example`. This refusal has a *second*
+        audience the template path does not describe: the front door's `example.env` ships
+        `change-me-openssl-rand-hex-32`, the same string this module lists as a placeholder,
+        and its by-hand install downloads that file straight to `.env` and tells the operator
+        to replace six values in it. Someone who starts the stack a step early meets this
+        error with no `src/` tree anywhere on the machine, so naming the template would send
+        them to a file they cannot open. `.env` is the file both of them are editing. (The
+        `install.sh` path generates the key before writing `.env`, so it never reaches here -
+        which is why the by-hand install is the case that decides the wording rather than an
+        edge of it.)
 
         **The first seven words are load-bearing and are not ours to reword.** The front
         door's `docs/configuration`-neighbouring `docs/troubleshooting.md` opens an entry
@@ -1185,11 +1181,10 @@ class Settings(
         Every environment except `local`. `local` is the one where the logged-link
         fallback *is* the documented sign-in flow - the developer reads the link out of
         `docker compose logs api` - and anything else is a deployment someone other than
-        the developer can reach. This used to be scoped to `production` alone, on the
-        argument that staging is close enough to local to be run the same way on purpose;
-        that holds only while staging is a second laptop. A staging box more than one
-        person can reach is a real deployment, and the sign-in links in its logs are real
-        credentials.
+        the developer can reach. Not `production` alone: that staging is close enough to
+        local to be run the same way holds only while staging is a second laptop. A staging
+        box more than one person can reach is a real deployment, and the sign-in links in its
+        logs are real credentials.
         """
         if self.ENVIRONMENT != EnvironmentOption.LOCAL and not self.SMTP_HOST:
             raise ValueError(
@@ -1204,7 +1199,7 @@ class Settings(
     def _require_google_client_secret(self) -> Self:
         """Refuses to boot an instance that offers Google sign-in but cannot complete one.
 
-        The browser never receives a token from Google any more: it comes back with an
+        The browser never receives a token from Google: it comes back with an
         authorization code, and this server redeems that code at Google's token endpoint -
         which takes both halves of the OAuth client. So a `GOOGLE_CLIENT_ID` with no secret
         is an instance that renders the button and then 401s every click.
@@ -1279,9 +1274,9 @@ class Settings(
         against: a cross-field validator that fires on the template's own values takes out
         `docker compose up` and pytest collection together.
 
-        The message names `.env` and not `src/.env.example`, which is what it used to name.
-        A self-hoster installs the bundle from the front door - `docker-compose.yml`,
-        `Caddyfile`, `install.sh` and `example.env` - and has no `src/` tree to open. What
+        The message names `.env` and not `src/.env.example`. A self-hoster installs the
+        bundle from the front door - `docker-compose.yml`, `Caddyfile`, `install.sh` and
+        `example.env` - and has no `src/` tree to open. What
         they do have is `.env`, written out of `example.env` one line at a time precisely so
         the comments around each setting survive into it, object-storage block included; a
         developer's `src/.env` is the same file by the same route. One name is true for both.
@@ -1320,10 +1315,9 @@ class Settings(
         """Refuses to boot an instance that has a relay configured but no address to send
         as.
 
-        `EMAIL_FROM_ADDRESS` used to default to `onboarding@resend.dev`, which was
-        deliverable on exactly one provider's sandbox domain. Through an arbitrary relay
-        that default is not a default at all - it is an SPF/DKIM failure that surfaces
-        hours later, in a recipient's spam folder, with nothing in this app's logs
+        `EMAIL_FROM_ADDRESS` has no default: a provider's sandbox address is deliverable on
+        that provider alone, and through an arbitrary relay it is an SPF/DKIM failure that
+        surfaces hours later, in a recipient's spam folder, with nothing in this app's logs
         pointing at the cause. Failing startup puts the error where the mistake was made.
 
         This is why `src/.env.example` ships the from-address *commented out*: the

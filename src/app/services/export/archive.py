@@ -6,7 +6,8 @@ Layout, and what each member is for:
 logbook.divejson     the complete structured export, a DiveJSON 1.0 document -
                      the same bytes GET /export/divejson serves; see schemas/export.py
 dives.uddf           the same bytes GET /export/uddf serves
-csv/dives.csv        the flat spreadsheet view, plus eight normalized files beside it
+csv/dives.csv        the flat spreadsheet view, plus the normalized files beside it
+                     (`tabular.CSV_WRITERS`)
 avatar.<ext>         the diver's profile picture, if they have one: its original where
                      one is kept, a JPEG or PNG, and otherwise the WebP shown in the app
 portrait.<ext>       the check-in portrait's original, a JPEG or PNG, if there is one

@@ -22,12 +22,11 @@ the sites and species they name and carries the deepest of them, and a site's su
 dives naming it - how many, the latest, the deepest, the species, the rating. So every dive
 write that can move one of those drops the diver's trip caches and site caches together.
 
-These helpers live here rather than in the route modules so `dives.py`, `gear_items.py`,
-`dive_sites.py`, `courses.py`, `contacts.py`, `people.py` and `tags.py` can all reach them
-without importing each other (which would be circular - `dives.py` already invalidates gear
-caches, and gear now has to invalidate dive caches).
+These helpers live here rather than in the route modules so every route and service that
+writes an embedded resource can reach them without importing a route module (which would be
+circular - `dives.py` invalidates gear caches, and gear invalidates dive caches).
 
-Both work by pattern, which is only possible because every affected cache key is
+Every one works by pattern, which is only possible because every affected cache key is
 user-scoped. See `read_dive`/`_cached_read_dives` and `gear_items.py` for the key
 shapes themselves.
 """

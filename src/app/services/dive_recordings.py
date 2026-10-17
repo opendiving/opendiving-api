@@ -5,8 +5,8 @@ dive, or neither. Two halves, on the `dive_files.py` idiom: the top one is pure 
 (`same_device`, `devices_differ`, `delta_seconds`, the three gates), so the decisions worth
 testing are testable without a database; the bottom one persists.
 
-**Why any of this exists.** A dive used to have at most one export and at most one profile.
-Three ordinary things a diver does break that: wearing two computers, exporting one computer
+**Why any of this exists.** At most one export and one profile per dive would not survive
+three ordinary things a diver does: wearing two computers, exporting one computer
 twice (the same Suunto Ocean writes a JSON and a FIT of one dive, and neither carries what
 the other does), and surfacing mid-dive so a computer logs two records. A recording is the
 row between the dive and its files that makes all three representable.
@@ -960,10 +960,9 @@ async def resolve_recording(db: AsyncSession, *, dive_id: int, uuid: uuid_pkg.UU
 async def get_recordings_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, list[RecordingRead]]:
     """Every dive's recordings, with their files and profile summaries, in three queries.
 
-    Batched though only the detail endpoint asks for it, and only ever for one dive - the
-    `get_file_infos_for_dives` shape, for the reason that one gives: it makes the
-    explicit-columns discipline the default, and it is what a recordings marker in the dive
-    list would need without a rewrite.
+    Batched though only the detail endpoint asks for it, and only ever for one dive: it is
+    what a recordings marker in the dive list would need without a rewrite. The two child
+    reads select explicit columns, so neither stored payload is ever loaded.
     """
     if not dive_ids:
         return {}

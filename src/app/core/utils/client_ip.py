@@ -1,7 +1,7 @@
 """Resolving the caller's IP address, which is what every per-IP rate limit is keyed on.
 
 `request.client.host` is the *socket peer*. Directly exposed that is the caller; behind
-any reverse proxy - the bundled nginx, an ALB, Cloudflare - it is the proxy, identically
+any reverse proxy - the bundled Caddy, an ALB, Cloudflare - it is the proxy, identically
 for everyone. Every per-IP bucket then collapses into one global bucket, and a single
 bot exhausting the magic-link limit locks sign-in out for the whole instance.
 
