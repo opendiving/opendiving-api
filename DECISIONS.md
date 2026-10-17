@@ -645,8 +645,9 @@ due.
 
 Unlike `GearItem.type`, these get DB-level `CheckConstraint`s, alongside each interval's `> 0`: they
 are domain invariants rather than a duplicated list, mirrored in `GearServiceScheduleBase`'s
-`require_an_interval` validator and the frontend's Zod refine. `interval_hours` alone also carries a
-Pydantic ceiling of a million, because its threshold adds `3600 ×` it to a snapshot.
+`require_an_interval` validator and the frontend's Zod refine. The write shapes, and not the read
+ones, also cap each interval (`INTERVAL_*_MAX`), because a threshold adds it to a snapshot and an
+unbounded one overflows its column or the calendar.
 
 `services.gear_service.recalculate_service_schedule` derives every due field from one baseline — the
 latest non-deleted record for the schedule, ordered `(serviced_on DESC, id DESC)`, falling back to
