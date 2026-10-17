@@ -71,8 +71,8 @@ from ..app.core.db.database import local_session
 from ..app.models.species import Species
 from ..app.services import blob_store, species_photos
 from ..app.services.species_service import fetch_photo_for_species
+from ._common import log_at_info
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # What one species costs upstream: a Wikidata entity fetch, possibly a synonym search and a
@@ -343,4 +343,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    log_at_info()
     asyncio.run(main())

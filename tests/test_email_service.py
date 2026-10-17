@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pytest
+from pydantic import SecretStr
 
 from src.app.core.config import EnvironmentOption, SMTPTLSMode
 from src.app.services.email_service import (
@@ -171,7 +172,7 @@ class TestSendOverSMTP:
             patch("src.app.services.email_service.settings") as mock_settings,
             patch("src.app.services.email_service.smtplib") as mock_smtplib,
         ):
-            _configured(mock_settings, SMTP_USERNAME=None, SMTP_PASSWORD="ignored")
+            _configured(mock_settings, SMTP_USERNAME=None, SMTP_PASSWORD=SecretStr("ignored"))
 
             _send(self._message())
 
@@ -182,7 +183,7 @@ class TestSendOverSMTP:
             patch("src.app.services.email_service.settings") as mock_settings,
             patch("src.app.services.email_service.smtplib") as mock_smtplib,
         ):
-            _configured(mock_settings, SMTP_USERNAME="resend", SMTP_PASSWORD="re_test_key")
+            _configured(mock_settings, SMTP_USERNAME="resend", SMTP_PASSWORD=SecretStr("re_test_key"))
 
             _send(self._message())
 

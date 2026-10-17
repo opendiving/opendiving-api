@@ -24,6 +24,7 @@ import anyio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from src.app.api import router
 from src.app.api.dependencies import get_current_user
@@ -792,7 +793,7 @@ class TestProviderContract:
         assert "key" not in dict(patched.requests[0].url.params)
 
     def test_sends_the_key_when_one_is_configured(self, client: TestClient, no_redis: None, monkeypatch: Any):
-        monkeypatch.setattr(settings, "GEOCODER_API_KEY", "secret-key")
+        monkeypatch.setattr(settings, "GEOCODER_API_KEY", SecretStr("secret-key"))
 
         with _responds(REVERSE_PAYLOAD) as patched:
             client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2})
@@ -805,7 +806,7 @@ class TestProviderContract:
         `core.setup` pins that logger to WARNING for exactly this reason; this asserts it,
         at INFO, so nobody removes the line and finds out from a log aggregator.
         """
-        monkeypatch.setattr(settings, "GEOCODER_API_KEY", "super-secret-key")
+        monkeypatch.setattr(settings, "GEOCODER_API_KEY", SecretStr("super-secret-key"))
 
         with caplog.at_level(logging.INFO), _responds({"error": "Bandwidth limit exceeded"}):
             client.get("/api/v1/geocode/reverse", params={"lat": 1, "lon": 2})
@@ -1359,7 +1360,7 @@ class TestSearchProviderContract:
     def test_sends_only_parameters_photon_accepts(self, client: TestClient, no_redis: None, monkeypatch: Any):
         """With a key configured, since `GEOCODER_API_KEY` is the Nominatim parameter that
         would do the most harm arriving somewhere it was never meant for."""
-        monkeypatch.setattr(settings, "GEOCODER_API_KEY", "secret-key")
+        monkeypatch.setattr(settings, "GEOCODER_API_KEY", SecretStr("secret-key"))
 
         request = self._sent(client)
 
