@@ -26,7 +26,7 @@ from ...core.exceptions.http_exceptions import (
 from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
 from ...core.utils.binary_responses import not_modified, stored_bytes_response
 from ...core.utils.cache import cache, delete_keys_by_pattern
-from ...core.utils.client_ip import client_ip
+from ...core.utils.client_ip import client_ip_bucket
 from ...core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE, clamp_pagination
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.request_context import RequestContext
@@ -536,7 +536,7 @@ async def request_email_change(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
     await enforce_rate_limit(
-        f"email-change:ip:{client_ip(request)}",
+        f"email-change:ip:{client_ip_bucket(request)}",
         settings.EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER * 5,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -604,7 +604,7 @@ async def check_email_change_link(
     response.headers["Cache-Control"] = "private, no-store"
 
     await enforce_rate_limit(
-        f"email-change-verify-check:ip:{client_ip(request)}",
+        f"email-change-verify-check:ip:{client_ip_bucket(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -651,7 +651,7 @@ async def verify_email_change(
     account's email and takes the identical tolerated-replay-or-reject decision.
     """
     await enforce_rate_limit(
-        f"email-change-verify:ip:{client_ip(request)}",
+        f"email-change-verify:ip:{client_ip_bucket(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )

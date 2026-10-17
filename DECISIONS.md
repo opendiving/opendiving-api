@@ -3984,14 +3984,16 @@ by uuid each tab names its own.
 
 Six digits is ~20 bits; `code_hash` is SHA-256 for hygiene only, and no key-stretching saves a
 millionfold space. `SIGN_IN_CODE_ATTEMPTS_MAX` (5) is the defence, so it must hold under
-concurrency: `register_failed_code_attempt` is hand-written Core, one `UPDATE` that increments and,
-in the same `CASE`, nulls `code_hash` when the count reaches the cap. Read-decide-write lets five
-parallel guesses all read `0`, and rate limiting is no substitute: it fails open on a Redis outage.
-Residual exposure: only a requester holds a `request_id`, and every request emails the victim.
-`MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL` allows 3 per `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS` (900
-s), each worth 5 guesses in 10⁶: 15 guesses a quarter hour, an expected success in ~694 days of 288
-emails a day. The lever, if observation disagrees, is eight digits (×100), not the request cap,
-whose 3 → 1 of headroom every diver with a lost first email pays for.
+concurrency: `charge_code_attempt` is hand-written Core, one
+`UPDATE … WHERE code_attempts < :max RETURNING code_hash`, and the route compares against the digest
+it returns. Rejected: comparing first and charging on failure, where every guess in flight reads the
+digest before any charge lands and a right one among a hundred parallel guesses claims. Rate
+limiting is no substitute: it fails open on a Redis outage. Residual exposure: only a requester
+holds a `request_id`, and every request emails the victim. `MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL`
+allows 3 per `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS` (900 s), each worth 5 guesses in 10⁶: 15 guesses
+a quarter hour, an expected success in ~694 days of 288 emails a day. The lever, if observation
+disagrees, is eight digits (×100), not the request cap, whose 3 → 1 of headroom every diver with a
+lost first email pays for.
 
 ## Sign-in code: Everything else is the shape already there
 
@@ -5318,7 +5320,7 @@ and its registration — so a thing that fails to happen leaves no row saying it
 the write commits on its own, including every path about to raise: `async_get_db` does not commit on
 unwind, so a row left in flight on a 401 is lost. The refresh replay and the passkey counter
 regression, which `finish_sign_in` follows with an `UnauthorizedException`, both fire on such a
-path; `register_failed_code_attempt` commits before its own 401 for the same reason.
+path; `charge_code_attempt` commits before its own 401 for the same reason.
 
 ## Auth audit: What a row may never contain
 

@@ -33,7 +33,7 @@ from src.app.core.exceptions.http_exceptions import (
 )
 from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
 from src.app.core.security import ALGORITHM, SECRET_KEY, hash_sign_in_code
-from src.app.core.utils import outbound
+from src.app.core.utils import cache, outbound
 from src.app.schemas.auth import (
     EmailAuthRequest,
     EmailCodeVerifyRequest,
@@ -42,6 +42,7 @@ from src.app.schemas.auth import (
     ProfileCompletionRequest,
 )
 from src.app.services.user_pictures import StoredAvatar
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.fake_s3 import select_s3_backend
 from tests.helpers.images import jpeg_with_exif
 from tests.helpers.mocks import (
@@ -238,6 +239,22 @@ class TestRequestEmailLink:
 
             with pytest.raises(RateLimitException):
                 await request_email_link(_request(), EmailAuthRequest(email="spammed@example.com"), mock_db)
+
+    @pytest.mark.asyncio
+    async def test_a_request_the_ip_limit_refuses_spends_nothing_of_the_address(self, mock_db):
+        """Through the real limiter. Charged the other way round, one caller over its own
+        per-IP limit could go on draining any address's three a window, and keep that
+        diver out of email sign-in without ever being let through itself."""
+        redis = FakeRedis()
+        ip_key = "auth:email-request:ip:1.2.3.4"
+        redis.store[ip_key] = str(settings.MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP).encode()
+        redis.expiries[ip_key] = settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS
+
+        with patch.object(cache, "client", redis):
+            with pytest.raises(RateLimitException):
+                await request_email_link(_request(), EmailAuthRequest(email="victim@example.com"), mock_db)
+
+        assert "auth:email-request:email:victim@example.com" not in redis.store
 
 
 class TestCheckEmailLink:
@@ -581,6 +598,19 @@ class TestVerifyEmailCode:
     def _body(code: str = CODE) -> EmailCodeVerifyRequest:
         return EmailCodeVerifyRequest(request_id=REQUEST_UUID, code=code)
 
+    @pytest.fixture(autouse=True)
+    def charge(self):
+        """The charge hands back the row's digest, as a live row with attempts left does.
+        `stub_claim` cannot stand in for it: its `execute` answers with a rowcount and no
+        digest, so the comparison would be against a mock."""
+        with (
+            patch(
+                "src.app.api.v1.auth.charge_code_attempt", new_callable=AsyncMock, return_value=hash_sign_in_code(CODE)
+            ) as charge,
+            patch("src.app.api.v1.auth.spend_exhausted_code", new_callable=AsyncMock),
+        ):
+            yield charge
+
     @pytest.mark.asyncio
     async def test_rate_limited_requests_are_rejected(self, mock_db):
         with patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock) as mock_limit:
@@ -624,7 +654,6 @@ class TestVerifyEmailCode:
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
-            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock),
         ):
             mock_requests.get = AsyncMock(return_value=None)
             with pytest.raises(UnauthorizedException) as unknown_id:
@@ -637,11 +666,11 @@ class TestVerifyEmailCode:
         assert unknown_id.value.detail == wrong_code.value.detail
 
     @pytest.mark.asyncio
-    async def test_a_wrong_code_is_charged_against_the_attempt_cap(self, mock_db):
+    async def test_a_wrong_code_is_charged_against_the_attempt_cap(self, mock_db, charge):
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
-            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock) as mock_charge,
+            patch("src.app.api.v1.auth.spend_exhausted_code", new_callable=AsyncMock) as mock_spend,
             patch("src.app.api.v1.auth.resolve_identity", new_callable=AsyncMock) as mock_resolve,
         ):
             mock_requests.get = AsyncMock(return_value=_code_request())
@@ -650,14 +679,55 @@ class TestVerifyEmailCode:
             with pytest.raises(UnauthorizedException):
                 await verify_email_code(_request(), self._body(code="000000"), response, mock_db)
 
-            mock_charge.assert_awaited_once()
-            assert mock_charge.await_args.kwargs["request_id"] == 1
-            assert mock_charge.await_args.kwargs["max_attempts"] == settings.SIGN_IN_CODE_ATTEMPTS_MAX
+            charge.assert_awaited_once()
+            assert charge.await_args.kwargs["request_id"] == 1
+            assert charge.await_args.kwargs["max_attempts"] == settings.SIGN_IN_CODE_ATTEMPTS_MAX
+            mock_spend.assert_awaited_once()
             mock_resolve.assert_not_called()
             response.set_cookie.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_a_spent_code_is_rejected_without_charging_another_attempt(self, mock_db):
+    async def test_the_right_code_is_refused_when_the_charge_finds_no_attempt_left(self, mock_db, charge):
+        """The cap holding under concurrency. Every guess in flight passed the read above
+        it, so a right code whose charge comes back empty lost its place to the guesses
+        that spent the last attempts - and must not reach the claim.
+        """
+        charge.return_value = None
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.resolve_identity", new_callable=AsyncMock) as mock_resolve,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request())
+            stub_claim(mock_db)
+
+            response = Mock()
+            with pytest.raises(UnauthorizedException, match="invalid or has expired"):
+                await verify_email_code(_request(), self._body(), response, mock_db)
+
+            mock_db.execute.assert_not_called()
+            mock_resolve.assert_not_called()
+            response.set_cookie.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_code_is_compared_with_the_digest_the_charge_returned(self, mock_db, charge):
+        """Not with the one the fast-path read saw: that read is not what bounds the
+        guesses, and a digest nulled since it was taken must not still admit a code."""
+        charge.return_value = hash_sign_in_code("999999")
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.resolve_identity", new_callable=AsyncMock) as mock_resolve,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request())
+
+            with pytest.raises(UnauthorizedException):
+                await verify_email_code(_request(), self._body(), Mock(), mock_db)
+
+            mock_resolve.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_spent_code_is_rejected_without_charging_another_attempt(self, mock_db, charge):
         """`code_hash IS NULL` is how "the attempts ran out" is spelled. Charging again
         would keep incrementing a counter nothing reads, and the row still carries a live
         link this must not touch.
@@ -665,14 +735,13 @@ class TestVerifyEmailCode:
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
-            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock) as mock_charge,
         ):
             mock_requests.get = AsyncMock(return_value=_code_request(code_hash=None))
 
             with pytest.raises(UnauthorizedException):
                 await verify_email_code(_request(), self._body(), Mock(), mock_db)
 
-            mock_charge.assert_not_called()
+            charge.assert_not_called()
             mock_db.execute.assert_not_called()
 
     @pytest.mark.asyncio
@@ -684,7 +753,7 @@ class TestVerifyEmailCode:
             pytest.param({"expires_at": datetime.now(UTC) - timedelta(minutes=1)}, id="expired"),
         ],
     )
-    async def test_a_row_that_is_no_longer_live_is_rejected(self, mock_db, overrides):
+    async def test_a_row_that_is_no_longer_live_is_rejected(self, mock_db, overrides, charge):
         """Unlike the link, these collapse into one message rather than reporting which
         applies: the link's reasons steer a human looking at a page ("a newer link is
         waiting"), while a code is typed against a row the caller cannot see.
@@ -692,14 +761,13 @@ class TestVerifyEmailCode:
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
-            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock) as mock_charge,
         ):
             mock_requests.get = AsyncMock(return_value=_code_request(**overrides))
 
             with pytest.raises(UnauthorizedException, match="invalid or has expired"):
                 await verify_email_code(_request(), self._body(), Mock(), mock_db)
 
-            mock_charge.assert_not_called()
+            charge.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_the_right_code_signs_an_existing_user_in_through_the_claim(self, mock_db):
