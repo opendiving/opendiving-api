@@ -438,6 +438,10 @@ class TestCredentialsDoNotRenderThemselves:
             "GEOCODER_API_KEY",
             "S3_SECRET_ACCESS_KEY",
             "CRUD_ADMIN_REDIS_PASSWORD",
+            "POSTGRES_PASSWORD",
+            "REDIS_PASSWORD",
+            "POSTGRES_URI",
+            "REDIS_CACHE_URL",
         ],
     )
     def test_neither_repr_nor_str_spills_the_value(self, name: str):
@@ -446,6 +450,27 @@ class TestCredentialsDoNotRenderThemselves:
         assert "a-real-looking-secret" not in repr(value)
         assert "a-real-looking-secret" not in str(value)
         assert value.get_secret_value() == "a-real-looking-secret"
+
+    def test_the_dsns_carry_the_password_as_configured(self, tmp_path, monkeypatch):
+        """The DSNs are built from the unwrapped passwords at import, so what reaches Postgres
+        and Redis is the configured value - and `repr(settings)` shows neither."""
+        for name, value in {
+            "POSTGRES_USER": "opendive",
+            "POSTGRES_PASSWORD": "pg-p@ss",
+            "POSTGRES_SERVER": "db",
+            "POSTGRES_PORT": "5432",
+            "POSTGRES_DB": "opendive",
+            "REDIS_CACHE_HOST": "redis",
+            "REDIS_CACHE_PORT": "6379",
+            "REDIS_PASSWORD": "redis-p@ss",
+        }.items():
+            monkeypatch.setenv(name, value)
+
+        loaded = _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings
+
+        assert loaded.POSTGRES_URI.get_secret_value() == "opendive:pg-p%40ss@db:5432/opendive"
+        assert loaded.REDIS_CACHE_URL.get_secret_value() == "redis://:redis-p%40ss@redis:6379"
+        assert "p@ss" not in repr(loaded) and "p%40ss" not in repr(loaded)
 
 
 class TestGeocoderDefaults:

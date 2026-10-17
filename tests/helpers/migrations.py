@@ -31,7 +31,7 @@ def engine_for(database: str, **options: Any) -> Engine:
         settings.POSTGRES_SYNC_PREFIX
         + postgres_uri(
             settings.POSTGRES_USER,
-            settings.POSTGRES_PASSWORD,
+            settings.POSTGRES_PASSWORD.get_secret_value(),
             settings.POSTGRES_SERVER,
             settings.POSTGRES_PORT,
             database,

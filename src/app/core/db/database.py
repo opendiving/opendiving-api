@@ -11,9 +11,9 @@ class Base(DeclarativeBase, MappedAsDataclass):
     pass
 
 
-DATABASE_URI = settings.POSTGRES_URI
-DATABASE_PREFIX = settings.POSTGRES_ASYNC_PREFIX
-DATABASE_URL = f"{DATABASE_PREFIX}{DATABASE_URI}"
+# A plain `str` because that is what `create_async_engine` and alembic's `env.py` take; the
+# engine keeps it as a `URL`, whose `repr` masks the password.
+DATABASE_URL = settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI.get_secret_value()
 
 
 async_engine = create_async_engine(DATABASE_URL, echo=False, future=True)

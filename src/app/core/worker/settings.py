@@ -77,7 +77,11 @@ class WorkerSettings:
         cron(send_renewal_reminders, hour=settings.GEAR_SERVICE_DIGEST_HOUR, minute=0),
         cron(send_year_in_review, hour=settings.GEAR_SERVICE_DIGEST_HOUR, minute=0),
     ]
-    redis_settings = RedisSettings(host=REDIS_QUEUE_HOST, port=REDIS_QUEUE_PORT, password=settings.REDIS_PASSWORD)
+    redis_settings = RedisSettings(
+        host=REDIS_QUEUE_HOST,
+        port=REDIS_QUEUE_PORT,
+        password=settings.REDIS_PASSWORD.get_secret_value() if settings.REDIS_PASSWORD is not None else None,
+    )
     # `arq --check` reads a sentinel key that the worker rewrites every
     # `health_check_interval` seconds with a TTL of interval + 1, so the interval is also
     # how stale a passing check may be. Arq's default of an hour would let a dead worker

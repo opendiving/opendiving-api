@@ -135,7 +135,7 @@ class TestTheLifespanMeasuresWhatTheRevisionCouldNot:
             settings.POSTGRES_ASYNC_PREFIX
             + postgres_uri(
                 settings.POSTGRES_USER,
-                settings.POSTGRES_PASSWORD,
+                settings.POSTGRES_PASSWORD.get_secret_value(),
                 settings.POSTGRES_SERVER,
                 settings.POSTGRES_PORT,
                 name,
@@ -168,7 +168,7 @@ class TestTheLifespanMeasuresWhatTheRevisionCouldNot:
             settings.POSTGRES_ASYNC_PREFIX
             + postgres_uri(
                 settings.POSTGRES_USER,
-                settings.POSTGRES_PASSWORD,
+                settings.POSTGRES_PASSWORD.get_secret_value(),
                 settings.POSTGRES_SERVER,
                 settings.POSTGRES_PORT,
                 name,

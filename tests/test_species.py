@@ -3157,7 +3157,7 @@ class TestConcurrentResolvesDoNotExhaustThePool:
         only how long a *failing* run takes.
         """
         engine = create_async_engine(
-            settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI,
+            settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI.get_secret_value(),
             # Size and overflow are `create_async_engine`'s own defaults, spelled out so the
             # numbers below are readable. `pool_timeout` is not - it defaults to 30 s, and
             # waiting that out is the very failure under test, so a run that reintroduces it
