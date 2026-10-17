@@ -48,6 +48,21 @@ def test_preflight_request_is_allowed_for_configured_frontend_origin(cors_client
     assert response.headers["access-control-allow-credentials"] == "true"
 
 
+def test_a_frontend_url_with_a_trailing_slash_still_matches_the_browsers_origin() -> None:
+    """A browser's `Origin` is a bare `scheme://host[:port]`, so the raw setting written the
+    ordinary way, with a slash, would match no request and refuse every split-origin call."""
+    origin = settings.frontend_origin
+    slashed = settings.model_copy(update={"FRONTEND_URL": f"{origin}/"})
+    app = create_application(router=router, settings=slashed, apply_migrations_on_start=False)
+
+    # Not entered, so no lifespan: the module's `cors_client` already runs one, and the map
+    # renderer's refresher is process-wide. A preflight is answered by the middleware alone.
+    response = TestClient(app).options("/api/v1/auth/refresh", headers={"Origin": origin, **_PREFLIGHT_HEADERS})
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+
+
 def test_preflight_request_is_rejected_for_unrecognized_origin(cors_client: TestClient) -> None:
     response = cors_client.options(
         "/api/v1/auth/refresh", headers={"Origin": "http://evil.example.com", **_PREFLIGHT_HEADERS}

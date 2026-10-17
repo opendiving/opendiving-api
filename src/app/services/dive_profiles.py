@@ -48,7 +48,8 @@ from typing import Any, Literal, cast
 
 import divejson
 from pydantic import ValidationError
-from sqlalchemy import CursorResult, delete, func, insert, select, update
+from sqlalchemy import CursorResult, case, delete, func, insert, null, select, type_coerce, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
@@ -1205,16 +1206,28 @@ async def load_stored_profile(db: AsyncSession, *, recording_id: int) -> StoredP
     `duration` and the two provenance columns ride along because a caller rewriting the row
     has to put them back: the span may be the document's rather than the samples' (see
     `store_profile`), and a merge that reset either provenance column would make a profile
-    nothing can reproduce look reproducible.
+    nothing can reproduce look reproducible. **`gas_attribution` is the stored column's**,
+    which was derived from the full-resolution samples before they were thinned; one that no
+    longer validates is derived again from the stored samples, with a warning.
     """
-    stmt = select(DiveProfile.duration, DiveProfile.parser_key, DiveProfile.source_sha256, DiveProfile.data).where(
-        DiveProfile.recording_id == recording_id
-    )
+    stmt = select(
+        DiveProfile.duration,
+        DiveProfile.parser_key,
+        DiveProfile.source_sha256,
+        DiveProfile.gas_attribution,
+        DiveProfile.data,
+    ).where(DiveProfile.recording_id == recording_id)
     row = (await db.execute(stmt)).one_or_none()
     if row is None:
         return None
+    profile = profile_from_data(row.data or {})
+    try:
+        attribution = [GasAttribution.model_validate(entry) for entry in row.gas_attribution or []]
+    except ValidationError:
+        logger.warning("Re-deriving unreadable gas attribution stored for recording %s", recording_id, exc_info=True)
+        attribution = derive_gas_attribution(profile)
     return StoredProfile(
-        profile=profile_from_data(row.data or {}),
+        profile=replace(profile, gas_attribution=attribution),
         duration=row.duration,
         parser_key=row.parser_key,
         source_sha256=row.source_sha256,
@@ -1234,26 +1247,27 @@ async def replace_profile_samples(db: AsyncSession, *, recording_id: int, profil
 
     `duration` is left alone for the same reason: a relabel moves no sample in time, and the
     stored span may be a document's declared one rather than the samples' own.
-    `gas_attribution` is re-derived rather than carried - its entries are keyed by
-    `gas_number`, which is precisely what just moved.
+    `gas_attribution` is the profile's own, which `load_stored_profile` read off the row and
+    `apply_gas_mapping` relabelled: deriving it here would read the thinned samples, which
+    `attribute_and_cap` exists to prevent. A NULL column stays NULL - extracted before
+    attribution existed, which a relabel does not change.
 
     Also the rewrite that keeps a dive's other recordings pointing at its cylinders when a
     primary's labels renumber them (`dive_files.label_cylinders`). **The row's `uuid` is
     minted afresh** either way, because the profile's ETag carries it: samples that changed under
     an unchanged ETag would be served from a client's cache against cylinders that moved.
     """
-    attributed = replace(profile, gas_attribution=derive_gas_attribution(profile))
-
+    attribution = type_coerce([entry.model_dump() for entry in profile.gas_attribution], JSONB)
     await db.execute(
         update(DiveProfile)
         .where(DiveProfile.recording_id == recording_id)
         .values(
-            depth_sample_count=attributed.depth_sample_count,
-            event_count=len(attributed.events),
-            **summary_extremes(attributed),
-            gas_attribution=[entry.model_dump() for entry in attributed.gas_attribution],
-            depth_outline=_depth_outline_column(attributed),
-            data=attributed.to_data(),
+            depth_sample_count=profile.depth_sample_count,
+            event_count=len(profile.events),
+            **summary_extremes(profile),
+            gas_attribution=case((DiveProfile.gas_attribution.is_(None), null()), else_=attribution),
+            depth_outline=_depth_outline_column(profile),
+            data=profile.to_data(),
             uuid=uuid7(),
         )
     )

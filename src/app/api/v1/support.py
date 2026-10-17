@@ -10,7 +10,7 @@ there is nowhere else for the message to go.
 from fastapi import APIRouter, HTTPException, Request
 
 from ...core.config import settings
-from ...core.utils.client_ip import client_ip
+from ...core.utils.client_ip import client_ip_bucket
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...schemas.support import SUPPORT_CATEGORY_LABELS, SupportRequest, SupportResponse
 from ...services.email_service import send_support_request_email
@@ -45,14 +45,15 @@ async def send_support_request(request: Request, body: SupportRequest) -> Suppor
 
     email = body.email.lower()
 
+    # Per-IP before per-address, as `request_email_link` orders them and for its reason.
     await enforce_rate_limit(
-        f"support:email:{email}",
-        settings.CONTACT_FORM_RATE_LIMIT_PER_EMAIL,
+        f"support:ip:{client_ip_bucket(request)}",
+        settings.CONTACT_FORM_RATE_LIMIT_PER_IP,
         settings.CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS,
     )
     await enforce_rate_limit(
-        f"support:ip:{client_ip(request)}",
-        settings.CONTACT_FORM_RATE_LIMIT_PER_IP,
+        f"support:email:{email}",
+        settings.CONTACT_FORM_RATE_LIMIT_PER_EMAIL,
         settings.CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS,
     )
 

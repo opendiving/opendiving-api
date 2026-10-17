@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from src.app.core.utils import client_ip as client_ip_module
-from src.app.core.utils.client_ip import client_ip
+from src.app.core.utils.client_ip import client_ip, client_ip_bucket
 
 
 def _request(peer: str | None, forwarded: str | None = None) -> Mock:
@@ -136,3 +136,31 @@ class TestRateLimitKeysActuallyDiffer:
             second = client_ip(_request("10.0.0.5", "198.51.100.4"))
 
         assert first != second
+
+
+class TestClientIpBucket:
+    """What a per-IP rate limit is keyed on. An IPv6 host is handed a whole /64, so keying
+    on its full address would let one machine present a fresh bucket per request."""
+
+    def test_an_ipv4_address_is_its_own_bucket(self):
+        with _with_trusted(None):
+            assert client_ip_bucket(_request("203.0.113.7")) == "203.0.113.7"
+
+    def test_ipv6_addresses_in_one_64_share_a_bucket(self):
+        with _with_trusted(None):
+            one = client_ip_bucket(_request("2001:db8:1:2::1"))
+            other = client_ip_bucket(_request("2001:db8:1:2:ffff:ffff:ffff:ffff"))
+
+        assert one == other == "2001:db8:1:2::/64"
+
+    def test_neighbouring_64s_do_not(self):
+        with _with_trusted(None):
+            assert client_ip_bucket(_request("2001:db8:1:2::1")) != client_ip_bucket(_request("2001:db8:1:3::1"))
+
+    def test_an_ipv4_mapped_address_is_keyed_as_ipv4(self):
+        with _with_trusted(None):
+            assert client_ip_bucket(_request("::ffff:203.0.113.7")) == "203.0.113.7"
+
+    def test_an_unknown_peer_stays_the_shared_bucket(self):
+        with _with_trusted(None):
+            assert client_ip_bucket(_request(None)) == "unknown"

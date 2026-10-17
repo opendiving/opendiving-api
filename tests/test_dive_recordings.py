@@ -404,12 +404,25 @@ class TestRelabellingASecondComputersCylinders:
         """A real tank the second computer saw. Dropping it would lose a cylinder from the
         dive; reusing a label would attribute two tanks' pressures to one."""
         mapping, cylinders = relabel_gas_numbers(
-            self._parsed((1, 21.0, 0.0), (2, 99.0, 0.0)), self._stored((1, 21.0, 0.0)), fill=False
+            self._parsed((1, 21.0, 0.0), (2, 99.0, 0.0)), self._stored((1, 21.0, 0.0)), fill=True
         )
 
         assert mapping == {1: 1, 2: 2}
         assert cylinders is not None
         assert [(row.oxygen, row.gas_number) for row in cylinders] == [(21.0, 1), (99.0, 2)]
+
+    def test_a_re_read_appends_nothing_and_points_the_channel_at_no_cylinder(self) -> None:
+        """A cylinder that pairs with nothing on a re-read is one the diver deleted. A backfill
+        or a repeat upload must not put it back, and its channel must not name a row the dive
+        still has."""
+        mapping, cylinders = relabel_gas_numbers(
+            self._parsed((1, 21.0, 0.0), (2, 99.0, 0.0), (3, 32.0, 0.0)),
+            self._stored((1, 21.0, 0.0), (4, 32.0, 0.0)),
+            fill=False,
+        )
+
+        assert cylinders is None
+        assert mapping == {1: 1, 2: 5, 3: 4}
 
     def test_the_primary_recordings_own_labels_map_to_themselves(self) -> None:
         """The identity case, and the reason an empty map leaves a profile alone."""
@@ -445,7 +458,7 @@ class TestRelabellingASecondComputersCylinders:
         mapping, cylinders = relabel_gas_numbers(
             self._parsed((0, 21.0, 0.0), (1, 32.0, 0.0), (2, 99.0, 0.0)),
             self._stored((None, 21.0, 0.0), (0, 32.0, 0.0)),
-            fill=False,
+            fill=True,
         )
 
         assert cylinders is not None
