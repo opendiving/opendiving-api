@@ -1,4 +1,5 @@
 import uuid as uuid_pkg
+from collections.abc import Awaitable
 from datetime import datetime
 from typing import Annotated, Any, cast
 
@@ -77,15 +78,21 @@ router = APIRouter(tags=["trips"])
 # insert (a concurrent hard delete): lengths and ranges are already bounded by
 # `TripPartInput`, and the people write drops a repeated person before
 # `ux_trip_person_trip_id_person_id` could refuse it. 422 rather than a raw 500,
-# matching how `patch_dive` treats its child-row writes.
-#
-# Both routes raise before invalidating anything, so this path knowingly leaves the trip's
-# caches as they were - including any column update `patch_trip` already committed. Same
-# as `patch_dive`, and the trade is deliberate: the trigger needs a concurrent delete, and
-# invalidating on the way out of a failed write would mean doing it in two places for a
-# race that narrow.
+# matching how `patch_dive` treats its child-row writes, and the whole request rolls back
+# with it, so the caches have nothing to drop.
 _PART_ERROR_DETAIL = "Trip parts could not be saved."
 _PEOPLE_ERROR_DETAIL = "The trip's people could not be saved."
+
+
+async def _write_or_422(db: AsyncSession, write: Awaitable[object], detail: str) -> None:
+    """Run one uncommitted write of a trip request and flush it, so a constraint it breaks is
+    this write's 422 - and rolls back the whole request, the trip row included."""
+    try:
+        await write
+        await db.flush()
+    except IntegrityError as e:
+        await db.rollback()
+        raise UnprocessableEntityException(detail) from e
 
 
 async def _resolve_accommodations(
@@ -209,8 +216,8 @@ async def write_trip(
     own - or doesn't exist - is a 422. `people` names who came on the trip, each with a role
     or none, and is refused the same way.
 
-    The trip row commits before its parts do, so a failure inserting them leaves the trip
-    behind without them - the same accepted semantics as `POST /dive` and its mixtures.
+    The trip, its parts and its people commit together or not at all, as a dive and its
+    children do.
     """
     if await trip_name_exists(db=db, user_id=current_user["id"], name=trip.name):
         raise DuplicateValueException("A trip with this name already exists")
@@ -221,22 +228,23 @@ async def write_trip(
     # parts are rows in another table.
     trip_internal = TripCreateInternal(name=trip.name, notes=trip.notes, user_id=current_user["id"])
     created_trip = await crud_trips.create(
-        db=db, object=trip_internal, schema_to_select=TripReadInternal, return_as_model=True
+        db=db, object=trip_internal, commit=False, schema_to_select=TripReadInternal, return_as_model=True
     )
 
-    try:
-        await replace_parts_for_trip(
-            db=db, trip_id=created_trip.id, parts=trip.parts, accommodation_ids=accommodation_ids
-        )
-    except IntegrityError as e:
-        await db.rollback()
-        raise UnprocessableEntityException(_PART_ERROR_DETAIL) from e
+    await _write_or_422(
+        db,
+        replace_parts_for_trip(
+            db=db, trip_id=created_trip.id, parts=trip.parts, commit=False, accommodation_ids=accommodation_ids
+        ),
+        _PART_ERROR_DETAIL,
+    )
     if people:
-        try:
-            await replace_people_for_trip(db=db, trip_id=created_trip.id, references=people)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_PEOPLE_ERROR_DETAIL) from e
+        await _write_or_422(
+            db,
+            replace_people_for_trip(db=db, trip_id=created_trip.id, references=people, commit=False),
+            _PEOPLE_ERROR_DETAIL,
+        )
+    await db.commit()
 
     await invalidate_trip_caches(current_user["id"])
 
@@ -648,25 +656,26 @@ async def patch_trip(
     )
 
     if update_data:
-        await crud_trips.update(db=db, object=update_data, uuid=uuid)
-
+        await crud_trips.update(db=db, object=update_data, uuid=uuid, commit=False)
     if parts is not None:
-        try:
-            await replace_parts_for_trip(db=db, trip_id=db_trip.id, parts=parts, accommodation_ids=accommodation_ids)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_PART_ERROR_DETAIL) from e
-
+        await _write_or_422(
+            db,
+            replace_parts_for_trip(
+                db=db, trip_id=db_trip.id, parts=parts, commit=False, accommodation_ids=accommodation_ids
+            ),
+            _PART_ERROR_DETAIL,
+        )
     if people is not None:
-        try:
-            await replace_people_for_trip(db=db, trip_id=db_trip.id, references=people)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_PEOPLE_ERROR_DETAIL) from e
+        await _write_or_422(
+            db,
+            replace_people_for_trip(db=db, trip_id=db_trip.id, references=people, commit=False),
+            _PEOPLE_ERROR_DETAIL,
+        )
 
     # A parts- or people-only edit has an empty `update_data` but still changes what every
     # read of this trip says.
     if update_data or parts is not None or people is not None:
+        await db.commit()
         await invalidate_trip_caches(db_trip.user_id)
     # A part's dates decide which dives on no trip the trip's dive list carries.
     if parts is not None:

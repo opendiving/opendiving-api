@@ -34,6 +34,7 @@ from ...crud.crud_auth_audit_events import record_auth_event
 from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
 from ...crud.crud_dive_form_presets import crud_dive_form_presets
 from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
+from ...crud.crud_invitations import account_exists_for
 from ...crud.crud_trip_parts import get_places_for_user
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_user_sessions import revoke_session
@@ -160,7 +161,8 @@ async def patch_user(
     """
     # Note: `email` is deliberately not part of `UserUpdate` - see
     # `POST /user/email-change/request` for how email changes work instead.
-    if values.username is not None and values.username != current_user["username"]:
+    claims_a_username = values.username is not None and values.username != current_user["username"]
+    if claims_a_username:
         await enforce_rate_limit(
             f"username-change:user:{current_user['id']}",
             settings.USERNAME_CHANGE_RATE_LIMIT_PER_USER,
@@ -174,7 +176,15 @@ async def patch_user(
     ):
         raise UnprocessableEntityException("Dive form preset not found.")
 
-    await crud_users.update(db=db, object=values, uuid=current_user["uuid"])
+    try:
+        await crud_users.update(db=db, object=values, uuid=current_user["uuid"])
+    except IntegrityError:
+        await db.rollback()
+        # The `exists` check above loses to a concurrent claim of the same name. Anything
+        # else - the picked preset deleted in between - is not about the username.
+        if claims_a_username:
+            raise DuplicateValueException("Username not available") from None
+        raise
     return {"message": "User updated"}
 
 
@@ -682,7 +692,7 @@ async def verify_email_change(
     if expires_at < datetime.now(UTC):
         raise UnauthorizedException("This confirmation link has expired.")
 
-    if await crud_users.exists(db=db, email=new_email):
+    if await account_exists_for(db, email=new_email.lower()):
         raise DuplicateValueException("Email is already registered to another account")
 
     try:

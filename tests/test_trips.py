@@ -294,7 +294,7 @@ class _FakeRedis:
     async def get(self, key: str) -> None:
         return None
 
-    async def set(self, key: str, value: str) -> None:
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
         self.written.append(key)
 
     async def expire(self, key: str, seconds: int) -> None:
@@ -354,9 +354,16 @@ def _current_user() -> dict[str, Any]:
     return {"id": USER_ID, "uuid": USER_UUID}
 
 
+def _session() -> MagicMock:
+    """A stand-in session whose transaction calls can be awaited and asserted on."""
+    db = MagicMock()
+    db.flush, db.commit, db.rollback = AsyncMock(), AsyncMock(), AsyncMock()
+    return db
+
+
 async def _write(**body: Any) -> Any:
     trip = TripCreate.model_validate(body)
-    return await trips_module.write_trip(request=MagicMock(), trip=trip, current_user=_current_user(), db=MagicMock())
+    return await trips_module.write_trip(request=MagicMock(), trip=trip, current_user=_current_user(), db=_session())
 
 
 async def _patch(values: dict[str, Any]) -> Any:
@@ -365,7 +372,7 @@ async def _patch(values: dict[str, Any]) -> Any:
         uuid=uuid7(),
         values=TripUpdateRequest.model_validate(values),
         current_user=_current_user(),
-        db=MagicMock(),
+        db=_session(),
     )
 
 
@@ -416,18 +423,17 @@ class TestWriteTrip:
 
     @pytest.mark.asyncio
     async def test_a_failed_part_write_rolls_back_and_is_a_422(self, write_collaborators: dict[str, Any]) -> None:
-        """The trip row is already committed by this point, so the session has to be
-        rolled back and the caller told - the alternative is a raw 500 over a session
-        left in a failed state."""
+        """Rolled back with the trip row still uncommitted, so no trip is left without its
+        parts - the alternative is a raw 500 over a session left in a failed state."""
         write_collaborators["replace_parts"].side_effect = IntegrityError("insert", {}, Exception("gone"))
-        db = MagicMock()
-        db.rollback = AsyncMock()
+        db = _session()
         trip = TripCreate.model_validate({"name": "Cebu 2026", "parts": [{"location": MOALBOAL}]})
 
         with pytest.raises(UnprocessableEntityException):
             await trips_module.write_trip(request=MagicMock(), trip=trip, current_user=_current_user(), db=db)
 
         db.rollback.assert_awaited_once()
+        db.commit.assert_not_awaited()
 
 
 class TestPatchTrip:
@@ -505,8 +511,7 @@ class TestPatchTrip:
     @pytest.mark.asyncio
     async def test_a_failed_part_write_rolls_back_and_is_a_422(self, write_collaborators: dict[str, Any]) -> None:
         write_collaborators["replace_parts"].side_effect = IntegrityError("insert", {}, Exception("gone"))
-        db = MagicMock()
-        db.rollback = AsyncMock()
+        db = _session()
 
         with pytest.raises(UnprocessableEntityException):
             await trips_module.patch_trip(
@@ -1162,7 +1167,7 @@ class _ServingRedis:
     async def get(self, key: str) -> bytes | None:
         return self.store.get(key)
 
-    async def set(self, key: str, value: str) -> None:
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
         self.store[key] = value.encode()
 
     async def expire(self, key: str, seconds: int) -> None:
