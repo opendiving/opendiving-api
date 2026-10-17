@@ -98,6 +98,7 @@ batched by `loader.py`.
 """
 
 import bisect
+import re
 import uuid as uuid_pkg
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -300,21 +301,22 @@ def _num(value: float) -> str:
     return "0" if text in ("", "-", "-0") else text
 
 
-# Everything XML 1.0 forbids outright, even escaped: the C0 controls other than tab, LF
-# and CR. `ElementTree` escapes `&`, `<` and `>` and passes these straight through, so a
-# single one makes the whole document unparseable - the "validates perfectly and is
-# nonsense" failure this module is otherwise careful about, in its loudest form.
+# Everything outside XML 1.0's `Char` production, which no escape can make legal: the C0
+# controls other than tab, LF and CR, the surrogates, and U+FFFE and U+FFFF. `ElementTree`
+# escapes `&`, `<` and `>` and passes these straight through, so a single one makes the
+# whole document unparseable - the "validates perfectly and is nonsense" failure this
+# module is otherwise careful about, in its loudest form. DEL is legal but dropped too.
 #
 # They do reach here. Notes and names are plain Pydantic strings with no character
 # filter, and `<setmarker>` carries a device's own wording off an uploaded file - a FIT
 # event's label is whatever the device wrote. Scrubbing at the single point every
 # string passes through is the only version of this that cannot be forgotten at a call
 # site. Dropped rather than replaced: they carry no meaning a diver put there.
-_FORBIDDEN_IN_XML = str.maketrans(dict.fromkeys(range(0x20), None) | {0x09: "\t", 0x0A: "\n", 0x0D: "\r", 0x7F: None})
+_FORBIDDEN_IN_XML = re.compile("[^\t\n\r\x20-\x7e\x80-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
 
 def _xml_safe(value: str) -> str:
-    return value.translate(_FORBIDDEN_IN_XML)
+    return _FORBIDDEN_IN_XML.sub("", value)
 
 
 def _sub(parent: ET.Element, tag: str, text: str | None = None, **attrs: str) -> ET.Element:
