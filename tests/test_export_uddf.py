@@ -180,6 +180,17 @@ class TestSchemaValidity:
         assert _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}notes/{UDDF}para") == "abcd\ne"
 
     @pytest.mark.asyncio
+    async def test_noncharacters_and_surrogates_do_not_break_the_document(self, schema, monkeypatch):
+        """XML 1.0's `Char` also excludes U+FFFE, U+FFFF and the surrogates, which a JSON
+        string can carry as an escape. Everything else outside the BMP is legal and kept."""
+        notes = "a\ufffeb\uffffc\ud800d\U0001f420e"
+        bundle = build_bundle(dives=[make_dive(1, full_bundle().dives[0].uuid, notes=notes)])
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        para = _text(_dive(_tree(document), 0), f"{UDDF}informationafterdive/{UDDF}notes/{UDDF}para")
+        assert para == "abcd\U0001f420e"
+
+    @pytest.mark.asyncio
     async def test_a_control_character_in_an_attribute_is_scrubbed_too(self, schema, monkeypatch):
         """Attributes go through the same scrub - a `<setmarker>` is element text, but a
         device label could as easily land in one."""

@@ -4,10 +4,10 @@ from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.integrity import write_or_422
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
@@ -19,6 +19,7 @@ from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_dive_dive_sites import replace_dive_site_on_dives
 from ...crud.crud_dive_sites import (
+    DIVE_SITE_NAME_KEY,
     DIVE_SITE_SEARCH_COLUMNS,
     crud_dive_sites,
     dive_site_name_exists,
@@ -35,6 +36,7 @@ from ...crud.crud_tags import (
     resolve_tag_id_for_user,
     resolve_tag_ids,
 )
+from ...crud.unique_keys import write_or_duplicate
 from ...models.dive_dive_site import DiveDiveSite
 from ...models.dive_site import DiveSite
 from ...schemas.dive_site import (
@@ -66,6 +68,8 @@ from ...services.cache_invalidation import invalidate_dive_caches, invalidate_di
 from ...services.dive_site_catalog import search_sites
 
 router = APIRouter(tags=["dive-sites"])
+
+_NAME_TAKEN = "A dive site with this name already exists at this location"
 
 
 async def _get_owned_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
@@ -123,16 +127,6 @@ async def _resolved_tag_ids(db: AsyncSession, *, user_id: int, names: list[str])
     return await resolve_tag_ids(db, user_id=user_id, names=names) if names else []
 
 
-async def _replace_tags(db: AsyncSession, *, dive_site_id: int, tag_ids: list[int]) -> None:
-    """Write a site's tags, a tag deleted between the resolve and the insert being a 422
-    as it is on a dive."""
-    try:
-        await replace_tags_for_dive_site(db, dive_site_id, tag_ids)
-    except IntegrityError as e:
-        await db.rollback()
-        raise UnprocessableEntityException(TAG_NOT_FOUND) from e
-
-
 @router.post("/dive-site", response_model=DiveSiteRead, status_code=201)
 async def write_dive_site(
     request: Request,
@@ -168,7 +162,7 @@ async def write_dive_site(
         name=dive_site.name,
         location_name=None if location is None else location.name,
     ):
-        raise DuplicateValueException("A dive site with this name already exists at this location")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     tag_ids = await _resolved_tag_ids(db, user_id=current_user["id"], names=dive_site.tags)
     dive_site_internal = DiveSiteCreateInternal(
@@ -176,11 +170,20 @@ async def write_dive_site(
         **location_columns(location, DIVE_SITE_LOCATION_PREFIX),
         user_id=current_user["id"],
     )
-    created_dive_site = await crud_dive_sites.create(
-        db=db, object=dive_site_internal, schema_to_select=DiveSiteReadInternal, return_as_model=True
+    created_dive_site = await write_or_duplicate(
+        db,
+        crud_dive_sites.create(
+            db=db, object=dive_site_internal, commit=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
+        ),
+        DIVE_SITE_NAME_KEY,
+        _NAME_TAKEN,
     )
     if tag_ids:
-        await _replace_tags(db, dive_site_id=created_dive_site.id, tag_ids=tag_ids)
+        await write_or_422(
+            db, replace_tags_for_dive_site(db, created_dive_site.id, tag_ids, commit=False), TAG_NOT_FOUND
+        )
+    # The new tags `_resolved_tag_ids` created commit with the site, or roll back with it.
+    await db.commit()
     await invalidate_dive_site_caches(current_user["id"])
 
     tags = (await get_tags_for_dive_sites(db, [created_dive_site.id]))[created_dive_site.id] if tag_ids else []
@@ -475,7 +478,7 @@ async def patch_dive_site(
         location_name=effective_location_name,
         exclude_id=db_dive_site.id,
     ):
-        raise DuplicateValueException("A dive site with this name already exists at this location")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     # The schema checks a pair it was sent whole; against the stored end of one it was sent
     # half of, the route checks.
@@ -499,11 +502,17 @@ async def patch_dive_site(
     tag_ids = None if values.tags is None else await _resolved_tag_ids(db, user_id=owner_id, names=values.tags)
 
     if update_data:
-        await crud_dive_sites.update(db=db, object=update_data, uuid=uuid)
+        await write_or_duplicate(
+            db,
+            crud_dive_sites.update(db=db, object=update_data, uuid=uuid, commit=False),
+            DIVE_SITE_NAME_KEY,
+            _NAME_TAKEN,
+        )
     if tag_ids is not None:
-        await _replace_tags(db, dive_site_id=db_dive_site.id, tag_ids=tag_ids)
+        await write_or_422(db, replace_tags_for_dive_site(db, db_dive_site.id, tag_ids, commit=False), TAG_NOT_FOUND)
 
     if update_data or tag_ids is not None:
+        await db.commit()
         await invalidate_dive_site_caches(owner_id)
         # Dive reads embed this site's name, locality and position, so a rename, a new
         # place or a dragged marker makes every cached dive logged here stale - the bug

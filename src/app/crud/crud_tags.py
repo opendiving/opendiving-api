@@ -69,6 +69,9 @@ async def get_tags_page(
     return {"data": [TagRead.model_validate(dict(row._mapping)) for row in rows], "total_count": total_count or 0}
 
 
+TAG_NAME_KEY = "ux_tag_user_id_name_folded"
+
+
 async def tag_name_exists(db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None) -> bool:
     """Checked on the unique index's own expression, so the answer is the one the index
     would give. Names arrive trimmed."""

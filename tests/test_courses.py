@@ -137,7 +137,7 @@ async def _patch(body: dict[str, Any]) -> dict[str, str]:
         uuid=uuid7(),
         values=CourseUpdateRequest.model_validate(body),
         current_user=_current_user(),
-        db=MagicMock(),
+        db=AsyncMock(),
     )
 
 
@@ -274,10 +274,10 @@ class TestWriteCourse:
         body = CourseCreate.model_validate({"name": "Advanced Nitrox", "agency": "tdi"})
 
         await courses_module.write_course(
-            request=MagicMock(), course=body, current_user=_current_user(), db=MagicMock()
+            request=MagicMock(), course=body, current_user=_current_user(), db=AsyncMock()
         )
         await courses_module.write_course(
-            request=MagicMock(), course=body, current_user=_current_user(), db=MagicMock()
+            request=MagicMock(), course=body, current_user=_current_user(), db=AsyncMock()
         )
 
         assert write_collaborators["create"].await_count == 2
@@ -289,7 +289,7 @@ class TestWriteCourse:
         body = CourseCreate.model_validate({"name": "Advanced Nitrox", "agency": "tdi"})
 
         created = await courses_module.write_course(
-            request=MagicMock(), course=body, current_user=_current_user(), db=MagicMock()
+            request=MagicMock(), course=body, current_user=_current_user(), db=AsyncMock()
         )
 
         assert created.user_uuid == USER_UUID

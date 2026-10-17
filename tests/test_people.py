@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+from src.app.api.integrity import refuse_vanished_reference
 from src.app.api.v1 import certifications as certifications_module
 from src.app.api.v1 import courses as courses_module
 from src.app.api.v1 import dives as dives_module
@@ -195,7 +196,7 @@ class TestTheRoutes:
                 uuid=uuid7(),
                 values=PersonUpdateRequest.model_validate({"name": "Sam"}),
                 current_user=_current_user(),
-                db=MagicMock(),
+                db=AsyncMock(),
             )
 
         assert route_collaborators["exists"].await_args.kwargs["exclude_id"] == 5
@@ -211,7 +212,7 @@ class TestTheRoutes:
             uuid=uuid7(),
             values=PersonUpdateRequest.model_validate(body),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
         route_collaborators["update"].assert_awaited_once()
@@ -230,7 +231,7 @@ class TestTheRoutes:
             uuid=uuid7(),
             values=PersonUpdateRequest.model_validate({"username": None}),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
         assert route_collaborators["update"].await_args.kwargs["object"] == {"linked_user_id": None}
@@ -269,7 +270,7 @@ class TestTheIntegrityMessages:
         )
 
         with pytest.raises(UnprocessableEntityException, match="Person not found."):
-            await certifications_module._refuse_a_vanished_reference(AsyncMock(), error)
+            await refuse_vanished_reference(AsyncMock(), error, certifications_module._FK_CONSTRAINT_MESSAGES)
 
 
 # ------------------------------------------------------------------ against Postgres

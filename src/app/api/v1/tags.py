@@ -11,14 +11,14 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException
 from ...core.utils.pagination import clamp_pagination
-from ...crud.crud_tags import crud_tags, get_tags_page, tag_name_exists
+from ...crud.crud_tags import TAG_NAME_KEY, crud_tags, get_tags_page, tag_name_exists
+from ...crud.unique_keys import write_or_duplicate
 from ...schemas.tag import TAG_NAME_MAX, TagRead, TagReadInternal, TagUpdate
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches
 
@@ -94,12 +94,10 @@ async def patch_tag(
     if await tag_name_exists(db, user_id=db_tag.user_id, name=values.name, exclude_id=db_tag.id):
         raise DuplicateValueException(_NAME_TAKEN)
 
-    try:
-        await crud_tags.update(db=db, object={"name": values.name}, uuid=uuid)
-    except IntegrityError as e:
-        # A concurrent rename, dive write or site write took the name between the check and the write.
-        await db.rollback()
-        raise DuplicateValueException(_NAME_TAKEN) from e
+    # A concurrent rename, dive write or site write can take the name between the check and the write.
+    await write_or_duplicate(
+        db, crud_tags.update(db=db, object={"name": values.name}, uuid=uuid), TAG_NAME_KEY, _NAME_TAKEN
+    )
 
     await invalidate_dive_caches(db_tag.user_id)
     await invalidate_dive_site_caches(db_tag.user_id)
