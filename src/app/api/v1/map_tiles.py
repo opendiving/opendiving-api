@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
+from ...core.utils.binary_responses import not_modified, stored_bytes_response
 from ...core.utils.uploads import content_disposition_attachment
 from ...services.map_tiles import (
     CONTENT_TYPE,
@@ -75,18 +76,13 @@ async def read_map_tile(
         # A raw `HTTPException`, as in `api/v1/support.py`: there is no 503 class to raise.
         raise HTTPException(status_code=503, detail="The map tile could not be drawn. Try again later.") from exc
 
-    headers = {"ETag": etag(served.sha256), "Cache-Control": _KEPT}
+    tag = etag(served.sha256)
     if served.data is None:
-        return Response(status_code=304, headers=headers)
-    return Response(
-        content=served.data,
+        return not_modified(tag, cache_control=_KEPT)
+    return stored_bytes_response(
+        served.data,
         media_type=CONTENT_TYPE,
-        headers={
-            **headers,
-            "Content-Disposition": content_disposition_attachment("map-tile.webp", default="map-tile"),
-            "X-Content-Type-Options": "nosniff",
-            # As `_serve_picture`'s, `frame-ancestors` included: a response with its own policy
-            # opts out of `SecurityHeadersMiddleware`'s default.
-            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
-        },
+        etag=tag,
+        cache_control=_KEPT,
+        disposition=content_disposition_attachment("map-tile.webp", default="map-tile"),
     )
