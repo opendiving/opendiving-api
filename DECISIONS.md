@@ -1227,8 +1227,9 @@ every re-derivation: a row takes the label of the file cylinder it matches by mi
 the file does not match keeps its label unless a matched row claims it, and is then cleared. A
 sibling recording's channels and markers follow with `replace_profile_samples`, a cleared label
 moving to a fresh unused one. A later recording's cylinders map onto the dive's by the same join,
-which at an arrival also fills the rows' blanks, and a later cylinder carrying nothing is not
-appended. `merge_mixture_fields` never writes a label.
+which at an arrival also fills the rows' blanks and appends a cylinder the dive lacks, unless it
+carries nothing. A re-read appends nothing: an unpaired cylinder is one the diver deleted, and its
+channel takes a fresh unused label. `merge_mixture_fields` never writes a label.
 
 `ck_dive_mixture_gas_number_non_negative` is `>= 0`: labels start at 0.
 
@@ -1836,10 +1837,10 @@ the C `json` module, so inline in an `async def` one upload stalls the worker; X
 same way.
 
 The read transaction is released first: `run_in_threadpool` frees the event loop, not the
-connection, and `_find_by_digest`/`get_existing_profile` have already opened one, so without
-`_release_read_transaction` it sits idle-in-transaction. Safe because nothing is written yet and
-both lookups return frozen dataclasses; `TestProfileExtractionReleasesTheTransaction` pins the
-ordering.
+connection, and the account, quota and digest lookups have already opened one, so without
+`release_read_transaction` it sits idle-in-transaction. Safe because nothing is written yet and no
+lookup returns a live ORM object; `TestProfileExtractionReleasesTheTransaction` and
+`TestTheParseReleasesTheTransactionBeforeReading` pin the ordering.
 
 A thread is not a bound: a 5 MB file of bare `record` messages takes ~10 s to decode against AnyIO's
 40-thread limiter. The reader bounds the messages it decodes and raises `SourceTooLargeError` rather
@@ -3984,14 +3985,16 @@ by uuid each tab names its own.
 
 Six digits is ~20 bits; `code_hash` is SHA-256 for hygiene only, and no key-stretching saves a
 millionfold space. `SIGN_IN_CODE_ATTEMPTS_MAX` (5) is the defence, so it must hold under
-concurrency: `register_failed_code_attempt` is hand-written Core, one `UPDATE` that increments and,
-in the same `CASE`, nulls `code_hash` when the count reaches the cap. Read-decide-write lets five
-parallel guesses all read `0`, and rate limiting is no substitute: it fails open on a Redis outage.
-Residual exposure: only a requester holds a `request_id`, and every request emails the victim.
-`MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL` allows 3 per `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS` (900
-s), each worth 5 guesses in 10⁶: 15 guesses a quarter hour, an expected success in ~694 days of 288
-emails a day. The lever, if observation disagrees, is eight digits (×100), not the request cap,
-whose 3 → 1 of headroom every diver with a lost first email pays for.
+concurrency: `charge_code_attempt` is hand-written Core, one
+`UPDATE … WHERE code_attempts < :max RETURNING code_hash`, and the route compares against the digest
+it returns. Rejected: comparing first and charging on failure, where every guess in flight reads the
+digest before any charge lands and a right one among a hundred parallel guesses claims. Rate
+limiting is no substitute: it fails open on a Redis outage. Residual exposure: only a requester
+holds a `request_id`, and every request emails the victim. `MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL`
+allows 3 per `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS` (900 s), each worth 5 guesses in 10⁶: 15 guesses
+a quarter hour, an expected success in ~694 days of 288 emails a day. The lever, if observation
+disagrees, is eight digits (×100), not the request cap, whose 3 → 1 of headroom every diver with a
+lost first email pays for.
 
 ## Sign-in code: Everything else is the shape already there
 
@@ -5321,7 +5324,7 @@ and its registration — so a thing that fails to happen leaves no row saying it
 the write commits on its own, including every path about to raise: `async_get_db` does not commit on
 unwind, so a row left in flight on a 401 is lost. The refresh replay and the passkey counter
 regression, which `finish_sign_in` follows with an `UnauthorizedException`, both fire on such a
-path; `register_failed_code_attempt` commits before its own 401 for the same reason.
+path; `charge_code_attempt` commits before its own 401 for the same reason.
 
 ## Auth audit: What a row may never contain
 
@@ -6307,15 +6310,17 @@ The earlier dive survives by `starts_before` (`delta_seconds`' rule, `services/d
 `_orders_first` breaking ties by id; the loser is soft-deleted. Same-device records fold into one
 recording; different devices or a NULL start append. The offset is the recordings' delta, never the
 dives'. The gap stays empty: `join_profiles` is not `fill_channels`; pressure joins by `gas_number`;
-markers all stay. Provenance is `merge`, so `should_extract` never re-extracts; files stay. A fold's
-`submerged_time` and `avg_depth` are its time in the water; side by side they stand; `max_depth` is
-the deepest reading; `None` means leave alone; `start_time` and the fixes stay,
-`refresh_tech_scalars` uncalled; the absorbed record's readouts fill the survivor's blanks. An
-`avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers`
-precedes the join, keeping `usage` and filling the survivor's blank cylinder members from the
-absorbed rows it pairs, as an arrival does, an empty absorbed row not appended; moved profiles use
-`replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
-within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
+markers all stay. Provenance is `merge`, so `should_extract` never re-extracts and a later attach or
+file deletion leaves the profile and gate figures alone (`_keeps_stored_profile`); files stay. A
+fold's `submerged_time` and `avg_depth` are its time in the water; side by side they stand;
+`max_depth` is the deepest reading; `None` means leave alone; `start_time` and the fixes stay,
+`refresh_tech_scalars` uncalled; the absorbed record's device, settings and readouts fill the
+survivor's blanks. An `avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write.
+`relabel_gas_numbers` precedes the join, keeping `usage` and filling the survivor's blank cylinder
+members from the absorbed rows it pairs, as an arrival does, an empty absorbed row not appended;
+moved profiles use `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions
+stay, notes append within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not
+reused.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 

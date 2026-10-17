@@ -57,7 +57,7 @@ pytestmark = pytest.mark.skipif(not db_available(), reason="No database connecti
 def _export(
     *,
     cns_end: float | None = None,
-    samples: tuple[tuple[float, float], ...] = (),
+    samples: tuple[tuple[float, float] | tuple[float, float, int, int], ...] = (),
     start: str = "2026-09-08T15:17:38.670+03:00",
     cylinder: dict[str, Any] | None = None,
 ) -> bytes:
@@ -769,6 +769,154 @@ class TestDeletingAFile:
         assert (
             await async_db.execute(select(DiveProfile.id).where(DiveProfile.recording_id == stored.recording_id))
         ).scalar_one_or_none() is not None
+
+
+class TestAProfileNoFileCanReYield:
+    """A re-derivation over a recording's files leaves a merged profile alone, and a document's
+    unless the files bring samples of their own."""
+
+    MERGED = NormalizedProfile(depth=ProfileSeries(t=[0, 10_000, 20_000, 30_000], v=[0, 1200, 2400, 0]))
+    SAMPLES = _samples((0, "0"), (10, "5"))
+
+    async def _merged(self, db: AsyncSession, recording_id: int) -> uuid_pkg.UUID:
+        """Stand in for `POST /dives/merge`: samples no file holds, and the gate figures
+        they were stored with. Returns the profile's ETag identity."""
+        await db.execute(
+            update(DiveProfile)
+            .where(DiveProfile.recording_id == recording_id)
+            .values(parser_key=MERGE_PARSER_KEY, data=self.MERGED.to_data(), duration=30_000)
+        )
+        await db.execute(
+            update(DiveRecording).where(DiveRecording.id == recording_id).values(duration=30, max_depth=24.0)
+        )
+        await db.commit()
+        return await self._identity(db, recording_id)
+
+    @staticmethod
+    async def _identity(db: AsyncSession, recording_id: int) -> uuid_pkg.UUID:
+        return (await db.execute(select(DiveProfile.uuid).where(DiveProfile.recording_id == recording_id))).scalar_one()
+
+    async def _assert_merged(self, db: AsyncSession, recording_id: int, identity: uuid_pkg.UUID) -> None:
+        profile = (
+            await db.execute(
+                select(DiveProfile.parser_key, DiveProfile.data, DiveProfile.uuid).where(
+                    DiveProfile.recording_id == recording_id
+                )
+            )
+        ).one()
+        figures = (
+            await db.execute(
+                select(DiveRecording.duration, DiveRecording.max_depth).where(DiveRecording.id == recording_id)
+            )
+        ).one()
+        assert (profile.parser_key, profile.data, profile.uuid) == (MERGE_PARSER_KEY, self.MERGED.to_data(), identity)
+        assert tuple(figures) == (30, 24.0)
+
+    @pytest.mark.asyncio
+    async def test_deleting_one_of_a_merged_recordings_two_files_keeps_its_samples(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """The file left is one half of what the merge joined: re-reading it would replace the
+        whole dive's samples with that half's, and the deleted bytes go after the commit."""
+        stored = await _attach(async_db, diver, dive, _export(cns_end=9.0, samples=self.SAMPLES), filename="a.json")
+        second = await _attach(async_db, diver, dive, _export(cns_end=11.0, samples=self.SAMPLES), filename="b.json")
+        assert second.recording_id == stored.recording_id
+        identity = await self._merged(async_db, stored.recording_id)
+        file_id = (await async_db.execute(select(DiveFile.id).where(DiveFile.uuid == second.file_uuid))).scalar_one()
+
+        await delete_dive_file(async_db, file_id=file_id)
+
+        await self._assert_merged(async_db, stored.recording_id, identity)
+        assert await _cns_end(async_db, dive) == 9.0
+
+    @pytest.mark.asyncio
+    async def test_a_header_only_file_joining_a_merged_recording_keeps_its_samples_and_fills(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """No sampled span to compare, so the header-only export passes the same-recording gate
+        and joins - and still supplies the readout the recording had none of."""
+        stored = await _attach(async_db, diver, dive, _export(samples=self.SAMPLES), filename="a.json")
+        identity = await self._merged(async_db, stored.recording_id)
+
+        joined = await _attach(async_db, diver, dive, _export(cns_end=7.0), filename="header.json")
+
+        assert joined.recording_id == stored.recording_id
+        await self._assert_merged(async_db, stored.recording_id, identity)
+        assert await _cns_end(async_db, dive) == 7.0
+
+    @pytest.mark.asyncio
+    async def test_a_header_only_file_joining_a_merged_recording_still_fills_the_dives_cylinder(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """An arrival, whatever the recording keeps: the dive's blank mix fills."""
+        stored = await _attach(async_db, diver, dive, _export(samples=self.SAMPLES), filename="a.json")
+        identity = await self._merged(async_db, stored.recording_id)
+        db.add(DiveMixture(dive_id=dive.id, gas_number=3, start_pressure=200.0, end_pressure=50.0))
+        db.commit()
+
+        await _attach(async_db, diver, dive, _export(cylinder={"Oxygen": 0.32}), filename="header.json")
+
+        await self._assert_merged(async_db, stored.recording_id, identity)
+        cylinder = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalar_one()
+        assert (cylinder.oxygen, cylinder.gas_number) == (32.0, 3)
+
+    @pytest.mark.asyncio
+    async def test_a_labelled_cylinder_joining_a_merged_recording_does_not_renumber_the_dives(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """The merged samples' channels name the dive's labels as they stand, so a joining
+        file's transmitter, which the reader labels 0, must not move the dive's 3 onto it."""
+        stored = await _attach(async_db, diver, dive, _export(samples=self.SAMPLES), filename="a.json")
+        identity = await self._merged(async_db, stored.recording_id)
+        db.add(DiveMixture(dive_id=dive.id, gas_number=3))
+        db.commit()
+        # The merged span, so the same-recording gate admits it.
+        transmitter = ((0, 0.0, 0, 20_000_000), (30, 0.0, 0, 15_000_000))
+
+        joined = await _attach(async_db, diver, dive, _export(samples=transmitter), filename="b.json")
+
+        assert joined.recording_id == stored.recording_id
+        await self._assert_merged(async_db, stored.recording_id, identity)
+        labels = (
+            await async_db.execute(select(DiveMixture.gas_number).where(DiveMixture.dive_id == dive.id))
+        ).scalars()
+        assert list(labels) == [3]
+
+    @pytest.mark.asyncio
+    async def test_a_header_only_file_joining_an_imported_recording_keeps_the_documents_samples(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        imported = await _import_recording(
+            async_db, db, diver, dive, cns_end=12.5, otu_end=31.0, start=datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC)
+        )
+
+        joined = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="header.json")
+
+        assert joined.recording_id == imported.id
+        assert (
+            await async_db.execute(select(DiveProfile.parser_key).where(DiveProfile.recording_id == imported.id))
+        ).scalar_one() == IMPORT_PARSER_KEY
+
+    @pytest.mark.asyncio
+    async def test_a_sampled_file_joining_an_imported_recording_replaces_the_documents_samples(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """A whole second reading of the record, which the import writer's fill relies on."""
+        imported = await _import_recording(
+            async_db, db, diver, dive, cns_end=12.5, otu_end=31.0, start=datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC)
+        )
+        # The document's span is the file's, as it is for a document converted from it.
+        await async_db.execute(
+            update(DiveProfile).where(DiveProfile.recording_id == imported.id).values(duration=10_000)
+        )
+        await async_db.commit()
+
+        joined = await _attach(async_db, diver, dive, _export(samples=self.SAMPLES), filename="export.json")
+
+        assert joined.recording_id == imported.id
+        assert (
+            await async_db.execute(select(DiveProfile.parser_key).where(DiveProfile.recording_id == imported.id))
+        ).scalar_one() == "suunto_json"
 
 
 class TestDeletingASecondComputersFile:

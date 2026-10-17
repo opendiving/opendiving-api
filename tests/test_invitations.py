@@ -234,7 +234,8 @@ class TestRequestAnInvite:
             await request_an_invite(_request(), InviteRequestSubmission(email="a@example.com"), mock_db)
 
         keys = [call.args[0] for call in limiter.await_args_list]
-        assert keys == ["invite-request:email:a@example.com", "invite-request:ip:203.0.113.7"]
+        # Per-IP first: a request it refuses must not have spent the address's bucket.
+        assert keys == ["invite-request:ip:203.0.113.7", "invite-request:email:a@example.com"]
 
 
 class TestReadInvitations:

@@ -20,9 +20,11 @@ about the position to clear a field the diver may have typed into.
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
 from ...core.config import settings
+from ...core.db.database import async_get_db, release_read_transaction
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...schemas.geocoding import GeocodeResult
 from ...services.geocoding_service import reverse_geocode, search_places
@@ -30,8 +32,12 @@ from ...services.geocoding_service import reverse_geocode, search_places
 router = APIRouter(tags=["geocoding"])
 
 
-async def _enforce_geocode_limit(user_id: int) -> None:
+async def _enforce_geocode_limit(db: AsyncSession, user_id: int) -> None:
     """Per-user budget, shared by both endpoints, and the only thing here that can 429.
+
+    Then releases the transaction `get_current_user` opened - the same session, which
+    FastAPI hands every dependency of one request - so the connection is not held
+    idle-in-transaction across a provider call of up to several seconds.
 
     Distinct from the one-per-second cap on each provider enforced inside the service: those
     bound what this instance does to a third party and *degrade* when they are hit, since
@@ -44,6 +50,7 @@ async def _enforce_geocode_limit(user_id: int) -> None:
         settings.GEOCODER_RATE_LIMIT_PER_USER,
         settings.GEOCODER_RATE_LIMIT_WINDOW_SECONDS,
     )
+    await release_read_transaction(db)
 
 
 @router.get(
@@ -53,6 +60,7 @@ async def _enforce_geocode_limit(user_id: int) -> None:
 )
 async def read_reverse_geocode(
     current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
     lat: Annotated[float, Query(ge=-90, le=90, description="Latitude in decimal degrees.")],
     lon: Annotated[float, Query(ge=-180, le=180, description="Longitude in decimal degrees.")],
 ) -> GeocodeResult | Response | None:
@@ -74,7 +82,7 @@ async def read_reverse_geocode(
     The position is rounded to roughly 110 m before being looked up, since the answer is a
     locality name and that is the resolution at which it stops changing.
     """
-    await _enforce_geocode_limit(current_user["id"])
+    await _enforce_geocode_limit(db, current_user["id"])
     result, asked = await reverse_geocode(lat, lon)
 
     if result is None and asked:
@@ -88,6 +96,7 @@ async def read_reverse_geocode(
 @router.get("/geocode/search", response_model=list[GeocodeResult])
 async def read_geocode_search(
     current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
     q: Annotated[str, Query(min_length=2, max_length=200, description="Free-text place search.")],
 ) -> list[GeocodeResult]:
     """Find places by name - "ko tao" is how a diver looks for where a site is.
@@ -102,5 +111,5 @@ async def read_geocode_search(
     is unavailable or switched off"; from the form's point of view those are the same thing,
     and the diver types the site in by hand either way.
     """
-    await _enforce_geocode_limit(current_user["id"])
+    await _enforce_geocode_limit(db, current_user["id"])
     return await search_places(q)
