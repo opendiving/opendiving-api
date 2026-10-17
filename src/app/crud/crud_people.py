@@ -94,10 +94,13 @@ async def get_person_read(db: AsyncSession, *, person_id: int) -> PersonRead | N
     return None if row is None else PersonRead.model_validate(dict(row._mapping))
 
 
+PERSON_NAME_KEY = "ux_person_user_id_name_lower"
+
+
 async def person_name_exists(db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None) -> bool:
     """Asked on `ux_person_user_id_name_lower`'s own expressions."""
     return await unique_key_taken(
-        db, Person, "ux_person_user_id_name_lower", {"user_id": user_id, "name": name}, exclude_id=exclude_id
+        db, Person, PERSON_NAME_KEY, {"user_id": user_id, "name": name}, exclude_id=exclude_id
     )
 
 

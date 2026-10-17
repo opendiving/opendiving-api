@@ -22,12 +22,14 @@ from ...core.exceptions.http_exceptions import DuplicateValueException, NotFound
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_lookups import get_lookup_page
 from ...crud.crud_people import (
+    PERSON_NAME_KEY,
     crud_people,
     get_people_page,
     get_person_read,
     person_name_exists,
     person_search_condition,
 )
+from ...crud.unique_keys import write_or_duplicate
 from ...models.dive_person import DivePerson
 from ...models.person import Person
 from ...models.user import User
@@ -96,13 +98,18 @@ async def write_person(
         await spend_link_attempt(current_user["id"])
         linked_user_id = await resolve_linked_account(db, owner_id=current_user["id"], username=person.username)
 
-    created = await crud_people.create(
-        db=db,
-        object=PersonCreateInternal(
-            **person.model_dump(exclude={"username"}), user_id=current_user["id"], linked_user_id=linked_user_id
+    created = await write_or_duplicate(
+        db,
+        crud_people.create(
+            db=db,
+            object=PersonCreateInternal(
+                **person.model_dump(exclude={"username"}), user_id=current_user["id"], linked_user_id=linked_user_id
+            ),
+            schema_to_select=PersonReadInternal,
+            return_as_model=True,
         ),
-        schema_to_select=PersonReadInternal,
-        return_as_model=True,
+        PERSON_NAME_KEY,
+        _NAME_TAKEN,
     )
     return await _read(db, created.id)
 
@@ -234,7 +241,9 @@ async def patch_person(
                 )
 
     if update_data:
-        await crud_people.update(db=db, object=update_data, uuid=uuid)
+        await write_or_duplicate(
+            db, crud_people.update(db=db, object=update_data, uuid=uuid), PERSON_NAME_KEY, _NAME_TAKEN
+        )
 
     return {"message": "Person updated"}
 

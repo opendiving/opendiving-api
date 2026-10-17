@@ -1,6 +1,6 @@
 import uuid as uuid_pkg
 from datetime import date, datetime
-from typing import Annotated, Any, NoReturn, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.integrity import refuse_vanished_reference, write_or_422
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     NotFoundException,
@@ -23,7 +24,6 @@ from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import COURSE_SEARCH_COLUMNS, crud_courses, get_courses_page
 from ...crud.crud_lookups import get_lookup_page
 from ...crud.crud_people import (
-    StoredReference,
     get_people_for_courses,
     replace_people_for_course,
 )
@@ -54,7 +54,7 @@ router = APIRouter(tags=["courses"])
 
 # The one foreign key a course write can set, resolved by a separate query - so a contact
 # deleted between the resolve and the write reaches Postgres as a violation of this.
-_CONTACT_FK_CONSTRAINT = "course_contact_id_fkey"
+_CONTACT_FK_MESSAGES = {"course_contact_id_fkey": CONTACT_NOT_FOUND}
 
 
 def _to_public_course(
@@ -77,28 +77,6 @@ def _to_public_course(
         contact_uuid=contact_uuid,
         people=people or [],
     )
-
-
-async def _write_people(db: AsyncSession, course_id: int, references: list[StoredReference]) -> None:
-    """Replace a course's people, a person deleted since it was resolved being the 422 a
-    missing one gets."""
-    try:
-        await replace_people_for_course(db=db, course_id=course_id, references=references)
-    except IntegrityError as e:
-        await db.rollback()
-        raise UnprocessableEntityException(PERSON_NOT_FOUND) from e
-
-
-async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> NoReturn:
-    """Turn a lost `contact_id` reference into the 422 a foreign or missing uuid gets.
-
-    Rolls back first, as `certifications.py` does for its course: the failed statement
-    leaves the session in an aborted transaction. Re-raises anything else untouched.
-    """
-    await db.rollback()
-    if _CONTACT_FK_CONSTRAINT in str(exc.orig):
-        raise UnprocessableEntityException(CONTACT_NOT_FOUND) from exc
-    raise exc
 
 
 # Kept for its `list_cache_key_prefix` only - `read_list` is never
@@ -195,13 +173,18 @@ async def write_course(
     )
     try:
         created = await crud_courses.create(
-            db=db, object=course_internal, schema_to_select=CourseReadInternal, return_as_model=True
+            db=db, object=course_internal, commit=False, schema_to_select=CourseReadInternal, return_as_model=True
         )
     except IntegrityError as e:
-        await _refuse_a_vanished_contact(db, e)
+        await refuse_vanished_reference(db, e, _CONTACT_FK_MESSAGES)
     created_course = cast(CourseReadInternal, created)
     if people:
-        await _write_people(db, created_course.id, people)
+        await write_or_422(
+            db,
+            replace_people_for_course(db=db, course_id=created_course.id, references=people, commit=False),
+            PERSON_NOT_FOUND,
+        )
+    await db.commit()
     await invalidate_course_caches(current_user["id"])
 
     return _to_public_course(
@@ -531,12 +514,17 @@ async def patch_course(
 
     if update_data:
         try:
-            await crud_courses.update(db=db, object=update_data, uuid=uuid)
+            await crud_courses.update(db=db, object=update_data, uuid=uuid, commit=False)
         except IntegrityError as e:
-            await _refuse_a_vanished_contact(db, e)
+            await refuse_vanished_reference(db, e, _CONTACT_FK_MESSAGES)
     if people is not None:
-        await _write_people(db, db_course.id, people)
+        await write_or_422(
+            db,
+            replace_people_for_course(db=db, course_id=db_course.id, references=people, commit=False),
+            PERSON_NOT_FOUND,
+        )
     if update_data or people is not None:
+        await db.commit()
         await invalidate_course_caches(db_course.user_id)
 
     return {"message": "Course updated"}

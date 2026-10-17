@@ -624,6 +624,36 @@ def pair_may_fill(pair: CylinderPair, *, trust_position: bool) -> bool:
     return not _mixes_disagree(row, incoming)
 
 
+def fold_tank_pressures(
+    absorbed: Sequence[DiveMixtureRead], survivor: Sequence[DiveMixtureRead], *, survivor_first: bool
+) -> dict[int, dict[str, float | None]]:
+    """A folded tank's start pressure from the earlier record and its end from the later, by
+    the surviving row's id.
+
+    `POST /dives/merge`'s rule where one computer's two records fold into one, and only there:
+    the records run one after the other, so the earlier one's end is the tank at the restart,
+    not at the surface. A pair `pair_may_fill` would refuse is two tanks, and stays as the
+    fill leaves it; so does a tank either record has no start for, the pressures filling as a
+    pair. The later record's end falls back to the earlier's where it has none.
+    """
+    pairs, _ = pair_cylinders(absorbed, survivor)
+    pressures: dict[int, dict[str, float | None]] = {}
+    for pair in pairs:
+        earlier, later = (pair.row, pair.incoming) if survivor_first else (pair.incoming, pair.row)
+        if earlier.start_pressure is None or later.start_pressure is None:
+            continue
+        if not pair_may_fill(pair, trust_position=False):
+            continue
+        values = {
+            "start_pressure": earlier.start_pressure,
+            "end_pressure": earlier.end_pressure if later.end_pressure is None else later.end_pressure,
+        }
+        unchanged = values == {"start_pressure": pair.row.start_pressure, "end_pressure": pair.row.end_pressure}
+        if not unchanged and _fill_is_storable(pair.row, values):
+            pressures[pair.row.id] = values
+    return pressures
+
+
 def _records_nothing_else(row: DiveMixtureRead, incoming: IncomingCylinder) -> bool:
     """Whether every member the row records, the label aside, the incoming cylinder records too."""
     return all(
@@ -777,7 +807,7 @@ def apply_gas_mapping(profile: NormalizedProfile | None, mapping: dict[int, int]
     )
 
 
-def _fill_is_storable(stored_mix: IncomingCylinder, values: Mapping[str, float]) -> bool:
+def _fill_is_storable(stored_mix: IncomingCylinder, values: Mapping[str, float | None]) -> bool:
     """Would the row `values` produces still satisfy `dive_mixture`'s own constraints?
 
     The table's `CHECK`s over these five columns, restated here because a fill is the one

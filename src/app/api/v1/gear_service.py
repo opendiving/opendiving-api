@@ -11,7 +11,7 @@ DECISIONS.md for why putting the check inside a cached function is a vulnerabili
 """
 
 import uuid as uuid_pkg
-from typing import Annotated, Any, NoReturn, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
+from ...api.integrity import refuse_vanished_reference
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
@@ -35,11 +36,13 @@ from ...crud.crud_gear_service_records import (
     resolve_record_for_user,
 )
 from ...crud.crud_gear_service_schedules import (
+    SCHEDULE_KIND_KEY,
     crud_gear_service_schedules,
     get_due_overview_for_user,
     resolve_schedule_for_user,
     schedule_kind_exists,
 )
+from ...crud.unique_keys import write_or_duplicate
 from ...schemas.gear_item import GearItemReadInternal
 from ...schemas.gear_service import (
     NEEDS_AN_INTERVAL,
@@ -60,6 +63,8 @@ from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_referen
 from ...services.gear_service import recalculate_service_schedule
 
 router = APIRouter(tags=["gear"])
+
+_KIND_TAKEN = "This gear item already has a schedule for that kind of service"
 
 # `GET /gear-service-due` returns the user's whole active schedule list rather than a
 # date-filtered slice (see `GearServiceDueResponse`), so it needs *some* bound. A diver
@@ -109,14 +114,9 @@ def _to_public_record(
     )
 
 
-async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> NoReturn:
-    """Turn a contact deleted between the resolve and the write into the 422 a foreign or
-    missing uuid gets. Rolls back first, as `certifications.py` does; re-raises anything
-    else untouched."""
-    await db.rollback()
-    if "gear_service_record_contact_id_fkey" in str(exc.orig):
-        raise UnprocessableEntityException(CONTACT_NOT_FOUND) from exc
-    raise exc
+# A contact deleted between the resolve and the write - the one reference a record write sets
+# that a concurrent delete can take away.
+_CONTACT_FK_MESSAGES = {"gear_service_record_contact_id_fkey": CONTACT_NOT_FOUND}
 
 
 # An id no row has, so a filter naming something unknown or someone else's narrows the list to
@@ -167,7 +167,7 @@ async def write_gear_service_schedule(
     db_gear_item = await _owned_gear_item(db, schedule.gear_item_uuid, current_user["id"])
 
     if await schedule_kind_exists(db=db, gear_item_id=db_gear_item.id, kind=schedule.kind.value, label=schedule.label):
-        raise DuplicateValueException("This gear item already has a schedule for that kind of service")
+        raise DuplicateValueException(_KIND_TAKEN)
 
     schedule_internal = GearServiceScheduleCreateInternal(
         **schedule.model_dump(exclude={"gear_item_uuid"}),
@@ -179,8 +179,13 @@ async def write_gear_service_schedule(
         dive_count_at_start=db_gear_item.dive_count,
         dive_time_at_start=db_gear_item.dive_time,
     )
-    created = await crud_gear_service_schedules.create(
-        db=db, object=schedule_internal, schema_to_select=GearServiceScheduleReadInternal, return_as_model=True
+    created = await write_or_duplicate(
+        db,
+        crud_gear_service_schedules.create(
+            db=db, object=schedule_internal, schema_to_select=GearServiceScheduleReadInternal, return_as_model=True
+        ),
+        SCHEDULE_KIND_KEY,
+        _KIND_TAKEN,
     )
     # A brand-new schedule has no records, so this derives the first due date straight
     # from `starts_on` and the two snapshots - which is why the row is read back below.
@@ -372,9 +377,11 @@ async def patch_gear_service_schedule(
         label=effective_label,
         exclude_id=schedule.id,
     ):
-        raise DuplicateValueException("This gear item already has a schedule for that kind of service")
+        raise DuplicateValueException(_KIND_TAKEN)
 
-    await crud_gear_service_schedules.update(db=db, object=update_data, uuid=uuid)
+    await write_or_duplicate(
+        db, crud_gear_service_schedules.update(db=db, object=update_data, uuid=uuid), SCHEDULE_KIND_KEY, _KIND_TAKEN
+    )
     # `starts_on` and either interval move the due date, and `kind`/`label` change which
     # records count towards it - cheaper to always recalculate than to work out which
     # edits could have mattered.
@@ -462,7 +469,7 @@ async def write_gear_service_record(
             db=db, object=record_internal, schema_to_select=GearServiceRecordReadInternal, return_as_model=True
         )
     except IntegrityError as e:
-        await _refuse_a_vanished_contact(db, e)
+        await refuse_vanished_reference(db, e, _CONTACT_FK_MESSAGES)
     if schedule is not None:
         # Moves the due date onto this service and clears the notify state, so the
         # reminder re-arms for the next cycle.
@@ -702,7 +709,7 @@ async def patch_gear_service_record(
     try:
         await crud_gear_service_records.update(db=db, object=update_data, uuid=uuid)
     except IntegrityError as e:
-        await _refuse_a_vanished_contact(db, e)
+        await refuse_vanished_reference(db, e, _CONTACT_FK_MESSAGES)
     if record.gear_service_schedule_id is not None:
         await recalculate_service_schedule(db=db, schedule_id=record.gear_service_schedule_id)
     await invalidate_gear_caches(record.user_id)
