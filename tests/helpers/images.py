@@ -214,6 +214,20 @@ def screenshot_png(*, size: tuple[int, int] = (40, 30), alpha: bool = False, ori
     )
 
 
+def phone_webp(*, size: tuple[int, int] = (64, 48), orientation: int | None = 6) -> bytes:
+    """The WebP counterpart: an extended file with EXIF (an orientation and GPS) and XMP
+    chunks, and bytes after the RIFF container ends."""
+    image = Image.new("RGB", size, "red")
+    image.paste(Image.new("RGB", (size[0] // 2, size[1]), "green"), (0, 0))
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[0x0112] = orientation
+    exif[0x8825] = {1: "N", 2: (10.0, 0.0, 0.0), 3: "E", 4: (123.0, 0.0, 0.0)}
+    buffer = io.BytesIO()
+    image.save(buffer, format="WEBP", lossless=True, exif=exif, xmp=XMP_PAYLOAD)
+    return buffer.getvalue() + b"trailing bytes"
+
+
 def solid_png(*, size: tuple[int, int], mode: str = "RGB") -> bytes:
     """A PNG of `size` that compresses to almost nothing, for the caps' full-size cases."""
     buffer = io.BytesIO()
