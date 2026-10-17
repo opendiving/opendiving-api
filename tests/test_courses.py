@@ -258,6 +258,26 @@ class TestCourseSchema:
         assert values.end_date == date(1999, 1, 1)
 
 
+class TestTheName:
+    """Trimmed on the way in and taken as stored on the way out, so a row already holding a
+    blank name reads back rather than failing its owner's response."""
+
+    @pytest.mark.parametrize("schema", [CourseCreate, CourseUpdateRequest], ids=lambda s: s.__name__)
+    def test_it_is_stored_trimmed(self, schema: type[CourseCreate | CourseUpdateRequest]) -> None:
+        assert schema.model_validate({"name": "  Advanced Nitrox \t"}).name == "Advanced Nitrox"
+
+    @pytest.mark.parametrize("schema", [CourseCreate, CourseUpdateRequest], ids=lambda s: s.__name__)
+    @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+    def test_a_blank_one_is_refused(self, schema: type[CourseCreate | CourseUpdateRequest], blank: str) -> None:
+        with pytest.raises(ValidationError, match="name"):
+            schema.model_validate({"name": blank})
+
+    def test_a_blank_one_already_stored_still_reads(self) -> None:
+        public = courses_module._to_public_course(_internal_course(name="   "), user_uuid=USER_UUID)
+
+        assert public.name == "   "
+
+
 class TestWriteCourse:
     @pytest.mark.asyncio
     async def test_a_duplicate_name_is_allowed(self, write_collaborators: dict[str, Any]) -> None:

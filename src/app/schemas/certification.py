@@ -9,7 +9,9 @@ from ..core.schemas import (
     NOTES_MAX_LENGTH,
     PublicUUIDSchema,
     RejectsExplicitNulls,
+    StoredName,
     StoredVocabulary,
+    Trimmed,
 )
 from .contact import CONTACT_UUID_DESCRIPTION
 
@@ -165,8 +167,7 @@ class CertificationBase(BaseModel):
         Field(default=None, max_length=64, description="Agency name, required when `agency` is `other`"),
     ]
     name: Annotated[
-        str,
-        Field(min_length=1, max_length=255, examples=["Advanced Open Water Diver"], description="Level as printed"),
+        str, Trimmed, Field(max_length=255, examples=["Advanced Open Water Diver"], description="Level as printed")
     ]
     certification_number: Annotated[str | None, Field(default=None, max_length=64, examples=["1234567"])]
     certified_on: Annotated[date | None, Field(default=None, description="Date the certification was issued")]
@@ -193,6 +194,7 @@ class CertificationRead(CertificationBase, PublicUUIDSchema):
     # Overrides `CertificationBase.agency`, which stays `CertificationAgency` for the
     # writes that base validates. See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
     agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    name: Annotated[StoredName, Field(description="Level as printed")]
 
     user_uuid: uuid_pkg.UUID
     # The training course this card came out of, if the diver recorded one. Filled in by
@@ -221,6 +223,7 @@ class CertificationReadInternal(CertificationBase, PublicUUIDSchema):
     """
 
     agency: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    name: StoredName
 
     id: int
     user_id: int
@@ -281,7 +284,7 @@ class CertificationUpdate(RejectsExplicitNulls):
 
     agency: Annotated[CertificationAgency | None, Field(default=None)]
     agency_other: Annotated[str | None, Field(default=None, max_length=64)]
-    name: Annotated[str | None, Field(default=None, min_length=1, max_length=255)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(default=None, max_length=255)]
     certification_number: Annotated[str | None, Field(default=None, max_length=64)]
     certified_on: Annotated[date | None, Field(default=None)]
     expires_on: Annotated[date | None, Field(default=None)]
