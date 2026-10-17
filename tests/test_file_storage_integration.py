@@ -18,6 +18,7 @@ import uuid as uuid_pkg
 from compression import zstd
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -31,7 +32,7 @@ from uuid6 import uuid7
 from src.app.api.v1.dives import read_dive_file
 from src.app.core.security import create_dive_file_token
 from src.app.schemas.certification import CertificationSide
-from src.app.services import blob_store
+from src.app.services import blob_store, certification_files
 from src.app.services.certification_files import (
     KEY_KIND as CARD_KIND,
 )
@@ -381,6 +382,28 @@ class TestACardImageIsStoredStripped:
             )
 
         assert list(blob_store.iter_keys()) == []
+
+    @pytest.mark.asyncio
+    async def test_the_strip_runs_off_the_event_loop(self, volume: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The walk is Python, and an upload chooses how long it takes."""
+        hopped: list[object] = []
+        real_run_sync = certification_files.anyio.to_thread.run_sync
+
+        async def spy(func: Any, *args: Any, **kwargs: Any) -> Any:
+            hopped.append(func)
+            return await real_run_sync(func, *args, **kwargs)
+
+        monkeypatch.setattr(certification_files.anyio.to_thread, "run_sync", spy)
+
+        await store_certification_file(
+            TestCardFileWriteOrdering._session(),
+            user_id=1,
+            certification_id=3,
+            side=CertificationSide.FRONT,
+            upload=_upload(phone_jpeg(), "card.jpg"),
+        )
+
+        assert certification_files.strip_card_image in hopped
 
     def test_stripping_a_stripped_webp_changes_no_byte(self) -> None:
         once = strip_metadata(phone_webp(), "image/webp")

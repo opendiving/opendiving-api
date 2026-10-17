@@ -16,6 +16,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import anyio.to_thread
 from fastapi import UploadFile
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -142,7 +143,9 @@ async def store_certification_file(
         raise UnsupportedCardFileError("The uploaded file is empty.")
 
     content_type = sniff_content_type(data)
-    data = strip_card_image(data, content_type)
+    # Off the event loop: the strip walks the container in Python, byte by byte where a JPEG
+    # pads its markers, and an upload chooses how much of that there is.
+    data = await anyio.to_thread.run_sync(strip_card_image, data, content_type)
     filename = safe_filename(upload.filename, default="card")
     digest = hashlib.sha256(data).hexdigest()
     now = datetime.now(UTC)

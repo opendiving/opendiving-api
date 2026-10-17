@@ -474,7 +474,7 @@ class TestTheOriginalIsStrippedLosslessly:
 class TestRenderingThroughACrop:
     def test_a_12_mp_phone_photo_turned_by_its_exif_renders_upright_at_700x900(self) -> None:
         """Stored landscape with orientation 6: the crop is in the upright 3024x4032 image,
-        and `draft` decodes it at half, where the 3888 px crop is 1944 high - bounded to 900."""
+        and `draft` decodes it at a quarter, where the 3888 px crop is 972 high - bounded to 900."""
         rendition = _prepare_original(
             phone_jpeg(size=(4032, 3024), orientation=6), PORTRAIT_FRAME, PORTRAIT_CROP_OF_A_TURNED_PHONE_PHOTO
         ).rendition
