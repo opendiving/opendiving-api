@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.config import settings
 from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import NotFoundException
+from ...core.exceptions.http_exceptions import NotFoundException, RateLimitException
 from ...core.utils.binary_responses import uncacheable_not_found
 from ...core.utils.client_ip import client_ip
 from ...core.utils.pagination import clamp_pagination
@@ -234,9 +234,8 @@ async def create_invitation(
     )
 
     if await account_exists_for(db, email=email):
-        # A raw `HTTPException`: `core/exceptions/http_exceptions.py` has no class for 409
-        # that does not also compose its own message (`DuplicateValueException`), and these
-        # two sentences are what the card shows.
+        # A raw `HTTPException`: `core/exceptions/http_exceptions.py` has no 409 class -
+        # `DuplicateValueException` is a 422.
         raise HTTPException(status_code=409, detail="That address already has an account on this instance.")
 
     if await live_invitation_from(db, email=email, user_id=current_user["id"]):
@@ -248,12 +247,9 @@ async def create_invitation(
         )
         if made >= settings.INVITATIONS_PER_USER:
             window = _window_phrase(settings.INVITATIONS_WINDOW_DAYS)
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    f"You can make {settings.INVITATIONS_PER_USER} invitations {window}, by address or through "
-                    "your invite link. Try again later."
-                ),
+            raise RateLimitException(
+                f"You can make {settings.INVITATIONS_PER_USER} invitations {window}, by address or through "
+                "your invite link. Try again later."
             )
 
     created = await crud_invitations.create(

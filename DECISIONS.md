@@ -3209,8 +3209,8 @@ key:
 6. `aphia_id`, for a total order.
 
 `status` (the fold normalises it to `accepted`) and `source` (which register beat the budget) stay
-out. `_local_search` keeps its own three-way `match_rank` and `LIMIT _MAX_RESULTS`, so a catalog
-with more matches than that can cut a row the Python key would rank first; fix with the `pg_trgm`
+out. `_local_search` keeps its own three-way `match_rank` and `LIMIT MAX_RESULTS`, so a catalog with
+more matches than that can cut a row the Python key would rank first; fix with the `pg_trgm`
 escalation.
 
 ## The ajax endpoint annotates rows; it never makes them
@@ -6432,7 +6432,7 @@ collision skip and idempotence: a revision failing partway rolls back without ad
 
 ## The WoRMS credit is a link, and any edit to it is a cache-version change
 
-`_WORMS_ATTRIBUTION` (`services/species_service.py`) is
+`WORMS_ATTRIBUTION` (`services/species_service.py`) is
 `[World Register of Marine Species](https://www.marinespecies.org) (CC BY)`: a credit names origin
 and licence and links to the licence text; WoRMS's text is CC BY. It is written linked, like the
 geocoder's `_DEFAULT_ATTRIBUTION` and `_MARINE_ATTRIBUTION`: a statement this project makes, not a

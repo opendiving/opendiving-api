@@ -150,6 +150,19 @@ class ProfileCompletionRequest(BaseModel):
     username: Annotated[str, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userson"])]
 
 
+# -------------- session --------------
+class RefreshResponse(BaseModel):
+    """The replacement access token. Its refresh token rides the `refresh_token` cookie set on
+    the same response, never the body."""
+
+    access_token: str
+    token_type: str
+
+
+class LogoutResponse(BaseModel):
+    message: str = "Logged out successfully"
+
+
 # -------------- shared outcome --------------
 class AuthOutcome(BaseModel):
     """Unified response for every entry point into the app (`/auth/email/verify`,

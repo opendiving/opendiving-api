@@ -1,5 +1,6 @@
 import uuid as uuid_pkg
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import Request
@@ -7,8 +8,13 @@ from fastcrud import compute_offset, paginated_response
 from sqlalchemy import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...schemas.lookup import lookup_bound
 from .cache import cache
 from .search import search_clause, search_multi
+
+# A page of one resource's picker rows: `user_id`, `db`, `page`, `items_per_page`, `search`,
+# `until` and `uuids`, all by keyword.
+type LookupPage = Callable[..., Awaitable[dict[str, Any]]]
 
 
 class OwnedResourceCache[InternalT, PublicT]:
@@ -236,6 +242,50 @@ class OwnedResourceCache[InternalT, PublicT]:
             offset=offset,
             limit=limit,
         )
+
+    def lookup(self, fetch: LookupPage) -> Callable[..., Awaitable[dict[str, Any]]]:
+        """`GET /<plural>/lookup` over `fetch`: the term trimmed and lowered, `until` reduced to
+        the one instant it ranks by. Reached only after the route has authorized the caller and
+        clamped the page.
+
+        Cached under the list's prefix, so every sweep that drops the list drops the lookup with
+        it - unless the request names `uuids`, the rows a form already holds, which is not
+        cached: no two forms hold the same set for long.
+        """
+
+        async def unnarrowed(request: Request, **query: Any) -> dict[str, Any]:
+            return await fetch(**query, uuids=None)
+
+        cached = cache(key_prefix=self.lookup_cache_key_prefix, resource_id_name="user_id", expiration=60)(unnarrowed)
+
+        async def read(
+            request: Request,
+            *,
+            user_id: int,
+            db: AsyncSession,
+            page: int,
+            items_per_page: int,
+            search: str | None,
+            until: datetime | date | None,
+            uuids: list[uuid_pkg.UUID] | None,
+        ) -> dict[str, Any]:
+            query: dict[str, Any] = {
+                "user_id": user_id,
+                "db": db,
+                "page": page,
+                "items_per_page": items_per_page,
+                "search": (search or "").strip().lower() or None,
+                "until": lookup_bound(until),
+            }
+            if uuids:
+                return await fetch(**query, uuids=uuids)
+            return await cached(request, **query)
+
+        return read
+
+    @property
+    def lookup_cache_key_prefix(self) -> str:
+        return self.list_cache_key_prefix + ":lookup:until_{until}"
 
     @staticmethod
     def list_cache_pattern(resource_name: str, user_id: int) -> str:

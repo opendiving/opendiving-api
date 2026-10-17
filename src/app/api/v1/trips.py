@@ -48,7 +48,7 @@ from ...crud.crud_trips import (
 from ...models.dive import Dive
 from ...models.trip import Trip
 from ...schemas.dive import DiveListItem
-from ...schemas.lookup import LookupUntil, LookupUuids, lookup_bound
+from ...schemas.lookup import LookupUntil, LookupUuids
 from ...schemas.person import PersonReferenceRead
 from ...schemas.trip import (
     TripCreate,
@@ -248,10 +248,6 @@ async def write_trip(
 
     await invalidate_trip_caches(current_user["id"])
 
-    trip_read = await crud_trips.get(db=db, id=created_trip.id, schema_to_select=TripReadInternal, return_as_model=True)
-    if trip_read is None:
-        raise NotFoundException("Created trip not found")
-
     stored_parts = await get_parts_for_trip(db=db, trip_id=created_trip.id)
     stored_people = (await get_people_for_trips(db, [created_trip.id]))[created_trip.id] if people else []
     # Its parts may cover dives already logged on no trip, which are its candidates from now on.
@@ -260,7 +256,7 @@ async def write_trip(
     )
     # A dive can only name a trip that already exists, so a new one has none.
     return _to_public_trip(
-        cast(TripReadInternal, trip_read),
+        created_trip,
         user_uuid=current_user["uuid"],
         figures=NO_DIVES,
         parts=stored_parts,
@@ -396,25 +392,7 @@ async def _lookup_trips(
     return response
 
 
-# Under the list's prefix, so every sweep that drops the list drops the lookup with it.
-_LOOKUP_CACHE_KEY_PREFIX = _trip_cache.list_cache_key_prefix + ":lookup:until_{until}"
-
-
-@cache(key_prefix=_LOOKUP_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
-async def _cached_lookup_trips(
-    request: Request,
-    user_id: int,
-    db: AsyncSession,
-    page: int,
-    items_per_page: int,
-    search: str | None,
-    until: datetime | None,
-) -> dict:
-    """`_lookup_trips` with no uuids, cached under the list's prefix so that
-    `invalidate_trip_caches` drops it with the list."""
-    return await _lookup_trips(
-        user_id=user_id, db=db, page=page, items_per_page=items_per_page, search=search, until=until, uuids=None
-    )
+_lookup = _trip_cache.lookup(_lookup_trips)
 
 
 @router.get("/trips/lookup", response_model=PaginatedListResponse[TripLookupItem])
@@ -440,18 +418,16 @@ async def lookup_trips(
     pagination is clamped.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
-    query: dict[str, Any] = {
-        "user_id": current_user["id"],
-        "db": db,
-        "page": page,
-        "items_per_page": items_per_page,
-        "search": (search or "").strip().lower() or None,
-        "until": lookup_bound(until),
-    }
-
-    if uuid:
-        return await _lookup_trips(**query, uuids=uuid)
-    return await _cached_lookup_trips(request, **query)
+    return await _lookup(
+        request,
+        user_id=current_user["id"],
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        search=search,
+        until=until,
+        uuids=uuid,
+    )
 
 
 @cache(key_prefix="user_{user_id}_trip", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)

@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -227,7 +227,6 @@ def _install_trip(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     monkeypatch.setattr(trips_module, "get_parts_for_trip", AsyncMock(return_value=[]))
     monkeypatch.setattr(trips_module, "invalidate_trip_caches", AsyncMock())
     monkeypatch.setattr(trips_module.crud_trips, "create", created)
-    monkeypatch.setattr(trips_module.crud_trips, "get", AsyncMock(return_value=_internal_trip()))
     return created
 
 
@@ -243,7 +242,6 @@ def _install_course(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
 
 
 def _install_dive(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    created = AsyncMock(return_value=MagicMock(id=11))
     stored = DiveReadInternal(
         id=11,
         user_id=CALLER_ID,
@@ -253,7 +251,8 @@ def _install_dive(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         utc_offset_minutes=120,
         submerged_time=1800,
         created_at=CREATED_AT,
-    ).model_dump()
+    )
+    created = AsyncMock(return_value=stored)
     for name in ("replace_mixtures_for_dive", "replace_dive_sites_for_dive", "replace_gear_items_for_dive"):
         monkeypatch.setattr(dives_module, name, AsyncMock())
     for name in ("replace_species_for_dive", "recalculate_dive_stats", "recalculate_gear_dive_counts"):
@@ -270,7 +269,6 @@ def _install_dive(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     for name in ("get_mixtures_for_dive", "get_dive_sites_for_dive", "get_gear_items_for_dive", "get_species_for_dive"):
         monkeypatch.setattr(dives_module, name, AsyncMock(return_value=[]))
     monkeypatch.setattr(dives_module.crud_dives, "create", created)
-    monkeypatch.setattr(dives_module.crud_dives, "get", AsyncMock(return_value=stored))
     return created
 
 
@@ -280,7 +278,6 @@ def _install_dive_site(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(dive_sites_module, "invalidate_dive_site_caches", AsyncMock())
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "create", created)
-    monkeypatch.setattr(dive_sites_module.crud_dive_sites, "get", AsyncMock(return_value=stored))
     return created
 
 
@@ -312,7 +309,6 @@ def _install_gear_item(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     monkeypatch.setattr(gear_items_module, "gear_item_name_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(gear_items_module, "invalidate_gear_caches", AsyncMock())
     monkeypatch.setattr(gear_items_module.crud_gear_items, "create", created)
-    monkeypatch.setattr(gear_items_module.crud_gear_items, "get", AsyncMock(return_value=stored))
     return created
 
 
@@ -324,7 +320,6 @@ def _install_gear_set(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     monkeypatch.setattr(gear_sets_module, "get_gear_items_for_set", AsyncMock(return_value=[]))
     monkeypatch.setattr(gear_sets_module, "invalidate_gear_caches", AsyncMock())
     monkeypatch.setattr(gear_sets_module.crud_gear_sets, "create", created)
-    monkeypatch.setattr(gear_sets_module.crud_gear_sets, "get", AsyncMock(return_value=stored))
     return created
 
 
