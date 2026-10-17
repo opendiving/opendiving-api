@@ -1088,6 +1088,30 @@ class TestFilesFollowTheirBytes:
             await async_db.execute(select(DiveFile.dive_id).where(DiveFile.user_id == destination.id))
         ).scalars().all() == [dive.id]
 
+    @pytest.mark.asyncio
+    async def test_a_skipped_certification_still_counts_the_cards_it_names(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        card = {"archive_path": "files/front.jpg", "sha256": "c" * 64}
+        document = json.dumps(
+            {
+                "format": "divejson",
+                "version": "1.0",
+                "certifications": [
+                    {"uuid": str(uuid7()), "agency": "padi", "front_file": card},
+                    {"uuid": str(uuid7()), "name": "Open Water Diver", "back_file": card},
+                ],
+            }
+        ).encode()
+        destination = create_user(db)
+
+        bare = await _preview(async_db, destination.id, document)
+        archived = await _preview(async_db, destination.id, _zip_of(document, {}), filename="logbook.zip")
+
+        assert _counts(bare)["certifications"] == (0, 0, 0, 2)
+        assert (bare.files_referenced, bare.files_not_contained, bare.files_skipped) == (2, 2, 0)
+        assert (archived.files_referenced, archived.files_not_contained, archived.files_skipped) == (2, 0, 2)
+
 
 def _zip_of(document: bytes, members: dict[str, bytes]) -> bytes:
     buffer = io.BytesIO()
@@ -3983,8 +4007,8 @@ class TestTwoRecordsClaimingOneIdentifier:
 
     @pytest.mark.asyncio
     async def test_two_sites_sharing_one_identifier_both_arrive(self, db: Session, async_db: AsyncSession) -> None:
-        """Sites were the one collection keyed on the uuid before the remap, so the second
-        site lost its own registry entries to a `KeyError` and the whole import 500'd."""
+        """Two sites sharing one uuid both arrive, each with its own registry entries - the
+        second under a new identifier."""
         shared = str(uuid7())
         document = _site_document(
             {"uuid": shared, "name": "First of the pair", "external_ids": [_entry()]},

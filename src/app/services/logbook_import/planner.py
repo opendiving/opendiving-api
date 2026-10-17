@@ -2290,9 +2290,11 @@ class _Planner:
             return linked
         name = _trimmed(certification.name)
         if not name:
+            self._count_unwritten((certification.front_file, certification.back_file))
             return self._skip(collection, certification.uuid, "A certification needs a name, and this one has none.")
         agency = self._agency(collection, certification.uuid, certification)
         if agency is None:
+            self._count_unwritten((certification.front_file, certification.back_file))
             return self._skip(
                 collection,
                 certification.uuid,
