@@ -85,6 +85,7 @@ class TestThePanelIsHandedThePlainCredentials:
     def test_the_admin_and_redis_passwords_arrive_unwrapped(self):
         configured = _settings(
             ENVIRONMENT=EnvironmentOption.LOCAL,
+            ADMIN_USERNAME="admin",
             CRUD_ADMIN_REDIS_ENABLED=True,
             CRUD_ADMIN_REDIS_PASSWORD="a-redis-password",
         )
