@@ -156,6 +156,9 @@ async def _serve_stored(db: AsyncSession, stored: _Stored, *, if_none_match: str
         await db.execute(delete(MapTile).where(MapTile.id == stored.id, MapTile.storage_key == stored.storage_key))
         await db.commit()
         return None
+    except OSError as exc:
+        logger.warning("A stored map tile could not be read: %s", exc)
+        raise MapTileUnavailable(str(exc)) from exc
     return ServedMapTile(sha256=stored.sha256, data=data)
 
 
@@ -189,7 +192,11 @@ async def _release(key: str) -> None:
 async def _store(*, signature: str, tile: Tile, image: bytes, sha256: str) -> None:
     """The file first, then the row, in a session of the draw's own: the request's may be gone."""
     key = blob_store.new_key(BLOB_KIND, sha256=sha256)
-    await blob_store.put(key, image)
+    try:
+        await blob_store.put(key, image)
+    except OSError as exc:
+        logger.warning("A drawn map tile could not be stored: %s", exc)
+        raise MapTileUnavailable(str(exc)) from exc
     now = datetime.now(UTC)
     async with local_session() as db:
         inserted = (

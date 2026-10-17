@@ -72,6 +72,19 @@ class TestTheFilesVolumeWarning:
 
         assert caplog.records == []
 
+    @pytest.mark.asyncio
+    async def test_a_store_that_cannot_be_listed_is_an_error_and_not_a_failed_boot(self, caplog):
+        """A key without the listing permission, or a transient failure, says so and serves -
+        and says nothing about the store being empty, which it has no way to know."""
+        with (
+            patch.object(setup, "engine", self._engine_counting(3)),
+            patch.object(setup.blob_store, "has_any_key", side_effect=RuntimeError("AccessDenied")),
+            caplog.at_level(logging.ERROR, logger="src.app.core.setup"),
+        ):
+            await setup.warn_if_files_volume_looks_empty()
+
+        assert [record.levelno for record in caplog.records] == [logging.ERROR]
+
 
 class TestTheMigrationRefusal:
     def test_the_downgrade_sends_the_operator_to_a_url(self):

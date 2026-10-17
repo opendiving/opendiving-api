@@ -4275,13 +4275,14 @@ warning catches someone giving it this one.
 but `DELETE FROM "user"` retires `dive_file` and `certification_file` inside Postgres through FK
 cascades: SQLAlchemy never sees those rows, nothing is parked, and the purge would report success
 with every export and c-card scan still stored. `src/scripts/sweep_orphaned_files.py` is a manual
-script, not an erasure guarantee. So the keys are collected explicitly (two selects, the second
-joining `certification` because `certification_file` has no `user_id`) and registered after the
-guarded `DELETE` and before the commit; a restored account rolls back, and the rollback listener
-drops the unlinks. `authentication_request` rows are deleted by email, since `purpose="sign_in"`
-rows carry a `NULL user_id`; partial, because `verify_email_change` rewrites `user.email`, so older
-rows are left to the weekly expiry sweep. `token_blacklist` rows stay until natural expiry, keeping
-the deleted account's tokens dead. Logs carry the id and request date, never the address.
+script, not an erasure guarantee. So the keys are collected explicitly (a select per owned column in
+`BLOB_KEY_COLUMNS`; a card file's owner is reached through `certification`, since
+`certification_file` has no `user_id`) and registered after the guarded `DELETE` and before the
+commit; a restored account rolls back, and the rollback listener drops the unlinks.
+`authentication_request` rows are deleted by email, since `purpose="sign_in"` rows carry a
+`NULL user_id`; partial, because `verify_email_change` rewrites `user.email`, so older rows are left
+to the weekly expiry sweep. `token_blacklist` rows stay until natural expiry, keeping the deleted
+account's tokens dead. Logs carry the id and request date, never the address.
 
 ## No Redis sweep in the worker, and the absence is the decision
 
