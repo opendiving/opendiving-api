@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, Response, UploadFile
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -179,6 +180,38 @@ class TestAgencyPairing:
         agency nobody's UI knows how to label."""
         with pytest.raises(ValueError):
             CertificationBase(agency="padi-international", name="Open Water Diver")
+
+
+# Every body a certification's name arrives in, and what else it needs to be valid.
+each_write = pytest.mark.parametrize(
+    ("schema", "body"),
+    [(CertificationCreate, {"agency": "padi"}), (CertificationUpdateRequest, {})],
+    ids=["CertificationCreate", "CertificationUpdateRequest"],
+)
+
+
+class TestTheName:
+    """Trimmed on the way in and taken as stored on the way out, so a row already holding a
+    blank name reads back rather than failing its owner's response."""
+
+    @each_write
+    def test_it_is_stored_trimmed(
+        self, schema: type[CertificationCreate | CertificationUpdateRequest], body: dict[str, Any]
+    ) -> None:
+        assert schema.model_validate({**body, "name": " Rescue Diver  "}).name == "Rescue Diver"
+
+    @each_write
+    @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+    def test_a_blank_one_is_refused(
+        self, schema: type[CertificationCreate | CertificationUpdateRequest], body: dict[str, Any], blank: str
+    ) -> None:
+        with pytest.raises(ValidationError, match="name"):
+            schema.model_validate({**body, "name": blank})
+
+    def test_a_blank_one_already_stored_still_reads(self) -> None:
+        public = _to_public_certification(_internal_certification(name="   "), user_uuid=uuid7())
+
+        assert public.name == "   "
 
 
 class TestPatchAgencyPairing:

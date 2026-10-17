@@ -9,7 +9,9 @@ from ..core.schemas import (
     NOTES_MAX_LENGTH,
     PublicUUIDSchema,
     RejectsExplicitNulls,
+    StoredName,
     StoredVocabulary,
+    Trimmed,
     validate_date_range,
 )
 from .certification import CertificationAgency, validate_agency_pairing
@@ -42,10 +44,7 @@ class CourseStatus(StrEnum):
 
 
 class CourseBase(BaseModel):
-    name: Annotated[
-        str,
-        Field(min_length=1, max_length=255, examples=["Advanced Nitrox + Decompression Procedures"]),
-    ]
+    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Advanced Nitrox + Decompression Procedures"])]
     agency: Annotated[
         CertificationAgency | None,
         Field(
@@ -90,6 +89,7 @@ class CourseRead(CourseBase, PublicUUIDSchema):
 
     # Override `CourseBase`'s enums, which stay enums for the writes that base validates.
     # See *"A stored vocabulary is read back as a string"* in DECISIONS.md.
+    name: StoredName
     agency: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field
     status: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
@@ -106,6 +106,7 @@ class CourseReadInternal(CourseBase, PublicUUIDSchema):
     which additionally resolves `user_id` to the owning user's `uuid`).
     """
 
+    name: StoredName
     agency: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field
     status: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
@@ -155,7 +156,7 @@ class CourseUpdate(RejectsExplicitNulls):
     # edits. `agency_other` in particular is half of moving a course off `agency="other"`.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "status", "notes")
 
-    name: Annotated[str | None, Field(default=None, min_length=1, max_length=255)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(default=None, max_length=255)]
     agency: Annotated[CertificationAgency | None, Field(default=None)]
     agency_other: Annotated[str | None, Field(default=None, max_length=64)]
     status: Annotated[CourseStatus | None, Field(default=None)]

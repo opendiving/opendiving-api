@@ -52,9 +52,9 @@ AccountEmail = Annotated[EmailStr, Field(max_length=EMAIL_MAX_LENGTH)]
 # duplicate twenty fields on `DiveBase` alone.
 StoredVocabulary = str
 
-# A name a per-user unique index keys on is stored trimmed, so the `lower(name)` the index
-# compares is the name the diver sees: "Egypt " is not a second "Egypt", and "   " is no
-# name. Write shapes only - see `StoredName`.
+# A record's name is stored trimmed: "   " is no name, and where a per-user unique index keys
+# on it, the `lower(name)` the index compares is the name the diver sees - "Egypt " is not a
+# second "Egypt". Write shapes only - see `StoredName`.
 Trimmed = StringConstraints(strip_whitespace=True, min_length=1)
 
 
