@@ -2085,9 +2085,10 @@ A release that changes how the reader chooses a dive's entry or exit fix moves n
 stored. The earlier fix is the previous rule's answer rather than a corrupt value, and every re-read
 of the files - a repeat upload, the profile backfill, the tech-field backfill - fills a blank fix
 and never overwrites one. What re-derives the primary recording outright moves it: the dive or its
-file deleted and uploaded again, a file removed from the primary, another recording made primary.
-Rejected: a backfill that rewrites every stored fix the dive's files yield, a data path the
-flagship's one account does not need.
+file deleted and uploaded again, a file removed from the primary, another recording made primary. A
+fold moves the entry to the earlier record's dive's and the exit to the later record's. Rejected: a
+backfill that rewrites every stored fix the dive's files yield, a data path the flagship's one
+account does not need.
 
 ## Real dive-computer files are committed, and only the cases no file shows are written
 
@@ -6319,11 +6320,11 @@ dives'. The gap stays empty: `join_profiles` is not `fill_channels`; pressure jo
 markers all stay. Provenance is `merge`, so `should_extract` never re-extracts and a later attach or
 file deletion leaves the profile and gate figures alone (`_keeps_stored_profile`); files stay. A
 fold's `submerged_time` and `avg_depth` are its time in the water; side by side they stand;
-`max_depth` is the deepest reading; `None` means leave alone; `start_time` and the fixes stay,
+`max_depth` is the deepest reading; `None` means leave alone; `start_time` stays,
 `refresh_tech_scalars` uncalled; the absorbed record's device, settings and surface pressure fill
-the survivor's blanks; its CNS, OTU and paired tank pressures go by side (`_write_fold`). Rejected:
-fill-only, which ends the dive at the restart and halves its SAC; the cost: a value the diver typed
-on the surviving dive's other side is replaced. An `avg_depth` failing
+the survivor's blanks; its CNS, OTU, paired tank pressures and fixes go by side (`_write_fold`,
+`fold_fixes`). Rejected: fill-only, which ends the dive at the restart and halves its SAC; the cost:
+a value the diver typed on the surviving dive's other side is replaced. An `avg_depth` failing
 `ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers` precedes the join,
 keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
 as an arrival does, an empty absorbed row not appended; moved profiles use

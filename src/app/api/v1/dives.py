@@ -1468,8 +1468,8 @@ async def merge_two_dives(
     marked as a merge: nothing on this server can produce them again from those files.
     Two *different* computers were both recording throughout, so their recordings are simply
     appended side by side, the surviving dive's first. A fold's two records run one after the
-    other, so the dive starts on the earlier record's CNS, OTU and tank pressure and ends on
-    the later record's, whichever dive held them.
+    other, so the dive starts on the earlier record's CNS, OTU, tank pressure and position and
+    ends on the later record's, whichever dive held them.
 
     A fold gives the surviving dive the time in the water and the average depth its folded
     samples hold, the stretch the computer was off counting only when it went off in the

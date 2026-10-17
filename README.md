@@ -321,6 +321,11 @@ curl -X POST http://localhost:8000/api/v1/import/logbook \
   `docker compose exec api python -m src.scripts.backfill_depth_outlines --dry-run`, then without
   `--dry-run`. It rewrites each stored outline from its profile's samples and nothing else; until it
   runs, the dive list draws the outlines stored before.
+- Once, after the release that takes a fold's start and end values by side:
+  `docker compose exec api python -m src.scripts.backfill_folded_dives --dry-run`, then without
+  `--dry-run`. It ends each dive merged before on the later record's CNS, OTU, tank pressure and
+  exit fix, lists every value it changes, and names each dive whose cylinders and fixes it leaves
+  for you.
 
 ## Related repositories
 
