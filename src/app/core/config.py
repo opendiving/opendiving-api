@@ -390,9 +390,9 @@ class MagicLinkSettings(BaseSettings):
     # whose redeemed code is that proof for a Google account.
     MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP: int = config("MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP", default=30)
 
-    # Wrong guesses allowed against the six-digit code printed beside the link, after
-    # which the code is spent and only the link still works (see
-    # `crud.crud_authentication_requests.register_failed_code_attempt`).
+    # Guesses allowed against the six-digit code printed beside the link - the right one is
+    # charged too - after which the code is spent and only the link still works (see
+    # `crud.crud_authentication_requests.charge_code_attempt`).
     #
     # This is the boundary, not the rate limit: 5 guesses in a space of 10^6 is roughly a
     # one-in-200,000 shot per request, and every request emails the victim, so an attack

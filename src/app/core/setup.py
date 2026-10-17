@@ -120,7 +120,21 @@ async def warn_if_files_volume_looks_empty() -> None:
         logger.debug("Could not count stored file keys for the files-volume check", exc_info=True)
         return
 
-    if keys and not await asyncio.to_thread(blob_store.has_any_key):
+    if not keys:
+        return
+    try:
+        has_any_key = await asyncio.to_thread(blob_store.has_any_key)
+    except Exception:
+        # A key without the listing permission, or a store that is briefly unreachable: the
+        # check cannot answer, which is not the same as the store being empty. Any exception,
+        # since the listing is the one call `blob_store` does not translate botocore's for.
+        logger.error(
+            "Could not list %s to check that it holds the files the database references.",
+            blob_store.describe_location(),
+            exc_info=True,
+        )
+        return
+    if not has_any_key:
         logger.critical(
             "The database references %d stored file(s) but %s is empty - it looks unmounted, not yet "
             "restored, or not the store these rows were written to, and file downloads will fail "

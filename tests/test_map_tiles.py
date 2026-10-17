@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from functools import cache as memoize
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -608,6 +609,38 @@ class TestTheRoute:
 
         renderer.status = 200
         assert (await client.get(_url())).status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_a_store_that_refuses_the_write_is_a_503_and_stores_nothing(
+        self,
+        api: tuple[httpx.AsyncClient, User],
+        db: Session,
+        renderer: StubRenderer,
+        redis: FakeRedis,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client, _diver = api
+        monkeypatch.setattr(map_tiles.blob_store, "put", AsyncMock(side_effect=blob_store.BlobStoreError("down")))
+
+        failed = await client.get(_url())
+
+        assert failed.status_code == 503
+        assert _rows(db, renderer.signature) == []
+        assert not _claims(redis), "the claim outlived the draw"
+
+    @pytest.mark.asyncio
+    async def test_a_stored_tile_the_store_cannot_read_is_a_503_and_keeps_its_row(
+        self, api: tuple[httpx.AsyncClient, User], db: Session, renderer: StubRenderer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unlike a file that is gone, a store that is down says nothing about the row."""
+        client, _diver = api
+        assert (await client.get(_url())).status_code == 200
+        monkeypatch.setattr(map_tiles.blob_store, "get", AsyncMock(side_effect=blob_store.BlobStoreError("down")))
+
+        failed = await client.get(_url())
+
+        assert failed.status_code == 503
+        assert len(_rows(db, renderer.signature)) == 1
 
     @pytest.mark.asyncio
     async def test_a_renderer_redeployed_mid_request_stores_the_tile_under_the_signature_it_drew_with(

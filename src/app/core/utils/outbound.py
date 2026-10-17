@@ -6,11 +6,13 @@ byte cap, accepted statuses and slot policy, because they are measured against o
 each and are wrong for the others - see *"The timeouts are measured, and the geocoder's must
 not be copied"* in `DECISIONS.md`.
 
-Nothing here logs a failure. The callers do, each in its own logger and at its own level,
-naming the provider and never the URL: a built URL carries a diver's typed search or an API
-key, and logs get collected and kept.
+Nothing here logs a fetch's failure. The callers do, each in its own logger and at its own
+level, naming the provider and never the URL: a built URL carries a diver's typed search or an
+API key, and logs get collected and kept. The cache's own warnings follow the same rule for its
+keys, which carry the same search (`_loggable`).
 """
 
+import hashlib
 import json
 import logging
 from collections.abc import Callable, Container
@@ -24,9 +26,8 @@ from anyio import sleep  # A name of this module's own, so a test can stub the s
 from redis.exceptions import RedisError
 
 from ..config import PROJECT_USER_AGENT
-from ..exceptions.http_exceptions import RateLimitException
 from . import cache
-from .rate_limit import enforce_rate_limit
+from .rate_limit import claim_rate_limit_slot
 
 logger = logging.getLogger(__name__)
 
@@ -117,14 +118,6 @@ async def fetch_capped(
         return Failed(FetchFailure.DEADLINE)
 
 
-async def _claim(key: str, max_requests: int, window_seconds: int) -> bool:
-    try:
-        await enforce_rate_limit(key, max_requests, window_seconds)
-    except RateLimitException:
-        return False
-    return True
-
-
 async def claim_provider_slot(key: str, max_requests: int, window_seconds: int, *, wait_seconds: float = 0) -> bool:
     """Take one slot against the instance-wide cap at `key`, or report that there is none.
 
@@ -134,12 +127,19 @@ async def claim_provider_slot(key: str, max_requests: int, window_seconds: int, 
     once before it is given up on. The limiter fails open on a Redis outage, so an instance with
     no Redis still calls out.
     """
-    if await _claim(key, max_requests, window_seconds):
+    if await claim_rate_limit_slot(key, max_requests, window_seconds):
         return True
     if wait_seconds <= 0:
         return False
     await sleep(wait_seconds)
-    return await _claim(key, max_requests, window_seconds)
+    return await claim_rate_limit_slot(key, max_requests, window_seconds)
+
+
+def _loggable(key: str) -> str:
+    """A cache key as a log line may carry it: its namespace and kind, and a digest standing in
+    for the rest, which is a diver's typed search or the pin they dropped."""
+    head = ":".join(key.split(":", 2)[:2])
+    return f"{head}:#{hashlib.sha256(key.encode()).hexdigest()[:12]}"
 
 
 async def read_cached[T](key: str, parse: Callable[[Any], T]) -> T | None:
@@ -165,7 +165,7 @@ async def read_cached[T](key: str, parse: Callable[[Any], T]) -> T | None:
         return parse(json.loads(raw.decode()))
     except ValueError, TypeError:
         # `ValueError` covers pydantic's `ValidationError`, which subclasses it.
-        logger.warning("Discarding an unreadable provider cache entry at %s.", key)
+        logger.warning("Discarding an unreadable provider cache entry at %s.", _loggable(key))
         return None
 
 

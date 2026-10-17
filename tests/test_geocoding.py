@@ -160,7 +160,7 @@ def no_redis() -> Generator[None]:
 def unthrottled() -> Generator[AsyncMock]:
     """Both limits stubbed by default; the tests that are *about* throttling opt back in."""
     with (
-        patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+        patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         patch("src.app.api.v1.geocoding.enforce_rate_limit", new_callable=AsyncMock),
     ):
         yield provider_limit
@@ -481,7 +481,7 @@ class TestCouldNotAsk:
         with (
             _responds(REVERSE_PAYLOAD),
             patch("src.app.core.utils.outbound.sleep", new_callable=AsyncMock),
-            patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+            patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
 
@@ -1061,7 +1061,7 @@ class TestThrottling:
         allowance either - otherwise a page full of cached sites 429s for no reason."""
         with (
             _responds(REVERSE_PAYLOAD),
-            patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+            patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
             client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
@@ -1097,7 +1097,7 @@ class TestThrottling:
         with (
             _responds(REVERSE_PAYLOAD) as provider,
             patch("src.app.core.utils.outbound.sleep", new_callable=AsyncMock),
-            patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+            patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = RateLimitException("Too many requests. Please try again later.")
 
@@ -1116,7 +1116,7 @@ class TestThrottling:
         with (
             _responds(_photon(MOALBOAL_CEBU)) as provider,
             patch("src.app.core.utils.outbound.sleep", new_callable=AsyncMock) as slept,
-            patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+            patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = [RateLimitException("Too many requests."), None]
 
@@ -1134,7 +1134,7 @@ class TestThrottling:
         with (
             _responds([]),
             patch("src.app.core.utils.outbound.sleep", new_callable=AsyncMock) as slept,
-            patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+            patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         ):
             provider_limit.side_effect = RateLimitException("Too many requests.")
 
@@ -1155,7 +1155,7 @@ class TestThrottling:
         with (
             _providers(search=_photon(MOALBOAL_CEBU)) as provider,
             patch("src.app.core.utils.outbound.sleep", new_callable=AsyncMock) as slept,
-            patch("src.app.core.utils.outbound.enforce_rate_limit", side_effect=one_a_window),
+            patch("src.app.core.utils.rate_limit.enforce_rate_limit", side_effect=one_a_window),
         ):
             client.get("/api/v1/geocode/reverse", params={"lat": 28.5717, "lon": 34.5372})
             _search(client, "moalboal")
