@@ -1836,10 +1836,10 @@ the C `json` module, so inline in an `async def` one upload stalls the worker; X
 same way.
 
 The read transaction is released first: `run_in_threadpool` frees the event loop, not the
-connection, and `_find_by_digest`/`get_existing_profile` have already opened one, so without
-`_release_read_transaction` it sits idle-in-transaction. Safe because nothing is written yet and
-both lookups return frozen dataclasses; `TestProfileExtractionReleasesTheTransaction` pins the
-ordering.
+connection, and the account, quota and digest lookups have already opened one, so without
+`release_read_transaction` it sits idle-in-transaction. Safe because nothing is written yet and no
+lookup returns a live ORM object; `TestProfileExtractionReleasesTheTransaction` and
+`TestTheParseReleasesTheTransactionBeforeReading` pin the ordering.
 
 A thread is not a bound: a 5 MB file of bare `record` messages takes ~10 s to decode against AnyIO's
 40-thread limiter. The reader bounds the messages it decodes and raises `SourceTooLargeError` rather

@@ -67,6 +67,36 @@ def _make_dive_upload_client() -> TestClient:
     return TestClient(app)
 
 
+class TestTheParseReleasesTheTransactionBeforeReading:
+    """The thread frees the event loop, not the connection: the account and quota lookups
+    opened a transaction, and a burst of large FIT uploads from one account would otherwise
+    pin a pool connection per decode. An ordering test, as in
+    `TestProfileExtractionReleasesTheTransaction`: what can regress is the read moving back
+    above the release."""
+
+    def test_releases_after_the_quota_check_and_before_the_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+        real_read = dives_module.read_prefill
+
+        async def quota(*_args: object, **_kwargs: object) -> None:
+            calls.append("quota")
+
+        def read(content: bytes) -> object:
+            calls.append("read")
+            return real_read(content)
+
+        monkeypatch.setattr(dives_module, "ensure_room_to_attach", quota)
+        monkeypatch.setattr(dives_module, "read_prefill", read)
+        client = _make_dive_upload_client()
+        session = client.app.dependency_overrides[async_get_db]()  # type: ignore[attr-defined]
+        session.rollback = AsyncMock(side_effect=lambda: calls.append("release"))
+
+        response = client.post("/dive/parse", files={"file": ("dive.xml", VALID_SUUNTO_XML, "application/xml")})
+
+        assert response.status_code == 200
+        assert calls == ["quota", "release", "read"]
+
+
 class TestParseDiveUploadSizeLimit:
     def test_accepts_file_within_limit(self):
         client = _make_dive_upload_client()
