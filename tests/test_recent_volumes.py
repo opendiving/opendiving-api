@@ -29,6 +29,7 @@ from src.app.models.dive_mixture import DiveMixture
 from src.app.models.user import User
 from src.app.schemas.lookup import lookup_bound
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 
 CURRENT_USER = {"id": 7, "uuid": uuid7(), "username": "ada", "is_superuser": False}
 
@@ -51,23 +52,6 @@ class TestTheCacheKey:
         assert key(date(2026, 6, 2)) != key(datetime(2026, 6, 2, 8, 0, tzinfo=UTC))
 
 
-class _FakeRedis:
-    """Enough of the client for `@cache` to run; the app's lifespan points a real pool at the
-    compose hostname, which does not resolve here."""
-
-    def __init__(self) -> None:
-        self.store: dict[str, bytes] = {}
-
-    async def get(self, key: str) -> bytes | None:
-        return self.store.get(key)
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.store[key] = value.encode()
-
-    async def expire(self, key: str, seconds: int) -> None:
-        pass
-
-
 @pytest.fixture(scope="module")
 def app() -> Any:
     return create_application(router=api_router, settings=settings, apply_migrations_on_start=False)
@@ -78,7 +62,7 @@ def client(app: Any) -> Generator[TestClient]:
     # After the lifespan, which assigns the cache client on startup.
     app.dependency_overrides[get_current_user] = lambda: CURRENT_USER
     app.dependency_overrides[async_get_db] = lambda: MagicMock()
-    with TestClient(app) as test_client, patch("src.app.core.utils.cache.client", _FakeRedis()):
+    with TestClient(app) as test_client, patch("src.app.core.utils.cache.client", FakeRedis()):
         yield test_client
     app.dependency_overrides = {}
 

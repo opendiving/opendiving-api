@@ -246,12 +246,9 @@ def _ensure_tables() -> None:
 
 
 @pytest_asyncio.fixture
-async def async_db() -> AsyncGenerator[AsyncSession]:
-    """An `AsyncSession` on its own engine, for testing async crud against real Postgres.
-
-    Separate from `db`, which is the sync session the rest of the suite seeds rows with -
-    a test typically wants both: `db` to arrange, `async_db` to exercise the code under
-    test.
+async def async_sessions() -> AsyncGenerator[async_sessionmaker[AsyncSession]]:
+    """A session factory on its own engine, for a test that needs more than one `AsyncSession`
+    against real Postgres - two transactions racing, or a second tab acting mid-request.
 
     Engine per test rather than per session, and disposed at teardown, because
     pytest-asyncio gives each test its own event loop and a pooled asyncpg connection is
@@ -261,10 +258,20 @@ async def async_db() -> AsyncGenerator[AsyncSession]:
     fixtures are shared, and a local copy silently wins"* in `DECISIONS.md`.
     """
     engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
+    yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def async_db(async_sessions: async_sessionmaker[AsyncSession]) -> AsyncGenerator[AsyncSession]:
+    """An `AsyncSession` for testing async crud against real Postgres, from `async_sessions`.
+
+    Separate from `db`, which is the sync session the rest of the suite seeds rows with -
+    a test typically wants both: `db` to arrange, `async_db` to exercise the code under
+    test.
+    """
+    async with async_sessions() as session:
+        yield session
 
 
 @pytest.fixture

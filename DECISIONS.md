@@ -2914,17 +2914,17 @@ resources, and `invalidate_gear_caches`'s `user_{id}_gear_*` pattern covers the
 ## The Postgres test fixtures are shared, and a local copy silently wins
 
 Database-backed test modules (`grep -rl 'skipif(not db_available' tests/`) take `_ensure_tables`,
-`async_db`, `diver` and `other_diver` from `tests/conftest.py`. A same-named module-level fixture
-shadows conftest's silently (pytest resolves from the nearest scope outwards), so never redefine one
-you still depend on. Substitution is fine: `test_client_cache_middleware.py`, `test_geocoding.py`
-and `test_export_endpoints.py` define their own `client` over a purpose-built `FastAPI()`.
-`async_db` builds and disposes an engine per test: pytest-asyncio gives each test its own event
-loop, and a pooled asyncpg connection is bound to its opening loop. `db_available()` is a plain
-function because `pytest.mark.skipif` calls it at import. `POSTGRES_SERVER=localhost` runs them, and
-the skip is silent: a worktree lacks the gitignored `src/.env`, so credentials fall back to
-`postgres`/`postgres` and the tests skip identically; copy it in and check the skip count. Rows
-written are permanent (`unique_username`); the traps in that are under *"Species are a global
-catalog, filled one pick at a time"*.
+`async_db`, `async_sessions`, `diver` and `other_diver` from `tests/conftest.py`, and a Redis double
+from `tests/helpers/fake_redis.py`. A same-named module-level fixture shadows conftest's silently
+(pytest resolves from the nearest scope outwards), so never redefine one you still depend on.
+Substitution is fine: `test_client_cache_middleware.py`, `test_geocoding.py` and
+`test_export_endpoints.py` define their own `client` over a purpose-built `FastAPI()`.
+`async_sessions` builds and disposes an engine per test, and `async_db` is one session from it:
+pytest-asyncio gives each test its own event loop, and a pooled asyncpg connection is bound to its
+opening loop. `db_available()` is a plain function because `pytest.mark.skipif` calls it at import;
+the skip is silent, and `CONTRIBUTING.md` says what makes them run. Rows written are permanent
+(`unique_username`); the traps in that are under *"Species are a global catalog, filled one pick at
+a time"*.
 
 ## The suite has its own database, and builds it with the migrations
 

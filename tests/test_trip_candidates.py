@@ -32,6 +32,7 @@ from src.app.models.user import User
 from src.app.schemas.trip import TripDiveAddRequest, TripPartInput, TripPartRead, TripUpdateRequest
 from src.app.services.year_in_review import local_day
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_contact
 
 USER_ID = 7
@@ -69,18 +70,6 @@ def test_a_trip_whose_parts_carry_no_dates_attributes_no_day() -> None:
 class TestTheListKey:
     @pytest.mark.asyncio
     async def test_is_under_the_dives_prefix_every_dive_write_sweeps(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        written: list[str] = []
-
-        class _Recording:
-            async def get(self, key: str) -> None:
-                return None
-
-            async def set(self, key: str, value: str, ex: int | None = None) -> None:
-                written.append(key)
-
-            async def expire(self, key: str, seconds: int) -> None:
-                return None
-
         async def _page(*_: Any, **__: Any) -> dict[str, Any]:
             return {"data": [], "total_count": 0}
 
@@ -89,7 +78,8 @@ class TestTheListKey:
 
         monkeypatch.setattr(trips_module, "get_parts_for_trip", _parts)
         monkeypatch.setattr(trips_module, "get_dives_page", _page)
-        monkeypatch.setattr(cache_module, "client", _Recording())
+        redis = FakeRedis()
+        monkeypatch.setattr(cache_module, "client", redis)
         request = MagicMock()
         request.method = "GET"
 
@@ -97,7 +87,7 @@ class TestTheListKey:
             request, user_id=USER_ID, user_uuid=uuid7(), db=MagicMock(), trip_id=11, page=2, items_per_page=25
         )
 
-        (key,) = written
+        (key,) = redis.store
         assert key == namespaced(f"user_{USER_ID}_dives:trip_11:page_2:items_per_page:25:{USER_ID}")
         assert fnmatch(key, across_builds(f"user_{USER_ID}_dives:*"))
 
@@ -170,30 +160,6 @@ def _get() -> MagicMock:
     return request
 
 
-class _ServingRedis:
-    """Keeps what `@cache` writes, serves it back and sweeps by pattern, so a read after a
-    write is stale unless something dropped it."""
-
-    def __init__(self) -> None:
-        self.store: dict[str, bytes] = {}
-
-    async def get(self, key: str) -> bytes | None:
-        return self.store.get(key)
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.store[key] = value.encode()
-
-    async def expire(self, key: str, seconds: int) -> None:
-        return None
-
-    async def delete(self, *keys: str) -> None:
-        for key in keys:
-            self.store.pop(key, None)
-
-    async def scan(self, cursor: int = 0, match: str = "*", count: int | None = None) -> tuple[int, list[str]]:
-        return 0, [key for key in self.store if fnmatch(key, match)]
-
-
 async def _listed(async_db: AsyncSession, user: User, trip: Trip, *, page: int = 1, size: int = 50) -> dict[str, Any]:
     result: dict[str, Any] = await trips_module.read_trip_dives(
         request=_get(), uuid=trip.uuid, current_user=_as(user), db=async_db, page=page, items_per_page=size
@@ -241,7 +207,7 @@ JUNE = (date(2026, 6, 10), date(2026, 6, 12))
 
 @pytest.fixture
 def serving_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cache_module, "client", _ServingRedis())
+    monkeypatch.setattr(cache_module, "client", FakeRedis())
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")

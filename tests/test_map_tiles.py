@@ -14,7 +14,6 @@ import io
 import json
 from collections.abc import AsyncGenerator, Generator
 from datetime import UTC, datetime, timedelta
-from fnmatch import fnmatch
 from functools import cache as memoize
 from pathlib import Path
 from typing import Any
@@ -43,6 +42,7 @@ from src.app.schemas.trip import TripRead
 from src.app.services import blob_store, map_renderer, map_tiles
 from src.app.services.map_tiles import MAX_ZOOM, UNSERVED_RETENTION, Tile, tile_at
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_user
 
 RENDERER_URL = "http://renderer.test"
@@ -123,48 +123,6 @@ class StubRenderer:
         return httpx.Response(404)
 
 
-class FakeRedis:
-    """What the rate limiter and the draw claim ask of Redis, in a dict."""
-
-    def __init__(self) -> None:
-        self.values: dict[str, bytes] = {}
-        self.expiries: dict[str, int] = {}
-
-    async def get(self, key: str) -> bytes | None:
-        return self.values.get(key)
-
-    async def set(
-        self, key: str, value: object, ex: int | None = None, px: int | None = None, nx: bool = False
-    ) -> bool | None:
-        if nx and key in self.values:
-            return None
-        self.values[key] = value if isinstance(value, bytes) else str(value).encode()
-        if px is not None:
-            self.expiries[key] = px // 1000
-        return True
-
-    async def expire(self, key: str, seconds: int) -> bool:
-        self.expiries[key] = seconds
-        return True
-
-    async def ttl(self, key: str) -> int:
-        return self.expiries.get(key, -1)
-
-    async def incr(self, key: str) -> int:
-        value = int(self.values.get(key, b"0")) + 1
-        self.values[key] = str(value).encode()
-        return value
-
-    async def delete(self, *keys: str) -> int:
-        return sum(self.values.pop(key, None) is not None for key in keys)
-
-    async def scan(self, cursor: int, match: str, count: int) -> tuple[int, list[str]]:
-        return 0, [key for key in self.values if fnmatch(key, match)]
-
-    def claims(self) -> list[str]:
-        return [key for key in self.values if key.startswith(_CLAIMS)]
-
-
 @pytest.fixture
 def renderer(monkeypatch: pytest.MonkeyPatch) -> StubRenderer:
     """This instance with a renderer, which is the stub, and its signature already learned."""
@@ -181,6 +139,10 @@ def renderer(monkeypatch: pytest.MonkeyPatch) -> StubRenderer:
     monkeypatch.setattr(map_renderer, "_unreachable", False)
     monkeypatch.setattr(map_tiles, "_WAIT_POLL_SECONDS", 0.01)
     return stub
+
+
+def _claims(redis: FakeRedis) -> list[str]:
+    return [key for key in redis.store if key.startswith(_CLAIMS)]
 
 
 @pytest.fixture
@@ -479,7 +441,7 @@ class TestBeforeAnythingIsRead:
         assert response.status_code == 404
         assert response.json() == {"detail": "No such map tile"}
         assert renderer.calls == 0
-        assert redis.values == {}, "a request that names no tile counted against a limit"
+        assert redis.store == {}, "a request that names no tile counted against a limit"
 
     @pytest.mark.asyncio
     async def test_without_a_renderer_every_tile_is_a_404_and_the_config_says_so(
@@ -642,7 +604,7 @@ class TestTheRoute:
 
         assert failed.status_code == 503
         assert _rows(db, renderer.signature) == []
-        assert not redis.claims(), "the claim outlived the draw"
+        assert not _claims(redis), "the claim outlived the draw"
 
         renderer.status = 200
         assert (await client.get(_url())).status_code == 200
@@ -730,7 +692,7 @@ class TestTheRoute:
         monkeypatch.setattr(settings, "MAP_RENDERER_TIMEOUT", 0.1)
         tile = tile_at("light", 9, 304, 214)
         assert tile is not None
-        redis.values[map_tiles._claim_key(renderer.signature, tile)] = b"1"
+        redis.store[map_tiles._claim_key(renderer.signature, tile)] = b"1"
 
         response = await client.get(_url())
 
@@ -758,7 +720,7 @@ class TestTheRoute:
         (row,) = _rows(db, renderer.signature)
         assert (row.theme, row.z, row.x, row.y) == ("dark", 2, 1, 3)
         assert blob_store.exists(row.storage_key)
-        assert not redis.claims()
+        assert not _claims(redis)
 
     @pytest.mark.asyncio
     async def test_a_claimant_cancelled_before_its_draw_lets_the_claim_go(
@@ -777,7 +739,7 @@ class TestTheRoute:
 
         async def held_once_claimed(session: Any) -> None:
             await release(session)
-            if redis.claims():
+            if _claims(redis):
                 reached.set()
                 await held.wait()
 
@@ -790,12 +752,12 @@ class TestTheRoute:
                 )
             )
             await asyncio.wait_for(reached.wait(), timeout=5)
-            assert redis.claims()
+            assert _claims(redis)
             request.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await request
 
-        assert not redis.claims()
+        assert not _claims(redis)
         assert renderer.renders == []
 
     @pytest.mark.asyncio
@@ -822,7 +784,7 @@ class TestTheRoute:
         assert refused.status_code == 429
         assert stored.status_code == 200
         assert len(renderer.renders) == 1
-        assert not redis.claims(), "a refused claim stood"
+        assert not _claims(redis), "a refused claim stood"
 
     @pytest.mark.asyncio
     async def test_the_request_limit_counts_every_request_hits_and_waits_included(

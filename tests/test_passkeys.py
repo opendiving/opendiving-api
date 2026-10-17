@@ -18,7 +18,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
-from redis.exceptions import ConnectionError as RedisConnectionError
 
 from src.app.api.v1.auth import passkey_sign_in_options, passkey_sign_in_verify
 from src.app.api.v1.passkeys import (
@@ -41,6 +40,7 @@ from src.app.schemas.webauthn_credential import (
     WebauthnCredentialUpdate,
 )
 from src.app.services.passkey_challenges import ChallengeStoreUnavailable
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.mocks import fake_request, stub_claim
 from tests.helpers.webauthn import SoftAuthenticator
 
@@ -52,33 +52,6 @@ CREDENTIAL_UUID = uuid_pkg.uuid4()
 # derivation the moment it changed.
 RP_ID = settings.passkey_rp_id
 ORIGIN = settings.passkey_origin
-
-
-class FakeRedis:
-    """The three commands the challenge store uses, in a dict.
-
-    `fail_with` turns every call into that exception, which is how the fails-closed
-    behaviour is exercised - `redis-py` connects lazily, so a real outage arrives as a
-    `RedisError` from an otherwise ordinary-looking client, not as a missing one.
-    """
-
-    def __init__(self, fail_with: Exception | None = None) -> None:
-        self.values: dict[str, bytes] = {}
-        self.expiries: dict[str, int | None] = {}
-        self.fail_with = fail_with
-
-    async def set(self, key: str, value: bytes, ex: int | None = None) -> bool:
-        if self.fail_with:
-            raise self.fail_with
-        self.values[key] = value
-        self.expiries[key] = ex
-        return True
-
-    async def getdel(self, key: str) -> bytes | None:
-        if self.fail_with:
-            raise self.fail_with
-        self.expiries.pop(key, None)
-        return self.values.pop(key, None)
 
 
 _request = fake_request
@@ -187,7 +160,7 @@ class TestRegistration:
         assert result.options["authenticatorSelection"]["residentKey"] == "required"
         assert result.options["authenticatorSelection"]["userVerification"] == "preferred"
         assert result.options["attestation"] == "none"
-        assert list(redis_client.values) == ["auth:passkey-challenge:user:7"]
+        assert list(redis_client.store) == ["auth:passkey-challenge:user:7"]
         assert redis_client.expiries["auth:passkey-challenge:user:7"] == settings.PASSKEY_CHALLENGE_TTL_SECONDS
 
     @pytest.mark.asyncio
@@ -480,7 +453,7 @@ class TestSignInOptions:
         assert result.options["rpId"] == RP_ID
         assert result.options.get("allowCredentials") in (None, [])
         assert result.options["userVerification"] == "preferred"
-        assert list(redis_client.values) == [f"auth:passkey-challenge:flow:{result.flow_id}"]
+        assert list(redis_client.store) == [f"auth:passkey-challenge:flow:{result.flow_id}"]
 
     @pytest.mark.asyncio
     async def test_two_calls_get_independent_flows(self, redis_client):
@@ -494,7 +467,7 @@ class TestSignInOptions:
     async def test_it_fails_closed_when_redis_is_unreachable(self):
         """Unlike rate limiting, which fails open. The challenge *is* the anti-replay
         guarantee, and email sign-in is unaffected by the same outage."""
-        with patch("src.app.core.utils.cache.client", FakeRedis(fail_with=RedisConnectionError("no route"))):
+        with patch("src.app.core.utils.cache.client", FakeRedis(failing=True)):
             with pytest.raises(ChallengeStoreUnavailable) as exc_info:
                 await passkey_sign_in_options(_request())
 
@@ -951,7 +924,7 @@ class TestChallengeStoreFailsClosed:
     @pytest.mark.usefixtures("no_rate_limits")
     async def test_registration_options_fail_closed(self, mock_db):
         with (
-            patch("src.app.core.utils.cache.client", FakeRedis(fail_with=RedisConnectionError("no route"))),
+            patch("src.app.core.utils.cache.client", FakeRedis(failing=True)),
             patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud,
         ):
             crud.get_multi = AsyncMock(return_value={"data": []})
@@ -970,7 +943,7 @@ class TestChallengeStoreFailsClosed:
         options_response = await passkey_sign_in_options(_request())
         assertion = ceremony.device.authenticate(options_response.options)
 
-        with patch("src.app.core.utils.cache.client", FakeRedis(fail_with=RedisConnectionError("no route"))):
+        with patch("src.app.core.utils.cache.client", FakeRedis(failing=True)):
             with pytest.raises(ChallengeStoreUnavailable):
                 await passkey_sign_in_verify(
                     _request(),
@@ -983,7 +956,7 @@ class TestChallengeStoreFailsClosed:
     @pytest.mark.usefixtures("no_rate_limits")
     async def test_the_outage_is_logged_once_it_happens(self, mock_db, caplog):
         with (
-            patch("src.app.core.utils.cache.client", FakeRedis(fail_with=RedisConnectionError("no route"))),
+            patch("src.app.core.utils.cache.client", FakeRedis(failing=True)),
             caplog.at_level(logging.WARNING),
             pytest.raises(ChallengeStoreUnavailable),
         ):

@@ -34,7 +34,6 @@ import anyio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from redis.exceptions import ConnectionError
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
@@ -59,6 +58,7 @@ from src.app.schemas.species import SpeciesSearchResponse, SpeciesSearchResult
 from src.app.services import species_service
 from src.app.services.dive_stats import recalculate_dive_stats
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_dive, create_species, create_user
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
@@ -331,28 +331,6 @@ def anonymous_client(species_app: Any) -> Generator[TestClient]:
     with TestClient(species_app) as test_client:
         yield test_client
     species_app.dependency_overrides = {}
-
-
-class FakeRedis:
-    """Enough of the Redis client for this module. `failing=True` makes both calls raise,
-    which is how "a cache outage is a miss, not an error" gets exercised."""
-
-    def __init__(self, *, failing: bool = False) -> None:
-        self.store: dict[str, bytes] = {}
-        self.expiries: dict[str, int] = {}
-        self.failing = failing
-
-    async def get(self, key: str) -> bytes | None:
-        if self.failing:
-            raise ConnectionError("redis is down")
-        return self.store.get(key)
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        if self.failing:
-            raise ConnectionError("redis is down")
-        self.store[key] = value.encode()
-        if ex is not None:
-            self.expiries[key] = ex
 
 
 @pytest.fixture

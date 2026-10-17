@@ -11,12 +11,12 @@ from unittest.mock import AsyncMock, patch
 import anyio
 import httpx
 import pytest
-from redis.exceptions import ConnectionError
 
 from src.app.core.config import PROJECT_USER_AGENT
 from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.utils import outbound
 from src.app.core.utils.outbound import Failed, Fetched, FetchFailure
+from tests.helpers.fake_redis import FakeRedis
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 _URL = "https://provider.example/api"
@@ -162,28 +162,10 @@ class TestClaimProviderSlot:
         assert limit.await_count == 2
 
 
-class _FakeRedis:
-    def __init__(self, *, failing: bool = False) -> None:
-        self.store: dict[str, bytes] = {}
-        self.expiries: dict[str, int | None] = {}
-        self.failing = failing
-
-    async def get(self, key: str) -> bytes | None:
-        if self.failing:
-            raise ConnectionError("redis is down")
-        return self.store.get(key)
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        if self.failing:
-            raise ConnectionError("redis is down")
-        self.store[key] = value.encode()
-        self.expiries[key] = ex
-
-
 class TestProviderCache:
     @pytest.mark.asyncio
     async def test_a_written_answer_reads_back_through_parse(self):
-        redis = _FakeRedis()
+        redis = FakeRedis()
         with patch("src.app.core.utils.cache.client", redis):
             await outbound.write_cached("k", '{"n": 2}', ttl_seconds=60)
             assert await outbound.read_cached("k", lambda body: body["n"] * 2) == 4
@@ -198,13 +180,13 @@ class TestProviderCache:
 
     @pytest.mark.asyncio
     async def test_a_failing_redis_is_a_miss_and_a_silent_write(self):
-        with patch("src.app.core.utils.cache.client", _FakeRedis(failing=True)):
+        with patch("src.app.core.utils.cache.client", FakeRedis(failing=True)):
             await outbound.write_cached("k", "[]", ttl_seconds=60)
             assert await outbound.read_cached("k", list) is None
 
     @pytest.mark.asyncio
     async def test_an_entry_that_will_not_decode_or_parse_is_a_miss(self):
-        redis = _FakeRedis()
+        redis = FakeRedis()
         redis.store = {"garbage": b"not json", "shape": b'{"a": 1}'}
 
         def refuse(body: Any) -> Any:

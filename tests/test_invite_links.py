@@ -13,17 +13,15 @@ developer's own `src/.env` at import.
 
 import asyncio
 import re
-from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-import pytest_asyncio
 from fastapi import Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
@@ -297,13 +295,6 @@ class TestTheAdvisoryGate:
 needs_a_database = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 
-@pytest_asyncio.fixture
-async def sessions() -> AsyncGenerator[Any]:
-    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-    yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    await engine.dispose()
-
-
 def _caller(user: User) -> dict[str, Any]:
     return {"id": user.id, "name": user.name, "is_superuser": user.is_superuser}
 
@@ -325,11 +316,13 @@ def _invite(db: Session, *, email: str, inviter: User, from_queue: bool = False)
 @needs_a_database
 class TestTheMembersRoutes:
     @pytest.mark.asyncio
-    async def test_make_read_reset_and_remove(self, db: Session, sessions: Any) -> None:
+    async def test_make_read_reset_and_remove(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         member = create_user(db)
         caller = _caller(member)
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with _mode(RegistrationMode.INVITE):
                 with pytest.raises(NotFoundException):
                     await read_own_invite_link(caller, session)
@@ -358,13 +351,15 @@ class TestTheMembersRoutes:
         assert db.scalar(select(func.count()).select_from(InviteLink).where(InviteLink.user_id == member.id)) == 0
 
     @pytest.mark.asyncio
-    async def test_two_first_creates_racing_both_succeed_and_leave_one_row(self, db: Session, sessions: Any) -> None:
+    async def test_two_first_creates_racing_both_succeed_and_leave_one_row(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """The upsert on `user_id`: a double click or two tabs never meet the unique index."""
         member = create_user(db)
         caller = _caller(member)
 
         async def make() -> str:
-            async with sessions() as session:
+            async with async_sessions() as session:
                 return (await make_invite_link(fake_request(), caller, session)).token
 
         with _mode(RegistrationMode.INVITE):
@@ -377,7 +372,7 @@ class TestTheMembersRoutes:
 
     @pytest.mark.asyncio
     async def test_the_sign_in_requests_question_is_whether_the_row_exists_and_nothing_else(
-        self, db: Session, sessions: Any
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
     ) -> None:
         """A deleted owner's token still exists here: whether the owner is deleted is the
         gates' question, after the address is proven, and not the anonymous endpoint's."""
@@ -387,19 +382,21 @@ class TestTheMembersRoutes:
         owner.deleted_at = datetime.now(UTC)
         db.commit()
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             assert await invite_link_exists(session, token=token) is True
             assert await invite_link_exists(session, token=new_invite_link_token()) is False
 
     @pytest.mark.asyncio
-    async def test_a_deleted_owners_link_resolves_to_nothing(self, db: Session, sessions: Any) -> None:
+    async def test_a_deleted_owners_link_resolves_to_nothing(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         owner = create_user(db)
         token = _link(db, owner)
         owner.is_deleted = True
         owner.deleted_at = datetime.now(UTC)
         db.commit()
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with _mode(RegistrationMode.INVITE):
                 answer = await resolve_invite_link(token, Response(), session)
 
@@ -413,9 +410,13 @@ class TestTheAuthoritativeGate:
 
     @staticmethod
     async def _admit(
-        sessions: Any, *, email: str, via: str | None, mode: RegistrationMode = RegistrationMode.INVITE
+        async_sessions: async_sessionmaker[AsyncSession],
+        *,
+        email: str,
+        via: str | None,
+        mode: RegistrationMode = RegistrationMode.INVITE,
     ) -> Any:
-        async with sessions() as session:
+        async with async_sessions() as session:
             try:
                 with _channels(None), _mode(mode):
                     return await admit_or_refuse(session, email=email, via=via)
@@ -424,39 +425,43 @@ class TestTheAuthoritativeGate:
 
     @pytest.mark.asyncio
     async def test_a_live_link_admits_an_uninvited_address_as_its_owners_invitation(
-        self, db: Session, sessions: Any
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
     ) -> None:
         owner = create_user(db)
-        admission = await self._admit(sessions, email=unique_email(), via=_link(db, owner))
+        admission = await self._admit(async_sessions, email=unique_email(), via=_link(db, owner))
 
         assert admission.source == AccountSource.INVITATION
         assert admission.invite_link_owner_id == owner.id
 
     @pytest.mark.asyncio
-    async def test_the_link_wins_over_an_invitation_from_the_queue(self, db: Session, sessions: Any) -> None:
+    async def test_the_link_wins_over_an_invitation_from_the_queue(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         owner = create_user(db)
         email = unique_email()
         _invite(db, email=email, inviter=create_user(db, is_super_user=True), from_queue=True)
 
-        admission = await self._admit(sessions, email=email, via=_link(db, owner))
+        admission = await self._admit(async_sessions, email=email, via=_link(db, owner))
 
         assert admission.source == AccountSource.INVITATION
         assert admission.invite_link_owner_id == owner.id
 
     @pytest.mark.asyncio
-    async def test_an_owner_at_quota_refuses_an_uninvited_address(self, db: Session, sessions: Any) -> None:
+    async def test_an_owner_at_quota_refuses_an_uninvited_address(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         owner = create_user(db)
         _invite(db, email=unique_email(), inviter=owner)
         token = _link(db, owner)
 
         with patch.object(settings, "INVITATIONS_PER_USER", 1), pytest.raises(ForbiddenException) as refusal:
-            await self._admit(sessions, email=unique_email(), via=token)
+            await self._admit(async_sessions, email=unique_email(), via=token)
 
         assert refusal.value.detail == SPENT_INVITE_LINK
 
     @pytest.mark.asyncio
     async def test_an_owner_at_quota_still_lets_in_an_address_somebody_invited(
-        self, db: Session, sessions: Any
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
     ) -> None:
         """Under that invitation's door, and naming no owner, so no link row is written."""
         owner = create_user(db)
@@ -466,24 +471,28 @@ class TestTheAuthoritativeGate:
         _invite(db, email=email, inviter=create_user(db, is_super_user=True), from_queue=True)
 
         with patch.object(settings, "INVITATIONS_PER_USER", 1):
-            admission = await self._admit(sessions, email=email, via=token)
+            admission = await self._admit(async_sessions, email=email, via=token)
 
         assert admission.source == AccountSource.WAITLIST
         assert admission.invite_link_owner_id is None
 
     @pytest.mark.asyncio
-    async def test_a_superuser_owner_is_never_at_quota(self, db: Session, sessions: Any) -> None:
+    async def test_a_superuser_owner_is_never_at_quota(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         owner = create_user(db, is_super_user=True)
         _invite(db, email=unique_email(), inviter=owner)
         token = _link(db, owner)
 
         with patch.object(settings, "INVITATIONS_PER_USER", 1):
-            admission = await self._admit(sessions, email=unique_email(), via=token)
+            admission = await self._admit(async_sessions, email=unique_email(), via=token)
 
         assert admission.invite_link_owner_id == owner.id
 
     @pytest.mark.asyncio
-    async def test_a_deleted_owners_link_is_stale(self, db: Session, sessions: Any) -> None:
+    async def test_a_deleted_owners_link_is_stale(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         owner = create_user(db)
         token = _link(db, owner)
         owner.is_deleted = True
@@ -491,24 +500,28 @@ class TestTheAuthoritativeGate:
         db.commit()
 
         with pytest.raises(ForbiddenException) as refusal:
-            await self._admit(sessions, email=unique_email(), via=token)
+            await self._admit(async_sessions, email=unique_email(), via=token)
 
         assert refusal.value.detail == STALE_INVITE_LINK
 
     @pytest.mark.asyncio
-    async def test_a_token_attributes_nothing_on_an_open_instance(self, db: Session, sessions: Any) -> None:
+    async def test_a_token_attributes_nothing_on_an_open_instance(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         token = _link(db, create_user(db))
 
-        admission = await self._admit(sessions, email=unique_email(), via=token, mode=RegistrationMode.OPEN)
+        admission = await self._admit(async_sessions, email=unique_email(), via=token, mode=RegistrationMode.OPEN)
 
         assert admission.source == AccountSource.OPEN
         assert admission.invite_link_owner_id is None
 
     @pytest.mark.asyncio
-    async def test_no_via_is_still_not_invited(self, db: Session, sessions: Any) -> None:
+    async def test_no_via_is_still_not_invited(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         create_user(db)
         with pytest.raises(ForbiddenException) as refusal:
-            await self._admit(sessions, email=unique_email(), via=None)
+            await self._admit(async_sessions, email=unique_email(), via=None)
 
         assert refusal.value.detail == NOT_INVITED
 
@@ -555,7 +568,7 @@ def _rows_for(db: Session, *, inviter: User, email: str) -> list[Invitation]:
 class TestTheCreatingTransaction:
     @pytest.mark.asyncio
     async def test_a_link_sign_up_gives_the_owner_one_accepted_link_row_in_the_same_commit(
-        self, db: Session, sessions: Any
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
     ) -> None:
         owner, other = create_user(db), create_user(db)
         token = _link(db, owner)
@@ -565,7 +578,7 @@ class TestTheCreatingTransaction:
         db.commit()
         before = _invitation_count(db)
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with _channels(None), _mode(RegistrationMode.INVITE):
                 await _complete(session, _completion(email, via=token))
 
@@ -582,19 +595,19 @@ class TestTheCreatingTransaction:
         assert typed.accepted_at is not None
         assert db.scalar(select(func.count()).select_from(InviteRequest).where(InviteRequest.email == email)) == 0
         # The row is charged to the owner's quota.
-        async with sessions() as session:
+        async with async_sessions() as session:
             assert await invitations_created_since(session, user_id=owner.id, window_days=1) == 1
 
     @pytest.mark.asyncio
     async def test_an_address_the_owner_already_typed_keeps_that_row_and_gains_no_second(
-        self, db: Session, sessions: Any
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
     ) -> None:
         owner = create_user(db)
         token = _link(db, owner)
         email = unique_email()
         typed = _invite(db, email=email, inviter=owner)
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with _channels(None), _mode(RegistrationMode.INVITE):
                 await _complete(session, _completion(email, via=token))
 
@@ -606,7 +619,7 @@ class TestTheCreatingTransaction:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("channels", "sentence"), [(None, STALE_INVITE_LINK), ("reddit=Reddit", STALE_JOIN_LINK)])
     async def test_a_link_reset_before_completion_refuses_it_and_creates_nothing(
-        self, db: Session, sessions: Any, channels: str | None, sentence: str
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession], channels: str | None, sentence: str
     ) -> None:
         """`test_a_revocation_committed_mid_handler_is_honoured`'s shape: the owner resets the
         link from another session while the handler is between its duplicate checks and its
@@ -616,13 +629,13 @@ class TestTheCreatingTransaction:
         email = unique_email()
 
         async def reset_from_another_session(_: Any) -> None:
-            async with sessions() as other:
+            async with async_sessions() as other:
                 await other.execute(
                     update(InviteLink).where(InviteLink.user_id == owner.id).values(token=new_invite_link_token())
                 )
                 await other.commit()
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with (
                 _channels(channels),
                 _mode(RegistrationMode.INVITE),
@@ -635,13 +648,15 @@ class TestTheCreatingTransaction:
         assert _rows_for(db, inviter=owner, email=email) == []
 
     @pytest.mark.asyncio
-    async def test_an_owner_at_quota_refuses_and_creates_nothing(self, db: Session, sessions: Any) -> None:
+    async def test_an_owner_at_quota_refuses_and_creates_nothing(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         owner = create_user(db)
         _invite(db, email=unique_email(), inviter=owner)
         token = _link(db, owner)
         email = unique_email()
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with (
                 _channels(None),
                 _mode(RegistrationMode.INVITE),
@@ -657,25 +672,27 @@ class TestTheCreatingTransaction:
 @needs_a_database
 class TestWhatTheInviterSees:
     @staticmethod
-    async def _listed(sessions: Any, inviter: User) -> list[dict[str, Any]]:
-        async with sessions() as session:
+    async def _listed(async_sessions: async_sessionmaker[AsyncSession], inviter: User) -> list[dict[str, Any]]:
+        async with async_sessions() as session:
             with _mode(RegistrationMode.INVITE):
                 page = await read_invitations(_caller(inviter), session)
         return list(page["data"])
 
     @pytest.mark.asyncio
-    async def test_a_link_row_names_the_member_and_a_typed_row_is_unchanged(self, db: Session, sessions: Any) -> None:
+    async def test_a_link_row_names_the_member_and_a_typed_row_is_unchanged(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         owner = create_user(db)
         token = _link(db, owner)
         typed_email = unique_email()
         _invite(db, email=typed_email, inviter=owner)
         joined_email = unique_email()
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with _channels(None), _mode(RegistrationMode.INVITE):
                 await _complete(session, _completion(joined_email, via=token))
 
-        joined, typed = await self._listed(sessions, owner)
+        joined, typed = await self._listed(async_sessions, owner)
         assert joined["email"] is None
         assert joined["from_invite_link"] is True
         assert joined["member_name"] == "Grace Reef"
@@ -686,17 +703,19 @@ class TestWhatTheInviterSees:
         # The current name, as the member changes it.
         db.execute(update(User).where(func.lower(User.email) == joined_email).values(name="Grace Hopper"))
         db.commit()
-        assert (await self._listed(sessions, owner))[0]["member_name"] == "Grace Hopper"
+        assert (await self._listed(async_sessions, owner))[0]["member_name"] == "Grace Hopper"
 
     @pytest.mark.asyncio
-    async def test_a_later_account_on_the_old_address_is_never_named(self, db: Session, sessions: Any) -> None:
+    async def test_a_later_account_on_the_old_address_is_never_named(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """The joiner moves to another address, and somebody who never opened the link signs
         up with the old one: the row names nobody rather than them."""
         owner = create_user(db)
         token = _link(db, owner)
         email = unique_email()
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with _channels(None), _mode(RegistrationMode.INVITE):
                 await _complete(session, _completion(email, via=token))
 
@@ -707,6 +726,6 @@ class TestWhatTheInviterSees:
         stranger.created_at = datetime.now(UTC) + timedelta(seconds=1)
         db.commit()
 
-        [row] = await self._listed(sessions, owner)
+        [row] = await self._listed(async_sessions, owner)
         assert row["member_name"] is None
         assert row["email"] is None

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 from botocore.exceptions import ClientError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
@@ -316,7 +316,9 @@ class TestTheInvitationSweepsAgainstPostgres:
         assert db.get(InviteRequest, fresh) is not None
 
     @pytest.mark.asyncio
-    async def test_the_purge_deletes_by_lowercased_address(self, db: Session) -> None:
+    async def test_the_purge_deletes_by_lowercased_address(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """Invariant 13's sharp edge, and the one a mock would answer wrongly rather than
         not at all.
 
@@ -344,17 +346,13 @@ class TestTheInvitationSweepsAgainstPostgres:
         invitation_id, request_id, user_id = invitation.id, request_row.id, purged.id
         db.expunge_all()
 
-        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-        try:
-            async with async_sessionmaker(bind=engine, class_=AsyncSession)() as session:
-                gone = await _purge_one_account(
-                    session,
-                    user_id=user_id,
-                    email=f"Shouty.{user_id}@Example.COM",
-                    cutoff=datetime.now(UTC),
-                )
-        finally:
-            await engine.dispose()
+        async with async_sessions() as session:
+            gone = await _purge_one_account(
+                session,
+                user_id=user_id,
+                email=f"Shouty.{user_id}@Example.COM",
+                cutoff=datetime.now(UTC),
+            )
 
         assert gone is True
         assert db.get(Invitation, invitation_id) is None

@@ -25,7 +25,6 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from redis.exceptions import ConnectionError
 
 from src.app.api import router
 from src.app.api.dependencies import get_current_user
@@ -33,6 +32,7 @@ from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.setup import create_application
 from src.app.services import geocoding_service
+from tests.helpers.fake_redis import FakeRedis
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
@@ -133,33 +133,6 @@ def anonymous_client(geocode_app: Any) -> Generator[TestClient]:
     with TestClient(geocode_app) as test_client:
         yield test_client
     geocode_app.dependency_overrides = {}
-
-
-class FakeRedis:
-    """Enough of the Redis client for this module: `get`/`set` with an expiry we record but
-    don't act on, since nothing here needs a clock.
-
-    `failing=True` makes both raise, which is how the "a cache outage is a miss, not an
-    error" branches get exercised - the one thing a purely in-memory double would otherwise
-    let go untested.
-    """
-
-    def __init__(self, *, failing: bool = False) -> None:
-        self.store: dict[str, bytes] = {}
-        self.expiries: dict[str, int] = {}
-        self.failing = failing
-
-    async def get(self, key: str) -> bytes | None:
-        if self.failing:
-            raise ConnectionError("redis is down")
-        return self.store.get(key)
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        if self.failing:
-            raise ConnectionError("redis is down")
-        self.store[key] = value.encode()
-        if ex is not None:
-            self.expiries[key] = ex
 
 
 @pytest.fixture
