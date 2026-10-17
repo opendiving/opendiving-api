@@ -4,8 +4,9 @@ takes effect - directly setting `email` via `PATCH /user` is no longer possible
 (see `schemas.user.UserUpdate`).
 """
 
+import smtplib
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import Response
@@ -27,6 +28,7 @@ from src.app.core.security import hash_token
 from src.app.models.authentication_request import AuthenticationRequest
 from src.app.models.user import User
 from src.app.schemas.email_change import EmailChangeRequest, EmailChangeVerifyRequest
+from src.app.services import email_service
 from tests.conftest import db_available, unique_email
 from tests.helpers.mocks import claimed_used_at_sql, fake_request, stub_claim
 
@@ -630,6 +632,37 @@ class TestVerifyEmailChangeAgainstPostgres:
         # open transaction.
         assert db.scalar(select(User.email).where(User.id == diver.id)) == new_email
         assert _used_at(db, request_row.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_a_relay_that_fails_the_notice_does_not_fail_the_change(
+        self, db: Session, async_db: AsyncSession, diver: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The notice goes to the old address after the change has committed, so a relay
+        failure there has nothing left to undo: the person gets their answer, and the
+        account has the address they confirmed."""
+        new_email = unique_email()
+        raw_token = "e2e-relay-down-" + uuid7().hex
+        request_row = AuthenticationRequest(
+            email=new_email,
+            token_hash=hash_token(raw_token),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            purpose="email_change",
+            user_id=diver.id,
+        )
+        db.add(request_row)
+        db.commit()
+
+        monkeypatch.setattr(email_service.settings, "SMTP_HOST", "smtp.example.com")
+        monkeypatch.setattr(email_service.settings, "EMAIL_FROM_ADDRESS", "noreply@example.com")
+        relay = Mock(side_effect=smtplib.SMTPServerDisconnected("Connection unexpectedly closed"))
+        monkeypatch.setattr(email_service, "_send", relay)
+
+        with patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock):
+            result = await verify_email_change(_request(), EmailChangeVerifyRequest(token=raw_token), async_db)
+
+        assert result.email == new_email
+        relay.assert_called_once()
+        assert db.scalar(select(User.email).where(User.id == diver.id)) == new_email
 
     @pytest.mark.asyncio
     async def test_a_second_verification_reports_the_change_without_rewriting_it(

@@ -13,9 +13,7 @@ until `POST /auth/complete`, so there is nothing to attach one to until onboardi
 done.
 """
 
-import logging
 import uuid as uuid_pkg
-from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -36,12 +34,10 @@ from ...schemas.webauthn_credential import (
     WebauthnCredentialReadInternal,
     WebauthnCredentialUpdate,
 )
-from ...services.email_service import EmailDeliveryError, send_passkey_added_email, send_passkey_removed_email
+from ...services.email_service import send_best_effort, send_passkey_added_email, send_passkey_removed_email
 from ...services.passkey_service import finish_registration, start_registration
 
 router = APIRouter(tags=["passkeys"])
-
-logger = logging.getLogger(__name__)
 
 _NOT_FOUND = "Passkey not found"
 
@@ -50,24 +46,6 @@ _NOT_FOUND = "Passkey not found"
 # setting after people have registered would otherwise make the excess rows invisible in
 # the UI, and a passkey nobody can see is a passkey nobody can revoke.
 _LIST_LIMIT = 100
-
-
-_PasskeyNotice = Callable[..., Awaitable[None]]
-
-
-async def _notify(send: _PasskeyNotice, *, email: str, passkey_name: str, what: str) -> None:
-    """Send a passkey security notice, logging a delivery failure rather than raising it.
-
-    The DB write has already committed by the time this runs, and it is not undoable in
-    any way the user would understand: they completed a biometric prompt, so a relay that
-    times out must not come back as "that failed". `OSError` alongside `EmailDeliveryError`
-    because that is the shape an unreachable or slow SMTP host arrives in - `smtplib` raises
-    `SMTPException` and `socket.timeout`, both of which are `OSError`.
-    """
-    try:
-        await send(email=email, passkey_name=passkey_name)
-    except (EmailDeliveryError, OSError) as exc:
-        logger.warning("Could not send the passkey-%s notice to %s: %s", what, email, exc)
 
 
 # -------------------- registration ceremony (signed in) --------------------
@@ -122,7 +100,13 @@ async def passkey_registration_verify(
         context=RequestContext.from_request(request),
     )
 
-    await _notify(send_passkey_added_email, email=current_user["email"], passkey_name=created.name, what="added")
+    # After the commit, and never fatal: the person has just completed a biometric prompt, so a
+    # relay that times out must not come back as "that failed".
+    await send_best_effort(
+        send_passkey_added_email(email=current_user["email"], passkey_name=created.name),
+        what="the passkey-added notice",
+        user_id=current_user["id"],
+    )
 
     return WebauthnCredentialRead.model_validate(created, from_attributes=True)
 
@@ -218,8 +202,11 @@ async def erase_passkey(
     )
 
     # The delivery failure this can log is not an auth event of its own: the auth event on
-    # this path is the removal above, and an SMTP relay timing out is the class `erase_user`
-    # logs at `exception` for the deletion mail.
-    await _notify(send_passkey_removed_email, email=current_user["email"], passkey_name=stored.name, what="removed")
+    # this path is the removal above.
+    await send_best_effort(
+        send_passkey_removed_email(email=current_user["email"], passkey_name=stored.name),
+        what="the passkey-removed notice",
+        user_id=current_user["id"],
+    )
 
     return {"message": "Passkey removed"}

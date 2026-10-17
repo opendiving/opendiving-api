@@ -79,7 +79,7 @@ async def fetch_signature() -> str:
             async with _client(timeout=_SIGNATURE_TIMEOUT_SECONDS) as client:
                 response = await client.get("/signature")
         body = response.json() if response.status_code == 200 else None
-    except (httpx.HTTPError, TimeoutError, ValueError) as exc:
+    except (httpx.HTTPError, httpx.InvalidURL, TimeoutError, ValueError) as exc:
         raise RendererUnavailable(f"GET /signature failed: {type(exc).__name__}") from exc
     signature = _valid_signature(body.get("signature")) if isinstance(body, dict) else None
     if signature is None:
@@ -145,7 +145,9 @@ async def render(body: dict[str, Any], *, timeout: float) -> Drawn:
         with anyio.fail_after(timeout):
             async with _client(timeout=timeout) as client:
                 response = await client.post("/render", json=body)
-    except (httpx.HTTPError, TimeoutError) as exc:
+    # `InvalidURL` is not an `HTTPError`: it is how httpx refuses a `MAP_RENDERER_URL` the
+    # settings validator let through, and that is a renderer this process cannot reach.
+    except (httpx.HTTPError, httpx.InvalidURL, TimeoutError) as exc:
         raise RendererUnavailable(f"POST /render failed: {type(exc).__name__}") from exc
     if response.status_code == 400:
         # The body is this API's own, so a refusal is a contract mismatch, not a bad request.

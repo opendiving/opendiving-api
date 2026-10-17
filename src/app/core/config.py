@@ -556,7 +556,13 @@ def normalize_map_renderer_url(raw: str) -> str:
     if "://" not in value:
         value = f"http://{value}"
     parsed = urlparse(value)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+    try:
+        # `port` raises on one that is no number or out of range, which `urlparse` lets
+        # through and httpx would refuse only at the first call, as an `InvalidURL`.
+        names_renderer = parsed.scheme in ("http", "https") and bool(parsed.hostname) and parsed.port != 0
+    except ValueError:
+        names_renderer = False
+    if not names_renderer:
         raise ValueError(
             f"MAP_RENDERER_URL is {raw!r}, which names no renderer. Set it in your .env to the "
             "renderer's host:port or http(s) URL, or leave it empty to draw no map tiles."

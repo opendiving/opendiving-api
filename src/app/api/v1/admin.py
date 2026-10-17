@@ -21,7 +21,6 @@ The web gate is a convenience over this one and never a substitute: a non-superu
 refused here whatever page they came from.
 """
 
-import logging
 import uuid as uuid_pkg
 from collections import defaultdict
 from dataclasses import dataclass
@@ -71,12 +70,10 @@ from ...schemas.species import (
     PhotoCuration,
 )
 from ...services import species_photos, species_service
-from ...services.email_service import send_invitation_email
+from ...services.email_service import send_best_effort, send_invitation_email
 from ...services.species_life_list import _search_clause
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_current_superuser)])
-
-logger = logging.getLogger(__name__)
 
 
 @router.get("/invite-requests", response_model=PaginatedListResponse[AdminInviteRequestRead])
@@ -181,14 +178,16 @@ async def invite_batch(
         )
         await db.commit()
 
-        try:
-            await send_invitation_email(email=email, inviter_name=current_user["name"])
-        except Exception:
-            # After the commit, so the invitation stands and the address is admitted. The
-            # broad catch is the point of the per-address report: one unreachable relay or
-            # one rejected recipient must not take the rest of the batch with it, and the
-            # operator needs to see which ones to follow up by hand.
-            logger.exception("Invitation for %s was created but could not be emailed", email)
+        # After the commit, so the invitation stands and the address is admitted. One
+        # unreachable relay or one rejected recipient must not take the rest of the batch
+        # with it, and the per-address outcome is how the operator sees which ones to follow
+        # up by hand.
+        sent = await send_best_effort(
+            send_invitation_email(email=email, inviter_name=current_user["name"]),
+            what="an invitation email",
+            user_id=current_user["id"],
+        )
+        if not sent:
             results.append(AdminInvitationOutcome(email=email, outcome="mail_failed"))
             continue
 
