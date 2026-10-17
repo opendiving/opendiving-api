@@ -84,7 +84,7 @@ from src.app.schemas.logbook_import import (
     ImportPortraitChoice,
 )
 from src.app.schemas.user_picture import PictureCrop, PictureKind
-from src.app.services import blob_store, dive_reader
+from src.app.services import blob_store, certification_files, dive_reader
 from src.app.services.dive_files import store_recording_file
 from src.app.services.dive_profiles import MAX_LABEL_CHARS, READER_VERSION, backfill_profiles
 from src.app.services.export import load_export_bundle, write_divejson, write_uddf
@@ -99,6 +99,7 @@ from src.app.services.logbook_import import (
 )
 from src.app.services.logbook_import import planner as planner_module
 from src.app.services.logbook_import import reader as import_reader
+from src.app.services.logbook_import import writer as writer_module
 from src.app.services.logbook_import.planner import (
     _DIVE_BOUNDS,
     _GEAR_BOUNDS,
@@ -652,7 +653,8 @@ class TestRestore:
                 )
             )
         ).all()
-        assert [tuple(row) for row in files] == [("front", hashlib.sha256(cards["front"]).hexdigest())]
+        stripped = certification_files.strip_card_image(cards["front"], "image/jpeg")
+        assert [tuple(row) for row in files] == [("front", hashlib.sha256(stripped).hexdigest())]
 
     @pytest.mark.asyncio
     async def test_a_deleted_dive_gets_its_own_files_back_from_the_archive(
@@ -675,6 +677,91 @@ class TestRestore:
         stored = (await async_db.execute(select(DiveFile).where(DiveFile.dive_id == dive.id))).scalars().one()
         assert stored.sha256 == digest
         assert await blob_store.get(stored.storage_key) == payload
+
+
+async def _archive_with_a_card(db: Session, async_db: AsyncSession, card: bytes) -> bytes:
+    """Another account's archive whose one certification's front is `card`, stored as an
+    export made before uploads were stripped would carry it."""
+    source = create_user(db)
+    certification = create_certification(db, source)
+    digest = hashlib.sha256(card).hexdigest()
+    key = blob_store.new_key("certification-files", sha256=digest)
+    await blob_store.put(key, card)
+    db.add(
+        CertificationFile(
+            certification_id=certification.id,
+            side="front",
+            content_type="image/jpeg",
+            byte_size=len(card),
+            original_filename="front.jpg",
+            sha256=digest,
+            storage_key=key,
+        )
+    )
+    db.commit()
+    document = await _export(async_db, source.id, archive_paths=True)
+    member = parse_document(document)["certifications"][0]["front_file"]["archive_path"]
+    return _zip_of(document, {member: card})
+
+
+class TestAnImportedCardIsStrippedAsAnUploadIs:
+    """A check-in link serves the card to whoever holds the link, so the location a phone
+    photo carries does not come back with an archive made before uploads were stripped."""
+
+    @pytest.mark.asyncio
+    async def test_the_stored_card_keeps_the_image_and_drops_the_location(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        card = phone_jpeg()
+        archive = await _archive_with_a_card(db, async_db, card)
+        destination = create_user(db)
+        hopped: list[Any] = []
+        real = writer_module.run_in_threadpool
+
+        async def spy(func: Any, *args: Any, **kwargs: Any) -> Any:
+            hopped.append(func)
+            return await real(func, *args, **kwargs)
+
+        monkeypatch.setattr(writer_module, "run_in_threadpool", spy)
+
+        plan = await _apply(async_db, destination.id, archive, filename="logbook.zip")
+
+        assert plan.files_restored == 1
+        row = (
+            (
+                await async_db.execute(
+                    select(CertificationFile)
+                    .join(Certification, Certification.id == CertificationFile.certification_id)
+                    .where(Certification.user_id == destination.id)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        stored = await blob_store.get(row.storage_key)
+        assert b"PhoneMaker" not in stored
+        with Image.open(io.BytesIO(stored)) as kept, Image.open(io.BytesIO(card)) as imported:
+            assert kept.getexif().get(0x8825) is None, "the GPS block survived"
+            assert kept.convert("RGB").tobytes() == imported.convert("RGB").tobytes()
+        assert row.sha256 == hashlib.sha256(stored).hexdigest() != hashlib.sha256(card).hexdigest()
+        assert row.storage_key.endswith(f"_{row.sha256}")
+        assert row.byte_size == len(stored)
+        assert any(getattr(func, "func", None) is certification_files.strip_card_image for func in hopped)
+
+    @pytest.mark.asyncio
+    async def test_a_damaged_card_is_skipped_and_the_certification_kept(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        archive = await _archive_with_a_card(db, async_db, phone_jpeg()[:200])
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, archive, filename="logbook.zip")
+
+        assert _counts(plan)["certifications"] == (1, 0, 0, 0)
+        assert (plan.files_restored, plan.files_skipped) == (0, 1)
+        assert ImportNoteCode.FILE_SKIPPED in _codes(plan)
 
 
 class TestUniquenessNeverFailsAnImport:
