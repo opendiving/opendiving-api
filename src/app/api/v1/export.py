@@ -36,6 +36,7 @@ from starlette.concurrency import run_in_threadpool
 from ...api.dependencies import get_current_user
 from ...core.config import settings
 from ...core.db.database import async_get_db
+from ...core.utils.binary_responses import BINARY_CSP
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...schemas.export import DIVEJSON_EXTENSION, DIVEJSON_MEDIA_TYPE
 from ...services.export import (
@@ -91,16 +92,12 @@ def _download(buffer: IO[bytes], *, filename: str, media_type: str) -> Streaming
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Length": str(size),
             "Cache-Control": "no-store",
-            # The same pair `read_dive_file` serves stored uploads with. These bodies are
+            # The same pair `stored_bytes_response` serves stored uploads with. These bodies are
             # `attachment` and diver-supplied besides (the archive carries their own dive
             # files; the UDDF is XML), so the browser must not be free to re-interpret one
             # as something scriptable at this origin.
             "X-Content-Type-Options": "nosniff",
-            # `frame-ancestors` is spelled out because it does not fall back to
-            # `default-src`: a response with its own policy opts out of
-            # `SecurityHeadersMiddleware`'s default and would otherwise be framable
-            # however strict the rest of this is.
-            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
+            "Content-Security-Policy": BINARY_CSP,
         },
     )
 
