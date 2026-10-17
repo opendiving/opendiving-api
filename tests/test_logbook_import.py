@@ -86,7 +86,7 @@ from src.app.schemas.logbook_import import (
 from src.app.schemas.user_picture import PictureCrop, PictureKind
 from src.app.services import blob_store, dive_reader
 from src.app.services.dive_files import store_recording_file
-from src.app.services.dive_profiles import READER_VERSION, backfill_profiles
+from src.app.services.dive_profiles import MAX_LABEL_CHARS, READER_VERSION, backfill_profiles
 from src.app.services.export import load_export_bundle, write_divejson, write_uddf
 from src.app.services.export.archive import DIVEJSON_NAME, write_archive
 from src.app.services.export.paths import plan_archive_paths
@@ -654,6 +654,28 @@ class TestRestore:
         ).all()
         assert [tuple(row) for row in files] == [("front", hashlib.sha256(cards["front"]).hexdigest())]
 
+    @pytest.mark.asyncio
+    async def test_a_deleted_dive_gets_its_own_files_back_from_the_archive(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """A soft delete that left the dive's files in place - the admin panel's - leaves its
+        digests held. They are the restored dive's own, cleared before it is written, so the
+        archive's copy is restored rather than skipped as stored against another recording."""
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        user = create_user(db)
+        payload = b'{"restored": "with its file"}'
+        dive, digest = await _dive_with_a_file(db, async_db, user, payload)
+        archive = await _own_archive(async_db, user.id, payload)
+        _soft_delete(db, dive)
+
+        plan = await _apply(async_db, user.id, archive, filename="logbook.zip")
+
+        assert _counts(plan)["dives"] == (0, 0, 1, 0)
+        assert (plan.files_restored, plan.files_skipped) == (1, 0)
+        stored = (await async_db.execute(select(DiveFile).where(DiveFile.dive_id == dive.id))).scalars().one()
+        assert stored.sha256 == digest
+        assert await blob_store.get(stored.storage_key) == payload
+
 
 class TestUniquenessNeverFailsAnImport:
     """No uniqueness rule anywhere 500s an import - the caller's existing row wins and the
@@ -728,6 +750,115 @@ class TestUniquenessNeverFailsAnImport:
 
         created, linked, _, _ = _counts(plan)["sites"]
         assert (created, linked) == (2, 1)
+
+    @pytest.mark.asyncio
+    async def test_names_are_keyed_and_stored_as_a_write_trims_them(self, db: Session, async_db: AsyncSession) -> None:
+        """ "Blue Hole " is the "Blue Hole" already there, as a save through the API would
+        have it - not a second site beside it that the next save of it refuses."""
+        destination = create_user(db)
+        db.add(DiveSite(user_id=destination.id, name="Blue Hole", location_name="Dahab", notes=""))
+        db.commit()
+        item_uuid = str(uuid7())
+        document = json.dumps(
+            {
+                "format": "divejson",
+                "version": "1.0",
+                "sites": [{"uuid": str(uuid7()), "name": "Blue Hole ", "location": {"name": " Dahab"}}],
+                "trips": [{"uuid": str(uuid7()), "name": " Red Sea 2026 "}],
+                "contacts": [{"uuid": str(uuid7()), "name": "Blue Ocean Dive Center  "}],
+                "gear": [{"uuid": item_uuid, "name": " Wing ", "brand": "   "}],
+                "gear_sets": [{"uuid": str(uuid7()), "name": "Sidemount ", "gear_uuids": [item_uuid]}],
+                "gear_service_schedules": [
+                    {
+                        "uuid": str(uuid7()),
+                        "gear_uuid": item_uuid,
+                        "type": "service",
+                        "label": "  ",
+                        "starts_on": "2026-01-01",
+                        "interval_months": 12,
+                    }
+                ],
+            }
+        ).encode()
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert _counts(plan)["sites"] == (0, 1, 0, 0)
+        assert [site.name for site in await _sites_of(async_db, destination.id)] == ["Blue Hole"]
+        trip = (await async_db.execute(select(Trip).where(Trip.user_id == destination.id))).scalars().one()
+        contact = (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalars().one()
+        item = (await async_db.execute(select(GearItem).where(GearItem.user_id == destination.id))).scalars().one()
+        gear_set = (await async_db.execute(select(GearSet).where(GearSet.user_id == destination.id))).scalars().one()
+        schedule = (
+            (await async_db.execute(select(GearServiceSchedule).where(GearServiceSchedule.gear_item_id == item.id)))
+            .scalars()
+            .one()
+        )
+        assert (trip.name, contact.name, item.name, item.brand, gear_set.name, schedule.label) == (
+            "Red Sea 2026",
+            "Blue Ocean Dive Center",
+            "Wing",
+            None,
+            "Sidemount",
+            None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_site_that_links_by_name_reports_nothing_dropped_from_it(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Its locality is read for the key, but a linked site writes nothing, so a position
+        that would have been dropped from it was dropped from nothing."""
+        destination = create_user(db)
+        db.add(DiveSite(user_id=destination.id, name="Blue Hole", location_name="Dahab", notes=""))
+        db.commit()
+        location = {"name": "Dahab", "position": {"latitude": 200, "longitude": 0}}
+        linked = _site_document({"name": "Blue Hole", "location": location})
+        created = _site_document({"name": "Canyon", "location": location})
+
+        linking = await _preview(async_db, destination.id, linked)
+        creating = await _preview(async_db, destination.id, created)
+
+        assert _counts(linking)["sites"] == (0, 1, 0, 0)
+        assert ImportNoteCode.VALUE_DROPPED not in _codes(linking)
+        assert ImportNoteCode.VALUE_DROPPED in _codes(creating)
+
+
+async def _dive_with_a_file(db: Session, async_db: AsyncSession, user: Any, payload: bytes) -> tuple[Dive, str]:
+    """One dive of `user`'s holding `payload` as a stored file, and the file's digest."""
+    dive = create_dive(db, user)
+    digest = hashlib.sha256(payload).hexdigest()
+    key = blob_store.new_key("dive-files", sha256=digest)
+    stored_byte_size = await blob_store.put(key, payload)
+    db.add(
+        DiveFile(
+            user_id=user.id,
+            recording_id=create_dive_recording(db, user, dive).id,
+            dive_id=dive.id,
+            sha256=digest,
+            content_type="application/json",
+            byte_size=len(payload),
+            stored_byte_size=stored_byte_size,
+            original_filename="dive.json",
+            parser_key="suunto_json",
+            storage_key=key,
+        )
+    )
+    db.commit()
+    return dive, digest
+
+
+async def _own_archive(async_db: AsyncSession, user_id: int, payload: bytes) -> bytes:
+    """`user_id`'s export as an archive carrying `payload` as its one dive's file."""
+    document = await _export(async_db, user_id, archive_paths=True)
+    member = parse_document(document)["dives"][0]["recordings"][0]["source_files"][0]["archive_path"]
+    return _zip_of(document, {member: payload})
+
+
+def _soft_delete(db: Session, dive: Dive) -> None:
+    """The admin panel's delete: the row flagged, its files left where they are."""
+    db.query(Dive).filter(Dive.id == dive.id).update({"is_deleted": True, "deleted_at": datetime.now(UTC)})
+    db.commit()
 
 
 class TestFilesFollowTheirBytes:
@@ -892,6 +1023,70 @@ class TestFilesFollowTheirBytes:
         assert (
             not (await async_db.execute(select(DiveFile.id).where(DiveFile.user_id == destination.id))).scalars().all()
         )
+
+    @pytest.mark.asyncio
+    async def test_re_importing_the_accounts_own_archive_names_no_file_as_missing(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """Every record links, so nothing is written - but the archive carries every file's
+        bytes, and "not contained" is the figure that tells the diver to import the archive."""
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        user = create_user(db)
+        payload = b'{"already": "here"}'
+        await _dive_with_a_file(db, async_db, user, payload)
+        archive = await _own_archive(async_db, user.id, payload)
+
+        plan = await _apply(async_db, user.id, archive, filename="logbook.zip")
+
+        assert _counts(plan)["dives"] == (0, 1, 0, 0)
+        assert (plan.files_referenced, plan.files_restored, plan.files_not_contained, plan.files_skipped) == (
+            1,
+            0,
+            0,
+            1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_dive_claims_no_file_a_later_dive_carries(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """A dive skipped for having no dive time writes no file, so its copy is not counted
+        restored, and the digest stays free for the next dive carrying the same bytes."""
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        payload = b'{"one": "file, two dives"}'
+        stored = {"archive_path": "files/dive.json", "sha256": hashlib.sha256(payload).hexdigest()}
+        document = json.dumps(
+            {
+                "format": "divejson",
+                "version": "1.0",
+                "dives": [
+                    {
+                        "uuid": str(uuid7()),
+                        "started_at": "2026-06-01T09:00:00+02:00",
+                        "recordings": [{"source_files": [stored]}],
+                    },
+                    {
+                        "uuid": str(uuid7()),
+                        "started_at": "2026-06-02T09:00:00+02:00",
+                        "submerged_time": 1800,
+                        "recordings": [{"source_files": [stored]}],
+                    },
+                ],
+            }
+        ).encode()
+        destination = create_user(db)
+
+        plan = await _apply(
+            async_db, destination.id, _zip_of(document, {"files/dive.json": payload}), filename="logbook.zip"
+        )
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 1)
+        assert (plan.files_referenced, plan.files_restored, plan.files_skipped) == (2, 1, 1)
+        dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        assert dive.submerged_time == 1800
+        assert (
+            await async_db.execute(select(DiveFile.dive_id).where(DiveFile.user_id == destination.id))
+        ).scalars().all() == [dive.id]
 
 
 def _zip_of(document: bytes, members: dict[str, bytes]) -> bytes:
@@ -1271,6 +1466,31 @@ class TestTheDecompressionMembersRoundTrip:
             ("other", "Bailout"),
             ("ppo2_high", "PO2 High"),
         ]
+
+    @pytest.mark.asyncio
+    async def test_an_event_label_longer_than_this_app_stores_is_cut_rather_than_refused(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The format leaves `label` unbounded, so a long one is a conforming document."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["recordings"] = [
+            {
+                "profile": {
+                    "duration": 10,
+                    "depth": {"times": [0, 10], "values": [100, 5200]},
+                    "events": [{"time": 1, "label": "A" * 400}],
+                }
+            }
+        ]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert ImportNoteCode.VALUE_DROPPED in _codes(plan)
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        profile = await self._profile(async_db, imported.id)
+        assert [event["label"] for event in profile.data["events"]] == ["A" * MAX_LABEL_CHARS]
 
     @pytest.mark.asyncio
     async def test_an_event_that_is_neither_classified_nor_labelled_is_dropped(
@@ -3760,6 +3980,26 @@ class TestTwoRecordsClaimingOneIdentifier:
         dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
         assert dive.trip_id == trips[parsed["trips"][0]["name"]]
         assert dive.trip_id != trips[twin["name"]]
+
+    @pytest.mark.asyncio
+    async def test_two_sites_sharing_one_identifier_both_arrive(self, db: Session, async_db: AsyncSession) -> None:
+        """Sites were the one collection keyed on the uuid before the remap, so the second
+        site lost its own registry entries to a `KeyError` and the whole import 500'd."""
+        shared = str(uuid7())
+        document = _site_document(
+            {"uuid": shared, "name": "First of the pair", "external_ids": [_entry()]},
+            {"uuid": shared, "name": "Second of the pair", "external_ids": [_entry()]},
+        )
+        destination = create_user(db)
+
+        assert _counts(await _preview(async_db, destination.id, document))["sites"] == (2, 0, 0, 0)
+        plan = await _apply(async_db, destination.id, document)
+
+        assert ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY in _codes(plan)
+        assert sorted(site.name for site in await _sites_of(async_db, destination.id)) == [
+            "First of the pair",
+            "Second of the pair",
+        ]
 
 
 class TestAServiceRecordOnAScheduleTheImportDidNotWrite:

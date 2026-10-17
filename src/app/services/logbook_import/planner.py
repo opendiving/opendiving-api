@@ -36,7 +36,8 @@ files before it left it, which is what `batch.py` owns.
 
 import hashlib
 import uuid as uuid_pkg
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -109,6 +110,7 @@ from ...schemas.logbook_import import (
     ImportPortraitChoice,
     ImportPortraitOffer,
     ImportProfile,
+    ImportRecording,
     ImportSpecies,
     ImportStoredFile,
     ImportTrip,
@@ -647,6 +649,17 @@ def _key(*parts: str | None) -> tuple[str, ...]:
     return tuple((part or "").lower() for part in parts)
 
 
+def _trimmed(value: str | None) -> str:
+    """A name as a write schema's `Trimmed` stores it, before it is keyed or stored - so
+    "Blue Hole " is the "Blue Hole" already there rather than a second one beside it."""
+    return (value or "").strip()
+
+
+def _trimmed_or_none(value: str | None) -> str | None:
+    """`Trimmed` behind `BlankIsNone`, for an optional member an index coalesces."""
+    return _trimmed(value) or None
+
+
 class _Planner:
     """One plan, built once.
 
@@ -692,6 +705,8 @@ class _Planner:
         self._records: dict[str, dict[uuid_pkg.UUID, PlannedRecord]] = {name: {} for name in COLLECTIONS}
         self._notes: list[ImportNote] = []
         self._notes_dropped = 0
+        # Set while `_holding_notes` is.
+        self._held_notes: list[ImportNote] | None = None
         self._files_referenced = 0
         self._files_restored = 0
         self._files_not_contained = 0
@@ -706,6 +721,10 @@ class _Planner:
         # `recording_id`, so it cannot serve two either. The file is skipped and reported; the
         # dive is not.
         self._claimed_digests: dict[str, int | None] = {}
+        # Of those, the ones a soft-deleted dive's own files hold, by dive. A restore clears
+        # that dive's files before writing it (`delete_files_for_dive`), so they are its own
+        # to restore rather than "stored against another recording".
+        self._digests_on_deleted_dives: dict[int, list[str]] = {}
         # Incoming recordings that belong to dives this account already has - see
         # `PlannedRecordingMatch`. Filled by `_plan_dives`, walked by the writer.
         self._recording_matches: list[PlannedRecordingMatch] = []
@@ -742,9 +761,30 @@ class _Planner:
     # ------------------------------------------------------------------ notes
 
     def _note(self, code: ImportNoteCode, message: str, *, collection: str | None = None, uuid: Any = None) -> None:
-        self._notes_dropped += add_note(
-            self._notes, ImportNote(code=code, collection=collection, uuid=uuid, message=message)
-        )
+        note = ImportNote(code=code, collection=collection, uuid=uuid, message=message)
+        if self._held_notes is not None:
+            self._held_notes.append(note)
+        else:
+            self._notes_dropped += add_note(self._notes, note)
+
+    @contextmanager
+    def _holding_notes(self) -> Iterator[list[ImportNote]]:
+        """Hold back the notes of values read before the record knows whether it is written.
+
+        A value a key or a skip depends on is read before the record resolves, and a record
+        that then links to a row already there writes none of it, so what was dropped is
+        not news. `_release` reports them on every other outcome.
+        """
+        held: list[ImportNote] = []
+        outer, self._held_notes = self._held_notes, held
+        try:
+            yield held
+        finally:
+            self._held_notes = outer
+
+    def _release(self, held: list[ImportNote]) -> None:
+        for note in held:
+            self._note(note.code, note.message, collection=note.collection, uuid=note.uuid)
 
     def _claim_document_uuid(self, collection: str, record: Any) -> None:
         """Make a record whose uuid another record of this collection already claimed its own.
@@ -1046,7 +1086,7 @@ class _Planner:
 
         latitude, longitude = self._position(collection, record_uuid, location.position, centre_label)
         place |= {
-            f"{prefix}name": location.name,
+            f"{prefix}name": _trimmed(location.name),
             f"{prefix}latitude": latitude,
             f"{prefix}longitude": longitude,
         }
@@ -1345,11 +1385,12 @@ class _Planner:
         collection = "contacts"
         if (linked := self._linked(collection, contact.uuid, existing)) is not None:
             return linked
-        if not (contact.name or "").strip():
+        name = _trimmed(contact.name)
+        if not name:
             return self._skip(collection, contact.uuid, "A contact needs a name, and this one has none.")
         record = self._resolve(collection, contact.uuid, existing)
         if record.action is Action.CREATE:
-            contact_key = _key(contact.name)
+            contact_key = _key(name)
             record = self._claim_unique(
                 collection,
                 record,
@@ -1364,7 +1405,7 @@ class _Planner:
 
         record.values = {
             "user_id": self._user_id,
-            "name": contact.name,
+            "name": name,
             # Already stripped of values outside the vocabulary by the reader (§5.6); a set,
             # so written in vocabulary order with repeats folded, as the write schema does.
             "roles": [role.value for role in canonical_roles(contact.roles or [])],
@@ -1681,18 +1722,19 @@ class _Planner:
     ) -> PlannedRecord:
         if (linked := self._linked("trips", trip.uuid, existing)) is not None:
             return linked
-        if not (trip.name or "").strip():
+        name = _trimmed(trip.name)
+        if not name:
             return self._skip("trips", trip.uuid, "A trip needs a name, and this one has none.")
         record = self._resolve("trips", trip.uuid, existing)
         if record.action is Action.CREATE:
-            trip_key = _key(trip.name)
+            trip_key = _key(name)
             record = self._claim_unique("trips", record, index, aliases, trip_key, "trip", index_key=trip_key)
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
 
         record.values = {
             "user_id": self._user_id,
-            "name": trip.name,
+            "name": name,
             "notes": self._notes_text("trips", trip.uuid, trip.notes),
             "created_at": self._created_at(trip.created_at),
         }
@@ -1748,9 +1790,9 @@ class _Planner:
         # uuid to say otherwise.
         if (linked := self._linked("courses", course.uuid, existing)) is not None:
             return linked
-        if not (course.name or "").strip():
+        name = _trimmed(course.name)
+        if not name:
             return self._skip("courses", course.uuid, "A course needs a name, and this one has none.")
-        agency, agency_other = self._course_agency(course.uuid, course)
         if course.status is None:
             # `course.status` is `NOT NULL` here and OPTIONAL in the format, and §6.17 says
             # in as many words that a reader must not assume `completed`. There is no
@@ -1762,6 +1804,7 @@ class _Planner:
                 "invented for it.",
             )
         record = self._resolve("courses", course.uuid, existing)
+        agency, agency_other = self._course_agency(course.uuid, course)
 
         end_date = course.ends_on
         if end_date is not None and course.starts_on is not None and end_date < course.starts_on:
@@ -1769,7 +1812,7 @@ class _Planner:
             end_date = None
         record.values = {
             "user_id": self._user_id,
-            "name": course.name,
+            "name": name,
             "agency": agency,
             "agency_other": agency_other,
             "status": course.status.value,
@@ -1803,17 +1846,19 @@ class _Planner:
             DiveSite, (DiveSite.name, DiveSite.location_name), lambda row: _key(row[0], row[1])
         )
         held = await sites_by_external_id(self._db, user_id=self._user_id)
-        entries = {site.uuid: _site_external_ids(site)[0] for site in self._document.sites}
+        # By position rather than by uuid: the claim below remaps a repeated uuid, after
+        # which the site would no longer find its own entries.
+        entries = [_site_external_ids(site)[0] for site in self._document.sites]
         on_document_sites: dict[tuple[str, str], int] = {}
-        for kept in entries.values():
+        for kept in entries:
             for entry in kept:
                 on_document_sites[entry.pair] = on_document_sites.get(entry.pair, 0) + 1
         aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
-        for site in self._document.sites:
+        for site, kept in zip(self._document.sites, entries, strict=True):
             self._claim_document_uuid("sites", site)
             single = {
                 holders[0].id
-                for entry in entries[site.uuid]
+                for entry in kept
                 if on_document_sites[entry.pair] == 1 and len(holders := held.get(entry.pair, [])) == 1
             }
             self._records["sites"][site.uuid] = self._plan_site(site, existing, index, aliases, single)
@@ -1828,18 +1873,20 @@ class _Planner:
     ) -> PlannedRecord:
         if (linked := self._linked("sites", site.uuid, existing)) is not None:
             return linked
-        if not (site.name or "").strip():
+        name = _trimmed(site.name)
+        if not name:
             return self._skip("sites", site.uuid, "A dive site needs a name, and this one has none.")
         # The locality is read before the uniqueness claim, because the index keys on its
         # *name* and a place the reader drops takes the key with it.
-        place = self._place(
-            "sites",
-            site.uuid,
-            site.location,
-            label="dive site's locality",
-            centre_label="dive site locality's",
-            prefix=DIVE_SITE_LOCATION_PREFIX,
-        )
+        with self._holding_notes() as place_notes:
+            place = self._place(
+                "sites",
+                site.uuid,
+                site.location,
+                label="dive site's locality",
+                centre_label="dive site locality's",
+                prefix=DIVE_SITE_LOCATION_PREFIX,
+            )
         record = self._resolve("sites", site.uuid, existing)
         if record.action is Action.CREATE and len(held_by_entry) == 1:
             # Every entry that singles a site out names the same one of the caller's. A match
@@ -1855,10 +1902,11 @@ class _Planner:
                 action=Action.LINK, source_uuid=site.uuid, uuid=site.uuid, row_id=next(iter(held_by_entry))
             )
         if record.action is Action.CREATE:
-            site_key = _key(site.name, place[f"{DIVE_SITE_LOCATION_PREFIX}name"])
+            site_key = _key(name, place[f"{DIVE_SITE_LOCATION_PREFIX}name"])
             record = self._claim_unique("sites", record, index, aliases, site_key, "dive site", index_key=site_key)
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
+        self._release(place_notes)
 
         latitude, longitude = self._position("sites", site.uuid, site.position, "site's")
         bounded = self._bounded("sites", site.uuid, site, _SITE_BOUNDS)
@@ -1872,11 +1920,11 @@ class _Planner:
             self._dropped("sites", site.uuid, reason)
         record.values = {
             "user_id": self._user_id,
-            "name": site.name,
+            "name": name,
             # Trimmed as a tag is, a blank one dropped, and one the name or an earlier one
             # already says dropped too: it says nothing the record does not.
             "other_names": canonical_other_names(
-                site.name, [trimmed for raw in site.other_names if (trimmed := trim_tag(raw))]
+                name, [trimmed for raw in site.other_names if (trimmed := trim_tag(raw))]
             ),
             "latitude": latitude,
             "longitude": longitude,
@@ -1965,11 +2013,12 @@ class _Planner:
     ) -> PlannedRecord:
         if (linked := self._linked("gear", item.uuid, existing)) is not None:
             return linked
-        if not (item.name or "").strip():
+        name, brand = _trimmed(item.name), _trimmed_or_none(item.brand)
+        if not name:
             return self._skip("gear", item.uuid, "A gear item needs a name, and this one has none.")
         record = self._resolve("gear", item.uuid, existing)
         if record.action is Action.CREATE:
-            item_key = _key(item.brand, item.name)
+            item_key = _key(brand, name)
             record = self._claim_unique("gear", record, index, aliases, item_key, "gear item", index_key=item_key)
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
@@ -1988,8 +2037,8 @@ class _Planner:
         vessel = self._bounded("gear", item.uuid, item, _GEAR_BOUNDS)
         record.values = {
             "user_id": self._user_id,
-            "name": item.name,
-            "brand": item.brand,
+            "name": name,
+            "brand": brand,
             "type": gear_type,
             "notes": self._notes_text("gear", item.uuid, item.notes),
             "rented": bool(item.rented),
@@ -2024,11 +2073,12 @@ class _Planner:
     ) -> PlannedRecord:
         if (linked := self._linked("gear_sets", gear_set.uuid, existing)) is not None:
             return linked
-        if not (gear_set.name or "").strip():
+        name = _trimmed(gear_set.name)
+        if not name:
             return self._skip("gear_sets", gear_set.uuid, "A gear set needs a name, and this one has none.")
         record = self._resolve("gear_sets", gear_set.uuid, existing)
         if record.action is Action.CREATE:
-            set_key = _key(gear_set.name)
+            set_key = _key(name)
             record = self._claim_unique("gear_sets", record, index, aliases, set_key, "gear set", index_key=set_key)
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
@@ -2039,7 +2089,7 @@ class _Planner:
             weight = None
         record.values = {
             "user_id": self._user_id,
-            "name": gear_set.name,
+            "name": name,
             "weight": weight,
             "created_at": self._created_at(gear_set.created_at),
         }
@@ -2084,12 +2134,16 @@ class _Planner:
             return self._skip(collection, schedule.uuid, "A service schedule needs a kind this app recognizes.")
         if schedule.starts_on is None:
             return self._skip(collection, schedule.uuid, "A service schedule needs the date its clock starts from.")
-        intervals = self._bounded(collection, schedule.uuid, schedule, _SCHEDULE_BOUNDS)
+        with self._holding_notes() as interval_notes:
+            intervals = self._bounded(collection, schedule.uuid, schedule, _SCHEDULE_BOUNDS)
         if not intervals:
             # `ck_gear_service_schedule_has_an_interval`: a rule with no interval can never
-            # become due, so it would sit in the table generating nothing forever.
+            # become due, so it would sit in the table generating nothing forever. The drops
+            # are kept, since they say why.
+            self._release(interval_notes)
             return self._skip(collection, schedule.uuid, "A service schedule needs at least one interval to be due on.")
 
+        label = _trimmed_or_none(schedule.label)
         record = self._resolve(collection, schedule.uuid, existing)
         gear_record = self._records["gear"][gear_uuid]
         if record.action is Action.CREATE:
@@ -2105,7 +2159,7 @@ class _Planner:
             # Keying the alias half on either one alone misses the other case, and both
             # misses end the same way: two inserts against
             # `ux_gear_service_schedule_item_kind_label` and the whole import refused.
-            rule = _key(schedule.type.value, schedule.label)
+            rule = _key(schedule.type.value, label)
             gear_identity = str(gear_uuid) if gear_record.row_id is None else str(gear_record.row_id)
             record = self._claim_unique(
                 collection,
@@ -2118,11 +2172,12 @@ class _Planner:
             )
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
+        self._release(interval_notes)
 
         record.values = {
             "user_id": self._user_id,
             "kind": schedule.type.value,
-            "label": schedule.label,
+            "label": label,
             "starts_on": schedule.starts_on,
             "interval_months": intervals.get("interval_months"),
             "interval_dives": intervals.get("interval_dives"),
@@ -2192,7 +2247,7 @@ class _Planner:
             "kind": service.type.value,
             "serviced_on": service.serviced_on,
             "dive_count_at_service": self._count(collection, service.uuid, service.dive_count_at_service),
-            "label": service.label,
+            "label": _trimmed_or_none(service.label),
             "performed_by": service.performed_by,
             "notes": self._notes_text("gear_service_records", service.uuid, service.notes),
             "created_at": self._created_at(service.created_at),
@@ -2231,9 +2286,10 @@ class _Planner:
     ) -> PlannedRecord:
         collection = "certifications"
         if (linked := self._linked(collection, certification.uuid, existing)) is not None:
-            self._count_uncontained_cards(certification.front_file, certification.back_file)
+            self._count_unwritten((certification.front_file, certification.back_file))
             return linked
-        if not (certification.name or "").strip():
+        name = _trimmed(certification.name)
+        if not name:
             return self._skip(collection, certification.uuid, "A certification needs a name, and this one has none.")
         agency = self._agency(collection, certification.uuid, certification)
         if agency is None:
@@ -2248,7 +2304,7 @@ class _Planner:
             "user_id": self._user_id,
             "agency": agency[0],
             "agency_other": agency[1],
-            "name": certification.name,
+            "name": name,
             "certification_number": certification.number,
             "certified_on": certification.certified_on,
             "expires_on": certification.expires_on,
@@ -2302,12 +2358,17 @@ class _Planner:
         unique = sorted(set(wanted))
         for start in range(0, len(unique), _DIGESTS_PER_QUERY):
             rows = await self._db.execute(
-                select(DiveFile.sha256, DiveFile.recording_id).where(
+                select(DiveFile.sha256, DiveFile.recording_id, DiveFile.dive_id, Dive.is_deleted)
+                .join(Dive, Dive.id == DiveFile.dive_id)
+                .where(
                     DiveFile.user_id == self._user_id,
                     DiveFile.sha256.in_(unique[start : start + _DIGESTS_PER_QUERY]),
                 )
             )
-            held.update({row.sha256: row.recording_id for row in rows})
+            for row in rows:
+                held[row.sha256] = row.recording_id
+                if row.is_deleted:
+                    self._digests_on_deleted_dives.setdefault(row.dive_id, []).append(row.sha256)
         return held
 
     async def _load_candidates(self, around: datetime) -> list[RecordingCandidate]:
@@ -2458,17 +2519,18 @@ class _Planner:
     async def _plan_dive(self, dive: ImportDive, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
         collection = "dives"
         if (linked := self._linked(collection, dive.uuid, existing)) is not None:
-            self._count_uncontained_files(dive)
+            self._count_unwritten_files(dive)
             self._not_writing_the_file()
             return linked
         if dive.started_at is None:
+            self._count_unwritten_files(dive)
             self._not_writing_the_file()
             return self._skip(collection, dive.uuid, "A dive needs a start time, and this one has none.")
 
         record = self._resolve(collection, dive.uuid, existing)
 
         bounded = self._bounded(collection, dive.uuid, dive, _DIVE_BOUNDS)
-        recordings = self._plan_recordings(dive)
+        recordings, sources = self._plan_recordings(dive)
         # The primary recording's profile, for the dive-level jobs a profile still has: standing
         # in for an unrecorded submerged time, average depth and bottom temperature below, and keeping
         # the skip message honest. Capped, which keeps every channel's extremes
@@ -2500,6 +2562,7 @@ class _Planner:
                 uuid=dive.uuid,
             )
         if submerged_time is None or submerged_time <= 0:
+            self._count_unwritten_files(dive)
             self._not_writing_the_file()
             return self._skip(
                 collection,
@@ -2507,6 +2570,15 @@ class _Planner:
                 "A dive needs a dive time, and this one carries neither a dive time nor a profile to take one from. "
                 "Nothing was invented for it.",
             )
+        # Only now that the dive is written: a file planned for a skipped one would be
+        # counted restored and claim a digest a later dive's copy needs.
+        if record.action is Action.RESTORE and record.row_id is not None:
+            for digest in self._digests_on_deleted_dives.pop(record.row_id, []):
+                self._claimed_digests.pop(digest, None)
+        recordings = [
+            replace(recording, files=self._plan_recording_files(dive, source))
+            for recording, source in zip(recordings, sources, strict=True)
+        ]
 
         max_depth, avg_depth = bounded.get("max_depth"), bounded.get("avg_depth")
         if avg_depth is None and dive.avg_depth is None and in_water is not None:
@@ -2871,24 +2943,21 @@ class _Planner:
 
     # ------------------------------------------------------------------ recordings
 
-    def _plan_recordings(self, dive: ImportDive) -> list[PlannedRecording]:
-        """A dive's recordings, in the document's order - the first primary.
+    def _plan_recordings(self, dive: ImportDive) -> tuple[list[PlannedRecording], list[ImportRecording]]:
+        """A dive's recordings, in the document's order - the first primary - with the
+        document's recording behind each, for `_plan_recording_files`.
 
         Each is shaped by `recording_shape.shape_recording`, the function the attach path
         shapes a dive-computer file's recording with, so the import and the attach store one
-        recording for one file; what this adds is the archive's files and the document's
-        declared span. A recording that describes nothing is dropped there, with its note.
+        recording for one file; what this adds is the document's declared span. A recording
+        that describes nothing is dropped there, with its note.
         """
         planned: list[PlannedRecording] = []
+        sources: list[ImportRecording] = []
         for source in dive.recordings:
             shaped = shape_recording(dive, source, self._drop_on("dives", dive.uuid))
             if shaped is None:
                 continue
-            files = [
-                planned_file
-                for stored in source.source_files
-                if (planned_file := self._plan_dive_file(dive, stored)) is not None
-            ]
             profile = (
                 None
                 if shaped.profile is None or source.profile is None
@@ -2909,10 +2978,18 @@ class _Planner:
                     max_depth=max_depth,
                     profile=profile,
                     in_water=None if profile is None else in_water_of(shaped.profile),
-                    files=files,
                 )
             )
-        return planned
+            sources.append(source)
+        return planned, sources
+
+    def _plan_recording_files(self, dive: ImportDive, source: ImportRecording) -> list[PlannedFile]:
+        """The archive's files behind one recording of a dive this import writes."""
+        return [
+            planned_file
+            for stored in source.source_files
+            if (planned_file := self._plan_dive_file(dive, stored)) is not None
+        ]
 
     # ------------------------------------------------------------------ files
 
@@ -2995,24 +3072,25 @@ class _Planner:
                 else ImportMemberNotKept.NOT_WRITTEN
             )
 
-    def _count_uncontained_files(self, dive: ImportDive) -> None:
+    def _count_unwritten_files(self, dive: ImportDive) -> None:
         """Count the binaries of a dive the import is not writing.
 
         A linked or skipped dive still *references* its files, and the report's `referenced`
         count is about the document rather than about what got written - so they are counted,
-        and counted as not restored.
+        as not restored.
         """
-        for recording in dive.recordings:
-            for stored in recording.source_files:
-                if stored is not None:
-                    self._files_referenced += 1
-                    self._files_not_contained += 1
+        self._count_unwritten(stored for recording in dive.recordings for stored in recording.source_files)
 
-    def _count_uncontained_cards(self, *files: ImportStoredFile | None) -> None:
-        """`_count_uncontained_files` for a certification's two card images."""
+    def _count_unwritten(self, files: Iterable[ImportStoredFile | None]) -> None:
+        """Not contained only where the document carries no bytes for the file: an archive
+        that does - the account's own, re-imported - is not one to tell the diver to import."""
         for stored in files:
-            if stored is not None:
-                self._files_referenced += 1
+            if stored is None:
+                continue
+            self._files_referenced += 1
+            if self._loaded.is_archive and stored.archive_path is not None:
+                self._files_skipped += 1
+            else:
                 self._files_not_contained += 1
 
     def _plan_dive_file(self, dive: ImportDive, stored: ImportStoredFile | None) -> PlannedFile | None:

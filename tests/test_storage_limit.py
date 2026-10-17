@@ -570,6 +570,24 @@ class TestAnImport:
         assert preview.portrait is not None
         assert refused.value.status_code == 413
 
+    @pytest.mark.asyncio
+    async def test_a_restore_at_the_limit_counts_the_files_it_clears(self, db: Session, async_db: AsyncSession) -> None:
+        """A dive soft-deleted with its files in place - the admin panel's delete - restores
+        from the archive by clearing those files and storing the archive's: it frees what it
+        adds, so an account already at the limit has room for it."""
+        diver = create_user(db)
+        dive = create_dive(db, diver)
+        await _attach(async_db, diver, dive.id)
+        archive = await _archive_of(async_db, diver)
+        db.query(Dive).filter(Dive.id == dive.id).update({"is_deleted": True, "deleted_at": datetime.now(UTC)})
+        db.commit()
+        _hold(db, diver, LIMIT - await _used(async_db, diver))
+
+        result = await _apply(async_db, diver, archive)
+
+        assert result.files.restored == 1
+        assert await _used(async_db, diver) == LIMIT
+
 
 # -------------------------------------------------------------------- the usage route
 

@@ -150,6 +150,9 @@ class WrittenImport:
 
     dive_ids: dict[uuid_pkg.UUID, int]
     match_files: list[int]
+    # What the restores' cleared files held, as `get_storage_usage` counts it - space the
+    # storage limit check gives back.
+    retired_bytes: int
 
 
 class _Writer:
@@ -162,6 +165,7 @@ class _Writer:
         self._plan = plan
         self._staged = staged
         self._match_files: list[int] = []
+        self.retired_bytes = 0
         self._now = datetime.now(UTC)
         # Document uuid -> row id, per collection. Seeded with everything the plan already
         # resolved (links and restores both name a row) and filled in as rows are created.
@@ -192,6 +196,9 @@ class _Writer:
     @property
     def match_files(self) -> list[int]:
         return list(self._match_files)
+
+    async def _stored_bytes(self, total: Any) -> int:
+        return int((await self._db.execute(total)).scalar_one())
 
     def _ids_for(self, collection: str, source_uuids: list[uuid_pkg.UUID]) -> list[int]:
         return [row_id for row_id in (self._id(collection, one) for one in source_uuids) if row_id is not None]
@@ -488,6 +495,11 @@ class _Writer:
                 # `erase_certification` takes the cards with the row, but a soft delete from
                 # the admin panel leaves them: a side the document carries would collide on
                 # `ux_certification_file_certification_id_side`, one it lacks would come back.
+                self.retired_bytes += await self._stored_bytes(
+                    select(func.coalesce(func.sum(CertificationFile.byte_size), 0)).where(
+                        CertificationFile.certification_id == record.row_id
+                    )
+                )
                 await delete_files_for_certification(self._db, certification_id=record.row_id, commit=False)
             record.values["course_id"] = self._id("courses", record.children.get("course_uuid"))
             record.values["contact_id"] = self._contact_id(record)
@@ -537,6 +549,11 @@ class _Writer:
                 # running it afterwards would wipe the positions this import just wrote. It
                 # also takes the old recordings and their profiles, which is what stops a
                 # restored dive from keeping curves the document does not describe.
+                self.retired_bytes += await self._stored_bytes(
+                    select(func.coalesce(func.sum(DiveFile.stored_byte_size), 0)).where(
+                        DiveFile.dive_id == record.row_id
+                    )
+                )
                 await delete_files_for_dive(self._db, dive_id=record.row_id, commit=False)
 
             record.values["trip_id"] = self._id("trips", record.children.get("trip_uuid"))
@@ -1023,4 +1040,5 @@ async def write_import(
     return WrittenImport(
         dive_ids={record.source_uuid: writer.dive_id(record.source_uuid) for record in plan.writable("dives")},
         match_files=writer.match_files,
+        retired_bytes=writer.retired_bytes,
     )
