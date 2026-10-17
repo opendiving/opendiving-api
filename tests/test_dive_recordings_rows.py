@@ -57,7 +57,7 @@ pytestmark = pytest.mark.skipif(not db_available(), reason="No database connecti
 def _export(
     *,
     cns_end: float | None = None,
-    samples: tuple[tuple[float, float], ...] = (),
+    samples: tuple[tuple[float, float] | tuple[float, float, int, int], ...] = (),
     start: str = "2026-09-08T15:17:38.670+03:00",
     cylinder: dict[str, Any] | None = None,
 ) -> bytes:
@@ -848,8 +848,7 @@ class TestAProfileNoFileCanReYield:
     async def test_a_header_only_file_joining_a_merged_recording_still_fills_the_dives_cylinder(
         self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
     ) -> None:
-        """An arrival, whatever the recording keeps: the dive's blank mix fills, and its label,
-        which the merged samples' channels name, stays."""
+        """An arrival, whatever the recording keeps: the dive's blank mix fills."""
         stored = await _attach(async_db, diver, dive, _export(samples=self.SAMPLES), filename="a.json")
         identity = await self._merged(async_db, stored.recording_id)
         db.add(DiveMixture(dive_id=dive.id, gas_number=3, start_pressure=200.0, end_pressure=50.0))
@@ -860,6 +859,28 @@ class TestAProfileNoFileCanReYield:
         await self._assert_merged(async_db, stored.recording_id, identity)
         cylinder = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalar_one()
         assert (cylinder.oxygen, cylinder.gas_number) == (32.0, 3)
+
+    @pytest.mark.asyncio
+    async def test_a_labelled_cylinder_joining_a_merged_recording_does_not_renumber_the_dives(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """The merged samples' channels name the dive's labels as they stand, so a joining
+        file's transmitter, which the reader labels 0, must not move the dive's 3 onto it."""
+        stored = await _attach(async_db, diver, dive, _export(samples=self.SAMPLES), filename="a.json")
+        identity = await self._merged(async_db, stored.recording_id)
+        db.add(DiveMixture(dive_id=dive.id, gas_number=3))
+        db.commit()
+        # The merged span, so the same-recording gate admits it.
+        transmitter = ((0, 0.0, 0, 20_000_000), (30, 0.0, 0, 15_000_000))
+
+        joined = await _attach(async_db, diver, dive, _export(samples=transmitter), filename="b.json")
+
+        assert joined.recording_id == stored.recording_id
+        await self._assert_merged(async_db, stored.recording_id, identity)
+        labels = (
+            await async_db.execute(select(DiveMixture.gas_number).where(DiveMixture.dive_id == dive.id))
+        ).scalars()
+        assert list(labels) == [3]
 
     @pytest.mark.asyncio
     async def test_a_header_only_file_joining_an_imported_recording_keeps_the_documents_samples(
