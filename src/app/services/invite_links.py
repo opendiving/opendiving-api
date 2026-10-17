@@ -16,7 +16,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
-from ..crud.crud_invitations import invitations_created_since
+from ..crud.crud_invitations import hold_invitation_quota, invitations_created_since
 from ..models.invite_link import InviteLink
 from ..models.user import User
 
@@ -92,8 +92,13 @@ async def live_invite_link(db: AsyncSession, *, token: str) -> LiveInviteLink | 
 async def can_still_invite(db: AsyncSession, link: LiveInviteLink) -> bool:
     """Whether the link's owner is under the invitation quota, which is the only bound on a
     standing link. Counted as `POST /user/invitations` counts it, so a sign-up through the
-    link and an invitation typed by address draw on one allowance."""
+    link and an invitation typed by address draw on one allowance.
+
+    Under the owner's `hold_invitation_quota`, so the sign-up `admit_or_refuse` admits is
+    counted against a typed invitation made at the same moment. The advisory check before
+    the profile form takes it too and holds it only until its own request commits."""
     if link.owner_is_superuser:
         return True
+    await hold_invitation_quota(db, user_id=link.owner_id)
     made = await invitations_created_since(db, user_id=link.owner_id, window_days=settings.INVITATIONS_WINDOW_DAYS)
     return made < settings.INVITATIONS_PER_USER

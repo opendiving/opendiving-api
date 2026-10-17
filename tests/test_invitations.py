@@ -494,6 +494,38 @@ class TestCreateInvitation:
         assert "5 invitations per day" in refusal.value.detail
 
     @pytest.mark.asyncio
+    async def test_the_quota_is_counted_under_the_inviters_lock(self, mock_db) -> None:
+        """Count-then-insert lets two invitations made at once both count the same number;
+        the per-inviter lock taken first makes the second count the first's row."""
+        account, already, quota = self._patches()
+        order = Mock()
+        with (
+            _mode(RegistrationMode.INVITE),
+            account,
+            already,
+            quota as counted,
+            patch("src.app.api.v1.invitations.hold_invitation_quota", new_callable=AsyncMock) as held,
+            patch("src.app.api.v1.invitations.crud_invitations") as crud,
+            patch("src.app.api.v1.invitations.send_invitation_email", new_callable=AsyncMock),
+        ):
+            crud.create = AsyncMock(
+                return_value=Mock(
+                    uuid=uuid_pkg.uuid4(),
+                    email="friend@example.com",
+                    created_at=datetime.now(UTC),
+                    accepted_at=None,
+                    revoked_at=None,
+                )
+            )
+            order.attach_mock(held, "hold")
+            order.attach_mock(counted, "count")
+
+            await create_invitation(_request(), InvitationCreateRequest(email="friend@example.com"), CALLER, mock_db)
+
+        assert [call[0] for call in order.mock_calls] == ["hold", "count"]
+        held.assert_awaited_once_with(mock_db, user_id=CALLER["id"])
+
+    @pytest.mark.asyncio
     async def test_a_multi_day_window_reads_as_a_window(self, mock_db) -> None:
         """ "per 3 days" rather than "per day": the sentence is shown verbatim to a diver,
         and the singular phrasing is only correct for the default."""
@@ -837,6 +869,30 @@ class TestAgainstPostgres:
 
         async with async_sessions() as session:
             assert await account_exists_for(session, email=shouty.email.lower()) is True
+
+    @pytest.mark.asyncio
+    async def test_the_quota_lock_is_per_inviter_and_held_to_the_transactions_end(
+        self, db: Session, diver: User, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from sqlalchemy import func
+
+        from src.app.crud.crud_invitations import _INVITATION_QUOTA_LOCK, hold_invitation_quota
+
+        other = create_user(db)
+
+        def try_lock(user_id: int) -> Any:
+            return select(func.pg_try_advisory_xact_lock(_INVITATION_QUOTA_LOCK, user_id))
+
+        async with async_sessions() as one, async_sessions() as two:
+            await hold_invitation_quota(one, user_id=diver.id)
+
+            assert await two.scalar(try_lock(diver.id)) is False
+            assert await two.scalar(try_lock(other.id)) is True
+            await two.rollback()
+
+            await one.commit()
+            assert await two.scalar(try_lock(diver.id)) is True
+            await two.rollback()
 
     @pytest.mark.asyncio
     async def test_the_quota_counts_revoked_rows_inside_the_window(

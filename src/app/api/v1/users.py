@@ -32,7 +32,11 @@ from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.request_context import RequestContext
 from ...core.utils.uploads import content_disposition_attachment
 from ...crud.crud_auth_audit_events import record_auth_event
-from ...crud.crud_authentication_requests import claim_authentication_request, crud_authentication_requests
+from ...crud.crud_authentication_requests import (
+    claim_authentication_request,
+    crud_authentication_requests,
+    invalidate_live_requests,
+)
 from ...crud.crud_dive_form_presets import crud_dive_form_presets
 from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
 from ...crud.crud_invitations import account_exists_for
@@ -44,7 +48,7 @@ from ...models.dive_site import DiveSite
 from ...models.user import User
 from ...schemas.auth import LinkCheckResponse
 from ...schemas.auth_audit_event import AuthEventType
-from ...schemas.authentication_request import AuthenticationRequestCreate, AuthenticationRequestUpdate
+from ...schemas.authentication_request import AuthenticationRequestCreate
 from ...schemas.dive import DiveActivityPoint, DiveGasUsePoint
 from ...schemas.email_change import (
     EmailChangeRequest,
@@ -543,18 +547,7 @@ async def request_email_change(
 
     # Only one *live* change request per user at a time, regardless of which target
     # address a previous one was for.
-    pending_count = await crud_authentication_requests.count(
-        db, user_id=current_user["id"], purpose="email_change", invalidated_at=None
-    )
-    if pending_count > 0:
-        await crud_authentication_requests.update(
-            db=db,
-            object=AuthenticationRequestUpdate(invalidated_at=datetime.now(UTC)),
-            allow_multiple=True,
-            user_id=current_user["id"],
-            purpose="email_change",
-            invalidated_at=None,
-        )
+    await invalidate_live_requests(db, purpose="email_change", user_id=current_user["id"])
 
     raw_token = generate_secure_token()
     expires_at = datetime.now(UTC) + timedelta(minutes=settings.EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES)
@@ -1155,8 +1148,9 @@ async def erase_user(
     )
     newly_deleted = deleted_at is not None
     if deleted_at is None:
-        # Already pending: report the deadline the *first* request set, so a double submit
-        # and a retry both answer with the same date.
+        # Already pending: report the deadline the *first* request set, so the second of a
+        # double submit answers with the same date. A later retry never gets here -
+        # `get_current_user` refuses a deleted account before the route runs.
         deleted_at = cast(
             datetime | None,
             (await db.execute(select(User.deleted_at).where(User.id == current_user["id"]))).scalar_one_or_none(),

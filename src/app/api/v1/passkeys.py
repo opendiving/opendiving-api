@@ -14,18 +14,21 @@ done.
 """
 
 import uuid as uuid_pkg
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy import CursorResult, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.config import settings
 from ...core.db.database import async_get_db
+from ...core.exceptions.http_exceptions import NotFoundException
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.request_context import RequestContext
 from ...crud.crud_auth_audit_events import record_auth_event
 from ...crud.crud_webauthn_credentials import crud_webauthn_credentials
+from ...models.webauthn_credential import WebauthnCredential
 from ...schemas.auth_audit_event import AuthEventType
 from ...schemas.webauthn_credential import (
     PasskeyRegistrationOptions,
@@ -191,7 +194,21 @@ async def erase_passkey(
         not_found_message=_NOT_FOUND,
     )
 
-    await crud_webauthn_credentials.delete(db=db, uuid=uuid)
+    # Core, and uncommitted until the event below commits it with the removal: one
+    # transaction, so a removal is never left without its audit row. A second request for
+    # the same passkey - a double click - blocks on this row until the first commits, then
+    # deletes nothing and is the 404 any later one would be; FastCRUD's `delete` would
+    # meet that as `NoResultFound` from its own `count()` and answer 500.
+    removed = cast(
+        CursorResult,
+        await db.execute(
+            delete(WebauthnCredential).where(
+                WebauthnCredential.uuid == uuid, WebauthnCredential.user_id == current_user["id"]
+            )
+        ),
+    ).rowcount
+    if not removed:
+        raise NotFoundException(_NOT_FOUND)
 
     await record_auth_event(
         db,
