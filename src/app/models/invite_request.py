@@ -4,6 +4,7 @@ from sqlalchemy import DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
+from ..core.schemas import EMAIL_MAX_LENGTH
 
 
 class InviteRequest(Base):
@@ -38,7 +39,7 @@ class InviteRequest(Base):
 
     id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, primary_key=True, init=False)
 
-    email: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(EMAIL_MAX_LENGTH), unique=True, index=True)
 
     # Indexed for the hourly sweep's `WHERE created_at < :cutoff`
     # (`core.worker.functions.purge_expired_invite_requests`) - the argument

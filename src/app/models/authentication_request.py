@@ -5,6 +5,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
 from ..core.db.models import PublicUUIDMixin
+from ..core.schemas import EMAIL_MAX_LENGTH
 
 
 class AuthenticationRequest(Base, PublicUUIDMixin):
@@ -34,7 +35,7 @@ class AuthenticationRequest(Base, PublicUUIDMixin):
 
     # For `purpose="sign_in"`, the (unverified-until-now) email being signed in with.
     # For `purpose="email_change"`, the *new* address `user_id` wants to change to.
-    email: Mapped[str] = mapped_column(String(50), index=True)
+    email: Mapped[str] = mapped_column(String(EMAIL_MAX_LENGTH), index=True)
 
     # SHA-256 hex digest of the raw token emailed to the user - only the hash is ever
     # persisted, so a DB leak alone can't be used to mint valid magic links.
