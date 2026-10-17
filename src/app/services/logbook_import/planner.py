@@ -829,6 +829,9 @@ class _Planner:
         self, collection: str, source_uuid: uuid_pkg.UUID, existing: dict[uuid_pkg.UUID, _ExistingRow]
     ) -> PlannedRecord:
         """The uuid rules, in one place, for every caller-owned collection."""
+        linked = self._linked(collection, source_uuid, existing)
+        if linked is not None:
+            return linked
         row = existing.get(source_uuid)
         if row is None:
             return PlannedRecord(action=Action.CREATE, source_uuid=source_uuid, uuid=source_uuid)
@@ -853,7 +856,22 @@ class _Planner:
                 collection=collection,
                 uuid=source_uuid,
             )
-            return PlannedRecord(action=Action.RESTORE, source_uuid=source_uuid, uuid=source_uuid, row_id=row.id)
+        return PlannedRecord(action=Action.RESTORE, source_uuid=source_uuid, uuid=source_uuid, row_id=row.id)
+
+    def _linked(
+        self, collection: str, source_uuid: uuid_pkg.UUID, existing: dict[uuid_pkg.UUID, _ExistingRow]
+    ) -> PlannedRecord | None:
+        """The caller's live row under this uuid, as a link - or `None` for every other branch.
+
+        Every planner asks this before it asks anything of the record's values. A link writes
+        nothing, so a member this app would need to *create* the record is not needed, and
+        skipping on it would break the idempotence invariant: the caller's own export omits a
+        value it has no word for, and a re-import would report that record skipped and drop
+        every reference to it.
+        """
+        row = existing.get(source_uuid)
+        if row is None or row.user_id != self._user_id or row.is_deleted:
+            return None
         self._note(
             ImportNoteCode.RECORD_LINKED,
             "This record is already in your logbook under the same identifier, so nothing was written for it.",
@@ -1325,6 +1343,8 @@ class _Planner:
 
     def _plan_contact(self, contact: ImportContact, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
         collection = "contacts"
+        if (linked := self._linked(collection, contact.uuid, existing)) is not None:
+            return linked
         if not (contact.name or "").strip():
             return self._skip(collection, contact.uuid, "A contact needs a name, and this one has none.")
         record = self._resolve(collection, contact.uuid, existing)
@@ -1456,6 +1476,8 @@ class _Planner:
         by link before a claim by name. A person whose entry names an account another of the
         caller's people already links is that person, whatever its name says."""
         collection = "people"
+        if (linked := self._linked(collection, person.uuid, existing)) is not None:
+            return linked
         name = (person.name or "").strip()
         if not name:
             return self._skip(collection, person.uuid, "A person needs a name, and this one has none.")
@@ -1657,6 +1679,8 @@ class _Planner:
         index: dict[tuple[str, ...], int],
         aliases: dict[tuple[str, ...], uuid_pkg.UUID],
     ) -> PlannedRecord:
+        if (linked := self._linked("trips", trip.uuid, existing)) is not None:
+            return linked
         if not (trip.name or "").strip():
             return self._skip("trips", trip.uuid, "A trip needs a name, and this one has none.")
         record = self._resolve("trips", trip.uuid, existing)
@@ -1722,6 +1746,8 @@ class _Planner:
         # No name dedupe, deliberately: a course failed once and retaken later is
         # legitimately the same name twice, and `course` carries no uniqueness beyond its
         # uuid to say otherwise.
+        if (linked := self._linked("courses", course.uuid, existing)) is not None:
+            return linked
         if not (course.name or "").strip():
             return self._skip("courses", course.uuid, "A course needs a name, and this one has none.")
         agency, agency_other = self._course_agency(course.uuid, course)
@@ -1736,8 +1762,6 @@ class _Planner:
                 "invented for it.",
             )
         record = self._resolve("courses", course.uuid, existing)
-        if record.action not in (Action.CREATE, Action.RESTORE):
-            return record
 
         end_date = course.ends_on
         if end_date is not None and course.starts_on is not None and end_date < course.starts_on:
@@ -1802,6 +1826,8 @@ class _Planner:
         aliases: dict[tuple[str, ...], uuid_pkg.UUID],
         held_by_entry: set[int],
     ) -> PlannedRecord:
+        if (linked := self._linked("sites", site.uuid, existing)) is not None:
+            return linked
         if not (site.name or "").strip():
             return self._skip("sites", site.uuid, "A dive site needs a name, and this one has none.")
         # The locality is read before the uniqueness claim, because the index keys on its
@@ -1937,6 +1963,8 @@ class _Planner:
         index: dict[tuple[str, ...], int],
         aliases: dict[tuple[str, ...], uuid_pkg.UUID],
     ) -> PlannedRecord:
+        if (linked := self._linked("gear", item.uuid, existing)) is not None:
+            return linked
         if not (item.name or "").strip():
             return self._skip("gear", item.uuid, "A gear item needs a name, and this one has none.")
         record = self._resolve("gear", item.uuid, existing)
@@ -1994,6 +2022,8 @@ class _Planner:
         index: dict[tuple[str, ...], int],
         aliases: dict[tuple[str, ...], uuid_pkg.UUID],
     ) -> PlannedRecord:
+        if (linked := self._linked("gear_sets", gear_set.uuid, existing)) is not None:
+            return linked
         if not (gear_set.name or "").strip():
             return self._skip("gear_sets", gear_set.uuid, "A gear set needs a name, and this one has none.")
         record = self._resolve("gear_sets", gear_set.uuid, existing)
@@ -2045,6 +2075,8 @@ class _Planner:
         aliases: dict[tuple[str, ...], uuid_pkg.UUID],
     ) -> PlannedRecord:
         collection = "gear_service_schedules"
+        if (linked := self._linked(collection, schedule.uuid, existing)) is not None:
+            return linked
         gear_uuid = self._reference(collection, schedule.uuid, "gear", schedule.gear_uuid)
         if gear_uuid is None:
             return self._skip(collection, schedule.uuid, "A service schedule with no gear item to hang on was skipped.")
@@ -2135,6 +2167,8 @@ class _Planner:
         self, service: ImportGearServiceRecord, existing: dict[uuid_pkg.UUID, _ExistingRow]
     ) -> PlannedRecord:
         collection = "gear_service_records"
+        if (linked := self._linked(collection, service.uuid, existing)) is not None:
+            return linked
         gear_uuid = self._reference(collection, service.uuid, "gear", service.gear_uuid)
         if gear_uuid is None:
             return self._skip(collection, service.uuid, "A service record with no gear item to hang on was skipped.")
@@ -2153,8 +2187,6 @@ class _Planner:
             )
 
         record = self._resolve(collection, service.uuid, existing)
-        if record.action not in (Action.CREATE, Action.RESTORE):
-            return record
         record.values = {
             "user_id": self._user_id,
             "kind": service.type.value,
@@ -2198,6 +2230,9 @@ class _Planner:
         self, certification: ImportCertification, existing: dict[uuid_pkg.UUID, _ExistingRow]
     ) -> PlannedRecord:
         collection = "certifications"
+        if (linked := self._linked(collection, certification.uuid, existing)) is not None:
+            self._count_uncontained_cards(certification.front_file, certification.back_file)
+            return linked
         if not (certification.name or "").strip():
             return self._skip(collection, certification.uuid, "A certification needs a name, and this one has none.")
         agency = self._agency(collection, certification.uuid, certification)
@@ -2208,9 +2243,6 @@ class _Planner:
                 "A certification needs an agency this app recognizes, and this one does not name one.",
             )
         record = self._resolve(collection, certification.uuid, existing)
-        if record.action not in (Action.CREATE, Action.RESTORE):
-            self._count_uncontained_cards(certification.front_file, certification.back_file)
-            return record
 
         record.values = {
             "user_id": self._user_id,
@@ -2425,15 +2457,15 @@ class _Planner:
 
     async def _plan_dive(self, dive: ImportDive, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
         collection = "dives"
+        if (linked := self._linked(collection, dive.uuid, existing)) is not None:
+            self._count_uncontained_files(dive)
+            self._not_writing_the_file()
+            return linked
         if dive.started_at is None:
             self._not_writing_the_file()
             return self._skip(collection, dive.uuid, "A dive needs a start time, and this one has none.")
 
         record = self._resolve(collection, dive.uuid, existing)
-        if record.action not in (Action.CREATE, Action.RESTORE):
-            self._count_uncontained_files(dive)
-            self._not_writing_the_file()
-            return record
 
         bounded = self._bounded(collection, dive.uuid, dive, _DIVE_BOUNDS)
         recordings = self._plan_recordings(dive)

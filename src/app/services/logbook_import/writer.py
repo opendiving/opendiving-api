@@ -75,7 +75,7 @@ from ...schemas.dive_mixture import DiveMixtureCreate
 from ...schemas.logbook_import import ImportMemberNotKept, ImportNote, ImportNoteCode
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice
 from ..certification_files import KEY_KIND as CERTIFICATION_KEY_KIND
-from ..certification_files import UnsupportedCardFileError, sniff_content_type
+from ..certification_files import UnsupportedCardFileError, delete_files_for_certification, sniff_content_type
 from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
 from ..dive_files import (
     TECH_SCALAR_FIELDS,
@@ -484,6 +484,11 @@ class _Writer:
 
     async def _write_certifications(self) -> None:
         for record in self._plan.writable("certifications"):
+            if record.action is Action.RESTORE and record.row_id is not None:
+                # `erase_certification` takes the cards with the row, but a soft delete from
+                # the admin panel leaves them: a side the document carries would collide on
+                # `ux_certification_file_certification_id_side`, one it lacks would come back.
+                await delete_files_for_certification(self._db, certification_id=record.row_id, commit=False)
             record.values["course_id"] = self._id("courses", record.children.get("course_uuid"))
             record.values["contact_id"] = self._contact_id(record)
             record.values["instructor_id"] = self._person_id(record.children.get("instructor"))

@@ -46,6 +46,7 @@ from src.app.core.schemas import NOTES_MAX_LENGTH
 from src.app.core.security import create_dive_file_token
 from src.app.crud.crud_checkin_details import read_checkin_details
 from src.app.models.certification import Certification
+from src.app.models.certification_file import CertificationFile
 from src.app.models.checkin_details import CheckinDetails, CheckinEmergencyContact, CheckinInsurancePolicy
 from src.app.models.contact import Contact
 from src.app.models.course import Course
@@ -465,6 +466,64 @@ class TestIdempotence:
         assert after == before
 
     @pytest.mark.asyncio
+    async def test_a_course_exported_without_its_status_links_and_keeps_a_restored_dives_link(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """A stored status the format has no word for exports as no status, and the course
+        still matches the caller's row - so a dive restored from the same document keeps its
+        course rather than losing it to an unresolved reference."""
+        user = _seed_logbook(db)
+        course = db.query(Course).filter(Course.user_id == user.id).one()
+        course.status = "audited"
+        db.commit()
+        document = await _export(async_db, user.id)
+        assert "status" not in json.loads(document)["courses"][0]
+        dive = db.query(Dive).filter(Dive.user_id == user.id).one()
+        dive.is_deleted = True
+        dive.deleted_at = datetime.now(UTC)
+        db.commit()
+
+        plan = await _apply(async_db, user.id, document)
+
+        assert _counts(plan)["courses"] == (0, 1, 0, 0)
+        assert ImportNoteCode.REFERENCE_UNRESOLVED not in _codes(plan)
+        restored = (await async_db.execute(select(Dive).where(Dive.id == dive.id))).scalars().one()
+        assert restored.course_id == course.id
+
+    @pytest.mark.parametrize(
+        ("collection", "member"),
+        [
+            ("courses", "status"),
+            ("courses", "name"),
+            ("certifications", "agency"),
+            ("dives", "started_at"),
+            ("sites", "name"),
+            ("trips", "name"),
+            ("gear", "name"),
+            ("gear_sets", "name"),
+            ("gear_service_schedules", "type"),
+            ("gear_service_records", "type"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_callers_own_record_links_whatever_it_lacks(
+        self, seeded: Any, async_db: AsyncSession, collection: str, member: str
+    ) -> None:
+        """A live row of the caller's under the document's uuid is a link before anything
+        about the record's values is asked: nothing is written for it, so a member this app
+        would need to create the record costs nothing and is not reported."""
+        user, document = seeded
+        parsed = json.loads(document)
+        record = parsed[collection][0]
+        del record[member]
+
+        plan = await _preview(async_db, user.id, json.dumps(parsed).encode())
+
+        assert _counts(plan)[collection] == (0, len(parsed[collection]), 0, 0)
+        notes = [note.code for note in plan.notes if note.uuid == uuid_pkg.UUID(record["uuid"])]
+        assert notes == [ImportNoteCode.RECORD_LINKED]
+
+    @pytest.mark.asyncio
     async def test_a_cross_account_import_run_twice_duplicates_and_the_preview_says_so(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
@@ -545,6 +604,55 @@ class TestRestore:
         counts = _counts(plan)
         assert counts["certifications"] == (0, 0, 1, 0)
         assert counts["gear_service_records"] == (0, 0, 1, 0)
+
+    @pytest.mark.asyncio
+    async def test_a_restored_certification_keeps_only_the_cards_the_document_carries(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """A certification soft-deleted outside `erase_certification` - the admin panel's
+        delete flags the row and leaves its file rows - restores with the document's cards
+        and none of its old ones: the front the archive carries replaces the old front
+        rather than colliding with it, and the back it lacks does not come back."""
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        user = create_user(db)
+        certification = create_certification(db, user)
+        cards = {
+            side: phone_jpeg(size=(32 + index, 24), orientation=None) for index, side in enumerate(("front", "back"))
+        }
+        for side, payload in cards.items():
+            digest = hashlib.sha256(payload).hexdigest()
+            key = blob_store.new_key("certification-files", sha256=digest)
+            await blob_store.put(key, payload)
+            db.add(
+                CertificationFile(
+                    certification_id=certification.id,
+                    side=side,
+                    content_type="image/jpeg",
+                    byte_size=len(payload),
+                    original_filename=f"{side}.jpg",
+                    sha256=digest,
+                    storage_key=key,
+                )
+            )
+        db.commit()
+        document = await _export(async_db, user.id, archive_paths=True)
+        front = parse_document(document)["certifications"][0]["front_file"]["archive_path"]
+        db.query(Certification).filter(Certification.id == certification.id).update(
+            {"is_deleted": True, "deleted_at": datetime.now(UTC)}
+        )
+        db.commit()
+
+        plan = await _apply(async_db, user.id, _zip_of(document, {front: cards["front"]}), filename="logbook.zip")
+
+        assert _counts(plan)["certifications"] == (0, 0, 1, 0)
+        files = (
+            await async_db.execute(
+                select(CertificationFile.side, CertificationFile.sha256).where(
+                    CertificationFile.certification_id == certification.id
+                )
+            )
+        ).all()
+        assert [tuple(row) for row in files] == [("front", hashlib.sha256(cards["front"]).hexdigest())]
 
 
 class TestUniquenessNeverFailsAnImport:
