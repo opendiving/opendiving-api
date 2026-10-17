@@ -16,8 +16,11 @@ CRUDGearSet = FastCRUD[
 crud_gear_sets = CRUDGearSet(GearSet)
 
 
+GEAR_SET_NAME_KEY = "ux_gear_set_user_id_name_lower"
+
+
 async def gear_set_name_exists(db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None) -> bool:
     """Asked on `ux_gear_set_user_id_name_lower`'s own expressions."""
     return await unique_key_taken(
-        db, GearSet, "ux_gear_set_user_id_name_lower", {"user_id": user_id, "name": name}, exclude_id=exclude_id
+        db, GearSet, GEAR_SET_NAME_KEY, {"user_id": user_id, "name": name}, exclude_id=exclude_id
     )

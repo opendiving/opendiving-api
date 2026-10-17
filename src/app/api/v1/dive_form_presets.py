@@ -9,7 +9,12 @@ from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, UnprocessableEntityException
 from ...core.utils.pagination import clamp_pagination
-from ...crud.crud_dive_form_presets import crud_dive_form_presets, dive_form_preset_name_exists
+from ...crud.crud_dive_form_presets import (
+    DIVE_FORM_PRESET_NAME_KEY,
+    crud_dive_form_presets,
+    dive_form_preset_name_exists,
+)
+from ...crud.unique_keys import write_or_duplicate
 from ...schemas.dive_form_preset import (
     DiveFormPresetCreate,
     DiveFormPresetCreateInternal,
@@ -72,13 +77,18 @@ async def write_dive_form_preset(
     if await dive_form_preset_name_exists(db=db, user_id=current_user["id"], name=preset.name):
         raise DuplicateValueException(_DUPLICATE_NAME)
 
-    created = await crud_dive_form_presets.create(
-        db=db,
-        object=DiveFormPresetCreateInternal(
-            user_id=current_user["id"], name=preset.name, hidden_fields=preset.hidden_fields
+    created = await write_or_duplicate(
+        db,
+        crud_dive_form_presets.create(
+            db=db,
+            object=DiveFormPresetCreateInternal(
+                user_id=current_user["id"], name=preset.name, hidden_fields=preset.hidden_fields
+            ),
+            schema_to_select=DiveFormPresetReadInternal,
+            return_as_model=True,
         ),
-        schema_to_select=DiveFormPresetReadInternal,
-        return_as_model=True,
+        DIVE_FORM_PRESET_NAME_KEY,
+        _DUPLICATE_NAME,
     )
     return _to_public(created, user_uuid=current_user["uuid"])
 
@@ -162,7 +172,12 @@ async def patch_dive_form_preset(
 
     update_data = values.model_dump(exclude_unset=True)
     if update_data:
-        await crud_dive_form_presets.update(db=db, object=update_data, uuid=uuid)
+        await write_or_duplicate(
+            db,
+            crud_dive_form_presets.update(db=db, object=update_data, uuid=uuid),
+            DIVE_FORM_PRESET_NAME_KEY,
+            _DUPLICATE_NAME,
+        )
 
     return {"message": "Dive form preset updated"}
 

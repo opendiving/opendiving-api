@@ -21,7 +21,8 @@ from ...crud.crud_gear_set_items import (
     get_gear_items_for_sets,
     replace_gear_items_for_set,
 )
-from ...crud.crud_gear_sets import crud_gear_sets, gear_set_name_exists
+from ...crud.crud_gear_sets import GEAR_SET_NAME_KEY, crud_gear_sets, gear_set_name_exists
+from ...crud.unique_keys import write_or_duplicate
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.gear_set import (
     GearSetCreateInternal,
@@ -37,6 +38,7 @@ router = APIRouter(tags=["gear"])
 # Also what a member deleted between its resolve and the insert gets: from the caller's side
 # the two are the same thing.
 _GEAR_ITEM_NOT_FOUND = "Gear item not found."
+_NAME_TAKEN = "A gear set with this name already exists"
 
 
 async def _get_owned_gear_set(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> GearSetReadInternal:
@@ -97,13 +99,18 @@ async def write_gear_set(
     same thing. Set names are unique per user, so reusing one is a 422.
     """
     if await gear_set_name_exists(db=db, user_id=current_user["id"], name=gear_set.name):
-        raise DuplicateValueException("A gear set with this name already exists")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     gear_item_ids = await _resolve_item_ids(db, gear_set.gear_item_uuids, current_user["id"])
 
     gear_set_internal = GearSetCreateInternal(name=gear_set.name, weight=gear_set.weight, user_id=current_user["id"])
-    created_gear_set = await crud_gear_sets.create(
-        db=db, object=gear_set_internal, commit=False, schema_to_select=GearSetReadInternal, return_as_model=True
+    created_gear_set = await write_or_duplicate(
+        db,
+        crud_gear_sets.create(
+            db=db, object=gear_set_internal, commit=False, schema_to_select=GearSetReadInternal, return_as_model=True
+        ),
+        GEAR_SET_NAME_KEY,
+        _NAME_TAKEN,
     )
     await write_or_422(
         db,
@@ -232,7 +239,7 @@ async def patch_gear_set(
     if values.name is not None and await gear_set_name_exists(
         db=db, user_id=db_gear_set.user_id, name=values.name, exclude_id=db_gear_set.id
     ):
-        raise DuplicateValueException("A gear set with this name already exists")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     gear_item_ids: list[int] | None = None
     if values.gear_item_uuids is not None:
@@ -240,7 +247,12 @@ async def patch_gear_set(
 
     update_data = values.model_dump(exclude={"gear_item_uuids"}, exclude_unset=True)
     if update_data:
-        await crud_gear_sets.update(db=db, object=update_data, uuid=uuid, commit=False)
+        await write_or_duplicate(
+            db,
+            crud_gear_sets.update(db=db, object=update_data, uuid=uuid, commit=False),
+            GEAR_SET_NAME_KEY,
+            _NAME_TAKEN,
+        )
 
     if gear_item_ids is not None:
         await write_or_422(

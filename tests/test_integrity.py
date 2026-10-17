@@ -1,4 +1,4 @@
-"""The two shapes a route turns an `IntegrityError` into a 422 with, and what each leaves alone."""
+"""The shapes a route turns an `IntegrityError` into a 422 with, and what each leaves alone."""
 
 from unittest.mock import AsyncMock
 
@@ -6,7 +6,8 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from src.app.api.integrity import refuse_vanished_reference, write_or_422
-from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
+from src.app.core.exceptions.http_exceptions import DuplicateValueException, UnprocessableEntityException
+from src.app.crud.unique_keys import write_or_duplicate
 
 
 def _violating(constraint: str) -> IntegrityError:
@@ -78,6 +79,33 @@ class TestRefuseVanishedReference:
 
         with pytest.raises(IntegrityError) as raised:
             await refuse_vanished_reference(db, error, {"course_contact_id_fkey": "Contact not found."})
+
+        assert raised.value is error
+        db.rollback.assert_awaited_once()
+
+
+class TestWriteOrDuplicate:
+    @pytest.mark.asyncio
+    async def test_the_named_index_is_the_duplicate_sentence_after_a_rollback(self) -> None:
+        db = AsyncMock()
+        error = IntegrityError(
+            "INSERT", {}, Exception('duplicate key value violates unique constraint "ux_trip_user_id_name_lower"')
+        )
+
+        with pytest.raises(DuplicateValueException, match="A trip with this name already exists"):
+            await write_or_duplicate(
+                db, _raising(error), "ux_trip_user_id_name_lower", "A trip with this name already exists"
+            )
+
+        db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_any_other_constraint_is_raised_as_it_came(self) -> None:
+        db = AsyncMock()
+        error = _violating("trip_user_id_fkey")
+
+        with pytest.raises(IntegrityError) as raised:
+            await write_or_duplicate(db, _raising(error), "ux_trip_user_id_name_lower", "unused")
 
         assert raised.value is error
         db.rollback.assert_awaited_once()

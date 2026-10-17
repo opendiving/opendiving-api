@@ -19,6 +19,7 @@ from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_dive_dive_sites import replace_dive_site_on_dives
 from ...crud.crud_dive_sites import (
+    DIVE_SITE_NAME_KEY,
     DIVE_SITE_SEARCH_COLUMNS,
     crud_dive_sites,
     dive_site_name_exists,
@@ -35,6 +36,7 @@ from ...crud.crud_tags import (
     resolve_tag_id_for_user,
     resolve_tag_ids,
 )
+from ...crud.unique_keys import write_or_duplicate
 from ...models.dive_dive_site import DiveDiveSite
 from ...models.dive_site import DiveSite
 from ...schemas.dive_site import (
@@ -66,6 +68,8 @@ from ...services.cache_invalidation import invalidate_dive_caches, invalidate_di
 from ...services.dive_site_catalog import search_sites
 
 router = APIRouter(tags=["dive-sites"])
+
+_NAME_TAKEN = "A dive site with this name already exists at this location"
 
 
 async def _get_owned_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
@@ -158,7 +162,7 @@ async def write_dive_site(
         name=dive_site.name,
         location_name=None if location is None else location.name,
     ):
-        raise DuplicateValueException("A dive site with this name already exists at this location")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     tag_ids = await _resolved_tag_ids(db, user_id=current_user["id"], names=dive_site.tags)
     dive_site_internal = DiveSiteCreateInternal(
@@ -166,8 +170,13 @@ async def write_dive_site(
         **location_columns(location, DIVE_SITE_LOCATION_PREFIX),
         user_id=current_user["id"],
     )
-    created_dive_site = await crud_dive_sites.create(
-        db=db, object=dive_site_internal, commit=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
+    created_dive_site = await write_or_duplicate(
+        db,
+        crud_dive_sites.create(
+            db=db, object=dive_site_internal, commit=False, schema_to_select=DiveSiteReadInternal, return_as_model=True
+        ),
+        DIVE_SITE_NAME_KEY,
+        _NAME_TAKEN,
     )
     if tag_ids:
         await write_or_422(
@@ -469,7 +478,7 @@ async def patch_dive_site(
         location_name=effective_location_name,
         exclude_id=db_dive_site.id,
     ):
-        raise DuplicateValueException("A dive site with this name already exists at this location")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     # The schema checks a pair it was sent whole; against the stored end of one it was sent
     # half of, the route checks.
@@ -493,7 +502,12 @@ async def patch_dive_site(
     tag_ids = None if values.tags is None else await _resolved_tag_ids(db, user_id=owner_id, names=values.tags)
 
     if update_data:
-        await crud_dive_sites.update(db=db, object=update_data, uuid=uuid, commit=False)
+        await write_or_duplicate(
+            db,
+            crud_dive_sites.update(db=db, object=update_data, uuid=uuid, commit=False),
+            DIVE_SITE_NAME_KEY,
+            _NAME_TAKEN,
+        )
     if tag_ids is not None:
         await write_or_422(db, replace_tags_for_dive_site(db, db_dive_site.id, tag_ids, commit=False), TAG_NOT_FOUND)
 
