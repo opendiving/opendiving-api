@@ -124,11 +124,15 @@ before every submit.
 two ways: a functional unique index on `(user_id, lower(name))` — `Index(..., func.lower(name))` in
 `__table_args__` reproduces that DDL exactly — and an application-level check (`trip_name_exists` /
 `dive_site_name_exists` / `contact_name_exists`) before insert or update, so a duplicate returns
-`422 DuplicateValueException` instead of a raw integrity error. Neither half carries a
-`WHERE is_deleted = false` predicate: all three are hard-deleted, so a deleted name frees its slot
-because the row is gone. The index and the check must agree — a predicate on one and not the other
-refuses names the other accepts. A new named, user-owned entity mirrors this pattern; add the
-predicate to both halves only if it is genuinely soft-deletable.
+`422 DuplicateValueException` instead of a raw integrity error. Gear items, gear sets, presets,
+people and service schedules follow the same pattern. The index and the check must agree, so every
+check is `unique_key_taken` (`crud/unique_keys.py`), which builds its probe from the index's own
+expressions rather than normalising the value in Python, and the write schemas store the name
+`Trimmed`, so the key the index compares is the name the diver sees. Rows already holding
+surrounding whitespace keep it, read back as `StoredName`, and are trimmed by their next save. No
+index carries a `WHERE is_deleted = false` predicate: all are hard-deleted, so a deleted name frees
+its slot because the row is gone. Add one only for a genuinely soft-deletable entity, and teach
+`unique_key_matches` the candidate's side of it.
 
 `Tag.name` departs on purpose: `ux_tag_user_id_name_folded` is on
 `casefold(name COLLATE pg_unicode_fast)`, and `tag_name_exists` and `tag_ids_by_name` compare on

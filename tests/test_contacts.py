@@ -508,7 +508,7 @@ class TestTheDatabase:
     ) -> None:
         mine = create_contact(db, diver)
 
-        assert await contact_name_exists(async_db, user_id=diver.id, name=f"  {mine.name.upper()} ")
+        assert await contact_name_exists(async_db, user_id=diver.id, name=mine.name.upper())
         assert not await contact_name_exists(async_db, user_id=other_diver.id, name=mine.name)
         assert not await contact_name_exists(async_db, user_id=diver.id, name=mine.name, exclude_id=mine.id)
         db.add(Contact(user_id=diver.id, name=mine.name.lower()))

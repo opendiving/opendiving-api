@@ -301,12 +301,12 @@ def _as(user: User) -> dict[str, Any]:
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestTheDatabase:
     @pytest.mark.asyncio
-    async def test_a_name_is_unique_per_diver_trimmed_and_case_insensitively(
+    async def test_a_name_is_unique_per_diver_case_insensitively(
         self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
         mine = create_person(db, diver)
 
-        assert await person_name_exists(async_db, user_id=diver.id, name=f"  {mine.name.upper()} ")
+        assert await person_name_exists(async_db, user_id=diver.id, name=mine.name.upper())
         assert not await person_name_exists(async_db, user_id=other_diver.id, name=mine.name)
         assert not await person_name_exists(async_db, user_id=diver.id, name=mine.name, exclude_id=mine.id)
         db.add(Person(user_id=diver.id, name=mine.name.lower()))
