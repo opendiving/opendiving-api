@@ -252,24 +252,62 @@ class TestOneComputersTwoRecordsFoldIntoOne:
         assert profile.duration == 3_163_000
 
     @pytest.mark.asyncio
-    async def test_the_absorbed_records_readouts_fill_the_survivors_blanks(
+    async def test_the_dive_starts_on_the_earlier_records_readouts_and_ends_on_the_later_records(
         self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
     ) -> None:
-        """The fold keeps one recording, and the other half's figures fill what it lacks -
-        fill, never overwrite, the rule every second record of one recording follows."""
+        """The two records run one after the other, so the first half's end is the restart's
+        reading, not the dive's. A start or end only one half recorded comes from that half."""
         first, second = await _two_halves(async_db, db, diver)
         await async_db.execute(
-            update(DiveRecording).where(DiveRecording.dive_id == first.id).values(cns_start=3.0, cns_end=5.0)
+            update(DiveRecording)
+            .where(DiveRecording.dive_id == first.id)
+            .values(cns_start=3.0, cns_end=5.0, otu_start=1.0, surface_pressure_bar=1.01)
         )
         await async_db.execute(
-            update(DiveRecording).where(DiveRecording.dive_id == second.id).values(cns_end=11.0, otu_end=22.0)
+            update(DiveRecording)
+            .where(DiveRecording.dive_id == second.id)
+            .values(cns_start=5.0, cns_end=11.0, otu_end=22.0, surface_pressure_bar=1.02)
         )
         await async_db.commit()
 
         await _merge(async_db, diver, first, second)
 
         [recording] = await _recordings(async_db, first)
-        assert (recording.cns_start, recording.cns_end, recording.otu_end) == (3.0, 5.0, 22.0)
+        assert (
+            recording.cns_start,
+            recording.cns_end,
+            recording.otu_start,
+            recording.otu_end,
+            recording.surface_pressure_bar,
+        ) == (3.0, 11.0, 1.0, 22.0, 1.01)
+
+    @pytest.mark.asyncio
+    async def test_a_tank_both_halves_recorded_ends_on_the_later_records_pressure(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """Otherwise the merged dive breathes 80 bar over both halves' time, half its real
+        rate."""
+        first, second = await _two_halves(async_db, db, diver)
+        db.add_all(
+            [
+                DiveMixture(
+                    dive_id=first.id, gas_number=0, oxygen=21.0, helium=0.0, start_pressure=200.0, end_pressure=120.0
+                ),
+                DiveMixture(
+                    dive_id=second.id, gas_number=0, oxygen=21.0, helium=0.0, start_pressure=120.0, end_pressure=50.0
+                ),
+            ]
+        )
+        db.commit()
+
+        await _merge(async_db, diver, first, second)
+
+        rows = (
+            await async_db.execute(
+                select(DiveMixture.start_pressure, DiveMixture.end_pressure).where(DiveMixture.dive_id == first.id)
+            )
+        ).all()
+        assert [tuple(row) for row in rows] == [(200.0, 50.0)]
 
     @pytest.mark.asyncio
     async def test_the_absorbed_records_device_and_settings_fill_the_survivors_blanks(
@@ -1053,6 +1091,31 @@ class TestWhenTheSurvivingDivesOwnRecordStartedLater:
         times = (await _profile(async_db, recording.id)).data["depth"]["t"]
         assert min(times) == 0
         assert max(times) == (RESTART_DELTA + 20) * 1000
+
+    @pytest.mark.asyncio
+    async def test_the_readouts_follow_the_records_rather_than_the_dives(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        earlier_logged = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 0, tzinfo=UTC), number=214)
+        later_logged = _dive_at(db, diver, datetime(2026, 9, 8, 12, 30, 0, tzinfo=UTC), number=215)
+        await _attach(
+            async_db, diver, earlier_logged, _export(start=SECOND_START, samples=_samples(3)), filename="late.json"
+        )
+        await _attach(
+            async_db, diver, later_logged, _export(start=FIRST_START, samples=_samples(3)), filename="early.json"
+        )
+        await async_db.execute(
+            update(DiveRecording).where(DiveRecording.dive_id == earlier_logged.id).values(cns_start=5.0, cns_end=11.0)
+        )
+        await async_db.execute(
+            update(DiveRecording).where(DiveRecording.dive_id == later_logged.id).values(cns_start=3.0, cns_end=5.0)
+        )
+        await async_db.commit()
+
+        await _merge(async_db, diver, earlier_logged, later_logged)
+
+        recording = (await _recordings(async_db, earlier_logged))[0]
+        assert (recording.cns_start, recording.cns_end) == (3.0, 11.0)
 
 
 class TestASameDeviceParedWithNoStartToPlaceIt:
