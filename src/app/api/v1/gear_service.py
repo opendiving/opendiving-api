@@ -183,7 +183,7 @@ async def write_gear_service_schedule(
         db=db, object=schedule_internal, schema_to_select=GearServiceScheduleReadInternal, return_as_model=True
     )
     # A brand-new schedule has no records, so this derives the first due date straight
-    # from `starts_on` and the two snapshots.
+    # from `starts_on` and the two snapshots - which is why the row is read back below.
     await recalculate_service_schedule(db=db, schedule_id=created.id)
     await invalidate_gear_caches(current_user["id"])
 
@@ -469,14 +469,8 @@ async def write_gear_service_record(
         await recalculate_service_schedule(db=db, schedule_id=schedule.id)
     await invalidate_gear_caches(current_user["id"])
 
-    record_read = await crud_gear_service_records.get(
-        db=db, id=created.id, schema_to_select=GearServiceRecordReadInternal, return_as_model=True
-    )
-    if record_read is None:
-        raise NotFoundException("Created service record not found")
-
     return _to_public_record(
-        cast(GearServiceRecordReadInternal, record_read),
+        created,
         user_uuid=current_user["uuid"],
         gear_item_uuid=db_gear_item.uuid,
         gear_service_schedule_uuid=schedule.uuid if schedule is not None else None,

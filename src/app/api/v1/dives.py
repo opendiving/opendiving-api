@@ -762,10 +762,6 @@ async def write_dive(
     await db.commit()
     await _after_dive_write(db, current_user["id"])
 
-    dive_read_internal = await crud_dives.get(db=db, id=created_dive.id, schema_to_select=DiveReadInternal)
-    if dive_read_internal is None:
-        raise NotFoundException("Created dive not found")
-
     mixtures = await get_mixtures_for_dive(db=db, dive_id=created_dive.id)
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=created_dive.id)
     gear_items = await get_gear_items_for_dive(db=db, dive_id=created_dive.id)
@@ -773,7 +769,7 @@ async def write_dive(
     stored_people = (await get_people_for_dives(db, [created_dive.id]))[created_dive.id] if people else []
     stored_tags = (await get_tags_for_dives(db, [created_dive.id]))[created_dive.id] if tag_ids else []
     return _to_public_dive_with_mixtures(
-        cast(dict[str, Any], dive_read_internal),
+        created_dive,
         user_uuid=current_user["uuid"],
         trip_uuid=dive.trip_uuid,
         course_uuid=dive.course_uuid,

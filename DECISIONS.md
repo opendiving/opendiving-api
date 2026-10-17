@@ -1174,9 +1174,9 @@ each through `rederive_recording` in a savepoint as a repeat upload is, committi
 always reporting `examined / extracted / skipped / no_samples / failed`, since success-only output
 hides a broken reader.
 
-It calls `create_redis_cache_pool()` first: `delete_keys_by_pattern` silently returns when
-`cache.client is None`, which only the API lifespan sets. `src/scripts/` is bind-mounted into `api`,
-so the host copy runs.
+It opens the cache pool around its session (`src/scripts/_common.py`'s `session_with_cache`):
+`delete_keys_by_pattern` silently returns when `cache.client is None`, which only the API lifespan
+sets. `src/scripts/` is bind-mounted into `api`, so the host copy runs.
 
 ## No manual DDL for the dive-profile feature
 
@@ -1434,8 +1434,8 @@ something an operator turns on, not something a fresh deploy inherits — unlike
 `core/setup.py` disables in production and gates behind a superuser in staging, it has no
 `ENVIRONMENT` gate of its own.
 
-1. `ADMIN_PASSWORD` has no default (`str | None = None`). Unset means "no admin account", which
-   `admin/initialize.py` handles.
+1. `ADMIN_PASSWORD` has no default (`SecretStr | None = None`). Unset means "no admin account",
+   which `admin/initialize.py` handles.
 2. `CRUD_ADMIN_ENABLED` defaults to `False`. `src/.env.example` enables it for local development.
 3. `Settings._reject_insecure_admin_config` raises at startup when the panel is enabled in
    production with a missing or boilerplate password (`"!Ch4ng3Th1sP4ssW0rd!"`). Chosen over
@@ -3210,8 +3210,8 @@ key:
 6. `aphia_id`, for a total order.
 
 `status` (the fold normalises it to `accepted`) and `source` (which register beat the budget) stay
-out. `_local_search` keeps its own three-way `match_rank` and `LIMIT _MAX_RESULTS`, so a catalog
-with more matches than that can cut a row the Python key would rank first; fix with the `pg_trgm`
+out. `_local_search` keeps its own three-way `match_rank` and `LIMIT MAX_RESULTS`, so a catalog with
+more matches than that can cut a row the Python key would rank first; fix with the `pg_trgm`
 escalation.
 
 ## The ajax endpoint annotates rows; it never makes them
@@ -3471,8 +3471,10 @@ worker. It lives in `core/config.py` because that module owns `LOG_LEVEL` and is
 entrypoints already import; `core/setup.py` would drag FastAPI, the routers and the models into the
 worker's import graph for two lines of logging.
 
-The one-shot scripts in `src/scripts/` keep their own `basicConfig(level=INFO)`: a person runs them
-to watch something happen, and `LOG_LEVEL=WARNING` should not turn that into a silent command.
+The one-shot scripts in `src/scripts/` log at INFO: a person runs them to watch something happen,
+and `LOG_LEVEL=WARNING` should not turn that into a silent command. Each calls
+`_common.log_at_info()` under `__main__`, after every import, because importing `core.setup` applies
+`LOG_LEVEL` to the root logger and a `basicConfig` at the top of the script is then a no-op.
 
 `logging.basicConfig` does nothing when the root logger already has a handler, so
 `configure_logging` also sets the root level explicitly. The httpx pin to `WARNING` in
@@ -4872,11 +4874,11 @@ signing in again" cannot help there.
 
 ## Nothing of the token response is logged, and the secret is a `SecretStr`
 
-`GOOGLE_CLIENT_SECRET` is typed `SecretStr` where `SMTP_PASSWORD` and `GEOCODER_API_KEY` beside it
-are bare `str | None`: a value that must not reach a log line is better served by a type whose
-`repr` cannot spill it into a traceback. `SecretStr("")` is truthy (no `__bool__`), so the boot
-guard checks `.get_secret_value().strip()` rather than falsiness, or an empty variable passes
-startup and fails at the first sign-in.
+`GOOGLE_CLIENT_SECRET` is typed `SecretStr`, as are `SMTP_PASSWORD`, `GEOCODER_API_KEY`,
+`ADMIN_PASSWORD` and `CRUD_ADMIN_REDIS_PASSWORD`: a value that must not reach a log line is better
+served by a type whose `repr` cannot spill it into a traceback. Each consumer unwraps it with
+`.get_secret_value()`. The boot guard checks `.get_secret_value().strip()`, or a whitespace-only
+variable passes startup and fails at the first sign-in.
 
 The secret travels only in the request body, and httpx's request log line is URL and status.
 Google's response is not logged above DEBUG: a refusal writes its HTTP status at WARNING and the
@@ -6431,7 +6433,7 @@ collision skip and idempotence: a revision failing partway rolls back without ad
 
 ## The WoRMS credit is a link, and any edit to it is a cache-version change
 
-`_WORMS_ATTRIBUTION` (`services/species_service.py`) is
+`WORMS_ATTRIBUTION` (`services/species_service.py`) is
 `[World Register of Marine Species](https://www.marinespecies.org) (CC BY)`: a credit names origin
 and licence and links to the licence text; WoRMS's text is CC BY. It is written linked, like the
 geocoder's `_DEFAULT_ATTRIBUTION` and `_MARINE_ATTRIBUTION`: a statement this project makes, not a

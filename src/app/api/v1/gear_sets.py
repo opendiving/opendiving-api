@@ -103,16 +103,8 @@ async def write_gear_set(
     await replace_gear_items_for_set(db=db, gear_set_id=created_gear_set.id, gear_item_ids=gear_item_ids)
     await invalidate_gear_caches(current_user["id"])
 
-    gear_set_read = await crud_gear_sets.get(
-        db=db, id=created_gear_set.id, schema_to_select=GearSetReadInternal, return_as_model=True
-    )
-    if gear_set_read is None:
-        raise NotFoundException("Created gear set not found")
-
     gear_items = await get_gear_items_for_set(db=db, gear_set_id=created_gear_set.id)
-    return _to_public_gear_set(
-        cast(GearSetReadInternal, gear_set_read), user_uuid=current_user["uuid"], gear_items=gear_items
-    )
+    return _to_public_gear_set(created_gear_set, user_uuid=current_user["uuid"], gear_items=gear_items)
 
 
 @cache(

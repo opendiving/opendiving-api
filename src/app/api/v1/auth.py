@@ -87,7 +87,9 @@ from ...schemas.auth import (
     EmailVerifyRequest,
     GoogleAuthRequest,
     LinkCheckResponse,
+    LogoutResponse,
     ProfileCompletionRequest,
+    RefreshResponse,
     RestoreRequest,
 )
 from ...schemas.auth_audit_event import AuthEventType
@@ -1052,9 +1054,9 @@ async def _handle_revoked_refresh(refresh_token: str, db: AsyncSession, context:
     await record_auth_event(db, event_type=AuthEventType.REFRESH_REPLAY_DETECTED, context=context, user_id=user_id)
 
 
-@router.post("/refresh")
+@router.post("/refresh", response_model=RefreshResponse)
 async def refresh_access_token(
-    request: Request, response: Response, db: AsyncSession = Depends(async_get_db)
+    request: Request, response: Response, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict[str, str]:
     """Exchanges the httpOnly `refresh_token` cookie (set by `issue_tokens`) for a new
     access token *and a new refresh token*. See `DECISIONS.md` for why this is the one
@@ -1145,14 +1147,14 @@ async def refresh_access_token(
     )
 
 
-@router.post("/logout")
+@router.post("/logout", response_model=LogoutResponse)
 async def logout(
     request: Request,
     response: Response,
-    access_token: str = Depends(oauth2_scheme),
-    refresh_token: str | None = Cookie(None, alias="refresh_token"),
-    db: AsyncSession = Depends(async_get_db),
-) -> dict[str, str]:
+    access_token: Annotated[str, Depends(oauth2_scheme)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    refresh_token: Annotated[str | None, Cookie(alias="refresh_token")] = None,
+) -> LogoutResponse:
     """End the caller's session.
 
     Blacklists both the access and refresh tokens, stamps `revoked_at` on the session row
@@ -1194,4 +1196,4 @@ async def logout(
 
     response.delete_cookie(key="refresh_token")
 
-    return {"message": "Logged out successfully"}
+    return LogoutResponse()

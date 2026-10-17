@@ -7,6 +7,7 @@ instance nobody can sign in to, a password with an `@` in it, a `LOG_LEVEL` typo
 setting the app no longer reads.
 """
 
+import ast
 import importlib.util
 import logging
 import re
@@ -255,17 +256,6 @@ class TestGoogleSignInNeedsBothHalvesOfItsClient:
 
         assert _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings.GOOGLE_CLIENT_SECRET is None
 
-    def test_it_does_not_render_itself(self):
-        """`SecretStr`, unlike the bare `str | None` its neighbours use, so a settings
-        object reaching a traceback or a log line cannot spill it.
-        """
-        settings = _settings(
-            GOOGLE_CLIENT_ID="an-id.apps.googleusercontent.com", GOOGLE_CLIENT_SECRET="a-real-looking-secret"
-        )
-
-        assert "a-real-looking-secret" not in repr(settings.GOOGLE_CLIENT_SECRET)
-        assert "a-real-looking-secret" not in str(settings.GOOGLE_CLIENT_SECRET)
-
 
 class TestRetiredSettings:
     @pytest.mark.parametrize("name", ["ADMIN_NAME", "ADMIN_EMAIL", "CRUD_ADMIN_REDIS_SSL"])
@@ -366,28 +356,8 @@ class TestRegistrationSettings:
         assert loaded.INVITE_REQUEST_RATE_LIMIT_PER_EMAIL == loaded.CONTACT_FORM_RATE_LIMIT_PER_EMAIL
         assert loaded.INVITE_REQUEST_RATE_LIMIT_PER_IP == loaded.CONTACT_FORM_RATE_LIMIT_PER_IP
 
-    def test_every_new_setting_is_in_the_template(self):
-        """`src/.env.example`'s own rule: a setting that can be silently wrong belongs there
-        as a commented block showing its default. The template is the canonical setup, so a
-        setting missing from it is one a self-hoster only discovers by reading the source.
-        """
-        from pathlib import Path
-
+    def test_the_template_offers_the_non_default_value(self):
         template = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text()
-
-        for name in (
-            "REGISTRATION_MODE",
-            "PROJECT_OPERATED",
-            "INVITATIONS_PER_USER",
-            "INVITATIONS_WINDOW_DAYS",
-            "INVITATION_ATTEMPT_RATE_LIMIT_PER_USER",
-            "INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS",
-            "INVITE_REQUEST_RATE_LIMIT_PER_EMAIL",
-            "INVITE_REQUEST_RATE_LIMIT_PER_IP",
-            "JOIN_CHANNELS",
-            "GEOCODER_SEARCH_URL",
-        ):
-            assert name in template, name
 
         # The line to uncomment is the *non-default* value, the way `# WEB_NOINDEX=true`
         # flips away from its default in the bundle's own template: uncommenting a block is
@@ -395,6 +365,87 @@ class TestRegistrationSettings:
         assert '# REGISTRATION_MODE="open"' in template
         assert "# PROJECT_OPERATED=true" in template
         assert "# JOIN_CHANNELS=" in template
+
+
+#: `Settings` fields `src/.env.example` deliberately does not list, each for a reason that
+#: makes listing it wrong rather than merely unnecessary.
+NOT_IN_THE_TEMPLATE = {
+    # A copy in the template freezes the build identity at whenever the operator copied
+    # it; `pyproject.toml` and the `Dockerfile`'s build arg are the sources.
+    "APP_VERSION",
+    "APP_COMMIT",
+    # The SQLAlchemy dialects the app is built against, not a choice: the image installs
+    # `asyncpg` and nothing else for the async side.
+    "POSTGRES_SYNC_PREFIX",
+    "POSTGRES_ASYNC_PREFIX",
+    # Built from the parts the template does list.
+    "POSTGRES_URI",
+    "REDIS_CACHE_URL",
+}
+
+
+def _env_names_by_field() -> dict[str, str]:
+    """Each `Settings` field's variable name. Usually the field's own, but `config()` can
+    read another (`LICENSE_NAME` reads `LICENSE`), and the template lists what `.env` sets.
+    """
+    source = (Path(__file__).resolve().parents[1] / "src" / "app" / "core" / "config.py").read_text()
+    names: dict[str, str] = {}
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "config"
+        ):
+            names[node.target.id] = ast.literal_eval(node.value.args[0])
+    return {field: names.get(field, field) for field in Settings.model_fields}
+
+
+class TestTheTemplateListsEverySetting:
+    """The template is what a self-hoster configures from, so a setting missing from it is
+    one they discover only by reading the source."""
+
+    @staticmethod
+    def _listed() -> set[str]:
+        template = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text()
+        return set(re.findall(r"^#?\s*([A-Z][A-Z0-9_]*)=", template, re.MULTILINE))
+
+    def test_every_setting_is_listed(self):
+        listed = self._listed()
+        names = _env_names_by_field()
+        missing = [env for field, env in names.items() if field not in NOT_IN_THE_TEMPLATE and env not in listed]
+
+        assert not missing, f"add these to src/.env.example, or to NOT_IN_THE_TEMPLATE with a reason: {missing}"
+
+    def test_every_exemption_is_a_setting_the_template_leaves_out(self):
+        """Keeps the exemptions honest: a retired field or one the template has since
+        picked up should leave the list, not linger as a hole the first test can't see."""
+        names = _env_names_by_field()
+
+        assert NOT_IN_THE_TEMPLATE <= names.keys()
+        assert not {names[field] for field in NOT_IN_THE_TEMPLATE} & self._listed()
+
+
+class TestCredentialsDoNotRenderThemselves:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "SECRET_KEY",
+            "ADMIN_PASSWORD",
+            "GOOGLE_CLIENT_SECRET",
+            "SMTP_PASSWORD",
+            "GEOCODER_API_KEY",
+            "S3_SECRET_ACCESS_KEY",
+            "CRUD_ADMIN_REDIS_PASSWORD",
+        ],
+    )
+    def test_neither_repr_nor_str_spills_the_value(self, name: str):
+        value = getattr(_settings(**{name: "a-real-looking-secret"}), name)
+
+        assert "a-real-looking-secret" not in repr(value)
+        assert "a-real-looking-secret" not in str(value)
+        assert value.get_secret_value() == "a-real-looking-secret"
 
 
 class TestGeocoderDefaults:
