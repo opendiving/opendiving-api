@@ -2086,8 +2086,9 @@ stored. The earlier fix is the previous rule's answer rather than a corrupt valu
 of the files - a repeat upload, the profile backfill, the tech-field backfill - fills a blank fix
 and never overwrites one. What re-derives the primary recording outright moves it: the dive or its
 file deleted and uploaded again, a file removed from the primary, another recording made primary. A
-fold moves the exit to the later record's dive's. Rejected: a backfill that rewrites every stored
-fix the dive's files yield, a data path the flagship's one account does not need.
+fold moves the entry to the earlier record's dive's and the exit to the later record's. Rejected: a
+backfill that rewrites every stored fix the dive's files yield, a data path the flagship's one
+account does not need.
 
 ## Real dive-computer files are committed, and only the cases no file shows are written
 
@@ -6323,12 +6324,10 @@ fold's `submerged_time` and `avg_depth` are its time in the water; side by side 
 `refresh_tech_scalars` uncalled; the absorbed record's device, settings and surface pressure fill
 the survivor's blanks; its CNS, OTU, paired tank pressures and fixes go by side (`_write_fold`,
 `fold_fixes`). Rejected: fill-only, which ends the dive at the restart and halves its SAC; the cost:
-a value the diver typed on the surviving dive's other side is replaced. `backfill_folded_dives`
-replays this over earlier folds, finding the absorbed dive by a `deleted_at` beside the folded
-profile's `created_at`; a window holding two leaves that fold's cylinders and fixes alone. An
-`avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers`
-precedes the join, keeping `usage` and filling the survivor's blank cylinder members from the
-absorbed rows it pairs, as an arrival does, an empty absorbed row not appended; moved profiles use
+a value the diver typed on the surviving dive's other side is replaced. An `avg_depth` failing
+`ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers` precedes the join,
+keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
+as an arrival does, an empty absorbed row not appended; moved profiles use
 `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
 within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
 

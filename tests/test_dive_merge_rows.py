@@ -1312,6 +1312,63 @@ class TestBackfillingAFoldMergedBefore:
         assert (report.examined, report.dives_updated, report.changes) == (1, 0, [])
 
     @pytest.mark.asyncio
+    async def test_a_fold_a_later_merge_moved_onto_another_computers_dive_leaves_that_dives_tanks(
+        self,
+        volume: Any,
+        merging: None,
+        monkeypatch: pytest.MonkeyPatch,
+        async_db: AsyncSession,
+        db: Session,
+        diver: User,
+    ) -> None:
+        """Side by side, the surviving dive's tanks are its own computer's account and only
+        fill; the fold's absorbed dive is no evidence about them."""
+        monkeypatch.setattr("src.app.services.fold_backfill.invalidate_dive_caches", AsyncMock())
+        folded, recording_id = await self._merged_the_old_way(async_db, db, diver)
+        # The first merge a day back, so the second merge's deletion is outside its window.
+        day = timedelta(days=1)
+        await async_db.execute(
+            update(DiveProfile)
+            .where(DiveProfile.recording_id == recording_id)
+            .values(created_at=DiveProfile.created_at - day)
+        )
+        await async_db.execute(
+            update(Dive)
+            .where(Dive.user_id == diver.id, Dive.is_deleted.is_(True))
+            .values(deleted_at=Dive.deleted_at - day)
+        )
+        await async_db.commit()
+        other = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 0, tzinfo=UTC), number=213)
+        await _attach(
+            async_db,
+            diver,
+            other,
+            _export(start="2026-09-08T15:17:00.000+03:00", serial="999999999999", samples=_samples(3)),
+            filename="other.json",
+        )
+        db.add(
+            DiveMixture(
+                dive_id=other.id, gas_number=0, oxygen=21.0, helium=0.0, start_pressure=210.0, end_pressure=60.0
+            )
+        )
+        db.commit()
+        await _merge(async_db, diver, other, folded)
+
+        report = await backfill_folds(async_db, user_id=diver.id)
+
+        assert (report.examined, report.absorbed_not_found) == (1, 0)
+        pressures = (
+            await async_db.execute(
+                select(DiveMixture.start_pressure, DiveMixture.end_pressure).where(DiveMixture.dive_id == other.id)
+            )
+        ).all()
+        assert [tuple(row) for row in pressures] == [(210.0, 60.0)]
+        cns_end = (
+            await async_db.execute(select(DiveRecording.cns_end).where(DiveRecording.id == recording_id))
+        ).scalar_one()
+        assert cns_end == 11.0
+
+    @pytest.mark.asyncio
     async def test_a_fold_whose_absorbed_dive_is_ambiguous_still_has_its_readouts_repaired(
         self,
         volume: Any,

@@ -135,8 +135,18 @@ async def _repair(db: AsyncSession, row: _Candidate, report: FoldBackfillReport)
         else await _repair_readouts(db, recording_id=row.id, start_time=row.start_time, offset=row.utc_offset_minutes)
     )
 
+    # A fold is made as its dive's primary. One anywhere else was moved there by a later merge,
+    # onto a dive whose cylinders and fixes are that dive's own, or lost the place to a promotion
+    # that rewrote the fixes from the new primary (`refresh_tech_scalars`).
+    if row.ordinal != 0:
+        return changes
     absorbed_id = await _absorbed_dive_id(db, user_id=row.user_id, merged_at=row.created_at)
     if absorbed_id is None:
+        logger.warning(
+            "Leaving dive %s's cylinders and fixes: no single deleted dive matches its fold (recording %s)",
+            row.dive_id,
+            row.id,
+        )
         report.absorbed_not_found += 1
         return changes
     survivor, absorbed = await _dive(db, row.dive_id), await _dive(db, absorbed_id)
@@ -159,13 +169,10 @@ async def _repair(db: AsyncSession, row: _Candidate, report: FoldBackfillReport)
             if getattr(before[mixture_id], column) != value
         )
 
-    # The dive's fixes are its primary recording's, and a fold that has since lost that place
-    # had them rewritten from the new primary (`refresh_tech_scalars`).
-    if row.ordinal == 0:
-        fixes = fold_fixes(survivor, absorbed, survivor_first=survivor_first)
-        if fixes:
-            await db.execute(update(Dive).where(Dive.id == row.dive_id).values(**fixes))
-            changes.extend(f"{column}: {getattr(survivor, column)} -> {value}" for column, value in fixes.items())
+    fixes = fold_fixes(survivor, absorbed, survivor_first=survivor_first)
+    if fixes:
+        await db.execute(update(Dive).where(Dive.id == row.dive_id).values(**fixes))
+        changes.extend(f"{column}: {getattr(survivor, column)} -> {value}" for column, value in fixes.items())
     return changes
 
 
