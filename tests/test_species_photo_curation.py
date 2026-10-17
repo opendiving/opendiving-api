@@ -46,7 +46,7 @@ _ANY_UUID = "01a11779-b240-78e5-b3b6-983bccb45606"
 
 @pytest.fixture(autouse=True)
 def unthrottled() -> Generator[None]:
-    with patch("src.app.services.species_service.enforce_rate_limit", new_callable=AsyncMock):
+    with patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock):
         yield
 
 
@@ -106,7 +106,7 @@ class _Wikimedia:
         def build(**kwargs: Any) -> httpx.AsyncClient:
             return _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(self._record), **kwargs)
 
-        self._patcher = patch("src.app.services.species_service.httpx.AsyncClient", side_effect=build)
+        self._patcher = patch("src.app.core.utils.outbound.httpx.AsyncClient", side_effect=build)
         self._patcher.start()
         return self
 

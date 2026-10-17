@@ -247,6 +247,10 @@ class AccountSource(StrEnum):
 JOIN_CHANNEL_SLUG_PATTERN = r"^[a-z0-9-]{1,32}$"
 JOIN_CHANNEL_LABEL_MAX_LENGTH = 40
 
+# Identifies this project, and nobody in it, to every third party it calls. The two provider
+# settings default to it; an outbound call with no setting of its own sends it as it is.
+PROJECT_USER_AGENT = "OpenDiving (+https://github.com/opendiving/opendiving-api)"
+
 
 def parse_join_channels(raw: str | None) -> dict[str, str]:
     """`JOIN_CHANNELS` as a slug-to-label mapping, refusing a value that is not one.
@@ -501,9 +505,7 @@ class GeocodingSettings(BaseSettings):
     # blocks generic ones; Photon's maintainers give a generic one no guarantees. Sent to
     # both. A public deployment that isn't this project's own should say so here, since the
     # address in it is where the providers' operators will complain.
-    GEOCODER_USER_AGENT: str = config(
-        "GEOCODER_USER_AGENT", default="OpenDiving (+https://github.com/opendiving/opendiving-api)"
-    )
+    GEOCODER_USER_AGENT: str = config("GEOCODER_USER_AGENT", default=PROJECT_USER_AGENT)
 
     # What one account may spend, and the only limit on these endpoints that can produce a
     # 429 - the provider cap below degrades instead. So this is purely an abuse bound, not
@@ -635,9 +637,7 @@ class SpeciesSettings(BaseSettings):
     # asks to be told who is calling. One string satisfies both. A public deployment that
     # isn't this project's own should say so here - it is the address either provider's
     # operators will use before they block you.
-    SPECIES_USER_AGENT: str = config(
-        "SPECIES_USER_AGENT", default="OpenDiving (+https://github.com/opendiving/opendiving-api)"
-    )
+    SPECIES_USER_AGENT: str = config("SPECIES_USER_AGENT", default=PROJECT_USER_AGENT)
 
     # What one account may spend across `/species/search`, `/species/resolve` and the
     # `/user/species/suggest` calls that reach the search, together, and the only limit here

@@ -44,16 +44,8 @@ from collections.abc import Iterator
 from itertools import islice
 from typing import Any, NamedTuple
 
-import anyio
-import httpx
-from anyio import sleep  # A name of this module's own, so a test can stub its wait and nobody else's.
-from pydantic import ValidationError
-from redis.exceptions import RedisError
-
 from ..core.config import settings
-from ..core.exceptions.http_exceptions import RateLimitException
-from ..core.utils import cache
-from ..core.utils.rate_limit import enforce_rate_limit
+from ..core.utils.outbound import Failed, claim_provider_slot, fetch_capped, read_cached, write_cached
 from ..schemas.geocoding import GeocodeResult
 from .marine_areas import water_name
 
@@ -62,9 +54,9 @@ logger = logging.getLogger(__name__)
 # Short enough that a slow provider can't hold a request open. There is no retry: a second
 # attempt would spend the caller's remaining patience *and* a second slot against the
 # provider's rate limit, for an endpoint whose failure mode is already "type it yourself".
-_TIMEOUT = httpx.Timeout(5.0)
+_TIMEOUT_SECONDS = 5.0
 
-# The bounds that actually hold, because `_TIMEOUT` is per socket read: a host that answers
+# The bounds that actually hold, because `_TIMEOUT_SECONDS` is per socket read: a host that answers
 # slowly enough, or endlessly enough, is bounded by these two and by nothing else. Both are
 # far above any honest answer from either provider - a search's rows are a few kilobytes.
 #
@@ -235,35 +227,12 @@ async def _cached(key: str) -> list[GeocodeResult] | None:
     keystroke. Redis being absent or unreachable is a cache miss, not an error: the caller
     then simply asks the provider.
     """
-    if cache.client is None:
-        return None
-
-    try:
-        raw = await cache.client.get(key)
-    except RedisError as exc:
-        logger.warning("Geocoding cache read failed (%s); asking the provider instead.", type(exc).__name__)
-        return None
-
-    if raw is None:
-        return None
-
-    try:
-        rows = json.loads(raw.decode())
-        return [GeocodeResult(**row) for row in rows]
-    except ValueError, TypeError, ValidationError:
-        logger.warning("Discarding an unreadable geocoding cache entry at %s.", key)
-        return None
+    return await read_cached(key, lambda rows: [GeocodeResult(**row) for row in rows])
 
 
 async def _store(key: str, results: list[GeocodeResult]) -> None:
-    if cache.client is None:
-        return
-
     ttl = _HIT_TTL_SECONDS if results else _MISS_TTL_SECONDS
-    try:
-        await cache.client.set(key, json.dumps([result.model_dump() for result in results]), ex=ttl)
-    except RedisError as exc:
-        logger.warning("Geocoding cache write failed (%s).", type(exc).__name__)
+    await write_cached(key, json.dumps([result.model_dump() for result in results]), ttl_seconds=ttl)
 
 
 def _log_safe(value: Any) -> str:
@@ -275,24 +244,6 @@ def _log_safe(value: Any) -> str:
     entries around itself in anything that parses the file afterwards.
     """
     return " ".join(str(value).split())[:_LOGGED_VALUE_MAX_LENGTH]
-
-
-async def _claim_provider_slot(provider: str) -> bool:
-    """Take one slot against the instance-wide cap for `provider`, or report that there is none.
-
-    A boolean rather than the exception `enforce_rate_limit` raises, because here being over
-    the cap is an ordinary branch to wait on - not an error to propagate. Both providers share
-    the one configured limit, each on its own counter.
-    """
-    try:
-        await enforce_rate_limit(
-            f"geocode:provider:{provider}",
-            settings.GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS,
-            settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS,
-        )
-    except RateLimitException:
-        return False
-    return True
 
 
 async def _fetch(provider: str, base_url: str, path: str, params: dict[str, Any]) -> Any | None:
@@ -325,49 +276,31 @@ async def _fetch(provider: str, base_url: str, path: str, params: dict[str, Any]
     httpx would log the whole URL itself at INFO, which is why `core.setup` pins its logger to
     WARNING.
     """
-    if not await _claim_provider_slot(provider):
-        await sleep(min(settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS, _MAX_PROVIDER_WAIT_SECONDS))
-        if not await _claim_provider_slot(provider):
-            logger.warning("Skipping a %s call to %s: this instance is over its provider rate limit.", provider, path)
-            return None
+    # Both providers share the one configured limit, each on its own counter.
+    claimed = await claim_provider_slot(
+        f"geocode:provider:{provider}",
+        settings.GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS,
+        settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS,
+        wait_seconds=min(settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS, _MAX_PROVIDER_WAIT_SECONDS),
+    )
+    if not claimed:
+        logger.warning("Skipping a %s call to %s: this instance is over its provider rate limit.", provider, path)
+        return None
 
-    url = f"{base_url.rstrip('/')}{path}"
+    fetched = await fetch_capped(
+        f"{base_url.rstrip('/')}{path}",
+        params=params,
+        user_agent=settings.GEOCODER_USER_AGENT,
+        timeout=_TIMEOUT_SECONDS,
+        deadline=_DEADLINE_SECONDS,
+        max_bytes=_MAX_RESPONSE_BYTES,
+    )
+    if isinstance(fetched, Failed):
+        logger.warning("A %s geocoder request to %s %s.", provider, path, fetched)
+        return None
+
     try:
-        # `_TIMEOUT` bounds each socket read, which is not the same as bounding the call: a
-        # host that dribbles one byte every few seconds never trips it and holds the request
-        # open forever. `fail_after` is the actual deadline; the byte cap below is the
-        # matching bound on how much such a host can make this process buffer.
-        with anyio.fail_after(_DEADLINE_SECONDS):
-            # A client per call, deliberately: the provider caps above hold this to roughly
-            # one request a second per provider, so a pooled connection would sit idle far
-            # longer than any keep-alive, and a module-level client would need lifespan
-            # wiring to be closed. An integration with real throughput should not copy this.
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                headers = {"User-Agent": settings.GEOCODER_USER_AGENT}
-                async with client.stream("GET", url, params=params, headers=headers) as response:
-                    if response.status_code != 200:
-                        logger.warning("The %s geocoder answered %s with %d.", provider, path, response.status_code)
-                        return None
-
-                    body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        body.extend(chunk)
-                        if len(body) > _MAX_RESPONSE_BYTES:
-                            logger.warning(
-                                "The %s geocoder's answer to %s exceeded %d bytes.", provider, path, _MAX_RESPONSE_BYTES
-                            )
-                            return None
-
-        return json.loads(body)
-    except (httpx.HTTPError, httpx.InvalidURL) as exc:
-        # `InvalidURL` is listed separately because it descends from `Exception` rather than
-        # `HTTPError`, so a merely malformed URL setting - a typo'd port, say - would
-        # otherwise escape as a 500 and break this module's one promise.
-        logger.warning("A %s geocoder request to %s failed (%s).", provider, path, type(exc).__name__)
-        return None
-    except TimeoutError:
-        logger.warning("A %s geocoder request to %s exceeded its %ss deadline.", provider, path, _DEADLINE_SECONDS)
-        return None
+        return json.loads(fetched.body)
     except ValueError:
         logger.warning("The %s geocoder's answer to %s was not JSON.", provider, path)
         return None
