@@ -2889,7 +2889,6 @@ class TestWriteDiveEmbedsSightings:
             seen["sightings"] = sightings
 
         monkeypatch.setattr(dives_module.crud_dives, "create", AsyncMock(return_value=created))
-        monkeypatch.setattr(dives_module.crud_dives, "get", AsyncMock(return_value={}))
         monkeypatch.setattr(dives_module, "resolve_trip_id_for_user", AsyncMock(return_value=77))
         monkeypatch.setattr(dives_module, "resolve_dive_site_ids_for_user", AsyncMock(return_value={}))
         monkeypatch.setattr(dives_module, "resolve_gear_item_ids_for_user", AsyncMock(return_value={}))
