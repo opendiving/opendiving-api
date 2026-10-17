@@ -48,7 +48,6 @@ from src.app.schemas.location import (
     LocationRead,
     WholeCoordinatePair,
 )
-from tests.helpers.fake_redis import FakeRedis
 
 USER_UUID = uuid7()
 # The Blue Hole, Dahab - a real pair, so a transposed lat/lon is visible in a diff.
@@ -139,11 +138,6 @@ class TestTheCoordinatePairRule:
 
 
 @pytest.fixture
-def redis() -> FakeRedis:
-    return FakeRedis()
-
-
-@pytest.fixture
 def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stubs out everything `patch_dive_site` touches and records the `update_data` it
     builds."""
@@ -174,10 +168,10 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return seen
 
 
-async def _patch(values: dict[str, Any], redis: Any) -> None:
+async def _patch(values: dict[str, Any], mock_redis: Any) -> None:
     request = MagicMock()
     request.method = "PATCH"
-    with patch.object(cache_module, "client", redis):
+    with patch.object(cache_module, "client", mock_redis):
         await dive_sites_module.patch_dive_site(
             request=request,
             uuid=uuid7(),
@@ -193,32 +187,34 @@ class TestWhatReachesTheColumns:
     absent."""
 
     @pytest.mark.asyncio
-    async def test_a_whole_pair_is_stored(self, captured: dict[str, Any], redis: Any) -> None:
-        await _patch({"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}, redis)
+    async def test_a_whole_pair_is_stored(self, captured: dict[str, Any], mock_redis: Any) -> None:
+        await _patch({"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}, mock_redis)
 
         assert captured["update_data"] == {"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}
 
     @pytest.mark.asyncio
-    async def test_clearing_both_halves_removes_the_position(self, captured: dict[str, Any], redis: Any) -> None:
+    async def test_clearing_both_halves_removes_the_position(self, captured: dict[str, Any], mock_redis: Any) -> None:
         """An explicit null is the only way to unset a coordinate, and it survives
         `exclude_unset` because it was explicitly set."""
         captured["db_dive_site"].latitude, captured["db_dive_site"].longitude = BLUE_HOLE
 
-        await _patch({"latitude": None, "longitude": None}, redis)
+        await _patch({"latitude": None, "longitude": None}, mock_redis)
 
         assert captured["update_data"] == {"latitude": None, "longitude": None}
 
     @pytest.mark.asyncio
-    async def test_an_unrelated_edit_leaves_the_coordinates_alone(self, captured: dict[str, Any], redis: Any) -> None:
+    async def test_an_unrelated_edit_leaves_the_coordinates_alone(
+        self, captured: dict[str, Any], mock_redis: Any
+    ) -> None:
         """Omitted means unchanged: renaming a site must not blank its position, and a
         site *without* one must not be refused for not having sent it."""
-        await _patch({"name": "Blue Hole (Dahab)"}, redis)
+        await _patch({"name": "Blue Hole (Dahab)"}, mock_redis)
 
         assert captured["update_data"] == {"name": "Blue Hole (Dahab)"}
 
     @pytest.mark.asyncio
     async def test_an_unrelated_edit_survives_a_half_pair_already_in_the_row(
-        self, captured: dict[str, Any], redis: Any
+        self, captured: dict[str, Any], mock_redis: Any
     ) -> None:
         """Nothing at the database level enforces the rule, so a half pair can be in the
         table (raw SQL, a restored dump). Because the rule reads the body and never the
@@ -226,7 +222,7 @@ class TestWhatReachesTheColumns:
         against the stored row had to special-case exactly this."""
         captured["db_dive_site"].latitude = BLUE_HOLE[0]
 
-        await _patch({"notes": "Deep, dark, and busier than it looks"}, redis)
+        await _patch({"notes": "Deep, dark, and busier than it looks"}, mock_redis)
 
         assert captured["update_data"] == {"notes": "Deep, dark, and busier than it looks"}
 
@@ -242,26 +238,26 @@ class TestDiveCacheInvalidation:
     """
 
     @pytest.mark.asyncio
-    async def test_a_coordinate_edit_now_drops_them(self, captured: dict[str, Any], redis: Any) -> None:
-        await _patch({"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}, redis)
+    async def test_a_coordinate_edit_now_drops_them(self, captured: dict[str, Any], mock_redis: Any) -> None:
+        await _patch({"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}, mock_redis)
 
         captured["invalidate_dive_caches"].assert_awaited_once_with(1)
 
     @pytest.mark.asyncio
-    async def test_a_rename_still_drops_them(self, captured: dict[str, Any], redis: Any) -> None:
-        await _patch({"name": "Blue Hole (Dahab)"}, redis)
+    async def test_a_rename_still_drops_them(self, captured: dict[str, Any], mock_redis: Any) -> None:
+        await _patch({"name": "Blue Hole (Dahab)"}, mock_redis)
 
         captured["invalidate_dive_caches"].assert_awaited_once_with(1)
 
     @pytest.mark.asyncio
-    async def test_an_edit_to_neither_leaves_them_alone(self, captured: dict[str, Any], redis: Any) -> None:
-        await _patch({"notes": "Deep, dark, and busier than it looks"}, redis)
+    async def test_an_edit_to_neither_leaves_them_alone(self, captured: dict[str, Any], mock_redis: Any) -> None:
+        await _patch({"notes": "Deep, dark, and busier than it looks"}, mock_redis)
 
         captured["invalidate_dive_caches"].assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_coordinate_edit_skips_the_uniqueness_recheck(
-        self, captured: dict[str, Any], redis: Any, monkeypatch: pytest.MonkeyPatch
+        self, captured: dict[str, Any], mock_redis: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A marker drag says nothing about the name, so the query is pointless - and on a
         row whose name is already duplicated somewhere (rows predating the constraint), a
@@ -270,7 +266,7 @@ class TestDiveCacheInvalidation:
         name_exists = AsyncMock(return_value=True)
         monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", name_exists)
 
-        await _patch({"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}, redis)
+        await _patch({"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}, mock_redis)
 
         name_exists.assert_not_awaited()
         assert captured["update_data"] == {"latitude": BLUE_HOLE[0], "longitude": BLUE_HOLE[1]}

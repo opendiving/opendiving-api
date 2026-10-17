@@ -45,7 +45,6 @@ from src.app.schemas.dive_site import (
 )
 from src.app.schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS, location_from_row
 from tests.conftest import db_available
-from tests.helpers.fake_redis import FakeRedis
 
 USER_UUID = uuid7()
 
@@ -166,11 +165,6 @@ class TestAnEmptyLocalityNameIsRefusedOnTheWayInOnly:
 
 
 @pytest.fixture
-def redis() -> FakeRedis:
-    return FakeRedis()
-
-
-@pytest.fixture
 def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stubs out everything `patch_dive_site` touches and records the `update_data` it
     builds - the `test_dive_site_coordinates.py` fixture, with a locality on the row."""
@@ -202,10 +196,10 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return seen
 
 
-async def _patch(values: dict[str, Any], redis: Any) -> None:
+async def _patch(values: dict[str, Any], mock_redis: Any) -> None:
     request = MagicMock()
     request.method = "PATCH"
-    with patch.object(cache_module, "client", redis):
+    with patch.object(cache_module, "client", mock_redis):
         await dive_sites_module.patch_dive_site(
             request=request,
             uuid=uuid7(),
@@ -219,19 +213,19 @@ class TestWhatReachesTheColumns:
     """The wire nests, the table does not, and nothing else pins the mapping."""
 
     @pytest.mark.asyncio
-    async def test_a_picked_place_writes_every_column_of_it(self, captured: dict[str, Any], redis: Any) -> None:
-        await _patch({"location": DAHAB}, redis)
+    async def test_a_picked_place_writes_every_column_of_it(self, captured: dict[str, Any], mock_redis: Any) -> None:
+        await _patch({"location": DAHAB}, mock_redis)
 
         assert captured["update_data"] == _columns()
 
     @pytest.mark.asyncio
     async def test_a_place_with_only_a_name_clears_the_rest_rather_than_leaving_it(
-        self, captured: dict[str, Any], redis: Any
+        self, captured: dict[str, Any], mock_redis: Any
     ) -> None:
         """The whole reason the write replaces rather than merges: a diver who picks a
         locality and then types a different one must not keep the first one's centre and
         box, which would put the new place's name on the old place's map."""
-        await _patch({"location": {"name": "Nuweiba, Egypt"}}, redis)
+        await _patch({"location": {"name": "Nuweiba, Egypt"}}, mock_redis)
 
         assert captured["update_data"] == {
             f"{DIVE_SITE_LOCATION_PREFIX}{field}": ("Nuweiba, Egypt" if field == "name" else None)
@@ -239,55 +233,57 @@ class TestWhatReachesTheColumns:
         }
 
     @pytest.mark.asyncio
-    async def test_an_explicit_null_clears_the_whole_place(self, captured: dict[str, Any], redis: Any) -> None:
+    async def test_an_explicit_null_clears_the_whole_place(self, captured: dict[str, Any], mock_redis: Any) -> None:
         """How a site entered with the wrong locality is corrected back to "not
         recorded" - behaviour the string had and the object keeps."""
-        await _patch({"location": None}, redis)
+        await _patch({"location": None}, mock_redis)
 
         assert captured["update_data"] == {f"{DIVE_SITE_LOCATION_PREFIX}{field}": None for field in LOCATION_FIELDS}
 
     @pytest.mark.asyncio
-    async def test_an_unrelated_edit_leaves_the_place_alone(self, captured: dict[str, Any], redis: Any) -> None:
+    async def test_an_unrelated_edit_leaves_the_place_alone(self, captured: dict[str, Any], mock_redis: Any) -> None:
         """Omitted means unchanged. A dialog that seeds its fields from the record and
         PATCHes them back would otherwise strip a picked place on every rename."""
-        await _patch({"name": "Blue Hole (Dahab)"}, redis)
+        await _patch({"name": "Blue Hole (Dahab)"}, mock_redis)
 
         assert captured["update_data"] == {"name": "Blue Hole (Dahab)"}
 
 
 class TestUniquenessKeysOnTheLocalitysName:
     @pytest.mark.asyncio
-    async def test_the_recheck_uses_the_new_localitys_name(self, captured: dict[str, Any], redis: Any) -> None:
-        await _patch({"location": DAHAB}, redis)
+    async def test_the_recheck_uses_the_new_localitys_name(self, captured: dict[str, Any], mock_redis: Any) -> None:
+        await _patch({"location": DAHAB}, mock_redis)
 
         assert captured["name_exists"].await_args.kwargs["location_name"] == "Dahab, Egypt"
 
     @pytest.mark.asyncio
     async def test_the_recheck_falls_back_to_the_stored_name_when_the_place_is_untouched(
-        self, captured: dict[str, Any], redis: Any
+        self, captured: dict[str, Any], mock_redis: Any
     ) -> None:
-        await _patch({"name": "Blue Hole (Dahab)"}, redis)
+        await _patch({"name": "Blue Hole (Dahab)"}, mock_redis)
 
         assert captured["name_exists"].await_args.kwargs["location_name"] == "Dahab, Egypt"
 
     @pytest.mark.asyncio
-    async def test_clearing_the_place_rechecks_against_no_locality(self, captured: dict[str, Any], redis: Any) -> None:
-        await _patch({"location": None}, redis)
+    async def test_clearing_the_place_rechecks_against_no_locality(
+        self, captured: dict[str, Any], mock_redis: Any
+    ) -> None:
+        await _patch({"location": None}, mock_redis)
 
         assert captured["name_exists"].await_args.kwargs["location_name"] is None
 
     @pytest.mark.asyncio
-    async def test_a_repeat_is_refused(self, captured: dict[str, Any], redis: Any) -> None:
+    async def test_a_repeat_is_refused(self, captured: dict[str, Any], mock_redis: Any) -> None:
         captured["name_exists"].return_value = True
 
         with pytest.raises(DuplicateValueException):
-            await _patch({"location": DAHAB}, redis)
+            await _patch({"location": DAHAB}, mock_redis)
 
     @pytest.mark.asyncio
-    async def test_moving_a_place_drops_the_cached_dives(self, captured: dict[str, Any], redis: Any) -> None:
+    async def test_moving_a_place_drops_the_cached_dives(self, captured: dict[str, Any], mock_redis: Any) -> None:
         """A dive's cached body embeds its sites' localities, so a body that only moves the
         place's centre still reshapes what those dives carry."""
-        await _patch({"location": {**DAHAB, "latitude": 28.5, "longitude": 34.5}}, redis)
+        await _patch({"location": {**DAHAB, "latitude": 28.5, "longitude": 34.5}}, mock_redis)
 
         captured["invalidate_dive_caches"].assert_awaited_once_with(1)
 

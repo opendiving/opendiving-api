@@ -2,7 +2,7 @@ import os
 import tempfile
 from collections.abc import AsyncGenerator, Generator
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from starlette.config import Config
 
@@ -298,6 +298,16 @@ def other_diver(db: Session) -> User:
 def mock_db():
     """Mock database session for unit tests."""
     return Mock(spec=AsyncSession)
+
+
+@pytest.fixture
+def mock_redis():
+    """Mock Redis connection for unit tests."""
+    mock_redis = Mock()
+    mock_redis.get = AsyncMock(return_value=None)
+    mock_redis.set = AsyncMock(return_value=True)
+    mock_redis.delete = AsyncMock(return_value=True)
+    return mock_redis
 
 
 @pytest.fixture
