@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
-from ...core.db.database import async_get_db
+from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import (
     BadRequestException,
     NotFoundException,
@@ -534,6 +534,9 @@ async def parse_dive(
     content = await read_upload_within_limit(file, MAX_DIVE_FILE_SIZE)
     digest = hashlib.sha256(content).hexdigest()
     await ensure_room_to_attach(db, user_id=current_user["id"], data=content, digest=digest)
+    # The thread frees the event loop, not the connection: the account and quota lookups
+    # opened a transaction, and nothing they returned is a live ORM object.
+    await release_read_transaction(db)
     try:
         # Off the event loop: reading is pure CPU with nothing awaited inside it, and the
         # FIT decoder is pure Python, roughly two orders of magnitude more CPU per byte than
