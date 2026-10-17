@@ -33,6 +33,7 @@ from src.app.core.exceptions.http_exceptions import (
 )
 from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
 from src.app.core.security import ALGORITHM, SECRET_KEY, hash_sign_in_code
+from src.app.core.utils import outbound
 from src.app.schemas.auth import (
     EmailAuthRequest,
     EmailCodeVerifyRequest,
@@ -40,7 +41,6 @@ from src.app.schemas.auth import (
     GoogleAuthRequest,
     ProfileCompletionRequest,
 )
-from src.app.services import user_pictures
 from src.app.services.user_pictures import StoredAvatar
 from tests.helpers.fake_s3 import select_s3_backend
 from tests.helpers.images import jpeg_with_exif
@@ -1256,7 +1256,7 @@ class TestCompleteProfile:
             transport = httpx.MockTransport(lambda request: httpx.Response(200, content=jpeg_with_exif()))
             return real_client(*args, **{**kwargs, "transport": transport})
 
-        monkeypatch.setattr(user_pictures.httpx, "AsyncClient", google)
+        monkeypatch.setattr(outbound.httpx, "AsyncClient", google)
         s3 = select_s3_backend(monkeypatch)
         s3.explode_on["put_object"] = ClientError({"Error": {"Code": "InternalError"}}, "PutObject")
 

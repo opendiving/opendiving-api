@@ -41,7 +41,6 @@ from typing import cast
 from urllib.parse import urlsplit
 
 import anyio.to_thread
-import httpx
 from fastapi import UploadFile
 from PIL import Image, ImageOps
 from sqlalchemy import CursorResult, delete, select, update
@@ -50,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from uuid6 import uuid7
 
 from ..core.db.database import release_read_transaction
+from ..core.utils.outbound import Failed, FetchFailure, fetch_capped
 from ..core.utils.uploads import read_upload_within_limit, safe_filename
 from ..models.user_picture import UserPicture
 from ..schemas.user_picture import PictureCrop, PictureKind
@@ -971,30 +971,19 @@ async def import_google_avatar(url: str | None) -> StoredAvatar | None:
         logger.warning("Refusing to import a profile picture from an unexpected host")
         return None
 
-    try:
-        # httpx's timeout bounds each read, not the response, so a host trickling bytes
-        # under it would hold the sign-up open indefinitely without this deadline.
-        with anyio.fail_after(_GOOGLE_AVATAR_TIMEOUT_SECONDS):
-            async with httpx.AsyncClient(follow_redirects=False, timeout=_GOOGLE_AVATAR_TIMEOUT_SECONDS) as client:
-                async with client.stream("GET", url) as response:
-                    if response.status_code != 200:
-                        logger.info(
-                            "Google profile picture fetch answered %s; creating the account without one",
-                            response.status_code,
-                        )
-                        return None
-                    chunks: list[bytes] = []
-                    total = 0
-                    async for chunk in response.aiter_bytes():
-                        total += len(chunk)
-                        if total > MAX_PICTURE_UPLOAD_SIZE:
-                            logger.info(
-                                "Google profile picture exceeded the upload limit; creating the account without one"
-                            )
-                            return None
-                        chunks.append(chunk)
+    fetched = await fetch_capped(
+        url,
+        timeout=_GOOGLE_AVATAR_TIMEOUT_SECONDS,
+        deadline=_GOOGLE_AVATAR_TIMEOUT_SECONDS,
+        max_bytes=MAX_PICTURE_UPLOAD_SIZE,
+    )
+    if isinstance(fetched, Failed):
+        level = logging.INFO if fetched.reason in (FetchFailure.STATUS, FetchFailure.TOO_LARGE) else logging.WARNING
+        logger.log(level, "Google profile picture fetch %s; creating the account without one", fetched)
+        return None
 
-        processed = await process_avatar(b"".join(chunks))
+    try:
+        processed = await process_avatar(fetched.body)
     except Exception:
         logger.warning("Could not import the Google profile picture; creating the account without one", exc_info=True)
         return None

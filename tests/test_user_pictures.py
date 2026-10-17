@@ -49,6 +49,7 @@ from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.core.db.migrations import alembic_config
 from src.app.core.setup import create_application
+from src.app.core.utils import outbound
 from src.app.crud.crud_users import read_account
 from src.app.models.user import User
 from src.app.models.user_picture import _ORIGINAL_COLUMNS, UserPicture
@@ -894,7 +895,7 @@ class TestGoogleImport:
         def build(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
             return real_client(*args, **{**kwargs, "transport": httpx.MockTransport(handler)})
 
-        monkeypatch.setattr(user_pictures.httpx, "AsyncClient", build)
+        monkeypatch.setattr(outbound.httpx, "AsyncClient", build)
 
     @pytest.mark.asyncio
     async def test_the_happy_path_stores_a_normalized_avatar(

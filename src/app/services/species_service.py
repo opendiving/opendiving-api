@@ -50,19 +50,15 @@ from typing import Any
 from urllib.parse import quote
 
 import anyio
-import httpx
 from fastapi import HTTPException
 from pydantic import ValidationError
-from redis.exceptions import RedisError
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
 from ..core.db.database import release_read_transaction
-from ..core.exceptions.http_exceptions import RateLimitException
-from ..core.utils import cache
-from ..core.utils.rate_limit import enforce_rate_limit
+from ..core.utils.outbound import Failed, FetchFailure, claim_provider_slot, fetch_capped, read_cached, write_cached
 from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like
 from ..models.species import Species
 from ..models.species_name import SpeciesName
@@ -82,9 +78,9 @@ logger = logging.getLogger(__name__)
 # So the bounds are set where WoRMS can actually answer, and the *callers* below decide how
 # long they are each willing to wait - search on a keystroke budget, resolve on a much longer
 # one. There is still no retry, for the reason the geocoder gives.
-_TIMEOUT = httpx.Timeout(15.0)
+_TIMEOUT_SECONDS = 15.0
 
-# The per-request hard cap: `_TIMEOUT` bounds each socket read, so a host that dribbles one
+# The per-request hard cap: `_TIMEOUT_SECONDS` bounds each socket read, so a host that dribbles one
 # byte at a time never trips it and would hold the request open forever. Above the longest
 # budget below, so it only ever fires for a host behaving pathologically rather than slowly.
 _DEADLINE_SECONDS = 30.0
@@ -412,23 +408,7 @@ async def _cached_search(key: str) -> SpeciesSearchResponse | None:
     distinct from `None` - that distinction is what stops a negative answer being re-asked on
     every keystroke. Redis absent or unreachable is a miss, not an error.
     """
-    if cache.client is None:
-        return None
-
-    try:
-        raw = await cache.client.get(key)
-    except RedisError as exc:
-        logger.warning("Species cache read failed (%s); asking the providers instead.", type(exc).__name__)
-        return None
-
-    if raw is None:
-        return None
-
-    try:
-        return SpeciesSearchResponse(**json.loads(raw.decode()))
-    except ValueError, TypeError, ValidationError:
-        logger.warning("Discarding an unreadable species cache entry at %s.", key)
-        return None
+    return await read_cached(key, lambda body: SpeciesSearchResponse(**body))
 
 
 async def _store_search(key: str, response: SpeciesSearchResponse, *, complete: bool) -> None:
@@ -446,14 +426,8 @@ async def _store_search(key: str, response: SpeciesSearchResponse, *, complete: 
     all of them" - which is a distinction a two-source search has and a one-source one does
     not.
     """
-    if cache.client is None:
-        return
-
     ttl = _HIT_TTL_SECONDS if response.results and complete else _MISS_TTL_SECONDS
-    try:
-        await cache.client.set(key, response.model_dump_json(), ex=ttl)
-    except RedisError as exc:
-        logger.warning("Species cache write failed (%s).", type(exc).__name__)
+    await write_cached(key, response.model_dump_json(), ttl_seconds=ttl)
 
 
 # -------------- outbound requests --------------
@@ -462,10 +436,8 @@ async def _store_search(key: str, response: SpeciesSearchResponse, *, complete: 
 async def _claim_provider_slot(provider: str) -> bool:
     """Take one slot against the instance-wide cap for `provider`, or report there is none.
 
-    A boolean rather than the exception `enforce_rate_limit` raises: being over the cap here
-    is an ordinary branch a caller decides about, not an error to propagate. Neither cap is
-    published by the provider it throttles - both are self-imposed politeness (see
-    `core/config.py`) - so exceeding one is never a caller's fault and never a 429.
+    No cap here is published by the provider it throttles - each is self-imposed politeness
+    (see `core/config.py`).
     """
     limits = {
         _PROVIDER_WORMS: (settings.SPECIES_WORMS_RATE_LIMIT_REQUESTS, settings.SPECIES_WORMS_RATE_LIMIT_WINDOW_SECONDS),
@@ -482,11 +454,7 @@ async def _claim_provider_slot(provider: str) -> bool:
     # `KeyError` at the first call, which is loud, where a default would be an unthrottled
     # third party nobody notices. Every caller of this passes one of the three constants.
     max_requests, window = limits[provider]
-    try:
-        await enforce_rate_limit(f"species:provider:{provider}", max_requests, window)
-    except RateLimitException:
-        return False
-    return True
+    return await claim_provider_slot(f"species:provider:{provider}", max_requests, window)
 
 
 async def _request(provider: str, url: str, params: dict[str, Any]) -> Any | None:
@@ -513,44 +481,25 @@ async def _request(provider: str, url: str, params: dict[str, Any]) -> Any | Non
         logger.warning("Skipping a %s call: this instance is over its provider rate limit.", provider)
         return None
 
+    # Any 2xx is an answer: the 204 and the empty 200 are WoRMS's "no such name". The provider
+    # name is logged, never the built URL: it carries the diver's typed query.
+    fetched = await fetch_capped(
+        url,
+        params=params,
+        headers={"Accept": "application/json"},
+        user_agent=settings.SPECIES_USER_AGENT,
+        timeout=_TIMEOUT_SECONDS,
+        deadline=_DEADLINE_SECONDS,
+        max_bytes=_MAX_RESPONSE_BYTES,
+        accept=range(200, 300),
+    )
+    if isinstance(fetched, Failed):
+        logger.warning("A %s request %s.", provider, fetched)
+        return None
+    if not fetched.body:
+        return []
     try:
-        # `_TIMEOUT` bounds each socket read, which is not the same as bounding the call.
-        # `fail_after` is the actual deadline; the byte cap below bounds how much a slow,
-        # endless host can make this process buffer.
-        with anyio.fail_after(_DEADLINE_SECONDS):
-            # A client per call, deliberately, and knowingly against httpx's advice: the
-            # provider caps above hold this to a few requests a second, so a pooled
-            # connection would sit idle far longer than any keep-alive, and a module-level
-            # client would need lifespan wiring to be closed. Same trade as the geocoder.
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                headers = {"User-Agent": settings.SPECIES_USER_AGENT, "Accept": "application/json"}
-                async with client.stream("GET", url, params=params, headers=headers) as response:
-                    response.raise_for_status()
-                    if response.status_code == 204:
-                        return []
-
-                    body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        body.extend(chunk)
-                        if len(body) > _MAX_RESPONSE_BYTES:
-                            logger.warning("A %s response exceeded %d bytes.", provider, _MAX_RESPONSE_BYTES)
-                            return None
-
-        # An empty 200 body, which WoRMS also produces for some no-result queries. Same
-        # meaning as the 204 above; `json.loads` on it would raise and be logged as garbage.
-        if not body:
-            return []
-        return json.loads(body)
-    except (httpx.HTTPError, httpx.InvalidURL) as exc:
-        # `InvalidURL` is listed separately because it descends from `Exception` rather than
-        # `HTTPError`, so a merely malformed `WORMS_API_URL` would otherwise escape as a 500
-        # and break this module's one promise. The provider name is logged, never the built
-        # URL: it carries the diver's typed query, and logs get collected and kept.
-        logger.warning("A %s request failed (%s).", provider, type(exc).__name__)
-        return None
-    except TimeoutError:
-        logger.warning("A %s request exceeded its %ss deadline.", provider, _DEADLINE_SECONDS)
-        return None
+        return json.loads(fetched.body)
     except ValueError:
         logger.warning("A %s response was not JSON.", provider)
         return None
@@ -2338,26 +2287,22 @@ async def _fetch_media(url: str, *, claim_slot: bool) -> tuple[bytes, str] | Non
         logger.warning("Skipping a species photo fetch: this instance is over its Commons rate limit.")
         return None
 
-    try:
-        async with (
-            _MEDIA_LIMITER,
-            httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT) as client,
-            client.stream("GET", url, headers={"User-Agent": settings.SPECIES_USER_AGENT}) as response,
-        ):
-            if response.status_code != 200:
-                logger.info("A species photo fetch answered %s; the species keeps no photo.", response.status_code)
-                return None
-            body = bytearray()
-            async for chunk in response.aiter_bytes():
-                body.extend(chunk)
-                if len(body) > species_photos.MAX_PHOTO_DOWNLOAD_BYTES:
-                    logger.warning("A species photo exceeded %d bytes.", species_photos.MAX_PHOTO_DOWNLOAD_BYTES)
-                    return None
-            content_type = response.headers.get("content-type", "")
-    except (httpx.HTTPError, httpx.InvalidURL) as exc:
-        logger.warning("A species photo fetch failed (%s).", type(exc).__name__)
+    # The deadline is entered inside the limiter, so a preview queued behind two others is not
+    # charged for its wait.
+    async with _MEDIA_LIMITER:
+        fetched = await fetch_capped(
+            url,
+            user_agent=settings.SPECIES_USER_AGENT,
+            timeout=_TIMEOUT_SECONDS,
+            deadline=_DEADLINE_SECONDS,
+            max_bytes=species_photos.MAX_PHOTO_DOWNLOAD_BYTES,
+        )
+    if isinstance(fetched, Failed):
+        level = logging.INFO if fetched.reason is FetchFailure.STATUS else logging.WARNING
+        logger.log(level, "A species photo fetch %s; the species keeps no photo.", fetched)
         return None
-    return bytes(body), content_type.split(";")[0].strip().lower()
+    content_type = fetched.headers.get("content-type", "")
+    return fetched.body, content_type.split(";")[0].strip().lower()
 
 
 async def _fetch_photo_bytes(url: str) -> bytes | None:
