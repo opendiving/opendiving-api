@@ -12,15 +12,16 @@ OTU come from its files, which moved onto the folded recording and are told apar
 surviving record's by the start each one states.
 
 A fold whose profile is no longer `merge` - replaced before `_keeps_stored_profile` existed, or
-never stored because neither half had samples - is not found, and neither is one whose absorbed
-dive the window cannot single out; the report counts the second.
+never stored because neither half had samples - is not found. One whose absorbed dive the window
+cannot single out, or whose dive holds another recording, has only its readouts repaired, and the
+run names its dive.
 """
 
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..crud.crud_dive_mixtures import get_mixtures_for_dive
@@ -47,9 +48,10 @@ MERGE_WINDOW = timedelta(seconds=60)
 class FoldBackfillReport:
     examined: int = 0
     dives_updated: int = 0
-    # Folds no single soft-deleted dive in the window answers: their readouts are still
-    # repaired from the files, their cylinders and fixes are not.
+    # Folds whose cylinders and fixes are left, each logged by dive: their readouts are still
+    # repaired from the files.
     absorbed_not_found: int = 0
+    beside_another_recording: int = 0
     failed: int = 0
     changes: list[str] = field(default_factory=list)
 
@@ -60,7 +62,6 @@ class _Candidate:
 
     id: int
     dive_id: int
-    ordinal: int
     start_time: datetime | None
     utc_offset_minutes: int | None
     created_at: datetime
@@ -85,7 +86,6 @@ async def backfill_folds(db: AsyncSession, *, user_id: int | None = None, dry_ru
         select(
             DiveRecording.id,
             DiveRecording.dive_id,
-            DiveRecording.ordinal,
             DiveRecording.start_time,
             DiveRecording.utc_offset_minutes,
             DiveProfile.created_at,
@@ -135,10 +135,19 @@ async def _repair(db: AsyncSession, row: _Candidate, report: FoldBackfillReport)
         else await _repair_readouts(db, recording_id=row.id, start_time=row.start_time, offset=row.utc_offset_minutes)
     )
 
-    # A fold is made as its dive's primary. One anywhere else was moved there by a later merge,
-    # onto a dive whose cylinders and fixes are that dive's own, or lost the place to a promotion
-    # that rewrote the fixes from the new primary (`refresh_tech_scalars`).
-    if row.ordinal != 0:
+    # Beside another recording, the dive's cylinders and fixes may be that recording's - a
+    # second computer's, or a later merge's that moved the fold here - and nothing stored says
+    # which, so they are left for the diver. Alone, the fold is the dive's whole account.
+    recordings = (
+        await db.execute(select(func.count()).select_from(DiveRecording).where(DiveRecording.dive_id == row.dive_id))
+    ).scalar_one()
+    if recordings > 1:
+        logger.warning(
+            "Leaving dive %s's cylinders and fixes: it holds another recording beside its fold (recording %s)",
+            row.dive_id,
+            row.id,
+        )
+        report.beside_another_recording += 1
         return changes
     absorbed_id = await _absorbed_dive_id(db, user_id=row.user_id, merged_at=row.created_at)
     if absorbed_id is None:

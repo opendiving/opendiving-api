@@ -33,11 +33,13 @@ async def main() -> None:
         report = await backfill_folds(session, user_id=args.user_id, dry_run=args.dry_run)
 
     logger.info(
-        "Folded-dive backfill %s: examined=%d dives_updated=%d absorbed_not_found=%d failed=%d",
+        "Folded-dive backfill %s: examined=%d dives_updated=%d absorbed_not_found=%d "
+        "beside_another_recording=%d failed=%d",
         "(dry run)" if args.dry_run else "complete",
         report.examined,
         report.dives_updated,
         report.absorbed_not_found,
+        report.beside_another_recording,
         report.failed,
     )
 

@@ -1356,7 +1356,7 @@ class TestBackfillingAFoldMergedBefore:
 
         report = await backfill_folds(async_db, user_id=diver.id)
 
-        assert (report.examined, report.absorbed_not_found) == (1, 0)
+        assert (report.examined, report.absorbed_not_found, report.beside_another_recording) == (1, 0, 1)
         pressures = (
             await async_db.execute(
                 select(DiveMixture.start_pressure, DiveMixture.end_pressure).where(DiveMixture.dive_id == other.id)
