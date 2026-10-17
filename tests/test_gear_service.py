@@ -896,3 +896,58 @@ class TestAVanishedGearItemDoesNotFiveHundred:
                 current_user={"id": 7, "uuid": uuid7()},
                 db=MagicMock(),
             )
+
+
+class TestAListFilterNamingNothingOfTheCallersIsAnEmptyPage:
+    """As `GET /dives`' filters: an unknown uuid and someone else's are one answer, and it is
+    not an error that would tell them apart."""
+
+    @pytest.mark.asyncio
+    async def test_the_schedules_filtered_by_an_unresolved_item(self, monkeypatch) -> None:
+        monkeypatch.setattr(gear_service_module, "resolve_gear_item_ids_for_user", AsyncMock(return_value=None))
+        read = AsyncMock(return_value={"data": []})
+        monkeypatch.setattr(gear_service_module, "_cached_read_schedules", read)
+
+        await gear_service_module.read_gear_service_schedules(
+            request=MagicMock(), current_user={"id": 7, "uuid": uuid7()}, db=MagicMock(), gear_item_uuid=uuid7()
+        )
+
+        assert read.await_args_list[0].kwargs["gear_item_id"] == -1
+
+    @pytest.mark.asyncio
+    async def test_the_records_filtered_by_an_unresolved_item_or_schedule(self, monkeypatch) -> None:
+        monkeypatch.setattr(gear_service_module, "resolve_gear_item_ids_for_user", AsyncMock(return_value=None))
+        monkeypatch.setattr(gear_service_module, "resolve_schedule_for_user", AsyncMock(return_value=None))
+        read = AsyncMock(return_value={"data": []})
+        monkeypatch.setattr(gear_service_module, "_cached_read_records", read)
+
+        await gear_service_module.read_gear_service_records(
+            request=MagicMock(),
+            current_user={"id": 7, "uuid": uuid7()},
+            db=MagicMock(),
+            gear_item_uuid=uuid7(),
+            gear_service_schedule_uuid=uuid7(),
+        )
+
+        assert (
+            read.await_args_list[0].kwargs["gear_item_id"],
+            read.await_args_list[0].kwargs["gear_service_schedule_id"],
+        ) == (-1, -1)
+
+    @pytest.mark.asyncio
+    async def test_a_resolved_item_narrows_to_its_id(self, monkeypatch) -> None:
+        item_uuid = uuid7()
+        monkeypatch.setattr(
+            gear_service_module, "resolve_gear_item_ids_for_user", AsyncMock(return_value={item_uuid: 3})
+        )
+        read = AsyncMock(return_value={"data": []})
+        monkeypatch.setattr(gear_service_module, "_cached_read_records", read)
+
+        await gear_service_module.read_gear_service_records(
+            request=MagicMock(), current_user={"id": 7, "uuid": uuid7()}, db=MagicMock(), gear_item_uuid=item_uuid
+        )
+
+        assert (
+            read.await_args_list[0].kwargs["gear_item_id"],
+            read.await_args_list[0].kwargs["gear_service_schedule_id"],
+        ) == (3, None)
