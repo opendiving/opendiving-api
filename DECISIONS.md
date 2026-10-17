@@ -6318,16 +6318,14 @@ file deletion leaves the profile and gate figures alone (`_keeps_stored_profile`
 fold's `submerged_time` and `avg_depth` are its time in the water; side by side they stand;
 `max_depth` is the deepest reading; `None` means leave alone; `start_time` and the fixes stay,
 `refresh_tech_scalars` uncalled; the absorbed record's device, settings and surface pressure fill
-the survivor's blanks. A fold's records run one after the other, so CNS and OTU start on the earlier
-record's and end on the later's, and a tank the two records pair takes the earlier start pressure
-and the later end (`fold_tank_pressures`); each falls back where blank. Rejected: fill-only, which
-ends the dive at the restart and halves its SAC; the cost: a diver's typed end on the first half is
-replaced. An `avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write.
-`relabel_gas_numbers` precedes the join, keeping `usage` and filling the survivor's blank cylinder
-members from the absorbed rows it pairs, as an arrival does, an empty absorbed row not appended;
-moved profiles use `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions
-stay, notes append within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not
-reused.
+the survivor's blanks; its CNS, OTU and paired tank pressures go by side (`_write_fold`). Rejected:
+fill-only, which ends the dive at the restart and halves its SAC; the cost: a value the diver typed
+on the surviving dive's other side is replaced. An `avg_depth` failing
+`ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers` precedes the join,
+keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
+as an arrival does, an empty absorbed row not appended; moved profiles use
+`replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
+within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
