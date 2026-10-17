@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+from src.app.api.integrity import refuse_vanished_reference
 from src.app.api.v1 import certifications as certifications_module
 from src.app.api.v1 import courses as courses_module
 from src.app.api.v1 import dives as dives_module
@@ -269,7 +270,7 @@ class TestTheIntegrityMessages:
         )
 
         with pytest.raises(UnprocessableEntityException, match="Person not found."):
-            await certifications_module._refuse_a_vanished_reference(AsyncMock(), error)
+            await refuse_vanished_reference(AsyncMock(), error, certifications_module._FK_CONSTRAINT_MESSAGES)
 
 
 # ------------------------------------------------------------------ against Postgres

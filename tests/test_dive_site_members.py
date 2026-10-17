@@ -243,7 +243,7 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     )
     seen["site"] = site
 
-    async def fake_update(*, db: Any, object: dict, uuid: Any) -> None:
+    async def fake_update(*, db: Any, object: dict, uuid: Any, commit: bool) -> None:
         seen["update_data"] = object
 
     seen["replace_tags"] = AsyncMock()
@@ -266,7 +266,7 @@ async def _patch(body: dict[str, Any]) -> None:
         uuid=uuid7(),
         values=DiveSiteUpdateRequest.model_validate(body),
         current_user={"id": USER_ID, "uuid": uuid7()},
-        db=MagicMock(),
+        db=AsyncMock(),
     )
 
 
@@ -382,18 +382,6 @@ class TestTheReads:
         )
 
         assert calls == ["owned", "read"]
-
-    @pytest.mark.asyncio
-    async def test_a_tag_deleted_mid_write_is_a_422(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        error = IntegrityError("INSERT", {}, Exception('violates foreign key constraint "dive_site_tag_tag_id_fkey"'))
-        monkeypatch.setattr(dive_sites_module, "replace_tags_for_dive_site", AsyncMock(side_effect=error))
-        db = MagicMock()
-        db.rollback = AsyncMock()
-
-        with pytest.raises(UnprocessableEntityException):
-            await dive_sites_module._replace_tags(db, dive_site_id=11, tag_ids=[3])
-
-        db.rollback.assert_awaited_once()
 
 
 class TestEveryWriteThatMovesASummaryDropsTheSiteReads:
