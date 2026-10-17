@@ -437,9 +437,9 @@ async def _collect_stored_file_keys(db: AsyncSession, user_id: int) -> list[str]
     is a manual script nothing invokes - for a GDPR purge, "an operator might run a script
     one day" is not an answer.
 
-    The pictures are why `DELETE /user` can leave them alone: that route only flags the
-    row, and `POST /auth/restore` inside the grace period should bring back a whole account
-    rather than a faceless one.
+    This collecting the pictures is why `DELETE /user` can leave them alone: that route
+    only flags the row, and `POST /auth/restore` inside the grace period should bring back
+    a whole account rather than a faceless one.
     """
     keys: list[str] = []
     for entry in BLOB_KEY_COLUMNS:
