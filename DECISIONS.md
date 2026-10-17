@@ -419,16 +419,16 @@ export. Public dive stats would be `GET /profile/{uuid}/dive-stats`.
 
 `create_application` (`core/setup.py`) adds `CORSMiddleware` gated on
 `isinstance(settings, FrontendSettings)`, like the `ClientSideCacheSettings`/`EnvironmentSettings`
-checks: `allow_origins=[settings.FRONTEND_URL]` (the one trusted origin, already used for magic-link
-URLs), `allow_credentials=True` for the refresh-token cookie, and `allow_methods`/`allow_headers`
-`["*"]` — the Fetch spec forbids only a wildcard origin with credentials. Without it every browser
-preflight is a bare `405 Method Not Allowed`, since FastAPI has no `OPTIONS` handler: `apiClient`
-(`lib/api/client.ts`) sends `withCredentials: true`, an `Authorization` header and JSON bodies, all
-of which preflight. `lifespan_factory` and `create_application` both accept `FrontendSettings` in
-their `settings` union. `tests/test_cors.py` builds its own app with
-`create_application(..., apply_migrations_on_start=False)` instead of `conftest.py`'s session-scoped
-`client` fixture, whose lifespan runs `alembic upgrade head` against `POSTGRES_URI`; checking
-middleware headers on an `OPTIONS` request needs no Postgres.
+checks: `allow_origins=[settings.frontend_origin]` (the one trusted origin, rebuilt from
+`FRONTEND_URL` as a browser writes it), `allow_credentials=True` for the refresh-token cookie, and
+`allow_methods`/`allow_headers` `["*"]` — the Fetch spec forbids only a wildcard origin with
+credentials. Without it every browser preflight is a bare `405 Method Not Allowed`, since FastAPI
+has no `OPTIONS` handler: `apiClient` (`lib/api/client.ts`) sends `withCredentials: true`, an
+`Authorization` header and JSON bodies, all of which preflight. `lifespan_factory` and
+`create_application` both accept `FrontendSettings` in their `settings` union. `tests/test_cors.py`
+builds its own app with `create_application(..., apply_migrations_on_start=False)` instead of
+`conftest.py`'s session-scoped `client` fixture, whose lifespan runs `alembic upgrade head` against
+`POSTGRES_URI`; checking middleware headers on an `OPTIONS` request needs no Postgres.
 
 ## `/dive/parse` takes any one-dive file the reader converts, and the head names the format
 
@@ -4880,9 +4880,12 @@ signing in again" cannot help there.
 `GOOGLE_CLIENT_SECRET` is typed `SecretStr`, as are `SMTP_PASSWORD`, `GEOCODER_API_KEY`,
 `ADMIN_PASSWORD`, `CRUD_ADMIN_REDIS_PASSWORD`, `POSTGRES_PASSWORD` and `REDIS_PASSWORD`: a value
 that must not reach a log line is better served by a type whose `repr` cannot spill it into a
-traceback. `POSTGRES_URI` and `REDIS_CACHE_URL` embed a password, so they are `SecretStr` too. Each
-consumer unwraps it with `.get_secret_value()`. The boot guard checks `.get_secret_value().strip()`,
-or a whitespace-only variable passes startup and fails at the first sign-in.
+traceback. `POSTGRES_URI` and `REDIS_CACHE_URL` embed a password, so they are `SecretStr` too, and
+are properties built from their parts rather than settings that could disagree with them;
+`CRUD_ADMIN_DB_URL` is a DSN as well. `hide_input_in_errors` keeps a validator's refusal from
+echoing the raw configuration. Each consumer unwraps with `.get_secret_value()`. The boot guard
+checks `.get_secret_value().strip()`, or a whitespace-only variable passes startup and fails at the
+first sign-in.
 
 The secret travels only in the request body, and httpx's request log line is URL and status.
 Google's response is not logged above DEBUG: a refusal writes its HTTP status at WARNING and the

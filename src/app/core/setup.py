@@ -346,7 +346,7 @@ def create_application(
         # preflight (and therefore every real cross-origin request) 405s.
         application.add_middleware(
             CORSMiddleware,
-            allow_origins=[settings.FRONTEND_URL],
+            allow_origins=[settings.frontend_origin],
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
