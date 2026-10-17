@@ -121,7 +121,7 @@ async def invalidate_gear_caches(user_id: int) -> None:
 # writers outside those routers - an import filling both collections from a service, every
 # dive route changing a trip's counts and a site's summary - have no business importing a
 # route module, so the key shape is shared instead of the object: these two go through
-# `OwnedResourceCache.list_cache_pattern`, the same function those instances key by, and
+# `OwnedResourceCache.list_cache_pattern`, the wildcard their key prefix sits under, and
 # `tests/test_cache_utils.py` checks the resource names still match the real caches'.
 #
 # Without them a restored logbook serves empty `/dive-sites` and `/trips` pages for up to
