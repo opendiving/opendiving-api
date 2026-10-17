@@ -224,7 +224,12 @@ def shape_events(source: ImportProfile, drop: Drop) -> list[ProfileEvent]:
             # `time` is REQUIRED (spec §6.6); without it there is no marker to place.
             drop("A profile event with no time was dropped")
             continue
-        label = event.label[:MAX_LABEL_CHARS] if event.label is not None else None
+        label = event.label
+        if label is not None and len(label) > MAX_LABEL_CHARS:
+            drop(
+                f"A profile event's label was longer than the {MAX_LABEL_CHARS} characters this app stores, and was cut"
+            )
+            label = label[:MAX_LABEL_CHARS]
         kind = event.type if event.type is not None else ProfileEventType.OTHER
         if kind is ProfileEventType.OTHER and not (label or "").strip():
             drop("An unclassified event with no label was dropped")

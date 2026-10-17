@@ -356,7 +356,7 @@ async def import_batch(
             unnumbered.extend(written.dive_ids[source] for source in plan.unnumbered_dives)
             dives.add(index, row.loaded, plan, written)
             plans.append(plan)
-            retired += portrait_change(plan)[1]
+            retired += portrait_change(plan)[1] + written.retired_bytes
 
         # The one thing a batch does as a whole rather than file by file: its dives with no
         # number are numbered in date order across every file, as the dive form would number
