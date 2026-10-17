@@ -46,8 +46,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..app.core.db.database import local_session
 from ..app.services import blob_store
 from ..app.services.blob_keys import BLOB_KEY_COLUMNS
+from ._common import log_at_info
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # How old an unreferenced file has to be before it counts as an orphan. This is what makes
@@ -239,4 +239,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    log_at_info()
     asyncio.run(main())

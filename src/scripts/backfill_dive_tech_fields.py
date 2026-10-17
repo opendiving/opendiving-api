@@ -43,23 +43,15 @@ import argparse
 import asyncio
 import logging
 
-from ..app.core.db.database import local_session
-from ..app.core.setup import close_redis_cache_pool, create_redis_cache_pool
 from ..app.services.dive_files import backfill_tech_fields
+from ._common import add_parser_key_argument, log_at_info, session_with_cache
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--parser-key",
-        default=None,
-        help="Only re-read recordings holding a file recorded under this format (e.g. `suunto_xml`). "
-        "This is what `dive_file.parser_key` is for; a recording holding two files is a candidate "
-        "when either of them names it.",
-    )
+    add_parser_key_argument(parser)
     parser.add_argument("--limit", type=int, default=None, help="Stop after this many candidate recordings.")
     parser.add_argument("--dry-run", action="store_true", help="Report what would be written, write nothing.")
     return parser.parse_args()
@@ -68,21 +60,13 @@ def _parse_args() -> argparse.Namespace:
 async def main() -> None:
     args = _parse_args()
 
-    # Same reason as `backfill_dive_profiles`: `delete_keys_by_pattern` silently returns
-    # when `cache.client is None`, which is only ever set by the API's lifespan - and this
-    # script does not go through it. Without this pool every backfilled dive's cached
-    # detail response would keep serving the old values for up to an hour, silently.
-    await create_redis_cache_pool()
-    try:
-        async with local_session() as session:
-            report = await backfill_tech_fields(
-                session,
-                parser_key=args.parser_key,
-                limit=args.limit,
-                dry_run=args.dry_run,
-            )
-    finally:
-        await close_redis_cache_pool()
+    async with session_with_cache() as session:
+        report = await backfill_tech_fields(
+            session,
+            parser_key=args.parser_key,
+            limit=args.limit,
+            dry_run=args.dry_run,
+        )
 
     logger.info(
         "Tech-field backfill %s: examined=%d recordings_updated=%d mixtures_updated=%d mixtures_skipped=%d failed=%d",
@@ -96,4 +80,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    log_at_info()
     asyncio.run(main())

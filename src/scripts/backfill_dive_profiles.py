@@ -30,23 +30,15 @@ import argparse
 import asyncio
 import logging
 
-from ..app.core.db.database import local_session
-from ..app.core.setup import close_redis_cache_pool, create_redis_cache_pool
 from ..app.services.dive_profiles import backfill_profiles
+from ._common import add_parser_key_argument, log_at_info, session_with_cache
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--parser-key",
-        default=None,
-        help="Only re-read recordings holding a file recorded under this format (e.g. `suunto_xml`). "
-        "This is what `dive_file.parser_key` is for; a recording holding two files is a candidate "
-        "when either of them names it.",
-    )
+    add_parser_key_argument(parser)
     parser.add_argument("--limit", type=int, default=None, help="Stop after this many candidate recordings.")
     parser.add_argument(
         "--force",
@@ -61,22 +53,14 @@ def _parse_args() -> argparse.Namespace:
 async def main() -> None:
     args = _parse_args()
 
-    # `delete_keys_by_pattern` silently returns when `cache.client is None`, and that is
-    # only ever set by the API's lifespan - which this script does not go through. Without
-    # this pool every backfilled dive's cached detail response would keep claiming the
-    # dive has no profile for up to an hour, and the failure would be completely silent.
-    await create_redis_cache_pool()
-    try:
-        async with local_session() as session:
-            report = await backfill_profiles(
-                session,
-                parser_key=args.parser_key,
-                limit=args.limit,
-                force=args.force,
-                dry_run=args.dry_run,
-            )
-    finally:
-        await close_redis_cache_pool()
+    async with session_with_cache() as session:
+        report = await backfill_profiles(
+            session,
+            parser_key=args.parser_key,
+            limit=args.limit,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
 
     logger.info(
         "Backfill %s: examined=%d extracted=%d skipped=%d no_samples=%d failed=%d",
@@ -90,4 +74,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    log_at_info()
     asyncio.run(main())
