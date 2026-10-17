@@ -482,9 +482,9 @@ async def _credentials_for_user(db: AsyncSession, user_id: int) -> list[Webauthn
     """Every credential on an account, oldest first.
 
     Unpaginated and uncached on purpose: the ceiling is
-    `PASSKEY_MAX_CREDENTIALS_PER_USER` (ten by default), so this is a handful of rows, and nothing embeds a
-    credential anywhere - so there is no invalidation obligation to get wrong. See the
-    documented opt-outs on `OwnedResourceCache`.
+    `PASSKEY_MAX_CREDENTIALS_PER_USER` (ten by default), so this is a handful of rows, and
+    nothing embeds a credential anywhere - so there is no invalidation obligation to get
+    wrong. See the documented opt-outs on `OwnedResourceCache`.
     """
     rows = await crud_webauthn_credentials.get_multi(
         db=db,

@@ -275,8 +275,9 @@ exist), and work that finishes once, such as a backfill, is a script. `RedisQueu
 `REDIS_QUEUE_HOST` and `REDIS_QUEUE_PORT` stay in `core/config.py` because the worker builds its own
 `RedisSettings` from them.
 
-The sweeps share the hour mark with `run_at_startup=True`: each deletes only rows past an absolute
-cutoff, so a restart loop costs a no-op `DELETE`. `purge_expired_tokens` calls `count()` before
+The housekeeping crons share the hour mark with `run_at_startup=True`, because a restart loop
+changes nothing: each sweep deletes only rows past an absolute cutoff, and `record_sign_in_totals`
+rewrites counts it never lowers. `purge_expired_tokens` calls `count()` before
 `crud_token_blacklist.delete()` because fastcrud's `delete()` raises `NoResultFound` on zero
 matches, which most runs produce. The account purge and the emails never run at startup: a restart
 loop must not destroy a logbook early or send a round of mail twice.

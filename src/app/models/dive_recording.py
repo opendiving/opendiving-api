@@ -11,9 +11,9 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     """One device's record of one dive.
 
     One stored export and one profile per dive, keyed on `dive_id`, would leave three
-    things inexpressible, and each of them is an ordinary thing a diver does: wearing two computers, exporting the same
-    computer twice in two formats, and having a dive cut in half by a computer that shut
-    down mid-water. A recording is the row that makes all three representable - the
+    things inexpressible, and each of them is an ordinary thing a diver does: wearing two
+    computers, exporting the same computer twice in two formats, and having a dive cut in
+    half by a computer that shut down mid-water. A recording is the row that makes all three representable - the
     plural unit between the dive and the files, matching DiveJSON's own §6.4a.
 
     **A recording need not have a file.** Logbook import stores no bytes for a bare document

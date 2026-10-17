@@ -738,9 +738,9 @@ class ExportEnvelope(BaseModel):
     at a time so a thousand-dive log with its profiles never sits in memory whole, which
     means this model would drift out of step with the real output if nothing checked it.
     `tests/test_export_json.py` closes that gap by validating the streamed bytes against
-    this model *and* against the `divejson` package's JSON Schema and the spec's beyond-schema rules -
-    so it is the app's statement of the format, kept honest by a test rather than by being
-    on the write path.
+    this model *and* against the `divejson` package's JSON Schema and the spec's
+    beyond-schema rules - so it is the app's statement of the format, kept honest by a test
+    rather than by being on the write path.
     """
 
     format: str = DIVEJSON_FORMAT

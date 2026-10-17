@@ -242,10 +242,11 @@ class UserDelete(BaseModel):
     deletion clock `purge_deleted_accounts` counts from.
 
     There is deliberately no `UserRestoreDeleted` beside it. One carrying `is_deleted`
-    alone would clear the flag and leave the clock set - `is_deleted = false, deleted_at = <a date>` looks alive but is a row nothing
-    reconciles, and the mirror state (`true`, `NULL`) is the never-purge one the job warns
-    about. `POST /auth/restore` clears both in one statement under a row lock; a schema that
-    can only clear one is a trap wearing the right name.
+    alone would clear the flag and leave the clock set - `is_deleted = false,
+    deleted_at = <a date>` looks alive but is a row nothing reconciles, and the mirror
+    state (`true`, `NULL`) is the never-purge one the job warns about. `POST /auth/restore`
+    clears both in one statement under a row lock; a schema that can only clear one is a
+    trap wearing the right name.
     """
 
     model_config = ConfigDict(extra="forbid")

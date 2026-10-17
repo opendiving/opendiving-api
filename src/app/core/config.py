@@ -1151,15 +1151,16 @@ class Settings(
         with a published key is compromised in exactly the way a production one is, and
         the local instance is the one whose `.env` came straight from the template.
 
-        The message names `.env` and not `src/.env.example`. This refusal has a *second* audience the template path does not describe: the front
-        door's `example.env` ships `change-me-openssl-rand-hex-32`, the same string this
-        module lists as a placeholder, and its by-hand install downloads that file straight
-        to `.env` and tells the operator to replace six values in it. Someone who starts the
-        stack a step early meets this error with no `src/` tree anywhere on the machine, so
-        the old text sent them to a file they could not open. `.env` is the file both of
-        them are editing. (The `install.sh` path generates the key before writing `.env`, so
-        it never reaches here - which is why the by-hand install is the case that decides
-        the wording rather than an edge of it.)
+        The message names `.env` and not `src/.env.example`. This refusal has a *second*
+        audience the template path does not describe: the front door's `example.env` ships
+        `change-me-openssl-rand-hex-32`, the same string this module lists as a placeholder,
+        and its by-hand install downloads that file straight to `.env` and tells the operator
+        to replace six values in it. Someone who starts the stack a step early meets this
+        error with no `src/` tree anywhere on the machine, so naming the template would send
+        them to a file they cannot open. `.env` is the file both of them are editing. (The
+        `install.sh` path generates the key before writing `.env`, so it never reaches here -
+        which is why the by-hand install is the case that decides the wording rather than an
+        edge of it.)
 
         **The first seven words are load-bearing and are not ours to reword.** The front
         door's `docs/configuration`-neighbouring `docs/troubleshooting.md` opens an entry
@@ -1194,9 +1195,9 @@ class Settings(
         fallback *is* the documented sign-in flow - the developer reads the link out of
         `docker compose logs api` - and anything else is a deployment someone other than
         the developer can reach. Not `production` alone: that staging is close enough to
-        local to be run the same way holds only while staging is a second laptop. A staging box more than one
-        person can reach is a real deployment, and the sign-in links in its logs are real
-        credentials.
+        local to be run the same way holds only while staging is a second laptop. A staging
+        box more than one person can reach is a real deployment, and the sign-in links in its
+        logs are real credentials.
         """
         if self.ENVIRONMENT != EnvironmentOption.LOCAL and not self.SMTP_HOST:
             raise ValueError(
@@ -1286,8 +1287,9 @@ class Settings(
         against: a cross-field validator that fires on the template's own values takes out
         `docker compose up` and pytest collection together.
 
-        The message names `.env` and not `src/.env.example`. A self-hoster installs the bundle from the front door - `docker-compose.yml`,
-        `Caddyfile`, `install.sh` and `example.env` - and has no `src/` tree to open. What
+        The message names `.env` and not `src/.env.example`. A self-hoster installs the
+        bundle from the front door - `docker-compose.yml`, `Caddyfile`, `install.sh` and
+        `example.env` - and has no `src/` tree to open. What
         they do have is `.env`, written out of `example.env` one line at a time precisely so
         the comments around each setting survive into it, object-storage block included; a
         developer's `src/.env` is the same file by the same route. One name is true for both.
@@ -1326,9 +1328,9 @@ class Settings(
         """Refuses to boot an instance that has a relay configured but no address to send
         as.
 
-        `EMAIL_FROM_ADDRESS` has no default: a provider's sandbox address, deliverable on
-        exactly one provider's sandbox domain, is through an arbitrary relay not a default at all - it is an SPF/DKIM failure that surfaces
-        hours later, in a recipient's spam folder, with nothing in this app's logs
+        `EMAIL_FROM_ADDRESS` has no default: a provider's sandbox address is deliverable on
+        that provider alone, and through an arbitrary relay it is an SPF/DKIM failure that
+        surfaces hours later, in a recipient's spam folder, with nothing in this app's logs
         pointing at the cause. Failing startup puts the error where the mistake was made.
 
         This is why `src/.env.example` ships the from-address *commented out*: the
