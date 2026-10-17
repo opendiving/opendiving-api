@@ -14,6 +14,7 @@ from src.app.api import router
 from src.app.core.config import settings
 from src.app.core.schemas import EMAIL_MAX_LENGTH
 from src.app.core.setup import create_application
+from src.app.core.utils import cache
 from src.app.models.auth_audit_event import AuthAuditEvent
 from src.app.models.authentication_request import AuthenticationRequest
 from tests.conftest import db_available, unique_username
@@ -34,7 +35,12 @@ def _address(length: int) -> str:
 @pytest.fixture(scope="module")
 def client() -> Generator[TestClient]:
     app = create_application(router=router, settings=settings, apply_migrations_on_start=False)
+    # The lifespan points the module-level Redis client at a pool on the test client's loop
+    # and leaves it there; restored on exit, or the next module on this worker inherits
+    # connections from a closed loop wherever Redis is reachable.
     with (
+        patch.object(cache, "client", cache.client),
+        patch.object(cache, "pool", cache.pool),
         TestClient(app) as test_client,
         patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
         patch("src.app.api.v1.auth.send_magic_link_email", new_callable=AsyncMock),
