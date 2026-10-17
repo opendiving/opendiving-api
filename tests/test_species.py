@@ -2885,7 +2885,7 @@ class TestWriteDiveEmbedsSightings:
         async def resolve(*, db: Any, species_uuids: list[uuid_pkg.UUID]) -> dict | None:
             return {value: index + 100 for index, value in enumerate(species_uuids)} if resolves else None
 
-        async def replace(*, db: Any, dive_id: int, sightings: list[StoredSighting]) -> None:
+        async def replace(*, db: Any, dive_id: int, sightings: list[StoredSighting], commit: bool) -> None:
             seen["sightings"] = sightings
 
         monkeypatch.setattr(dives_module.crud_dives, "create", AsyncMock(return_value=created))
@@ -2939,7 +2939,7 @@ class TestWriteDiveEmbedsSightings:
             request=MagicMock(),
             dive=body,
             current_user={"id": 1, "uuid": user_uuid},
-            db=MagicMock(),
+            db=MagicMock(flush=AsyncMock(), commit=AsyncMock()),
         )
 
     @pytest.mark.asyncio

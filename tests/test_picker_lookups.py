@@ -140,9 +140,14 @@ class TestEveryDiveWriteDropsTheContactAndCourseLookups:
 
         dropping_trips = {name for name, calls in routes.items() if "invalidate_trip_caches" in calls}
 
-        assert dropping_trips == {"write_dive", "patch_dive", "erase_dive", "merge_two_dives"}
-        for name in dropping_trips:
-            assert {"invalidate_contact_caches", "invalidate_course_caches"} <= routes[name], name
+        assert dropping_trips == {"_after_dive_write"}
+        assert {"invalidate_contact_caches", "invalidate_course_caches"} <= routes["_after_dive_write"]
+        assert {name for name, calls in routes.items() if "_after_dive_write" in calls} == {
+            "write_dive",
+            "patch_dive",
+            "erase_dive",
+            "merge_two_dives",
+        }
 
 
 # ------------------------------------------------------------------ against Postgres
