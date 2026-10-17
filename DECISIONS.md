@@ -5320,7 +5320,7 @@ and its registration — so a thing that fails to happen leaves no row saying it
 the write commits on its own, including every path about to raise: `async_get_db` does not commit on
 unwind, so a row left in flight on a 401 is lost. The refresh replay and the passkey counter
 regression, which `finish_sign_in` follows with an `UnauthorizedException`, both fire on such a
-path; `register_failed_code_attempt` commits before its own 401 for the same reason.
+path; `charge_code_attempt` commits before its own 401 for the same reason.
 
 ## Auth audit: What a row may never contain
 
