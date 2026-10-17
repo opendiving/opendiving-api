@@ -110,7 +110,7 @@ def _to_public_dive_site(
     )
 
 
-# Kept for its list key's shape only, as `trips.py` keeps its own: a site read carries its tags and
+# Kept for its list key's shape and its `lookup`, as `trips.py` keeps its own: a site read carries its tags and
 # the summary of its dives, two further queries zipped back into the page, and the list sorts
 # on that summary, which no `sort_columns` string can name. Both reads are hand-written below,
 # and the single one sits under `user_{id}_dive_site` so that `invalidate_dive_site_caches`

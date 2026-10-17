@@ -11,6 +11,7 @@ from ..core.schemas import (
     PostgresInteger,
     PublicUUIDSchema,
     RejectsExplicitNulls,
+    StoredName,
     StoredVocabulary,
 )
 from ..core.utils.datetime_offset import full_date_is_a_date, require_utc_offset
@@ -575,6 +576,8 @@ class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
     waves: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
     weather: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
     entry_type: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
+    # `BoatName` refuses a blank one on the way in; a row holding one still reads.
+    boat_name: StoredName | None = None
 
     user_uuid: uuid_pkg.UUID
     trip_uuid: Annotated[
@@ -640,6 +643,8 @@ class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
     waves: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
     weather: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
     entry_type: StoredVocabulary | None = None  # type: ignore[assignment]  # as `water_type`
+    # `BoatName` refuses a blank one on the way in; a row holding one still reads.
+    boat_name: StoredName | None = None
     start_time: datetime  # the column, never the public spelling
 
     id: int

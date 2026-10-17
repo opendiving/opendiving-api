@@ -79,7 +79,7 @@ def _to_public_course(
     )
 
 
-# Kept for its `list_cache_key_prefix` only - `read_list` is never
+# Kept for its `list_cache_key_prefix` and its `lookup` - `read_list` is never
 # called, exactly as in `trips.py`. Its `search_columns` being non-empty is what
 # keeps the `:search:{search}` segment in the key, and that segment is load-bearing: two
 # different searches on the same page must not serve each other's results.
