@@ -7,8 +7,11 @@ has - so a deploy that set `SECRET_KEY` but forgot `ADMIN_PASSWORD` served a ful
 interface behind a known credential. These tests pin the guard that replaced that.
 """
 
+from unittest.mock import patch
+
 import pytest
 
+from src.app.admin.initialize import create_admin_interface
 from src.app.core.config import LEGACY_DEFAULT_ADMIN_PASSWORD, EnvironmentOption, Settings
 from tests.helpers.model_metadata import divers_own_hard_deleted, soft_deleting_models
 
@@ -46,7 +49,8 @@ class TestAdminPasswordIsRequiredInProduction:
         # The no-allowlist warning is expected here and asserted on its own below.
         settings = _settings(ADMIN_PASSWORD="a-real-password", CRUD_ADMIN_ALLOWED_IPS="203.0.113.7")
 
-        assert settings.ADMIN_PASSWORD == "a-real-password"
+        assert settings.ADMIN_PASSWORD is not None
+        assert settings.ADMIN_PASSWORD.get_secret_value() == "a-real-password"
 
     def test_disabling_the_panel_needs_no_password(self):
         """Not setting `ADMIN_PASSWORD` at all is a valid production posture - it means
@@ -73,6 +77,38 @@ class TestAdminPasswordIsRequiredInProduction:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             _settings(CRUD_ADMIN_ALLOWED_IPS="203.0.113.7")
+
+
+class TestThePanelIsHandedThePlainCredentials:
+    """The settings hold `SecretStr`s; CRUDAdmin and the redis client want the strings."""
+
+    def test_the_admin_and_redis_passwords_arrive_unwrapped(self):
+        configured = _settings(
+            ENVIRONMENT=EnvironmentOption.LOCAL,
+            CRUD_ADMIN_REDIS_ENABLED=True,
+            CRUD_ADMIN_REDIS_PASSWORD="a-redis-password",
+        )
+        with (
+            patch("src.app.admin.initialize.settings", configured),
+            patch("src.app.admin.initialize.CRUDAdmin") as crud_admin,
+            patch("src.app.admin.initialize.register_admin_views"),
+        ):
+            create_admin_interface()
+
+        kwargs = crud_admin.call_args.kwargs
+        assert kwargs["initial_admin"] == {"username": "admin", "password": "a-real-password"}
+        assert kwargs["redis_config"]["password"] == "a-redis-password"
+
+    def test_an_unset_redis_password_stays_none(self):
+        configured = _settings(ENVIRONMENT=EnvironmentOption.LOCAL, CRUD_ADMIN_REDIS_ENABLED=True)
+        with (
+            patch("src.app.admin.initialize.settings", configured),
+            patch("src.app.admin.initialize.CRUDAdmin") as crud_admin,
+            patch("src.app.admin.initialize.register_admin_views"),
+        ):
+            create_admin_interface()
+
+        assert crud_admin.call_args.kwargs["redis_config"]["password"] is None
 
 
 # Derived rather than listed, so a model cannot arrive in the panel with a `delete` button
@@ -182,7 +218,7 @@ class TestDefaults:
     def test_the_admin_password_has_no_default(self):
         source = self._config_source()
 
-        assert 'config("ADMIN_PASSWORD", default=None)' in source
+        assert 'config("ADMIN_PASSWORD", default=None, cast=SecretStr)' in source
         # The published boilerplate password may only appear as the value the guard
         # rejects, never as a fallback.
         assert f'default="{LEGACY_DEFAULT_ADMIN_PASSWORD}"' not in source
