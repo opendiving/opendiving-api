@@ -5,6 +5,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
 from ..core.db.models import PublicUUIDMixin, TimestampMixin
+from ..core.schemas import EMAIL_MAX_LENGTH
 
 
 class Invitation(Base, PublicUUIDMixin, TimestampMixin):
@@ -53,7 +54,7 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     # The invited address, lowercased on every write (`api.v1.invitations`, the admin batch
     # route, and an invite-link sign-up's row in `POST /auth/complete`). Indexed because the
     # gate reads by it on every account creation, and the account purge deletes by it.
-    email: Mapped[str] = mapped_column(String(50), index=True)
+    email: Mapped[str] = mapped_column(String(EMAIL_MAX_LENGTH), index=True)
 
     # The inviter. `CASCADE` for the reason every other FK into `user.id` carries it: the
     # account purge is a `DELETE FROM "user"`, and this row naming an account that no

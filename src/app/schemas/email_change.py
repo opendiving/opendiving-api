@@ -1,10 +1,12 @@
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict
+
+from ..core.schemas import AccountEmail
 
 
 class EmailChangeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    new_email: EmailStr
+    new_email: AccountEmail
 
 
 class EmailChangeRequestResponse(BaseModel):

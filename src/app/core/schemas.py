@@ -1,8 +1,8 @@
 import uuid as uuid_pkg
 from datetime import date, datetime
-from typing import ClassVar, Self
+from typing import Annotated, ClassVar, Self
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
 # Free-text "notes" fields (Dive, DiveSite, Trip) are stored as unbounded `Text`
 # columns in Postgres (VARCHAR(n) and TEXT perform identically there), so this
@@ -14,6 +14,14 @@ NOTES_MAX_LENGTH = 100_000
 POSTGRES_INTEGER_MAX = 2**31 - 1
 
 DATE_RANGE_MESSAGE = "end_date must be on or after start_date"
+
+# The width of every column holding an account's address. 254 is the RFC 5321 path limit, and
+# `EmailStr` already refuses anything longer, so a wider column could hold nothing it admits.
+EMAIL_MAX_LENGTH = 254
+
+# The bound is restated rather than left to `EmailStr` so the schema and the columns share
+# one number: an address the API accepts is one the column takes, and a 422 never a 500.
+AccountEmail = Annotated[EmailStr, Field(max_length=EMAIL_MAX_LENGTH)]
 
 # The read-side type for a column that stores one of a closed vocabulary - `ServiceKind`,
 # `GearType`, `WaterType` and the rest. Those enums are the *write* boundary: every route

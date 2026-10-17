@@ -11,9 +11,9 @@ and is in none of these.
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import PublicUUIDSchema
+from ..core.schemas import AccountEmail, PublicUUIDSchema
 
 
 class InvitationCreateInternal(BaseModel):
@@ -71,7 +71,7 @@ class InvitationRead(PublicUUIDSchema):
     say. On a typed row `member_name` is always `null`.
     """
 
-    email: EmailStr | None
+    email: AccountEmail | None
     created_at: datetime
     accepted_at: datetime | None = None
     revoked_at: datetime | None = None
@@ -88,7 +88,7 @@ class InvitationCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    email: EmailStr
+    email: AccountEmail
 
 
 class InvitationRevokedResponse(BaseModel):
@@ -115,7 +115,7 @@ class AdminInvitationBatchRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    emails: list[EmailStr] = Field(min_length=1, max_length=MAX_ADDRESSES_PER_BATCH)
+    emails: list[AccountEmail] = Field(min_length=1, max_length=MAX_ADDRESSES_PER_BATCH)
 
 
 class AdminInvitationOutcome(BaseModel):
@@ -127,7 +127,7 @@ class AdminInvitationOutcome(BaseModel):
     admitted, so the operator's job is to tell them another way, not to invite again.
     """
 
-    email: EmailStr
+    email: AccountEmail
     outcome: str
 
 

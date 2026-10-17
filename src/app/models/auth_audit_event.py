@@ -4,6 +4,7 @@ from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
+from ..core.schemas import EMAIL_MAX_LENGTH
 from ..core.utils.request_context import MAX_IP_LENGTH, MAX_USER_AGENT_LENGTH
 
 # Every member of `AuthEventType` is comfortably inside this; the longest today is
@@ -13,10 +14,6 @@ from ..core.utils.request_context import MAX_IP_LENGTH, MAX_USER_AGENT_LENGTH
 # enforced by the enum every writer goes through, and a copy in the schema would need a
 # `DROP`/`ADD CONSTRAINT` every time an event is added.
 EVENT_TYPE_MAX_LENGTH = 40
-
-# Matches `authentication_request.email`, which is the other table holding an address
-# somebody typed rather than one an account owns.
-EMAIL_MAX_LENGTH = 50
 
 # `email` / `google` / `passkey`, same vocabulary as `authentication_provider.provider`.
 PROVIDER_MAX_LENGTH = 20
