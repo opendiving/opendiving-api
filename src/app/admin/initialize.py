@@ -95,8 +95,7 @@ async def main() -> None:
     worker*. Under `gunicorn -w 4` the four workers raced to create the same tables and
     insert the same initial admin row; the losers crashed and took the container with
     them. Creating a schema and seeding a row is a deployment step, not something each
-    process should attempt on boot - the same reasoning that keeps
-    `create_first_superuser` out of the lifespan.
+    process should attempt on boot.
 
     A no-op (exit 0) when `CRUD_ADMIN_ENABLED` is false, so it can sit unconditionally in
     a compose file or entrypoint without the panel having to be turned on.

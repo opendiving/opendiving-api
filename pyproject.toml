@@ -91,9 +91,12 @@ dependencies = [
     "boto3>=1.43.93",
 ]
 
+# An extra, never a `[dependency-groups]` entry: `uv sync` installs the `dev` group by default,
+# so the Dockerfile's builder stage would carry it into the image that ships.
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.2",
+    "pytest-asyncio>=1.0.0",
     "pytest-mock>=3.14.0",
     "pytest-xdist>=3.8.0",
     "pytest-cov>=7.1.0",
@@ -188,12 +191,6 @@ source = ["src/app"]
 
 [tool.coverage.report]
 precision = 2
-
-[dependency-groups]
-dev = [
-    "pytest-asyncio>=1.0.0",
-    "httpx2>=0.1.0",
-]
 
 [tool.mypy]
 python_version = "3.14"

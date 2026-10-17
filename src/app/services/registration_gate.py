@@ -40,11 +40,11 @@ same questions without the lock and without an answer.
 **The bootstrap exemption.** While the `user` table is empty, the address is admitted
 whatever the mode, and the row it creates carries `is_superuser = true`. That resolves the
 deadlock a fresh `invite`-mode instance would otherwise have - no invitations exist and no
-superuser exists to create one - and gives a self-hoster an operator account without SQL or
-a script that is not in the shipped image. It is a property of the table being empty rather
-than a one-shot flag: `_purge_one_account` hard-deletes the `User` row, so an instance whose
-last account is purged is a fresh instance again and its next signer-in is its operator,
-which is the same sentence the install docs already carry.
+superuser exists to create one - and gives a self-hoster an operator account without SQL.
+It is a property of the table being empty rather than a one-shot flag: `_purge_one_account`
+hard-deletes the `User` row, so an instance whose last account is purged is a fresh
+instance again and its next signer-in is its operator, which is the same sentence the
+install docs already carry.
 """
 
 import logging
