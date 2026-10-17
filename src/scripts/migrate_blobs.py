@@ -37,8 +37,8 @@ from dataclasses import dataclass
 
 from ..app.core.config import FileStorageBackendOption
 from ..app.services import blob_store
+from ._common import log_at_info
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 #: Progress lands in the log every this many keys, because the only feedback a copy of tens
@@ -174,4 +174,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    log_at_info()
     asyncio.run(main())

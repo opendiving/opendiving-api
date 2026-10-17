@@ -26,11 +26,9 @@ import argparse
 import asyncio
 import logging
 
-from ..app.core.db.database import local_session
-from ..app.core.setup import close_redis_cache_pool, create_redis_cache_pool
 from ..app.services.figures_backfill import Device, backfill_dive_figures
+from ._common import add_user_id_argument, log_at_info, session_with_cache
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -51,9 +49,7 @@ def _parse_args() -> argparse.Namespace:
         help="A primary device whose logbook-imported dives may be rewritten, as the recording stores it: "
         '`--device suunto "Suunto Ocean"`, or a brand alone for a recording with no model. Repeatable.',
     )
-    parser.add_argument(
-        "--user-id", type=int, default=None, help="Only this account's dives, to try a run on one first."
-    )
+    add_user_id_argument(parser)
     parser.add_argument("--dry-run", action="store_true", help="Report what would be rewritten, write nothing.")
     return parser.parse_args()
 
@@ -65,14 +61,8 @@ async def main() -> None:
     except argparse.ArgumentTypeError as exc:
         raise SystemExit(str(exc)) from exc
 
-    # Without the pool `delete_keys_by_pattern` returns silently and every rewritten dive's
-    # cached read keeps its old figures - see `backfill_dive_profiles`.
-    await create_redis_cache_pool()
-    try:
-        async with local_session() as session:
-            report = await backfill_dive_figures(session, devices=devices, user_id=args.user_id, dry_run=args.dry_run)
-    finally:
-        await close_redis_cache_pool()
+    async with session_with_cache() as session:
+        report = await backfill_dive_figures(session, devices=devices, user_id=args.user_id, dry_run=args.dry_run)
 
     logger.info(
         "Imported dives from: %s", "; ".join(str(device) for device in report.devices) or "no device (none touched)"
@@ -101,4 +91,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    log_at_info()
     asyncio.run(main())
