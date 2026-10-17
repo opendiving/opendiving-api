@@ -972,24 +972,27 @@ async def import_google_avatar(url: str | None) -> StoredAvatar | None:
         return None
 
     try:
-        async with httpx.AsyncClient(follow_redirects=False, timeout=_GOOGLE_AVATAR_TIMEOUT_SECONDS) as client:
-            async with client.stream("GET", url) as response:
-                if response.status_code != 200:
-                    logger.info(
-                        "Google profile picture fetch answered %s; creating the account without one",
-                        response.status_code,
-                    )
-                    return None
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in response.aiter_bytes():
-                    total += len(chunk)
-                    if total > MAX_PICTURE_UPLOAD_SIZE:
+        # httpx's timeout bounds each read, not the response, so a host trickling bytes
+        # under it would hold the sign-up open indefinitely without this deadline.
+        with anyio.fail_after(_GOOGLE_AVATAR_TIMEOUT_SECONDS):
+            async with httpx.AsyncClient(follow_redirects=False, timeout=_GOOGLE_AVATAR_TIMEOUT_SECONDS) as client:
+                async with client.stream("GET", url) as response:
+                    if response.status_code != 200:
                         logger.info(
-                            "Google profile picture exceeded the upload limit; creating the account without one"
+                            "Google profile picture fetch answered %s; creating the account without one",
+                            response.status_code,
                         )
                         return None
-                    chunks.append(chunk)
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > MAX_PICTURE_UPLOAD_SIZE:
+                            logger.info(
+                                "Google profile picture exceeded the upload limit; creating the account without one"
+                            )
+                            return None
+                        chunks.append(chunk)
 
         processed = await process_avatar(b"".join(chunks))
     except Exception:

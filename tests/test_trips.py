@@ -294,7 +294,7 @@ class _FakeRedis:
     async def get(self, key: str) -> None:
         return None
 
-    async def set(self, key: str, value: str) -> None:
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
         self.written.append(key)
 
     async def expire(self, key: str, seconds: int) -> None:
@@ -1162,7 +1162,7 @@ class _ServingRedis:
     async def get(self, key: str) -> bytes | None:
         return self.store.get(key)
 
-    async def set(self, key: str, value: str) -> None:
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
         self.store[key] = value.encode()
 
     async def expire(self, key: str, seconds: int) -> None:

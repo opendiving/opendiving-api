@@ -4,9 +4,11 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 from uuid6 import uuid7
 
 from src.app.api.v1.users import patch_user, read_current_user
+from src.app.core.exceptions.http_exceptions import DuplicateValueException
 from src.app.schemas.user import UnitSystem, UserRead, UserUpdate
 
 # Note: there is no `POST /user` endpoint to test here anymore - account creation only
@@ -60,6 +62,41 @@ class TestPatchUser:
 
             with pytest.raises(DuplicateValueException):
                 await patch_user(Mock(), user_update, current_user_dict, mock_db)
+
+    @pytest.mark.asyncio
+    async def test_a_name_claimed_between_the_check_and_the_write_is_a_duplicate(self, mock_db, current_user_dict):
+        """Two divers claiming the same free username both pass `exists`; the unique index
+        decides, and the loser gets the same answer the check would have given."""
+        mock_db.rollback = AsyncMock()
+
+        with (
+            patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.users.crud_users") as mock_crud,
+        ):
+            mock_crud.exists = AsyncMock(return_value=False)
+            mock_crud.update = AsyncMock(side_effect=IntegrityError("update", {}, Exception("duplicate key")))
+
+            with pytest.raises(DuplicateValueException, match="Username not available"):
+                await patch_user(Mock(), UserUpdate(username="raced"), current_user_dict, mock_db)
+
+        mock_db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_conflict_with_no_username_claimed_is_not_reported_as_one(self, mock_db, current_user_dict):
+        mock_db.rollback = AsyncMock()
+        values = UserUpdate.model_validate({"dive_form_preset_uuid": str(uuid7())})
+
+        with (
+            patch("src.app.api.v1.users.crud_users") as mock_crud,
+            patch("src.app.api.v1.users.crud_dive_form_presets") as presets,
+        ):
+            presets.exists = AsyncMock(return_value=True)
+            mock_crud.update = AsyncMock(side_effect=IntegrityError("update", {}, Exception("foreign key")))
+
+            with pytest.raises(IntegrityError):
+                await patch_user(Mock(), values, current_user_dict, mock_db)
+
+        mock_db.rollback.assert_awaited_once()
 
 
 class TestIsSuperuserOnTheCallersOwnRecord:
