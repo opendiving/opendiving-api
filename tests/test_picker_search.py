@@ -234,6 +234,13 @@ class TestListCacheKeys:
 
         assert ":search:" not in unsearchable.list_cache_key_prefix
 
+    def test_a_resource_without_search_refuses_a_lookup(self) -> None:
+        # With no `:search:` segment in the key, every search would be served the first one's page.
+        unsearchable: OwnedResourceCache = OwnedResourceCache(resource_name="gear_sets", crud=crud_gear_items)
+
+        with pytest.raises(ValueError, match="search_columns"):
+            unsearchable.lookup(AsyncMock())
+
 
 V1_ROUTES_DIR = Path(__file__).resolve().parents[1] / "src" / "app" / "api" / "v1"
 

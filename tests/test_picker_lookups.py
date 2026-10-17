@@ -287,7 +287,7 @@ def _use_contact(db: Session, dive: Dive, contact: Any) -> None:
 
 
 async def _lookup_contacts(async_db: AsyncSession, user: User, search: str | None, bound: datetime | None) -> list[Any]:
-    return await _page(contacts_module._cached_lookup_contacts, async_db, user, search, bound)
+    return await _fetched(contacts_module._lookup_contacts, async_db, user, search, bound)
 
 
 async def _list_contacts(async_db: AsyncSession, user: User, term: str) -> set[Any]:

@@ -169,7 +169,7 @@ async def _public_trips(
     ]
 
 
-# Kept for its `list_cache_key_prefix` only - `read_list` is never called, so it declares
+# Kept for its `list_cache_key_prefix` and its `lookup` - `read_list` is never called, so it declares
 # no `to_public`, and like `dive_sites.py`'s it declares no `sort_columns`, the list's ordering
 # being an aggregate over `trip_part` rather than a column of `trip`. A trip read
 # also embeds its parts and counts its dives, which are further queries zipped back into the

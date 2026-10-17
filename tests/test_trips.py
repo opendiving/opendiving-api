@@ -85,6 +85,7 @@ from src.app.schemas.trip import (
     TripReadInternal,
     TripUpdateRequest,
 )
+from src.app.schemas.trip_part import TripPartCreate, TripPartUpdate
 from tests.conftest import db_available
 from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_dive, create_dive_site, create_species, create_trip
@@ -260,6 +261,21 @@ class TestTripPartInput:
         is a 422 rather than something quietly translated into parts."""
         with pytest.raises(ValidationError, match="extra_forbidden"):
             schema.model_validate({"name": "Cebu 2026", member: [] if member == "locations" else "2026-03-01"})
+
+
+class TestTheAdminPanelsPartSchemas:
+    """CRUDAdmin's form for `trip_part` holds a part to what `TripPartInput` does."""
+
+    @pytest.mark.parametrize("schema", [TripPartCreate, TripPartUpdate])
+    def test_the_name_is_trimmed_and_a_blank_one_refused(self, schema: type[BaseModel]) -> None:
+        assert schema.model_validate({"trip_id": 1, "name": "  Moalboal "}).name == "Moalboal"  # type: ignore[attr-defined]
+        with pytest.raises(ValidationError):
+            schema.model_validate({"trip_id": 1, "name": "   "})
+
+    @pytest.mark.parametrize("schema", [TripPartCreate, TripPartUpdate])
+    def test_a_reversed_range_is_refused(self, schema: type[BaseModel]) -> None:
+        with pytest.raises(ValidationError):
+            schema.model_validate({"trip_id": 1, "start_date": "2026-03-05", "end_date": "2026-03-01"})
 
 
 class TestPartsOnAnUpdate:

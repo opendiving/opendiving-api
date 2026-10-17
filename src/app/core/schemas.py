@@ -82,8 +82,8 @@ StoredName = str
 def validate_date_range(start_date: date | None, end_date: date | None) -> None:
     """The one place a `start_date`/`end_date` pair's ordering is decided.
 
-    Reached from the schemas that own a pair - `CourseBase`/`CourseUpdate` and
-    `TripPartInput` - and public because `patch_course` has to run it on a pair no schema
+    Reached from the schemas that own a pair - `CourseBase`/`CourseUpdate`, `TripPartInput`
+    and the admin panel's `TripPartCreate`/`TripPartUpdate` - and public because `patch_course` has to run it on a pair no schema
     sees: a merged stored+incoming one, since a PATCH may carry either date alone. Only
     `course` has a CHECK constraint underneath it; on `trip_part` this is the whole
     enforcement.

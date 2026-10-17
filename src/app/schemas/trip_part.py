@@ -8,7 +8,9 @@ replaced wholesale. These exist so CRUDAdmin can render the rows.
 from datetime import date
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from ..core.schemas import Trimmed, validate_date_range
 
 
 class TripPartBase(BaseModel):
@@ -16,7 +18,7 @@ class TripPartBase(BaseModel):
     position: Annotated[int, Field(default=0, examples=[0], description="Order the part was listed in (0 = first)")]
     start_date: Annotated[date | None, Field(default=None, examples=["2024-06-01"])]
     end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"])]
-    name: Annotated[str | None, Field(default=None, min_length=1, max_length=255, examples=["Moalboal"])]
+    name: Annotated[Annotated[str, Trimmed, Field(max_length=255)] | None, Field(default=None, examples=["Moalboal"])]
     latitude: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.9367])]
     longitude: Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[123.3958])]
     bbox_south: Annotated[float | None, Field(default=None, ge=-90, le=90)]
@@ -41,6 +43,11 @@ class TripPartReadInternal(TripPartBase):
 class TripPartCreate(TripPartBase):
     model_config = ConfigDict(extra="forbid")
 
+    @model_validator(mode="after")
+    def check_date_range(self) -> TripPartCreate:
+        validate_date_range(self.start_date, self.end_date)
+        return self
+
 
 class TripPartUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -49,13 +56,20 @@ class TripPartUpdate(BaseModel):
     position: Annotated[int | None, Field(default=None, description="Order the part was listed in (0 = first)")]
     start_date: Annotated[date | None, Field(default=None)]
     end_date: Annotated[date | None, Field(default=None)]
-    name: Annotated[str | None, Field(default=None, min_length=1, max_length=255)]
+    name: Annotated[Annotated[str, Trimmed, Field(max_length=255)] | None, Field(default=None)]
     latitude: Annotated[float | None, Field(default=None, ge=-90, le=90)]
     longitude: Annotated[float | None, Field(default=None, ge=-180, le=180)]
     bbox_south: Annotated[float | None, Field(default=None, ge=-90, le=90)]
     bbox_north: Annotated[float | None, Field(default=None, ge=-90, le=90)]
     bbox_west: Annotated[float | None, Field(default=None, ge=-180, le=180)]
     bbox_east: Annotated[float | None, Field(default=None, ge=-180, le=180)]
+
+    # The pair a body carries; one date against the stored other is not seen here, and
+    # `trip_part` has no CHECK beneath it.
+    @model_validator(mode="after")
+    def check_date_range(self) -> TripPartUpdate:
+        validate_date_range(self.start_date, self.end_date)
+        return self
 
 
 class TripPartDelete(BaseModel):

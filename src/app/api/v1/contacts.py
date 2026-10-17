@@ -28,7 +28,7 @@ from ...schemas.contact import (
     address_columns,
     address_from_row,
 )
-from ...schemas.lookup import LookupUntil, lookup_bound
+from ...schemas.lookup import LookupUntil
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
     invalidate_contact_caches,
@@ -54,9 +54,9 @@ def _to_public_contact(db_contact: ContactReadInternal | dict[str, Any], *, user
     )
 
 
-# Serves the list through `read_list`. The single read is hand-written below, as every
-# single read is: every contact key sits under `user_{id}_contact` so one pattern drops both,
-# as courses do.
+# Serves the list through `read_list` and the picker through `lookup`. The single read is
+# hand-written below, as every single read is: every contact key sits under `user_{id}_contact`
+# so one pattern drops both, as courses do.
 _contact_cache: OwnedResourceCache[ContactReadInternal, ContactRead] = OwnedResourceCache(
     resource_name="contacts",
     crud=crud_contacts,
@@ -152,30 +152,27 @@ _LOOKUP_COLUMNS = (
 )
 
 
-# Under the list's prefix, so every sweep that drops the list drops the lookup with it.
-_LOOKUP_CACHE_KEY_PREFIX = _contact_cache.list_cache_key_prefix + ":lookup:until_{until}"
-
-
-@cache(key_prefix=_LOOKUP_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
-async def _cached_lookup_contacts(
-    request: Request,
+async def _lookup_contacts(
+    *,
     user_id: int,
     db: AsyncSession,
     page: int,
     items_per_page: int,
     search: str | None,
     until: datetime | None,
+    uuids: list[uuid_pkg.UUID] | None,
 ) -> dict:
-    """Fetches (and caches) a page of `GET /contacts/lookup`, under the list's prefix so that
-    `invalidate_contact_caches` drops it with the list. Reached only after the route has
-    authorized the caller."""
+    """A page of `GET /contacts/lookup`. Reached only after the route has authorized the caller."""
+    conditions: tuple[Any, ...] = (
+        _contact_cache.search_conditions(user_id=user_id, term=search) if search else (Contact.user_id == user_id,)
+    )
+    if uuids:
+        conditions += (Contact.uuid.in_(uuids),)
     data = await get_lookup_page(
         db,
         model=Contact,
         columns=_LOOKUP_COLUMNS,
-        conditions=_contact_cache.search_conditions(user_id=user_id, term=search)
-        if search
-        else (Contact.user_id == user_id,),
+        conditions=conditions,
         used_by=Dive.contact_id,
         user_id=user_id,
         bound=until,
@@ -188,6 +185,9 @@ async def _cached_lookup_contacts(
     ]
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
     return response
+
+
+_lookup = _contact_cache.lookup(_lookup_contacts)
 
 
 @router.get("/contacts/lookup", response_model=PaginatedListResponse[ContactLookupItem])
@@ -210,15 +210,15 @@ async def lookup_contacts(
     `search` matches what `GET /contacts` matches. Out-of-range pagination is clamped.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
-
-    return await _cached_lookup_contacts(
+    return await _lookup(
         request,
         user_id=current_user["id"],
         db=db,
         page=page,
         items_per_page=items_per_page,
-        search=(search or "").strip().lower() or None,
-        until=lookup_bound(until),
+        search=search,
+        until=until,
+        uuids=None,
     )
 
 

@@ -251,7 +251,12 @@ class OwnedResourceCache[InternalT, PublicT]:
         Cached under the list's prefix, so every sweep that drops the list drops the lookup with
         it - unless the request names `uuids`, the rows a form already holds, which is not
         cached: no two forms hold the same set for long.
+
+        Refused for a resource with no `search_columns`: its key has no `:search:` segment, so
+        every search would be served the first one's page.
         """
+        if not self._search_columns:
+            raise ValueError(f"{self.resource_name} declares no search_columns, so its lookups would share one key")
 
         async def unnarrowed(request: Request, **query: Any) -> dict[str, Any]:
             return await fetch(**query, uuids=None)

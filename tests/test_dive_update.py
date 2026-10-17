@@ -33,7 +33,14 @@ from uuid6 import uuid7
 from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.crud.crud_dive_species import StoredSighting
-from src.app.schemas.dive import DiveCreateRequest, DiveUpdate, DiveUpdateRequest, WaterType
+from src.app.schemas.dive import (
+    DiveCreateRequest,
+    DiveRead,
+    DiveReadInternal,
+    DiveUpdate,
+    DiveUpdateRequest,
+    WaterType,
+)
 from src.app.schemas.dive_mixture import GasRole, TankUsage
 
 TRIP_UUID = uuid7()
@@ -375,6 +382,33 @@ class TestNonNullableFields:
 
         assert "start_time" not in captured["update_data"]
         assert "utc_offset_minutes" not in captured["update_data"]
+
+
+class TestABlankBoatName:
+    """Refused on the way in, and read back if a row holds one anyway - a read that refused it
+    would 500 every list page the dive is on."""
+
+    def test_a_write_refuses_it(self) -> None:
+        with pytest.raises(ValidationError):
+            DiveUpdate.model_validate({"boat_name": "   "})
+
+    @pytest.mark.parametrize("shape", [DiveRead, DiveReadInternal])
+    def test_a_read_carries_it(self, shape: type[BaseModel]) -> None:
+        row = {
+            "id": 5,
+            "uuid": uuid7(),
+            "user_id": 7,
+            "user_uuid": uuid7(),
+            "dive_number": 1,
+            "start_time": datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
+            "utc_offset_minutes": 120,
+            "submerged_time": 1800,
+            "notes": "",
+            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+            "boat_name": "  ",
+        }
+
+        assert shape.model_validate(row).boat_name == "  "  # type: ignore[attr-defined]
 
 
 class TestMixtureFieldsAreClosed:
