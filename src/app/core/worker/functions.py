@@ -1,12 +1,13 @@
 import asyncio
 import logging
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 
 import uvloop
 from arq.worker import Worker
-from sqlalchemy import CursorResult, and_, delete, func, or_, select, update
+from sqlalchemy import CursorResult, Delete, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_auth_audit_events import expired_event_predicate
@@ -52,12 +53,14 @@ from ...services.renewals import (
 )
 from ...services.year_in_review import YEAR_IN_REVIEW_BATCH_SIZE, reviewed_year, year_in_review, year_window
 from ..config import configure_logging, settings
-from ..db.crud_token_blacklist import crud_token_blacklist
 from ..db.database import local_session
+from ..db.token_blacklist import TokenBlacklist
 
 asyncio.set_event_loop(uvloop.new_event_loop())
 
 configure_logging(settings.LOG_LEVEL)
+
+logger = logging.getLogger(__name__)
 
 # How long an `authentication_request` row is kept *after* its own `expires_at` has
 # passed. Not a knob: it exists to protect one documented leniency, and an operator
@@ -134,6 +137,37 @@ INVITE_REQUEST_RETENTION = timedelta(days=90)
 
 
 # -------- background tasks --------
+async def _purge(
+    statement: Delete,
+    noun: str,
+    *,
+    before: Callable[[AsyncSession], Awaitable[None]] | None = None,
+) -> str:
+    """Run one housekeeping `DELETE` in a transaction of its own and report what it took.
+
+    Core rather than FastCRUD's `delete()`, which raises `NoResultFound` when nothing matches -
+    the ordinary case on an hourly sweep - so the count and its check-then-act window would
+    have to come first. `rowcount` reports an empty sweep for free.
+
+    `before` runs in the same transaction ahead of the `DELETE`, for a job that has to read
+    the rows it is about to remove. `noun` is singular and pluralizes with an `s`.
+    """
+    async with local_session() as db:
+        if before is not None:
+            await before(db)
+        result = cast(CursorResult, await db.execute(statement))
+        # Read before the commit: the count belongs to the statement, not the transaction.
+        purged = result.rowcount
+        await db.commit()
+
+    if purged == 0:
+        logger.info("No %ss to purge", noun)
+        return f"No {noun}s to purge"
+
+    logger.info("Purged %d %s(s)", purged, noun)
+    return f"Purged {purged} {noun}(s)"
+
+
 async def purge_expired_tokens(ctx: dict[Any, Any]) -> str:
     """Delete rows from `token_blacklist` whose `expires_at` is in the past.
 
@@ -146,16 +180,9 @@ async def purge_expired_tokens(ctx: dict[Any, Any]) -> str:
     `DateTime(timezone=True)` column written by `core.security._blacklist_one`, so a
     naive local `datetime.now()` would compare against it off by the host's UTC offset.
     """
-    async with local_session() as db:
-        now = datetime.now(UTC)
-        expired_count = await crud_token_blacklist.count(db, expires_at__lt=now)
-        if expired_count == 0:
-            logging.info("No expired blacklisted tokens to purge")
-            return "No expired tokens to purge"
-
-        await crud_token_blacklist.delete(db, allow_multiple=True, expires_at__lt=now)
-        logging.info("Purged %d expired blacklisted token(s)", expired_count)
-        return f"Purged {expired_count} expired token(s)"
+    return await _purge(
+        delete(TokenBlacklist).where(TokenBlacklist.expires_at < datetime.now(UTC)), "expired blacklisted token"
+    )
 
 
 async def purge_expired_authentication_requests(ctx: dict[Any, Any]) -> str:
@@ -174,12 +201,6 @@ async def purge_expired_authentication_requests(ctx: dict[Any, Any]) -> str:
     a row that is spent but still live is the one both verify endpoints read to say *why*
     it was rejected.
 
-    One `DELETE` reporting its own `rowcount`, where `purge_expired_tokens` counts first -
-    not an inconsistency to tidy up. That job counts because FastCRUD's `delete()` raises
-    `NoResultFound` when nothing matches, which is the normal case on an hourly sweep;
-    Core has no such objection, so the count and its check-then-act window are avoidable
-    here.
-
     UTC-aware for the reason `purge_expired_tokens` spells out: `expires_at` is a
     `DateTime(timezone=True)`, so a naive `datetime.now()` would compare against it off by
     the host's UTC offset.
@@ -189,21 +210,10 @@ async def purge_expired_authentication_requests(ctx: dict[Any, Any]) -> str:
     both are true.
     """
     cutoff = datetime.now(UTC) - AUTHENTICATION_REQUEST_RETENTION
-    async with local_session() as db:
-        result = cast(
-            CursorResult,
-            await db.execute(delete(AuthenticationRequest).where(AuthenticationRequest.expires_at < cutoff)),
-        )
-        # Read before the commit: the count belongs to the statement, not the transaction.
-        purged = result.rowcount
-        await db.commit()
-
-    if purged == 0:
-        logging.info("No expired authentication requests to purge")
-        return "No expired authentication requests to purge"
-
-    logging.info("Purged %d expired authentication request(s)", purged)
-    return f"Purged {purged} expired authentication request(s)"
+    return await _purge(
+        delete(AuthenticationRequest).where(AuthenticationRequest.expires_at < cutoff),
+        "expired authentication request",
+    )
 
 
 async def purge_expired_invitations(ctx: dict[Any, Any]) -> str:
@@ -219,30 +229,12 @@ async def purge_expired_invitations(ctx: dict[Any, Any]) -> str:
     `accepted_at IS NULL` is the whole guard on the other side. An accepted invitation is
     two accounts' shared history, not a pending allow-list entry, and it goes with either of
     them rather than on a clock.
-
-    One `DELETE` reporting its own `rowcount`, for the reason
-    `purge_expired_authentication_requests` gives: FastCRUD's `delete()` raises
-    `NoResultFound` when nothing matches, which on an hourly sweep is the ordinary case, and
-    Core has no such objection.
     """
     cutoff = datetime.now(UTC) - INVITATION_RETENTION
-    async with local_session() as db:
-        result = cast(
-            CursorResult,
-            await db.execute(
-                delete(Invitation).where(Invitation.accepted_at.is_(None), Invitation.created_at < cutoff)
-            ),
-        )
-        # Read before the commit: the count belongs to the statement, not the transaction.
-        purged = result.rowcount
-        await db.commit()
-
-    if purged == 0:
-        logging.info("No unaccepted invitations to purge")
-        return "No unaccepted invitations to purge"
-
-    logging.info("Purged %d unaccepted invitation(s)", purged)
-    return f"Purged {purged} unaccepted invitation(s)"
+    return await _purge(
+        delete(Invitation).where(Invitation.accepted_at.is_(None), Invitation.created_at < cutoff),
+        "unaccepted invitation",
+    )
 
 
 async def purge_expired_invite_requests(ctx: dict[Any, Any]) -> str:
@@ -258,17 +250,7 @@ async def purge_expired_invite_requests(ctx: dict[Any, Any]) -> str:
     what bound that.
     """
     cutoff = datetime.now(UTC) - INVITE_REQUEST_RETENTION
-    async with local_session() as db:
-        result = cast(CursorResult, await db.execute(delete(InviteRequest).where(InviteRequest.created_at < cutoff)))
-        purged = result.rowcount
-        await db.commit()
-
-    if purged == 0:
-        logging.info("No expired invite requests to purge")
-        return "No expired invite requests to purge"
-
-    logging.info("Purged %d expired invite request(s)", purged)
-    return f"Purged {purged} expired invite request(s)"
+    return await _purge(delete(InviteRequest).where(InviteRequest.created_at < cutoff), "expired invite request")
 
 
 async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
@@ -292,24 +274,13 @@ async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
 
     `expires_at` is `DateTime(timezone=True)`, so the comparison is UTC-aware for the reason
     `purge_expired_tokens` spells out.
-
-    One `DELETE` reporting its own `rowcount`, like the sibling above it: Core has no
-    objection to matching nothing, so there is no count-then-delete window to open.
     """
     now = datetime.now(UTC)
-    async with local_session() as db:
-        await snapshot_active_accounts(db, now=now)
-        result = cast(CursorResult, await db.execute(delete(UserSession).where(swept_session_predicate(now))))
-        # Read before the commit: the count belongs to the statement, not the transaction.
-        purged = result.rowcount
-        await db.commit()
-
-    if purged == 0:
-        logging.info("No dead sessions to purge")
-        return "No dead sessions to purge"
-
-    logging.info("Purged %d dead session(s)", purged)
-    return f"Purged {purged} dead session(s)"
+    return await _purge(
+        delete(UserSession).where(swept_session_predicate(now)),
+        "dead session",
+        before=lambda db: snapshot_active_accounts(db, now=now),
+    )
 
 
 async def purge_expired_checkin_links(ctx: dict[Any, Any]) -> str:
@@ -320,20 +291,9 @@ async def purge_expired_checkin_links(ctx: dict[Any, Any]) -> str:
     routes read. No retention margin, unlike a revoked session's: nothing counts or reads a
     dead link, and a desk holding one sees the same 404 whether its row is still here or not.
     """
-    async with local_session() as db:
-        result = cast(
-            CursorResult, await db.execute(delete(CheckinLink).where(swept_checkin_link_predicate(datetime.now(UTC))))
-        )
-        # Read before the commit: the count belongs to the statement, not the transaction.
-        purged = result.rowcount
-        await db.commit()
-
-    if purged == 0:
-        logging.info("No dead check-in links to purge")
-        return "No dead check-in links to purge"
-
-    logging.info("Purged %d dead check-in link(s)", purged)
-    return f"Purged {purged} dead check-in link(s)"
+    return await _purge(
+        delete(CheckinLink).where(swept_checkin_link_predicate(datetime.now(UTC))), "dead check-in link"
+    )
 
 
 async def purge_expired_auth_audit_events(ctx: dict[Any, Any]) -> str:
@@ -352,27 +312,15 @@ async def purge_expired_auth_audit_events(ctx: dict[Any, Any]) -> str:
     Both cutoffs come from one `now`, so a single sweep reasons about a single instant.
     """
     now = datetime.now(UTC)
-    async with local_session() as db:
-        result = cast(
-            CursorResult,
-            await db.execute(
-                delete(AuthAuditEvent).where(
-                    expired_event_predicate(
-                        account_cutoff=now - AUTH_AUDIT_RETENTION,
-                        anonymous_cutoff=now - AUTH_AUDIT_ANONYMOUS_RETENTION,
-                    )
-                )
-            ),
-        )
-        purged = result.rowcount
-        await db.commit()
-
-    if purged == 0:
-        logging.info("No expired auth audit events to purge")
-        return "No expired auth audit events to purge"
-
-    logging.info("Purged %d expired auth audit event(s)", purged)
-    return f"Purged {purged} expired auth audit event(s)"
+    return await _purge(
+        delete(AuthAuditEvent).where(
+            expired_event_predicate(
+                account_cutoff=now - AUTH_AUDIT_RETENTION,
+                anonymous_cutoff=now - AUTH_AUDIT_ANONYMOUS_RETENTION,
+            )
+        ),
+        "expired auth audit event",
+    )
 
 
 async def record_sign_in_totals(ctx: dict[Any, Any]) -> str:
@@ -388,7 +336,7 @@ async def record_sign_in_totals(ctx: dict[Any, Any]) -> str:
         await record_sign_ins(db)
         await db.commit()
 
-    logging.info("Recorded daily sign-in totals")
+    logger.info("Recorded daily sign-in totals")
     return "Recorded daily sign-in totals"
 
 
@@ -409,10 +357,10 @@ async def purge_unserved_map_tiles(ctx: dict[Any, Any]) -> str:
             break
 
     if purged == 0:
-        logging.info("No unserved map tiles to purge")
+        logger.info("No unserved map tiles to purge")
         return "No unserved map tiles to purge"
 
-    logging.info("Purged %d unserved map tile(s)", purged)
+    logger.info("Purged %d unserved map tile(s)", purged)
     return f"Purged {purged} unserved map tile(s)"
 
 
@@ -516,7 +464,7 @@ async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cuto
         # Rolls back every by-address delete above with it - a restored account keeps its
         # sign-in history, its audit trail and the invitation that let it in like any other.
         await db.rollback()
-        logging.info("Account %d was restored before the purge reached it; nothing deleted", user_id)
+        logger.info("Account %d was restored before the purge reached it; nothing deleted", user_id)
         return False
 
     # After the statement that retired the rows and before the commit, per
@@ -570,7 +518,7 @@ async def purge_deleted_accounts(ctx: dict[Any, Any]) -> str:
             )
         ).scalar_one()
         if stranded:
-            logging.warning(
+            logger.warning(
                 "%d deleted account(s) carry no deleted_at and will never be purged; "
                 "only DELETE /user should write either column",
                 stranded,
@@ -586,7 +534,7 @@ async def purge_deleted_accounts(ctx: dict[Any, Any]) -> str:
         ).all()
 
     if not due:
-        logging.info("No accounts past their deletion grace period")
+        logger.info("No accounts past their deletion grace period")
         return "No accounts to purge"
 
     purged = 0
@@ -600,18 +548,18 @@ async def purge_deleted_accounts(ctx: dict[Any, Any]) -> str:
             try:
                 gone = await _purge_one_account(db, user_id=row.id, email=row.email, cutoff=cutoff)
             except Exception:
-                logging.exception("Could not purge account %d", row.id)
+                logger.exception("Could not purge account %d", row.id)
 
         if gone:
             purged += 1
             # The id and the request date, never the address: writing the email being
             # erased into logs that outlive the purge would be a self-inflicted wound.
-            logging.info("Purged account %d (requested %s)", row.id, row.deleted_at)
+            logger.info("Purged account %d (requested %s)", row.id, row.deleted_at)
 
     if len(due) == ACCOUNT_PURGE_BATCH_SIZE:
-        logging.info("Purge batch was full; more accounts may be due on the next pass")
+        logger.info("Purge batch was full; more accounts may be due on the next pass")
 
-    logging.info("Purged %d deleted account(s)", purged)
+    logger.info("Purged %d deleted account(s)", purged)
     return f"Purged {purged} deleted account(s)"
 
 
@@ -768,7 +716,7 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
         )
 
     if not by_user:
-        logging.info("No gear service reminders to send")
+        logger.info("No gear service reminders to send")
         return "No gear service reminders to send"
 
     sent_users = 0
@@ -808,7 +756,7 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
             sent_users += 1
             sent_schedules += len(bucket["lines"])
 
-    logging.info("Sent %d gear service digest(s) covering %d schedule(s)", sent_users, sent_schedules)
+    logger.info("Sent %d gear service digest(s) covering %d schedule(s)", sent_users, sent_schedules)
     return f"Sent {sent_users} gear service digest(s) covering {sent_schedules} schedule(s)"
 
 
@@ -908,7 +856,7 @@ async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None)
         bucket["policies"].append((policy.policy_id, stage.value, policy.expires_on))
 
     if not by_user:
-        logging.info("No renewal reminders to send")
+        logger.info("No renewal reminders to send")
         return "No renewal reminders to send"
 
     sent_users = 0
@@ -938,7 +886,7 @@ async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None)
             sent_users += 1
             sent_subjects += len(lines)
 
-    logging.info("Sent %d renewal reminder(s) covering %d subject(s)", sent_users, sent_subjects)
+    logger.info("Sent %d renewal reminder(s) covering %d subject(s)", sent_users, sent_subjects)
     return f"Sent {sent_users} renewal reminder(s) covering {sent_subjects} subject(s)"
 
 
@@ -1003,8 +951,8 @@ async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) ->
             sent += 1
 
     if sent == YEAR_IN_REVIEW_BATCH_SIZE:
-        logging.info("Year-in-review batch was full; more divers may be due on the next run")
-    logging.info("Sent %d year-in-review email(s) for %d", sent, year)
+        logger.info("Year-in-review batch was full; more divers may be due on the next run")
+    logger.info("Sent %d year-in-review email(s) for %d", sent, year)
     return f"Sent {sent} year-in-review email(s) for {year}"
 
 
@@ -1030,8 +978,8 @@ async def startup(ctx: Worker) -> None:
     instead of quietly doing half its job.
     """
     await asyncio.to_thread(blob_store.ensure_storage_ready)
-    logging.info("Worker Started")
+    logger.info("Worker Started")
 
 
 async def shutdown(ctx: Worker) -> None:
-    logging.info("Worker end")
+    logger.info("Worker end")
