@@ -439,6 +439,19 @@ class TestTheNormalizedFiles:
         rows = _parse(_render(write_certifications_csv(bundle)))
         assert rows[1][0] == "Ukrainian Diving Federation"
 
+    def test_a_named_agency_shows_itself_beside_a_stray_agency_other(self):
+        """A pair the admin panel can store and the write schemas refuse: the agency is the
+        load-bearing half, and the stray name beside it is not the card's agency."""
+        bundle = full_bundle()
+        bundle.certifications[0].agency_other = "FFESSM"
+        bundle.courses[0].agency_other = "NSS-CDS"
+
+        certifications = _parse(_render(write_certifications_csv(bundle)))
+        courses = _parse(_render(write_courses_csv(bundle)))
+
+        assert certifications[1][0] == bundle.certifications[0].agency
+        assert courses[1][COURSES_HEADER.index("agency")] == bundle.courses[0].agency
+
     def test_every_normalized_file_is_headed_even_when_empty(self):
         empty = build_bundle()
         for writer, _ in _NORMALIZED_FILES:
@@ -466,10 +479,10 @@ class TestTheNormalizedFiles:
             assert all(len(row) == len(header) for row in rows[1:]), writer.__name__
 
     def test_a_course_with_no_agency_leaves_the_cell_empty(self):
-        """The column reads `agency_other or agency`, so a course that ran under no agency
-        yields nothing - and nothing in a CSV is an empty cell, the same as every other
-        unrecorded value in these files. There is nothing to invent and no row to drop: a
-        CSV keeps every row with its stored value, having no vocabulary to keep."""
+        """A course that ran under no agency yields nothing - and nothing in a CSV is an empty
+        cell, the same as every other unrecorded value in these files. There is nothing to
+        invent and no row to drop: a CSV keeps every row with its stored value, having no
+        vocabulary to keep."""
         course = _with_id(
             Course(
                 user_id=1,
