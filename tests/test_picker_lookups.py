@@ -193,16 +193,6 @@ class _Resource:
     keys: frozenset[str]
 
 
-async def _page(
-    helper: Any, async_db: AsyncSession, user: User, search: str | None, bound: datetime | None
-) -> list[dict[str, Any]]:
-    result = await helper.__wrapped__(
-        None, user_id=user.id, db=async_db, page=1, items_per_page=50, search=search, until=bound
-    )
-    rows: list[dict[str, Any]] = result["data"]
-    return rows
-
-
 async def _fetched(
     fetch: Any, async_db: AsyncSession, user: User, search: str | None, bound: datetime | None
 ) -> list[dict[str, Any]]:
