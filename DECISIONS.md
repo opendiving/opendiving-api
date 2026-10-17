@@ -6317,13 +6317,15 @@ markers all stay. Provenance is `merge`, so `should_extract` never re-extracts a
 file deletion leaves the profile and gate figures alone (`_keeps_stored_profile`); files stay. A
 fold's `submerged_time` and `avg_depth` are its time in the water; side by side they stand;
 `max_depth` is the deepest reading; `None` means leave alone; `start_time` and the fixes stay,
-`refresh_tech_scalars` uncalled; the absorbed record's device, settings and readouts fill the
-survivor's blanks. An `avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write.
-`relabel_gas_numbers` precedes the join, keeping `usage` and filling the survivor's blank cylinder
-members from the absorbed rows it pairs, as an arrival does, an empty absorbed row not appended;
-moved profiles use `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions
-stay, notes append within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not
-reused.
+`refresh_tech_scalars` uncalled; the absorbed record's device, settings and surface pressure fill
+the survivor's blanks; its CNS, OTU and paired tank pressures go by side (`_write_fold`). Rejected:
+fill-only, which ends the dive at the restart and halves its SAC; the cost: a value the diver typed
+on the surviving dive's other side is replaced. An `avg_depth` failing
+`ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers` precedes the join,
+keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
+as an arrival does, an empty absorbed row not appended; moved profiles use
+`replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
+within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
@@ -7040,7 +7042,8 @@ It fills at an arrival only - a recording past the first created, new bytes join
 merge - so a value the diver cleared survives a repeat, a deletion and a backfill. A pair made by
 position from a recording past the first is a guess, and fills only a row recording nothing it
 contradicts, or the last row meeting the last cylinder. Pressures fill as a pair. A recording past
-the first appends no cylinder carrying nothing.
+the first appends no cylinder carrying nothing. A fold's pressures are the exception: see *"Merging
+two dives keeps the gap and synthesises nothing"*.
 
 ## Map tiles are drawn once for the whole instance, and any signed-in account may read one
 
