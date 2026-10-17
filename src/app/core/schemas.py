@@ -13,6 +13,11 @@ NOTES_MAX_LENGTH = 100_000
 # a number is the width of the column it lands in.
 POSTGRES_INTEGER_MAX = 2**31 - 1
 
+# An `integer` column's whole range, for a field whose real bound is a `CHECK` that maps to a
+# 422 message of its own: a value past the column's width fails before the `CHECK` is consulted,
+# as a `DataError` and a 500.
+PostgresInteger = Annotated[int, Field(ge=-(2**31), le=POSTGRES_INTEGER_MAX)]
+
 DATE_RANGE_MESSAGE = "end_date must be on or after start_date"
 
 # The width of every column holding an account's address. 254 is the RFC 5321 path limit, and

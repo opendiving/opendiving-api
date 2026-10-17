@@ -43,7 +43,7 @@ from src.app.models.user import User
 from src.app.models.user_session import UserSession
 from src.app.schemas.auth_audit_event import AuthEventType
 from tests.conftest import db_available, unique_email
-from tests.helpers.mocks import awaited_kwargs
+from tests.helpers.mocks import awaited_kwargs, email_lookups_on
 
 CONTEXT = RequestContext(ip="203.0.113.7", user_agent="Mozilla/5.0 (X11; Linux x86_64) TestAgent/1.0")
 
@@ -193,7 +193,8 @@ class TestWhichSitesWriteAnEvent:
 
         with (
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
-            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.charge_code_attempt", new_callable=AsyncMock, return_value="0" * 64),
+            patch("src.app.api.v1.auth.spend_exhausted_code", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock) as recorder,
         ):
             requests.get = AsyncMock(return_value=row)
@@ -227,7 +228,8 @@ class TestWhichSitesWriteAnEvent:
 
         with (
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
-            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.charge_code_attempt", new_callable=AsyncMock, return_value="0" * 64),
+            patch("src.app.api.v1.auth.spend_exhausted_code", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock) as recorder,
         ):
             requests.get = AsyncMock(return_value=row)
@@ -424,6 +426,8 @@ class TestTheNamedExclusions:
         with (
             patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as verify,
             patch("src.app.api.v1.auth.crud_users") as users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(users)[1]),
             patch("src.app.api.v1.auth.live_session_for", new_callable=AsyncMock) as session,
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock),
@@ -463,6 +467,8 @@ class TestTheNamedExclusions:
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as verify,
             patch("src.app.api.v1.auth.crud_users") as users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(users)[1]),
             patch("src.app.api.v1.auth.crud_authentication_providers") as providers,
             patch("src.app.api.v1.auth.seed_default_presets", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.seed_default_tags", new_callable=AsyncMock),
@@ -536,6 +542,8 @@ class TestTheNamedExclusions:
             ),
             patch("src.app.api.v1.auth.accept_invitations", new_callable=AsyncMock, return_value=2) as accepted,
             patch("src.app.api.v1.auth.crud_users") as users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(users)[1]),
             patch("src.app.api.v1.auth.crud_authentication_providers") as providers,
             patch("src.app.api.v1.auth.seed_default_presets", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.seed_default_tags", new_callable=AsyncMock),
@@ -671,6 +679,8 @@ class TestTheRefreshReplayThreshold:
             patch("src.app.api.v1.auth.revocation_time", new_callable=AsyncMock) as revoked,
             patch("src.app.api.v1.auth.token_subject") as subject,
             patch("src.app.api.v1.auth.crud_users") as users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(users)[1]),
             patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock) as recorder,
         ):
             revoked.return_value = long_ago
@@ -693,6 +703,8 @@ class TestTheRefreshReplayThreshold:
             patch("src.app.api.v1.auth.revocation_time", new_callable=AsyncMock) as revoked,
             patch("src.app.api.v1.auth.token_subject") as subject,
             patch("src.app.api.v1.auth.crud_users") as users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(users)[1]),
             patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock) as recorder,
         ):
             revoked.return_value = long_ago

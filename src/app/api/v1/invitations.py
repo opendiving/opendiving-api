@@ -30,7 +30,7 @@ from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException, RateLimitException
 from ...core.utils.binary_responses import uncacheable_not_found
-from ...core.utils.client_ip import client_ip
+from ...core.utils.client_ip import client_ip_bucket
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.request_context import RequestContext
@@ -107,14 +107,15 @@ async def request_an_invite(
     # The mode check is above these deliberately, the way `send_support_request` puts its
     # 503 above its own: an instance where this feature is off must not have its buckets
     # spent by traffic that was never going to be stored.
+    # Per-IP before per-address, as `request_email_link` orders them and for its reason.
     await enforce_rate_limit(
-        f"invite-request:email:{email}",
-        settings.INVITE_REQUEST_RATE_LIMIT_PER_EMAIL,
+        f"invite-request:ip:{client_ip_bucket(request)}",
+        settings.INVITE_REQUEST_RATE_LIMIT_PER_IP,
         settings.INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS,
     )
     await enforce_rate_limit(
-        f"invite-request:ip:{client_ip(request)}",
-        settings.INVITE_REQUEST_RATE_LIMIT_PER_IP,
+        f"invite-request:email:{email}",
+        settings.INVITE_REQUEST_RATE_LIMIT_PER_EMAIL,
         settings.INVITE_REQUEST_RATE_LIMIT_WINDOW_SECONDS,
     )
 

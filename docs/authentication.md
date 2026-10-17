@@ -15,8 +15,8 @@ emails a magic link *and* a six-digit code, and either completes the sign-in - w
 first consumes the row, so exactly one session is ever issued. The code exists because a link signs
 in the device that opens it, and mail is often read on a different one; the code travels with the
 person instead. It is redeemed against the `request_id` the request response hands back to the
-browser that asked, and is bounded by `SIGN_IN_CODE_ATTEMPTS_MAX` wrong guesses, after which the
-code alone dies and the link keeps working.
+browser that asked, and is bounded by `SIGN_IN_CODE_ATTEMPTS_MAX` guesses, after which the code
+alone dies and the link keeps working.
 
 A **passkey is a third first factor, never a second one** - there is no password here for a second
 factor to backstop, and a ceremony with user verification is already two factors in one gesture. It
@@ -150,7 +150,7 @@ sequenceDiagram
     else Reads it elsewhere - types the code back here
         U->>FE: Enters the six-digit code
         FE->>API: POST /auth/email/verify-code\n{request_id, code}
-        API->>DB: Compare code_hash; a wrong guess\nincrements code_attempts
+        API->>DB: Charge an attempt, returning code_hash\n(none once code_attempts hits the cap), then compare
     end
     API->>DB: Claim the request (used_at) - link and code\nrace for one row, exactly one wins
     API->>DB: resolve_identity(email) -> no account
@@ -600,7 +600,7 @@ MAGIC_LINK_TOKEN_EXPIRE_MINUTES=30
 ONBOARDING_TOKEN_EXPIRE_MINUTES=30
 EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES=30
 
-# Wrong guesses allowed against the six-digit code before it is spent. The link in
+# Guesses allowed against the six-digit code before it is spent. The link in
 # the same email is untouched by this - see `DECISIONS.md` for why that asymmetry
 # is the point.
 SIGN_IN_CODE_ATTEMPTS_MAX=5

@@ -29,6 +29,8 @@ from datetime import UTC, datetime
 from sqlalchemy import ColumnElement, exists, func, literal, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.exceptions.http_exceptions import UnprocessableEntityException
+from ..core.schemas import POSTGRES_INTEGER_MAX
 from ..core.utils.datetime_offset import combine_dive_start_time, split_start_time
 from ..models.dive import Dive
 from ..schemas.dive import (
@@ -256,6 +258,14 @@ async def renumber_dives(
             .order_by(*_CHRONOLOGICAL)
         )
     ).all()
+
+    # The latest dive takes the largest number, and one past the column would fail the
+    # write as a `DataError` rather than a 422.
+    if rows and rows[-1].new_dive_number > POSTGRES_INTEGER_MAX:
+        raise UnprocessableEntityException(
+            f"Starting at {start_at}, the last of these {len(rows)} dives would be numbered "
+            f"past {POSTGRES_INTEGER_MAX}."
+        )
 
     changes = [
         DiveRenumberChange(

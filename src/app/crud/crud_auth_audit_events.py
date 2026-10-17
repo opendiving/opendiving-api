@@ -47,8 +47,7 @@ async def record_auth_event(
       row left uncommitted on a 401 path is silently lost - and two of the events here fire
       on exactly such a path (the refresh replay, and the passkey counter regression, which
       `finish_sign_in` follows immediately with an `UnauthorizedException`).
-      `register_failed_code_attempt` already commits before its own 401 for the same
-      reason.
+      `charge_code_attempt` already commits before its own 401 for the same reason.
 
     Nothing token-derived may ever be passed in: not a token, not a `jti`, not a token
     hash, not a sign-in code or its digest. The fact of the artifact, never the artifact.

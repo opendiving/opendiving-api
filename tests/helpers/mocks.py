@@ -153,6 +153,25 @@ def oauth2_scheme() -> str:
     return token  # type: ignore
 
 
+def email_lookups_on(users: Any) -> tuple[Any, Any]:
+    """`account_for_email` and `account_exists_for` doubles that answer from a patched
+    `crud_users`' `get` and `exists`, so a test arranges an account once, on that mock,
+    whichever of the three lookups reaches it.
+
+    Both helpers query on `lower(User.email)` through `db.execute`, which a mocked session
+    cannot answer; their case-insensitivity is pinned against Postgres in
+    `test_account_email_lookup.py`.
+    """
+
+    async def account_for_email(db: Any, *, email: str) -> Any:
+        return await users.get(db=db, email=email)
+
+    async def account_exists_for(db: Any, *, email: str) -> Any:
+        return await users.exists(db=db, email=email)
+
+    return account_for_email, account_exists_for
+
+
 def stub_claim(mock_db: Any, *, won: bool = True) -> Any:
     """Give a mocked `AsyncSession` an `execute` whose result carries a `rowcount`.
 

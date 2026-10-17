@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 from fastcrud import FastCRUD
-from sqlalchemy import CursorResult, case, null, update
+from sqlalchemy import CursorResult, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.authentication_request import AuthenticationRequest
@@ -86,18 +86,51 @@ async def claim_authentication_request(db: AsyncSession, *, request_id: int, com
     return claimed
 
 
-async def register_failed_code_attempt(db: AsyncSession, *, request_id: int, max_attempts: int) -> None:
-    """Charge one wrong guess against a row's sign-in code, and spend the code outright
-    once `max_attempts` of them have been charged.
+async def charge_code_attempt(db: AsyncSession, *, request_id: int, max_attempts: int) -> str | None:
+    """Spend one of a row's sign-in code attempts and return the digest to compare the
+    submitted code against - or `None` when there is no attempt left to spend, which the
+    caller answers exactly as it answers a wrong code.
 
     The attempt cap is the *only* thing standing between a six-digit code and whoever
-    holds the `request_id` it belongs to, so it has to hold under concurrency. Read the
-    counter, decide, then write it back and two simultaneous guesses both read the same
-    number and both store `n + 1` - an attacker firing guesses in parallel is charged for
-    a fraction of them, which is precisely the shape that turns a 5-in-a-million bound
-    into no bound at all. One `UPDATE` that increments and nulls in the same expression
-    has no window to lose: Postgres evaluates `code_attempts + 1` against the row version
-    it holds the lock on, so concurrent statements queue and each is counted.
+    holds the `request_id` it belongs to, so it has to hold under concurrency, and that is
+    why the charge comes **before** the comparison rather than after a wrong one. Compare
+    first and charge on failure, and every guess in flight has already read the digest
+    before any of their charges lands: an attacker firing a hundred guesses together has a
+    hundred codes evaluated, and the one that matches goes on to claim the row whatever the
+    counter says by then. Here the only way to see the digest is through this `UPDATE`,
+    whose `code_attempts < max_attempts` is evaluated against the row version it holds the
+    lock on, so concurrent statements queue and at most `max_attempts` of them ever get one
+    back - whatever their order, and whether or not one of them is right.
+
+    Committed before returning, so the charge survives the 401 that usually follows
+    (`async_get_db` does not commit on unwind) and the row lock is released before the
+    comparison rather than held across the rest of the request.
+
+    The digest is left in place by this statement, because it has to be returned: Postgres's
+    `RETURNING` reads the new row, so nulling it here would hand back `NULL` on the last
+    attempt. `spend_exhausted_code` clears it after a wrong guess instead.
+    """
+    code_hash = (
+        await db.execute(
+            update(AuthenticationRequest)
+            .where(
+                AuthenticationRequest.id == request_id,
+                AuthenticationRequest.used_at.is_(None),
+                AuthenticationRequest.code_hash.is_not(None),
+                AuthenticationRequest.code_attempts < max_attempts,
+            )
+            .values(code_attempts=AuthenticationRequest.code_attempts + 1)
+            .returning(AuthenticationRequest.code_hash)
+        )
+    ).scalar_one_or_none()
+    await db.commit()
+    return code_hash
+
+
+async def spend_exhausted_code(db: AsyncSession, *, request_id: int, max_attempts: int) -> None:
+    """Null a row's code digest once its attempts have run out, so `code_hash IS NULL` goes
+    on meaning "spent". Not the cap - `charge_code_attempt` already refuses past it - but
+    the reason a fast-path read can reject a spent code without charging anything.
 
     Nulling `code_hash` kills **the code and nothing else**. The link in the same email is
     untouched, on purpose: it carries 256 bits delivered to a mailbox and needs no
@@ -105,18 +138,10 @@ async def register_failed_code_attempt(db: AsyncSession, *, request_id: int, max
     reach this endpoint a way to cancel a sign-in they cannot complete - aimed squarely at
     the accounts whose only method is email.
 
-    No `WHERE code_hash IS NOT NULL`: the caller has already established there is a live
-    code, and a row whose code is spent is one the caller rejects before reaching here.
+    Left uncommitted: the caller's audit event for the wrong guess commits it.
     """
     await db.execute(
         update(AuthenticationRequest)
-        .where(AuthenticationRequest.id == request_id)
-        .values(
-            code_attempts=AuthenticationRequest.code_attempts + 1,
-            code_hash=case(
-                (AuthenticationRequest.code_attempts + 1 >= max_attempts, null()),
-                else_=AuthenticationRequest.code_hash,
-            ),
-        )
+        .where(AuthenticationRequest.id == request_id, AuthenticationRequest.code_attempts >= max_attempts)
+        .values(code_hash=None)
     )
-    await db.commit()

@@ -46,7 +46,7 @@ def create_admin_interface() -> CRUDAdmin | None:
         mount_path=settings.CRUD_ADMIN_MOUNT_PATH,
         # `None` falls back to CRUDAdmin's per-container SQLite file - see
         # `CRUD_ADMIN_DB_URL` in `core.config` for why that only works single-process.
-        admin_db_url=settings.CRUD_ADMIN_DB_URL,
+        admin_db_url=settings.CRUD_ADMIN_DB_URL.get_secret_value() if settings.CRUD_ADMIN_DB_URL else None,
         session_backend=session_backend,
         redis_config=redis_config,
         # CRUDAdmin reads these as "no restriction" only when they are `None`; an empty

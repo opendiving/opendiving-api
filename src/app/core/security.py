@@ -117,7 +117,7 @@ def hash_sign_in_code(code: str) -> str:
     someone who already has the database.
 
     So this hash is not what protects the code. `code_attempts` is (see
-    `crud.crud_authentication_requests.register_failed_code_attempt`), and this exists so
+    `crud.crud_authentication_requests.charge_code_attempt`), and this exists so
     that a live credential is not sitting in plaintext in logs, backups, or the admin
     panel's row view.
     """
