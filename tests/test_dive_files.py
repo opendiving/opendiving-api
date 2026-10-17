@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatch
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -34,7 +35,7 @@ from src.app.models.dive import Dive
 from src.app.models.dive_recording import DiveRecording
 from src.app.schemas.dive import DiveFileInfo, DiveTechScalars, RecordingReadouts
 from src.app.schemas.dive_mixture import DiveMixtureRead, GasRole
-from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
+from src.app.schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
 from src.app.services import dive_files as dive_files_module
 from src.app.services.blob_store import new_key
 from src.app.services.cache_invalidation import invalidate_dive_caches
@@ -46,6 +47,7 @@ from src.app.services.dive_files import (
     READOUT_FIELDS,
     SCALAR_FIELDS,
     TECH_SCALAR_FIELDS,
+    FileExtraction,
     InvalidDiveFileTokenError,
     LoadedDiveFile,
     RecordingChange,
@@ -1025,6 +1027,90 @@ class TestAFileThisBuildCannotRead:
 
         assert extraction.unreadable is True
         assert extraction.profile is None
+
+
+class TestTheDeviceAndSettingsFillMemberByMember:
+    """A recording's device and settings take each member from the first file that recorded
+    it, as attaching the files one at a time fills the columns - not the first readable file's
+    whole parse, which would leave a member only a later file carries unfilled."""
+
+    @staticmethod
+    def _parsed(**members: Any) -> ParsedDiveSchema:
+        required = ("avg_depth", "bottom_temperature", "dive_number", "submerged_time", "max_depth", "start_time")
+        return ParsedDiveSchema(mixtures=[], **dict.fromkeys(required), **members)
+
+    FIRST = b"first"
+    SECOND = b"second"
+    EXTRACTIONS = {
+        _digest(FIRST): FileExtraction(
+            parsed=_parsed(
+                device=ParsedDevice(brand="Suunto", model="Ocean"),
+                deco_model=ParsedDecoModel(algorithm="buhlmann"),
+            ),
+            profile=None,
+            scalars={},
+        ),
+        _digest(SECOND): FileExtraction(
+            parsed=_parsed(
+                device=ParsedDevice(model="Ocean 2", serial="2345678901"),
+                mode="open_circuit",
+                deco_model=ParsedDecoModel(algorithm="rgbm", gf_low=40, gf_high=85),
+                salinity="salt",
+            ),
+            profile=None,
+            scalars={},
+        ),
+    }
+
+    def _files(self) -> list[LoadedDiveFile]:
+        return [
+            LoadedDiveFile(
+                data=content,
+                content_type="application/json",
+                original_filename="export.json",
+                sha256=_digest(content),
+                parser_key="suunto_json",
+            )
+            for content in (self.FIRST, self.SECOND)
+        ]
+
+    def test_a_member_only_the_second_file_carries_is_taken_from_it(self) -> None:
+        extraction = extract_recording(self._files(), self.EXTRACTIONS, start_time=None, utc_offset_minutes=None)
+
+        assert extraction.device == ParsedDevice(brand="Suunto", model="Ocean", serial="2345678901")
+        assert extraction.deco_model == ParsedDecoModel(algorithm="buhlmann", gf_low=40, gf_high=85)
+        assert (extraction.mode, extraction.salinity) == ("open_circuit", "salt")
+
+    @pytest.mark.asyncio
+    async def test_the_backfill_fills_from_both_files(self, monkeypatch) -> None:
+        devices: list[ParsedDevice | None] = []
+        settings: list[dict] = []
+
+        async def fill_device_fields(db, *, recording_id, device):
+            devices.append(device)
+
+        async def fill_recording_settings(db, *, recording_id, **values):
+            settings.append(values)
+
+        monkeypatch.setattr("src.app.services.dive_files.load_recording_files", AsyncMock(return_value=self._files()))
+        monkeypatch.setattr(
+            "src.app.services.dive_files.extract_file", lambda data, parser_key: self.EXTRACTIONS[_digest(data)]
+        )
+        monkeypatch.setattr("src.app.services.dive_recordings.fill_readouts", AsyncMock())
+        monkeypatch.setattr("src.app.services.dive_recordings.fill_device_fields", fill_device_fields)
+        monkeypatch.setattr("src.app.services.dive_recordings.fill_recording_settings", fill_recording_settings)
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+        candidate = SimpleNamespace(
+            recording_id=1, dive_id=1, user_id=1, ordinal=1, start_time=None, utc_offset_minutes=None
+        )
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[[candidate], *[MagicMock() for _ in range(5)]])
+        db.begin_nested = MagicMock(return_value=TestBackfillDoesNotStopOnOneBadDive._Savepoint())
+
+        await backfill_tech_fields(db)
+
+        assert [device.serial for device in devices if device is not None] == ["2345678901"]
+        assert [values["salinity"] for values in settings] == ["salt"]
 
 
 class TestStoredMixturesAreReadInSavedOrder:

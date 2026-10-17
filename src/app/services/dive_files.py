@@ -35,6 +35,7 @@ from enum import Enum
 from typing import Literal
 
 from fastapi import UploadFile
+from pydantic import BaseModel
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,10 +49,10 @@ from ..models.dive import Dive
 from ..models.dive_file import DiveFile
 from ..models.dive_mixture import DiveMixture
 from ..models.dive_recording import DiveRecording
-from ..schemas.dive import DiveTechScalars
+from ..schemas.dive import DiveMode, DiveTechScalars, Salinity
 from ..schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, as_create
 from ..schemas.dive_profile import MILLISECONDS_PER_SECOND
-from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
+from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
 from . import blob_store, dive_recordings
 from .dive_profiles import (
     READER_VERSION,
@@ -294,7 +295,9 @@ class RecordingExtraction:
     One object rather than several returns because they are read together everywhere and every
     one of them is *the first file that recorded it* - only the unit differs. The profile
     takes each channel whole from the earliest file carrying it; the scalars take each
-    reading likewise; the device likewise; and the cylinders take each *member* of each
+    reading likewise; the device and the settings take each member likewise, which is the
+    order `fill_device_fields` and `fill_recording_settings` fill the columns in when the
+    files are attached one at a time; and the cylinders take each *member* of each
     cylinder likewise, which is one level finer because a Suunto's two exports of one dive
     split the pressures and the gas fraction between them. Only the channels count a FIT
     file after every other, for the reason `extract_recording` gives. `unreadable` says at
@@ -304,9 +307,24 @@ class RecordingExtraction:
 
     profile: NormalizedProfile | None = None
     scalars: dict[str, float | None] = field(default_factory=dict)
-    device_source: ParsedDiveSchema | None = None
+    device: ParsedDevice | None = None
+    mode: DiveMode | None = None
+    deco_model: ParsedDecoModel | None = None
+    salinity: Salinity | None = None
     mixtures: list[DiveMixtureSchema] = field(default_factory=list)
     unreadable: bool = False
+
+
+def _filled[M: BaseModel](earlier: M | None, later: M | None) -> M | None:
+    """`earlier` with each member it lacks taken from `later`.
+
+    Never half a gradient-factor pair: `ParsedDecoModel` drops a lone one, so each file
+    carries both or neither, and the first to carry `gf_low` carries `gf_high` too.
+    """
+    if earlier is None or later is None:
+        return later if earlier is None else earlier
+    taken = {name: value for name, value in later if value is not None and getattr(earlier, name) is None}
+    return earlier.model_copy(update=taken) if taken else earlier
 
 
 def _placed(
@@ -392,6 +410,7 @@ def extract_recording(
         )
         placed = apply_gas_mapping(_placed(extraction.profile, extraction.start, origin), labels)
         (fit_profiles if file.parser_key == "fit" else profiles).append(placed)
+        parsed = extraction.parsed
         result = RecordingExtraction(
             # Earlier files win: a key already carrying a value keeps it, and one carrying
             # `None` takes this file's reading.
@@ -400,7 +419,10 @@ def extract_recording(
                 for name, value in (extraction.scalars or {}).items()
             }
             or result.scalars,
-            device_source=result.device_source or extraction.parsed,
+            device=_filled(result.device, None if parsed is None else parsed.device),
+            mode=result.mode or (None if parsed is None else parsed.mode),
+            deco_model=_filled(result.deco_model, None if parsed is None else parsed.deco_model),
+            salinity=result.salinity or (None if parsed is None else parsed.salinity),
             mixtures=mixtures,
             unreadable=result.unreadable,
         )
@@ -1983,7 +2005,6 @@ async def backfill_tech_fields(
             mixtures_updated += len(updates or [])
             continue
 
-        source = extraction.device_source
         try:
             # A savepoint, so a recording the database rejects costs only that recording.
             # Without it the failure propagates out of this function and the enclosing
@@ -1992,15 +2013,13 @@ async def backfill_tech_fields(
             # same row and dies the same way.
             async with db.begin_nested():
                 await dive_recordings.fill_readouts(db, recording_id=row.recording_id, readouts=extraction.scalars)
-                await dive_recordings.fill_device_fields(
-                    db, recording_id=row.recording_id, device=None if source is None else source.device
-                )
+                await dive_recordings.fill_device_fields(db, recording_id=row.recording_id, device=extraction.device)
                 await dive_recordings.fill_recording_settings(
                     db,
                     recording_id=row.recording_id,
-                    mode=None if source is None else source.mode,
-                    deco_model=None if source is None else source.deco_model,
-                    salinity=None if source is None else source.salinity,
+                    mode=extraction.mode,
+                    deco_model=extraction.deco_model,
+                    salinity=extraction.salinity,
                 )
                 if primary:
                     await fill_tech_scalars(db, dive_id=row.dive_id, scalars=extraction.scalars)
