@@ -2,7 +2,7 @@ import uuid as uuid_pkg
 from typing import Any
 
 from fastcrud import FastCRUD
-from sqlalchemy import and_, inspect, select
+from sqlalchemy import and_, func, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -46,3 +46,29 @@ async def read_account(db: AsyncSession, *, uuid: uuid_pkg.UUID) -> dict[str, An
         box = {part: account.pop(f"{kind.value}_crop_{part}") for part in _CROP_PARTS}
         account[f"{kind.value}_crop"] = None if box["x"] is None else box
     return account
+
+
+async def account_for_email(db: AsyncSession, *, email: str) -> dict[str, Any] | None:
+    """The account holding `email`, compared **case-insensitively**, as `crud_users.get`
+    would return it: every mapped `user` column, deleted rows included.
+
+    `lower(User.email)`, served by `ix_user_email_lower`, because a stored address may carry
+    capitals - `POST /auth/complete` stores the onboarding token's address as it came, and
+    Google's claim is not lowercased - while the magic link lowercases what it is sent. A raw
+    equality would miss that account at sign-in and send its owner to onboarding for a
+    second one.
+
+    Two rows can differ only in case, from before this lookup existed, so the answer is
+    ordered: the exact-case match first, which is the row a raw equality found, then the
+    oldest.
+    """
+    columns = [getattr(User, attribute.key) for attribute in inspect(User).column_attrs]
+    row = (
+        await db.execute(
+            select(*columns)
+            .where(func.lower(User.email) == email.lower())
+            .order_by((User.email == email).desc(), User.id)
+            .limit(1)
+        )
+    ).one_or_none()
+    return None if row is None else dict(row._mapping)

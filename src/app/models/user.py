@@ -105,10 +105,11 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
         return (
             # `ix_user_email` beside it is a plain b-tree on the raw column, which no
             # `lower(email)` predicate can use - so every case-insensitive account lookup
-            # would be a sequential scan of this table without this one. The invitation path
-            # makes three of them (`crud.crud_invitations.account_exists_for` and the
-            # operator queue's `has_account` join), and the batch invite runs the first up to
-            # a hundred times in one request.
+            # would be a sequential scan of this table without this one. Sign-in makes one per
+            # verified address (`crud.crud_users.account_for_email`), the invitation path
+            # three (`crud.crud_invitations.account_exists_for` and the operator queue's
+            # `has_account` join), and the batch invite runs the second up to a hundred times
+            # in one request.
             #
             # **Not unique**, deliberately, and the distinction is the whole reason the
             # column keeps its own unique index as well. Accounts differing only in case are

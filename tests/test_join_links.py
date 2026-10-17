@@ -63,7 +63,7 @@ from src.app.services.registration_gate import (
 )
 from tests.conftest import db_available, unique_email, unique_username
 from tests.helpers.generators import create_user
-from tests.helpers.mocks import awaited_kwargs, fake_request, google_auth_body, stub_claim
+from tests.helpers.mocks import awaited_kwargs, email_lookups_on, fake_request, google_auth_body, stub_claim
 
 CHANNELS = "scubaboard=ScubaBoard,reddit=Reddit"
 
@@ -260,6 +260,7 @@ class TestEveryDoorHandsTheGateItsSlug:
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
             patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
             patch("src.app.api.v1.auth.refuse_uninvited", new_callable=AsyncMock) as gate,
         ):
             requests.get = AsyncMock(return_value=self._row())
@@ -279,6 +280,7 @@ class TestEveryDoorHandsTheGateItsSlug:
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
             patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
             patch("src.app.api.v1.auth.refuse_uninvited", new_callable=AsyncMock) as gate,
         ):
             requests.get = AsyncMock(return_value=row)
@@ -301,6 +303,7 @@ class TestEveryDoorHandsTheGateItsSlug:
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as verified,
             patch("src.app.services.auth_service.crud_authentication_providers") as providers,
             patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
             patch("src.app.api.v1.auth.refuse_uninvited", new_callable=AsyncMock) as gate,
         ):
             verified.return_value = GoogleUserInfo(google_id="g-1", email="New@Example.com", name="New")

@@ -74,10 +74,10 @@ from ...crud.crud_authentication_requests import (
     register_failed_code_attempt,
 )
 from ...crud.crud_daily_totals import count_account_created
-from ...crud.crud_invitations import accept_invitations, record_invite_link_sign_up
+from ...crud.crud_invitations import accept_invitations, account_exists_for, record_invite_link_sign_up
 from ...crud.crud_invite_requests import delete_invite_requests
 from ...crud.crud_user_sessions import live_session_for, revoke_session
-from ...crud.crud_users import crud_users
+from ...crud.crud_users import account_for_email, crud_users
 from ...models.user import User
 from ...schemas.auth import (
     AuthOutcome,
@@ -407,7 +407,7 @@ async def check_email_link(
     # Still side-effect-free, and no more of an oracle than the line above it: this
     # response already names the address, and only the holder of a live, unspent link sent
     # to that inbox ever sees either.
-    user = await crud_users.get(db=db, email=auth_request["email"])
+    user = await account_for_email(db, email=auth_request["email"])
     if user is not None and user["is_deleted"]:
         pending = DeletionPending.for_row(cast(dict[str, Any], user))
         return LinkCheckResponse(
@@ -737,9 +737,10 @@ async def complete_profile(
     if await crud_users.exists(db=db, username=body.username):
         raise DuplicateValueException("Username not available")
 
-    if await crud_users.exists(db=db, email=token_data.email):
+    if await account_exists_for(db, email=token_data.email.lower()):
         # Someone else completed onboarding for this email first - e.g. a concurrent
-        # request reusing the same onboarding token/browser tab.
+        # request reusing the same onboarding token/browser tab - or an account holds it
+        # in another case, which the raw unique index below would let a second one beside.
         raise DuplicateValueException("An account with this email already exists")
 
     # The duplicate checks above autobegan a transaction, and what follows is a network

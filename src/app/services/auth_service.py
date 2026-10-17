@@ -23,7 +23,7 @@ from ..core.utils.request_context import RequestContext
 from ..crud.crud_auth_audit_events import record_auth_event
 from ..crud.crud_authentication_providers import crud_authentication_providers
 from ..crud.crud_user_sessions import MAX_LIVE_SESSIONS_PER_USER, evict_stalest_sessions, touch_session
-from ..crud.crud_users import crud_users
+from ..crud.crud_users import account_for_email, crud_users
 from ..models.user_session import UserSession
 from ..schemas.auth_audit_event import AuthEventType
 from ..schemas.authentication_provider import AuthenticationProviderCreate
@@ -196,9 +196,10 @@ async def resolve_identity(
 
     1. If `provider_user_id` is given (Google) and already linked to *some* account,
        that account owns this identity outright - sign in as them.
-    2. Otherwise, look up by `email`. If found, link `provider` onto that account (if
-       it isn't already) - this is what lets an email-created account later sign in
-       with Google (or vice versa) without creating a duplicate user.
+    2. Otherwise, look up by `email`, case-insensitively (`account_for_email`). If found,
+       link `provider` onto that account (if it isn't already) - this is what lets an
+       email-created account later sign in with Google (or vice versa) without creating a
+       duplicate user.
     3. Otherwise, no account exists yet - the caller should start onboarding.
 
     **Neither lookup filters `is_deleted` any more**, and both branches answer
@@ -227,7 +228,7 @@ async def resolve_identity(
                     return DeletionPending.for_row(linked_user)
                 return AuthenticatedUser(user=linked_user, provider=provider)
 
-    user = await crud_users.get(db=db, email=email)
+    user = await account_for_email(db, email=email)
     if user is not None:
         user = cast(dict[str, Any], user)
         if user["is_deleted"]:
