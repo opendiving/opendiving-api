@@ -55,7 +55,9 @@ from ..schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
 from . import blob_store, dive_recordings
 from .dive_profiles import (
+    MERGE_PARSER_KEY,
     READER_VERSION,
+    ExistingProfileRow,
     NormalizedProfile,
     attribute_and_cap,
     delete_profile_for_recording,
@@ -668,7 +670,10 @@ def relabel_gas_numbers(
 
     **`fill` says this is an arrival** - `rederive_recording`'s rule - and each pair then
     fills on `fill_from_pair`'s terms, a guessed pair bounded. Not on every re-derivation:
-    a value the diver cleared would come back on the next backfill.
+    a value the diver cleared would come back on the next backfill. **Nor is anything
+    appended without it**, for the same reason: a cylinder that pairs with nothing on a
+    re-read is one the diver deleted, so its label maps to one no row carries - a channel
+    naming no cylinder, as `renumber_onto_labels` leaves a cleared row's.
 
     **A cylinder's vessel link travels on the same terms**: a pair fills a blank link at an
     arrival and never replaces one, and an appended cylinder keeps its own. A vessel is one
@@ -707,6 +712,11 @@ def relabel_gas_numbers(
 
     appended: list[DiveMixtureCreate] = []
     for incoming in unmatched:
+        if not fill:
+            if incoming.gas_number is not None:
+                mapping[incoming.gas_number] = next_free
+                next_free += 1
+            continue
         if _carries_nothing(incoming):
             continue
         if incoming.gas_number is not None:
@@ -1275,7 +1285,17 @@ async def rederive_recording(
     which bring nothing new - filling there puts back a value the diver cleared, read straight
     off the very file they were editing away from, on the next repeat upload or backfill.
     Required rather than defaulted, so a caller added later has to say which it is.
+
+    **A profile no file can re-yield stays** (`_keeps_stored_profile`), and with it the
+    labelling and the gate figures it was stored with; the readouts and the fixes only fill.
     """
+    existing = await get_existing_profile(db, recording_id=recording_id)
+    if _keeps_stored_profile(existing, extraction):
+        await dive_recordings.fill_readouts(db, recording_id=recording_id, readouts=extraction.scalars)
+        if ordinal == 0:
+            await fill_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars)
+        return
+
     if not files:
         await delete_profile_for_recording(db, recording_id=recording_id, commit=False)
         return
@@ -1318,6 +1338,21 @@ async def rederive_recording(
         await store_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars, commit=False)
     else:
         await fill_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars)
+
+
+def _keeps_stored_profile(existing: ExistingProfileRow | None, extraction: RecordingExtraction) -> bool:
+    """Whether a re-derivation must leave the recording's stored profile as it is.
+
+    **A merge's, always.** Its samples join two records, and its files are the halves: what
+    they yield after a deletion, or beside a header-only file, is part of what it describes.
+    **A document's, unless the files yield samples.** A file joining a file-less imported
+    recording is a whole second reading of it (`is_same_recording`), and its samples replace
+    the document's - `_fill_recording` in the import writer relies on that - but no samples
+    at all would delete them.
+    """
+    if existing is None or existing.is_reproducible:
+        return False
+    return existing.parser_key == MERGE_PARSER_KEY or extraction.profile is None
 
 
 def renumber_onto_labels(
@@ -1398,9 +1433,9 @@ async def label_cylinders(
     every other recording's stored profile is rewritten through the same map, samples it has
     no bytes for included, so no sibling points at a label the renumbering replaced.
     **A recording past the first is mapped onto the dive's cylinders instead**
-    (`relabel_gas_numbers`), a cylinder the dive's list lacks appended and a matched row with
-    no label given one: `gas_number` is dive-scoped, and a second computer numbers its tanks
-    its own way.
+    (`relabel_gas_numbers`), a cylinder the dive's list lacks appended at an arrival and a
+    matched row with no label given one: `gas_number` is dive-scoped, and a second computer
+    numbers its tanks its own way.
     """
     from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive, vessel_ids_for_dive
 
@@ -1466,9 +1501,9 @@ async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int, touched_primar
     `None`, clearing figures a document supplied that nothing on this instance can re-derive;
     and on a primary that *has* files, clearing any field the document supplied and the files
     do not yield. Either way the recording the diver actually deleted had no bearing on them.
-    `POST /dives/merge` skips this call outright for the same reason - see *"The dive's own
-    `start_time` is not touched, and neither are its oxygen-exposure readings"* in
-    `DECISIONS.md`. Required rather than defaulted, so a fourth caller has to answer it.
+    `POST /dives/merge` skips this call outright for the same reason - see *"Merging two dives
+    keeps the gap and synthesises nothing"* in `DECISIONS.md`. Required rather than defaulted,
+    so a fourth caller has to answer it.
     """
     if not touched_primary:
         return
@@ -1549,11 +1584,11 @@ async def _repeat_upload(
                 files=files,
                 extraction=extraction,
             )
-            # One commit for the profile and the scalars: they come out of the same bytes,
-            # and a dive whose exposure readings were upgraded but whose profile wasn't would
-            # be describing two different extractions. The writes are inside the `try`, not
-            # just the commit: a `CHECK` is not deferrable in Postgres, so `IntegrityError` is
-            # raised from `execute()` rather than from `commit()`.
+            # One commit for the profile, the readouts and the fixes: they come out of the
+            # same bytes, and a recording whose readouts were upgraded but whose profile wasn't
+            # would be describing two different extractions. The writes are inside the `try`,
+            # not just the commit: a `CHECK` is not deferrable in Postgres, so `IntegrityError`
+            # is raised from `execute()` rather than from `commit()`.
             await db.commit()
         except IntegrityError:
             # An opportunistic upgrade of bytes the recording already has, so failing it must
@@ -1685,7 +1720,7 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
 
     **The dive's readings are re-derived only where the file came off the primary recording.**
     A secondary recording is a second computer's account of the same dive and the dive's
-    oxygen-exposure figures were never read off it, so emptying one has nothing to say about
+    entry and exit fixes were never read off it, so emptying one has nothing to say about
     them - see `refresh_tech_scalars` on what running it anyway costs.
     """
     row = (
