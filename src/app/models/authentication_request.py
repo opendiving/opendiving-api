@@ -59,11 +59,11 @@ class AuthenticationRequest(Base, PublicUUIDMixin):
     #
     # `NULL` also means "spent": nulled once `code_attempts` reaches
     # `SIGN_IN_CODE_ATTEMPTS_MAX`, which kills the code while deliberately leaving the
-    # link in this same row alive - see `register_failed_code_attempt`.
+    # link in this same row alive - see `spend_exhausted_code`.
     code_hash: Mapped[str | None] = mapped_column(String(64), default=None)
 
-    # Wrong guesses against `code_hash` so far. Incremented in the same statement that
-    # reads it, never by a read followed by a write - see `register_failed_code_attempt`.
+    # Guesses charged against `code_hash` so far, the right one included. Charged by the
+    # statement that hands the digest out, before any comparison - see `charge_code_attempt`.
     code_attempts: Mapped[int] = mapped_column(Integer, default=0)
 
     # Timestamp of the first successful verification, and what makes a token

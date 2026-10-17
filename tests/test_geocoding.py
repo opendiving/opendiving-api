@@ -29,6 +29,7 @@ from pydantic import SecretStr
 from src.app.api import router
 from src.app.api.dependencies import get_current_user
 from src.app.core.config import settings
+from src.app.core.db.database import async_get_db
 from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.setup import create_application
 from src.app.services import geocoding_service
@@ -607,6 +608,42 @@ class TestOffshoreFallback:
 
         (key,) = fake_redis.expiries
         assert fake_redis.expiries[key] == geocoding_service._MISS_TTL_SECONDS
+
+
+class TestTheTransactionIsReleasedBeforeTheProvider:
+    """`get_current_user`'s lookup opened a transaction on the request's session, and a
+    provider call can take seconds; held across it, a burst of searches pins the pool. An
+    ordering test: the limit is checked, the transaction released, and the call follows with
+    no query between to reopen it."""
+
+    @pytest.mark.parametrize(
+        ("path", "service"),
+        [
+            ("/api/v1/geocode/search?q=ko+tao", "search_places"),
+            ("/api/v1/geocode/reverse?lat=10.1&lon=99.8", "reverse_geocode"),
+        ],
+    )
+    def test_releases_between_the_limit_and_the_call(
+        self, geocode_app: Any, client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str, service: str
+    ) -> None:
+        calls: list[str] = []
+        session = AsyncMock()
+        session.rollback = AsyncMock(side_effect=lambda: calls.append("release"))
+        session.execute = AsyncMock(side_effect=lambda *_args, **_kwargs: calls.append("query"))
+        geocode_app.dependency_overrides[async_get_db] = lambda: session
+
+        async def limit(*_args: object) -> None:
+            calls.append("limit")
+
+        async def provider(*_args: object) -> Any:
+            calls.append("provider")
+            return [] if service == "search_places" else (None, False)
+
+        monkeypatch.setattr("src.app.api.v1.geocoding.enforce_rate_limit", limit)
+        monkeypatch.setattr(f"src.app.api.v1.geocoding.{service}", provider)
+
+        assert client.get(path).status_code == 200
+        assert calls == ["limit", "release", "provider"]
 
 
 class TestSearchRoute:

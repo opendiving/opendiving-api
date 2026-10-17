@@ -218,6 +218,11 @@ class TestTheOutcomeOnEveryEntryPoint:
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
             patch("src.app.services.auth_service.crud_authentication_providers"),
             patch("src.app.services.auth_service.crud_users") as users,
+            patch(
+                "src.app.api.v1.auth.charge_code_attempt",
+                new_callable=AsyncMock,
+                return_value=hash_sign_in_code("481052"),
+            ),
         ):
             requests.get = AsyncMock(return_value=_live_auth_request())
             users.get = AsyncMock(return_value=_pending_row())
