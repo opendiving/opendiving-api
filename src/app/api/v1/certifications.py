@@ -1,5 +1,5 @@
 import uuid as uuid_pkg
-from typing import Annotated, Any, NoReturn, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.integrity import refuse_vanished_reference
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
 from ...core.utils.binary_responses import not_modified, stored_bytes_response
@@ -69,25 +70,6 @@ _FK_CONSTRAINT_MESSAGES = {
     "certification_contact_id_fkey": CONTACT_NOT_FOUND,
     "certification_instructor_id_fkey": PERSON_NOT_FOUND,
 }
-
-
-async def _refuse_a_vanished_reference(db: AsyncSession, exc: IntegrityError) -> NoReturn:
-    """Turn a lost `course_id`, `contact_id` or `instructor_id` reference into the 422 the
-    rest of the API gives for one.
-
-    Rolls back first: the failed statement leaves the session in an aborted transaction,
-    and anything the route did afterwards (a cache invalidation, say) would run against a
-    connection that refuses every command. Matches `write_dive`'s handling.
-
-    Re-raises anything else untouched. A constraint this does not recognize is a bug
-    somewhere else, and dressing it as "Course not found." would send the caller after the
-    wrong thing - the failure `_fk_error_detail`'s own comment records.
-    """
-    await db.rollback()
-    for constraint, detail in _FK_CONSTRAINT_MESSAGES.items():
-        if constraint in str(exc.orig):
-            raise UnprocessableEntityException(detail) from exc
-    raise exc
 
 
 def _to_public_certification(
@@ -203,7 +185,7 @@ async def write_certification(
             db=db, object=certification_internal, schema_to_select=CertificationReadInternal, return_as_model=True
         )
     except IntegrityError as e:
-        await _refuse_a_vanished_reference(db, e)
+        await refuse_vanished_reference(db, e, _FK_CONSTRAINT_MESSAGES)
     await invalidate_certification_caches(current_user["id"])
 
     return _to_public_certification(
@@ -431,7 +413,7 @@ async def patch_certification(
         try:
             await crud_certifications.update(db=db, object=update_data, uuid=uuid)
         except IntegrityError as e:
-            await _refuse_a_vanished_reference(db, e)
+            await refuse_vanished_reference(db, e, _FK_CONSTRAINT_MESSAGES)
         await invalidate_certification_caches(db_certification.user_id)
 
     return {"message": "Certification updated"}

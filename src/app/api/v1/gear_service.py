@@ -11,7 +11,7 @@ DECISIONS.md for why putting the check inside a cached function is a vulnerabili
 """
 
 import uuid as uuid_pkg
-from typing import Annotated, Any, NoReturn, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
+from ...api.integrity import refuse_vanished_reference
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
@@ -109,14 +110,9 @@ def _to_public_record(
     )
 
 
-async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> NoReturn:
-    """Turn a contact deleted between the resolve and the write into the 422 a foreign or
-    missing uuid gets. Rolls back first, as `certifications.py` does; re-raises anything
-    else untouched."""
-    await db.rollback()
-    if "gear_service_record_contact_id_fkey" in str(exc.orig):
-        raise UnprocessableEntityException(CONTACT_NOT_FOUND) from exc
-    raise exc
+# A contact deleted between the resolve and the write - the one reference a record write sets
+# that a concurrent delete can take away.
+_CONTACT_FK_MESSAGES = {"gear_service_record_contact_id_fkey": CONTACT_NOT_FOUND}
 
 
 # An id no row has, so a filter naming something unknown or someone else's narrows the list to
@@ -462,7 +458,7 @@ async def write_gear_service_record(
             db=db, object=record_internal, schema_to_select=GearServiceRecordReadInternal, return_as_model=True
         )
     except IntegrityError as e:
-        await _refuse_a_vanished_contact(db, e)
+        await refuse_vanished_reference(db, e, _CONTACT_FK_MESSAGES)
     if schedule is not None:
         # Moves the due date onto this service and clears the notify state, so the
         # reminder re-arms for the next cycle.
@@ -702,7 +698,7 @@ async def patch_gear_service_record(
     try:
         await crud_gear_service_records.update(db=db, object=update_data, uuid=uuid)
     except IntegrityError as e:
-        await _refuse_a_vanished_contact(db, e)
+        await refuse_vanished_reference(db, e, _CONTACT_FK_MESSAGES)
     if record.gear_service_schedule_id is not None:
         await recalculate_service_schedule(db=db, schedule_id=record.gear_service_schedule_id)
     await invalidate_gear_caches(record.user_id)

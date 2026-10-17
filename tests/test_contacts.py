@@ -351,7 +351,7 @@ class TestTheCourseWrite:
             request=MagicMock(),
             course=CourseCreate.model_validate({"name": "Advanced Nitrox", **body}),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
     async def _patch(self, body: dict[str, Any]) -> None:
@@ -360,7 +360,7 @@ class TestTheCourseWrite:
             uuid=uuid7(),
             values=CourseUpdateRequest.model_validate(body),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
     @pytest.mark.asyncio

@@ -6,6 +6,7 @@ from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.integrity import write_or_422
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
@@ -32,6 +33,10 @@ from ...schemas.gear_set import (
 from ...services.cache_invalidation import invalidate_gear_caches
 
 router = APIRouter(tags=["gear"])
+
+# Also what a member deleted between its resolve and the insert gets: from the caller's side
+# the two are the same thing.
+_GEAR_ITEM_NOT_FOUND = "Gear item not found."
 
 
 async def _get_owned_gear_set(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> GearSetReadInternal:
@@ -73,7 +78,7 @@ async def _resolve_item_ids(db: AsyncSession, gear_item_uuids: list[uuid_pkg.UUI
     """
     id_by_uuid = await resolve_gear_item_ids_for_user(db=db, gear_item_uuids=gear_item_uuids, user_id=user_id)
     if id_by_uuid is None:
-        raise UnprocessableEntityException("Gear item not found.")
+        raise UnprocessableEntityException(_GEAR_ITEM_NOT_FOUND)
     return [id_by_uuid[u] for u in gear_item_uuids]
 
 
@@ -98,9 +103,14 @@ async def write_gear_set(
 
     gear_set_internal = GearSetCreateInternal(name=gear_set.name, weight=gear_set.weight, user_id=current_user["id"])
     created_gear_set = await crud_gear_sets.create(
-        db=db, object=gear_set_internal, schema_to_select=GearSetReadInternal, return_as_model=True
+        db=db, object=gear_set_internal, commit=False, schema_to_select=GearSetReadInternal, return_as_model=True
     )
-    await replace_gear_items_for_set(db=db, gear_set_id=created_gear_set.id, gear_item_ids=gear_item_ids)
+    await write_or_422(
+        db,
+        replace_gear_items_for_set(db=db, gear_set_id=created_gear_set.id, gear_item_ids=gear_item_ids, commit=False),
+        _GEAR_ITEM_NOT_FOUND,
+    )
+    await db.commit()
     await invalidate_gear_caches(current_user["id"])
 
     gear_items = await get_gear_items_for_set(db=db, gear_set_id=created_gear_set.id)
@@ -230,12 +240,17 @@ async def patch_gear_set(
 
     update_data = values.model_dump(exclude={"gear_item_uuids"}, exclude_unset=True)
     if update_data:
-        await crud_gear_sets.update(db=db, object=update_data, uuid=uuid)
+        await crud_gear_sets.update(db=db, object=update_data, uuid=uuid, commit=False)
 
     if gear_item_ids is not None:
-        await replace_gear_items_for_set(db=db, gear_set_id=db_gear_set.id, gear_item_ids=gear_item_ids)
+        await write_or_422(
+            db,
+            replace_gear_items_for_set(db=db, gear_set_id=db_gear_set.id, gear_item_ids=gear_item_ids, commit=False),
+            _GEAR_ITEM_NOT_FOUND,
+        )
 
     if update_data or gear_item_ids is not None:
+        await db.commit()
         await invalidate_gear_caches(db_gear_set.user_id)
 
     return {"message": "Gear set updated"}
