@@ -33,6 +33,7 @@ import uuid as uuid_pkg
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 from sqlalchemy import func, insert, select, update
@@ -75,7 +76,12 @@ from ...schemas.dive_mixture import DiveMixtureCreate
 from ...schemas.logbook_import import ImportMemberNotKept, ImportNote, ImportNoteCode
 from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice
 from ..certification_files import KEY_KIND as CERTIFICATION_KEY_KIND
-from ..certification_files import UnsupportedCardFileError, delete_files_for_certification, sniff_content_type
+from ..certification_files import (
+    UnsupportedCardFileError,
+    delete_files_for_certification,
+    sniff_content_type,
+    strip_card_image,
+)
 from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
 from ..dive_files import (
     TECH_SCALAR_FIELDS,
@@ -263,7 +269,10 @@ class _Writer:
 
         `sniff` is for card images, whose content type is read off the leading bytes exactly
         as `store_certification_file` reads it - a document is no more trustworthy about a
-        media type than an uploader is, and that value ends up in a response header.
+        media type than an uploader is, and that value ends up in a response header. They are
+        stripped of their metadata as an upload is, so an export made before uploads were
+        stripped does not bring a card's location back; what is stored, and keyed, is the
+        stripped image under its own digest.
         """
         data = self._loaded.read_member(planned.archive_path)
         if data is None:
@@ -279,12 +288,20 @@ class _Writer:
             return None
 
         content_type = planned.content_type
+        strip: Callable[[bytes], bytes] | None = None
         if sniff:
             try:
                 content_type = sniff_content_type(data)
             except UnsupportedCardFileError:
                 self._file_skipped(collection, record_uuid, "its bytes are not an image or a PDF")
                 return None
+            strip = partial(strip_card_image, content_type=content_type)
+            try:
+                data = await run_in_threadpool(strip, data)
+            except UnsupportedCardFileError:
+                self._file_skipped(collection, record_uuid, "its image is damaged")
+                return None
+            digest = hashlib.sha256(data).hexdigest()
 
         # Minted per write and never derived from the row, which is `blob_store.new_key`'s
         # whole rule: a retired key must never be mintable again, or a concurrent write's
@@ -292,7 +309,10 @@ class _Writer:
         # when it is written rather than held, so an import's files are not all in memory at
         # once.
         key, stored_byte_size = self._staged.stage(
-            kind=kind, sha256=digest, size=len(data), read=self._rereader(planned.archive_path, digest)
+            kind=kind,
+            sha256=digest,
+            size=len(data),
+            read=self._rereader(planned.archive_path, planned.sha256, strip=strip, digest=digest),
         )
         return _StoredBlob(
             storage_key=key,
@@ -302,16 +322,22 @@ class _Writer:
             content_type=content_type,
         )
 
-    def _rereader(self, path: str, digest: str) -> Callable[[], bytes]:
+    def _rereader(
+        self, path: str, manifest: str, *, strip: Callable[[bytes], bytes] | None, digest: str
+    ) -> Callable[[], bytes]:
         """How a staged file's bytes are read again when it is written: checked against the
+        manifest's digest, stripped again where they were stripped, and checked against the
         digest they were staged under, since a key names its bytes' digest and a row claims
         the bytes exist."""
 
         def read() -> bytes:
             data = self._loaded.read_member(path)
-            if data is None or hashlib.sha256(data).hexdigest() != digest:
-                raise RuntimeError(f"A file staged for storage under {digest} could not be read back")
-            return data
+            if data is not None and hashlib.sha256(data).hexdigest() == manifest:
+                if strip is not None:
+                    data = strip(data)
+                if hashlib.sha256(data).hexdigest() == digest:
+                    return data
+            raise RuntimeError(f"A file staged for storage under {digest} could not be read back")
 
         return read
 

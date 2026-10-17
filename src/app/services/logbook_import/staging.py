@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from ...models.dive_file import DiveFile
 from .. import blob_store
@@ -77,7 +78,12 @@ class StagedFiles:
         """What the held objects occupy once written, measured the way `blob_store.put` stores
         them - a compression per dive-computer file, so asked only where the ceiling does not
         fit."""
-        return sum([await blob_store.stored_size(held.kind, held.read()) for held in self._held.values()])
+        return sum(
+            [
+                await blob_store.stored_size(held.kind, await run_in_threadpool(held.read))
+                for held in self._held.values()
+            ]
+        )
 
     async def write(self, db: AsyncSession) -> None:
         """Write every held object, before the caller commits the rows that name them.
@@ -88,7 +94,8 @@ class StagedFiles:
         `sweep_orphaned_files.py`.
         """
         for key, held in self._held.items():
-            stored = await blob_store.put(key, held.read())
+            # Off the event loop: a read inflates an archive member and re-strips a card image.
+            stored = await blob_store.put(key, await run_in_threadpool(held.read))
             if blob_store.compresses(held.kind):
                 await db.execute(update(DiveFile).where(DiveFile.storage_key == key).values(stored_byte_size=stored))
         self._held.clear()
