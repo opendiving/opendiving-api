@@ -60,7 +60,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             return None
         return {value: index + 100 for index, value in enumerate(species_uuids)}
 
-    async def _record_sightings(*, db: Any, dive_id: int, sightings: list[StoredSighting]) -> None:
+    async def _record_sightings(*, db: Any, dive_id: int, sightings: list[StoredSighting], commit: bool) -> None:
         seen["sightings"] = sightings
 
     db_dive = MagicMock()
@@ -72,7 +72,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     db_dive.avg_depth = None
     db_dive.max_depth = None
 
-    async def fake_update(*, db: Any, object: dict, uuid: uuid_pkg.UUID) -> None:
+    async def fake_update(*, db: Any, object: dict, uuid: uuid_pkg.UUID, commit: bool) -> None:
         seen["update_data"] = object
 
     monkeypatch.setattr(dives_module, "_get_owned_dive", AsyncMock(return_value=db_dive))
@@ -99,7 +99,7 @@ async def _patch(values: DiveUpdateRequest) -> None:
         uuid=uuid7(),
         values=values,
         current_user={"id": 1, "uuid": uuid7()},
-        db=MagicMock(),
+        db=MagicMock(flush=AsyncMock(), commit=AsyncMock()),
     )
 
 

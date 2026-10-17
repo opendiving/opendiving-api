@@ -274,7 +274,7 @@ class TestAnUpdateMayPreserveButNotRemove:
         db_dive.utc_offset_minutes = 120
         db_dive.start_date_only = False
 
-        async def fake_update(*, db: object, object: dict, uuid: uuid_pkg.UUID) -> None:
+        async def fake_update(*, db: object, object: dict, uuid: uuid_pkg.UUID, commit: bool) -> None:
             seen["update_data"] = object
 
         monkeypatch.setattr(dives_module, "_get_owned_dive", AsyncMock(return_value=db_dive))
@@ -296,7 +296,7 @@ class TestAnUpdateMayPreserveButNotRemove:
             uuid=uuid_pkg.UUID(str(uuid7())),
             values=DiveUpdateRequest.model_validate({"start_time": start_time}),
             current_user={"id": 1, "uuid": uuid7()},
-            db=MagicMock(),
+            db=MagicMock(flush=AsyncMock(), commit=AsyncMock()),
         )
 
     @pytest.mark.asyncio
@@ -368,7 +368,7 @@ class TestAnUpdateMayPreserveButNotRemove:
             uuid=uuid_pkg.UUID(str(uuid7())),
             values=DiveUpdateRequest.model_validate({"notes": "Thresher on the second pass"}),
             current_user={"id": 1, "uuid": uuid7()},
-            db=MagicMock(),
+            db=MagicMock(flush=AsyncMock(), commit=AsyncMock()),
         )
 
         assert "utc_offset_minutes" not in captured["update_data"]
