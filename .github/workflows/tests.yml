@@ -170,7 +170,9 @@ jobs:
   # exists because logbook import now imports `divejson` on the request path.
   #
   # `python -c` rather than a health check against a running container: the route module is
-  # what has the import graph, and importing it needs neither Postgres nor Redis.
+  # what has the import graph, and importing it needs neither Postgres nor Redis. The worker and
+  # the operator scripts run out of the same image, so they are imported too - every script,
+  # found by walking the package rather than listed, so a new one is covered without an edit.
   runtime-imports:
     runs-on: ubuntu-latest
 
@@ -189,4 +191,18 @@ jobs:
             -e SECRET_KEY=test-secret-key-for-testing-only \
             opendiving-api:runtime-check \
             python -c "import app.api.v1.logbook_import, app.api.v1.dives, app.main"
+
+      - name: The worker and the scripts import out of the runtime image
+        run: |
+          docker run --rm \
+            -e ENVIRONMENT=local \
+            -e SECRET_KEY=test-secret-key-for-testing-only \
+            opendiving-api:runtime-check \
+            python -c "
+          import importlib, pkgutil
+          import app.core.worker.settings
+          import src.scripts
+          for script in pkgutil.iter_modules(src.scripts.__path__):
+              importlib.import_module(f'src.scripts.{script.name}')
+          "
 

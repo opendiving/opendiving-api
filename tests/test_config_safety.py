@@ -224,8 +224,9 @@ class TestGoogleSignInNeedsBothHalvesOfItsClient:
 
     @pytest.mark.parametrize("secret", ["", "   "])
     def test_a_blank_secret_is_not_a_secret(self, secret: str):
-        """`SecretStr("")` is truthy - it defines no `__bool__` - so a plain falsiness check
-        would let an empty variable through and fail at the first sign-in instead.
+        """`SecretStr("")` is falsy - it defines `__len__` - and the `if settings.X` checks
+        on optional secrets rely on that, but `SecretStr("   ")` is not, so a falsiness check
+        alone would let a blank variable through and fail at the first sign-in instead.
         """
         with pytest.raises(ValueError, match="GOOGLE_CLIENT_SECRET"):
             _settings(GOOGLE_CLIENT_ID="an-id.apps.googleusercontent.com", GOOGLE_CLIENT_SECRET=secret)
@@ -404,9 +405,24 @@ class TestTheTemplateListsEverySetting:
     one they discover only by reading the source."""
 
     @staticmethod
-    def _listed() -> set[str]:
-        template = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text()
-        return set(re.findall(r"^#?\s*([A-Z][A-Z0-9_]*)=", template, re.MULTILINE))
+    def _assigned(template: str) -> set[str]:
+        """The names on assignment lines, commented out or not: a name, `=`, and one value
+        ending the line. Prose that happens to start with `NAME=value` lists nothing."""
+        return set(re.findall(r'^#?\s*([A-Z][A-Z0-9_]*)=(?:"[^"]*"|\S*)\s*$', template, re.MULTILINE))
+
+    @classmethod
+    def _listed(cls) -> set[str]:
+        return cls._assigned((Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text())
+
+    def test_a_comment_mentioning_a_setting_does_not_list_it(self):
+        template = (
+            'APP_NAME="OpenDiving"\n'
+            "# MIGRATE_ON_START=true\n"
+            "# FILE_STORAGE_BACKEND=s3 - startup refuses and names whichever is missing\n"
+            '# ENVIRONMENT="production" with CRUD_ADMIN_ENABLED=true, startup fails\n'
+        )
+
+        assert self._assigned(template) == {"APP_NAME", "MIGRATE_ON_START"}
 
     def test_every_setting_is_listed(self):
         listed = self._listed()

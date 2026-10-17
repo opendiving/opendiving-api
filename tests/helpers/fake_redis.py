@@ -5,7 +5,12 @@ cache (`get`/`set` with `ex`), the rate limiter (`incr`/`expire`/`ttl`), the map
 claim (`set` with `nx`/`px`) and the passkey challenge store (`getdel`). It serves back what
 was written and sweeps by pattern the way the real one does, so a read after a write is stale
 unless something actually dropped the key. Expiries are recorded, never enforced: nothing
-here needs a clock.
+here needs a clock. `writes` lists every key `set` stored, in order, so a test can tell one
+write from two of the same key.
+
+Where the real client refuses, so does this: `set` takes what `redis-py`'s encoder takes and
+raises its `DataError` for the rest - `None`, a `bool`, a `dict` - and a `set` without an
+expiry clears the one the key had, as `SET` does without `KEEPTTL`.
 
 `failing=True` turns every call into `redis-py`'s `ConnectionError`, which is how the "a cache
 outage is a miss, not an error" branches get exercised. `redis-py` connects lazily, so a real
@@ -14,13 +19,27 @@ outage arrives as a `RedisError` from an ordinary-looking client, not as a missi
 
 from fnmatch import fnmatchcase
 
-from redis.exceptions import ConnectionError
+from redis.exceptions import ConnectionError, DataError
+
+
+def _encode(value: object) -> bytes:
+    """What `redis-py`'s `Encoder.encode` stores for `value`, or its `DataError`."""
+    if isinstance(value, bytes | memoryview):
+        return bytes(value)
+    if isinstance(value, str):
+        return value.encode()
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value).encode()
+    if isinstance(value, float):
+        return repr(value).encode()
+    raise DataError(f"Invalid input of type: '{type(value).__name__}'. Convert to a bytes, string, int or float first.")
 
 
 class FakeRedis:
     def __init__(self, *, failing: bool = False) -> None:
         self.store: dict[str, bytes] = {}
         self.expiries: dict[str, int] = {}
+        self.writes: list[str] = []
         self.failing = failing
 
     def _fail_if_down(self) -> None:
@@ -35,13 +54,17 @@ class FakeRedis:
         self, key: str, value: object, ex: int | None = None, px: int | None = None, nx: bool = False
     ) -> bool | None:
         self._fail_if_down()
+        encoded = _encode(value)
         if nx and key in self.store:
             return None
-        self.store[key] = value if isinstance(value, bytes) else str(value).encode()
+        self.store[key] = encoded
+        self.writes.append(key)
         if ex is not None:
             self.expiries[key] = ex
         elif px is not None:
             self.expiries[key] = px // 1000
+        else:
+            self.expiries.pop(key, None)
         return True
 
     async def getdel(self, key: str) -> bytes | None:

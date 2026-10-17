@@ -612,7 +612,7 @@ class TestReadPath:
                 **_NO_FILTERS,
             )
 
-        (key,) = redis.store
+        (key,) = redis.writes
         assert key == namespaced(
             f"user_{USER_ID}_courses:page_2:items_per_page:10:search:nitrox"
             f":date_from:None:date_to:None:agency:None:status:None:{USER_ID}"
@@ -648,7 +648,7 @@ class TestReadPath:
                     **{**_NO_FILTERS, **filters},
                 )
 
-        assert len(redis.store) == len(varied)
+        assert len(redis.writes) == len(set(redis.writes)) == len(varied)
         # And still swept by the one wildcard, the filters sitting after the prefix it matches.
         assert all(fnmatch(key, across_builds(f"user_{USER_ID}_course*")) for key in redis.store)
 
@@ -707,7 +707,7 @@ class TestReadPath:
                 _get_request(), user_id=USER_ID, uuid=course.uuid, owner_uuid=USER_UUID, db=MagicMock()
             )
 
-        (key,) = redis.store
+        (key,) = redis.writes
         assert key == namespaced(f"user_{USER_ID}_course:{course.uuid}")
         assert fnmatch(key, across_builds(f"user_{USER_ID}_course*"))
 
