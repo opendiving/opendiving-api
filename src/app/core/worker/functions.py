@@ -15,20 +15,18 @@ from ...crud.crud_user_sessions import swept_session_predicate
 from ...models.auth_audit_event import AuthAuditEvent
 from ...models.authentication_request import AuthenticationRequest
 from ...models.certification import Certification
-from ...models.certification_file import CertificationFile
 from ...models.checkin_details import CheckinInsurancePolicy
 from ...models.checkin_link import CheckinLink
 from ...models.dive import Dive
-from ...models.dive_file import DiveFile
 from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.invitation import Invitation
 from ...models.invite_request import InviteRequest
 from ...models.user import User
-from ...models.user_picture import UserPicture
 from ...models.user_session import UserSession
 from ...schemas.gear_service import ServiceStatus
 from ...services import blob_store, map_tiles
+from ...services.blob_keys import BLOB_KEY_COLUMNS
 from ...services.checkin_links import swept_checkin_link_predicate
 from ...services.email_service import (
     send_gear_service_digest_email,
@@ -427,51 +425,29 @@ ACCOUNT_PURGE_BATCH_SIZE = 100
 
 
 async def _collect_stored_file_keys(db: AsyncSession, user_id: int) -> list[str]:
-    """Every blob key the account owns, read *before* anything is deleted.
+    """Every blob key the account owns, read *before* anything is deleted: each column in
+    `BLOB_KEY_COLUMNS` that has an owner.
 
     This is the step the cascade cannot do for us, and nothing warns you that it can't.
-    `DELETE FROM "user"` retires `dive_file` and `certification_file` rows **inside
-    Postgres**, through the FK cascades - SQLAlchemy never sees those rows, no service
-    function runs, and `blob_store.delete_after_commit` is therefore never called. The
-    purge would commit cleanly, report success, and leave every dive-computer export and
-    every c-card scan sitting on the volume. `src/scripts/sweep_orphaned_files.py` would
-    reclaim them, but it is a manual script nothing invokes - for a GDPR purge, "an
-    operator might run a script one day" is not an answer.
+    `DELETE FROM "user"` retires the rows holding those keys **inside Postgres**, through
+    the FK cascades - SQLAlchemy never sees those rows, no service function runs, and
+    `blob_store.delete_after_commit` is therefore never called. The purge would commit
+    cleanly, report success, and leave every dive-computer export, c-card scan and picture
+    sitting in the store. `src/scripts/sweep_orphaned_files.py` would reclaim them, but it
+    is a manual script nothing invokes - for a GDPR purge, "an operator might run a script
+    one day" is not an answer.
 
-    `certification_file` has no `user_id` of its own (it hangs off `certification`), which
-    is why the second query joins rather than filtering.
-
-    The two pictures are the third source, each row holding a rendition's key and usually
-    an original's. They are here for the same reason as the other two - a purge that leaves
-    the diver's face in the store is a privacy hole inside an erasure feature - and it is
-    why `DELETE /user` can leave them alone: that route only flags the row, and
-    `POST /auth/restore` inside the grace period should bring back a whole account rather
-    than a faceless one.
-
-    Map tiles are not here: drawn from the basemap alone and shared by every account, they
-    are nobody's, and taking them with one account would delete tiles others are shown.
+    The pictures are why `DELETE /user` can leave them alone: that route only flags the
+    row, and `POST /auth/restore` inside the grace period should bring back a whole account
+    rather than a faceless one.
     """
-    dive_file_keys = (await db.execute(select(DiveFile.storage_key).where(DiveFile.user_id == user_id))).scalars().all()
-    certification_file_keys = (
-        (
-            await db.execute(
-                select(CertificationFile.storage_key)
-                .join(Certification, Certification.id == CertificationFile.certification_id)
-                .where(Certification.user_id == user_id)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    picture_keys = (
-        await db.execute(
-            select(UserPicture.rendition_storage_key, UserPicture.original_storage_key).where(
-                UserPicture.user_id == user_id
-            )
-        )
-    ).all()
-    picture_file_keys = [key for row in picture_keys for key in row if key]
-    return [*dive_file_keys, *certification_file_keys, *picture_file_keys]
+    keys: list[str] = []
+    for entry in BLOB_KEY_COLUMNS:
+        if entry.owner is None:
+            continue
+        query = select(entry.column).where(entry.owner(user_id), entry.column.is_not(None))
+        keys.extend((await db.execute(query)).scalars())
+    return keys
 
 
 async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cutoff: datetime) -> bool:
