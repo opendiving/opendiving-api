@@ -2538,7 +2538,7 @@ uv run python -c "import ast; ast.parse(open('src/app/services/geocoding_service
 
 `src/app/core/security.py`, `services/dive_files.py` and `services/blob_store.py` carry the same
 form. The parentheses return when the clause binds — `except (A, B) as exc:` — so
-`services/blob_store.py` spells it both ways, and the `httpx` handler in `geocoding_service.py` is
+`services/blob_store.py` spells it both ways, and the `httpx` handler in `core/utils/outbound.py` is
 parenthesized for that reason alone. Unifying breaks whichever half is rewritten: parentheses added
 to the unbound form fail `ruff format --check`, removed from the bound form they are a `SyntaxError`
 ("multiple exception types must be parenthesized when using 'as'"). Check for an `as` before
@@ -3120,7 +3120,7 @@ Search asks `generator=search` with `prop=entityterms` (fifty candidates, terms 
 - Errors are HTTP 200 with a top-level `error` object.
 
 Wikimedia's anonymous throttle 429s `wbgetentities&props=claims` after roughly 28 heavy calls in 90
-s, below the app's own cap; a 429 logs as "request failed (HTTPStatusError)" and drops `ok`.
+s, below the app's own cap; a 429 logs as "A wikidata request answered 429." and drops `ok`.
 `_WIKIDATA_ENRICH_LIMIT` is the lever: lower it, or authenticate.
 
 ## The WoRMS search term goes in the URL *path*, so it must be percent-encoded
