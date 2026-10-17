@@ -111,7 +111,6 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
     current_user: dict[str, Any],
     schema: type[OwnedRowT],
     not_found_message: str,
-    include_deleted: bool = False,
 ) -> OwnedRowT:
     """Fetch a row by its public `uuid` and assert `current_user` owns it: 404 both when
     the row isn't there and when it belongs to someone else.
@@ -147,13 +146,12 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
     owner" and its absence beside a 404 in the access log means "absent" - the same
     distinction, without the volume. Raise the level to see both.
 
-    `include_deleted` exists for the routes that legitimately act on a soft-deleted row
-    (restoring a certification, say) - everything else wants the default. Both it and the
-    filter it controls apply only to the models that carry the column - of those routed
-    through here, `Dive` and `Certification`; the rest are hard-deleted. The check is on the
-    model rather than unconditional because FastCRUD's `get_model_column` raises
-    `ValueError` for a column the model lacks instead of ignoring it, so an unconditional
-    filter would turn every `GET`/`PATCH`/`DELETE` on the others into a 500.
+    A soft-deleted row reads as absent. The filter applies only to the models that carry the
+    column - of those routed through here, `Dive` and `Certification`; the rest are
+    hard-deleted. The check is on the model rather than unconditional because FastCRUD's
+    `get_model_column` raises `ValueError` for a column the model lacks instead of ignoring
+    it, so an unconditional filter would turn every `GET`/`PATCH`/`DELETE` on the others
+    into a 500.
 
     Note the two intentional non-users: `api.v1.gear_service._owned_gear_item` and
     `api.v1.gear_sets._resolve_item_ids` answer 422 for both cases, because there the
@@ -162,7 +160,7 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
     resource.
     """
     filters: dict[str, Any] = {"uuid": uuid}
-    if not include_deleted and hasattr(crud.model, "is_deleted"):
+    if hasattr(crud.model, "is_deleted"):
         filters["is_deleted"] = False
 
     row = await crud.get(db=db, schema_to_select=schema, return_as_model=True, **filters)

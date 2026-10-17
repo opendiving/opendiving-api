@@ -30,7 +30,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Cookie, Depends, Request, Response
-from jose import JWTError
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1168,36 +1167,32 @@ async def logout(
     access token the way `_handle_revoked_refresh` already does. One indexed read, on a
     route nobody calls in a loop.
     """
-    try:
-        if not refresh_token:
-            raise UnauthorizedException("Refresh token not found")
+    if not refresh_token:
+        raise UnauthorizedException("Refresh token not found")
 
-        await blacklist_tokens(access_token=access_token, refresh_token=refresh_token, db=db)
+    await blacklist_tokens(access_token=access_token, refresh_token=refresh_token, db=db)
 
-        session_uuid = token_session_id(access_token)
-        if session_uuid is not None:
-            await revoke_session(db, session_uuid=session_uuid)
+    session_uuid = token_session_id(access_token)
+    if session_uuid is not None:
+        await revoke_session(db, session_uuid=session_uuid)
 
-        subject = token_subject(access_token)
-        user_id: int | None = None
-        if subject is not None:
-            try:
-                user = await crud_users.get(db=db, uuid=uuid_pkg.UUID(subject))
-            except ValueError:
-                user = None
-            if user is not None:
-                user_id = cast(dict[str, Any], user)["id"]
+    subject = token_subject(access_token)
+    user_id: int | None = None
+    if subject is not None:
+        try:
+            user = await crud_users.get(db=db, uuid=uuid_pkg.UUID(subject))
+        except ValueError:
+            user = None
+        if user is not None:
+            user_id = cast(dict[str, Any], user)["id"]
 
-        # Commits the revoke above with it - `record_auth_event` commits by default and
-        # the revoke deliberately does not, so signing out and recording that you did are
-        # one transaction.
-        await record_auth_event(
-            db, event_type=AuthEventType.LOGOUT, context=RequestContext.from_request(request), user_id=user_id
-        )
+    # Commits the revoke above with it - `record_auth_event` commits by default and
+    # the revoke deliberately does not, so signing out and recording that you did are
+    # one transaction.
+    await record_auth_event(
+        db, event_type=AuthEventType.LOGOUT, context=RequestContext.from_request(request), user_id=user_id
+    )
 
-        response.delete_cookie(key="refresh_token")
+    response.delete_cookie(key="refresh_token")
 
-        return {"message": "Logged out successfully"}
-
-    except JWTError:
-        raise UnauthorizedException("Invalid token.")
+    return {"message": "Logged out successfully"}

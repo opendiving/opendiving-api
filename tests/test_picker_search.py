@@ -218,7 +218,7 @@ class TestListCacheKeys:
     def test_the_key_stays_under_the_users_invalidation_wildcard(
         self, resource: OwnedResourceCache, expected_prefix: str
     ) -> None:
-        # `invalidate_list` purges `user_{id}_{resource}:*`, so the search segment has to
+        # Invalidation purges `user_{id}_{resource}:*`, so the search segment has to
         # sit after that prefix - otherwise a rename would leave stale results cached.
         assert resource.list_cache_key_prefix.startswith(expected_prefix)
 

@@ -106,7 +106,6 @@ class ExportRecordingRow:
     """
 
     id: int
-    uuid: uuid_pkg.UUID
     ordinal: int
     device: dict[str, Any]
     # The recording's own settings, keyed by **member** name the way `device` is, with the
@@ -615,7 +614,6 @@ async def _recordings_by_dive(db: AsyncSession, dive_ids: list[int]) -> dict[int
         by_dive.setdefault(row.dive_id, []).append(
             ExportRecordingRow(
                 id=row.id,
-                uuid=row.uuid,
                 ordinal=row.ordinal,
                 device={
                     member: getattr(row, column)

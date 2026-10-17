@@ -970,9 +970,6 @@ class AccountDeletionSettings(BaseSettings):
     ACCOUNT_DELETION_RATE_LIMIT_PER_USER: int = config("ACCOUNT_DELETION_RATE_LIMIT_PER_USER", default=5)
 
 
-class TestSettings(BaseSettings): ...
-
-
 # One password for both Redis pools. The bundled `redis` container needs none and the
 # default is unset, but a managed Redis - or any server with `requirepass` - always wants
 # one, and the cache and the arq queue are the same server in every configuration this app
@@ -1116,7 +1113,6 @@ class Settings(
     PasskeySettings,
     GearServiceSettings,
     AccountDeletionSettings,
-    TestSettings,
     RedisCacheSettings,
     ClientSideCacheSettings,
     RedisQueueSettings,

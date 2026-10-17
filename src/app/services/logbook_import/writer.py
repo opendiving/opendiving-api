@@ -23,8 +23,8 @@ written at the end of this file's rows.
 recording derived from all its files through `rederive_recording`, so the recording an
 import creates or fills is the one the form would for the same files in the same order.
 
-The write order is `_RESOLUTION_ORDER`, so every reference resolves to a row that already
-exists.
+The write order is the planner's (`_Planner.plan`), so every reference resolves to a
+row that already exists.
 """
 
 import hashlib

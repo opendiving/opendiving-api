@@ -7,7 +7,7 @@ from fastcrud import compute_offset, paginated_response
 from sqlalchemy import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .cache import cache, delete_keys_by_pattern
+from .cache import cache
 from .search import search_clause, search_multi
 
 
@@ -106,7 +106,7 @@ class OwnedResourceCache[InternalT, PublicT]:
         *,
         resource_name: str,
         crud: Any,
-        to_public: Callable[[InternalT, uuid_pkg.UUID], PublicT],
+        to_public: Callable[[InternalT, uuid_pkg.UUID], PublicT] | None = None,
         sort_columns: str | None = None,
         sort_orders: str = "asc",
         search_columns: tuple[str, ...] = (),
@@ -120,9 +120,11 @@ class OwnedResourceCache[InternalT, PublicT]:
             patterns, e.g. "trips" -> `user_{user_id}_trips:*`.
         crud: FastCRUD
             The resource's FastCRUD instance (must support `get_multi`).
-        to_public: Callable[[InternalT, uuid.UUID], PublicT]
+        to_public: Callable[[InternalT, uuid.UUID], PublicT] | None
             Converts an internal row (as returned by `crud`) plus the owner's `user_uuid`
-            into the resource's public response shape.
+            into the resource's public response shape. Omitted, like `sort_columns`, by a
+            resource that keeps an instance for its key shape alone; `read_list` then
+            raises.
         sort_columns / sort_orders: str
             Passed through to `crud.get_multi` for the list endpoint. `sort_columns` may be
             omitted only by a resource that opts out of `read_list` entirely and keeps an
@@ -203,6 +205,8 @@ class OwnedResourceCache[InternalT, PublicT]:
                 sort_columns=self._required_sort_column,
                 sort_orders=self._sort_orders,
             )
+        if self._to_public is None:
+            raise RuntimeError(f"{self.resource_name} opted out of read_list and declared no to_public")
         data["data"] = [self._to_public(item, user_uuid).model_dump() for item in data["data"]]  # type: ignore[attr-defined]
 
         response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
@@ -237,7 +241,7 @@ class OwnedResourceCache[InternalT, PublicT]:
     def list_cache_pattern(resource_name: str, user_id: int) -> str:
         """The wildcard that sweeps one user's cached list pages for `resource_name`.
 
-        A `staticmethod` because there is a second caller that has no instance to ask:
+        A `staticmethod` because its caller has no instance to ask:
         `services/cache_invalidation.py` sweeps the dive-site and trip lists after a
         logbook import, and those two caches are module-private to their routers - a
         service importing a route module would invert the layering, and importing it
@@ -246,7 +250,3 @@ class OwnedResourceCache[InternalT, PublicT]:
         `tests/test_cache_utils.py` pins that they agree.
         """
         return f"user_{user_id}_{resource_name}:*"
-
-    async def invalidate_list(self, user_id: int) -> None:
-        """Invalidates every cached list page for the given user, e.g. after a create/patch/delete."""
-        await delete_keys_by_pattern(self.list_cache_pattern(self.resource_name, user_id))

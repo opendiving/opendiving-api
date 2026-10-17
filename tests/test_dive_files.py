@@ -92,14 +92,9 @@ def _existing(*, dive_id: int, content: bytes = VALID_SUUNTO_XML) -> _ExistingRo
         dive_id=dive_id,
         recording_id=1,
         uuid=row_uuid,
-        content_type="application/xml",
-        byte_size=len(content),
-        original_filename="export.xml",
-        parser_key="suunto_xml",
         # A real key for these bytes, so the `noop` branch's self-heal rewrites the file
         # the row actually names rather than an invented path.
         storage_key=new_key(DIVE_FILE_KIND, sha256=_digest(content)),
-        updated_at=None,
     )
 
 

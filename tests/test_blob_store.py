@@ -269,7 +269,7 @@ class TestEnsureStorageReady:
             try:
                 for _ in range(40):
                     blob_store.ensure_storage_ready()
-            except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised by the assert
+            except BaseException as exc:
                 errors.append(exc)
 
         threads = [threading.Thread(target=probe) for _ in range(8)]

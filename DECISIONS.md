@@ -4538,10 +4538,10 @@ app's privacy page owe the same statement.
 ## Species photos: The selection rule is a sequence, and it refuses rather than guesses
 
 P18 is multi-valued, an extra value can be a different animal, and rank rarely settles it.
-`services/species_photos.py` reads file titles in this order: drop `deprecated` statements and
-non-raster extensions; one candidate, use it; one `preferred`, use it; keep only titles containing
-the taxon name or its specific epithet; if any survive, prefer one beginning with the taxon name,
-else the first in statement order; none, no photo.
+`services/species_photos.py` reads file titles in this order, after `species_service` has dropped
+`deprecated` statements: drop non-raster extensions; one candidate, use it; one `preferred`, use it;
+keep only titles containing the taxon name or its specific epithet; if any survive, prefer one
+beginning with the taxon name, else the first in statement order; none, no photo.
 
 The survivors step is not optional: stopping at "exactly one survives" loses ties where both name
 the taxon, and choosing between those cannot pick a different animal. The match uses the P225 of the

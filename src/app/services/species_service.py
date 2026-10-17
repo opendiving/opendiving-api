@@ -968,7 +968,7 @@ def _wikidata_entity(qid: str, entity: Any) -> _WikidataEntity | None:
 
 
 def _image_candidates(claims: dict[str, Any]) -> tuple[species_photos.ImageCandidate, ...]:
-    """Every P18 value on an entity, paired with its statement rank.
+    """Every non-deprecated P18 value on an entity, paired with its statement rank.
 
     Untouched otherwise: no format filter and no choosing happens here, both of which are
     `services.species_photos`' job. This reads the claim, that decides what to do with it.

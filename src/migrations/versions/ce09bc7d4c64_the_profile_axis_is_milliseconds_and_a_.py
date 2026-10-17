@@ -85,7 +85,7 @@ COPY_READOUTS = f"""
      WHERE r.dive_id = d.id
        AND r.ordinal = 0
        AND ({_ANY_READOUT})
-"""  # noqa: S608 - the column names are the literals above
+"""
 
 DIVES_WITH_READOUTS_AND_NO_RECORDING = f"""
     SELECT d.id AS dive_id, d.user_id, d.start_time, d.utc_offset_minutes,
@@ -94,7 +94,7 @@ DIVES_WITH_READOUTS_AND_NO_RECORDING = f"""
      WHERE ({_ANY_READOUT})
        AND NOT EXISTS (SELECT 1 FROM dive_recording AS r WHERE r.dive_id = d.id)
      ORDER BY d.id
-"""  # noqa: S608 - the column names are the literals above
+"""
 
 INSERT_READOUT_RECORDING = f"""
     INSERT INTO dive_recording (
@@ -105,7 +105,7 @@ INSERT_READOUT_RECORDING = f"""
         :uuid, :created_at, :dive_id, :user_id, 0, :start_time, :utc_offset_minutes,
         {", ".join(f":{column}" for column in READOUT_COLUMNS)}
     )
-"""  # noqa: S608 - the column names are the literals above
+"""
 
 # Step 3, a named-literal repair and not a vocabulary sweep.
 MOVE_EN13319 = """
@@ -131,7 +131,7 @@ RESTORE_READOUTS = f"""
       FROM dive_recording AS r
      WHERE r.dive_id = d.id
        AND r.ordinal = 0
-"""  # noqa: S608 - the column names are the literals above
+"""
 RESTORE_EN13319 = """
     UPDATE dive AS d
        SET water_type = 'en13319'

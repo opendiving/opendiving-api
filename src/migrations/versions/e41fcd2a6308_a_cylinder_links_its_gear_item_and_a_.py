@@ -109,7 +109,7 @@ def _rewrite_hidden_sets(rewrite: Callable[[list[str]], list[str]], only_contain
     connection = op.get_bind()
     for table, column in _HIDDEN_SETS:
         rows = connection.execute(
-            sa.text(f'SELECT id, {column} FROM "{table}" WHERE {column}::jsonb ? :key'),  # noqa: S608 - literals above
+            sa.text(f'SELECT id, {column} FROM "{table}" WHERE {column}::jsonb ? :key'),
             {"key": only_containing},
         ).all()
         changed = []
@@ -120,7 +120,7 @@ def _rewrite_hidden_sets(rewrite: Callable[[list[str]], list[str]], only_contain
                 changed.append({"id": row_id, "hidden": json.dumps(new)})
         if changed:
             connection.execute(
-                sa.text(f'UPDATE "{table}" SET {column} = CAST(:hidden AS json) WHERE id = :id'),  # noqa: S608
+                sa.text(f'UPDATE "{table}" SET {column} = CAST(:hidden AS json) WHERE id = :id'),
                 changed,
             )
 
@@ -178,7 +178,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     if not context.is_offline_mode():
         _rewrite_hidden_sets(_without_gear_item, only_containing=_GEAR_ITEM)
-        op.get_bind().execute(sa.text(f"DELETE FROM gear_service_schedule WHERE NOT ({_TWO_ARMS})"))  # noqa: S608
+        op.get_bind().execute(sa.text(f"DELETE FROM gear_service_schedule WHERE NOT ({_TWO_ARMS})"))
 
     op.drop_constraint(_HAS_AN_INTERVAL, "gear_service_schedule", type_="check")
     op.create_check_constraint(_HAS_AN_INTERVAL, "gear_service_schedule", _TWO_ARMS)

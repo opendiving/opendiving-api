@@ -181,8 +181,8 @@ async def _public_trips(
     ]
 
 
-# Kept for its `list_cache_key_prefix` only - `read_list`, and so `to_public`, is never
-# called, and like `dive_sites.py`'s it declares no `sort_columns`, the list's ordering
+# Kept for its `list_cache_key_prefix` only - `read_list` is never called, so it declares
+# no `to_public`, and like `dive_sites.py`'s it declares no `sort_columns`, the list's ordering
 # being an aggregate over `trip_part` rather than a column of `trip`. A trip read
 # also embeds its parts and counts its dives, which are further queries zipped back into the
 # page (see the factory's docstring, which lists `dives.py` and the other opt-outs). The
@@ -195,9 +195,6 @@ async def _public_trips(
 _trip_cache: OwnedResourceCache[TripReadInternal, TripRead] = OwnedResourceCache(
     resource_name="trips",
     crud=crud_trips,
-    to_public=lambda db_trip, user_uuid: _to_public_trip(
-        db_trip, user_uuid=user_uuid, figures=NO_DIVES, parts=[], candidate_counts=[], contact_uuids=[]
-    ),
     search_columns=("name",),
 )
 

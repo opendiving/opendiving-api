@@ -189,7 +189,7 @@ class TestDiveFileWriteOrdering:
         500ing while the server refuses the very bytes that would fix it."""
         row_uuid = uuid7()
         key = blob_store.new_key(DIVE_KIND, sha256=XML_DIGEST)
-        existing = (1, 7, 1, row_uuid, "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
+        existing = (1, 7, 1, row_uuid, key)
 
         db = self._session(existing_row=existing)
         token, user_uuid = _token()
@@ -205,7 +205,7 @@ class TestDiveFileWriteOrdering:
         after this re-reads with a rollback - so the length is written back and committed
         straight away, or the row lags the object for good."""
         key = blob_store.new_key(DIVE_KIND, sha256=XML_DIGEST)
-        existing = (1, 7, 1, uuid7(), "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
+        existing = (1, 7, 1, uuid7(), key)
         db = self._session(existing_row=existing)
         token, user_uuid = _token()
 
@@ -224,7 +224,7 @@ class TestDiveFileWriteOrdering:
         key = blob_store.new_key(DIVE_KIND, sha256=XML_DIGEST)
         await blob_store.put(key, XML)
         (volume / key).write_bytes((volume / key).read_bytes()[:-4])
-        existing = (1, 7, 1, uuid7(), "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
+        existing = (1, 7, 1, uuid7(), key)
         db = self._session(existing_row=existing)
         token, user_uuid = _token()
 
@@ -242,7 +242,7 @@ class TestDiveFileWriteOrdering:
         await blob_store.put(key, XML)
         before = (volume / key).stat().st_mtime_ns
 
-        existing = (1, 7, 1, row_uuid, "application/xml", len(XML), "export.xml", "suunto_xml", key, None)
+        existing = (1, 7, 1, row_uuid, key)
         db = self._session(existing_row=existing)
         token, user_uuid = _token()
         await store_recording_file(

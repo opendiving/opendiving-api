@@ -149,12 +149,12 @@ class PhotoTooNarrowError(UnsupportedPhotoImageError):
 
 @dataclass(frozen=True, slots=True)
 class ImageCandidate:
-    """One P18 value on a Wikidata item: the Commons file title, and the statement's rank.
+    """One non-deprecated P18 value on a Wikidata item: the Commons file title, and the
+    statement's rank.
 
-    The rank is carried rather than resolved away because the selection rule needs it twice:
-    `deprecated` is Wikidata's own marker for a value known to be wrong - precisely the
-    wrong-animal case the rule exists to refuse - and `preferred` is its marker for the one to
-    use when several are true.
+    The rank is carried rather than resolved away because the selection rule asks for
+    `preferred`, Wikidata's marker for the one to use when several are true. `deprecated`
+    values never arrive: `species_service._ranked_claim_values` drops them for every reader.
     """
 
     file: str
@@ -216,18 +216,14 @@ class StoredSpeciesPhoto:
 def photograph_candidates(images: tuple[ImageCandidate, ...]) -> list[ImageCandidate]:
     """Step 1 of the selection rule: the P18 values that could be a photograph of the taxon.
 
-    Drops `deprecated` statements and anything that is not a raster image by file extension.
-    Kept separate from `choose_photo_file` because the caller has to tell two refusals apart:
-    an item with **no** candidates at all is what the synonym retry exists for, while an item
-    whose candidates could not be told apart is a deliberate no-photo that no retry may
-    overturn. Collapsing them would hand *Triaenodon obesus* a photo from a synonym's item
-    after this rule had just refused its own for naming a different shark.
+    Drops anything that is not a raster image by file extension. Kept separate from
+    `choose_photo_file` because the caller has to tell two refusals apart: an item with
+    **no** candidates at all is what the synonym retry exists for, while an item whose
+    candidates could not be told apart is a deliberate no-photo that no retry may overturn.
+    Collapsing them would hand *Triaenodon obesus* a photo from a synonym's item after this
+    rule had just refused its own for naming a different shark.
     """
-    return [
-        candidate
-        for candidate in images
-        if candidate.rank != "deprecated" and candidate.file.casefold().endswith(_PHOTOGRAPH_SUFFIXES)
-    ]
+    return [candidate for candidate in images if candidate.file.casefold().endswith(_PHOTOGRAPH_SUFFIXES)]
 
 
 def choose_photo_file(candidates: list[ImageCandidate], *, taxon_name: str | None) -> str | None:

@@ -138,7 +138,7 @@ def _validate_agency_pairing(agency: str, agency_other: str | None) -> None:
 
 
 async def _get_owned_certification(
-    db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict, *, include_deleted: bool = False
+    db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict
 ) -> CertificationReadInternal:
     """Fetch a certification by public uuid and assert the caller owns it.
 
@@ -153,7 +153,6 @@ async def _get_owned_certification(
         current_user=current_user,
         schema=CertificationReadInternal,
         not_found_message="Certification not found",
-        include_deleted=include_deleted,
     )
 
 

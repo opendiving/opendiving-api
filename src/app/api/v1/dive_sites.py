@@ -115,9 +115,6 @@ def _to_public_dive_site(
 _dive_site_cache: OwnedResourceCache[DiveSiteReadInternal, DiveSiteRead] = OwnedResourceCache(
     resource_name="dive_sites",
     crud=crud_dive_sites,
-    to_public=lambda db_dive_site, user_uuid: _to_public_dive_site(
-        db_dive_site, user_uuid=user_uuid, tags=[], summary=DiveSiteSummary()
-    ),
     search_columns=DIVE_SITE_SEARCH_COLUMNS,
 )
 

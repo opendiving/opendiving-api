@@ -190,7 +190,7 @@ def make_file_row(row_id: int, **overrides: Any) -> ExportFileRow:
     return ExportFileRow(id=row_id, info=DiveFileInfo(**defaults))
 
 
-def make_recording(row_id: int, uuid: uuid_pkg.UUID, **overrides: Any) -> ExportRecordingRow:
+def make_recording(row_id: int, **overrides: Any) -> ExportRecordingRow:
     """One recording, defaulted to the ordinary case: primary, device-less, no samples."""
     defaults: dict[str, Any] = {
         "ordinal": 0,
@@ -205,7 +205,7 @@ def make_recording(row_id: int, uuid: uuid_pkg.UUID, **overrides: Any) -> Export
         "has_profile": False,
     }
     defaults.update(overrides)
-    return ExportRecordingRow(id=row_id, uuid=uuid, **defaults)
+    return ExportRecordingRow(id=row_id, **defaults)
 
 
 def build_bundle(
@@ -682,14 +682,12 @@ def full_bundle() -> ExportBundle:
             1: [
                 make_recording(
                     2,
-                    UUIDS["recording-readouts"],
                     readouts={"cns_end": 8.0, "otu_end": 21.0, "surface_pressure_bar": 1.013},
                 )
             ],
             2: [
                 make_recording(
                     1,
-                    UUIDS["recording"],
                     device={"brand": "Suunto", "model": "Suunto Ocean", "serial": "253810000400"},
                     # The two settings that are the device's rather than the dive's, so the
                     # conformance test covers §6.4a's `mode` and the whole of §6.4c.

@@ -336,7 +336,7 @@ def _one_file_each(*names: str) -> dict[int, list[ExportRecordingRow]]:
     dive any more.
     """
     return {
-        index: [make_recording(index, UUIDS["recording"], files=[make_file_row(index, original_filename=name)])]
+        index: [make_recording(index, files=[make_file_row(index, original_filename=name)])]
         for index, name in enumerate(names, start=1)
     }
 

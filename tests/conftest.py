@@ -1,6 +1,6 @@
 import os
 import tempfile
-from collections.abc import AsyncGenerator, Callable, Generator
+from collections.abc import AsyncGenerator, Generator
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock
 
@@ -287,10 +287,6 @@ def other_diver(db: Session) -> User:
     return create_user(db)
 
 
-def override_dependency(dependency: Callable[..., Any], mocked_response: Any) -> None:
-    app.dependency_overrides[dependency] = lambda: mocked_response
-
-
 @pytest.fixture
 def mock_db():
     """Mock database session for unit tests."""
@@ -305,29 +301,6 @@ def mock_redis():
     mock_redis.set = AsyncMock(return_value=True)
     mock_redis.delete = AsyncMock(return_value=True)
     return mock_redis
-
-
-@pytest.fixture
-def sample_user_data():
-    """Generate sample user data for tests."""
-    return {
-        "name": fake.name(),
-        "username": unique_username(),
-        "email": unique_email(),
-    }
-
-
-@pytest.fixture
-def sample_user_read():
-    """Generate a sample UserRead object (the public, uuid-keyed shape)."""
-    from src.app.schemas.user import UserRead
-
-    return UserRead(
-        uuid=uuid7(),
-        name=fake.name(),
-        username=unique_username(),
-        email=unique_email(),
-    )
 
 
 @pytest.fixture

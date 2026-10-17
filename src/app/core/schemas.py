@@ -90,12 +90,6 @@ def validate_date_range(start_date: date | None, end_date: date | None) -> None:
         raise ValueError(DATE_RANGE_MESSAGE)
 
 
-class HealthCheck(BaseModel):
-    name: str
-    version: str
-    description: str
-
-
 # -------------- mixins --------------
 class PublicUUIDSchema(BaseModel):
     """Adds the opaque, uuid7-based `uuid` field exposed as a resource's public
@@ -141,11 +135,6 @@ class RejectsExplicitNulls(BaseModel):
 
 
 # -------------- token --------------
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-
 class TokenData(BaseModel):
     """Decoded subject of an access/refresh token.
 

@@ -72,18 +72,18 @@ def _rewrite(connection: sa.Connection, columns: tuple[str, str], rescale: Calla
     ids = list(
         connection.execute(
             sa.text(
-                f"SELECT id FROM dive_profile WHERE data ? 'temperature' OR {low} IS NOT NULL OR {high} IS NOT NULL "  # noqa: S608 - the column names are the literals above
+                f"SELECT id FROM dive_profile WHERE data ? 'temperature' OR {low} IS NOT NULL OR {high} IS NOT NULL "
                 "ORDER BY id"
             )
         ).scalars()
     )
     select = (
-        sa.text(f"SELECT id, data, {low} AS low, {high} AS high FROM dive_profile WHERE id IN :ids")  # noqa: S608
+        sa.text(f"SELECT id, data, {low} AS low, {high} AS high FROM dive_profile WHERE id IN :ids")
         .bindparams(sa.bindparam("ids", expanding=True))
         .columns(id=sa.Integer, data=JSONB, low=sa.Integer, high=sa.Integer)
     )
     update = sa.text(
-        f"UPDATE dive_profile SET data = :data, {low} = :low, {high} = :high, updated_at = :now WHERE id = :id"  # noqa: S608
+        f"UPDATE dive_profile SET data = :data, {low} = :low, {high} = :high, updated_at = :now WHERE id = :id"
     ).bindparams(sa.bindparam("data", type_=JSONB))
     now = datetime.now(UTC)
     for start in range(0, len(ids), _BATCH):
