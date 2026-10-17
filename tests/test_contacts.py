@@ -205,7 +205,7 @@ class TestTheRoutes:
                 request=MagicMock(),
                 contact=ContactCreate.model_validate({"name": "blue ocean"}),
                 current_user=_current_user(),
-                db=MagicMock(),
+                db=AsyncMock(),
             )
 
         route_collaborators["create"].assert_not_awaited()
@@ -218,7 +218,7 @@ class TestTheRoutes:
                 {"name": "Blue Ocean", "roles": ["school"], "address": {"city": "Dahab", "country": "Egypt"}}
             ),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
         stored = route_collaborators["create"].await_args.kwargs["object"]
@@ -233,7 +233,7 @@ class TestTheRoutes:
             uuid=uuid7(),
             values=ContactUpdateRequest.model_validate({"address": {"country": "Egypt"}}),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
         written = route_collaborators["update"].await_args.kwargs["object"]
@@ -253,7 +253,7 @@ class TestTheRoutes:
             uuid=uuid7(),
             values=ContactUpdateRequest.model_validate({"name": "Blue Ocean Dahab"}),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
         route_collaborators["invalidate_contact_caches"].assert_awaited_once_with(USER_ID)
@@ -276,7 +276,7 @@ class TestTheRoutes:
                 uuid=uuid7(),
                 values=ContactUpdateRequest.model_validate({"name": "Gear Hub"}),
                 current_user=_current_user(),
-                db=MagicMock(),
+                db=AsyncMock(),
             )
 
         assert route_collaborators["exists"].await_args.kwargs["exclude_id"] == 5
@@ -289,7 +289,7 @@ class TestTheRoutes:
             uuid=uuid7(),
             values=ContactUpdateRequest.model_validate({}),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
         route_collaborators["update"].assert_not_awaited()
@@ -351,7 +351,7 @@ class TestTheCourseWrite:
             request=MagicMock(),
             course=CourseCreate.model_validate({"name": "Advanced Nitrox", **body}),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
     async def _patch(self, body: dict[str, Any]) -> None:
@@ -360,7 +360,7 @@ class TestTheCourseWrite:
             uuid=uuid7(),
             values=CourseUpdateRequest.model_validate(body),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
     @pytest.mark.asyncio

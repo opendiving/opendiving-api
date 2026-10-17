@@ -1,14 +1,15 @@
-from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import NamedTuple
 
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from uuid6 import uuid7
 
-from ..crud.crud_dive_form_presets import crud_dive_form_presets, dive_form_preset_names_for_user
-from ..schemas.dive_form_preset import (
-    DiveFormField,
-    DiveFormPresetCreateInternal,
-    DiveFormPresetReadInternal,
-)
+from ..crud.crud_dive_form_presets import DIVE_FORM_PRESET_NAME_KEY
+from ..crud.unique_keys import unique_key_expressions
+from ..models.dive_form_preset import DiveFormPreset
+from ..schemas.dive_form_preset import DiveFormField, DiveFormPresetReadInternal
 
 
 class DefaultPreset(NamedTuple):
@@ -27,7 +28,7 @@ class DefaultPreset(NamedTuple):
 #
 # They are seeded as **ordinary rows**. Nothing downstream special-cases them - a diver
 # edits, renames or deletes any of the three exactly as they would one they saved
-# themselves, and the only thing that remembers these names is `missing_default_presets`
+# themselves, and the only thing that remembers these names is `seed_default_presets`
 # below, which adds back whichever is absent.
 #
 # Each set is written in `DiveFormField` declaration order, which is what
@@ -120,25 +121,19 @@ def is_built_in_preset_name(name: str) -> bool:
     return name.strip().lower() == BUILT_IN_PRESET_NAME.lower()
 
 
-def missing_default_presets(existing_names: Iterable[str]) -> list[DefaultPreset]:
-    """Which of the three defaults no current preset carries, compared case-insensitively.
-
-    **Add what is missing, never overwrite**, which is what makes restore idempotent and
-    safe to offer whenever the diver asks: a default they edited keeps the edit, and a
-    default they renamed stays under its new name with the original re-created beside it.
-    The comparison is on the name for the same reason the unique index is - it is the only
-    identity these rows have, and matching on a hidden set would resurrect nothing once the
-    diver changed one.
-    """
-    taken = {name.strip().lower() for name in existing_names}
-    return [preset for preset in DEFAULT_PRESETS if preset.name.lower() not in taken]
-
-
 async def seed_default_presets(
     db: AsyncSession, *, user_id: int, commit: bool = True
 ) -> list[DiveFormPresetReadInternal]:
     """Create whichever defaults this account is missing, and return them in the order
     `DEFAULT_PRESETS` declares.
+
+    **Add what is missing, never overwrite**, which is what makes restore idempotent and
+    safe to offer whenever the diver asks: a default they edited keeps the edit, and a
+    default they renamed stays under its new name with the original re-created beside it.
+    "Missing" is the unique name index's answer, not a fold in Python: every default is
+    inserted `ON CONFLICT DO NOTHING` on that index, so a name Postgres folds onto a stored
+    one is skipped however Python would have folded it, and a concurrent restore's rows are
+    simply there.
 
     One helper for both callers, so the account a diver registers today and the account
     they press "Restore default presets" on tomorrow get the same three things. Registration
@@ -146,23 +141,34 @@ async def seed_default_presets(
     the account and its three presets land together or neither does; the route calls it with
     the default and commits.
     """
-    missing = missing_default_presets(await dive_form_preset_names_for_user(db, user_id))
-
-    created: list[DiveFormPresetReadInternal] = []
-    for preset in missing:
-        created.append(
-            await crud_dive_form_presets.create(
-                db=db,
-                object=DiveFormPresetCreateInternal(
-                    user_id=user_id, name=preset.name, hidden_fields=list(preset.hidden_fields)
-                ),
-                commit=False,
-                schema_to_select=DiveFormPresetReadInternal,
-                return_as_model=True,
-            )
+    now = datetime.now(UTC)
+    inserted = await db.execute(
+        pg_insert(DiveFormPreset)
+        .values(
+            [
+                {
+                    "user_id": user_id,
+                    "name": preset.name,
+                    "hidden_fields": [field.value for field in preset.hidden_fields],
+                    "uuid": uuid7(),
+                    "created_at": now,
+                }
+                for preset in DEFAULT_PRESETS
+            ]
         )
+        .on_conflict_do_nothing(index_elements=unique_key_expressions(DiveFormPreset, DIVE_FORM_PRESET_NAME_KEY))
+        .returning(DiveFormPreset.id)
+    )
+    created_ids = list(inserted.scalars())
+    if not created_ids:
+        return []
 
-    if commit and created:
+    rows = await db.execute(select(DiveFormPreset).where(DiveFormPreset.id.in_(created_ids)))
+    position = {preset.name: i for i, preset in enumerate(DEFAULT_PRESETS)}
+    created = sorted(
+        (DiveFormPresetReadInternal.model_validate(row, from_attributes=True) for row in rows.scalars()),
+        key=lambda preset: position[preset.name],
+    )
+    if commit:
         await db.commit()
-
     return created

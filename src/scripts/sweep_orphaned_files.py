@@ -70,7 +70,8 @@ _SUSPICIOUS_MIN_FILES = 20
 
 @dataclass(frozen=True, slots=True)
 class SweepReport:
-    """What one sweep found. `deleted` is 0 on a dry run by construction."""
+    """What one sweep found. `deleted` and `failed` - orphans the store would not delete - are
+    0 on a dry run by construction."""
 
     referenced: int = 0
     on_disk: int = 0
@@ -78,6 +79,7 @@ class SweepReport:
     within_grace: int = 0
     stale_temp_files: int = 0
     deleted: int = 0
+    failed: int = 0
     refused: str | None = None
 
 
@@ -183,10 +185,16 @@ async def sweep(*, delete: bool = False, force: bool = False) -> SweepReport:
     refused = None if force else _refusal(referenced, orphans, on_disk)
     should_delete = delete and refused is None
 
-    deleted = 0
+    deleted = failed = 0
     for key in orphans if should_delete else []:
-        await blob_store.delete(key)
-        deleted += 1
+        # One key the store refuses is no reason to leave the rest, or the temp pass, undone.
+        try:
+            await blob_store.delete(key)
+        except OSError:
+            logger.warning("Could not delete orphan %s", key, exc_info=True)
+            failed += 1
+        else:
+            deleted += 1
 
     stale_temp_files = _sweep_temp_dir(now=now, delete=should_delete)
 
@@ -197,6 +205,7 @@ async def sweep(*, delete: bool = False, force: bool = False) -> SweepReport:
         within_grace=within_grace,
         stale_temp_files=stale_temp_files,
         deleted=deleted,
+        failed=failed,
         refused=refused if delete else None,
     )
 
@@ -223,7 +232,7 @@ async def main() -> None:
     report = await sweep(delete=args.delete, force=args.force)
 
     logger.info(
-        "Sweep %s: referenced=%d on_disk=%d orphaned=%d within_grace=%d stale_temp_files=%d deleted=%d",
+        "Sweep %s: referenced=%d on_disk=%d orphaned=%d within_grace=%d stale_temp_files=%d deleted=%d failed=%d",
         "complete" if args.delete and report.refused is None else "(report only)",
         report.referenced,
         report.on_disk,
@@ -231,6 +240,7 @@ async def main() -> None:
         report.within_grace,
         report.stale_temp_files,
         report.deleted,
+        report.failed,
     )
     if report.refused is not None:
         logger.error("Refusing to delete: %s Re-run with --force if you are certain.", report.refused)

@@ -109,6 +109,9 @@ async def get_schedules_for_gear_items(
     return schedules_by_item
 
 
+SCHEDULE_KIND_KEY = "ux_gear_service_schedule_item_kind_label"
+
+
 async def schedule_kind_exists(
     db: AsyncSession, gear_item_id: int, kind: str, label: str | None = None, exclude_id: int | None = None
 ) -> bool:
@@ -117,7 +120,7 @@ async def schedule_kind_exists(
     return await unique_key_taken(
         db,
         GearServiceSchedule,
-        "ux_gear_service_schedule_item_kind_label",
+        SCHEDULE_KIND_KEY,
         {"gear_item_id": gear_item_id, "kind": kind, "label": label},
         exclude_id=exclude_id,
     )

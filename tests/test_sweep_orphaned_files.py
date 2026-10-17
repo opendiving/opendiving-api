@@ -90,6 +90,28 @@ class TestReporting:
         assert (report.orphaned, report.within_grace, report.deleted) == (0, 1, 0)
         assert (volume / ORPHAN).is_file()
 
+    @pytest.mark.asyncio
+    async def test_one_key_the_store_refuses_does_not_end_the_run(self, volume: Path) -> None:
+        """Counted and stepped over: the other orphans and the temp pass still happen."""
+        other = "dive-files/cc/another-orphan"
+        for key in (REFERENCED, ORPHAN, other):
+            _write(volume, key, age_hours=48)
+        stale = _write(volume, f"{blob_store.TMP_DIRNAME}/.dead.part", age_hours=48)
+        real_delete = blob_store.delete
+
+        async def refuse_one(key: str) -> None:
+            if key == ORPHAN:
+                raise blob_store.BlobStoreError("AccessDenied")
+            await real_delete(key)
+
+        with _with_referenced({REFERENCED}), patch.object(sweeper.blob_store, "delete", refuse_one):
+            report = await sweeper.sweep(delete=True)
+
+        assert (report.deleted, report.failed, report.stale_temp_files) == (1, 1, 1)
+        assert (volume / ORPHAN).is_file()
+        assert not (volume / other).exists()
+        assert not stale.exists()
+
 
 class TestCompressedKeys:
     @pytest.mark.asyncio

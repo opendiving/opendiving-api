@@ -17,7 +17,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.app.core.schemas import NOTES_MAX_LENGTH
+from src.app.schemas.dive_mixture import DiveMixtureRead
 from src.app.schemas.dive_profile import ProfileEventType
+from src.app.services.dive_files import fold_tank_pressures
 from src.app.services.dive_merge import DiveFigures, dive_figures, merged_notes
 from src.app.services.dive_profiles import (
     NormalizedProfile,
@@ -368,3 +370,46 @@ class TestTheNotesTheOtherDiveLeavesBehind:
         merged = merged_notes("a" * NOTES_MAX_LENGTH, "b" * NOTES_MAX_LENGTH, dive_number=215)
 
         assert len(merged) == NOTES_MAX_LENGTH
+
+
+class TestAFoldedTanksPressures:
+    """One tank across a computer's restart: the dive starts on the earlier record's pressure
+    and ends on the later's, which a fill would leave at the restart."""
+
+    @staticmethod
+    def _tank(row_id: int, start: float | None, end: float | None, oxygen: float | None = 21.0) -> DiveMixtureRead:
+        return DiveMixtureRead(
+            id=row_id, gas_number=0, oxygen=oxygen, helium=0.0, start_pressure=start, end_pressure=end
+        )
+
+    def test_the_start_is_the_earlier_records_and_the_end_the_later_records(self) -> None:
+        pressures = fold_tank_pressures(
+            [self._tank(2, 120.0, 50.0)], [self._tank(1, 200.0, 120.0)], survivor_first=True
+        )
+
+        assert pressures == {1: {"start_pressure": 200.0, "end_pressure": 50.0}}
+
+    def test_a_surviving_record_that_came_second_takes_the_others_start(self) -> None:
+        pressures = fold_tank_pressures(
+            [self._tank(2, 200.0, 120.0)], [self._tank(1, 120.0, 50.0)], survivor_first=False
+        )
+
+        assert pressures == {1: {"start_pressure": 200.0, "end_pressure": 50.0}}
+
+    def test_a_later_record_with_no_end_keeps_the_earlier_ones(self) -> None:
+        assert (
+            fold_tank_pressures([self._tank(2, 120.0, None)], [self._tank(1, 200.0, 120.0)], survivor_first=True) == {}
+        )
+
+    def test_a_record_with_no_start_leaves_the_tank_to_the_fill(self) -> None:
+        """Pressures fill as a pair, and a start nobody recorded is no start to keep."""
+        assert (
+            fold_tank_pressures([self._tank(2, None, 50.0)], [self._tank(1, 200.0, 120.0)], survivor_first=True) == {}
+        )
+
+    def test_two_tanks_of_different_mixes_are_two_tanks(self) -> None:
+        pressures = fold_tank_pressures(
+            [self._tank(2, 200.0, 150.0, oxygen=50.0)], [self._tank(1, 200.0, 120.0)], survivor_first=True
+        )
+
+        assert pressures == {}

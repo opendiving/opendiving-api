@@ -241,6 +241,9 @@ async def resolve_dive_site_ids_for_user(
     return mapping
 
 
+DIVE_SITE_NAME_KEY = "ux_dive_site_user_id_name_location_lower"
+
+
 async def dive_site_name_exists(
     db: AsyncSession, user_id: int, name: str, location_name: str | None = None, exclude_id: int | None = None
 ) -> bool:
@@ -250,7 +253,7 @@ async def dive_site_name_exists(
     return await unique_key_taken(
         db,
         DiveSite,
-        "ux_dive_site_user_id_name_location_lower",
+        DIVE_SITE_NAME_KEY,
         {"user_id": user_id, "name": name, "location_name": location_name},
         exclude_id=exclude_id,
     )

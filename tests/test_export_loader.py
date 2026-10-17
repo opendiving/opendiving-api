@@ -28,6 +28,7 @@ from src.app.models.certification import Certification
 from src.app.models.course import Course
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
+from src.app.models.dive_file import DiveFile
 from src.app.models.dive_gear_item import DiveGearItem
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_person import DivePerson
@@ -43,7 +44,7 @@ from src.app.models.trip_part import TripPart
 from src.app.models.user import User
 from src.app.services.export.loader import ExportBundle, load_export_bundle
 from tests.conftest import db_available
-from tests.helpers.generators import create_person, create_tag, create_user
+from tests.helpers.generators import create_dive_recording, create_person, create_tag, create_user
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -491,3 +492,40 @@ class TestOrdering:
 
         bundle = await _load(owner.id)
         assert [trip.name for trip in bundle.trips] == ["Earlier", "Later", "Undated"]
+
+
+class TestRecordingFiles:
+    @pytest.mark.asyncio
+    async def test_each_file_carries_its_own_row_id_in_attach_order(self, db: Session, owner: User):
+        """The archive's path plan and the digest map join on the row id, so an id paired
+        with the wrong file's metadata exports one file under another's name."""
+        dive = _dive(db, owner, number=1)
+        recordings = [create_dive_recording(db, owner, dive, ordinal=ordinal) for ordinal in (0, 1)]
+        files = [
+            DiveFile(
+                user_id=owner.id,
+                recording_id=recording.id,
+                dive_id=dive.id,
+                sha256=digit * 64,
+                content_type="application/octet-stream",
+                byte_size=1,
+                stored_byte_size=1,
+                original_filename=f"{digit}.fit",
+                parser_key="fit",
+                storage_key=f"dive-files/{digit * 2}/{owner.uuid}_{digit * 64}",
+            )
+            for recording, digit in ((recordings[1], "a"), (recordings[0], "b"), (recordings[1], "c"))
+        ]
+        db.add_all(files)
+        db.commit()
+
+        loaded = (await _load(owner.id)).recordings_by_dive[dive.id]
+
+        by_id = {file.id: file for file in files}
+        assert [[file.info.original_filename for file in recording.files] for recording in loaded] == [
+            ["b.fit"],
+            ["a.fit", "c.fit"],
+        ]
+        for recording in loaded:
+            for file in recording.files:
+                assert by_id[file.id].uuid == file.info.uuid

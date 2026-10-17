@@ -166,7 +166,7 @@ class TestTheRoutes:
                 uuid=uuid7(),
                 values=TagUpdate.model_validate({"name": "Wreck"}),
                 current_user=_current_user(),
-                db=MagicMock(),
+                db=AsyncMock(),
             )
 
         assert route_collaborators["exists"].await_args.kwargs["exclude_id"] == 5
@@ -181,7 +181,7 @@ class TestTheRoutes:
             uuid=uuid7(),
             values=TagUpdate.model_validate({"name": "night dive"}),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
         assert route_collaborators["update"].await_args.kwargs["object"] == {"name": "night dive"}
@@ -195,7 +195,7 @@ class TestTheRoutes:
             uuid=uuid7(),
             values=TagUpdate.model_validate({}),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
         route_collaborators["update"].assert_not_awaited()
