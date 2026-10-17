@@ -5,6 +5,7 @@ takes effect - directly setting `email` via `PATCH /user` is no longer possible
 """
 
 import smtplib
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -281,6 +282,11 @@ class TestCheckEmailChangeLink:
 class TestVerifyEmailChange:
     """`POST /user/email-change/verify`."""
 
+    @pytest.fixture(autouse=True)
+    def address_taken(self) -> Iterator[AsyncMock]:
+        with patch("src.app.api.v1.users.account_exists_for", new_callable=AsyncMock, return_value=False) as taken:
+            yield taken
+
     @pytest.mark.asyncio
     async def test_invalid_token_raises_unauthorized(self, mock_db):
         with (
@@ -391,7 +397,6 @@ class TestVerifyEmailChange:
             mock_users.get = AsyncMock(
                 side_effect=[{"id": 7, "email": "old@example.com"}, {"id": 7, "email": "new@example.com"}]
             )
-            mock_users.exists = AsyncMock(return_value=False)
             mock_users.update = AsyncMock(return_value=None)
             stub_claim(mock_db, won=False)
 
@@ -424,7 +429,6 @@ class TestVerifyEmailChange:
             mock_users.get = AsyncMock(
                 side_effect=[{"id": 7, "email": "old@example.com"}, {"id": 7, "email": "newer@example.com"}]
             )
-            mock_users.exists = AsyncMock(return_value=False)
             mock_users.update = AsyncMock(return_value=None)
             stub_claim(mock_db, won=False)
 
@@ -454,7 +458,6 @@ class TestVerifyEmailChange:
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
             mock_users.get = AsyncMock(side_effect=[{"id": 7, "email": "old@example.com"}, None])
-            mock_users.exists = AsyncMock(return_value=False)
             mock_users.update = AsyncMock(return_value=None)
             stub_claim(mock_db, won=False)
 
@@ -504,7 +507,7 @@ class TestVerifyEmailChange:
                 await verify_email_change(_request(), EmailChangeVerifyRequest(token="good"), mock_db)
 
     @pytest.mark.asyncio
-    async def test_new_email_already_taken_raises_duplicate(self, mock_db):
+    async def test_new_email_already_taken_raises_duplicate(self, mock_db, address_taken):
         auth_request = {
             "id": 1,
             "email": "taken@example.com",
@@ -520,7 +523,7 @@ class TestVerifyEmailChange:
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
             mock_users.get = AsyncMock(return_value={"id": 7, "email": "old@example.com"})
-            mock_users.exists = AsyncMock(return_value=True)
+            address_taken.return_value = True
 
             with pytest.raises(DuplicateValueException):
                 await verify_email_change(_request(), EmailChangeVerifyRequest(token="good"), mock_db)
@@ -544,7 +547,6 @@ class TestVerifyEmailChange:
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
             mock_users.get = AsyncMock(return_value={"id": 7, "email": "old@example.com"})
-            mock_users.exists = AsyncMock(return_value=False)
             mock_users.update = AsyncMock(return_value=None)
             stub_claim(mock_db)
 
@@ -580,7 +582,6 @@ class TestVerifyEmailChange:
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
             mock_users.get = AsyncMock(return_value={"id": 7, "email": "old@example.com"})
-            mock_users.exists = AsyncMock(return_value=False)
             mock_users.update = AsyncMock(side_effect=IntegrityError("update", {}, Exception("duplicate key")))
             mock_db.rollback = AsyncMock(return_value=None)
             stub_claim(mock_db)
@@ -632,6 +633,34 @@ class TestVerifyEmailChangeAgainstPostgres:
         # open transaction.
         assert db.scalar(select(User.email).where(User.id == diver.id)) == new_email
         assert _used_at(db, request_row.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_an_address_held_in_other_capitals_is_taken(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        """A stored address may carry capitals - `POST /auth/complete` and the Google path
+        keep the spelling they were given - while a change request is lowercased. The
+        column's unique index compares them as different, so only the check can refuse."""
+        other_diver.email = unique_email().upper()
+        db.commit()
+        original = diver.email
+        raw_token = "e2e-case-" + uuid7().hex
+        db.add(
+            AuthenticationRequest(
+                email=other_diver.email.lower(),
+                token_hash=hash_token(raw_token),
+                expires_at=datetime.now(UTC) + timedelta(minutes=10),
+                purpose="email_change",
+                user_id=diver.id,
+            )
+        )
+        db.commit()
+
+        with patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock):
+            with pytest.raises(DuplicateValueException):
+                await verify_email_change(_request(), EmailChangeVerifyRequest(token=raw_token), async_db)
+
+        assert db.scalar(select(User.email).where(User.id == diver.id)) == original
 
     @pytest.mark.asyncio
     async def test_a_relay_that_fails_the_notice_does_not_fail_the_change(

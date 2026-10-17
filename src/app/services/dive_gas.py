@@ -539,7 +539,7 @@ async def gas_use_history(db: AsyncSession, user_id: int) -> list[DiveGasUsePoin
             Dive.avg_depth,
         )
         .where(Dive.user_id == user_id, Dive.is_deleted.is_(False))
-        .order_by(Dive.start_time)
+        .order_by(Dive.start_time, Dive.id)
     )
     dives = list(result)
 

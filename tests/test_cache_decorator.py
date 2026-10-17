@@ -59,7 +59,10 @@ class TestCacheDecoratorGet:
         mock_redis.set.assert_called_once()
         cache_key = mock_redis.set.call_args[0][0]
         assert cache_key == namespaced("item:1")
-        mock_redis.expire.assert_called_once_with(cache_key, 120)
+        # In the same command as the body: a separate EXPIRE that never arrives leaves an
+        # entry no deploy or TTL ever clears.
+        assert mock_redis.set.call_args.kwargs == {"ex": 120}
+        mock_redis.expire.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_uses_resource_id_name_when_given(self):

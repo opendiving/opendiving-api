@@ -441,8 +441,7 @@ def cache(
                 serializable_data = jsonable_encoder(result)
                 serialized_data = json.dumps(serializable_data)
 
-                await client.set(stored_key, serialized_data)
-                await client.expire(stored_key, expiration)
+                await client.set(stored_key, serialized_data, ex=expiration)
 
                 return cast(R, json.loads(serialized_data))
 
