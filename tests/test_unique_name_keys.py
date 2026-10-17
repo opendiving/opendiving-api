@@ -108,14 +108,15 @@ class TestTheName:
         assert response.json()["name"] == name
 
     @each_named
+    @pytest.mark.parametrize(("first", "second"), [("{} ", "{} "), ("{}", " {} "), (" {}", "{}")])
     @pytest.mark.asyncio
     async def test_surrounding_whitespace_does_not_make_it_another_name(
-        self, http: httpx.AsyncClient, db: Session, diver: User, named: Named
+        self, http: httpx.AsyncClient, db: Session, diver: User, named: Named, first: str, second: str
     ) -> None:
         name = _name()
-        assert (await http.post(named.create, json=named.body(db, diver, name))).status_code == 201
+        assert (await http.post(named.create, json=named.body(db, diver, first.format(name)))).status_code == 201
 
-        response = await http.post(named.create, json=named.body(db, diver, f"{name.upper()} "))
+        response = await http.post(named.create, json=named.body(db, diver, second.format(name.upper())))
 
         assert response.status_code == 422, response.text
 
@@ -125,7 +126,7 @@ class TestTheName:
         self, http: httpx.AsyncClient, db: Session, diver: User, named: Named
     ) -> None:
         taken = _name()
-        assert (await http.post(named.create, json=named.body(db, diver, taken))).status_code == 201
+        assert (await http.post(named.create, json=named.body(db, diver, f"{taken} "))).status_code == 201
         other = await http.post(named.create, json=named.body(db, diver, _name()))
 
         response = await http.patch(named.patch.format(other.json()["uuid"]), json={"name": f" {taken}  "})
