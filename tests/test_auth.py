@@ -48,6 +48,7 @@ from tests.helpers.images import jpeg_with_exif
 from tests.helpers.mocks import (
     GOOGLE_CODE_VERIFIER,
     claimed_used_at_sql,
+    email_lookups_on,
     fake_request,
     google_auth_body,
     stub_claim,
@@ -155,6 +156,8 @@ class TestRequestEmailLink:
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_crud,
             patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(mock_users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(mock_users)[1]),
             patch("src.app.api.v1.auth.refuse_uninvited", new_callable=AsyncMock) as gate,
             patch("src.app.api.v1.auth.accept_invitations", new_callable=AsyncMock) as accepted,
             patch("src.app.api.v1.auth.send_magic_link_email", new_callable=AsyncMock),
@@ -356,6 +359,8 @@ class TestCheckEmailLink:
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_crud,
             patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(mock_users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(mock_users)[1]),
         ):
             mock_crud.get = AsyncMock(return_value=auth_request)
             mock_users.get = AsyncMock(return_value=None)
@@ -522,6 +527,7 @@ class TestVerifyEmailLink:
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
             mock_users.get = AsyncMock(return_value=db_user)
@@ -559,6 +565,7 @@ class TestVerifyEmailLink:
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             mock_requests.get = AsyncMock(return_value=auth_request)
             mock_users.get = AsyncMock(return_value=None)
@@ -630,6 +637,7 @@ class TestVerifyEmailCode:
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             mock_requests.get = AsyncMock(return_value=_code_request())
             mock_users.get = AsyncMock(
@@ -776,6 +784,7 @@ class TestVerifyEmailCode:
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             mock_requests.get = AsyncMock(return_value=_code_request())
             mock_users.get = AsyncMock(
@@ -805,6 +814,7 @@ class TestVerifyEmailCode:
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             mock_requests.get = AsyncMock(return_value=_code_request())
             mock_users.get = AsyncMock(
@@ -847,6 +857,7 @@ class TestVerifyEmailCode:
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             mock_requests.get = AsyncMock(return_value=_code_request(email="new@example.com"))
             mock_users.get = AsyncMock(return_value=None)
@@ -1026,6 +1037,7 @@ class TestAuthWithGoogle:
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             exchange.return_value = "an-id-token"
             mock_verify.return_value = google_user
@@ -1053,6 +1065,7 @@ class TestAuthWithGoogle:
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             exchange.return_value = "an-id-token"
             mock_verify.return_value = google_user
@@ -1085,6 +1098,7 @@ class TestAuthWithGoogle:
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             exchange.return_value = "an-id-token"
             mock_verify.return_value = google_user
@@ -1114,6 +1128,7 @@ class TestAuthWithGoogle:
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             exchange.return_value = "an-id-token"
             mock_verify.return_value = google_user
@@ -1159,6 +1174,8 @@ class TestCompleteProfile:
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(mock_users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(mock_users)[1]),
         ):
             mock_verify.return_value = token_data
             mock_users.exists = AsyncMock(return_value=True)
@@ -1178,6 +1195,8 @@ class TestCompleteProfile:
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(mock_users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(mock_users)[1]),
         ):
             mock_verify.return_value = token_data
             mock_users.exists = AsyncMock(side_effect=[False, True])  # username free, email taken
@@ -1191,6 +1210,30 @@ class TestCompleteProfile:
                 )
 
     @pytest.mark.asyncio
+    async def test_the_email_check_is_asked_of_the_lowercased_address(self, mock_db):
+        """A Google claim arrives as Google spells it, and the unique index is on the raw
+        column - so a duplicate check on the raw address would let `Jane@Corp.com` sit
+        beside the `jane@corp.com` that signed up by email."""
+        token_data = OnboardingTokenData(email="Jane@Corp.com", provider="google", provider_user_id="g-1")
+
+        with (
+            patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock, return_value=token_data),
+            patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.account_exists_for", new_callable=AsyncMock, return_value=True) as exists,
+        ):
+            mock_users.exists = AsyncMock(return_value=False)
+
+            with pytest.raises(DuplicateValueException, match="email already exists"):
+                await complete_profile(
+                    _request(),
+                    ProfileCompletionRequest(onboarding_token="good", name="Jane", username="jane"),
+                    Mock(),
+                    mock_db,
+                )
+
+        assert exists.await_args.kwargs["email"] == "jane@corp.com"
+
+    @pytest.mark.asyncio
     async def test_successful_completion_creates_user_and_provider(self, mock_db):
         token_data = OnboardingTokenData(
             email="new@example.com", provider="google", provider_user_id="g-1", name="New Person", avatar=None
@@ -1200,6 +1243,8 @@ class TestCompleteProfile:
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(mock_users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(mock_users)[1]),
             patch("src.app.api.v1.auth.crud_authentication_providers") as mock_providers,
             patch("src.app.api.v1.auth.seed_default_presets", new_callable=AsyncMock) as mock_seed,
             patch("src.app.api.v1.auth.seed_default_tags", new_callable=AsyncMock) as mock_seed_tags,
@@ -1263,6 +1308,8 @@ class TestCompleteProfile:
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(mock_users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(mock_users)[1]),
             patch("src.app.api.v1.auth.crud_authentication_providers") as mock_providers,
             patch("src.app.api.v1.auth.seed_default_presets", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.seed_default_tags", new_callable=AsyncMock),
@@ -1351,6 +1398,8 @@ class TestCompleteProfile:
         with (
             patch("src.app.api.v1.auth.verify_onboarding_token", new_callable=AsyncMock) as mock_verify,
             patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(mock_users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(mock_users)[1]),
         ):
             mock_verify.return_value = token_data
             mock_users.exists = AsyncMock(return_value=False)

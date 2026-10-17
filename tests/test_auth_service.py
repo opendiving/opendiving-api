@@ -16,6 +16,7 @@ from src.app.services.auth_service import (
     issue_tokens,
     resolve_identity,
 )
+from tests.helpers.mocks import email_lookups_on
 
 # Both functions now record where the request came from - `issue_tokens` onto the session
 # row it mints, `resolve_identity` onto the provider-linked audit event.
@@ -80,6 +81,7 @@ class TestResolveIdentity:
         with (
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             mock_providers.get = AsyncMock(return_value={"user_id": 7})
             mock_users.get = AsyncMock(return_value={"id": 7, "username": "someone", "is_deleted": False})
@@ -99,6 +101,7 @@ class TestResolveIdentity:
         with (
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             mock_providers.get = AsyncMock(return_value=None)
             mock_providers.exists = AsyncMock(return_value=False)
@@ -121,6 +124,7 @@ class TestResolveIdentity:
         with (
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             mock_providers.get = AsyncMock(return_value=None)
             mock_providers.exists = AsyncMock(return_value=True)
@@ -137,6 +141,7 @@ class TestResolveIdentity:
         with (
             patch("src.app.services.auth_service.crud_authentication_providers") as mock_providers,
             patch("src.app.services.auth_service.crud_users") as mock_users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(mock_users)[0]),
         ):
             mock_providers.get = AsyncMock(return_value=None)
             mock_users.get = AsyncMock(return_value=None)

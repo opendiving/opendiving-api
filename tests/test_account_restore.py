@@ -58,7 +58,7 @@ from src.app.schemas.auth import (
 from src.app.services.auth_service import AuthenticatedUser, DeletionPending, OnboardingRequired, resolve_identity
 from tests.conftest import db_available
 from tests.helpers.generators import create_user
-from tests.helpers.mocks import fake_request, google_auth_body, stub_claim
+from tests.helpers.mocks import email_lookups_on, fake_request, google_auth_body, stub_claim
 
 USER_UUID = uuid_pkg.uuid4()
 REQUEST_UUID = uuid_pkg.uuid4()
@@ -106,6 +106,7 @@ class TestResolveIdentityAgainstADeletedAccount:
         with (
             patch("src.app.services.auth_service.crud_authentication_providers") as providers,
             patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
         ):
             users.get = AsyncMock(return_value=_pending_row())
 
@@ -131,6 +132,7 @@ class TestResolveIdentityAgainstADeletedAccount:
         with (
             patch("src.app.services.auth_service.crud_authentication_providers") as providers,
             patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
         ):
             providers.get = AsyncMock(return_value={"user_id": 1})
             users.get = AsyncMock(return_value=_pending_row(email="new-address@example.com"))
@@ -151,6 +153,7 @@ class TestResolveIdentityAgainstADeletedAccount:
         with (
             patch("src.app.services.auth_service.crud_authentication_providers"),
             patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
         ):
             users.get = AsyncMock(return_value=None)
 
@@ -165,6 +168,7 @@ class TestResolveIdentityAgainstADeletedAccount:
         with (
             patch("src.app.services.auth_service.crud_authentication_providers"),
             patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
         ):
             users.get = AsyncMock(return_value=_pending_row(deleted_at=None))
 
@@ -201,6 +205,7 @@ class TestTheOutcomeOnEveryEntryPoint:
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
             patch("src.app.services.auth_service.crud_authentication_providers"),
             patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
         ):
             requests.get = AsyncMock(return_value=_live_auth_request())
             users.get = AsyncMock(return_value=_pending_row())
@@ -218,6 +223,7 @@ class TestTheOutcomeOnEveryEntryPoint:
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
             patch("src.app.services.auth_service.crud_authentication_providers"),
             patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
             patch(
                 "src.app.api.v1.auth.charge_code_attempt",
                 new_callable=AsyncMock,
@@ -246,6 +252,7 @@ class TestTheOutcomeOnEveryEntryPoint:
             patch("src.app.api.v1.auth.verify_google_id_token", new_callable=AsyncMock) as verify,
             patch("src.app.services.auth_service.crud_authentication_providers") as providers,
             patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
         ):
             exchange.return_value = "an-id-token"
             verify.return_value = GoogleUserInfo(google_id="g-1", email="gone@example.com", name="Gone")
@@ -265,6 +272,8 @@ class TestTheOutcomeOnEveryEntryPoint:
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
             patch("src.app.api.v1.auth.crud_users") as users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(users)[1]),
         ):
             requests.get = AsyncMock(return_value=_live_auth_request())
             users.get = AsyncMock(return_value=_pending_row())
