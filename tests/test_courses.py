@@ -61,6 +61,7 @@ from src.app.models.user import User
 from src.app.schemas.certification import CertificationAgency
 from src.app.schemas.course import CourseCreate, CourseReadInternal, CourseStatus, CourseUpdate, CourseUpdateRequest
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_certification, create_course, create_dive
 
 USER_ID = 1
@@ -105,29 +106,6 @@ def _get_request() -> MagicMock:
     return request
 
 
-class _FakeRedis:
-    """A cache that never hits, recording what the decorator writes and deletes."""
-
-    def __init__(self) -> None:
-        self.written: dict[str, str] = {}
-        self.deleted: list[str] = []
-
-    async def get(self, key: str) -> None:
-        return None
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.written[key] = value
-
-    async def expire(self, key: str, seconds: int) -> None:
-        return None
-
-    async def delete(self, key: str) -> None:
-        self.deleted.append(key)
-
-    async def scan(self, cursor: int = 0, match: str | None = None, count: int | None = None) -> tuple[int, list[str]]:
-        return 0, []
-
-
 @pytest.fixture
 def write_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stubs everything `write_course`, `patch_course` and `erase_course` touch."""
@@ -139,7 +117,7 @@ def write_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "invalidate_courses": AsyncMock(),
         "invalidate_dives": AsyncMock(),
         "invalidate_certifications": AsyncMock(),
-        "redis": _FakeRedis(),
+        "redis": FakeRedis(),
     }
 
     monkeypatch.setattr(cache_module, "client", stubs["redis"])
@@ -620,7 +598,7 @@ class TestReadPath:
         `:search:` segment is the load-bearing part: without it two different searches on
         the same page serve each other's results."""
         monkeypatch.setattr(courses_module, "get_courses_page", AsyncMock(return_value={"data": [], "total_count": 0}))
-        redis = _FakeRedis()
+        redis = FakeRedis()
 
         with patch.object(cache_module, "client", redis):
             await courses_module._cached_read_courses(
@@ -634,7 +612,7 @@ class TestReadPath:
                 **_NO_FILTERS,
             )
 
-        (key,) = redis.written
+        (key,) = redis.store
         assert key == namespaced(
             f"user_{USER_ID}_courses:page_2:items_per_page:10:search:nitrox"
             f":date_from:None:date_to:None:agency:None:status:None:{USER_ID}"
@@ -655,7 +633,7 @@ class TestReadPath:
             {"agency": "tdi"},
             {"status": "planned"},
         ]
-        redis = _FakeRedis()
+        redis = FakeRedis()
 
         with patch.object(cache_module, "client", redis):
             for filters in varied:
@@ -670,9 +648,9 @@ class TestReadPath:
                     **{**_NO_FILTERS, **filters},
                 )
 
-        assert len(redis.written) == len(varied)
+        assert len(redis.store) == len(varied)
         # And still swept by the one wildcard, the filters sitting after the prefix it matches.
-        assert all(fnmatch(key, across_builds(f"user_{USER_ID}_course*")) for key in redis.written)
+        assert all(fnmatch(key, across_builds(f"user_{USER_ID}_course*")) for key in redis.store)
 
     @pytest.mark.asyncio
     async def test_the_filters_reach_the_query_as_stored_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -722,14 +700,14 @@ class TestReadPath:
         course = _internal_course()
         monkeypatch.setattr(courses_module.crud_courses, "get", AsyncMock(return_value=course))
         _no_people(monkeypatch)
-        redis = _FakeRedis()
+        redis = FakeRedis()
 
         with patch.object(cache_module, "client", redis):
             await courses_module._cached_read_course(
                 _get_request(), user_id=USER_ID, uuid=course.uuid, owner_uuid=USER_UUID, db=MagicMock()
             )
 
-        (key,) = redis.written
+        (key,) = redis.store
         assert key == namespaced(f"user_{USER_ID}_course:{course.uuid}")
         assert fnmatch(key, across_builds(f"user_{USER_ID}_course*"))
 
@@ -793,7 +771,7 @@ class TestReadPath:
     async def test_a_missing_course_is_a_404(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(courses_module.crud_courses, "get", AsyncMock(return_value=None))
 
-        with patch.object(cache_module, "client", _FakeRedis()), pytest.raises(NotFoundException):
+        with patch.object(cache_module, "client", FakeRedis()), pytest.raises(NotFoundException):
             await _read_course_uncached(
                 _get_request(), user_id=USER_ID, uuid=uuid_pkg.UUID(int=0), owner_uuid=USER_UUID, db=MagicMock()
             )

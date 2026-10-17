@@ -43,6 +43,7 @@ from src.app.schemas.species import SpeciesLifeListEntry
 from src.app.services.dive_stats import recalculate_dive_stats
 from src.app.services.species_life_list import species_life_list, species_life_list_detail
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_dive, create_dive_site, create_species, create_user
 from tests.helpers.routes import iter_api_routes
 
@@ -56,33 +57,13 @@ def life_list_app() -> Any:
     return create_application(router=api_router, settings=settings, apply_migrations_on_start=False)
 
 
-class _FakeRedis:
-    """Enough of the client for `@cache` to run. The decorator raises `MissingClientError`
-    when there is none, so these route tests cannot simply have Redis absent - and the app's
-    lifespan builds a real pool pointed at the compose hostname, which does not resolve here.
-    """
-
-    def __init__(self) -> None:
-        self.store: dict[str, bytes] = {}
-        self.expiries: dict[str, int] = {}
-
-    async def get(self, key: str) -> bytes | None:
-        return self.store.get(key)
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.store[key] = value.encode()
-
-    async def expire(self, key: str, seconds: int) -> None:
-        self.expiries[key] = seconds
+@pytest.fixture
+def redis() -> FakeRedis:
+    return FakeRedis()
 
 
 @pytest.fixture
-def redis() -> _FakeRedis:
-    return _FakeRedis()
-
-
-@pytest.fixture
-def client(life_list_app: Any, redis: _FakeRedis) -> Generator[TestClient]:
+def client(life_list_app: Any, redis: FakeRedis) -> Generator[TestClient]:
     """**The fake goes in after the lifespan, not before.** `create_redis_cache_pool` assigns
     `cache.client` on startup, so a patch applied around `TestClient(...)` is overwritten by
     the app itself and every request below then tries to reach the compose hostname."""
@@ -139,7 +120,7 @@ class TestTheCacheKeyCarriesTheWholeQuery:
     manual one, where a human runs both requests inside a minute.
     """
 
-    def test_page_two_is_not_served_page_ones_rows(self, client: TestClient, redis: _FakeRedis) -> None:
+    def test_page_two_is_not_served_page_ones_rows(self, client: TestClient, redis: FakeRedis) -> None:
         """The defect itself, driven through the real decorator against a cache that really
         stores: a key without `page` serves page 1 for page 2, and the only visible symptom is
         a list that stops advancing."""
@@ -150,7 +131,7 @@ class TestTheCacheKeyCarriesTheWholeQuery:
         assert first["data"][0]["scientific_name"] == "Page one species"
         assert second["data"][0]["scientific_name"] == "Page two species"
 
-    def test_a_bigger_page_is_not_served_the_smaller_ones_entry(self, client: TestClient, redis: _FakeRedis) -> None:
+    def test_a_bigger_page_is_not_served_the_smaller_ones_entry(self, client: TestClient, redis: FakeRedis) -> None:
         """`items_per_page` changes the result set as surely as `page` does - the offsets differ
         the moment either moves."""
         with _service_answering({(0, None): "Ten at a time"}):
@@ -161,7 +142,7 @@ class TestTheCacheKeyCarriesTheWholeQuery:
         assert larger["data"][0]["scientific_name"] == "A hundred at a time"
 
     def test_a_search_does_not_serve_the_unfiltered_list_and_vice_versa(
-        self, client: TestClient, redis: _FakeRedis
+        self, client: TestClient, redis: FakeRedis
     ) -> None:
         """Both directions, because the failure is symmetric and either order hides the other:
         the search served the whole list, and the whole list then served the search's rows.
@@ -176,7 +157,7 @@ class TestTheCacheKeyCarriesTheWholeQuery:
         assert searched["data"][0]["scientific_name"] == "Just the moray"
         assert again["data"][0]["scientific_name"] == "Everything"
 
-    def test_each_distinct_query_gets_its_own_entry(self, client: TestClient, redis: _FakeRedis) -> None:
+    def test_each_distinct_query_gets_its_own_entry(self, client: TestClient, redis: FakeRedis) -> None:
         """The mechanism behind the three above, asserted once: four different queries, four
         keys. A prefix missing a placeholder collapses them onto one."""
         with _service_answering({(0, None): "a", (10, None): "b", (0, "moray"): "c", (0, "clownfish"): "d"}):
@@ -672,7 +653,7 @@ class TestTheDetailRoute:
         service.assert_awaited_once_with(db=ANY, user_id=CURRENT_USER["id"], species_uuid=detail.uuid)
 
     def test_a_species_the_caller_never_logged_is_a_404_and_is_not_cached(
-        self, client: TestClient, redis: _FakeRedis
+        self, client: TestClient, redis: FakeRedis
     ) -> None:
         """Uncached so a first sighting shows at once rather than after the TTL."""
         with patch.object(users_module, "species_life_list_detail", AsyncMock(return_value=None)):
@@ -681,7 +662,7 @@ class TestTheDetailRoute:
         assert response.status_code == 404
         assert redis.store == {}
 
-    def test_each_species_gets_its_own_entry_under_the_dive_sweep(self, client: TestClient, redis: _FakeRedis) -> None:
+    def test_each_species_gets_its_own_entry_under_the_dive_sweep(self, client: TestClient, redis: FakeRedis) -> None:
         """Under `user_{id}_dives:` so a dive write drops it with the list it must agree with,
         and keyed by the species so one page cannot serve another's figures."""
         first, second = (SpeciesLifeListEntry(**_row(name)) for name in ("one", "two"))

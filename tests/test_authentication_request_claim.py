@@ -19,10 +19,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 
-from src.app.core.config import settings
 from src.app.core.security import hash_sign_in_code
 from src.app.crud.crud_authentication_requests import claim_authentication_request, register_failed_code_attempt
 from src.app.models.authentication_request import AuthenticationRequest
@@ -85,7 +84,9 @@ class TestClaimAuthenticationRequest:
         assert await claim_authentication_request(async_db, request_id=-1) is False
 
     @pytest.mark.asyncio
-    async def test_exactly_one_of_two_concurrent_claims_wins(self, db: Session) -> None:
+    async def test_exactly_one_of_two_concurrent_claims_wins(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """The race the helper exists for, run for real on two connections.
 
         Both statements are issued before either commits, so the second blocks on the
@@ -96,16 +97,11 @@ class TestClaimAuthenticationRequest:
         asserting in a comment.
         """
         row = _live_request(db)
-        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-        session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-        try:
-            async with session_factory() as one, session_factory() as two:
-                results = await asyncio.gather(
-                    claim_authentication_request(one, request_id=row.id),
-                    claim_authentication_request(two, request_id=row.id),
-                )
-        finally:
-            await engine.dispose()
+        async with async_sessions() as one, async_sessions() as two:
+            results = await asyncio.gather(
+                claim_authentication_request(one, request_id=row.id),
+                claim_authentication_request(two, request_id=row.id),
+            )
 
         assert sorted(results) == [False, True]
 
@@ -171,24 +167,21 @@ class TestRegisterFailedCodeAttempt:
         assert await claim_authentication_request(async_db, request_id=row.id) is True
 
     @pytest.mark.asyncio
-    async def test_concurrent_guesses_are_each_charged(self, db: Session) -> None:
+    async def test_concurrent_guesses_are_each_charged(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """The race the statement exists for. Read-decide-write would let two guesses
         issued together both store `1`, and an attacker firing five in parallel would be
         charged for one - which is the difference between a five-guess bound and none.
         """
         row = _live_request(db, code="481052")
-        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-        session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-        try:
-            async with session_factory() as one, session_factory() as two:
-                await asyncio.gather(
-                    register_failed_code_attempt(one, request_id=row.id, max_attempts=5),
-                    register_failed_code_attempt(two, request_id=row.id, max_attempts=5),
-                )
-                charged = await one.scalar(
-                    select(AuthenticationRequest.code_attempts).where(AuthenticationRequest.id == row.id)
-                )
-        finally:
-            await engine.dispose()
+        async with async_sessions() as one, async_sessions() as two:
+            await asyncio.gather(
+                register_failed_code_attempt(one, request_id=row.id, max_attempts=5),
+                register_failed_code_attempt(two, request_id=row.id, max_attempts=5),
+            )
+            charged = await one.scalar(
+                select(AuthenticationRequest.code_attempts).where(AuthenticationRequest.id == row.id)
+            )
 
         assert charged == 2

@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
@@ -162,7 +162,9 @@ class TestTheGateIsInsideTheCreatingTransaction:
         db.rollback()
 
     @pytest.mark.asyncio
-    async def test_a_revocation_committed_mid_handler_is_honoured(self, db: Session, diver: User) -> None:
+    async def test_a_revocation_committed_mid_handler_is_honoured(
+        self, db: Session, diver: User, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """The race the placement exists for, and the one an assertion about lock ordering
         cannot substitute for.
 
@@ -177,21 +179,18 @@ class TestTheGateIsInsideTheCreatingTransaction:
         invitation_id = invitation.id
         db.expunge(invitation)
 
-        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-        sessions = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-
         async def revoke_from_another_session(_: Any) -> None:
             """Stands in for the inviter clicking Revoke in another tab. Hooked onto the
             avatar import because that is what the handler is doing while the transaction
             is released - the whole reason the window exists."""
-            async with sessions() as other:
+            async with async_sessions() as other:
                 await other.execute(
                     update(Invitation).where(Invitation.id == invitation_id).values(revoked_at=datetime.now(UTC))
                 )
                 await other.commit()
 
         try:
-            async with sessions() as handler_db:
+            async with async_sessions() as handler_db:
                 with (
                     _mode(RegistrationMode.INVITE),
                     patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
@@ -216,15 +215,16 @@ class TestTheGateIsInsideTheCreatingTransaction:
 
             assert refusal.value.detail == NOT_INVITED
         finally:
-            async with sessions() as cleanup:
+            async with async_sessions() as cleanup:
                 await cleanup.execute(delete(Invitation).where(Invitation.id == invitation_id))
                 await cleanup.commit()
-            await engine.dispose()
 
         assert db.query(User).filter(func.lower(User.email) == email).count() == 0
 
     @pytest.mark.asyncio
-    async def test_the_refusal_releases_the_advisory_lock(self, db: Session, diver: User) -> None:
+    async def test_the_refusal_releases_the_advisory_lock(
+        self, db: Session, diver: User, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """The reason the handler has an `except ForbiddenException` that rolls back.
 
         `pg_advisory_xact_lock` lives until the transaction ends and `async_get_db` does not
@@ -233,42 +233,36 @@ class TestTheGateIsInsideTheCreatingTransaction:
         lock from a second session immediately afterwards, with `try` semantics so a still
         held lock is a `False` rather than a hang.
         """
-        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-        sessions = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-
-        try:
-            async with sessions() as handler_db:
-                with (
-                    _mode(RegistrationMode.INVITE),
-                    patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
-                    patch(
-                        "src.app.api.v1.auth.verify_onboarding_token",
-                        new_callable=AsyncMock,
-                        return_value=OnboardingTokenData(
-                            email=unique_email(), provider="email", provider_user_id=None, name=None, avatar=None
-                        ),
+        async with async_sessions() as handler_db:
+            with (
+                _mode(RegistrationMode.INVITE),
+                patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+                patch(
+                    "src.app.api.v1.auth.verify_onboarding_token",
+                    new_callable=AsyncMock,
+                    return_value=OnboardingTokenData(
+                        email=unique_email(), provider="email", provider_user_id=None, name=None, avatar=None
                     ),
-                    patch("src.app.api.v1.auth.import_google_avatar", new_callable=AsyncMock, return_value=None),
-                    pytest.raises(ForbiddenException),
-                ):
-                    await complete_profile(
-                        _request(),
-                        ProfileCompletionRequest(
-                            onboarding_token="irrelevant", name="Ada Reef", username=unique_username()
-                        ),
-                        Mock(),
-                        handler_db,
-                    )
+                ),
+                patch("src.app.api.v1.auth.import_google_avatar", new_callable=AsyncMock, return_value=None),
+                pytest.raises(ForbiddenException),
+            ):
+                await complete_profile(
+                    _request(),
+                    ProfileCompletionRequest(
+                        onboarding_token="irrelevant", name="Ada Reef", username=unique_username()
+                    ),
+                    Mock(),
+                    handler_db,
+                )
 
-                async with sessions() as observer:
-                    from src.app.services.registration_gate import _REGISTRATION_LOCK_KEY
+            async with async_sessions() as observer:
+                from src.app.services.registration_gate import _REGISTRATION_LOCK_KEY
 
-                    taken = await observer.scalar(select(func.pg_try_advisory_xact_lock(_REGISTRATION_LOCK_KEY)))
-                    await observer.rollback()
+                taken = await observer.scalar(select(func.pg_try_advisory_xact_lock(_REGISTRATION_LOCK_KEY)))
+                await observer.rollback()
 
-            assert taken is True
-        finally:
-            await engine.dispose()
+        assert taken is True
 
 
 class TestTheBootstrapExemption:
@@ -282,8 +276,8 @@ class TestTheBootstrapExemption:
     concurrent first completions produce one superuser.
     """
 
-    @pytest_asyncio.fixture
-    async def empty_instance(self) -> AsyncGenerator[Any]:
+    @pytest.fixture
+    def empty_instance(self, async_sessions: async_sessionmaker[AsyncSession]) -> async_sessionmaker[AsyncSession]:
         """A session factory whose transactions see no accounts.
 
         Every account is deleted inside each session's own transaction and never committed,
@@ -291,9 +285,7 @@ class TestTheBootstrapExemption:
         out. Two sessions opened this way both see an empty table, which is exactly the
         fresh-instance race.
         """
-        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-        yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-        await engine.dispose()
+        return async_sessions
 
     @staticmethod
     async def _hide_every_account(session: AsyncSession) -> None:

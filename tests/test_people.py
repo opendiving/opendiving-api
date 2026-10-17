@@ -61,6 +61,7 @@ from src.app.schemas.person import (
 from src.app.services import person_links
 from src.app.services.person_links import resolve_linked_account, resolve_people_references
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_course, create_dive, create_person, create_trip, create_user
 
 USER_ID = 1
@@ -82,26 +83,6 @@ def _internal_person(**overrides: Any) -> PersonReadInternal:
     }
     values.update(overrides)
     return PersonReadInternal(**values)
-
-
-class _CountingRedis:
-    """Enough of a client for the fixed-window limiter: `incr` counts, and `get` reads."""
-
-    def __init__(self) -> None:
-        self.counts: dict[str, int] = {}
-
-    async def incr(self, key: str) -> int:
-        self.counts[key] = self.counts.get(key, 0) + 1
-        return self.counts[key]
-
-    async def expire(self, key: str, seconds: int) -> None:
-        return None
-
-    async def ttl(self, key: str) -> int:
-        return 60
-
-    async def get(self, key: str) -> str | None:
-        return None if key not in self.counts else str(self.counts[key])
 
 
 class TestTheWriteSchema:
@@ -499,7 +480,7 @@ class TestTheLink:
         """The limiter runs for real against a counter of our own: the module-level client is
         bound to the loop that opened it, and each test runs on its own - *"The local suite
         has no Redis"* in DECISIONS.md."""
-        monkeypatch.setattr(cache_module, "client", _CountingRedis())
+        monkeypatch.setattr(cache_module, "client", FakeRedis())
 
     @pytest.mark.asyncio
     async def test_an_account_is_found_by_its_exact_username(

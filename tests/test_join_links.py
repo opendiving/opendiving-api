@@ -11,19 +11,18 @@ Postgres-backed, for the reason `test_registration_gate.py` gives: a mock evalua
 import.
 """
 
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-import pytest_asyncio
 from fastapi import Response
 from fastapi.testclient import TestClient
 from jose import jwt
 from pydantic import ValidationError
 from sqlalchemy import delete, func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
@@ -377,13 +376,6 @@ class TestTheAdvisoryGate:
 needs_a_database = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 
-@pytest_asyncio.fixture
-async def sessions() -> AsyncGenerator[Any]:
-    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-    yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    await engine.dispose()
-
-
 def _invite(db: Session, *, email: str, inviter: User, from_queue: bool = False) -> int:
     row = Invitation(email=email, user_id=inviter.id, uuid=uuid7(), from_invite_request=from_queue)
     db.add(row)
@@ -397,8 +389,10 @@ class TestTheAuthoritativeGate:
     with. Each call is rolled back, which also releases the advisory lock."""
 
     @staticmethod
-    async def _admit(sessions: Any, *, email: str, via: str | None, mode: RegistrationMode) -> str:
-        async with sessions() as session:
+    async def _admit(
+        async_sessions: async_sessionmaker[AsyncSession], *, email: str, via: str | None, mode: RegistrationMode
+    ) -> str:
+        async with async_sessions() as session:
             try:
                 with _channels(), _mode(mode):
                     return (await admit_or_refuse(session, email=email, via=via)).source
@@ -406,35 +400,44 @@ class TestTheAuthoritativeGate:
                 await session.rollback()
 
     @pytest.mark.asyncio
-    async def test_a_live_link_admits_an_uninvited_address_under_its_slug(self, sessions: Any, diver: User) -> None:
-        source = await self._admit(sessions, email=unique_email(), via="scubaboard", mode=RegistrationMode.INVITE)
+    async def test_a_live_link_admits_an_uninvited_address_under_its_slug(
+        self, async_sessions: async_sessionmaker[AsyncSession], diver: User
+    ) -> None:
+        source = await self._admit(async_sessions, email=unique_email(), via="scubaboard", mode=RegistrationMode.INVITE)
 
         assert source == "scubaboard"
 
     @pytest.mark.asyncio
-    async def test_the_link_wins_over_an_invitation(self, db: Session, sessions: Any, diver: User) -> None:
+    async def test_the_link_wins_over_an_invitation(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession], diver: User
+    ) -> None:
         """The link is what the person clicked; the invitation is still stamped accepted by
         the completion, as it always was."""
         email = unique_email()
         _invite(db, email=email, inviter=diver, from_queue=True)
 
-        assert await self._admit(sessions, email=email, via="reddit", mode=RegistrationMode.INVITE) == "reddit"
+        assert await self._admit(async_sessions, email=email, via="reddit", mode=RegistrationMode.INVITE) == "reddit"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("from_queue", "expected"), [(True, AccountSource.WAITLIST), (False, AccountSource.INVITATION)]
     )
     async def test_an_invitation_admits_under_where_it_came_from(
-        self, db: Session, sessions: Any, diver: User, from_queue: bool, expected: AccountSource
+        self,
+        db: Session,
+        async_sessions: async_sessionmaker[AsyncSession],
+        diver: User,
+        from_queue: bool,
+        expected: AccountSource,
     ) -> None:
         email = unique_email()
         _invite(db, email=email, inviter=diver, from_queue=from_queue)
 
-        assert await self._admit(sessions, email=email, via=None, mode=RegistrationMode.INVITE) == expected
+        assert await self._admit(async_sessions, email=email, via=None, mode=RegistrationMode.INVITE) == expected
 
     @pytest.mark.asyncio
     async def test_any_queued_invitation_makes_it_the_waiting_list(
-        self, db: Session, sessions: Any, diver: User
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession], diver: User
     ) -> None:
         """Two invitations for one address, the operator's among them: the operator's is
         the one that says where the person came from."""
@@ -442,24 +445,24 @@ class TestTheAuthoritativeGate:
         _invite(db, email=email, inviter=diver)
         _invite(db, email=email, inviter=create_user(db), from_queue=True)
 
-        source = await self._admit(sessions, email=email, via=None, mode=RegistrationMode.INVITE)
+        source = await self._admit(async_sessions, email=email, via=None, mode=RegistrationMode.INVITE)
 
         assert source == AccountSource.WAITLIST
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("via", "expected"), [(None, "open"), ("scubaboard", "scubaboard"), ("instagram", "open")])
     async def test_an_open_instance_admits_under_the_live_slug_or_open(
-        self, sessions: Any, diver: User, via: str | None, expected: str
+        self, async_sessions: async_sessionmaker[AsyncSession], diver: User, via: str | None, expected: str
     ) -> None:
-        assert await self._admit(sessions, email=unique_email(), via=via, mode=RegistrationMode.OPEN) == expected
+        assert await self._admit(async_sessions, email=unique_email(), via=via, mode=RegistrationMode.OPEN) == expected
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("via", "sentence"), [(None, NOT_INVITED), ("instagram", STALE_JOIN_LINK)])
     async def test_an_uninvited_address_is_refused_with_the_sentence_for_what_it_holds(
-        self, sessions: Any, diver: User, via: str | None, sentence: str
+        self, async_sessions: async_sessionmaker[AsyncSession], diver: User, via: str | None, sentence: str
     ) -> None:
         with pytest.raises(ForbiddenException) as refusal:
-            await self._admit(sessions, email=unique_email(), via=via, mode=RegistrationMode.INVITE)
+            await self._admit(async_sessions, email=unique_email(), via=via, mode=RegistrationMode.INVITE)
 
         assert refusal.value.detail == sentence
 
@@ -508,7 +511,7 @@ class TestTheCreatingTransaction:
 
     @pytest.mark.asyncio
     async def test_a_link_removed_before_completion_refuses_it_and_creates_nothing(
-        self, db: Session, sessions: Any, diver: User
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession], diver: User
     ) -> None:
         """`test_a_revocation_committed_mid_handler_is_honoured`'s shape: the channel goes
         while the handler is between its duplicate checks and its insert, and the gate
@@ -518,7 +521,7 @@ class TestTheCreatingTransaction:
         def remove_the_channel(_: Any) -> None:
             settings.JOIN_CHANNELS = "reddit=Reddit"
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with (
                 _channels(),
                 _mode(RegistrationMode.INVITE),
@@ -531,7 +534,7 @@ class TestTheCreatingTransaction:
 
     @pytest.mark.asyncio
     async def test_a_link_counts_the_account_under_its_slug_and_clears_the_queue(
-        self, db: Session, sessions: Any, diver: User
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession], diver: User
     ) -> None:
         """A capitalised Google address, because the request row is stored lowercase and
         the account's address is stored as Google sent it."""
@@ -541,7 +544,7 @@ class TestTheCreatingTransaction:
         db.commit()
         before = _count(db, key="scubaboard")
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with _channels(), _mode(RegistrationMode.INVITE):
                 await _complete(session, _completion(email, provider="google", via="scubaboard"))
 
@@ -554,7 +557,7 @@ class TestTheCreatingTransaction:
 
     @pytest.mark.asyncio
     async def test_a_queued_invitation_is_counted_as_the_waiting_list_and_forgets_it(
-        self, db: Session, sessions: Any, diver: User
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession], diver: User
     ) -> None:
         """Decision the model records: the flag is read by the gate and cleared by the
         acceptance in one transaction, so no accepted row - and so no account - keeps it."""
@@ -562,7 +565,7 @@ class TestTheCreatingTransaction:
         invitation_id = _invite(db, email=email, inviter=diver, from_queue=True)
         before = _count(db, key=AccountSource.WAITLIST)
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with _channels(None), _mode(RegistrationMode.INVITE):
                 await _complete(session, _completion(email))
 
@@ -587,7 +590,7 @@ class TestWhereAnInvitationCameFrom:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("queued", [True, False])
     async def test_the_operators_batch_records_whether_it_took_one_off_the_queue(
-        self, db: Session, sessions: Any, queued: bool
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession], queued: bool
     ) -> None:
         operator = create_user(db, is_super_user=True)
         email = unique_email()
@@ -595,7 +598,7 @@ class TestWhereAnInvitationCameFrom:
             db.add(InviteRequest(email=email))
             db.commit()
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with patch("src.app.api.v1.admin.send_invitation_email", new_callable=AsyncMock):
                 await invite_batch(
                     fake_request(),
@@ -607,14 +610,16 @@ class TestWhereAnInvitationCameFrom:
         assert self._flag(db, email) == [queued]
 
     @pytest.mark.asyncio
-    async def test_a_member_inviting_a_queued_address_records_nothing(self, db: Session, sessions: Any) -> None:
+    async def test_a_member_inviting_a_queued_address_records_nothing(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """The member did the inviting, whatever the queue held."""
         member = create_user(db)
         email = unique_email()
         db.add(InviteRequest(email=email))
         db.commit()
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with (
                 _mode(RegistrationMode.INVITE),
                 patch("src.app.api.v1.invitations.enforce_rate_limit", new_callable=AsyncMock),

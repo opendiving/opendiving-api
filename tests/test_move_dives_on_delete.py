@@ -39,30 +39,11 @@ from src.app.models.user import User
 from src.app.schemas.dive_site import DiveSiteReadInternal
 from src.app.schemas.trip import TripReadInternal
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_dive, create_dive_site, create_trip
 
 USER_ID = 7
 USER_UUID = uuid7()
-
-
-class _FakeRedis:
-    """A cache that never hits, recording what the decorator deletes. Both routes carry a
-    `@cache` decorator that needs a client in place or the call raises before the body."""
-
-    def __init__(self) -> None:
-        self.deleted: list[str] = []
-
-    async def get(self, key: str) -> None:
-        return None
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        return None
-
-    async def expire(self, key: str, seconds: int) -> None:
-        return None
-
-    async def delete(self, key: str) -> None:
-        self.deleted.append(key)
 
 
 def _current_user() -> dict[str, Any]:
@@ -126,7 +107,7 @@ def trip_route(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "delete": AsyncMock(side_effect=_records(calls, "delete")),
         "invalidate_trips": AsyncMock(),
         "invalidate_dives": AsyncMock(),
-        "redis": _FakeRedis(),
+        "redis": FakeRedis(),
     }
 
     monkeypatch.setattr(cache_module, "client", stubs["redis"])
@@ -157,7 +138,7 @@ def dive_site_route(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "invalidate_sites": AsyncMock(),
         "invalidate_dives": AsyncMock(),
         "invalidate_trips": AsyncMock(),
-        "redis": _FakeRedis(),
+        "redis": FakeRedis(),
     }
 
     monkeypatch.setattr(cache_module, "client", stubs["redis"])

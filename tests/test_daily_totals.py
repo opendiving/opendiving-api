@@ -22,7 +22,7 @@ import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
@@ -106,13 +106,6 @@ def pinned_days(db: Session) -> Generator[None]:
     clear()
 
 
-@pytest_asyncio.fixture
-async def sessions() -> AsyncGenerator[Any]:
-    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-    yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-    await engine.dispose()
-
-
 @pytest_asyncio.fixture(autouse=True)
 async def _dispose_the_app_engine() -> AsyncGenerator[None]:
     """The jobs open their own sessions from the app's engine, and a pooled asyncpg
@@ -125,13 +118,15 @@ async def _dispose_the_app_engine() -> AsyncGenerator[None]:
 @needs_a_database
 class TestTheCounter:
     @pytest.mark.asyncio
-    async def test_two_creations_at_once_both_count(self, db: Session, sessions: Any) -> None:
+    async def test_two_creations_at_once_both_count(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """One upsert per creation, so a race between two has no read to lose."""
         key = f"t{uuid7().hex[-10:]}"
         now = datetime.now(UTC)
 
         async def create() -> None:
-            async with sessions() as session:
+            async with async_sessions() as session:
                 await count_account_created(session, source=key, now=now)
                 await session.commit()
 
@@ -161,7 +156,9 @@ class TestSignIns:
         return row.id
 
     @pytest.mark.asyncio
-    async def test_distinct_accounts_per_utc_day(self, db: Session, sessions: Any) -> None:
+    async def test_distinct_accounts_per_utc_day(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """One account signing in twice is one; the day is UTC's, whatever the hour."""
         first, second = create_user(db), create_user(db)
         self._signed_in(db, first, at(DAY, 1))
@@ -169,7 +166,7 @@ class TestSignIns:
         self._signed_in(db, second, at(DAY, 12))
         self._signed_in(db, second, at(DAY + timedelta(days=1), 0, 1))
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             await record_sign_ins(session)
             await session.commit()
 
@@ -263,7 +260,9 @@ class TestActiveAccounts:
         assert _stored(db, DAY, DailyMetric.ACTIVE_ACCOUNTS) == 1
 
     @pytest.mark.asyncio
-    async def test_the_sessions_list_never_shows_a_kept_revoked_row(self, db: Session, sessions: Any) -> None:
+    async def test_the_sessions_list_never_shows_a_kept_revoked_row(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """The row outlives its revoke by up to a day now, and nothing that lists or
         authenticates may see it: `_live` excludes it as it always did."""
         diver = create_user(db)
@@ -271,7 +270,7 @@ class TestActiveAccounts:
         kept = _session(db, diver, last_used_at=now, revoked_at=now)
         live = _session(db, diver, last_used_at=now)
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             listed = {row.id for row in await live_sessions_for_user(session, user_id=diver.id, limit=10)}
 
         assert listed == {live}
@@ -286,7 +285,9 @@ def _row(day: date, metric: DailyMetric, count: int, key: str = NO_KEY) -> Daily
 @pytest.mark.usefixtures("pinned_days")
 class TestTheStatsRoute:
     @pytest.mark.asyncio
-    async def test_every_day_is_answered_and_the_empty_ones_are_zero(self, db: Session, sessions: Any) -> None:
+    async def test_every_day_is_answered_and_the_empty_ones_are_zero(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         db.add_all(
             [
                 _row(DAY, DailyMetric.ACCOUNTS_CREATED, 3, "scubaboard"),
@@ -298,7 +299,7 @@ class TestTheStatsRoute:
         )
         db.commit()
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             with patch.object(settings, "JOIN_CHANNELS", "scubaboard=ScubaBoard"):
                 stats = await read_daily_stats(session, first=DAY - timedelta(days=1), last=DAY + timedelta(days=1))
             accounts = await session.scalar(select(func.count()).select_from(User))
@@ -321,9 +322,11 @@ class TestTheStatsRoute:
         assert set(body["totals"]) == {"accounts", "active_now"}
 
     @pytest.mark.asyncio
-    async def test_active_now_counts_accounts_not_sessions(self, db: Session, sessions: Any) -> None:
+    async def test_active_now_counts_accounts_not_sessions(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """Two live sessions on one account are one; a revoked or expired one is none."""
-        async with sessions() as session:
+        async with async_sessions() as session:
             before = (await read_daily_stats(session, first=DAY, last=DAY)).totals.active_now
 
         diver = create_user(db)
@@ -333,7 +336,7 @@ class TestTheStatsRoute:
         _session(db, create_user(db), last_used_at=now, revoked_at=now)
         _session(db, create_user(db), last_used_at=now - timedelta(days=8))
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             after = (await read_daily_stats(session, first=DAY, last=DAY)).totals.active_now
 
         assert after == before + 1

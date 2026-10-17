@@ -14,16 +14,14 @@ the developer's own `src/.env` happens to say - the same trap `test_support.py`'
 """
 
 import uuid as uuid_pkg
-from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-import pytest_asyncio
 from fastapi import HTTPException
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
@@ -824,14 +822,10 @@ class TestAgainstPostgres:
     to whichever query is issued.
     """
 
-    @pytest_asyncio.fixture
-    async def sessions(self) -> AsyncGenerator[Any]:
-        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-        yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-        await engine.dispose()
-
     @pytest.mark.asyncio
-    async def test_an_account_stored_with_capitals_is_still_found(self, db: Session, sessions: Any) -> None:
+    async def test_an_account_stored_with_capitals_is_still_found(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """The bug invariant 7 exists to prevent: a lowercased invitation address compared
         against the raw column misses exactly the Google-born accounts, and the inviter is
         then told an address is free when it is not."""
@@ -841,11 +835,13 @@ class TestAgainstPostgres:
         shouty.email = f"Mixed.Case.{shouty.id}@Example.COM"
         db.commit()
 
-        async with sessions() as session:
+        async with async_sessions() as session:
             assert await account_exists_for(session, email=shouty.email.lower()) is True
 
     @pytest.mark.asyncio
-    async def test_the_quota_counts_revoked_rows_inside_the_window(self, db: Session, diver: User) -> None:
+    async def test_the_quota_counts_revoked_rows_inside_the_window(
+        self, db: Session, diver: User, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """Counting rows rather than live invitations is what makes the quota a bound on
         invitations made: revoking one after the send does not unsend it."""
         from src.app.crud.crud_invitations import invitations_created_since
@@ -859,15 +855,13 @@ class TestAgainstPostgres:
             db.add(row)
         db.commit()
 
-        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-        try:
-            async with async_sessionmaker(bind=engine, class_=AsyncSession)() as session:
-                assert await invitations_created_since(session, user_id=diver.id, window_days=1) == 3
-        finally:
-            await engine.dispose()
+        async with async_sessions() as session:
+            assert await invitations_created_since(session, user_id=diver.id, window_days=1) == 3
 
     @pytest.mark.asyncio
-    async def test_a_row_outside_the_window_is_not_counted(self, db: Session, diver: User) -> None:
+    async def test_a_row_outside_the_window_is_not_counted(
+        self, db: Session, diver: User, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """A rate, not a lifetime allotment - which is the whole difference between this and
         Lemmy's `max_invites_per_user_allowed`."""
         from src.app.crud.crud_invitations import invitations_created_since
@@ -881,15 +875,13 @@ class TestAgainstPostgres:
         db.add(old)
         db.commit()
 
-        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-        try:
-            async with async_sessionmaker(bind=engine, class_=AsyncSession)() as session:
-                assert await invitations_created_since(session, user_id=diver.id, window_days=1) == 0
-        finally:
-            await engine.dispose()
+        async with async_sessions() as session:
+            assert await invitations_created_since(session, user_id=diver.id, window_days=1) == 0
 
     @pytest.mark.asyncio
-    async def test_the_crud_helpers_commit_only_when_asked(self, db: Session, diver: User, sessions: Any) -> None:
+    async def test_the_crud_helpers_commit_only_when_asked(
+        self, db: Session, diver: User, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """Both helpers take `commit` because both are called two ways: standalone from an
         operator route, and `commit=False` from inside a transaction somebody else ends.
         Getting that backwards is how "one commit" quietly becomes two.
@@ -899,7 +891,7 @@ class TestAgainstPostgres:
 
         email = unique_email()
         try:
-            async with sessions() as session:
+            async with async_sessions() as session:
                 session.add(Invitation(email=email, user_id=diver.id, uuid=uuid7()))
                 session.add(InviteRequest(email=email))
                 await session.commit()
@@ -912,13 +904,15 @@ class TestAgainstPostgres:
                 assert await accept_invitations(session, email=unique_email(), commit=True) == 0
                 assert await delete_invite_requests(session, emails=[], commit=True) == 0
         finally:
-            async with sessions() as cleanup:
+            async with async_sessions() as cleanup:
                 await cleanup.execute(delete(Invitation).where(Invitation.email == email))
                 await cleanup.execute(delete(InviteRequest).where(InviteRequest.email == email))
                 await cleanup.commit()
 
     @pytest.mark.asyncio
-    async def test_a_repeat_request_stores_one_row(self, db: Session, sessions: Any) -> None:
+    async def test_a_repeat_request_stores_one_row(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """`ON CONFLICT DO NOTHING` rather than a check followed by an insert: two
         submissions of one address have no window in which both find nothing, and the
         endpoint has one answer rather than a branch that could be got wrong."""
@@ -926,19 +920,21 @@ class TestAgainstPostgres:
 
         email = unique_email()
         try:
-            async with sessions() as session:
+            async with async_sessions() as session:
                 await record_invite_request(session, email=email)
                 await record_invite_request(session, email=email)
 
                 rows = (await session.execute(select(InviteRequest).where(InviteRequest.email == email))).all()
                 assert len(rows) == 1
         finally:
-            async with sessions() as cleanup:
+            async with async_sessions() as cleanup:
                 await cleanup.execute(delete(InviteRequest).where(InviteRequest.email == email))
                 await cleanup.commit()
 
     @pytest.mark.asyncio
-    async def test_the_queue_flags_an_address_that_already_has_an_account(self, db: Session, sessions: Any) -> None:
+    async def test_the_queue_flags_an_address_that_already_has_an_account(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """`has_account` on a `lower(User.email)` comparison - *this* route may look, and it
         has to look case-insensitively for the same reason the 409 does."""
         shouty = create_user(db)
@@ -948,7 +944,7 @@ class TestAgainstPostgres:
         stranger = unique_email()
 
         try:
-            async with sessions() as session:
+            async with async_sessions() as session:
                 session.add_all([InviteRequest(email=queued), InviteRequest(email=stranger)])
                 await session.commit()
 
@@ -958,20 +954,20 @@ class TestAgainstPostgres:
             assert flags[queued] is True
             assert flags[stranger] is False
         finally:
-            async with sessions() as cleanup:
+            async with async_sessions() as cleanup:
                 await cleanup.execute(delete(InviteRequest).where(InviteRequest.email.in_([queued, stranger])))
                 await cleanup.commit()
 
     @pytest.mark.asyncio
     async def test_inviting_an_address_clears_its_request_in_one_transaction(
-        self, db: Session, diver: User, sessions: Any
+        self, db: Session, diver: User, async_sessions: async_sessionmaker[AsyncSession]
     ) -> None:
         """The invariant stated end to end rather than by asserting `commit=False` on two
         mocks: after the route returns, the address has an invitation and no request row."""
         email = unique_email()
 
         try:
-            async with sessions() as session:
+            async with async_sessions() as session:
                 session.add(InviteRequest(email=email))
                 await session.commit()
 
@@ -988,7 +984,7 @@ class TestAgainstPostgres:
             assert requests == []
             assert len(invitations) == 1
         finally:
-            async with sessions() as cleanup:
+            async with async_sessions() as cleanup:
                 await cleanup.execute(delete(Invitation).where(Invitation.email == email))
                 await cleanup.execute(delete(InviteRequest).where(InviteRequest.email == email))
                 await cleanup.commit()

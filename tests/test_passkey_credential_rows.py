@@ -18,10 +18,9 @@ import os
 
 import pytest
 from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 
-from src.app.core.config import settings
 from src.app.crud.crud_webauthn_credentials import record_assertion
 from src.app.models.user import User
 from src.app.models.webauthn_credential import WebauthnCredential
@@ -89,25 +88,18 @@ class TestRecordAssertion:
         )
 
     @pytest.mark.asyncio
-    async def test_exactly_one_of_two_concurrent_recordings_wins(self, db: Session) -> None:
+    async def test_exactly_one_of_two_concurrent_recordings_wins(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
         """The race the helper exists for, run for real on two connections - the same
         shape as the magic-link claim test, for the same READ COMMITTED reason.
         """
         row = _credential(db, create_user(db), sign_count=2)
-        engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
-        session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-        try:
-            async with session_factory() as one, session_factory() as two:
-                results = await asyncio.gather(
-                    record_assertion(
-                        one, credential_uuid=row.uuid, sign_count=3, backed_up=True, expected_sign_count=2
-                    ),
-                    record_assertion(
-                        two, credential_uuid=row.uuid, sign_count=3, backed_up=True, expected_sign_count=2
-                    ),
-                )
-        finally:
-            await engine.dispose()
+        async with async_sessions() as one, async_sessions() as two:
+            results = await asyncio.gather(
+                record_assertion(one, credential_uuid=row.uuid, sign_count=3, backed_up=True, expected_sign_count=2),
+                record_assertion(two, credential_uuid=row.uuid, sign_count=3, backed_up=True, expected_sign_count=2),
+            )
 
         assert sorted(results) == [False, True]
 

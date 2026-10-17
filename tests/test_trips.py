@@ -86,6 +86,7 @@ from src.app.schemas.trip import (
     TripUpdateRequest,
 )
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_dive, create_dive_site, create_species, create_trip
 
 USER_ID = 1
@@ -283,25 +284,6 @@ class TestPartsOnAnUpdate:
 
         assert values.parts is not None
         assert [part.location.name for part in values.parts if part.location] == ["Moalboal, Philippines", "Bohol"]
-
-
-class _FakeRedis:
-    """Enough of the client for `@cache` to run: every read misses, every write is recorded."""
-
-    def __init__(self) -> None:
-        self.written: list[str] = []
-
-    async def get(self, key: str) -> None:
-        return None
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.written.append(key)
-
-    async def expire(self, key: str, seconds: int) -> None:
-        return None
-
-    async def delete(self, key: str) -> None:
-        return None
 
 
 @pytest.fixture
@@ -554,7 +536,7 @@ class TestReadPath:
         monkeypatch.setattr(trips_module, "get_figures_for_trips", AsyncMock(return_value={11: NO_DIVES, 12: NO_DIVES}))
         _no_derived(monkeypatch)
 
-        with patch.object(cache_module, "client", _FakeRedis()):
+        with patch.object(cache_module, "client", FakeRedis()):
             page = await trips_module._cached_read_trips(
                 _get_request(),
                 user_id=USER_ID,
@@ -586,7 +568,7 @@ class TestReadPath:
         monkeypatch.setattr(trips_module, "get_figures_for_trips", figures)
         _no_derived(monkeypatch)
 
-        with patch.object(cache_module, "client", _FakeRedis()):
+        with patch.object(cache_module, "client", FakeRedis()):
             page = await trips_module._cached_read_trips(
                 _get_request(),
                 user_id=USER_ID,
@@ -609,7 +591,7 @@ class TestReadPath:
         monkeypatch.setattr(trips_module, "get_trips_page", page_query)
         monkeypatch.setattr(trips_module, "get_parts_for_trips", AsyncMock(return_value={}))
 
-        with patch.object(cache_module, "client", _FakeRedis()):
+        with patch.object(cache_module, "client", FakeRedis()):
             await trips_module._cached_read_trips(
                 _get_request(),
                 user_id=USER_ID,
@@ -633,7 +615,7 @@ class TestReadPath:
     async def test_the_list_key_is_the_one_writes_sweep(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(trips_module, "get_trips_page", AsyncMock(return_value={"data": [], "total_count": 0}))
         monkeypatch.setattr(trips_module, "get_parts_for_trips", AsyncMock(return_value={}))
-        redis = _FakeRedis()
+        redis = FakeRedis()
 
         with patch.object(cache_module, "client", redis):
             await trips_module._cached_read_trips(
@@ -649,7 +631,7 @@ class TestReadPath:
         # Byte-identical to what `OwnedResourceCache.read_list` wrote before the trips
         # reads were hand-rolled, and inside the `user_{id}_trips:*` pattern
         # `invalidate_trip_caches` sweeps after every trip write and every dive write.
-        (key,) = redis.written
+        (key,) = redis.store
         assert key == namespaced(f"user_{USER_ID}_trips:page_2:items_per_page:10:search:moalboal:{USER_ID}")
         assert fnmatch(key, across_builds(f"user_{USER_ID}_trips:*"))
 
@@ -667,7 +649,7 @@ class TestReadPath:
             trips_module, "get_figures_for_trips", AsyncMock(return_value={trip.id: TripFigures(4, 3, 17, 32.4)})
         )
         _no_derived(monkeypatch)
-        redis = _FakeRedis()
+        redis = FakeRedis()
 
         with patch.object(cache_module, "client", redis):
             # Annotated `Any` because what comes back is what the client will get: on a
@@ -680,7 +662,7 @@ class TestReadPath:
         assert [part["location"]["name"] for part in body["parts"]] == ["Moalboal", "Bohol"]
         assert _figures_of(body) == (4, 3, 17, 32.4)
         # Under the user, so the sweep every dive write makes reaches it without naming it.
-        (key,) = redis.written
+        (key,) = redis.store
         assert key == namespaced(f"user_{USER_ID}_trip:{trip.uuid}")
         assert fnmatch(key, across_builds(f"user_{USER_ID}_trip:*"))
         assert not fnmatch(key, across_builds(f"user_{USER_ID}_trips:*"))
@@ -689,7 +671,7 @@ class TestReadPath:
     async def test_a_missing_trip_is_a_404(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(trips_module.crud_trips, "get", AsyncMock(return_value=None))
 
-        with patch.object(cache_module, "client", _FakeRedis()), pytest.raises(NotFoundException):
+        with patch.object(cache_module, "client", FakeRedis()), pytest.raises(NotFoundException):
             await trips_module._cached_read_trip(
                 _get_request(), user_id=USER_ID, uuid=uuid_pkg.UUID(int=0), owner_uuid=USER_UUID, db=MagicMock()
             )
@@ -1093,7 +1075,7 @@ class TestTheFigures:
         _link(db, create_dive(db, diver, trip=left, max_depth=18.0), sites=[wall], species=[turtle])
         moved = create_dive(db, diver, trip=left, max_depth=30.0)
         _link(db, moved, sites=[wall, create_dive_site(db, diver)], species=[create_species(db)])
-        monkeypatch.setattr(cache_module, "client", _ServingRedis())
+        monkeypatch.setattr(cache_module, "client", FakeRedis())
 
         before = await _reads(async_db, diver, left, joined)
         await _patch_dive(async_db, diver, moved, {"trip_uuid": str(joined.uuid)})
@@ -1112,7 +1094,7 @@ class TestTheFigures:
         and still changes what the trip it is on says."""
         trip = create_trip(db, diver)
         edited = create_dive(db, diver, trip=trip, max_depth=18.0)
-        monkeypatch.setattr(cache_module, "client", _ServingRedis())
+        monkeypatch.setattr(cache_module, "client", FakeRedis())
 
         before = await _reads(async_db, diver, trip)
         await _patch_dive(async_db, diver, edited, {"max_depth": 31.5})
@@ -1155,27 +1137,3 @@ async def _patch_dive(async_db: AsyncSession, diver: User, dive: Dive, values: d
 
 def _figures_of(trip: dict[str, Any]) -> TripFigures:
     return TripFigures(trip["dive_count"], trip["dive_site_count"], trip["species_count"], trip["max_depth"])
-
-
-class _ServingRedis:
-    """A Redis that keeps what `@cache` writes and serves it back, and sweeps the way the real
-    one does - so a read after a write is stale unless something actually dropped it."""
-
-    def __init__(self) -> None:
-        self.store: dict[str, bytes] = {}
-
-    async def get(self, key: str) -> bytes | None:
-        return self.store.get(key)
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.store[key] = value.encode()
-
-    async def expire(self, key: str, seconds: int) -> None:
-        return None
-
-    async def delete(self, *keys: str) -> None:
-        for key in keys:
-            self.store.pop(key, None)
-
-    async def scan(self, cursor: int = 0, match: str = "*", count: int | None = None) -> tuple[int, list[str]]:
-        return 0, [key for key in self.store if fnmatch(key, match)]
