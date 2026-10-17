@@ -4437,6 +4437,8 @@ carries no location, and stripping it again changes no byte. The rendition every
 drawn from original and crop: oriented, cropped, bounded (512 px square, 900 px high at 7:9), WebP,
 the portrait filled with white where transparent. A client cannot be trusted with either step. An
 avatar uploaded without a crop, and the Google seed, keep no original and render the centred square.
+A card image (JPEG, PNG or WebP) goes through the same strip before it is hashed, since a check-in
+link serves it; a PDF is stored as uploaded.
 
 `pillow-heif` is rejected as cards reject HEIC: a native-library dependency for a case iOS pickers
 already transcode around.

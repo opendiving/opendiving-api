@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import UploadFile
+from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.dml import Insert, Update
@@ -35,6 +36,7 @@ from src.app.services.certification_files import (
     KEY_KIND as CARD_KIND,
 )
 from src.app.services.certification_files import (
+    UnsupportedCardFileError,
     load_certification_file,
     store_certification_file,
 )
@@ -45,8 +47,10 @@ from src.app.services.dive_files import (
     load_dive_file,
     store_recording_file,
 )
+from src.app.services.picture_originals import strip_metadata
 from tests.conftest import db_available
 from tests.helpers.generators import create_dive, create_user
+from tests.helpers.images import COMMENT_PAYLOAD, XMP_PAYLOAD, phone_jpeg, phone_webp, plain_jpeg, screenshot_png
 
 # The namespace a Suunto DM5 export is sniffed on.
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
@@ -57,7 +61,8 @@ XML = f"""<?xml version="1.0" encoding="utf-8"?>
 """.encode()
 XML_DIGEST = hashlib.sha256(XML).hexdigest()
 
-JPEG = b"\xff\xd8\xff" + b"a card, notionally"
+# A real JPEG with nothing to strip, so what is stored is what was uploaded.
+JPEG = plain_jpeg()
 JPEG_DIGEST = hashlib.sha256(JPEG).hexdigest()
 
 
@@ -317,6 +322,78 @@ class TestCardFileWriteOrdering:
         written = [k for k in blob_store.iter_keys() if k != old_key]
         assert len(written) == 1, "the re-upload must land under a key of its own, not the retired one"
         assert (volume / written[0]).read_bytes() == JPEG
+
+
+class TestACardImageIsStoredStripped:
+    """A card is served to whoever holds a check-in link, so a phone photo of one must not
+    carry where it was taken - the strip a picture original gets, applied on the server."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("source", "filename"),
+        [(phone_jpeg(), "card.jpg"), (screenshot_png(), "card.png"), (phone_webp(), "card.webp")],
+    )
+    async def test_the_stored_file_keeps_the_image_and_drops_the_location(
+        self, volume: Path, source: bytes, filename: str
+    ) -> None:
+        db = TestCardFileWriteOrdering._session()
+
+        await store_certification_file(
+            db, user_id=1, certification_id=3, side=CertificationSide.FRONT, upload=_upload(source, filename)
+        )
+
+        [key] = blob_store.iter_keys()
+        stored = (volume / key).read_bytes()
+        for leaked in (XMP_PAYLOAD, b"PhoneMaker", COMMENT_PAYLOAD, b"trailing bytes"):
+            assert leaked not in stored
+        with Image.open(io.BytesIO(stored)) as kept, Image.open(io.BytesIO(source)) as uploaded:
+            assert kept.getexif().get(0x8825) is None, "the GPS block survived"
+            assert kept.getexif().get(0x0112) == uploaded.getexif().get(0x0112)
+            assert kept.convert("RGB").tobytes() == uploaded.convert("RGB").tobytes()
+        [row] = _written(db, Insert, "certification_file")
+        assert row["sha256"] == hashlib.sha256(stored).hexdigest() and key.endswith(f"_{row['sha256']}")
+        assert row["byte_size"] == len(stored)
+
+    @pytest.mark.asyncio
+    async def test_a_pdf_is_stored_as_it_came(self, volume: Path) -> None:
+        pdf = b"%PDF-1.7\n/Author (a diver)\n%%EOF"
+
+        await store_certification_file(
+            TestCardFileWriteOrdering._session(),
+            user_id=1,
+            certification_id=3,
+            side=CertificationSide.FRONT,
+            upload=_upload(pdf, "card.pdf"),
+        )
+
+        [key] = blob_store.iter_keys()
+        assert (volume / key).read_bytes() == pdf
+
+    @pytest.mark.asyncio
+    async def test_a_damaged_image_is_refused_before_anything_is_written(self, volume: Path) -> None:
+        with pytest.raises(UnsupportedCardFileError):
+            await store_certification_file(
+                TestCardFileWriteOrdering._session(),
+                user_id=1,
+                certification_id=3,
+                side=CertificationSide.FRONT,
+                upload=_upload(phone_jpeg()[:200], "card.jpg"),
+            )
+
+        assert list(blob_store.iter_keys()) == []
+
+    def test_stripping_a_stripped_webp_changes_no_byte(self) -> None:
+        once = strip_metadata(phone_webp(), "image/webp")
+
+        assert strip_metadata(once, "image/webp") == once
+
+    def test_a_webp_without_its_exif_says_so_in_its_header(self) -> None:
+        """A reader may trust the `VP8X` flags over the chunks, so they follow what is kept."""
+        stripped = strip_metadata(phone_webp(orientation=None), "image/webp")
+
+        assert b"EXIF" not in stripped and b"XMP " not in stripped
+        flags = stripped[stripped.index(b"VP8X") + 8]
+        assert flags & 0x0C == 0
 
 
 class TestTheReadTransactionIsReleasedBeforeTheBlobWrite:

@@ -27,6 +27,7 @@ from ..core.utils.uploads import read_upload_within_limit, safe_filename
 from ..models.certification_file import CertificationFile
 from ..schemas.certification import CertificationFileInfo, CertificationSide
 from . import blob_store
+from .picture_originals import DamagedImageError, strip_metadata
 from .storage_usage import ensure_room
 
 # The key prefix every card file is stored under. A "kind" rather than a directory, so a
@@ -95,6 +96,20 @@ def sniff_content_type(data: bytes) -> str:
     raise UnsupportedCardFileError("Unsupported file type. Upload a JPEG, PNG, WEBP or PDF.")
 
 
+def strip_card_image(data: bytes, content_type: str) -> bytes:
+    """A card image without its metadata - the lossless strip a picture original gets, for the
+    same reason: a phone photo of a card carries where it was taken, and a check-in link
+    serves the card to whoever holds the link. Done here rather than trusted to the client.
+    A PDF is stored as it came.
+    """
+    if content_type == "application/pdf":
+        return data
+    try:
+        return strip_metadata(data, content_type)
+    except DamagedImageError as exc:
+        raise UnsupportedCardFileError(f"That image is damaged: {exc}.") from exc
+
+
 async def store_certification_file(
     db: AsyncSession, *, user_id: int, certification_id: int, side: CertificationSide, upload: UploadFile
 ) -> CertificationFileInfo:
@@ -127,6 +142,7 @@ async def store_certification_file(
         raise UnsupportedCardFileError("The uploaded file is empty.")
 
     content_type = sniff_content_type(data)
+    data = strip_card_image(data, content_type)
     filename = safe_filename(upload.filename, default="card")
     digest = hashlib.sha256(data).hexdigest()
     now = datetime.now(UTC)
