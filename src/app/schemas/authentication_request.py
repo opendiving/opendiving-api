@@ -1,13 +1,15 @@
 import uuid as uuid_pkg
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict
+
+from ..core.schemas import AccountEmail
 
 
 class AuthenticationRequestCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    email: EmailStr
+    email: AccountEmail
     token_hash: str
     expires_at: datetime
     # Only the sign-in flow sets this; an email change is confirmed in the new mailbox,
@@ -28,7 +30,7 @@ class AuthenticationRequestUpdate(BaseModel):
 class AuthenticationRequestRead(BaseModel):
     id: int
     uuid: uuid_pkg.UUID
-    email: EmailStr
+    email: AccountEmail
     token_hash: str
     expires_at: datetime
     code_hash: str | None

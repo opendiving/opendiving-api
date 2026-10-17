@@ -8,8 +8,9 @@ would be an account-existence oracle for anyone who can reach the port.
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from ..core.schemas import AccountEmail
 from .invitation import MAX_ADDRESSES_PER_BATCH
 
 
@@ -26,7 +27,7 @@ class InviteRequestSubmission(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    email: EmailStr
+    email: AccountEmail
 
 
 class InviteRequestAccepted(BaseModel):
@@ -51,7 +52,7 @@ class AdminInviteRequestRead(BaseModel):
     removes it instead of inviting somebody who is already here.
     """
 
-    email: EmailStr
+    email: AccountEmail
     created_at: datetime
     has_account: bool
 
@@ -67,7 +68,7 @@ class AdminInviteRequestDeleteRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    emails: list[EmailStr] = Field(min_length=1, max_length=MAX_ADDRESSES_PER_BATCH)
+    emails: list[AccountEmail] = Field(min_length=1, max_length=MAX_ADDRESSES_PER_BATCH)
 
 
 class AdminInviteRequestDeleteResponse(BaseModel):

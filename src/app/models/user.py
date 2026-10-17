@@ -6,6 +6,7 @@ from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
 from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
+from ..core.schemas import EMAIL_MAX_LENGTH
 
 
 class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
@@ -15,7 +16,7 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
 
     name: Mapped[str] = mapped_column(String(30))
     username: Mapped[str] = mapped_column(String(20), unique=True, index=True)
-    email: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(EMAIL_MAX_LENGTH), unique=True, index=True)
 
     # No password/provider-id columns here at all - a user's actual authentication
     # methods (magic-link email, Google, and any future provider) live exclusively in
