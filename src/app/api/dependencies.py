@@ -22,9 +22,9 @@ async def get_current_user(
 
     The account lookup is the root of the entire ownership model - `fetch_owned_or_raise`
     below compares against the `id` it returns - so it has to name an account that cannot
-    change hands. It keys on the immutable `uuid` the token carries as its subject; it
-    used to key on the username, which `PATCH /user` can change and release for anyone
-    else to claim (see `services.auth_service.issue_tokens` and DECISIONS.md). It is one query
+    change hands. It keys on the immutable `uuid` the token carries as its subject, never
+    on the username, which `PATCH /user` can change and release for anyone else to claim
+    (see `services.auth_service.issue_tokens` and DECISIONS.md). It is one query
     that carries both pictures' `UserRead` fields with the account (`read_account`), since
     `GET /user` returns this dict as it is.
 
@@ -120,9 +120,8 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
     worth centralizing rather than restating per route:
 
     1. **Ordering.** This has to run *before* any `@cache`-wrapped read helper, because
-       `@cache` serves a cached response without re-running authorization. Each route
-       used to carry its own copy of that warning, and a copy is a thing that can be
-       left out.
+       `@cache` serves a cached response without re-running authorization. Stated here
+       rather than at each route, where a copy is a thing that can be left out.
     2. **The one answer for both cases.** A 403 on an addressed resource confirms that
        an opaque uuid names a real row belonging to *someone*, which is a fact the caller
        has no business learning. Answering 404 either way costs the owner nothing - they
@@ -150,12 +149,11 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
 
     `include_deleted` exists for the routes that legitimately act on a soft-deleted row
     (restoring a certification, say) - everything else wants the default. Both it and the
-    filter it controls apply only to the models that still carry the column: `Certification`
-    is the last one routed through here, and `Trip`/`DiveSite`/`Course`/`GearItem`/`GearSet`
-    are hard-deleted now. The check is on the model rather than unconditional because
-    FastCRUD's `get_model_column` raises `ValueError` for a column the model lacks instead
-    of ignoring it, so an unconditional filter would turn every `GET`/`PATCH`/`DELETE` on
-    those five into a 500.
+    filter it controls apply only to the models that carry the column - of those routed
+    through here, `Dive` and `Certification`; the rest are hard-deleted. The check is on the
+    model rather than unconditional because FastCRUD's `get_model_column` raises
+    `ValueError` for a column the model lacks instead of ignoring it, so an unconditional
+    filter would turn every `GET`/`PATCH`/`DELETE` on the others into a 500.
 
     Note the two intentional non-users: `api.v1.gear_service._owned_gear_item` and
     `api.v1.gear_sets._resolve_item_ids` answer 422 for both cases, because there the

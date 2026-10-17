@@ -196,9 +196,8 @@ def _info(row: _ExistingRow) -> DiveFileInfo:
 async def _find_by_digest(db: AsyncSession, *, user_id: int, digest: str) -> _ExistingRow | None:
     """Look up this diver's row for a given content hash.
 
-    Explicit columns rather than `select(DiveFile)`. That predates the payload leaving
-    Postgres - it kept the `bytea` from being dragged along by accident - and stays because
-    it says exactly what the dedupe decision reads.
+    Explicit columns rather than `select(DiveFile)`, because they say exactly what the
+    dedupe decision reads.
     """
     stmt = select(
         DiveFile.id,
@@ -417,8 +416,8 @@ def extract_recording(
         placed = apply_gas_mapping(_placed(extraction.profile, extraction.start, origin), labels)
         (fit_profiles if file.parser_key == "fit" else profiles).append(placed)
         result = RecordingExtraction(
-            # `|` with the stored side second is the fill: a key already carrying a value
-            # keeps it, and one carrying `None` is overwritten by a later file's reading.
+            # Earlier files win: a key already carrying a value keeps it, and one carrying
+            # `None` takes this file's reading.
             scalars={
                 name: result.scalars.get(name) if result.scalars.get(name) is not None else value
                 for name, value in (extraction.scalars or {}).items()
@@ -1742,8 +1741,9 @@ async def delete_files_for_dive(db: AsyncSession, *, dive_id: int, commit: bool 
     """Hard-delete every recording of a dive, and with them its files and profiles.
 
     The dive-deletion hook. The FK's `ON DELETE CASCADE` from `dive` can't do this for us:
-    deletion is application-level (`is_deleted`), so no `DELETE FROM dive` ever runs and that
-    cascade never fires - the same reasoning as `delete_files_for_certification`. The cascade
+    deletion is application-level (`is_deleted`), so the route issues no `DELETE FROM dive` and
+    that cascade fires only in the account purge - the same reasoning as
+    `delete_files_for_certification`. The cascade
     from `dive_recording` *does* fire, which is why removing the recordings is enough to take
     the files and the profiles with them.
     """
@@ -1862,12 +1862,8 @@ def merge_mixture_fields(
         # their stage bottle has touched neither fraction, so the guard above still admits
         # the join and the backfill would have written both back to `NULL`.
         #
-        # The dive's own scalars are overwritten outright a few lines up, and the asymmetry
-        # is the point: nothing but the import writes those, so there is no edit to lose.
-        # These two have another writer.
-        #
         # A reader *correction* still lands, which is what the fill-only rule costs and
-        # doesn't: where the file records a value the backfill overwrites as before, and it
+        # doesn't: where the file records a value the backfill overwrites it, and it
         # declines only where the file has nothing to say.
         #
         # **`gas_number` is not among them.** This join is positional, and a label written
@@ -1914,11 +1910,11 @@ async def backfill_tech_fields(
 
     Idempotent, and safe to run repeatedly.
 
-    **It no longer clears.** A logbook import that matches an existing recording and stores no
+    **It never clears.** A logbook import that matches an existing recording and stores no
     bytes fills a blank `cns_end` from the document, and an outright rewrite here would delete
     that reading on the next run with nothing on the volume to recover it from. So a run fills
-    only where a stored file yields a value and the column has none; what it can no longer do
-    is *null* a reading it has decided is bogus, and that is the accepted cost.
+    only where a stored file yields a value and the column has none; what it cannot do is
+    *null* a reading it has decided is bogus, and that is the accepted cost.
 
     **It walks every recording** for what is the recording's own - its readouts, its device
     and its settings - and is the recovery for recordings stored before the readouts moved

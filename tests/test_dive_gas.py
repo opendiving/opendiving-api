@@ -7,6 +7,9 @@ is exercised by hand (see DECISIONS.md), not here.
 """
 
 from typing import Any
+from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 from src.app.schemas.dive_mixture import DiveMixtureRead, TankUsage
 from src.app.schemas.dive_profile import MILLISECONDS_PER_SECOND, GasAttribution
@@ -16,6 +19,7 @@ from src.app.services.dive_gas import (
     compute_gas_use,
     compute_multi_tank_gas_use,
     compute_parallel_gas_use,
+    gas_use_history,
     resolve_gas_use,
 )
 from src.app.services.dive_profiles import ProfileGasAttribution
@@ -873,3 +877,21 @@ class TestResolveGasUse:
         assert result is not None
         assert len(result.tanks) == 2
         assert result.attributed_seconds == 5100
+
+
+class TestGasUseHistory:
+    @pytest.mark.asyncio
+    async def test_dives_starting_together_come_back_in_a_fixed_order(self) -> None:
+        """Two dives logged at the same minute - a dive and its second computer's import,
+        say - would otherwise swap places on the chart from one read to the next."""
+        db = Mock()
+        db.execute = AsyncMock(return_value=[])
+
+        with (
+            patch("src.app.services.dive_gas.get_mixtures_for_dives", new=AsyncMock(return_value={})),
+            patch("src.app.services.dive_gas.get_gas_attribution_for_dives", new=AsyncMock(return_value={})),
+        ):
+            assert await gas_use_history(db, user_id=7) == []
+
+        statement = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "ORDER BY dive.start_time, dive.id" in statement

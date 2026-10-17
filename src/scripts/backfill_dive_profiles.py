@@ -6,9 +6,9 @@ Run after a release that moves the reader or the extractor, from the API contain
     docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
     docker compose exec api python -m src.scripts.backfill_dive_profiles --dry-run
 
-A script rather than an arq job, deliberately. DECISIONS.md's "The Arq worker now does
-one real thing" records that the API-side queue plumbing was removed and the worker runs
-crons only; a backfill finishes once per version, so scheduling it as a cron would mean
+A script rather than an arq job, deliberately. DECISIONS.md's "The Arq worker runs crons
+only, and nothing in the API enqueues" records that the API has no queue plumbing and the
+worker runs crons only; a backfill finishes once per version, so scheduling it as a cron would mean
 rescanning the whole corpus forever for a job that is already done.
 
 Selects the **recordings** whose profile is missing, was read by an older extractor or

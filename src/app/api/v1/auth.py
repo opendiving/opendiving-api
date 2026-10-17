@@ -20,9 +20,7 @@ handed a restore token and the purge date, and `POST /auth/restore` is the expli
 that brings the account back. That is also why the restore endpoint lives here rather than
 under `/user`, where `get_current_user` would 401 on the very accounts it serves.
 
-`POST /auth/refresh`/`POST /auth/logout` also live here (see `DECISIONS.md`) - they
-used to sit in their own `login.py`/`logout.py` modules under a stale `"login"` tag,
-left over from the old password-based flow.
+`POST /auth/refresh`/`POST /auth/logout` also live here (see `DECISIONS.md`).
 """
 
 import hmac
@@ -432,11 +430,10 @@ async def verify_email_link(
     The token is strictly single-use, as the email that carries it promises: an
     already-`used_at` link is rejected, alongside one that expired or was superseded
     by a newer request (see `request_email_link` and
-    `AuthenticationRequest.invalidated_at`). Replay used to be allowed here on the
-    grounds that `resolve_identity` is a pure lookup - true, but beside the point,
-    since the side effect that matters is `_start_onboarding_or_sign_in` minting a
-    fresh refresh cookie good for `REFRESH_TOKEN_EXPIRE_DAYS`. Anyone who reads the
-    mail after the recipient has clicked it got a brand-new week-long session.
+    `AuthenticationRequest.invalidated_at`). That `resolve_identity` is a pure lookup
+    does not make replay safe: `_start_onboarding_or_sign_in` mints a fresh refresh
+    cookie good for `REFRESH_TOKEN_EXPIRE_DAYS`, so anyone who read the mail after the
+    recipient clicked it would get a brand-new week-long session.
     """
     await enforce_rate_limit(
         f"auth:email-verify:ip:{client_ip(request)}",
@@ -695,10 +692,8 @@ async def complete_profile(
 ) -> AuthOutcome:
     """Creates the `User` row (and its `AuthenticationProvider` link) for a verified
     identity that had no account yet, then signs the new user in. This is the only place
-    *self-service* registration ever creates a `User` row - two operator paths also write
-    one and are not registration: `scripts/create_first_superuser.py`, which is excluded
-    from the shipped image, and the admin panel's `User` view, both of which bypass the
-    gate below by construction.
+    *self-service* registration ever creates a `User` row - the admin panel's `User` view
+    also writes one and is not registration, and bypasses the gate below by construction.
 
     **On an `invite`-mode instance this refuses (403) an address with no live
     invitation**, unless the onboarding token carries a live join-channel slug or the token
@@ -789,11 +784,10 @@ async def complete_profile(
         # The three default dive-form presets, in the same transaction as the account:
         # a registration either creates the account with them or creates nothing. This is
         # the one place self-service registration makes a `User` row, so it is the one
-        # place they can be seeded eagerly - the other two writers (the admin panel's
-        # generic insert and `scripts/create_first_superuser.py`) are not registration and
-        # reach the same three through `POST /dive-form-presets/defaults` instead.
+        # place they can be seeded eagerly - the admin panel's generic insert is not
+        # registration and reaches the same three through `POST /dive-form-presets/defaults`.
         await seed_default_presets(db, user_id=created_user.id, commit=False)
-        # The default tags, on the same terms. The other two writers seed none, and have no
+        # The default tags, on the same terms. The admin panel seeds none, and has no
         # restore to reach for: a tag is typed into being wherever one is used.
         await seed_default_tags(db, user_id=created_user.id)
         if admission.invite_link_owner_id is not None:
@@ -956,8 +950,8 @@ def _elapsed(since: datetime) -> str:
 #
 # Five seconds is three orders of magnitude above the race and negligible against theft,
 # which is replayed minutes or hours later. **The `WARNING` is not conditioned on it**:
-# that still fires for every presentation, gap attached, exactly as before, so nothing
-# that was visible has become invisible. What sits past the threshold is the pair of
+# that fires for every presentation, gap attached, so every presentation stays
+# visible. What sits past the threshold is the pair of
 # consequences that assume replay-not-race - the revocation and the audit row.
 _REFRESH_REPLAY_THRESHOLD = timedelta(seconds=5)
 
@@ -1008,11 +1002,12 @@ async def _handle_revoked_refresh(refresh_token: str, db: AsyncSession, context:
 
     subject = token_subject(refresh_token)
     logger.warning(
-        "A revoked refresh token was presented (subject: %s) %s after it was revoked. Under a second is "
+        "A revoked refresh token was presented (subject: %s) %s after it was revoked. Under %.0fs is "
         "the two-tab rotation race POST /auth/refresh documents; a longer gap is worth investigating as "
         "a stolen cookie.",
         subject or "unknown",
         _elapsed(revoked_at),
+        _REFRESH_REPLAY_THRESHOLD.total_seconds(),
     )
 
     if datetime.now(UTC) - revoked_at < _REFRESH_REPLAY_THRESHOLD:

@@ -106,9 +106,9 @@ class UserCreateInternal(UserBase):
     the resulting authentication method is recorded separately (see
     `AuthenticationProviderCreate`), not on the user row itself.
 
-    "Self-service" is the qualifier, not decoration: `scripts/create_first_superuser.py`
-    and the admin panel's `User` view also write rows, and both bypass the registration
-    gate (`services.registration_gate`) by construction. On an `invite`-mode instance the
+    "Self-service" is the qualifier, not decoration: the admin panel's `User` view also
+    writes rows, and bypasses the registration gate (`services.registration_gate`) by
+    construction. On an `invite`-mode instance the
     completion route creates a row only for an address that holds a live invitation, for one
     that arrived by a member's live invite link, or for the very first account on an empty
     instance - which is `UserBootstrapCreateInternal` below rather than this schema.
@@ -143,7 +143,8 @@ class UserUpdate(RejectsExplicitNulls):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Every field here maps to a `NOT NULL` column. Neither picture is here at all - each is
+    # Every field listed maps to a `NOT NULL` column; `dive_form_preset_uuid`, the one
+    # nullable field below, is not listed. Neither picture is here at all - each is
     # written by its own routes under `/user/avatar` and `/user/portrait`, which own the blobs
     # beside the row, and a PATCH that could null a key while leaving the file in the store
     # is exactly the orphan this app has a sweeper for.
@@ -240,12 +241,12 @@ class UserDelete(BaseModel):
     """FastCRUD's soft-delete payload - both columns, which is what makes `deleted_at` the
     deletion clock `purge_deleted_accounts` counts from.
 
-    There is deliberately no `UserRestoreDeleted` beside it any more. It carried
-    `is_deleted` alone, so restoring through it would have cleared the flag and left the
-    clock set - `is_deleted = false, deleted_at = <a date>` looks alive but is a row nothing
-    reconciles, and the mirror state (`true`, `NULL`) is the never-purge one the job warns
-    about. `POST /auth/restore` clears both in one statement under a row lock; a schema that
-    can only clear one is a trap wearing the right name.
+    There is deliberately no `UserRestoreDeleted` beside it. One carrying `is_deleted`
+    alone would clear the flag and leave the clock set - `is_deleted = false,
+    deleted_at = <a date>` looks alive but is a row nothing reconciles, and the mirror
+    state (`true`, `NULL`) is the never-purge one the job warns about. `POST /auth/restore`
+    clears both in one statement under a row lock; a schema that can only clear one is a
+    trap wearing the right name.
     """
 
     model_config = ConfigDict(extra="forbid")

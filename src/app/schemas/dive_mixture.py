@@ -72,7 +72,7 @@ class TankUsage(StrEnum):
 
 
 class DiveMixtureBase(BaseModel):
-    """The shape a mixture is read back in - and deliberately the *unbounded* one.
+    """The shape a mixture is read back in - and deliberately without the pressure bounds.
 
     `DiveMixtureRead` inherits this and `crud_dive_mixtures` runs
     `DiveMixtureRead.model_validate(row)` over every mixture on every read, so a bound
@@ -85,7 +85,9 @@ class DiveMixtureBase(BaseModel):
     A read schema that can reject its own table is a liability. The pressure bounds
     therefore live on `DiveMixtureCreate`/`DiveMixtureUpdate` and on the DB `CHECK`s,
     which together are what keep the table clean; a row that somehow slips past both
-    still reaches the diver as a field with a message rather than as a 500.
+    still reaches the diver as a field with a message rather than as a 500. The two
+    bounds declared here, `po2_limit`'s and `gas_number`'s, are exactly their `CHECK`s',
+    so no stored row can fail them.
 
     The same reasoning is why `volume`, `oxygen` and `helium` are typed `float | None`
     here rather than only on the write schemas: their columns are nullable, this class is
@@ -243,11 +245,11 @@ def as_create(row: DiveMixtureRead) -> DiveMixtureCreate:
     """A stored cylinder re-expressed as the shape a write takes.
 
     Four callers copy cylinders from one dive's rows onto another - a merge, a recording
-    attach on either of two paths, and the logbook importer - and all four used to rebuild
-    `DiveMixtureCreate(**row.model_dump(...))` by hand. That stopped being safe when the read
-    shape widened: `role`/`usage` carry the stored string now (see *"A stored vocabulary is
-    read back as a string"* in DECISIONS.md) while this schema still types the enums, so a
-    value outside one raised `ValidationError` out of a merge, an attach or an import.
+    attach on either of two paths, and the logbook importer. Rebuilding
+    `DiveMixtureCreate(**row.model_dump(...))` by hand is not safe: `role`/`usage` carry the
+    stored string on the read shape (see *"A stored vocabulary is read back as a string"* in
+    DECISIONS.md) while this schema types the enums, so a value outside one would raise
+    `ValidationError` out of a merge, an attach or an import.
 
     The unrepresentable value is dropped rather than carried, which is the same answer the
     DiveJSON writer gives (`services/export/envelope.py::_sayable`) and for the same reason:

@@ -13,9 +13,7 @@ specification's own words:
 
 - **Unknown members are ignored** (spec §5.6), because minor versions are additive and a
   reader must not reject a `1.1` document for carrying something it has not heard of. So
-  every model here is `extra="ignore"` rather than `extra="forbid"`, and the envelope
-  carries the top-level `extensions` member `ExportEnvelope` deliberately does not - a
-  foreign producer may put one there and refusing it would be non-conforming.
+  every model here is `extra="ignore"` rather than `extra="forbid"`.
 - **An unknown value in a closed vocabulary reads as absent** (spec §5.6 again), which is
   what makes that additive promise hold for a member like a gear item's `type`. Pydantic
   would raise on one, so every enum member here goes through `_unknown_is_absent`.

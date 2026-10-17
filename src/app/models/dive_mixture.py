@@ -56,8 +56,10 @@ class DiveMixture(Base):
     )
 
     __table_args__ = (
-        # A DB-level backstop for the same bounds the API schemas and the web form apply,
-        # so direct API calls or bugs can't insert nonsensical gas mixtures.
+        # The table's bounds on a cylinder, so direct API calls or bugs can't insert
+        # nonsensical gas mixtures. The write schemas repeat the pressure, `po2_limit` and
+        # `gas_number` ones; the rest are enforced here alone, and `api/v1/dives.py` maps
+        # every one of these names to a 422.
         #
         # The four constraints over `volume`, `oxygen` and `helium` spell their null case
         # out, like every other nullable column here, and that is a **restatement rather

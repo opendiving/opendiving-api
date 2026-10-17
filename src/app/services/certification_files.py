@@ -6,11 +6,10 @@ move out of a `bytea` column and onto the files volume without a single call sit
 changing.
 
 `services/blob_store.py` is the layer below: it owns *where and how*, and this module owns
-what is stored, under which key, against which row. That lower layer now does pick between
-two backends at runtime - a filesystem volume or an S3-compatible bucket, on
-`FILE_STORAGE_BACKEND` - which this file used to say it never would. What was right about
-that sentence is the half that survived: the choice is one module's business and no
-`FileStorage` interface reaches up to here. Nothing in this file knows there are two.
+what is stored, under which key, against which row. That lower layer picks between two
+backends at runtime - a filesystem volume or an S3-compatible bucket, on
+`FILE_STORAGE_BACKEND` - and the choice is its business alone: no `FileStorage` interface
+reaches up to here, and nothing in this file knows there are two.
 """
 
 import hashlib
@@ -252,8 +251,8 @@ async def get_certification_file_sha256(
     """Fetch just one side's content hash, without touching its bytes.
 
     Lets the download route answer a conditional request (`If-None-Match`) with a 304
-    after a single narrow query, instead of pulling megabytes out of the database only to
-    discard them. Returns `None` if that side has no file.
+    after a single narrow query, instead of reading megabytes out of the blob store only
+    to discard them. Returns `None` if that side has no file.
     """
     stmt = select(CertificationFile.sha256).where(
         CertificationFile.certification_id == certification_id,
@@ -301,11 +300,10 @@ async def delete_files_for_certification(db: AsyncSession, *, certification_id: 
     """Hard-delete every card file belonging to a certification.
 
     Called when the certification itself is deleted. The FK's `ON DELETE CASCADE` can't
-    do this for us: deletion here is application-level (`is_deleted`), so no `DELETE FROM
-    certification` ever runs and the cascade never fires - the same reasoning as
-    `delete_files_for_dive` in `services/dive_files.py`. `gear_service_schedule` used to
-    need a third copy of this and no longer does: `gear_item` is hard-deleted, so its
-    cascades fire on their own.
+    do this for us: deletion here is application-level (`is_deleted`), so the route issues
+    no `DELETE FROM certification` and the cascade fires only in the account purge - the
+    same reasoning as `delete_files_for_dive` in `services/dive_files.py`. `gear_item` needs
+    no copy of this: it is hard-deleted, so its cascades fire on their own.
 
     Note the gap this does *not* close: a hard delete of a `Certification` from the admin
     panel fires the FK's cascade with no service layer in the way, so the rows go and the
@@ -334,9 +332,7 @@ async def get_file_infos_for_certifications(
     Every row in the list view shows whether it has a front and a back, so fetching this
     per row would be an N+1 on the hot path - the same reasoning (and shape) as
     `get_schedules_for_gear_items`. Selects explicit columns rather than whole entities,
-    which is now habit rather than necessity: it predates the payload leaving Postgres,
-    where a `select(CertificationFile)` would have been one careless `undefer` from
-    dragging megabytes through a list view.
+    so a list view loads only what it shows.
     """
     if not certification_ids:
         return {}

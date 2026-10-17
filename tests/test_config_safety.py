@@ -3,8 +3,8 @@
 The admin-panel guard has its own module (`test_admin_config.py`) and the from-address one
 `test_email_config.py`; this covers the rest of what a fresh install can get wrong before
 it has served a single request - a `SECRET_KEY` copied out of the template, a production
-instance nobody can sign in to, an admin address belonging to a stranger, a password with
-an `@` in it, and a `LOG_LEVEL` typo.
+instance nobody can sign in to, a password with an `@` in it, a `LOG_LEVEL` typo, and a
+setting the app no longer reads.
 """
 
 import importlib.util
@@ -267,31 +267,16 @@ class TestGoogleSignInNeedsBothHalvesOfItsClient:
         assert "a-real-looking-secret" not in str(settings.GOOGLE_CLIENT_SECRET)
 
 
-class TestTheFirstSuperuserAddressHasNoDefault:
-    """`ADMIN_EMAIL` used to default to `admin@admin.com`, a real domain belonging to
-    somebody else. Sign-in is passwordless and keyed on the address, so
-    `scripts.create_first_superuser` would have created an `is_superuser` row whose magic
-    link is delivered to whoever runs that domain.
-    """
-
-    def test_unset_is_a_configuration_the_app_accepts(self):
-        """It was typed `str`, so an install that deliberately set nothing used to get the
-        stranger's address rather than no account.
+class TestRetiredSettings:
+    @pytest.mark.parametrize("name", ["ADMIN_NAME", "ADMIN_EMAIL", "CRUD_ADMIN_REDIS_SSL"])
+    def test_one_left_in_the_environment_does_not_stop_startup(self, name, tmp_path, monkeypatch):
+        """`Settings` forbids extra keys, but pydantic-settings reads only the variables named
+        by its fields, so an operator's configuration still setting one of these upgrades
+        cleanly.
         """
-        assert _settings(ADMIN_EMAIL=None).ADMIN_EMAIL is None
+        monkeypatch.setenv(name, "true")
 
-    def test_nothing_configuring_it_leaves_it_unset(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("ADMIN_EMAIL", raising=False)
-
-        assert _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings.ADMIN_EMAIL is None
-
-    def test_the_display_name_keeps_its_default(self, tmp_path, monkeypatch):
-        """`ADMIN_NAME` is a label on a row - nothing is keyed on it and nothing is
-        delivered to it - so it is not the same question.
-        """
-        monkeypatch.delenv("ADMIN_NAME", raising=False)
-
-        assert _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings.ADMIN_NAME == "admin"
+        assert not hasattr(_config_loaded_without_an_env_file(tmp_path, monkeypatch).settings, name)
 
 
 class TestRegistrationSettings:

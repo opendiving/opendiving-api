@@ -139,7 +139,7 @@ UDDF_NAMESPACE = "http://www.streit.cc/uddf/3.2/"
 UDDF_VERSION = "3.2.2"
 
 # Absolute zero, for the Celsius -> Kelvin conversions below. Spelled out once so the
-# four call sites cannot drift.
+# call sites cannot drift.
 KELVIN_OFFSET = 273.15
 PASCAL_PER_BAR = 100_000.0
 # UDDF tank volumes are cubic meters; divers, cylinder stampings and our `volume` column
@@ -818,7 +818,7 @@ def _trippart_element(trip_element: ET.Element, part: TripPartRead | None, stays
         end_date = part.end_date or part.start_date
         _sub(element, "dateoftrip", startdate=f"{start_date}T00:00:00", enddate=f"{end_date}T00:00:00")
     if location is not None:
-        # A place per part, where the whole trip used to get one joined line - and the
+        # A place per part rather than one joined line for the whole trip - and the
         # coordinates survive with it, `geographyType` allowing the single lat/lon pair a
         # part has where a trip of three places had no one position to put there.
         geography = _sub(element, "geography")

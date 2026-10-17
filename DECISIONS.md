@@ -191,9 +191,8 @@ row belongs to: `POST /dive`, `/trip`, `/dive-site` take the owner from the sess
 `GET/PATCH/DELETE /dive/{uuid}`, `/trip/{uuid}`, `/dive-site/{uuid}` fetch by id alone, then compare
 the row's `user_id` with the caller's; a missing row and someone else's row are both a 404 (*Someone
 else's row is a 404, not a 403*). FastAPI matches routes in registration order, so two handlers on
-one path and method leave the second unreachable. No route hard-deletes a model with
-`PersistentDeletion`: `crud.delete()` (soft delete, flipping `is_deleted`/`deleted_at`) is the only
-delete path. A GDPR purge runs against the database or the admin panel, not a REST endpoint.
+one path and method leave the second unreachable. Which rows a `DELETE` soft-deletes and which it
+removes is *"What is soft-deleted, and why"*.
 
 ## All `/user*`/`/users`/`/dive/parse` endpoints require auth, except signup
 
@@ -267,20 +266,21 @@ filtered or sorted on. The aggregate uses `func.count()` (`COUNT(*)`), not `func
 only then does `EXPLAIN (ANALYZE, BUFFERS)` show `Index Only Scan using ix_dive_user_id_stats` with
 `Heap Fetches: 0`. Revisit if a bulk-import endpoint lands (recompute once per batch).
 
-## The Arq worker runs one job: purging expired `token_blacklist` rows
+## The Arq worker runs crons only, and nothing in the API enqueues
 
-The worker (`core/worker/`) runs one job: `purge_expired_tokens` (`core/worker/functions.py`), an
-hourly cron (`core/worker/settings.py`, `arq.cron.cron(..., minute=0, run_at_startup=True)`)
-deleting `token_blacklist` rows with `expires_at < now()`. `blacklist_token(s)` in
-`core/security.py` adds a row per logout or account deletion, and a row is only needed until its JWT
-would expire on its own. The job calls `count()` before `crud_token_blacklist.delete()` because
-fastcrud's `delete()` raises `NoResultFound` on zero matches, which most hourly runs produce.
-Nothing in the API enqueues jobs, so there is no API-side queue plumbing (`core/utils/queue.py`,
-`create_redis_queue_pool`, `api/v1/tasks.py` and `schemas/job.py` do not exist);
-`RedisQueueSettings`/`REDIS_QUEUE_HOST`/`REDIS_QUEUE_PORT` stay in `core/config.py` because the
-worker builds its own `RedisSettings` from them. `TokenBlacklist.expires_at`
-(`core/db/token_blacklist.py`) is indexed (`ix_token_blacklist_expires_at`) so the cron's
-`WHERE expires_at < ...` is not a sequential scan.
+The worker (`core/worker/`) runs the crons in `WorkerSettings.cron_jobs` (`core/worker/settings.py`)
+and registers no `functions`: nothing in the API enqueues, so there is no API-side queue plumbing
+(`core/utils/queue.py`, `create_redis_queue_pool`, `api/v1/tasks.py` and `schemas/job.py` do not
+exist), and work that finishes once, such as a backfill, is a script. `RedisQueueSettings`,
+`REDIS_QUEUE_HOST` and `REDIS_QUEUE_PORT` stay in `core/config.py` because the worker builds its own
+`RedisSettings` from them.
+
+The housekeeping crons share the hour mark with `run_at_startup=True`, because a restart loop
+changes nothing: each sweep deletes only rows past an absolute cutoff, and `record_sign_in_totals`
+rewrites counts it never lowers. `purge_expired_tokens` calls `count()` before
+`crud_token_blacklist.delete()` because fastcrud's `delete()` raises `NoResultFound` on zero
+matches, which most runs produce. The account purge and the emails never run at startup: a restart
+loop must not destroy a logbook early or send a round of mail twice.
 
 ## Unified auth flow: no passwords, no separate sign up, one `User` row per identity
 
@@ -376,9 +376,7 @@ account's current email equals the token's `new_email`; otherwise it rejects lik
 token.
 
 `admin/views.py`'s `User` view has no `password_transformer`/`PasswordTransformer`; admin-created
-users sign in by `email`. `scripts/create_first_superuser.py` sets no `hashed_password` and inserts
-an `authentication_provider` row (`provider="email"`) so that account can sign in. `create_all()`
-leaves an existing `user` table untouched:
+users sign in by `email`. `create_all()` leaves an existing `user` table untouched:
 
 ```sql
 ALTER TABLE "user" DROP COLUMN hashed_password;
@@ -999,10 +997,10 @@ see *"A dive has recordings, and a file belongs to one of them"*. The inheritanc
 response too and forces extra queries into `_cached_read_dives` — the hottest path in the app — for
 something only the detail page renders.
 
-`get_file_infos_for_dives` is written batched (explicit columns, `dive_id.in_()`) though it is only
-called with one id: it is the `get_file_infos_for_certifications` shape, it makes never selecting
-the `bytea` the default, and it is what an attachment marker in the dive list would need without a
-rewrite.
+`get_recordings_for_dives` is written batched (`dive_id.in_()`) though it is only called with one
+id: it is the `get_file_infos_for_certifications` shape, and it is what a recordings marker in the
+dive list would need without a rewrite. Its file and profile reads select explicit columns, so
+neither payload is loaded.
 
 ## No manual DDL for the dive-file feature
 
@@ -1153,12 +1151,14 @@ loads, so a conditional request costs one narrow query. The 304 is a bare `Respo
 client varies it with the profile's `uuid` and `updated_at`.
 
 `DiveProfileInfo` goes on `DiveReadWithMixtures`, never `DiveRead` — the inheritance trap
-`source_file` documents. `get_profile_infos_for_dives` is batched like `get_file_infos_for_dives`.
+`source_file` documents. `get_profile_infos_for_recordings` is batched like
+`get_file_infos_for_recordings`.
 
 ## The profile backfill is a script, not an arq job
 
-The worker runs crons only (*"The Arq worker now does one real thing"*); a backfill finishes once
-per extractor version and reader pin, so a cron would rescan the corpus forever.
+The worker runs crons only (*"The Arq worker runs crons only, and nothing in the API enqueues"*); a
+backfill finishes once per extractor version and reader pin, so a cron would rescan the corpus
+forever.
 
 ```bash
 docker compose exec api python -m src.scripts.backfill_dive_profiles --parser-key suunto_xml
@@ -1652,8 +1652,8 @@ labels all four `public, max-age=60`.
 sufficient on its own: `GET /auth/email/verify/check` and `GET /user/email-change/verify/check` are
 anonymous, side-effect-free GETs that take a single-use token in the query string and return the
 account's email address. Those set `Cache-Control: private, no-store` themselves, which the
-middleware's "never overwrite an explicit header" rule preserves. `GET /api/v1/health` still returns
-`public, max-age=60`; the fix is targeted, not a blanket disable of client caching.
+middleware's "never overwrite an explicit header" rule preserves, as do the health probes'
+`no-store`; the fix is targeted, not a blanket disable of client caching.
 
 ## `.dockerignore`, or: `.gitignore` does not apply to Docker
 
@@ -1761,8 +1761,9 @@ that roll back are the real fix.
 
 The token subject is `str(user.uuid)`, the immutable `uuid7` from `PublicUUIDMixin`;
 `get_current_user` looks the live account up by `uuid` (`read_account`), and `TokenData.user_uuid`
-is typed `uuid.UUID`. `create_access_token`/`create_refresh_token` add only `exp` and `token_type`,
-so the subject roots `fetch_owned_or_raise`'s ownership model.
+is typed `uuid.UUID`. `create_access_token`/`create_refresh_token` add `exp`, `jti`, `token_type`
+and the device's `sid`, none of which names the account, so the subject roots
+`fetch_owned_or_raise`'s ownership model.
 
 A username is not stable: `PATCH /user` frees it instantly, so a token naming it locks the renamer
 out, authenticates the name's next holder, and lets an attacker keep a token parked on a handle via
@@ -1992,9 +1993,9 @@ export with no `Gases` block leaves every fraction `None`, so a swap would put o
 
 The mixture half is fill-only — `po2_limit` and `role` are written only where read — because both
 are client-writable (`DiveMixtureCreate`, `PATCH /dive/{uuid}`), and a reader's `None` means the
-file did not record it. `gas_number` is `label_cylinders`' alone. The dive's own scalars are
-overwritten outright, `None`s included, because only the import writes them
-(`DiveCreate`/`DiveUpdate` are `extra="forbid"`).
+file did not record it. `gas_number` is `label_cylinders`' alone. The dive's own scalars take the
+same rule (`fill_tech_scalars`), for the logbook import's reason in *"The tech-field backfill is a
+second script, not a flag on the profile one"*.
 
 ## A parsed value the database refuses must not take the upload — or the backfill run — with it
 
@@ -2172,7 +2173,7 @@ nothing". `store_profile` always writes a list; `get_gas_attribution_for_dives` 
 either. No `CHECK`s, since nothing comes from a request body; `GasAttribution.model_validate` on the
 way out degrades an older payload to "no per-tank figure" with a warning, not a 500. Not `deferred`,
 unlike `data`: a few integers read on every dive detail; fetched by its own narrow query, not
-`get_profile_infos_for_dives`, because `gas_use_history` needs only this column.
+`get_profile_infos_for_recordings`, because `gas_use_history` needs only this column.
 
 ## `DiveMixture.name` is not a field: the label is a pure function of the fractions
 
@@ -3635,24 +3636,6 @@ argument.
 `tests/test_config_safety.py` and `tests/test_email_service.py` parametrise both guards over
 `production` and `staging`; the email side pins that the raise precedes the warning.
 
-## `ADMIN_EMAIL` has no default, because `admin.com` belongs to somebody else
-
-`ADMIN_EMAIL` is `str | None` with no default, `src/.env.example` ships it commented out, and
-`create_first_user` exits early naming the setting. Unset means no admin account.
-`scripts/create_first_superuser.py` creates an `is_superuser=True` row keyed on the address, and
-passwordless sign-in delivers that account's magic link to whoever controls the domain;
-`admin@admin.com` has a real owner. The same rule as `EMAIL_FROM_ADDRESS` and `CONTACT_FORM_EMAIL`.
-
-`is_superuser` gates `/docs`, `/redoc` and `/openapi.json` on non-local non-production environments
-(`core/setup.py`) and the `/api/v1/admin/*` routes (`api.v1.admin`); it grants no access to dives.
-
-`ADMIN_NAME` keeps `"admin"`: a display name nothing is keyed on or delivered to.
-
-`config()` resolves defaults at import against the developer's own `src/.env`, so
-`settings.ADMIN_EMAIL is None` on the imported module proves nothing. `tests/test_config_safety.py`
-loads a second copy of `core/config.py` under another name with `starlette.config.Config` pointed at
-a nonexistent file; `config.py` imports nothing from this package, so the copy is isolated.
-
 ## `linting.yml`, `tests.yml` and `type-checking.yml` run on a read-only token, with nothing left in `.git/config`
 
 All three declare `contents: read` at workflow level; a workflow with no `permissions:` block
@@ -4313,12 +4296,12 @@ duty, stated in the configuration reference under both the deletion knob and the
 ## Hourly at :30, and no `run_at_startup`
 
 Hourly rather than daily makes `ACCOUNT_DELETION_GRACE_DAYS=0` behave as an operator setting it
-would expect. At :30 so it does not contend with the two sweeps on the hour. No `run_at_startup`,
-unlike both of those: they delete rows already past expiry and a restart loop costs a no-op
-`DELETE`, while this one destroys logbooks, and a restart loop must never decide an account's fate
-minutes early. The batch is capped at 100 and the cap is logged when hit, because a silent
-truncation reads as "purged everything"; one account can carry hundreds of dives and sites, so an
-unbounded batch holds locks for minutes.
+would expect. At :30 so it does not contend with the sweeps on the hour. No `run_at_startup`, unlike
+those: they delete rows already past expiry and a restart loop costs a no-op `DELETE`, while this
+one destroys logbooks, and a restart loop must never decide an account's fate minutes early. The
+batch is capped at 100 and the cap is logged when hit, because a silent truncation reads as "purged
+everything"; one account can carry hundreds of dives and sites, so an unbounded batch holds locks
+for minutes.
 
 ## The email points at signing in, and carries no restore link of its own
 
@@ -4525,20 +4508,6 @@ hands every other reader this app's crop.
 read and a put, since the store has no copy. *Rejected:* one key shared by both rows, which lets
 either picture's replace or remove unlink the other's bytes, and which no per-column index or
 set-union sweep would notice.
-
-## The admin bootstrap's `Table` copy is drift-checked in both directions
-
-`src/scripts/create_first_superuser.py` hand-builds a Core `Table` mirroring `user`, and a column
-with a client-side `default=` goes into the INSERT whether or not the script's `data` dict names it.
-A column dropped from the model makes that INSERT an `UndefinedColumn`, which the bare
-`except Exception` in `create_first_user` logs and swallows, so a fresh install comes up with no
-superuser. Nothing else covers the script: `--cov` is scoped to `src/app` and it runs from a
-one-shot compose service.
-
-The two `Table` definitions are therefore module-level constants so
-`tests/test_create_first_superuser.py` asserts both directions of drift: every column the copy names
-exists on the real table, and every `NOT NULL` column without a server default is named by the copy.
-The next drop fails in CI rather than on somebody's first install.
 
 ## Species photos are the fourth kind on the files volume, and Commons is never hotlinked
 
@@ -5129,9 +5098,9 @@ distinction.
 
 A `planned` course has no dates; under Postgres's default `NULLS FIRST` a diver with two planned
 courses sees only those. `courses.py` keeps an `OwnedResourceCache` purely for
-`list_cache_key_prefix` and `invalidate_list`; its non-empty `search_columns` keeps the
-`:search:{search}` segment in the key, since every dimension a list read varies on — page, size,
-search term, and this list's four filters — appears in its key.
+`list_cache_key_prefix`; its non-empty `search_columns` keeps the `:search:{search}` segment in the
+key, since every dimension a list read varies on — page, size, search term, and this list's four
+filters — appears in its key.
 
 ## Deleting a course invalidates three cache families
 
@@ -5552,8 +5521,7 @@ raise would block every other account creation until the connection returned to 
 
 While `user` is empty, the next address to complete onboarding is admitted whatever
 `REGISTRATION_MODE` says and gets `is_superuser = true`, in `open` mode too. This resolves the
-deadlock of a fresh `invite` instance with no invitations and no superuser;
-`scripts/create_first_superuser.py` is excluded from the published image. Emptiness rather than a
+deadlock of a fresh `invite` instance with no invitations and no superuser. Emptiness rather than a
 flag: `_purge_one_account` hard-deletes the `User` row, so an instance whose last account is purged
 is fresh again. `admit_or_refuse` takes `pg_advisory_xact_lock` on a fixed key before the count, on
 every account creation — transaction-scoped so there is no unlock to forget, unconditional so there
@@ -5561,6 +5529,9 @@ is no race between branch and check. Account creations serialise, no cost for a 
 Rejected: `SERIALIZABLE`, which moves the guarantee into the isolation level and the failure into a
 retryable serialization error. The suite stages the race on two connections and asserts exactly one
 superuser.
+
+`is_superuser` gates `/docs`, `/redoc` and `/openapi.json` on non-local non-production environments
+(`core/setup.py`) and the `/api/v1/admin/*` routes (`api.v1.admin`); it grants no access to dives.
 
 ## The invite-request endpoint stays ignorant, exactly as the sign-in request does
 
@@ -5986,7 +5957,7 @@ Six invalidators run after commit: `invalidate_dive_caches`, `invalidate_certifi
 `invalidate_course_caches`, `invalidate_gear_caches`, and two helpers in
 `services/cache_invalidation.py` for the dive-site and trip list caches, module-private
 `OwnedResourceCache` instances in `api/v1/dive_sites.py` and `api/v1/trips.py`; they share
-`OwnedResourceCache.list_cache_pattern` with `invalidate_list` rather than importing a route module.
+`OwnedResourceCache.list_cache_pattern` with those instances rather than importing a route module.
 
 ## The `diver` member's identity and settings are never applied, and its check-in details only as confirmed
 
@@ -6151,13 +6122,13 @@ sends more entries than the vocabulary has members.
 Every account gets Basic, Recreational and Technical as ordinary rows, created in
 `complete_profile`'s own transaction (`api/v1/auth.py`): registration creates the account with its
 three presets or nothing. Only self-service registration passes through it; accounts from the admin
-panel's insert or `src/scripts/create_first_superuser.py` reach the same three through
-`POST /dive-form-presets/defaults`. Rejected: lazy seeding on the first `GET /dive-form-presets`
-behind a `seeded` flag — a GET that writes and a column on the hottest row; and web-side seeding
-from its own constant, which gives the vocabulary two owners. Restore adds what is missing by name,
-case-insensitively, and never overwrites: idempotent, and an edited or renamed default keeps its
-edit. `services/dive_form_presets.py::seed_default_presets` serves both callers. A changed default
-set reaches new accounts only; no revision rewrites existing rows, since that overwrites a saved
+panel's insert reach the same three through `POST /dive-form-presets/defaults`. Rejected: lazy
+seeding on the first `GET /dive-form-presets` behind a `seeded` flag — a GET that writes and a
+column on the hottest row; and web-side seeding from its own constant, which gives the vocabulary
+two owners. Restore adds what is missing by name, case-insensitively, and never overwrites:
+idempotent, and an edited or renamed default keeps its edit.
+`services/dive_form_presets.py::seed_default_presets` serves both callers. A changed default set
+reaches new accounts only; no revision rewrites existing rows, since that overwrites a saved
 preference and un-marks the preset as current for every diver whose `user.dive_form_hidden_fields`
 still holds the old set.
 

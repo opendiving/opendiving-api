@@ -13,15 +13,16 @@ from .search import search_clause, search_multi
 
 class OwnedResourceCache[InternalT, PublicT]:
     """Factory for the list-caching pattern shared by per-user owned resources: the key shape
-    of a paginated list endpoint, a `@cache`-wrapped read helper for the plainest of them, and
-    list-cache invalidation on mutation.
+    of a paginated list endpoint, the pattern that sweeps it, and a `@cache`-wrapped read
+    helper for the plainest of them.
 
     This intentionally does *not* wrap the create/patch/delete routes themselves, nor the
     ownership check: per `DECISIONS.md` ("auth before cache"), the ownership check must run
     *before* a cached read is ever called, since `@cache` can serve a cached response
     without re-running any authorization logic. Each resource's route still performs that
-    check itself, then delegates the actual (cached) data-fetching to `read_list` below, and
-    calls `invalidate_list` after a mutation.
+    check itself, then delegates the actual (cached) data-fetching to `read_list` below; a
+    mutation sweeps `list_cache_pattern` through the resource's invalidator in
+    `services/cache_invalidation.py`.
 
     There is no single-item read here. Every single read is hand-written under
     `user_{id}_{resource}` beside its list, so that one owner-scoped pattern drops both - which
@@ -83,6 +84,13 @@ class OwnedResourceCache[InternalT, PublicT]:
       the summary of the dives naming it, further queries zipped back into the page, and the
       list sorts on that summary, which no `sort_columns` string can name. It keeps an
       instance for the key shape.
+    - `gear_sets.py` - attaches each set's gear items, one batched lookup across the page.
+    - `gear_service.py` - the schedule and record lists resolve each row's gear item uuid
+      (and a record's schedule and contact uuids) in further batched queries, and key on an
+      item and a schedule filter the factory has no dimension for.
+    - `invitations.py` - uncached: an invitee accepting is a write no key of the inviter's
+      sees, and an invitation shown as pending after it was accepted is a wrong answer rather
+      than a stale one.
 
     In each of the enriched ones the enrichment is a second query whose results have to be
     zipped back into the page before conversion, which is precisely the step this factory has
@@ -203,8 +211,8 @@ class OwnedResourceCache[InternalT, PublicT]:
     def search_conditions(self, *, user_id: int, term: str) -> tuple[ColumnElement[bool], ...]:
         """The `WHERE` clauses matching the user's rows against a search term.
 
-        No liveness clause: every resource routed through this factory is hard-deleted, so the
-        column this used to name exists on none of their models.
+        No liveness clause: every resource routed through this factory is hard-deleted, so no
+        `is_deleted` column exists on their models.
         """
         model = self._crud.model
         return (

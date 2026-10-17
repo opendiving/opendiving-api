@@ -115,7 +115,7 @@ class _FakeRedis:
     async def get(self, key: str) -> None:
         return None
 
-    async def set(self, key: str, value: str) -> None:
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
         self.written[key] = value
 
     async def expire(self, key: str, seconds: int) -> None:

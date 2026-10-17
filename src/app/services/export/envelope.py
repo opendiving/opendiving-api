@@ -14,8 +14,8 @@ the format asks of a writer (spec §4) and which nothing about a dict would guar
 
 That trade has a cost: the declared shape (`ExportEnvelope`) is not on the write path and
 could drift from what is actually written. `tests/test_export_json.py` closes it by
-validating this generator's output against that model, against the vendored JSON Schema
-and against the spec's beyond-schema rules - which is why the model is worth declaring at
+validating this generator's output against that model, against the `divejson` package's JSON
+Schema and against the spec's beyond-schema rules - which is why the model is worth declaring at
 all.
 """
 
@@ -106,7 +106,7 @@ def _encode(value: Any) -> bytes:
 
     `exclude_none=True` is the format's "nothing invented" rule at the serializer (spec
     §5.4): there is exactly one spelling of "not recorded" and it is absence, so a `None`
-    anywhere in these models means the member is simply not written. The vendored schema
+    anywhere in these models means the member is simply not written. The format's schema
     rejects an explicit null, so this is enforced rather than stylistic.
 
     `ensure_ascii=False` because the file is declared UTF-8 and a diver's notes read
@@ -876,8 +876,7 @@ async def write_divejson(
     yield b'"dives": ['
     for index, dive in enumerate(bundle.dives):
         # One dive's profiles at a time, which is what keeps peak memory to a dive rather
-        # than a logbook - the same contract as before, now over however many recordings the
-        # dive has instead of exactly one.
+        # than a logbook, over however many recordings the dive has.
         profiles = {
             row.id: await load_profile(db, recording_id=row.id) if row.has_profile else None
             for row in bundle.recordings_by_dive.get(dive.id, [])

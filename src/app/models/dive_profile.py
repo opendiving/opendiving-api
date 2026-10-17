@@ -77,11 +77,12 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     `user_id` either - unlike `dive_file` there is no per-user uniqueness to enforce in
     this table, and every read resolves through `_get_owned_dive`.
 
-    **The `ON DELETE CASCADE` to `dive` never fires.** Dive deletion is application-level
-    (`is_deleted`), so no `DELETE FROM dive` ever runs - the same trap `delete_files_for_dive`
-    and `delete_files_for_certification` exist to work around, and the one the gear tables
-    got out of by going hard-delete. `delete_profiles_for_dive` in `services/dive_profiles.py`
-    is what actually removes these rows on that path.
+    **No dive route reaches the `ON DELETE CASCADE` to `dive`.** Dive deletion is
+    application-level (`is_deleted`), so a dive row goes only with its account, in the purge -
+    the same trap `delete_files_for_dive` and `delete_files_for_certification` exist to work
+    around, and the one the gear tables avoid by being hard-deleted.
+    `delete_profiles_for_dive` in `services/dive_profiles.py` is what removes these rows on a
+    dive's delete.
 
     The cascade to `dive_recording` **does** fire, because recordings are hard-deleted:
     removing a recording takes its profile and its files with it in the database rather

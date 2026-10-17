@@ -115,25 +115,8 @@ R = TypeVar("R")
 
 
 def _infer_resource_id(kwargs: dict[str, Any], resource_id_type: type | tuple[type, ...]) -> int | str:
-    """Infer the resource ID from a dictionary of keyword arguments.
-
-    Parameters
-    ----------
-    kwargs: Dict[str, Any]
-        A dictionary of keyword arguments.
-    resource_id_type: Union[type, Tuple[type, ...]]
-        The expected type of the resource ID, which can be integer (int) or a string (str).
-
-    Returns
-    -------
-    Union[None, int, str]
-        The inferred resource ID. If it cannot be inferred or does not match the expected type, it returns None.
-
-    Note
-    ----
-        - When `resource_id_type` is `int`, the function looks for an argument with the key 'id'.
-        - When `resource_id_type` is `str`, it attempts to infer the resource ID as a string.
-    """
+    """The last keyword argument of `resource_id_type` - for `int`, only one whose name
+    contains `id`. Raises `CacheIdentificationInferenceError` when none matches."""
     resource_id: int | str | None = None
     for arg_name, arg_value in kwargs.items():
         if isinstance(arg_value, resource_id_type):
@@ -155,20 +138,8 @@ def _infer_resource_id(kwargs: dict[str, Any], resource_id_type: type | tuple[ty
 
 
 def _extract_data_inside_brackets(input_string: str) -> list[str]:
-    """Extract data inside curly brackets from a given string using regular expressions.
+    """The placeholder names in a key template.
 
-    Parameters
-    ----------
-    input_string: str
-        The input string in which to find data enclosed within curly brackets.
-
-    Returns
-    -------
-    List[str]
-        A list of strings containing the data found inside the curly brackets within the input string.
-
-    Example
-    -------
     >>> _extract_data_inside_brackets("The {quick} brown {fox} jumps over the {lazy} dog.")
     ['quick', 'fox', 'lazy']
     """
@@ -177,19 +148,7 @@ def _extract_data_inside_brackets(input_string: str) -> list[str]:
 
 
 def _construct_data_dict(data_inside_brackets: list[str], kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Construct a dictionary based on data inside brackets and keyword arguments.
-
-    Parameters
-    ----------
-    data_inside_brackets: List[str]
-        A list of keys inside brackets.
-    kwargs: Dict[str, Any]
-        A dictionary of keyword arguments.
-
-    Returns
-    -------
-    Dict[str, Any]: A dictionary with keys from data_inside_brackets and corresponding values from kwargs.
-    """
+    """The keyword arguments a template's placeholders name."""
     data_dict = {}
     for key in data_inside_brackets:
         data_dict[key] = kwargs[key]
@@ -197,19 +156,7 @@ def _construct_data_dict(data_inside_brackets: list[str], kwargs: dict[str, Any]
 
 
 def _format_prefix(prefix: str, kwargs: dict[str, Any]) -> str:
-    """Format a prefix using keyword arguments.
-
-    Parameters
-    ----------
-    prefix: str
-        The prefix template to be formatted.
-    kwargs: Dict[str, Any]
-        A dictionary of keyword arguments.
-
-    Returns
-    -------
-    str: The formatted prefix.
-    """
+    """A key template filled from the call's keyword arguments."""
     data_inside_brackets = _extract_data_inside_brackets(prefix)
     data_dict = _construct_data_dict(data_inside_brackets, kwargs)
     formatted_prefix = prefix.format(**data_dict)
@@ -217,24 +164,8 @@ def _format_prefix(prefix: str, kwargs: dict[str, Any]) -> str:
 
 
 def _format_extra_data(to_invalidate_extra: dict[str, str], kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Format extra data based on provided templates and keyword arguments.
-
-    This function takes a dictionary of templates and their associated values and a dictionary of keyword arguments.
-    It formats the templates with the corresponding values from the keyword arguments and returns a dictionary
-    where keys are the formatted templates and values are the associated keyword argument values.
-
-    Parameters
-    ----------
-    to_invalidate_extra: Dict[str, str]
-        A dictionary where keys are templates and values are the associated values.
-    kwargs: Dict[str, Any]
-        A dictionary of keyword arguments.
-
-    Returns
-    -------
-        Dict[str, Any]: A dictionary where keys are formatted templates and values
-        are associated keyword argument values.
-    """
+    """`to_invalidate_extra` with each prefix template filled and each id template resolved
+    to the keyword argument it names."""
     formatted_extra = {}
     for prefix, id_template in to_invalidate_extra.items():
         formatted_prefix = _format_prefix(prefix, kwargs)
@@ -441,8 +372,7 @@ def cache(
                 serializable_data = jsonable_encoder(result)
                 serialized_data = json.dumps(serializable_data)
 
-                await client.set(stored_key, serialized_data)
-                await client.expire(stored_key, expiration)
+                await client.set(stored_key, serialized_data, ex=expiration)
 
                 return cast(R, json.loads(serialized_data))
 

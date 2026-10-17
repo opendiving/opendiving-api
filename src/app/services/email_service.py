@@ -389,10 +389,10 @@ async def send_account_deletion_email(email: str, purge_after: datetime) -> None
     deadline is already past when this is composed, so telling the user there is still time
     would be advice that cannot be followed - the next sweep takes the account.
 
-    **The way back is the user's own, and the copy now says so.** Signing in during the
+    **The way back is the user's own, and the copy says so.** Signing in during the
     window - by any of the four routes - reaches a screen offering the account back rather
-    than the dead end it used to (`/auth/complete`'s "An account with this email already
-    exists" against the tombstone). The mail deliberately does not carry a restore link of
+    than a dead end (`/auth/complete`'s "An account with this email already exists"
+    against the tombstone). The mail deliberately does not carry a restore link of
     its own: a restore token is minted only against a freshly verified identity, and one
     sitting in an inbox for a fortnight is a standing key to an account its owner has
     already asked to have destroyed.
@@ -589,11 +589,12 @@ async def send_year_in_review_email(email: str, review: YearInReview, units: str
 async def send_support_request_email(name: str, email: str, category_label: str, subject: str, message: str) -> None:
     """Forwards a support-form submission to `CONTACT_FORM_EMAIL`.
 
-    Every other sender in this module mails content this server composed itself; this
-    one mails content a *stranger* typed, so it's the one place that has to escape its
-    inputs - an unescaped `<a href=...>` in the message body would otherwise render as
-    a live link in the recipient's mail client. It's also the only one whose text
-    reaches a *header* - see `_header_safe`, which `_build_message` applies.
+    The other senders in this module escape what a diver typed into their own mail - an
+    inviter's name, a passkey's, a gear label; this one mails content a *stranger* typed,
+    so every input is escaped - an unescaped `<a href=...>` in the message body would
+    otherwise render as a live link in the recipient's mail client. Its subject reaches a
+    *header*, as the invitation's inviter name does - see `_header_safe`, which
+    `_build_message` applies.
 
     `Reply-To` is the submitter's address, so hitting Reply in the inbox answers the
     diver rather than the no-reply `From` address. The message is never sent *as* them
