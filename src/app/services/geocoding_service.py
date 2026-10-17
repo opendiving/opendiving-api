@@ -321,10 +321,11 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
         "addressdetails": 1,
         "accept-language": settings.GEOCODER_LANGUAGE,
     }
-    if settings.GEOCODER_API_KEY:
+    api_key = settings.GEOCODER_API_KEY.get_secret_value() if settings.GEOCODER_API_KEY else ""
+    if api_key:
         # The parameter Nominatim-compatible hosted mirrors expect. A provider that names
         # it something else (Geoapify uses `apiKey`) is a one-word change here.
-        query["key"] = settings.GEOCODER_API_KEY
+        query["key"] = api_key
 
     payload = await _fetch(_PROVIDER_NOMINATIM, settings.GEOCODER_URL, path, query)
     if payload is None:

@@ -95,7 +95,8 @@ def _send(message: EmailMessage) -> None:
         if settings.SMTP_TLS_MODE == SMTPTLSMode.STARTTLS:
             client.starttls(context=ssl.create_default_context())
         if settings.SMTP_USERNAME:
-            client.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD or "")
+            password = settings.SMTP_PASSWORD.get_secret_value() if settings.SMTP_PASSWORD else ""
+            client.login(settings.SMTP_USERNAME, password)
         client.send_message(message)
 
 

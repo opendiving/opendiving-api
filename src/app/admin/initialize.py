@@ -25,7 +25,7 @@ def create_admin_interface() -> CRUDAdmin | None:
     if not settings.CRUD_ADMIN_ENABLED:
         return None
 
-    admin_password = settings.ADMIN_PASSWORD
+    admin_password = settings.ADMIN_PASSWORD.get_secret_value() if settings.ADMIN_PASSWORD else None
     session_backend = "memory"
     redis_config = None
 
@@ -35,7 +35,9 @@ def create_admin_interface() -> CRUDAdmin | None:
             "host": settings.CRUD_ADMIN_REDIS_HOST,
             "port": settings.CRUD_ADMIN_REDIS_PORT,
             "db": settings.CRUD_ADMIN_REDIS_DB,
-            "password": settings.CRUD_ADMIN_REDIS_PASSWORD,
+            "password": settings.CRUD_ADMIN_REDIS_PASSWORD.get_secret_value()
+            if settings.CRUD_ADMIN_REDIS_PASSWORD is not None
+            else None,
         }
 
     admin = CRUDAdmin(

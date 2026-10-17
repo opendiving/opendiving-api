@@ -1434,8 +1434,8 @@ something an operator turns on, not something a fresh deploy inherits — unlike
 `core/setup.py` disables in production and gates behind a superuser in staging, it has no
 `ENVIRONMENT` gate of its own.
 
-1. `ADMIN_PASSWORD` has no default (`str | None = None`). Unset means "no admin account", which
-   `admin/initialize.py` handles.
+1. `ADMIN_PASSWORD` has no default (`SecretStr | None = None`). Unset means "no admin account",
+   which `admin/initialize.py` handles.
 2. `CRUD_ADMIN_ENABLED` defaults to `False`. `src/.env.example` enables it for local development.
 3. `Settings._reject_insecure_admin_config` raises at startup when the panel is enabled in
    production with a missing or boilerplate password (`"!Ch4ng3Th1sP4ssW0rd!"`). Chosen over
@@ -4871,11 +4871,11 @@ signing in again" cannot help there.
 
 ## Nothing of the token response is logged, and the secret is a `SecretStr`
 
-`GOOGLE_CLIENT_SECRET` is typed `SecretStr` where `SMTP_PASSWORD` and `GEOCODER_API_KEY` beside it
-are bare `str | None`: a value that must not reach a log line is better served by a type whose
-`repr` cannot spill it into a traceback. `SecretStr("")` is truthy (no `__bool__`), so the boot
-guard checks `.get_secret_value().strip()` rather than falsiness, or an empty variable passes
-startup and fails at the first sign-in.
+`GOOGLE_CLIENT_SECRET` is typed `SecretStr`, as are `SMTP_PASSWORD`, `GEOCODER_API_KEY`,
+`ADMIN_PASSWORD` and `CRUD_ADMIN_REDIS_PASSWORD`: a value that must not reach a log line is better
+served by a type whose `repr` cannot spill it into a traceback. Each consumer unwraps it with
+`.get_secret_value()`. The boot guard checks `.get_secret_value().strip()`, or a whitespace-only
+variable passes startup and fails at the first sign-in.
 
 The secret travels only in the request body, and httpx's request log line is URL and status.
 Google's response is not logged above DEBUG: a refusal writes its HTTP status at WARNING and the
