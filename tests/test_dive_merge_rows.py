@@ -44,6 +44,7 @@ from src.app.schemas.dive import DiveMergeRequest
 from src.app.services import blob_store
 from src.app.services.dive_files import store_recording_file
 from src.app.services.dive_profiles import MERGE_PARSER_KEY
+from src.app.services.fold_backfill import backfill_folds
 from tests.conftest import db_available
 from tests.helpers.dive_files import suunto_json
 from tests.helpers.generators import (
@@ -86,8 +87,11 @@ def _export(
     duration: int = 1800,
     max_depth: str = "19.04",
     samples: tuple[tuple[float, float] | tuple[float, float, int, int], ...] = (),
+    cns_end: float | None = None,
 ) -> bytes:
-    return suunto_json(start=start, serial=serial, duration=duration, max_depth=float(max_depth), samples=samples)
+    return suunto_json(
+        start=start, serial=serial, duration=duration, max_depth=float(max_depth), samples=samples, cns_end=cns_end
+    )
 
 
 @pytest.fixture
@@ -189,7 +193,9 @@ async def _row(db: AsyncSession, dive: Dive) -> Any:
     ).one()
 
 
-async def _two_halves(db: AsyncSession, sync_db: Session, diver: User) -> tuple[Dive, Dive]:
+async def _two_halves(
+    db: AsyncSession, sync_db: Session, diver: User, *, cns_ends: tuple[float | None, float | None] = (None, None)
+) -> tuple[Dive, Dive]:
     """One computer's two records of one dive, as two dives - which is how they reach the app.
 
     The second dive is logged four minutes after the first, which is the diver's own entry;
@@ -203,7 +209,13 @@ async def _two_halves(db: AsyncSession, sync_db: Session, diver: User) -> tuple[
         db,
         diver,
         first,
-        _export(start=FIRST_START, duration=180, max_depth="5.0", samples=_samples(FIRST_PART_SAMPLES, depth_cm=500)),
+        _export(
+            start=FIRST_START,
+            duration=180,
+            max_depth="5.0",
+            samples=_samples(FIRST_PART_SAMPLES, depth_cm=500),
+            cns_end=cns_ends[0],
+        ),
         filename="part-one.json",
     )
     await _attach(
@@ -211,7 +223,11 @@ async def _two_halves(db: AsyncSession, sync_db: Session, diver: User) -> tuple[
         diver,
         second,
         _export(
-            start=SECOND_START, duration=2921, max_depth="19.04", samples=_samples(SECOND_PART_SAMPLES, depth_cm=1904)
+            start=SECOND_START,
+            duration=2921,
+            max_depth="19.04",
+            samples=_samples(SECOND_PART_SAMPLES, depth_cm=1904),
+            cns_end=cns_ends[1],
         ),
         filename="part-two.json",
     )
@@ -1146,6 +1162,178 @@ class TestASameDeviceParedWithNoStartToPlaceIt:
 
         assert result.folded is False
         assert [row.ordinal for row in await _recordings(async_db, first)] == [0, 1]
+
+
+ENTRY_FIRST, EXIT_FIRST = (27.1, 34.1), (27.2, 34.2)
+ENTRY_SECOND, EXIT_SECOND = (27.3, 34.3), (27.4, 34.4)
+
+
+async def _set_fixes(db: AsyncSession, dive: Dive, entry: tuple[float, float], exit_: tuple[float, float]) -> None:
+    await db.execute(
+        update(Dive)
+        .where(Dive.id == dive.id)
+        .values(entry_latitude=entry[0], entry_longitude=entry[1], exit_latitude=exit_[0], exit_longitude=exit_[1])
+    )
+    await db.commit()
+
+
+async def _fixes(db: AsyncSession, dive: Dive) -> tuple[tuple[float | None, float | None], ...]:
+    row = (
+        await db.execute(
+            select(Dive.entry_latitude, Dive.entry_longitude, Dive.exit_latitude, Dive.exit_longitude).where(
+                Dive.id == dive.id
+            )
+        )
+    ).one()
+    return (row[0], row[1]), (row[2], row[3])
+
+
+class TestAFoldsFixes:
+    @pytest.mark.asyncio
+    async def test_the_dive_enters_where_the_earlier_record_did_and_exits_where_the_later_did(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """The first half's exit is where the computer restarted, not where the diver left the
+        water."""
+        first, second = await _two_halves(async_db, db, diver)
+        await _set_fixes(async_db, first, ENTRY_FIRST, EXIT_FIRST)
+        await _set_fixes(async_db, second, ENTRY_SECOND, EXIT_SECOND)
+
+        await _merge(async_db, diver, first, second)
+
+        assert await _fixes(async_db, first) == (ENTRY_FIRST, EXIT_SECOND)
+
+    @pytest.mark.asyncio
+    async def test_two_computers_side_by_side_keep_the_surviving_dives_fixes(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
+        second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 18, 0, tzinfo=UTC), number=215)
+        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(3)), filename="a.json")
+        await _attach(
+            async_db,
+            diver,
+            second,
+            _export(start=FIRST_START, serial="999999999999", samples=_samples(3)),
+            filename="b.json",
+        )
+        await _set_fixes(async_db, first, ENTRY_FIRST, EXIT_FIRST)
+        await _set_fixes(async_db, second, ENTRY_SECOND, EXIT_SECOND)
+
+        await _merge(async_db, diver, first, second)
+
+        assert await _fixes(async_db, first) == (ENTRY_FIRST, EXIT_FIRST)
+
+
+class TestBackfillingAFoldMergedBefore:
+    """A fold merged under the fill-only rule, stood in for by merging under the current one and
+    putting back what the old rule left: the first half's end values."""
+
+    async def _merged_the_old_way(self, async_db: AsyncSession, db: Session, diver: User) -> tuple[Dive, int]:
+        first, second = await _two_halves(async_db, db, diver, cns_ends=(5.0, 11.0))
+        await _set_fixes(async_db, first, ENTRY_FIRST, EXIT_FIRST)
+        await _set_fixes(async_db, second, ENTRY_SECOND, EXIT_SECOND)
+        db.add_all(
+            [
+                DiveMixture(
+                    dive_id=first.id, gas_number=0, oxygen=21.0, helium=0.0, start_pressure=200.0, end_pressure=120.0
+                ),
+                DiveMixture(
+                    dive_id=second.id, gas_number=0, oxygen=21.0, helium=0.0, start_pressure=120.0, end_pressure=50.0
+                ),
+            ]
+        )
+        db.commit()
+        await _merge(async_db, diver, first, second)
+
+        [recording] = await _recordings(async_db, first)
+        await async_db.execute(update(DiveRecording).where(DiveRecording.id == recording.id).values(cns_end=5.0))
+        await async_db.execute(update(DiveMixture).where(DiveMixture.dive_id == first.id).values(end_pressure=120.0))
+        await _set_fixes(async_db, first, ENTRY_FIRST, EXIT_FIRST)
+        return first, recording.id
+
+    @staticmethod
+    async def _state(async_db: AsyncSession, dive: Dive, recording_id: int) -> tuple[Any, ...]:
+        cns_end = (
+            await async_db.execute(select(DiveRecording.cns_end).where(DiveRecording.id == recording_id))
+        ).scalar_one()
+        pressures = (
+            await async_db.execute(
+                select(DiveMixture.start_pressure, DiveMixture.end_pressure).where(DiveMixture.dive_id == dive.id)
+            )
+        ).one()
+        return cns_end, tuple(pressures), await _fixes(async_db, dive)
+
+    @pytest.mark.asyncio
+    async def test_it_ends_the_dive_on_the_later_records_values(
+        self,
+        volume: Any,
+        merging: None,
+        monkeypatch: pytest.MonkeyPatch,
+        async_db: AsyncSession,
+        db: Session,
+        diver: User,
+    ) -> None:
+        monkeypatch.setattr("src.app.services.fold_backfill.invalidate_dive_caches", AsyncMock())
+        dive, recording_id = await self._merged_the_old_way(async_db, db, diver)
+
+        report = await backfill_folds(async_db, user_id=diver.id)
+
+        assert (report.examined, report.dives_updated, report.absorbed_not_found) == (1, 1, 0)
+        assert await self._state(async_db, dive, recording_id) == (11.0, (200.0, 50.0), (ENTRY_FIRST, EXIT_SECOND))
+
+    @pytest.mark.asyncio
+    async def test_a_dry_run_lists_the_changes_and_writes_none(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        dive, recording_id = await self._merged_the_old_way(async_db, db, diver)
+
+        report = await backfill_folds(async_db, user_id=diver.id, dry_run=True)
+
+        assert len(report.changes) == 4
+        assert await self._state(async_db, dive, recording_id) == (5.0, (200.0, 120.0), (ENTRY_FIRST, EXIT_FIRST))
+
+    @pytest.mark.asyncio
+    async def test_a_second_run_changes_nothing(
+        self,
+        volume: Any,
+        merging: None,
+        monkeypatch: pytest.MonkeyPatch,
+        async_db: AsyncSession,
+        db: Session,
+        diver: User,
+    ) -> None:
+        monkeypatch.setattr("src.app.services.fold_backfill.invalidate_dive_caches", AsyncMock())
+        await self._merged_the_old_way(async_db, db, diver)
+        await backfill_folds(async_db, user_id=diver.id)
+
+        report = await backfill_folds(async_db, user_id=diver.id)
+
+        assert (report.examined, report.dives_updated, report.changes) == (1, 0, [])
+
+    @pytest.mark.asyncio
+    async def test_a_fold_whose_absorbed_dive_is_ambiguous_still_has_its_readouts_repaired(
+        self,
+        volume: Any,
+        merging: None,
+        monkeypatch: pytest.MonkeyPatch,
+        async_db: AsyncSession,
+        db: Session,
+        diver: User,
+    ) -> None:
+        """Another dive deleted in the same minute could be either; the cylinders and fixes,
+        which only the absorbed dive holds, are left rather than guessed."""
+        monkeypatch.setattr("src.app.services.fold_backfill.invalidate_dive_caches", AsyncMock())
+        dive, recording_id = await self._merged_the_old_way(async_db, db, diver)
+        other = _dive_at(db, diver, datetime(2026, 9, 1, 9, 0, tzinfo=UTC), number=99)
+        other.is_deleted = True
+        other.deleted_at = datetime.now(UTC)
+        db.commit()
+
+        report = await backfill_folds(async_db, user_id=diver.id)
+
+        assert report.absorbed_not_found == 1
+        assert await self._state(async_db, dive, recording_id) == (11.0, (200.0, 120.0), (ENTRY_FIRST, EXIT_FIRST))
 
 
 class TestTheDivesOwnStartIsLeftAlone:

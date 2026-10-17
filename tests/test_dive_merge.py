@@ -17,10 +17,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.app.core.schemas import NOTES_MAX_LENGTH
+from src.app.schemas.dive import DiveTechScalars
 from src.app.schemas.dive_mixture import DiveMixtureRead
 from src.app.schemas.dive_profile import ProfileEventType
 from src.app.services.dive_files import fold_tank_pressures
-from src.app.services.dive_merge import DiveFigures, dive_figures, merged_notes
+from src.app.services.dive_merge import DiveFigures, dive_figures, fold_fixes, merged_notes
 from src.app.services.dive_profiles import (
     NormalizedProfile,
     ProfileEvent,
@@ -413,3 +414,25 @@ class TestAFoldedTanksPressures:
         )
 
         assert pressures == {}
+
+
+class TestAFoldsFixes:
+    EARLIER = DiveTechScalars(entry_latitude=1.0, entry_longitude=1.0, exit_latitude=2.0, exit_longitude=2.0)
+    LATER = DiveTechScalars(entry_latitude=3.0, entry_longitude=3.0, exit_latitude=4.0, exit_longitude=4.0)
+
+    def test_the_exit_is_the_later_records(self) -> None:
+        assert fold_fixes(self.EARLIER, self.LATER, survivor_first=True) == {
+            "exit_latitude": 4.0,
+            "exit_longitude": 4.0,
+        }
+
+    def test_a_surviving_record_that_came_second_takes_the_others_entry(self) -> None:
+        assert fold_fixes(self.LATER, self.EARLIER, survivor_first=False) == {
+            "entry_latitude": 1.0,
+            "entry_longitude": 1.0,
+        }
+
+    def test_a_later_record_with_no_exit_keeps_the_earlier_ones(self) -> None:
+        later = DiveTechScalars(entry_latitude=3.0, entry_longitude=3.0)
+
+        assert fold_fixes(self.EARLIER, later, survivor_first=True) == {}
