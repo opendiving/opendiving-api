@@ -205,9 +205,10 @@ async def refuse_uninvited(db: AsyncSession, *, email: str, via: str | None = No
     """Raise `ForbiddenException` if this address would be refused at account creation.
 
     The advisory check, run at the onboarding branch so the refusal arrives before the
-    profile form rather than after it. No lock and no write: everything here is a read, and
-    a false "you may proceed" costs only that the authoritative check refuses a moment
-    later, which `ProfileCompletionForm` already surfaces.
+    profile form rather than after it. No gate lock and no write - only the link owner's
+    quota lock, which `can_still_invite` takes before it counts - and a false "you may
+    proceed" costs only that the authoritative check refuses a moment later, which
+    `ProfileCompletionForm` already surfaces.
 
     In `open` mode this is a no-op, and on an empty instance it admits - the bootstrap
     account has to be able to reach onboarding like anyone else.

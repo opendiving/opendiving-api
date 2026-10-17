@@ -296,8 +296,8 @@ tokens (`create_onboarding_token`/`verify_onboarding_token`, `TokenType.ONBOARDI
 `ONBOARDING_TOKEN_EXPIRE_MINUTES`) carry the identity to `POST /auth/complete` and are blacklisted
 once used. `complete_profile` creates `User` and its provider row with `create(..., commit=False)`
 and one `db.commit()`; `IntegrityError` rolls back into `DuplicateValueException`.
-`POST /auth/email/request` counts before `update(..., allow_multiple=True)` (it raises
-`NoResultFound` on zero rows) and returns the same `EmailAuthRequestResponse` regardless.
+`POST /auth/email/request` invalidates earlier live requests with one Core `UPDATE`
+(`invalidate_live_requests`) and returns the same `EmailAuthRequestResponse` regardless.
 `enforce_rate_limit` (`core.utils.rate_limit`) is a Redis fixed window, a no-op when `cache.client`
 is `None`. Only `POST /auth/refresh` is cookie-authenticated, via an httpOnly, `samesite="lax"`
 `refresh_token` cookie.
@@ -3667,8 +3667,9 @@ A job needing more takes a job-level block and re-states `contents: read`, since
 
 A filtered FastCRUD write (`crud.update(..., id=X, used_at=None)` catching `NoResultFound`) is not
 atomic. FastCRUD 0.22.3's `validate_update_delete_operation` counts in a separate query before the
-UPDATE and `update` discards `rowcount`; the filter is a precondition assertion, never a guard.
-`request_email_link`'s `pending_count` guard relies on this.
+UPDATE and `update` discards `rowcount`; the filter is a precondition assertion, never a guard. The
+same count makes `allow_multiple=True` raise `NoResultFound` on zero matches, so a write where zero
+is ordinary - `invalidate_live_requests`, the one-live-link rule - is Core as well.
 
 `claim_authentication_request` in `crud/crud_authentication_requests.py` drops to Core and gates on
 `rowcount`:
@@ -4397,12 +4398,12 @@ between. The purge's `DELETE` repeats the selection's predicate, and the restore
 `FOR UPDATE`. A restore behind a mid-account purge waits, finds no row and answers a 401 saying the
 account is gone, not that the link is invalid — the caller holds a token this server signed, and
 "invalid link" sends them after a fresh one that cannot exist. A purge behind a restore matches
-nothing and logs that the account came back. `crud_token_blacklist.create` commits the session, so
+nothing and logs that the account came back. `crud_token_blacklist.revoke` commits the session, so
 spending the token and restoring the row are one transaction.
 
 `verify_restore_token` reads the blacklist before the lock, so a double-click passes both requests;
-the loser inserts a duplicate `token_blacklist.token`, and that `IntegrityError` maps to the same
-"already used" 401 — `_RESTORE_REJECTED` is one constant so both checks say one sentence.
+the loser's `revoke` inserts nothing (`ON CONFLICT DO NOTHING`), and that maps to the same "already
+used" 401 — `_RESTORE_REJECTED` is one constant so both checks say one sentence.
 
 ## Avatars are the third kind on the files volume, and portraits sit beside them
 

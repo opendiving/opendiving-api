@@ -23,7 +23,6 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -401,19 +400,18 @@ class TestRestoreAccount:
 
         `verify_restore_token` reads the blacklist *before* the lock is taken, so both
         halves of a double-click are past that check before either commits. The loser then
-        wakes up holding the lock and inserts a `token_blacklist.token` that is unique and
-        already there - an uncaught `IntegrityError` would be a 500 on a restore that
-        actually succeeded.
+        wakes up holding the lock and finds the token already listed - a restore that
+        actually succeeded, which must not mint the loser a second session.
         """
         session = _RestoreSession(locked=Mock(id=1, is_deleted=False))
 
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.verify_restore_token", new_callable=AsyncMock) as verify,
-            patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock) as blacklist,
+            patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
         ):
             verify.return_value = USER_UUID
-            blacklist.side_effect = IntegrityError("duplicate key", None, Exception())
 
             with pytest.raises(UnauthorizedException) as raised:
                 await self._call(session, "tok")
@@ -421,7 +419,7 @@ class TestRestoreAccount:
         # The same sentence the pre-lock check answers with - the two are one question
         # asked at two moments.
         assert "already been used" in str(raised.value.detail)
-        session.rollback.assert_awaited_once()
+        issue.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_token_that_does_not_verify_is_a_401(self, mock_db):

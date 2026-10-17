@@ -749,12 +749,18 @@ def verify_logbook_import_token(token: str) -> LogbookImportTokenData | None:
 
 
 # -------------- blacklisting --------------
-async def _blacklist_one(token: str, db: AsyncSession) -> None:
-    """Record a single token as revoked until its own `exp` passes.
+async def _blacklist_one(token: str, db: AsyncSession) -> bool:
+    """Record a single token as revoked until its own `exp` passes, and say whether this
+    call is the one that did: `False` means the token was already on the list.
 
     The row is keyed on the whole token string (`TokenBlacklist.token` is unique), which
     is only a per-issuance key because every revocable token carries a `jti` - see
     `_new_jti`. Anything minted here that should be revocable needs that claim.
+
+    The same token arriving twice is ordinary - two tabs rotating one refresh cookie, a
+    double-clicked sign-out or account deletion - so each caller decides what an
+    already-revoked token means to it (a refused refresh, a sign-out already done) rather
+    than meeting the unique index as a 500. See `crud_token_blacklist.revoke`.
 
     A token that can't be decoded can't be blacklisted, and the callers here reach this
     from routes that already authenticated - so a `JWTError` means a malformed token was
@@ -770,6 +776,9 @@ async def _blacklist_one(token: str, db: AsyncSession) -> None:
     it comes from the same clock as everything else in this module and can be frozen in a
     test alongside them. It answers a question `expires_at` cannot - see the column's own
     comment, and `api.v1.auth._handle_revoked_refresh`, which is its only reader.
+
+    Commits: `POST /auth/restore` relies on the restore and the spent token landing in one
+    transaction.
     """
     try:
         payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
@@ -777,29 +786,20 @@ async def _blacklist_one(token: str, db: AsyncSession) -> None:
         raise UnauthorizedException("Invalid token.") from None
 
     exp_timestamp = payload.get("exp")
-    if exp_timestamp is not None:
-        expires_at = datetime.fromtimestamp(exp_timestamp, UTC)
-        await crud_token_blacklist.create(
-            db,
-            object=TokenBlacklistCreate(token=token, expires_at=expires_at, revoked_at=datetime.now(UTC)),
-        )
+    if exp_timestamp is None:
+        return True
+    expires_at = datetime.fromtimestamp(exp_timestamp, UTC)
+    return await crud_token_blacklist.revoke(
+        db, object=TokenBlacklistCreate(token=token, expires_at=expires_at, revoked_at=datetime.now(UTC))
+    )
 
 
-async def blacklist_tokens(access_token: str, refresh_token: str, db: AsyncSession) -> None:
-    """Blacklist both access and refresh tokens.
-
-    Parameters
-    ----------
-    access_token: str
-        The access token to blacklist
-    refresh_token: str
-        The refresh token to blacklist
-    db: AsyncSession
-        Database session for performing database operations.
-    """
-    for token in [access_token, refresh_token]:
-        await _blacklist_one(token, db)
+async def blacklist_tokens(access_token: str, refresh_token: str, db: AsyncSession) -> bool:
+    """Blacklist both access and refresh tokens; `True` if either was not already listed."""
+    newly = [await _blacklist_one(token, db) for token in (access_token, refresh_token)]
+    return any(newly)
 
 
-async def blacklist_token(token: str, db: AsyncSession) -> None:
-    await _blacklist_one(token, db)
+async def blacklist_token(token: str, db: AsyncSession) -> bool:
+    """Blacklist one token; `False` if it was already listed. See `_blacklist_one`."""
+    return await _blacklist_one(token, db)

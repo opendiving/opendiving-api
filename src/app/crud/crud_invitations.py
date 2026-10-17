@@ -120,6 +120,25 @@ async def live_invitation_from(db: AsyncSession, *, email: str, user_id: int) ->
     return bool(exists)
 
 
+# The namespace of the per-inviter lock `hold_invitation_quota` takes, keyed `(this, user_id)`.
+# The two-integer form of `pg_advisory_xact_lock` occupies a keyspace of its own - `pg_locks`
+# tells the two apart by `objsubid` - so it cannot collide with the single-`bigint` keys
+# `core.setup` and `services.registration_gate` take, whatever their values.
+_INVITATION_QUOTA_LOCK = 0x0D1E_0002
+
+
+async def hold_invitation_quota(db: AsyncSession, *, user_id: int) -> None:
+    """Take the transaction-scoped lock one account's invitation quota is counted under.
+
+    `invitations_created_since` then the insert is a count and a later write, and two
+    invitations made at once - two typed, or one typed and a sign-up through the member's
+    link - would both count the same number and both be let through past the quota. Taken
+    before the count, the second waits for the first's transaction to end and counts its
+    row. Released by the transaction ending, whichever way it ends.
+    """
+    await db.execute(select(func.pg_advisory_xact_lock(_INVITATION_QUOTA_LOCK, user_id)))
+
+
 async def invitations_created_since(db: AsyncSession, *, user_id: int, window_days: int) -> int:
     """How many invitations this account has made in the trailing window, by address or
     through its invite link.

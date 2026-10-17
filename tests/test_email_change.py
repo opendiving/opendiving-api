@@ -76,10 +76,9 @@ class TestRequestEmailChange:
         with (
             patch("src.app.api.v1.users.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.users.crud_authentication_requests") as mock_crud,
+            patch("src.app.api.v1.users.invalidate_live_requests", new_callable=AsyncMock) as invalidate,
             patch("src.app.api.v1.users.send_email_change_confirmation_email", new_callable=AsyncMock),
         ):
-            mock_crud.count = AsyncMock(return_value=1)
-            mock_crud.update = AsyncMock(return_value=None)
             mock_crud.create = AsyncMock(return_value=None)
 
             await request_email_change(
@@ -89,13 +88,7 @@ class TestRequestEmailChange:
                 mock_db,
             )
 
-            mock_crud.update.assert_called_once()
-            kwargs = mock_crud.update.call_args.kwargs
-            assert kwargs["allow_multiple"] is True
-            assert kwargs["user_id"] == current_user_dict["id"]
-            assert kwargs["purpose"] == "email_change"
-            assert kwargs["invalidated_at"] is None
-            assert kwargs["object"].invalidated_at is not None
+            invalidate.assert_awaited_once_with(mock_db, purpose="email_change", user_id=current_user_dict["id"])
 
     @pytest.mark.asyncio
     async def test_the_row_it_mints_carries_no_sign_in_code(self, mock_db, current_user_dict):

@@ -21,27 +21,35 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
+from uuid6 import uuid7
 
 from src.app.core.security import hash_sign_in_code
 from src.app.crud.crud_authentication_requests import (
     charge_code_attempt,
     claim_authentication_request,
+    invalidate_live_requests,
     spend_exhausted_code,
 )
 from src.app.models.authentication_request import AuthenticationRequest
 from src.app.models.user import User
 from tests.conftest import db_available, unique_email
+from tests.helpers.generators import create_user
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 
 def _live_request(
-    db: Session, *, purpose: str = "sign_in", user: User | None = None, code: str | None = None
+    db: Session,
+    *,
+    purpose: str = "sign_in",
+    user: User | None = None,
+    code: str | None = None,
+    email: str | None = None,
 ) -> AuthenticationRequest:
     """An unused, unexpired request row. The token hash only has to be unique."""
     row = AuthenticationRequest(
-        email=unique_email(),
-        token_hash=f"hash-{datetime.now(UTC).timestamp()}-{id(db)}-{purpose}-{code}",
+        email=email or unique_email(),
+        token_hash=f"hash-{uuid7().hex}",
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
         code_hash=hash_sign_in_code(code) if code is not None else None,
         purpose=purpose,
@@ -215,3 +223,49 @@ class TestChargeCodeAttempt:
 
         assert sum(digest is not None for digest in handed_out) == 5
         assert charged == 5
+
+
+class TestInvalidateLiveRequests:
+    """`invalidate_live_requests` - the one-live-link rule as one `UPDATE`, against a live
+    Postgres because "matches nothing" has to be an ordinary answer rather than the
+    `NoResultFound` FastCRUD's counted precondition raises."""
+
+    @staticmethod
+    async def _invalidated(async_db: AsyncSession, row: AuthenticationRequest) -> bool:
+        stamped = await async_db.scalar(
+            select(AuthenticationRequest.invalidated_at).where(AuthenticationRequest.id == row.id)
+        )
+        return stamped is not None
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_invalidate_is_not_an_error(self, async_db: AsyncSession) -> None:
+        await invalidate_live_requests(async_db, purpose="sign_in", email=unique_email())
+
+    @pytest.mark.asyncio
+    async def test_stamps_the_addresses_live_rows_of_that_purpose_only(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        email = unique_email()
+        first, second = _live_request(db, email=email), _live_request(db, email=email)
+        other_address = _live_request(db)
+        other_purpose = _live_request(db, email=email, purpose="email_change")
+
+        await invalidate_live_requests(async_db, purpose="sign_in", email=email)
+        await async_db.commit()
+
+        assert await self._invalidated(async_db, first)
+        assert await self._invalidated(async_db, second)
+        assert not await self._invalidated(async_db, other_address)
+        assert not await self._invalidated(async_db, other_purpose)
+
+    @pytest.mark.asyncio
+    async def test_keys_on_the_account_when_given_one(self, db: Session, async_db: AsyncSession) -> None:
+        user = create_user(db)
+        mine = _live_request(db, purpose="email_change", user=user)
+        someone_elses = _live_request(db, purpose="email_change", user=create_user(db))
+
+        await invalidate_live_requests(async_db, purpose="email_change", user_id=user.id)
+        await async_db.commit()
+
+        assert await self._invalidated(async_db, mine)
+        assert not await self._invalidated(async_db, someone_elses)

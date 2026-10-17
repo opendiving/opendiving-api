@@ -196,44 +196,14 @@ class TestRequestEmailLink:
         with (
             patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.crud_authentication_requests") as mock_crud,
+            patch("src.app.api.v1.auth.invalidate_live_requests", new_callable=AsyncMock) as invalidate,
             patch("src.app.api.v1.auth.send_magic_link_email", new_callable=AsyncMock),
         ):
-            mock_crud.count = AsyncMock(return_value=1)
-            mock_crud.update = AsyncMock(return_value=None)
             mock_crud.create = AsyncMock(return_value=_created_row())
 
-            await request_email_link(_request(), EmailAuthRequest(email="repeat@example.com"), mock_db)
+            await request_email_link(_request(), EmailAuthRequest(email="Repeat@Example.com"), mock_db)
 
-            mock_crud.update.assert_called_once()
-            kwargs = mock_crud.update.call_args.kwargs
-            assert kwargs["allow_multiple"] is True
-            assert kwargs["email"] == "repeat@example.com"
-            assert kwargs["purpose"] == "sign_in"
-            assert kwargs["invalidated_at"] is None
-            assert kwargs["object"].invalidated_at is not None
-
-    @pytest.mark.asyncio
-    async def test_does_not_call_update_when_there_is_nothing_pending(self, mock_db):
-        """Regression test: FastCRUD's `update(..., allow_multiple=True)` raises
-        `NoResultFound` when zero rows match, so this must be checked via `count()`
-        first rather than calling `update()` unconditionally (the common case - a
-        first-time request - has nothing pending to invalidate)."""
-        with (
-            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
-            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_crud,
-            patch("src.app.api.v1.auth.send_magic_link_email", new_callable=AsyncMock),
-        ):
-            mock_crud.count = AsyncMock(return_value=0)
-            mock_crud.update = AsyncMock(return_value=None)
-            mock_crud.create = AsyncMock(return_value=_created_row())
-
-            await request_email_link(_request(), EmailAuthRequest(email="first-time@example.com"), mock_db)
-
-            mock_crud.count.assert_called_once_with(
-                mock_db, email="first-time@example.com", purpose="sign_in", invalidated_at=None
-            )
-            mock_crud.update.assert_not_called()
-            mock_crud.create.assert_called_once()
+            invalidate.assert_awaited_once_with(mock_db, purpose="sign_in", email="repeat@example.com")
 
     @pytest.mark.asyncio
     async def test_rate_limited_requests_are_rejected(self, mock_db):

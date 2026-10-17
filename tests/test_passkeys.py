@@ -835,20 +835,39 @@ class TestManagement:
             patch("src.app.api.v1.passkeys.send_passkey_removed_email", new_callable=AsyncMock) as send,
         ):
             owned.return_value = _stored(name="Old phone")
-            crud.delete = AsyncMock()
+            stub_claim(mock_db)
 
             result = await erase_passkey(_request(), CREDENTIAL_UUID, _user(), mock_db)
 
         assert result == {"message": "Passkey removed"}
-        crud.delete.assert_called_once()
+        crud.delete.assert_not_called()
+        statement = str(mock_db.execute.await_args_list[0].args[0])
+        assert statement.startswith("DELETE FROM webauthn_credential")
         assert send.call_args.kwargs == {"email": "diver@example.com", "passkey_name": "Old phone"}
+
+    @pytest.mark.asyncio
+    async def test_the_loser_of_a_double_click_is_a_404_and_sends_nothing(self, mock_db):
+        """Both requests pass the ownership read; the second's DELETE waits on the first's
+        row lock and then removes nothing. That is the 404 any later attempt gets - not a
+        500, and not a second "passkey removed" email or audit row."""
+        with (
+            patch("src.app.api.v1.passkeys.fetch_owned_or_raise", new_callable=AsyncMock, return_value=_stored()),
+            patch("src.app.api.v1.passkeys.record_auth_event", new_callable=AsyncMock) as recorder,
+            patch("src.app.api.v1.passkeys.send_passkey_removed_email", new_callable=AsyncMock) as send,
+        ):
+            stub_claim(mock_db, won=False)
+
+            with pytest.raises(NotFoundException):
+                await erase_passkey(_request(), CREDENTIAL_UUID, _user(), mock_db)
+
+        recorder.assert_not_awaited()
+        send.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_a_failed_removal_email_is_logged_not_raised(self, mock_db, caplog):
         from src.app.services.email_service import EmailDeliveryError
 
         with (
-            patch("src.app.api.v1.passkeys.crud_webauthn_credentials") as crud,
             patch("src.app.api.v1.passkeys.fetch_owned_or_raise", new_callable=AsyncMock) as owned,
             patch(
                 "src.app.api.v1.passkeys.send_passkey_removed_email",
@@ -858,7 +877,7 @@ class TestManagement:
             caplog.at_level(logging.WARNING),
         ):
             owned.return_value = _stored()
-            crud.delete = AsyncMock()
+            stub_claim(mock_db)
 
             result = await erase_passkey(_request(), CREDENTIAL_UUID, _user(), mock_db)
 

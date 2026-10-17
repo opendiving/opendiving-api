@@ -38,6 +38,7 @@ from ...crud.crud_auth_audit_events import record_auth_event
 from ...crud.crud_invitations import (
     account_exists_for,
     crud_invitations,
+    hold_invitation_quota,
     invitations_created_since,
     list_invitations_from,
     live_invitation_from,
@@ -243,10 +244,15 @@ async def create_invitation(
         raise HTTPException(status_code=409, detail="You have already invited that address.")
 
     if not current_user["is_superuser"]:
+        # Held until the commit below, so a concurrent invitation counts this one's row.
+        await hold_invitation_quota(db, user_id=current_user["id"])
         made = await invitations_created_since(
             db, user_id=current_user["id"], window_days=settings.INVITATIONS_WINDOW_DAYS
         )
         if made >= settings.INVITATIONS_PER_USER:
+            # Releases the quota lock now: `async_get_db` ends the transaction only when
+            # the session closes, after the response.
+            await db.rollback()
             window = _window_phrase(settings.INVITATIONS_WINDOW_DAYS)
             raise RateLimitException(
                 f"You can make {settings.INVITATIONS_PER_USER} invitations {window}, by address or through "

@@ -111,8 +111,11 @@ class FakeTokenBlacklist:
     async def exists(self, db: Any, token: str) -> bool:
         return token in self.entries
 
-    async def create(self, db: Any, object: TokenBlacklistCreate) -> None:
+    async def revoke(self, db: Any, object: TokenBlacklistCreate) -> bool:
+        if object.token in self.entries:
+            return False
         self.entries[object.token] = TokenBlacklistRead(id=len(self.entries) + 1, **object.model_dump())
+        return True
 
     async def get(self, db: Any, token: str, **kwargs: Any) -> TokenBlacklistRead | None:
         """`**kwargs` swallows FastCRUD's `schema_to_select`/`return_as_model`, which the

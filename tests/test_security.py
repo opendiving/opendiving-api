@@ -31,7 +31,7 @@ from src.app.core.security import (
     verify_onboarding_token,
     verify_token,
 )
-from tests.helpers.mocks import FrozenSecurityClock
+from tests.helpers.mocks import FakeTokenBlacklist, FrozenSecurityClock
 
 
 class TestMagicLinkTokens:
@@ -648,13 +648,23 @@ class TestBlacklistToken:
         token = await create_access_token({"sub": "someuser"})
 
         with patch("src.app.core.security.crud_token_blacklist") as mock_blacklist:
-            mock_blacklist.create = AsyncMock(return_value=None)
+            mock_blacklist.revoke = AsyncMock(return_value=True)
 
-            await blacklist_token(token, mock_db)
+            assert await blacklist_token(token, mock_db) is True
 
-            mock_blacklist.create.assert_called_once()
-            _, kwargs = mock_blacklist.create.call_args
+            mock_blacklist.revoke.assert_called_once()
+            _, kwargs = mock_blacklist.revoke.call_args
             assert kwargs["object"].token == token
+
+    @pytest.mark.asyncio
+    async def test_a_token_already_on_the_list_reports_it_rather_than_raising(self, mock_db):
+        """A refresh racing another tab, a double-clicked sign-out: each caller decides what
+        an already-revoked token means, which a unique-index 500 never let it do."""
+        token = await create_access_token({"sub": "someuser"})
+
+        with patch("src.app.core.security.crud_token_blacklist", FakeTokenBlacklist()):
+            assert await blacklist_token(token, mock_db) is True
+            assert await blacklist_token(token, mock_db) is False
 
     @pytest.mark.asyncio
     async def test_blacklist_tokens_blacklists_both(self, mock_db):
@@ -662,10 +672,10 @@ class TestBlacklistToken:
         refresh_token = await create_refresh_token({"sub": "someuser"})
 
         with patch("src.app.core.security.crud_token_blacklist") as mock_blacklist:
-            mock_blacklist.create = AsyncMock(return_value=None)
+            mock_blacklist.revoke = AsyncMock(return_value=True)
 
             await blacklist_tokens(access_token, refresh_token, mock_db)
 
-            assert mock_blacklist.create.call_count == 2
-            blacklisted_tokens = {call.kwargs["object"].token for call in mock_blacklist.create.call_args_list}
+            assert mock_blacklist.revoke.call_count == 2
+            blacklisted_tokens = {call.kwargs["object"].token for call in mock_blacklist.revoke.call_args_list}
             assert blacklisted_tokens == {access_token, refresh_token}

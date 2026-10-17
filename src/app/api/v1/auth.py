@@ -72,6 +72,7 @@ from ...crud.crud_authentication_requests import (
     charge_code_attempt,
     claim_authentication_request,
     crud_authentication_requests,
+    invalidate_live_requests,
     spend_exhausted_code,
 )
 from ...crud.crud_daily_totals import count_account_created
@@ -98,7 +99,6 @@ from ...schemas.authentication_provider import AuthenticationProviderCreate
 from ...schemas.authentication_request import (
     AuthenticationRequestCreate,
     AuthenticationRequestRead,
-    AuthenticationRequestUpdate,
 )
 from ...schemas.user import UserBootstrapCreateInternal, UserCreateInternal, UserReadInternal
 from ...schemas.webauthn_credential import PasskeySignInOptions, PasskeySignInVerifyRequest
@@ -126,9 +126,9 @@ logger = logging.getLogger(__name__)
 # caller who has not already proven they are the browser that asked for it.
 _CODE_REJECTED = "This code is invalid or has expired."
 
-# `POST /auth/restore`'s answer to a token it will not spend. Asked twice - once before the
-# row is locked and once as the `IntegrityError` a concurrent second submission raises on
-# the blacklist insert - so the two must say the same thing.
+# `POST /auth/restore`'s answer to a token it will not spend. Given twice - once before the
+# row is locked and once when a concurrent second submission finds the token already spent
+# - so the two must say the same thing.
 _RESTORE_REJECTED = "This restore link is invalid, has expired, or has already been used."
 
 
@@ -308,20 +308,8 @@ async def request_email_link(
     )
 
     # Only one *live* link per email: invalidate any previous, still-live request(s)
-    # rather than leaving them valid alongside the new one. FastCRUD's `update(...,
-    # allow_multiple=True)` raises `NoResultFound` when zero rows match (the common
-    # case - most emails won't have one), so check first rather than treating
-    # "nothing to invalidate" as an error.
-    pending_count = await crud_authentication_requests.count(db, email=email, purpose="sign_in", invalidated_at=None)
-    if pending_count > 0:
-        await crud_authentication_requests.update(
-            db=db,
-            object=AuthenticationRequestUpdate(invalidated_at=datetime.now(UTC)),
-            allow_multiple=True,
-            email=email,
-            purpose="sign_in",
-            invalidated_at=None,
-        )
+    # rather than leaving them valid alongside the new one.
+    await invalidate_live_requests(db, purpose="sign_in", email=email)
 
     raw_token = generate_secure_token()
     code = generate_sign_in_code()
@@ -905,25 +893,20 @@ async def restore_account(
     if locked.is_deleted:
         await db.execute(update(User).where(User.id == locked.id).values(is_deleted=False, deleted_at=None))
 
-    # Commits the restore with it - `crud_token_blacklist.create` commits the session - so
-    # the account coming back and its token being spent are one transaction, and the row
-    # lock above is held across both. A second *token* (a fresh one from another entry
-    # point) finds the account already live and simply signs in, which is the same answer
-    # either way.
+    # Commits the restore with it - `blacklist_token` commits the session - so the account
+    # coming back and its token being spent are one transaction, and the row lock above is
+    # held across both. A second *token* (a fresh one from another entry point) finds the
+    # account already live and simply signs in, which is the same answer either way.
     #
-    # The same token submitted twice is the case the `except` is for, and it is the only
+    # The same token submitted twice is the case the check is for, and it is the only
     # write here that a lock cannot serialize away. `verify_restore_token` reads the
     # blacklist *before* the lock is taken, so a double-click has both requests past that
-    # check before either commits; the loser then wakes up holding the lock and tries to
-    # insert a `token_blacklist.token` that is unique and already there. That is the
-    # deferred half of the check above, so it answers the same 401 rather than the 500 an
-    # escaping `IntegrityError` would be. The rollback drops the loser's own UPDATE with
-    # it, which is right: the winner has already restored the account.
-    try:
-        await blacklist_token(body.restore_token, db)
-    except IntegrityError:
-        await db.rollback()
-        raise UnauthorizedException(_RESTORE_REJECTED) from None
+    # check before either commits; the loser then wakes up holding the lock, after the
+    # winner's commit, and finds the token already listed. That is the deferred half of
+    # the check above, so it answers the same 401. The loser has written nothing by then:
+    # it saw the account already live under the lock, so its UPDATE never ran.
+    if not await blacklist_token(body.restore_token, db):
+        raise UnauthorizedException(_RESTORE_REJECTED)
 
     context = RequestContext.from_request(request)
     await record_auth_event(db, event_type=AuthEventType.ACCOUNT_RESTORED, context=context, user_id=locked.id)
@@ -1144,8 +1127,11 @@ async def refresh_access_token(
         raise UnauthorizedException("Invalid refresh token.")
 
     # Spend the presented token before minting its replacement, so a crash between the
-    # two leaves the caller signed out rather than holding two live refresh tokens.
-    await blacklist_token(refresh_token, db)
+    # two leaves the caller signed out rather than holding two live refresh tokens. Not
+    # spent by this call means another request rotated it first - the two-tab race, lost
+    # after both passed `verify_token` - and one cookie must not be rotated into two.
+    if not await blacklist_token(refresh_token, db):
+        raise UnauthorizedException("Invalid refresh token.")
 
     # The same `sid`, deliberately: rotation replaces the credential and continues the
     # session, which is the whole difference this table makes. No audit event - an ordinary

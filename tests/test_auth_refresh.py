@@ -246,6 +246,23 @@ class TestRefreshAccessToken(SignedInAccount):
 
             mock_blacklist.assert_called_once_with("good-token", mock_db)
 
+    @pytest.mark.asyncio
+    async def test_losing_the_rotation_to_another_tab_mints_nothing(self, mock_db):
+        """Two tabs presenting one cookie together both pass `verify_token` before either
+        spends it. The one whose spend finds it already listed is refused, rather than
+        rotating one cookie into two live sessions' worth of tokens."""
+        with (
+            patch("src.app.api.v1.auth.verify_token", new_callable=AsyncMock) as mock_verify,
+            patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
+        ):
+            mock_verify.return_value = TokenData(user_uuid=USER_UUID, session_uuid=SESSION_UUID)
+
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
+
+            mock_issue.assert_not_awaited()
+
 
 class TestRefreshRotationWithRealTokens(SignedInAccount):
     """Rotation driven end to end over the real helpers: tokens are genuinely minted,

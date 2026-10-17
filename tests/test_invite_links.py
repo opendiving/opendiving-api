@@ -729,3 +729,35 @@ class TestWhatTheInviterSees:
         [row] = await self._listed(async_sessions, owner)
         assert row["member_name"] is None
         assert row["email"] is None
+
+
+class TestCanStillInvite:
+    @pytest.mark.asyncio
+    async def test_counts_under_the_owners_lock(self, mock_db) -> None:
+        """A sign-up through the link and an invitation typed at the same moment draw on
+        one allowance, so the count waits for the other's transaction."""
+        from src.app.services.invite_links import can_still_invite
+
+        order = Mock()
+        with (
+            patch("src.app.services.invite_links.hold_invitation_quota", new_callable=AsyncMock) as held,
+            patch(
+                "src.app.services.invite_links.invitations_created_since", new_callable=AsyncMock, return_value=0
+            ) as counted,
+        ):
+            order.attach_mock(held, "hold")
+            order.attach_mock(counted, "count")
+
+            assert await can_still_invite(mock_db, LIVE) is True
+
+        assert [call[0] for call in order.mock_calls] == ["hold", "count"]
+        held.assert_awaited_once_with(mock_db, user_id=LIVE.owner_id)
+
+    @pytest.mark.asyncio
+    async def test_a_superusers_link_takes_no_lock(self, mock_db) -> None:
+        from src.app.services.invite_links import can_still_invite
+
+        with patch("src.app.services.invite_links.hold_invitation_quota", new_callable=AsyncMock) as held:
+            assert await can_still_invite(mock_db, LiveInviteLink(owner_id=1, owner_name="Op", owner_is_superuser=True))
+
+        held.assert_not_awaited()

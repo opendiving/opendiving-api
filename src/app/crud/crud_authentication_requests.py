@@ -23,6 +23,28 @@ CRUDAuthenticationRequest = FastCRUD[
 crud_authentication_requests = CRUDAuthenticationRequest(AuthenticationRequest)
 
 
+async def invalidate_live_requests(
+    db: AsyncSession, *, purpose: str, email: str | None = None, user_id: int | None = None
+) -> None:
+    """Stamp `invalidated_at` on every still-live request of `purpose` for an address or an
+    account, so the one about to be created is the only live one. Commits nothing - the
+    caller's `create` commits it with the new row.
+
+    One Core `UPDATE` rather than FastCRUD's `update(..., allow_multiple=True)`, which
+    raises `NoResultFound` when nothing matches and so needs a `count()` in front of it: a
+    concurrent request for the same address invalidating those rows between the two turns
+    the count's "one" into that 500. Matching nothing is the ordinary case here, not an
+    error. See *"A filter on a FastCRUD `update` is a `count()`, not an atomic condition"*
+    in `DECISIONS.md`.
+    """
+    owner = AuthenticationRequest.email == email if email is not None else AuthenticationRequest.user_id == user_id
+    await db.execute(
+        update(AuthenticationRequest)
+        .where(owner, AuthenticationRequest.purpose == purpose, AuthenticationRequest.invalidated_at.is_(None))
+        .values(invalidated_at=datetime.now(UTC))
+    )
+
+
 async def claim_authentication_request(db: AsyncSession, *, request_id: int, commit: bool = True) -> bool:
     """Stamp `used_at` on a request, returning whether *this* caller is the one that did
     it. `False` means someone else got there first, and the caller must not proceed.
