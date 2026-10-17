@@ -2,9 +2,8 @@
 
 Both, in one module, unlike `schemas/trip_part.py` - which is admin-only and says so.
 `species` is a public resource with its own endpoints *and* three tables the panel renders,
-so `SpeciesRead` (what `GET /species/{uuid}` returns) and `SpeciesReadInternal` (the row
-shape) coexist here the way `TripPartRead`/`TripPartReadInternal` do across their
-two modules.
+so `SpeciesRead` (what `GET /species/{uuid}` returns) and the panel's create and update
+schemas coexist here.
 
 Every string a provider wrote is bounded here, for the reason `GeocodeResult`'s are: they
 are third-party text, cached for a month and handed to every client. The bounds match the
@@ -342,20 +341,6 @@ class SpeciesCreate(SpeciesBase):
     model_config = ConfigDict(extra="forbid")
 
 
-class SpeciesReadInternal(SpeciesBase, SpeciesPhotoCredit):
-    """Mirrors the actual `species` table columns. Never returned over the API - the public
-    shape is `SpeciesRead`, which carries the `uuid` instead of the internal `id`.
-
-    The two photo fields `SpeciesRead` withholds are here, since this shape is the row."""
-
-    id: int
-    uuid: uuid_pkg.UUID
-    created_at: datetime
-    photo_sha256: Annotated[str | None, Field(default=None, max_length=64)]
-    photo_storage_key: Annotated[str | None, Field(default=None, max_length=255)]
-    photo_fetched_at: datetime | None = None
-
-
 class SpeciesUpdate(BaseModel):
     """Admin-only, and the panel is the only way to edit a catalog row at all: there is no
     PATCH endpoint, by design (see `models/species.py`). An edit here goes stale in already
@@ -404,13 +389,6 @@ class SpeciesNameBase(BaseModel):
 
 class SpeciesNameCreate(SpeciesNameBase):
     model_config = ConfigDict(extra="forbid")
-
-
-class SpeciesNameReadInternal(SpeciesNameBase):
-    """Mirrors the actual `species_name` table columns. These rows have no public shape:
-    they are a search index, and nothing outside `services.species_service` reads them."""
-
-    id: int
 
 
 class SpeciesNameUpdate(BaseModel):

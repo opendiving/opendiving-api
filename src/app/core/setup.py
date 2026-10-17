@@ -211,11 +211,6 @@ def lifespan_factory(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator:
-        from asyncio import Event
-
-        initialization_complete = Event()
-        app.state.initialization_complete = initialization_complete
-
         await set_threadpool_tokens()
 
         try:
@@ -233,8 +228,6 @@ def lifespan_factory(
             await warn_if_files_volume_looks_empty()
             await measure_unsized_renditions()
             map_renderer.start_signature_refresh()
-
-            initialization_complete.set()
 
             yield
 

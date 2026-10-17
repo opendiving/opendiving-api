@@ -178,25 +178,6 @@ class TestFetchOwnedOrRaise:
         assert crud.get.await_args.kwargs["is_deleted"] is False
 
     @pytest.mark.asyncio
-    async def test_include_deleted_drops_the_filter(self):
-        """For the routes that legitimately act on a soft-deleted row - restoring a
-        certification, say.
-        """
-        crud = _crud(_Row(id=1, user_id=7))
-
-        await fetch_owned_or_raise(
-            db=AsyncMock(),
-            crud=crud,
-            uuid=uuid_pkg.uuid4(),
-            current_user=CALLER,
-            schema=_Row,
-            not_found_message="Thing not found",
-            include_deleted=True,
-        )
-
-        assert "is_deleted" not in crud.get.await_args.kwargs
-
-    @pytest.mark.asyncio
     async def test_a_hard_deleting_model_is_never_filtered(self):
         """The filter has to be conditional rather than unconditional, and this is what
         that costs if it is not: FastCRUD's `get_model_column` raises `ValueError` for a

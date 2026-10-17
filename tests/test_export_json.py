@@ -765,9 +765,7 @@ class TestTheRecordingsModeAndDecoModel:
         """
         bundle = full_bundle()
         bundle.recordings_by_dive[2] = [
-            make_recording(
-                9, UUIDS["recording-second"], mode="gauge", deco_model={"algorithm": "buhlmann"}, salinity="en13319"
-            )
+            make_recording(9, mode="gauge", deco_model={"algorithm": "buhlmann"}, salinity="en13319")
         ]
 
         document = await _render(bundle, monkeypatch)
@@ -1153,8 +1151,8 @@ class TestReferences:
         midnight = datetime(2002, 6, 18, tzinfo=UTC)
         dive = make_dive(1, UUIDS["dive-bare"], start_time=midnight, utc_offset_minutes=None, start_date_only=True)
         recordings = [
-            make_recording(1, UUIDS["recording"], readouts={"cns_end": 4.0}),
-            make_recording(2, UUIDS["recording-second"], ordinal=1, readouts={"cns_end": 6.0}, start_time=midnight),
+            make_recording(1, readouts={"cns_end": 4.0}),
+            make_recording(2, ordinal=1, readouts={"cns_end": 6.0}, start_time=midnight),
         ]
 
         document = await _render(build_bundle(dives=[dive], recordings_by_dive={1: recordings}), monkeypatch)

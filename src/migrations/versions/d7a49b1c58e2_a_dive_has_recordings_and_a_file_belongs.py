@@ -134,7 +134,7 @@ def _backfill() -> int:
                 SET recording_id = r.id
                 FROM dive_recording AS r
                 WHERE r.dive_id = t.dive_id
-                """  # noqa: S608 - `table` is one of two literals above, never input
+                """
             )
         )
     return len(rows)

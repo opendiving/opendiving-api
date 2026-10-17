@@ -93,7 +93,7 @@ def _profiles(engine: Engine, suffix: str) -> dict[int, Any]:
             row.recording_id: row
             for row in connection.execute(
                 text(
-                    f"SELECT recording_id, data, min_temperature_{suffix} AS low, max_temperature_{suffix} AS high, "  # noqa: S608
+                    f"SELECT recording_id, data, min_temperature_{suffix} AS low, max_temperature_{suffix} AS high, "
                     "updated_at, extractor_version, reader_version FROM dive_profile"
                 )
             )

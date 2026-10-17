@@ -85,22 +85,12 @@ def _candidates(*files: str | tuple[str, str]) -> list[ImageCandidate]:
 
 
 class TestWhatCountsAsAPhotograph:
-    """Step 1: deprecated statements and non-raster files, dropped before anything is chosen.
+    """Step 1: non-raster files, dropped before anything is chosen.
 
     Kept separate from the choosing below because the caller reads the two answers
     differently - an item with no candidates is what the synonym retry is for, an item whose
     candidates were refused must never be retried.
     """
-
-    def test_a_deprecated_statement_is_dropped(self) -> None:
-        """Wikidata's own marker for a value the community has ruled wrong, which is exactly
-        the wrong-animal case this rule exists to refuse. The sample contains none at all,
-        which is precisely why nothing else would ever exercise this."""
-        candidates = photograph_candidates(
-            (ImageCandidate("Wrong animal.jpg", "deprecated"), ImageCandidate("Right animal.jpg", "normal"))
-        )
-
-        assert [candidate.file for candidate in candidates] == ["Right animal.jpg"]
 
     def test_a_vector_diagram_is_dropped(self) -> None:
         """The green turtle's item (Q199458) really carries `202304 Green turtle.svg`, a

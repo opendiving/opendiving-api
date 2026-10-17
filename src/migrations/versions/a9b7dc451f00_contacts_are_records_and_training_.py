@@ -151,7 +151,7 @@ def _rewrite_hidden_sets(rewrite: Callable[[list[str]], list[str]], only_contain
     connection = op.get_bind()
     for table, column in _HIDDEN_SETS:
         rows = connection.execute(
-            sa.text(f'SELECT id, {column} FROM "{table}" WHERE {column}::jsonb ? :key'),  # noqa: S608 - literals above
+            sa.text(f'SELECT id, {column} FROM "{table}" WHERE {column}::jsonb ? :key'),
             {"key": only_containing},
         ).all()
         changed = []
@@ -162,7 +162,7 @@ def _rewrite_hidden_sets(rewrite: Callable[[list[str]], list[str]], only_contain
                 changed.append({"id": row_id, "hidden": json.dumps(new)})
         if changed:
             connection.execute(
-                sa.text(f'UPDATE "{table}" SET {column} = CAST(:hidden AS json) WHERE id = :id'),  # noqa: S608
+                sa.text(f'UPDATE "{table}" SET {column} = CAST(:hidden AS json) WHERE id = :id'),
                 changed,
             )
 

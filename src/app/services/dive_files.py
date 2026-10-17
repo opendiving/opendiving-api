@@ -48,7 +48,7 @@ from ..models.dive import Dive
 from ..models.dive_file import DiveFile
 from ..models.dive_mixture import DiveMixture
 from ..models.dive_recording import DiveRecording
-from ..schemas.dive import DiveFileInfo, DiveTechScalars
+from ..schemas.dive import DiveTechScalars
 from ..schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, as_create
 from ..schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDiveSchema
@@ -147,12 +147,7 @@ class _ExistingRow:
     dive_id: int
     recording_id: int
     uuid: uuid_pkg.UUID
-    content_type: str
-    byte_size: int
-    original_filename: str
-    parser_key: str
     storage_key: str
-    updated_at: datetime | None
 
 
 def reconcile(existing: _ExistingRow | None, dive_id: int) -> Literal["noop", "conflict", "insert"]:
@@ -182,17 +177,6 @@ def reconcile(existing: _ExistingRow | None, dive_id: int) -> Literal["noop", "c
     return "conflict"
 
 
-def _info(row: _ExistingRow) -> DiveFileInfo:
-    return DiveFileInfo(
-        uuid=row.uuid,
-        content_type=row.content_type,
-        byte_size=row.byte_size,
-        original_filename=row.original_filename,
-        parser_key=row.parser_key,
-        updated_at=row.updated_at,
-    )
-
-
 async def _find_by_digest(db: AsyncSession, *, user_id: int, digest: str) -> _ExistingRow | None:
     """Look up this diver's row for a given content hash.
 
@@ -204,15 +188,10 @@ async def _find_by_digest(db: AsyncSession, *, user_id: int, digest: str) -> _Ex
         DiveFile.dive_id,
         DiveFile.recording_id,
         DiveFile.uuid,
-        DiveFile.content_type,
-        DiveFile.byte_size,
-        DiveFile.original_filename,
-        DiveFile.parser_key,
         DiveFile.storage_key,
-        DiveFile.updated_at,
     ).where(DiveFile.user_id == user_id, DiveFile.sha256 == digest)
     row = (await db.execute(stmt)).one_or_none()
-    # `tuple()` because SQLAlchemy types a ten-column row with an open `*tuple[Any, ...]` tail,
+    # `tuple()` because SQLAlchemy types a five-column row with an open `*tuple[Any, ...]` tail,
     # which mypy counts as surplus arguments.
     return None if row is None else _ExistingRow(*tuple(row))
 

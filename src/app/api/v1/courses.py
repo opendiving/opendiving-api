@@ -112,7 +112,6 @@ async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> N
 _course_cache: OwnedResourceCache[CourseReadInternal, CourseRead] = OwnedResourceCache(
     resource_name="courses",
     crud=crud_courses,
-    to_public=lambda db_course, user_uuid: _to_public_course(db_course, user_uuid=user_uuid),
     sort_columns="start_date",
     sort_orders="desc",
     search_columns=COURSE_SEARCH_COLUMNS,

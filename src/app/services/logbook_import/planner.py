@@ -150,7 +150,7 @@ from .check_in import propose, to_write
 from .reader import LoadedImport
 
 # The collections the envelope declares, in the order it declares them (spec §4). The
-# report follows this order; resolution does not - see `_RESOLUTION_ORDER`.
+# report follows this order; resolution does not - see `plan`.
 COLLECTIONS: tuple[str, ...] = (
     "dives",
     "trips",
@@ -164,28 +164,6 @@ COLLECTIONS: tuple[str, ...] = (
     "certifications",
     "contacts",
     "people",
-)
-
-# References only ever point *backwards* along this order, so one pass resolves everything:
-# a trip's parts, a course, a service record, a certification and a dive name a contact; a
-# trip, a course, a certification and a dive name people; a dive names a trip, a course,
-# sites, gear and species; a gear set, a schedule and a service record name gear; a
-# certification names a course. Nothing here is recursive, which is what
-# makes a fixed order enough rather than a graph walk - and it is the order `writer.py`
-# writes in, so a reference always resolves to a row that already exists.
-_RESOLUTION_ORDER: tuple[str, ...] = (
-    "contacts",
-    "people",
-    "trips",
-    "courses",
-    "sites",
-    "species",
-    "gear",
-    "gear_sets",
-    "gear_service_schedules",
-    "gear_service_records",
-    "certifications",
-    "dives",
 )
 
 _EMAIL = TypeAdapter(EmailStr)
@@ -1202,6 +1180,14 @@ class _Planner:
     # ------------------------------------------------------------------ collections
 
     async def plan(self) -> ImportPlan:
+        # The resolution order. References only ever point *backwards* along it, so one pass
+        # resolves everything: a trip's parts, a course, a service record, a certification and
+        # a dive name a contact; a trip, a course, a certification and a dive name people; a
+        # dive names a trip, a course, sites, gear and species; a gear set, a schedule and a
+        # service record name gear; a certification names a course. Nothing here is
+        # recursive, which is what makes a fixed order enough rather than a graph walk - and
+        # `_Writer.write` writes in it, so a reference always resolves to a row that
+        # already exists.
         for note in self._loaded.read_as_written:
             self._note(note.code, note.message, collection=note.collection, uuid=note.uuid)
         await self._plan_diver()
@@ -2035,7 +2021,7 @@ class _Planner:
             GearServiceSchedule, [schedule.uuid for schedule in self._document.gear_service_schedules]
         )
         # The index is keyed on `(gear_item_id, kind, lower(label))`, so it is built after
-        # gear has been planned and the ids are known - which is what `_RESOLUTION_ORDER`
+        # gear has been planned and the ids are known - which is what `plan`'s order
         # buys. A schedule whose gear is only being created now cannot collide with an
         # existing row, because there is no existing row under a gear item that does not
         # exist yet.
