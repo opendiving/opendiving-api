@@ -1058,7 +1058,7 @@ async def _handle_revoked_refresh(refresh_token: str, db: AsyncSession, context:
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh_access_token(
     request: Request, response: Response, db: Annotated[AsyncSession, Depends(async_get_db)]
-) -> RefreshResponse:
+) -> dict[str, str]:
     """Exchanges the httpOnly `refresh_token` cookie (set by `issue_tokens`) for a new
     access token *and a new refresh token*. See `DECISIONS.md` for why this is the one
     cookie-authenticated endpoint in this flow and why that's still CSRF-safe.
@@ -1143,10 +1143,9 @@ async def refresh_access_token(
     # session, which is the whole difference this table makes. No audit event - an ordinary
     # rotation is once per access-token lifetime per device, which is the recurring,
     # expected class the standing rule excludes, and `last_used_at` already records it.
-    tokens = await issue_tokens(
+    return await issue_tokens(
         response, user_data.user_uuid, db=db, context=context, user_id=user_id, session_uuid=session.uuid
     )
-    return RefreshResponse(**tokens)
 
 
 @router.post("/logout", response_model=LogoutResponse)
