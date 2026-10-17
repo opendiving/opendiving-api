@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import operator
 from collections.abc import AsyncGenerator, Callable
 from contextlib import _AsyncGeneratorContextManager, asynccontextmanager
+from functools import reduce
 from typing import Any
 
 import anyio
@@ -10,13 +12,14 @@ import redis.asyncio as redis
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from ..api.dependencies import get_current_superuser
 from ..middleware.client_cache_middleware import ClientCacheMiddleware
 from ..middleware.security_headers_middleware import SecurityHeadersMiddleware
 from ..models import *  # noqa: F403
 from ..services import blob_store, map_renderer
+from ..services.blob_keys import BLOB_KEY_COLUMNS
 from ..services.blob_store import ensure_storage_ready
 from .config import (
     AppSettings,
@@ -87,7 +90,7 @@ async def apply_migrations() -> None:
 
 
 async def warn_if_files_volume_looks_empty() -> None:
-    """Shout if the database has file rows and the store has no blobs.
+    """Shout if the database references stored files and the store has no blobs.
 
     The state this catches is a restore that brought the dump back and forgot the files
     archive, a compose file that lost its `files-data` mount, or a bucket switched under a
@@ -96,7 +99,8 @@ async def warn_if_files_volume_looks_empty() -> None:
 
     CRITICAL and keep serving, rather than a refusal: the documented restore order is
     database first, files second, so there is a legitimate window where this is true on
-    purpose. Runs after the migrations because `storage_key` has to exist to be counted.
+    purpose. Runs after the migrations because the columns in `BLOB_KEY_COLUMNS` have to
+    exist to be counted.
 
     `blob_store.has_any_key` rather than a walk, because on the S3 backend this is a
     network request made on every boot and a full listing would be an unbounded one. It
@@ -104,24 +108,21 @@ async def warn_if_files_volume_looks_empty() -> None:
     """
     try:
         async with engine.begin() as conn:
-            rows = (
-                await conn.execute(
-                    text("SELECT (SELECT count(*) FROM dive_file) + (SELECT count(*) FROM certification_file) AS n")
-                )
-            ).scalar_one()
+            counts = (select(func.count(entry.column)).scalar_subquery() for entry in BLOB_KEY_COLUMNS)
+            keys = (await conn.execute(select(reduce(operator.add, counts)))).scalar_one()
     except Exception:
         # Never a reason to fail startup: a schema this query cannot run against is either
         # a database `apply_migrations` was told not to touch or one that is mid-restore.
-        logger.debug("Could not count stored file rows for the files-volume check", exc_info=True)
+        logger.debug("Could not count stored file keys for the files-volume check", exc_info=True)
         return
 
-    if rows and not await asyncio.to_thread(blob_store.has_any_key):
+    if keys and not await asyncio.to_thread(blob_store.has_any_key):
         logger.critical(
-            "The database has %d stored file row(s) but %s is empty - it looks unmounted, not yet "
+            "The database references %d stored file(s) but %s is empty - it looks unmounted, not yet "
             "restored, or not the store these rows were written to, and file downloads will fail "
             "until it is. See "
             "https://github.com/opendiving/opendiving/blob/main/docs/backup-restore.md",
-            rows,
+            keys,
             blob_store.describe_location(),
         )
 

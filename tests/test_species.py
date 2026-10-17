@@ -358,13 +358,13 @@ class FakeRedis:
 @pytest.fixture
 def fake_redis() -> Generator[FakeRedis]:
     redis = FakeRedis()
-    with patch.object(species_service.cache, "client", redis):
+    with patch("src.app.core.utils.cache.client", redis):
         yield redis
 
 
 @pytest.fixture
 def no_redis() -> Generator[None]:
-    with patch.object(species_service.cache, "client", None):
+    with patch("src.app.core.utils.cache.client", None):
         yield
 
 
@@ -372,7 +372,7 @@ def no_redis() -> Generator[None]:
 def unthrottled() -> Generator[AsyncMock]:
     """Both limits stubbed by default; the tests that are *about* throttling opt back in."""
     with (
-        patch("src.app.services.species_service.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+        patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         patch("src.app.api.v1.species.enforce_rate_limit", new_callable=AsyncMock),
     ):
         yield provider_limit
@@ -406,7 +406,7 @@ class _Providers:
         def build(**kwargs: Any) -> httpx.AsyncClient:
             return _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(self._record), **kwargs)
 
-        self._patcher = patch("src.app.services.species_service.httpx.AsyncClient", side_effect=build)
+        self._patcher = patch("src.app.core.utils.outbound.httpx.AsyncClient", side_effect=build)
         self._patcher.start()
         return self
 
@@ -1920,7 +1920,7 @@ class TestCaching:
     @pytest.mark.asyncio
     async def test_a_redis_outage_is_a_miss_not_an_error(self):
         db = _empty_db()
-        with patch.object(species_service.cache, "client", FakeRedis(failing=True)):
+        with patch("src.app.core.utils.cache.client", FakeRedis(failing=True)):
             with _registers(by_name=[CLOWNFISH_RECORD]):
                 response = await species_service.search_species(db, "amphiprion ocellaris")
 
@@ -3262,8 +3262,8 @@ class TestConcurrentResolvesDoNotExhaustThePool:
 
         try:
             with (
-                patch("src.app.services.species_service.httpx.AsyncClient", side_effect=build),
-                patch("src.app.services.species_service.enforce_rate_limit", new_callable=AsyncMock),
+                patch("src.app.core.utils.outbound.httpx.AsyncClient", side_effect=build),
+                patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock),
             ):
                 async with anyio.create_task_group() as tasks:
                     for offset in range(concurrent):
