@@ -30,6 +30,7 @@ from src.app.schemas.gear_service import (
     GearServiceRecordCreate,
     GearServiceScheduleBase,
     GearServiceScheduleCreate,
+    GearServiceScheduleCreateInternal,
     GearServiceScheduleInfo,
     GearServiceScheduleUpdate,
     ServiceKind,
@@ -79,8 +80,8 @@ class TestAddMonths:
         assert add_months(start, 60) == date(2031, 6, 15)  # cylinder hydro
 
     def test_a_due_date_past_the_calendar_clamps_to_its_last_day(self) -> None:
-        # `date(10000, ...)` raises, and it did so inside `recalculate_service_schedule`
-        # after the schedule had committed - every later write to it 500ed the same way.
+        # `date(10000, ...)` raises, and `recalculate_service_schedule` runs after the
+        # schedule's own commit.
         assert add_months(date(9999, 6, 15), 12) == date.max
         assert add_months(date(2026, 6, 15), 2**31 - 1) == date.max
         assert add_months(date(9999, 6, 15), 6) == date(9999, 12, 15)
@@ -440,25 +441,33 @@ class TestGearServiceSchemas:
         ],
     )
     def test_intervals_have_a_ceiling_on_every_write_shape(self, field: str, ceiling: int) -> None:
-        """The base is CRUDAdmin's form as well as the API create's parent, so it carries
-        the ceilings itself rather than leaving them to `GearServiceScheduleCreate`."""
+        """The API's create and update, and CRUDAdmin's create form."""
         from uuid6 import uuid7
 
         at_the_ceiling = {"kind": ServiceKind.SERVICE, "starts_on": date(2026, 1, 1), field: ceiling}
-        assert getattr(GearServiceScheduleBase.model_validate(at_the_ceiling), field) == ceiling
         past_it = {**at_the_ceiling, field: ceiling + 1}
-        for schema, body in (
-            (GearServiceScheduleBase, past_it),
-            (GearServiceScheduleCreate, {**past_it, "gear_item_uuid": uuid7()}),
-            (GearServiceScheduleUpdate, {field: ceiling + 1}),
+        for schema, extra in (
+            (GearServiceScheduleCreate, {"gear_item_uuid": uuid7()}),
+            (GearServiceScheduleCreateInternal, {"user_id": 1, "gear_item_id": 1}),
         ):
+            assert getattr(schema.model_validate({**at_the_ceiling, **extra}), field) == ceiling
             with pytest.raises(ValidationError) as excinfo:
-                schema.model_validate(body)
+                schema.model_validate({**past_it, **extra})
             assert any(error["loc"] == (field,) for error in excinfo.value.errors())
+        with pytest.raises(ValidationError) as excinfo:
+            GearServiceScheduleUpdate.model_validate({field: ceiling + 1})
+        assert any(error["loc"] == (field,) for error in excinfo.value.errors())
+
+    def test_the_read_shape_takes_whatever_is_stored(self) -> None:
+        """The importer admits a month interval past the API's ceiling, and a read schema
+        that rejected its own table would 500 every schedule list holding one."""
+        stored = GearServiceScheduleBase(
+            kind=ServiceKind.SERVICE, starts_on=date(2026, 1, 1), interval_months=INTERVAL_MONTHS_MAX + 1
+        )
+        assert stored.interval_months == INTERVAL_MONTHS_MAX + 1
 
     def test_the_ceilings_keep_every_threshold_inside_its_column(self) -> None:
-        """What the ceilings are for: the largest of each lands in its column, from a
-        snapshot already near the column's own top for the dive count."""
+        """What the ceilings are for: the largest of each lands in its column."""
         next_due_on, dive_count, dive_time = next_due_from(
             baseline_on=date(2026, 1, 1),
             baseline_dive_count=1_000_000,
