@@ -260,8 +260,9 @@ async def get_trip_uuids_by_ids(db: AsyncSession, trip_ids: list[int], user_id: 
     return {row.id: row.uuid for row in result}
 
 
+TRIP_NAME_KEY = "ux_trip_user_id_name_lower"
+
+
 async def trip_name_exists(db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None) -> bool:
     """Asked on `ux_trip_user_id_name_lower`'s own expressions."""
-    return await unique_key_taken(
-        db, Trip, "ux_trip_user_id_name_lower", {"user_id": user_id, "name": name}, exclude_id=exclude_id
-    )
+    return await unique_key_taken(db, Trip, TRIP_NAME_KEY, {"user_id": user_id, "name": name}, exclude_id=exclude_id)

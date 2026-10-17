@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from alembic.script import ScriptDirectory
 from pydantic import ValidationError
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
@@ -61,7 +61,6 @@ from src.app.schemas.user import UserRead, UserUpdate
 from src.app.services.dive_form_presets import (
     DEFAULT_PRESETS,
     is_built_in_preset_name,
-    missing_default_presets,
     seed_default_presets,
 )
 from tests.conftest import db_available
@@ -501,31 +500,6 @@ class TestTheDefaults:
             DiveFormField.MIXTURE_USAGE,
         ]
 
-    def test_with_all_three_present_nothing_is_missing(self) -> None:
-        assert missing_default_presets(["Basic", "Recreational", "Technical"]) == []
-
-    def test_the_comparison_is_case_insensitive(self) -> None:
-        """A diver who renamed Basic to "basic" has it, whatever the shift key did. The
-        unique index is on `lower(name)`, so a case-sensitive check here would try to create
-        a row Postgres then refuses.
-        """
-        assert missing_default_presets(["BASIC", "recreational", "TeChNiCaL"]) == []
-
-    def test_only_the_absent_one_comes_back(self) -> None:
-        missing = missing_default_presets(["Recreational", "Technical", "Warm water"])
-
-        assert [preset.name for preset in missing] == ["Basic"]
-
-    def test_a_renamed_default_leaves_its_name_free(self) -> None:
-        """Renaming Technical to "Tech" means the account no longer has anything called
-        Technical - so restore creates a new one beside it rather than adopting "Tech".
-        That is the cost of matching on name, and it is the behaviour that keeps restore
-        from overwriting an edit.
-        """
-        missing = missing_default_presets(["Basic", "Recreational", "Tech"])
-
-        assert [preset.name for preset in missing] == ["Technical"]
-
 
 class TestTheBuiltInName:
     """ "All" is the clients' built-in preset for the empty set, and no stored row may take
@@ -765,6 +739,40 @@ class TestTheSeedAgainstPostgres:
 
         assert [preset.name for preset in created] == ["Recreational"]
         assert created[0].user_uuid == diver.uuid
+
+    @pytest.mark.asyncio
+    async def test_a_default_under_another_case_is_kept(self, db: Session, async_db: AsyncSession) -> None:
+        """A diver who renamed Basic to "BASIC" has it, whatever the shift key did."""
+        diver = create_user(db)
+        await seed_default_presets(async_db, user_id=diver.id)
+        await async_db.execute(
+            update(DiveFormPreset)
+            .where(DiveFormPreset.user_id == diver.id, DiveFormPreset.name == "Basic")
+            .values(name="BASIC")
+        )
+        await async_db.commit()
+
+        assert await seed_default_presets(async_db, user_id=diver.id) == []
+        assert sorted(await _stored_presets(async_db, diver.id)) == ["BASIC", "Recreational", "Technical"]
+
+    @pytest.mark.asyncio
+    async def test_what_counts_as_present_is_the_indexs_fold(self, db: Session, async_db: AsyncSession) -> None:
+        """`'BASİC'.lower()` is not `'basic'` in Python, and may be in Postgres, whose `lower()`
+        the unique index uses. Whichever way this server folds it, the seed agrees with the
+        index rather than inserting a row it refuses."""
+        diver = create_user(db)
+        await seed_default_presets(async_db, user_id=diver.id)
+        await async_db.execute(
+            update(DiveFormPreset)
+            .where(DiveFormPreset.user_id == diver.id, DiveFormPreset.name == "Basic")
+            .values(name="BASİC")
+        )
+        await async_db.commit()
+        folds_onto_basic = await async_db.scalar(select(func.lower("BASİC") == func.lower("Basic")))
+
+        created = await seed_default_presets(async_db, user_id=diver.id)
+
+        assert [preset.name for preset in created] == ([] if folds_onto_basic else ["Basic"])
 
     @pytest.mark.asyncio
     async def test_a_seeded_account_can_be_deleted(self, db: Session, async_db: AsyncSession) -> None:

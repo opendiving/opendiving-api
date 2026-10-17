@@ -12,8 +12,9 @@ from ...core.exceptions.http_exceptions import DuplicateValueException, NotFound
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import clamp_pagination
-from ...crud.crud_contacts import CONTACT_SEARCH_COLUMNS, contact_name_exists, crud_contacts
+from ...crud.crud_contacts import CONTACT_NAME_KEY, CONTACT_SEARCH_COLUMNS, contact_name_exists, crud_contacts
 from ...crud.crud_lookups import get_lookup_page
+from ...crud.unique_keys import write_or_duplicate
 from ...models.contact import Contact
 from ...models.dive import Dive
 from ...schemas.contact import (
@@ -39,6 +40,8 @@ from ...services.cache_invalidation import (
 )
 
 router = APIRouter(tags=["contacts"])
+
+_NAME_TAKEN = "A contact with this name already exists"
 
 _ADDRESS_COLUMNS = frozenset(f"{CONTACT_ADDRESS_PREFIX}{field}" for field in ADDRESS_FIELDS)
 
@@ -98,15 +101,20 @@ async def write_contact(
     folded; it may be empty. `address` is optional, and when present needs its `country`.
     """
     if await contact_name_exists(db=db, user_id=current_user["id"], name=contact.name):
-        raise DuplicateValueException("A contact with this name already exists")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     contact_internal = ContactCreateInternal(
         **contact.model_dump(exclude={"address"}),
         **address_columns(contact.address),
         user_id=current_user["id"],
     )
-    created = await crud_contacts.create(
-        db=db, object=contact_internal, schema_to_select=ContactReadInternal, return_as_model=True
+    created = await write_or_duplicate(
+        db,
+        crud_contacts.create(
+            db=db, object=contact_internal, schema_to_select=ContactReadInternal, return_as_model=True
+        ),
+        CONTACT_NAME_KEY,
+        _NAME_TAKEN,
     )
     await invalidate_contact_caches(current_user["id"])
 
@@ -274,14 +282,16 @@ async def patch_contact(
     if values.name is not None and await contact_name_exists(
         db=db, user_id=db_contact.user_id, name=values.name, exclude_id=db_contact.id
     ):
-        raise DuplicateValueException("A contact with this name already exists")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     update_data = values.model_dump(exclude_unset=True, exclude={"address"})
     if "address" in values.model_fields_set:
         update_data |= address_columns(values.address)
 
     if update_data:
-        await crud_contacts.update(db=db, object=update_data, uuid=uuid)
+        await write_or_duplicate(
+            db, crud_contacts.update(db=db, object=update_data, uuid=uuid), CONTACT_NAME_KEY, _NAME_TAKEN
+        )
         await invalidate_contact_caches(db_contact.user_id)
 
     return {"message": "Contact updated"}

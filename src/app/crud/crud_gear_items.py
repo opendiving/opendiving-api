@@ -126,6 +126,9 @@ async def get_gear_item_uuids_by_id(db: AsyncSession, gear_item_ids: list[int]) 
     return {row.id: row.uuid for row in result}
 
 
+GEAR_ITEM_NAME_KEY = "ux_gear_item_user_id_brand_name_lower"
+
+
 async def gear_item_name_exists(
     db: AsyncSession, user_id: int, name: str, brand: str | None = None, exclude_id: int | None = None
 ) -> bool:
@@ -135,7 +138,7 @@ async def gear_item_name_exists(
     return await unique_key_taken(
         db,
         GearItem,
-        "ux_gear_item_user_id_brand_name_lower",
+        GEAR_ITEM_NAME_KEY,
         {"user_id": user_id, "brand": brand, "name": name},
         exclude_id=exclude_id,
     )

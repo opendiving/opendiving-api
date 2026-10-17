@@ -1,6 +1,5 @@
 import hashlib
 import uuid as uuid_pkg
-from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 from typing import Annotated, Any, cast
 
@@ -14,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.integrity import write_or_422
 from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import (
     BadRequestException,
@@ -317,23 +317,6 @@ def _mixture_error_detail(exc: IntegrityError) -> str:
         if constraint in msg:
             return detail
     return "Invalid gas mixture."
-
-
-async def _write_or_422(
-    db: AsyncSession, write: Awaitable[object], detail: Callable[[IntegrityError], str] = _fk_error_detail
-) -> None:
-    """Run one uncommitted write of a dive request and flush it, so a constraint it breaks
-    is a 422 naming that write rather than surfacing in the next one's statement.
-
-    A failure rolls back the whole request: the dive row, its other children and any tag
-    `resolve_tag_ids` created with it.
-    """
-    try:
-        await write
-        await db.flush()
-    except IntegrityError as e:
-        await db.rollback()
-        raise UnprocessableEntityException(detail(e)) from e
 
 
 async def _after_dive_write(db: AsyncSession, user_id: int) -> None:
@@ -735,33 +718,43 @@ async def write_dive(
         contact_id=contact_id,
         utc_offset_minutes=utc_offset_minutes,
     )
-    try:
-        created_dive = await crud_dives.create(
+    created_dive = await write_or_422(
+        db,
+        crud_dives.create(
             db=db, object=dive_internal, commit=False, schema_to_select=DiveReadInternal, return_as_model=True
-        )
-    except IntegrityError as e:
-        await db.rollback()
-        raise UnprocessableEntityException(_fk_error_detail(e)) from e
+        ),
+        _fk_error_detail,
+    )
 
     dive_id = created_dive.id
-    await _write_or_422(
+    await write_or_422(
         db,
         replace_mixtures_for_dive(
             db=db, dive_id=dive_id, mixtures=dive.mixtures, commit=False, gear_item_ids=vessel_ids
         ),
         _mixture_error_detail,
     )
-    await _write_or_422(
-        db, replace_dive_sites_for_dive(db=db, dive_id=dive_id, dive_site_ids=dive_site_ids, commit=False)
+    await write_or_422(
+        db,
+        replace_dive_sites_for_dive(db=db, dive_id=dive_id, dive_site_ids=dive_site_ids, commit=False),
+        _fk_error_detail,
     )
-    await _write_or_422(
-        db, replace_gear_items_for_dive(db=db, dive_id=dive_id, gear_item_ids=gear_item_ids, commit=False)
+    await write_or_422(
+        db,
+        replace_gear_items_for_dive(db=db, dive_id=dive_id, gear_item_ids=gear_item_ids, commit=False),
+        _fk_error_detail,
     )
-    await _write_or_422(db, replace_species_for_dive(db=db, dive_id=dive_id, sightings=sightings, commit=False))
+    await write_or_422(
+        db, replace_species_for_dive(db=db, dive_id=dive_id, sightings=sightings, commit=False), _fk_error_detail
+    )
     if people:
-        await _write_or_422(db, replace_people_for_dive(db=db, dive_id=dive_id, references=people, commit=False))
+        await write_or_422(
+            db, replace_people_for_dive(db=db, dive_id=dive_id, references=people, commit=False), _fk_error_detail
+        )
     if tag_ids:
-        await _write_or_422(db, replace_tags_for_dive(db=db, dive_id=dive_id, tag_ids=tag_ids, commit=False))
+        await write_or_422(
+            db, replace_tags_for_dive(db=db, dive_id=dive_id, tag_ids=tag_ids, commit=False), _fk_error_detail
+        )
     await db.commit()
     await _after_dive_write(db, current_user["id"])
 
@@ -1366,9 +1359,9 @@ async def patch_dive(
     dive_id = db_dive.id
 
     if update_data:
-        await _write_or_422(db, crud_dives.update(db=db, object=update_data, uuid=uuid, commit=False))
+        await write_or_422(db, crud_dives.update(db=db, object=update_data, uuid=uuid, commit=False), _fk_error_detail)
     if values.mixtures is not None:
-        await _write_or_422(
+        await write_or_422(
             db,
             replace_mixtures_for_dive(
                 db=db, dive_id=dive_id, mixtures=values.mixtures, commit=False, gear_item_ids=vessel_ids
@@ -1376,19 +1369,29 @@ async def patch_dive(
             _mixture_error_detail,
         )
     if dive_site_ids is not None:
-        await _write_or_422(
-            db, replace_dive_sites_for_dive(db=db, dive_id=dive_id, dive_site_ids=dive_site_ids, commit=False)
+        await write_or_422(
+            db,
+            replace_dive_sites_for_dive(db=db, dive_id=dive_id, dive_site_ids=dive_site_ids, commit=False),
+            _fk_error_detail,
         )
     if gear_item_ids is not None:
-        await _write_or_422(
-            db, replace_gear_items_for_dive(db=db, dive_id=dive_id, gear_item_ids=gear_item_ids, commit=False)
+        await write_or_422(
+            db,
+            replace_gear_items_for_dive(db=db, dive_id=dive_id, gear_item_ids=gear_item_ids, commit=False),
+            _fk_error_detail,
         )
     if sightings is not None:
-        await _write_or_422(db, replace_species_for_dive(db=db, dive_id=dive_id, sightings=sightings, commit=False))
+        await write_or_422(
+            db, replace_species_for_dive(db=db, dive_id=dive_id, sightings=sightings, commit=False), _fk_error_detail
+        )
     if people is not None:
-        await _write_or_422(db, replace_people_for_dive(db=db, dive_id=dive_id, references=people, commit=False))
+        await write_or_422(
+            db, replace_people_for_dive(db=db, dive_id=dive_id, references=people, commit=False), _fk_error_detail
+        )
     if tag_ids is not None:
-        await _write_or_422(db, replace_tags_for_dive(db=db, dive_id=dive_id, tag_ids=tag_ids, commit=False))
+        await write_or_422(
+            db, replace_tags_for_dive(db=db, dive_id=dive_id, tag_ids=tag_ids, commit=False), _fk_error_detail
+        )
 
     if (
         update_data
@@ -1464,7 +1467,9 @@ async def merge_two_dives(
     either record kept stay downloadable on the one recording, and the folded samples are
     marked as a merge: nothing on this server can produce them again from those files.
     Two *different* computers were both recording throughout, so their recordings are simply
-    appended side by side, the surviving dive's first.
+    appended side by side, the surviving dive's first. A fold's two records run one after the
+    other, so the dive starts on the earlier record's CNS, OTU and tank pressure and ends on
+    the later record's, whichever dive held them.
 
     A fold gives the surviving dive the time in the water and the average depth its folded
     samples hold, the stretch the computer was off counting only when it went off in the

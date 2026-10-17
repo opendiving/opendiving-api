@@ -1,15 +1,14 @@
 import uuid as uuid_pkg
-from collections.abc import Awaitable
 from datetime import datetime
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import or_
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.integrity import write_or_422
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
@@ -35,6 +34,7 @@ from ...crud.crud_trip_parts import (
 )
 from ...crud.crud_trips import (
     NO_DIVES,
+    TRIP_NAME_KEY,
     TripFigures,
     crud_trips,
     get_candidate_counts_for_trips,
@@ -45,6 +45,7 @@ from ...crud.crud_trips import (
     search_conditions,
     trip_name_exists,
 )
+from ...crud.unique_keys import write_or_duplicate
 from ...models.dive import Dive
 from ...models.trip import Trip
 from ...schemas.dive import DiveListItem
@@ -81,18 +82,8 @@ router = APIRouter(tags=["trips"])
 # matching how `patch_dive` treats its child-row writes, and the whole request rolls back
 # with it, so the caches have nothing to drop.
 _PART_ERROR_DETAIL = "Trip parts could not be saved."
+_NAME_TAKEN = "A trip with this name already exists"
 _PEOPLE_ERROR_DETAIL = "The trip's people could not be saved."
-
-
-async def _write_or_422(db: AsyncSession, write: Awaitable[object], detail: str) -> None:
-    """Run one uncommitted write of a trip request and flush it, so a constraint it breaks is
-    this write's 422 - and rolls back the whole request, the trip row included."""
-    try:
-        await write
-        await db.flush()
-    except IntegrityError as e:
-        await db.rollback()
-        raise UnprocessableEntityException(detail) from e
 
 
 async def _resolve_accommodations(
@@ -220,18 +211,23 @@ async def write_trip(
     children do.
     """
     if await trip_name_exists(db=db, user_id=current_user["id"], name=trip.name):
-        raise DuplicateValueException("A trip with this name already exists")
+        raise DuplicateValueException(_NAME_TAKEN)
     accommodation_ids = await _resolve_accommodations(db, trip.parts, current_user["id"])
     people = await resolve_people_references(db, trip.people, user_id=current_user["id"])
 
     # Only the trip's own columns reach `TripCreateInternal`, which is `extra="forbid"`:
     # parts are rows in another table.
     trip_internal = TripCreateInternal(name=trip.name, notes=trip.notes, user_id=current_user["id"])
-    created_trip = await crud_trips.create(
-        db=db, object=trip_internal, commit=False, schema_to_select=TripReadInternal, return_as_model=True
+    created_trip = await write_or_duplicate(
+        db,
+        crud_trips.create(
+            db=db, object=trip_internal, commit=False, schema_to_select=TripReadInternal, return_as_model=True
+        ),
+        TRIP_NAME_KEY,
+        _NAME_TAKEN,
     )
 
-    await _write_or_422(
+    await write_or_422(
         db,
         replace_parts_for_trip(
             db=db, trip_id=created_trip.id, parts=trip.parts, commit=False, accommodation_ids=accommodation_ids
@@ -239,7 +235,7 @@ async def write_trip(
         _PART_ERROR_DETAIL,
     )
     if people:
-        await _write_or_422(
+        await write_or_422(
             db,
             replace_people_for_trip(db=db, trip_id=created_trip.id, references=people, commit=False),
             _PEOPLE_ERROR_DETAIL,
@@ -617,7 +613,7 @@ async def patch_trip(
     if values.name is not None and await trip_name_exists(
         db=db, user_id=db_trip.user_id, name=values.name, exclude_id=db_trip.id
     ):
-        raise DuplicateValueException("A trip with this name already exists")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     update_data = values.model_dump(
         include={"name", "notes"},
@@ -632,9 +628,11 @@ async def patch_trip(
     )
 
     if update_data:
-        await crud_trips.update(db=db, object=update_data, uuid=uuid, commit=False)
+        await write_or_duplicate(
+            db, crud_trips.update(db=db, object=update_data, uuid=uuid, commit=False), TRIP_NAME_KEY, _NAME_TAKEN
+        )
     if parts is not None:
-        await _write_or_422(
+        await write_or_422(
             db,
             replace_parts_for_trip(
                 db=db, trip_id=db_trip.id, parts=parts, commit=False, accommodation_ids=accommodation_ids
@@ -642,7 +640,7 @@ async def patch_trip(
             _PART_ERROR_DETAIL,
         )
     if people is not None:
-        await _write_or_422(
+        await write_or_422(
             db,
             replace_people_for_trip(db=db, trip_id=db_trip.id, references=people, commit=False),
             _PEOPLE_ERROR_DETAIL,
