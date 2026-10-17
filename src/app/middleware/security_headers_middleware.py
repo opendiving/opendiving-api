@@ -49,13 +49,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     Note
     ----
         - Headers already set by the endpoint are left alone, the same contract
-          `ClientCacheMiddleware` keeps with `Cache-Control`. The binary-download
-          responses (`dives.py`, `certifications.py`, `export.py`, and `users.py`'s
-          pictures) set a much stricter `default-src 'none'; sandbox`, and they name
-          `frame-ancestors 'none'` themselves - it does *not* fall back to `default-src`,
-          so a policy that omits it grants framing however strict the rest of it is.
-          Deliberately not counted here: the list grows, and a number in a docstring is
-          the copy that stops being true.
+          `ClientCacheMiddleware` keeps with `Cache-Control`. Every binary response sends
+          the much stricter `BINARY_CSP` (`core/utils/binary_responses.py`), which names
+          `frame-ancestors 'none'` itself - it does *not* fall back to `default-src`, so a
+          policy that omits it grants framing however strict the rest of it is.
         - `X-Frame-Options` is redundant in every browser that supports
           `frame-ancestors` (Chrome 40, Firefox 33, Safari 10), which is every browser
           that can run the panel. It is sent anyway for parity with the web app, which
