@@ -845,6 +845,23 @@ class TestAProfileNoFileCanReYield:
         assert await _cns_end(async_db, dive) == 7.0
 
     @pytest.mark.asyncio
+    async def test_a_header_only_file_joining_a_merged_recording_still_fills_the_dives_cylinder(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
+    ) -> None:
+        """An arrival, whatever the recording keeps: the dive's blank mix fills, and its label,
+        which the merged samples' channels name, stays."""
+        stored = await _attach(async_db, diver, dive, _export(samples=self.SAMPLES), filename="a.json")
+        identity = await self._merged(async_db, stored.recording_id)
+        db.add(DiveMixture(dive_id=dive.id, gas_number=3, start_pressure=200.0, end_pressure=50.0))
+        db.commit()
+
+        await _attach(async_db, diver, dive, _export(cylinder={"Oxygen": 0.32}), filename="header.json")
+
+        await self._assert_merged(async_db, stored.recording_id, identity)
+        cylinder = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalar_one()
+        assert (cylinder.oxygen, cylinder.gas_number) == (32.0, 3)
+
+    @pytest.mark.asyncio
     async def test_a_header_only_file_joining_an_imported_recording_keeps_the_documents_samples(
         self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive
     ) -> None:

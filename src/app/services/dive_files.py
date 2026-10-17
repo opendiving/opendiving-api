@@ -1287,10 +1287,24 @@ async def rederive_recording(
     Required rather than defaulted, so a caller added later has to say which it is.
 
     **A profile no file can re-yield stays** (`_keeps_stored_profile`), and with it the
-    labelling and the gate figures it was stored with; the readouts and the fixes only fill.
+    labels and the gate figures it was stored with: the dive's cylinders still fill at an
+    arrival, but are never renumbered onto the files' labels, and the readouts and the fixes
+    only fill.
     """
+    arrival = change is RecordingChange.JOINED or (change is RecordingChange.CREATED and ordinal != 0)
     existing = await get_existing_profile(db, recording_id=recording_id)
     if _keeps_stored_profile(existing, extraction):
+        if arrival:
+            await label_cylinders(
+                db,
+                dive_id=dive_id,
+                recording_id=recording_id,
+                ordinal=ordinal,
+                mixtures=extraction.mixtures,
+                profile=None,
+                fill=True,
+                renumber=False,
+            )
         await dive_recordings.fill_readouts(db, recording_id=recording_id, readouts=extraction.scalars)
         if ordinal == 0:
             await fill_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars)
@@ -1308,7 +1322,8 @@ async def rederive_recording(
         ordinal=ordinal,
         mixtures=extraction.mixtures,
         profile=extraction.profile,
-        fill=change is RecordingChange.JOINED or (change is RecordingChange.CREATED and ordinal != 0),
+        fill=arrival,
+        renumber=True,
     )
 
     if profile is None:
@@ -1417,6 +1432,7 @@ async def label_cylinders(
     mixtures: Sequence[DiveMixtureSchema],
     profile: NormalizedProfile | None,
     fill: bool,
+    renumber: bool,
 ) -> NormalizedProfile | None:
     """Join a re-derived recording's cylinder labels to the dive's, and at an arrival fill the
     blanks of the rows they pair. Returns the profile to store.
@@ -1436,6 +1452,10 @@ async def label_cylinders(
     (`relabel_gas_numbers`), a cylinder the dive's list lacks appended at an arrival and a
     matched row with no label given one: `gas_number` is dive-scoped, and a second computer
     numbers its tanks its own way.
+
+    **`renumber` is false where the recording keeps a profile no file can re-yield**: its
+    channels name the dive's labels as they stand, so a primary's rows keep theirs. A
+    recording past the first renumbers nothing either way.
     """
     from ..crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive, vessel_ids_for_dive
 
@@ -1457,6 +1477,8 @@ async def label_cylinders(
 
     if fill:
         await _write_fills(db, primary_fills(mixtures, stored))
+    if not renumber:
+        return profile
     renumbering = renumber_onto_labels(mixtures, stored)
     if renumbering is None:
         return profile

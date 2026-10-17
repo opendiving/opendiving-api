@@ -1431,9 +1431,11 @@ class TestScalarsAreWrittenAtAttach:
         async def fill(db, *, dive_id, scalars):
             chosen["dive fill"] = {name: scalars.get(name) for name in TECH_SCALAR_FIELDS}
 
-        async def labelling(db, *, dive_id, recording_id, ordinal, mixtures, profile, fill):
+        async def labelling(db, *, dive_id, recording_id, ordinal, mixtures, profile, fill, renumber):
             if fill:
                 chosen["cylinders"] = list(mixtures)
+            if not renumber:
+                chosen["labels kept"] = True
             return profile
 
         monkeypatch.setattr("src.app.services.dive_recordings.store_readouts", readouts_outright)
@@ -1546,12 +1548,14 @@ class TestScalarsAreWrittenAtAttach:
     ) -> None:
         """Its files are the halves the merge joined, so no change to them may relabel or
         replace its samples - and a `CREATED` or `REMOVED`, which would write outright, fills
-        rather than clearing what the other half supplied."""
+        rather than clearing what the other half supplied. An arrival still fills the dive's
+        cylinders, without renumbering them."""
         merged = ExistingProfileRow(source_sha256="a" * 64, extractor_version=3, parser_key=MERGE_PARSER_KEY)
 
         chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=change, existing=merged)
 
-        assert chosen.keys() == {"readouts fill", "dive fill"}
+        arrival = {"cylinders", "labels kept"} if change is RecordingChange.JOINED else set()
+        assert chosen.keys() == {"readouts fill", "dive fill", *arrival}
 
     @pytest.mark.asyncio
     async def test_a_secondary_recording_writes_its_own_readouts_and_none_of_the_dives_figures(
