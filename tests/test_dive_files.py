@@ -66,6 +66,7 @@ from src.app.services.dive_files import (
     renumber_onto_labels,
     store_recording_file,
 )
+from src.app.services.dive_profiles import MERGE_PARSER_KEY, ExistingProfileRow
 from src.app.services.dive_reader import FORMAT_CONTENT_TYPES
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
@@ -1401,7 +1402,14 @@ class TestScalarsAreWrittenAtAttach:
         ]
 
     @staticmethod
-    async def _rederive(files: list[LoadedDiveFile], monkeypatch, *, change: RecordingChange, ordinal: int = 0) -> dict:
+    async def _rederive(
+        files: list[LoadedDiveFile],
+        monkeypatch,
+        *,
+        change: RecordingChange,
+        ordinal: int = 0,
+        existing: ExistingProfileRow | None = None,
+    ) -> dict:
         """Run the re-derivation over `files` and report which writes it chose and with what.
 
         Captured at the seams rather than by inspecting the emitted `UPDATE`: the decision
@@ -1423,9 +1431,11 @@ class TestScalarsAreWrittenAtAttach:
         async def fill(db, *, dive_id, scalars):
             chosen["dive fill"] = {name: scalars.get(name) for name in TECH_SCALAR_FIELDS}
 
-        async def labelling(db, *, dive_id, recording_id, ordinal, mixtures, profile, fill):
+        async def labelling(db, *, dive_id, recording_id, ordinal, mixtures, profile, fill, renumber):
             if fill:
                 chosen["cylinders"] = list(mixtures)
+            if not renumber:
+                chosen["labels kept"] = True
             return profile
 
         monkeypatch.setattr("src.app.services.dive_recordings.store_readouts", readouts_outright)
@@ -1435,6 +1445,7 @@ class TestScalarsAreWrittenAtAttach:
         monkeypatch.setattr("src.app.services.dive_files.label_cylinders", labelling)
         monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
         monkeypatch.setattr("src.app.services.dive_files.delete_profile_for_recording", AsyncMock())
+        monkeypatch.setattr("src.app.services.dive_files.get_existing_profile", AsyncMock(return_value=existing))
 
         await rederive_recording(
             AsyncMock(),
@@ -1529,6 +1540,22 @@ class TestScalarsAreWrittenAtAttach:
         chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=change, ordinal=ordinal)
 
         assert ("cylinders" in chosen) is fills
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("change", list(RecordingChange))
+    async def test_a_merged_profile_is_left_alone_and_everything_else_fills(
+        self, monkeypatch, change: RecordingChange
+    ) -> None:
+        """Its files are the halves the merge joined, so no change to them may relabel or
+        replace its samples - and a `CREATED` or `REMOVED`, which would write outright, fills
+        rather than clearing what the other half supplied. An arrival still fills the dive's
+        cylinders, without renumbering them."""
+        merged = ExistingProfileRow(source_sha256="a" * 64, extractor_version=3, parser_key=MERGE_PARSER_KEY)
+
+        chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=change, existing=merged)
+
+        arrival = {"cylinders", "labels kept"} if change is RecordingChange.JOINED else set()
+        assert chosen.keys() == {"readouts fill", "dive fill", *arrival}
 
     @pytest.mark.asyncio
     async def test_a_secondary_recording_writes_its_own_readouts_and_none_of_the_dives_figures(

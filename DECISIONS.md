@@ -1227,8 +1227,9 @@ every re-derivation: a row takes the label of the file cylinder it matches by mi
 the file does not match keeps its label unless a matched row claims it, and is then cleared. A
 sibling recording's channels and markers follow with `replace_profile_samples`, a cleared label
 moving to a fresh unused one. A later recording's cylinders map onto the dive's by the same join,
-which at an arrival also fills the rows' blanks, and a later cylinder carrying nothing is not
-appended. `merge_mixture_fields` never writes a label.
+which at an arrival also fills the rows' blanks and appends a cylinder the dive lacks, unless it
+carries nothing. A re-read appends nothing: an unpaired cylinder is one the diver deleted, and its
+channel takes a fresh unused label. `merge_mixture_fields` never writes a label.
 
 `ck_dive_mixture_gas_number_non_negative` is `>= 0`: labels start at 0.
 
@@ -6306,15 +6307,17 @@ The earlier dive survives by `starts_before` (`delta_seconds`' rule, `services/d
 `_orders_first` breaking ties by id; the loser is soft-deleted. Same-device records fold into one
 recording; different devices or a NULL start append. The offset is the recordings' delta, never the
 dives'. The gap stays empty: `join_profiles` is not `fill_channels`; pressure joins by `gas_number`;
-markers all stay. Provenance is `merge`, so `should_extract` never re-extracts; files stay. A fold's
-`submerged_time` and `avg_depth` are its time in the water; side by side they stand; `max_depth` is
-the deepest reading; `None` means leave alone; `start_time` and the fixes stay,
-`refresh_tech_scalars` uncalled; the absorbed record's readouts fill the survivor's blanks. An
-`avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers`
-precedes the join, keeping `usage` and filling the survivor's blank cylinder members from the
-absorbed rows it pairs, as an arrival does, an empty absorbed row not appended; moved profiles use
-`replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
-within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
+markers all stay. Provenance is `merge`, so `should_extract` never re-extracts and a later attach or
+file deletion leaves the profile and gate figures alone (`_keeps_stored_profile`); files stay. A
+fold's `submerged_time` and `avg_depth` are its time in the water; side by side they stand;
+`max_depth` is the deepest reading; `None` means leave alone; `start_time` and the fixes stay,
+`refresh_tech_scalars` uncalled; the absorbed record's device, settings and readouts fill the
+survivor's blanks. An `avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write.
+`relabel_gas_numbers` precedes the join, keeping `usage` and filling the survivor's blank cylinder
+members from the absorbed rows it pairs, as an arrival does, an empty absorbed row not appended;
+moved profiles use `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions
+stay, notes append within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not
+reused.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
