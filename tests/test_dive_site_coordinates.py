@@ -155,7 +155,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     db_dive_site.depth_to = None
     seen["db_dive_site"] = db_dive_site
 
-    async def fake_update(*, db: Any, object: dict, uuid: uuid_pkg.UUID) -> None:
+    async def fake_update(*, db: Any, object: dict, uuid: uuid_pkg.UUID, commit: bool) -> None:
         seen["update_data"] = object
 
     monkeypatch.setattr(dive_sites_module, "_get_owned_dive_site", AsyncMock(return_value=db_dive_site))
@@ -177,7 +177,7 @@ async def _patch(values: dict[str, Any], mock_redis: Any) -> None:
             uuid=uuid7(),
             values=DiveSiteUpdateRequest.model_validate(values),
             current_user={"id": 1, "uuid": USER_UUID},
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
 
