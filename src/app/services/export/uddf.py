@@ -302,7 +302,8 @@ def _num(value: float) -> str:
 
 
 # Everything outside XML 1.0's `Char` production, which no escape can make legal: the C0
-# controls other than tab, LF and CR, the surrogates, and U+FFFE and U+FFFF. `ElementTree`
+# controls other than tab, LF and CR, the surrogates, and U+FFFE and U+FFFF. Listed rather
+# than `Char` negated, so the class needs no range over the astral planes. `ElementTree`
 # escapes `&`, `<` and `>` and passes these straight through, so a single one makes the
 # whole document unparseable - the "validates perfectly and is nonsense" failure this
 # module is otherwise careful about, in its loudest form. DEL is legal but dropped too.
@@ -312,7 +313,7 @@ def _num(value: float) -> str:
 # event's label is whatever the device wrote. Scrubbing at the single point every
 # string passes through is the only version of this that cannot be forgotten at a call
 # site. Dropped rather than replaced: they carry no meaning a diver put there.
-_FORBIDDEN_IN_XML = re.compile("[^\t\n\r\x20-\x7e\x80-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+_FORBIDDEN_IN_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff\ufffe\uffff]")
 
 
 def _xml_safe(value: str) -> str:
