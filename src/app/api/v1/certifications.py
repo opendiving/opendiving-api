@@ -448,9 +448,9 @@ async def erase_certification(
 
     The files go for good because they are the bulk of what this feature stores and
     nothing can read them once the certification is gone; the row itself is only
-    soft-deleted, matching every other resource here. `is_deleted` is application-level,
-    so the `ON DELETE CASCADE` on `certification_file.certification_id` never fires and
-    the files have to be removed explicitly.
+    soft-deleted, as a dive's is. `is_deleted` is application-level,
+    so this delete never reaches the `ON DELETE CASCADE` on
+    `certification_file.certification_id` and the files have to be removed explicitly.
     """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 

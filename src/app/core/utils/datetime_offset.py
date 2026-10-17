@@ -1,5 +1,5 @@
 """Helpers for datetimes that must round-trip through the API with their original UTC
-offset preserved (currently just `Dive.start_time`).
+offset preserved: `Dive.start_time`, and a recording's `start_time` stored the same way.
 
 The problem: a Postgres `timestamptz` column only ever stores an absolute instant - it
 has no memory of what UTC offset a value was originally expressed in. A dive logged at
@@ -8,10 +8,12 @@ instants, but once either is *read back*, Postgres/SQLAlchemy hand back a dateti
 whatever timezone the session is configured with (UTC here), not the original offset.
 
 So the offset a `start_time` was entered in is stored separately (`Dive.utc_offset_minutes`)
-and re-attached on the way out. This module is the single place that conversion happens
-for anything displayed or bucketed, so every read of a dive agrees on exactly how it's done.
-The one copy in SQL is `crud_dives.DIVE_LOCAL_DAY`, for a predicate a paginated list has to
-apply in the database, and a test pins it to `local_day()` over every stored state.
+and re-attached on the way out. Anything displayed or bucketed converts through this
+module, so every read of a dive agrees on exactly how it's done. Two copies sit outside it:
+`crud_dives.DIVE_LOCAL_DAY` in SQL, for a predicate a paginated list has to apply in the
+database, which a test pins to `local_day()` over every stored state; and
+`services/dive_recordings.wall_clock`, which shifts to a naive wall clock only to compare two
+recordings' starts and is never shown.
 
 **There is a third state, and only the logbook importer can create it.** A NULL
 `utc_offset_minutes` means "the wall clock was recorded and the instant is unknown" -
@@ -67,7 +69,7 @@ def require_utc_offset(value: datetime) -> datetime:
     parser either finds an explicit offset in the file or the caller falls back to the
     browser's offset - so the API requires it up front rather than guessing.
 
-    **A write-side rule, and no longer the whole of the write side.** It guards
+    **A write-side rule, and not the whole of the write side.** It guards
     `DiveCreate`, `DiveRenumberRequest.from_start_time` and `GET /dives/next-number`'s
     query parameter, because every one of those callers knows an offset. It is
     deliberately *not* on `DiveUpdate`: whether an offsetless update is legal depends on

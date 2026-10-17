@@ -8,16 +8,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     Why the app and not the proxy
     -----------------------------
         The bundled `Caddyfile` (https://github.com/opendiving/opendiving/blob/main/Caddyfile)
-        routes `/api/v1*`, `/admin*` and the three docs paths straight to this app, so
-        nothing the web container sets reaches them - and a bring-your-own-proxy install
+        routes `/api/v1*` and the three docs paths straight to this app, so nothing the web
+        container sets reaches them; an operator who enables the CRUDAdmin panel routes its
+        mount path here too; and a bring-your-own-proxy install
         (https://github.com/opendiving/opendiving/blob/main/docs/reverse-proxy.md) is a
         config file this repository never sees. Setting them here is the only version of this
         that holds for *every* deployment shape, including a developer's `docker compose
         up`, and it is a policy about this app's own responses rather than about a
-        surface someone else owns: `/admin` is mounted on this FastAPI app and `/docs`
+        surface someone else owns: the panel is mounted on this FastAPI app and `/docs`
         is a route in `core/setup.py`.
 
-        The surface that actually needs it is `/admin` - CRUDAdmin ships no security
+        The surface that actually needs it is the panel - CRUDAdmin ships no security
         headers of its own, and it is a full create/update/delete interface over `User`,
         `Dive`, `GearItem` and everything else in `admin/views.py`. It is not urgent:
         CRUDAdmin's session cookie is `SameSite=strict` outside debug mode, so a
@@ -25,16 +26,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         third-party default we don't control, which is the argument for having a header
         of our own rather than against it.
 
-        **`/admin` is about to stop meaning the panel, and nothing above depends on which
-        it means.** The operator's surface is now the JSON routes in `api.v1.admin` under
-        `/api/v1/admin/*`, driven by a superuser-gated section of the *web* app at
-        `/admin` - so the bundle's `Caddyfile` has to stop sending `/admin*` here, and a
-        companion change in the install bundle does that in the same release. Until that
-        ships, `/admin*` still reaches this app and the sentences above are literally true
-        of it; after it, `CRUD_ADMIN_MOUNT_PATH` (still `/admin` by default) has to be moved
-        by any operator who enables the panel. Either way what this middleware covers is
-        this app's own responses - `/api/v1*`, the docs paths, and wherever the panel is
-        mounted - which is the set the argument was always really about.
+        `/admin` on an install is the *web* app's superuser section, which drives the JSON
+        routes in `api.v1.admin` under `/api/v1/admin/*`. The panel mounts at
+        `CRUD_ADMIN_MOUNT_PATH`, `/admin` by default, which an operator who enables it has
+        to move. What this middleware covers is this app's own responses - `/api/v1*`, the
+        docs paths, and wherever the panel is mounted.
 
     What it deliberately does not do
     --------------------------------

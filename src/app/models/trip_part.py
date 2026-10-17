@@ -34,8 +34,8 @@ class TripPart(Base):
 
     The FK's `ON DELETE CASCADE` is the only way these rows are removed, and it fires:
     `erase_trip` is a real `DELETE FROM trip`, so a trip takes its parts with it. That is
-    *not* the same as the dive join tables, whose cascade still never runs - `Dive` is
-    soft-deleted, so no `DELETE FROM dive` is ever issued.
+    *not* the same as the dive join tables, whose cascade no dive route reaches - `Dive` is
+    soft-deleted, so a dive row goes only with its account, in the purge.
     """
 
     __tablename__ = "trip_part"

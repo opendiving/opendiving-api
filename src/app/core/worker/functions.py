@@ -186,9 +186,9 @@ async def purge_expired_authentication_requests(ctx: dict[Any, Any]) -> str:
     `DateTime(timezone=True)`, so a naive `datetime.now()` would compare against it off by
     the host's UTC offset.
 
-    One cost worth naming: a link older than the retention window now reports "invalid"
-    where it used to report "expired", because the row that carried the distinction is
-    gone. Both are 401s and both are true.
+    One cost worth naming: a link older than the retention window reports "invalid" rather
+    than "expired", because the row that carried the distinction is gone. Both are 401s and
+    both are true.
     """
     cutoff = datetime.now(UTC) - AUTHENTICATION_REQUEST_RETENTION
     async with local_session() as db:
@@ -562,8 +562,8 @@ async def purge_deleted_accounts(ctx: dict[Any, Any]) -> str:
     plus the stored files those rows pointed at.
 
     Hourly rather than daily, so `ACCOUNT_DELETION_GRACE_DAYS=0` behaves the way an
-    operator setting it to zero expects. No `run_at_startup`, unlike the two sweeps beside
-    it in `core/worker/settings.py`: those are idempotent housekeeping, this one destroys
+    operator setting it to zero expects. No `run_at_startup`, unlike the sweeps beside it
+    in `core/worker/settings.py`: those are idempotent housekeeping, this one destroys
     logbooks, and a restart loop must never be the thing that decides an account's fate
     early.
 
@@ -693,8 +693,8 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
     Three filters matter. Archived gear is skipped, so retiring a piece of kit silences it
     without the diver having to also pause every rule on it; `is_active` pauses one rule
     without touching the item; and `user.gear_service_emails` is the opt-out. There is no
-    liveness filter on the gear halves any more - a deleted item takes its schedules with
-    it - and `User.is_deleted` is the one that remains, since users still soft-delete.
+    liveness filter on the gear halves - a deleted item takes its schedules with it - and
+    `User.is_deleted` is the one there is, since users soft-delete.
 
     "Today" is UTC - `User` has no timezone column, and at date granularity with a
     30-day lead time being a few hours out either way changes nothing. If that ever

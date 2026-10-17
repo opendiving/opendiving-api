@@ -134,8 +134,8 @@ async def _cached_read_gear_items(
     key so the active-only view and the full one can't serve each other's results, and
     `search` for the same reason between two queries.
 
-    Hand-written rather than built with `OwnedResourceCache` (as trips, dive sites and
-    gear sets are) because of the two things that factory has no room for: the extra
+    Hand-written rather than read through `OwnedResourceCache.read_list` (as the contact
+    list is) because of the two things that factory has no room for: the extra
     `include_archived` filter dimension, and the batched service-schedule lookup below.
     See that class's docstring for why the duplication is preferred over a hook.
     """

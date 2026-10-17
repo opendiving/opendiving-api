@@ -167,9 +167,10 @@ async def finish_registration(
 ) -> WebauthnCredentialReadInternal:
     """Verify an attestation and store the credential it attests to.
 
-    The 10-credential ceiling is re-checked here as well as in `start_registration`: the
-    first check is what lets the UI say so before a biometric prompt, this one is the one
-    that holds when two tabs each got options while the account was at nine.
+    The `PASSKEY_MAX_CREDENTIALS_PER_USER` ceiling is re-checked here as well as in
+    `start_registration`: the first check is what lets the UI say so before a biometric
+    prompt, this one is the one that holds when two tabs each got options while the account
+    was one short of it.
 
     The passkey-added audit event is written **here rather than in the route**, because the
     credential's own insert commits inside this function - so this is the only place the
@@ -481,7 +482,7 @@ async def _credentials_for_user(db: AsyncSession, user_id: int) -> list[Webauthn
     """Every credential on an account, oldest first.
 
     Unpaginated and uncached on purpose: the ceiling is
-    `PASSKEY_MAX_CREDENTIALS_PER_USER`, so this is at most ten rows, and nothing embeds a
+    `PASSKEY_MAX_CREDENTIALS_PER_USER` (ten by default), so this is a handful of rows, and nothing embeds a
     credential anywhere - so there is no invalidation obligation to get wrong. See the
     documented opt-outs on `OwnedResourceCache`.
     """

@@ -10,9 +10,12 @@ device ran, on its settings and on the diver's exposure history, none of which a
 carries, so nothing in this module reconstructs one from depth and a gas fraction. The model
 itself is on `dive_recording` - it is one setting for the whole dive rather than a sample.
 
-The **only** module that reads or writes `dive_profile.data` - the same seam discipline
+The **only** module that queries or writes `dive_profile.data` - the same seam discipline
 as `services/dive_files.py`, for the same reason: the payload's encoding is an
-implementation detail, and everything above this module deals in `NormalizedProfile`.
+implementation detail, and everything above this module deals in `NormalizedProfile` or the
+wire shape `to_read_schema` builds. The one exception is the UDDF writer
+(`services/export/uddf.py`), which takes the raw payload from `load_profile` and reads the
+stored `t`/`v`/`pressure`/`events` keys itself.
 
 Two halves. The top one is pure and DB-free (`derive_gas_attribution`, `downsample`,
 `fill_channels`, `should_extract`), following the `reconcile()` idiom in `dive_files.py`: the
@@ -1196,8 +1199,8 @@ async def load_stored_profile(db: AsyncSession, *, recording_id: int) -> StoredP
     `load_profile` hands back the raw payload for the two callers that serialize it - the
     read route and the UDDF writer - and this is for the one that has to *reason* about the
     samples: `services/dive_merge.py`, folding two records of one dive onto one axis. Going
-    through here rather than through `load_profile(...).data` is what keeps the payload's
-    encoding inside this module, which is the seam the module docstring claims.
+    through here rather than through `load_profile(...).data` keeps the merge off the stored
+    encoding, which outside this module only the UDDF writer reads.
 
     `duration` and the two provenance columns ride along because a caller rewriting the row
     has to put them back: the span may be the document's rather than the samples' (see
@@ -1284,21 +1287,19 @@ async def get_profile_version(db: AsyncSession, *, recording_id: int) -> str | N
 
 
 async def load_profile(db: AsyncSession, *, recording_id: int) -> LoadedProfile | None:
-    """Fetch one recording's full profile. The only place `data` is ever loaded - hence the
-    explicit `undefer`, which is what makes every other query here cheap by default.
+    """Fetch one recording's full profile. The only place a `DiveProfile` entity is loaded
+    with its `data` - hence the explicit `undefer`; every other query here names the columns
+    it reads.
 
     Detached before returning, because an attached instance keeps its undeferred payload
-    materialized for the life of the session. That cost nothing while the only caller was a
-    single-dive route, and stopped being free when the full export began calling this once
-    per dive - twice, in fact, since `logbook.divejson` and `dives.uddf` each embed every
+    materialized for the life of the session, and the full export calls this once per
+    dive - twice, in fact, since `logbook.divejson` and `dives.uddf` each embed every
     profile. Without this an archive of a few hundred dives would hold every one of them,
     which is what `services/export/loader.py` promises it does not.
 
-    `load_dive_file` and `load_certification_file` used to be the siblings this pointed at.
-    They are not any more: their payloads left Postgres for the files volume, so both read
-    explicit columns and there is no longer an ORM instance to detach. This is now the only
-    place in the app where the problem exists at all - `dive_profile.data` is JSONB, stays
-    in the database deliberately, and so still arrives attached.
+    This is the only place in the app where the problem exists at all: the other payloads
+    live in the blob store, and `dive_profile.data` is JSONB, stays in the database
+    deliberately, and so arrives attached.
 
     Every caller copies what it needs out of `LoadedProfile` below and none of them touch
     the row again, so detaching is invisible to all three.
@@ -1316,10 +1317,10 @@ def to_read_schema(loaded: LoadedProfile) -> DiveProfileRead:
     """The stored payload as the wire shape, integers untouched.
 
     This is where the stored vocabulary meets the published one: `data` keeps the compact
-    `t`/`v`/`pressure` keys it has always had, and the wire speaks DiveJSON's
-    `times`/`values`/`pressures` (spec §§6.4-6.6). Renaming the JSONB keys instead would
-    be a data migration across every profile row to save this mapping, which is the wrong
-    trade - nothing outside this module reads the payload.
+    `t`/`v`/`pressure` keys, and the wire speaks DiveJSON's `times`/`values`/`pressures`
+    (spec §§6.4-6.6). Renaming the JSONB keys instead would be a data migration across
+    every profile row, plus a matching change to the UDDF writer that reads them, to save
+    this mapping - the wrong trade.
     """
     data = loaded.data or {}
 
@@ -1406,8 +1407,9 @@ async def delete_profiles_for_dive(db: AsyncSession, *, dive_id: int, commit: bo
     """Hard-delete every profile of a dive. Returns whether there were any.
 
     The dive-delete path's, and the reason `dive_id` is denormalized onto this table: dive
-    deletion is application-level (`is_deleted`), so no `DELETE FROM dive` ever runs and the
-    FK's `ON DELETE CASCADE` never fires - see `models/dive_profile.py`.
+    deletion is application-level (`is_deleted`), so the route issues no `DELETE FROM dive`
+    and the FK's `ON DELETE CASCADE` fires only in the account purge - see
+    `models/dive_profile.py`.
     """
     result = cast(CursorResult, await db.execute(delete(DiveProfile).where(DiveProfile.dive_id == dive_id)))
     deleted = result.rowcount > 0

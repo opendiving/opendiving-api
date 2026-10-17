@@ -10,9 +10,8 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     """One device's record of one dive.
 
-    A dive used to have at most one stored export and at most one profile, both keyed on
-    `dive_id` by a unique index. That model has three things it cannot express, and each
-    of them is an ordinary thing a diver does: wearing two computers, exporting the same
+    One stored export and one profile per dive, keyed on `dive_id`, would leave three
+    things inexpressible, and each of them is an ordinary thing a diver does: wearing two computers, exporting the same
     computer twice in two formats, and having a dive cut in half by a computer that shut
     down mid-water. A recording is the row that makes all three representable - the
     plural unit between the dive and the files, matching DiveJSON's own §6.4a.
@@ -41,9 +40,10 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
 
     No `SoftDeleteMixin`, matching `dive_file` and `dive_profile` below it: a soft-deleted
     recording would hold its files' bytes on the volume with nothing able to read them.
-    Deletion is `services/dive_recordings.py`'s, because the FK's `ON DELETE CASCADE` never
-    fires - dive deletion is application-level (`is_deleted`), so no `DELETE FROM dive` ever
-    runs. The same trap `delete_files_for_dive` exists to work around.
+    Deletion is `services/dive_recordings.py`'s, because no dive route reaches the FK's
+    `ON DELETE CASCADE` - dive deletion is application-level (`is_deleted`), and a dive row
+    goes only with its account, in the purge. The same trap `delete_files_for_dive` exists to
+    work around.
 
     **One row deletion is deliberately elsewhere**, and it is the exception that says what
     `delete_recording` is for: `services/dive_merge.py` folds two records of one dive into
@@ -197,9 +197,8 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
                 "surface_pressure_bar IS NULL OR (surface_pressure_bar >= 0.4 AND surface_pressure_bar <= 1.2)",
                 name="ck_dive_recording_surface_pressure_range",
             ),
-            # One recording per slot per dive. What used to be `ux_dive_file_dive_id`'s job
-            # - stopping a dive from accumulating records nobody asked for - moved here and
-            # became "in a defined order" instead of "at most one".
+            # One recording per slot per dive: a dive does not accumulate records nobody
+            # asked for, and the ones it has are in a defined order.
             Index("ux_dive_recording_dive_id_ordinal", "dive_id", "ordinal", unique=True),
             # The match query's index, and the reason `user_id` is on this table at all.
             # Candidates are the account's recordings whose stored `start_time` lies within

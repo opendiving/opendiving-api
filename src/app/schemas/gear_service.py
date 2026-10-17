@@ -118,8 +118,8 @@ class GearServiceScheduleInfo(PublicUUIDSchema):
     """
 
     # `StoredVocabulary`, not `ServiceKind`, on this and every other read shape below.
-    # This is the one embedded in `GearItemRead`, so an unrecognized stored `kind` used to
-    # fail the whole gear list rather than the one schedule carrying it. See
+    # This is the one embedded in `GearItemRead`, so an enum here would let an unrecognized
+    # stored `kind` fail the whole gear list rather than the one schedule carrying it. See
     # *"A stored vocabulary is read back as a string"* in DECISIONS.md.
     kind: StoredVocabulary
     label: str | None = None
@@ -279,12 +279,10 @@ class GearServiceRecordRead(GearServiceRecordBase, PublicUUIDSchema):
 
     user_uuid: uuid_pkg.UUID
     gear_item_uuid: uuid_pkg.UUID
-    # NULL in three cases, and the third is much the most common: the record was never
-    # attached to a schedule; the schedule was hard-deleted (the FK is `ON DELETE SET
-    # NULL`); or the schedule was *soft*-deleted, in which case the FK still points at it
-    # and `_schedule_uuids_by_id` declines to resolve it. Only the middle one empties the
-    # column - the other two are a live `gear_service_schedule_id` reading back as null,
-    # which is why nothing should infer the FK's state from this field.
+    # NULL when the record was never attached to a schedule, or the schedule was deleted
+    # (the FK is `ON DELETE SET NULL`) - including between the page read and
+    # `_schedule_uuids_by_id`'s resolve, where the row read still carries the id. So nothing
+    # should infer the FK's state from this field.
     gear_service_schedule_uuid: uuid_pkg.UUID | None = None
     contact_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact - the shop - that did the work")
