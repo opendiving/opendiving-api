@@ -16,19 +16,15 @@ import argparse
 import asyncio
 import logging
 
-from ..app.core.db.database import local_session
-from ..app.core.setup import close_redis_cache_pool, create_redis_cache_pool
 from ..app.services.dive_profiles import backfill_depth_outlines
+from ._common import add_user_id_argument, log_at_info, session_with_cache
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument(
-        "--user-id", type=int, default=None, help="Only this account's dives, to try a run on one first."
-    )
+    add_user_id_argument(parser)
     parser.add_argument("--dry-run", action="store_true", help="Report how many would be rewritten, write nothing.")
     return parser.parse_args()
 
@@ -36,14 +32,8 @@ def _parse_args() -> argparse.Namespace:
 async def main() -> None:
     args = _parse_args()
 
-    # Without the pool `delete_keys_by_pattern` returns silently and every cached dive-list page
-    # keeps the old outlines - see `backfill_dive_profiles`.
-    await create_redis_cache_pool()
-    try:
-        async with local_session() as session:
-            report = await backfill_depth_outlines(session, user_id=args.user_id, dry_run=args.dry_run)
-    finally:
-        await close_redis_cache_pool()
+    async with session_with_cache() as session:
+        report = await backfill_depth_outlines(session, user_id=args.user_id, dry_run=args.dry_run)
 
     logger.info(
         "Depth outline backfill %s: examined=%d %s=%d",
@@ -55,4 +45,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    log_at_info()
     asyncio.run(main())

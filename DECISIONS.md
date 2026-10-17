@@ -1174,9 +1174,9 @@ each through `rederive_recording` in a savepoint as a repeat upload is, committi
 always reporting `examined / extracted / skipped / no_samples / failed`, since success-only output
 hides a broken reader.
 
-It calls `create_redis_cache_pool()` first: `delete_keys_by_pattern` silently returns when
-`cache.client is None`, which only the API lifespan sets. `src/scripts/` is bind-mounted into `api`,
-so the host copy runs.
+It opens the cache pool around its session (`src/scripts/_common.py`'s `session_with_cache`):
+`delete_keys_by_pattern` silently returns when `cache.client is None`, which only the API lifespan
+sets. `src/scripts/` is bind-mounted into `api`, so the host copy runs.
 
 ## No manual DDL for the dive-profile feature
 
@@ -3470,8 +3470,10 @@ worker. It lives in `core/config.py` because that module owns `LOG_LEVEL` and is
 entrypoints already import; `core/setup.py` would drag FastAPI, the routers and the models into the
 worker's import graph for two lines of logging.
 
-The one-shot scripts in `src/scripts/` keep their own `basicConfig(level=INFO)`: a person runs them
-to watch something happen, and `LOG_LEVEL=WARNING` should not turn that into a silent command.
+The one-shot scripts in `src/scripts/` log at INFO: a person runs them to watch something happen,
+and `LOG_LEVEL=WARNING` should not turn that into a silent command. Each calls
+`_common.log_at_info()` under `__main__`, after every import, because importing `core.setup` applies
+`LOG_LEVEL` to the root logger and a `basicConfig` at the top of the script is then a no-op.
 
 `logging.basicConfig` does nothing when the root logger already has a handler, so
 `configure_logging` also sets the root level explicitly. The httpx pin to `WARNING` in
