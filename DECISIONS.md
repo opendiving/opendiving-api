@@ -2175,7 +2175,7 @@ nothing". `store_profile` always writes a list; `get_gas_attribution_for_dives` 
 either. No `CHECK`s, since nothing comes from a request body; `GasAttribution.model_validate` on the
 way out degrades an older payload to "no per-tank figure" with a warning, not a 500. Not `deferred`,
 unlike `data`: a few integers read on every dive detail; fetched by its own narrow query, not
-`get_profile_infos_for_dives`, because `gas_use_history` needs only this column.
+`get_profile_infos_for_recordings`, because `gas_use_history` needs only this column.
 
 ## `DiveMixture.name` is not a field: the label is a pure function of the fractions
 
