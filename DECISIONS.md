@@ -5589,14 +5589,12 @@ an invitation address meets an account — the `409` on `POST /user/invitations`
 `GET /admin/invite-requests`, the skip arm of `POST /admin/invitations` — all through
 `crud.crud_invitations.account_exists_for`; `POST /auth/complete`'s delete of a pending request for
 the new account's address; and the revision backfilling `daily_total`, which matches accepted
-invitations to accounts. Sign-in compares the same way: `resolve_identity` and the link precheck
-look the address up through `crud.crud_users.account_for_email`, exact-case match first where two
-rows differ only in case, and `POST /auth/complete`'s duplicate check is `account_exists_for`.
-Rejected: normalising `User.email` on write, which touches the account path, the email-change path
-and every row. `_purge_one_account` is the mirror image: its `authentication_request` and
-`auth_audit_event` deletes compare the stored email raw because those tables hold what sign-in
-wrote, while the two invitation deletes lowercase first; the difference is commented at the call
-site.
+invitations to accounts. Sign-in compares the same way, through `crud.crud_users.account_for_email`
+and `account_exists_for`. Rejected: normalising `User.email` on write, which touches the account
+path, the email-change path and every row. `_purge_one_account` is the mirror image: its
+`authentication_request` and `auth_audit_event` deletes compare the stored email raw because those
+tables hold what sign-in wrote, while the two invitation deletes lowercase first; the difference is
+commented at the call site.
 
 ## `invite_request.created_at` needs a `server_default`, unlike every other one in this app
 
