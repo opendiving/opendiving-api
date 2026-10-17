@@ -613,7 +613,8 @@ class TestOffshoreFallback:
 class TestTheTransactionIsReleasedBeforeTheProvider:
     """`get_current_user`'s lookup opened a transaction on the request's session, and a
     provider call can take seconds; held across it, a burst of searches pins the pool. An
-    ordering test: the limit is checked, the transaction released, and only then the call."""
+    ordering test: the limit is checked, the transaction released, and the call follows with
+    no query between to reopen it."""
 
     @pytest.mark.parametrize(
         ("path", "service"),
@@ -628,6 +629,7 @@ class TestTheTransactionIsReleasedBeforeTheProvider:
         calls: list[str] = []
         session = AsyncMock()
         session.rollback = AsyncMock(side_effect=lambda: calls.append("release"))
+        session.execute = AsyncMock(side_effect=lambda *_args, **_kwargs: calls.append("query"))
         geocode_app.dependency_overrides[async_get_db] = lambda: session
 
         async def limit(*_args: object) -> None:

@@ -72,7 +72,7 @@ class TestTheParseReleasesTheTransactionBeforeReading:
     opened a transaction, and a burst of large FIT uploads from one account would otherwise
     pin a pool connection per decode. An ordering test, as in
     `TestProfileExtractionReleasesTheTransaction`: what can regress is the read moving back
-    above the release."""
+    above the release, or a query landing between the two and reopening the transaction."""
 
     def test_releases_after_the_quota_check_and_before_the_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[str] = []
@@ -90,11 +90,18 @@ class TestTheParseReleasesTheTransactionBeforeReading:
         client = _make_dive_upload_client()
         session = client.app.dependency_overrides[async_get_db]()  # type: ignore[attr-defined]
         session.rollback = AsyncMock(side_effect=lambda: calls.append("release"))
+        execute = session.execute
+
+        async def query(*args: object, **kwargs: object) -> object:
+            calls.append("query")
+            return await execute(*args, **kwargs)
+
+        session.execute = query
 
         response = client.post("/dive/parse", files={"file": ("dive.xml", VALID_SUUNTO_XML, "application/xml")})
 
         assert response.status_code == 200
-        assert calls == ["quota", "release", "read"]
+        assert calls[: calls.index("read") + 1] == ["quota", "release", "read"]
 
 
 class TestParseDiveUploadSizeLimit:
