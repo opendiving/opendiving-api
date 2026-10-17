@@ -2945,16 +2945,17 @@ CI's first is `postgres_test_gw0`.
 
 Deleting a gear item destroys its service records (`gear_service_record.gear_item_id` is
 `ON DELETE CASCADE`); archiving is the only surface for retired kit whose history still reads.
-`_owned_gear_item` and `_get_owned_gear_item` do not filter `is_archived`, so an archived item
-resolves: its detail page loads, `?gear_item_uuid=` works on both listings, and the digest skips it.
-The gear page has a *Show archived* toggle, and the delete route's docstring, published in
-`/openapi.json`, steers to archiving. `/export/*` carries a live or archived item's history; a
-deleted item has nothing to export.
+`_owned_gear_item`, `_get_owned_gear_item` and `resolve_gear_item_ids_for_user` do not filter
+`is_archived`, so an archived item resolves: its detail page loads, `?gear_item_uuid=` works on both
+listings, and the digest skips it. A deleted item's uuid lists an empty page. The gear page has a
+*Show archived* toggle, and the delete route's docstring, published in `/openapi.json`, steers to
+archiving. `/export/*` carries a live or archived item's history; a deleted item has nothing to
+export.
 
 Rejected, and moot now the rows are gone: an `include_deleted_items` flag on
-`GET /gear-service-records`, or relaxing the 422 for a deleted item: both make deleting a lossy
-archive, `is_archived` being the reversible flag. `is_archived=False` on `_owned_gear_item`,
-matching the listing filter, would silently take the history off archived items;
+`GET /gear-service-records`, which makes deleting a lossy archive, `is_archived` being the
+reversible flag. `is_archived=False` on `_owned_gear_item`, matching the listing filter, would
+silently take the history off archived items;
 `tests/test_hard_delete.py::TestArchivingIsTheNonDestructivePath` pins that an archived item
 resolves with its schedules and records.
 
