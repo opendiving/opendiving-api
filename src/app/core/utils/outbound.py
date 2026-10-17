@@ -136,8 +136,8 @@ async def claim_provider_slot(key: str, max_requests: int, window_seconds: int, 
 
 
 def _loggable(key: str) -> str:
-    """A cache key as a log line may carry it: its namespace and kind, and a digest standing in
-    for the rest, which is a diver's typed search or the pin they dropped."""
+    """A cache key as a log line may carry it: its namespace and cache version, and a digest
+    standing in for the rest, which holds a diver's typed search or the pin they dropped."""
     head = ":".join(key.split(":", 2)[:2])
     return f"{head}:#{hashlib.sha256(key.encode()).hexdigest()[:12]}"
 

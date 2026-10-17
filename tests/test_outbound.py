@@ -200,10 +200,10 @@ class TestProviderCache:
     async def test_a_discarded_entry_is_logged_without_the_search_in_its_key(self, caplog: pytest.LogCaptureFixture):
         """A species key carries what the diver typed, and logs get collected and kept."""
         redis = FakeRedis()
-        redis.store = {"species:search:my secret reef": b"not json"}
+        redis.store = {"species:v7:search:my secret reef": b"not json"}
 
         with patch("src.app.core.utils.cache.client", redis), caplog.at_level("WARNING"):
-            assert await outbound.read_cached("species:search:my secret reef", list) is None
+            assert await outbound.read_cached("species:v7:search:my secret reef", list) is None
 
-        assert "species:search:#" in caplog.text
+        assert "species:v7:#" in caplog.text
         assert "secret" not in caplog.text
