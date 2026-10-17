@@ -193,7 +193,8 @@ class TestWhichSitesWriteAnEvent:
 
         with (
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
-            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.charge_code_attempt", new_callable=AsyncMock, return_value="0" * 64),
+            patch("src.app.api.v1.auth.spend_exhausted_code", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock) as recorder,
         ):
             requests.get = AsyncMock(return_value=row)
@@ -227,7 +228,8 @@ class TestWhichSitesWriteAnEvent:
 
         with (
             patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
-            patch("src.app.api.v1.auth.register_failed_code_attempt", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.charge_code_attempt", new_callable=AsyncMock, return_value="0" * 64),
+            patch("src.app.api.v1.auth.spend_exhausted_code", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock) as recorder,
         ):
             requests.get = AsyncMock(return_value=row)

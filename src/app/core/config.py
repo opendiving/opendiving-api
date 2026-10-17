@@ -8,7 +8,7 @@ from typing import Self
 from urllib.parse import quote, urlparse
 
 from pydantic import SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.config import Config
 
 current_file_dir = os.path.dirname(os.path.realpath(__file__))
@@ -162,11 +162,21 @@ class PostgresSettings(DatabaseSettings):
     POSTGRES_DB: str = config("POSTGRES_DB", default="postgres")
     POSTGRES_SYNC_PREFIX: str = config("POSTGRES_SYNC_PREFIX", default="postgresql://")
     POSTGRES_ASYNC_PREFIX: str = config("POSTGRES_ASYNC_PREFIX", default="postgresql+asyncpg://")
-    # A `SecretStr` like the password it embeds: a plain-string DSN would print the password
-    # in every `repr(settings)` the password's own type keeps it out of.
-    POSTGRES_URI: SecretStr = SecretStr(
-        postgres_uri(POSTGRES_USER, POSTGRES_PASSWORD.get_secret_value(), POSTGRES_SERVER, POSTGRES_PORT, POSTGRES_DB)
-    )
+
+    @property
+    def POSTGRES_URI(self) -> SecretStr:
+        """Built from the parts and never settable itself, so it cannot disagree with them -
+        a set DSN would also outrun the test suite's `POSTGRES_DB` redirect. A `SecretStr`
+        like the password it embeds."""
+        return SecretStr(
+            postgres_uri(
+                self.POSTGRES_USER,
+                self.POSTGRES_PASSWORD.get_secret_value(),
+                self.POSTGRES_SERVER,
+                self.POSTGRES_PORT,
+                self.POSTGRES_DB,
+            )
+        )
 
 
 # The password the upstream boilerplate shipped as `ADMIN_PASSWORD`'s default. It is
@@ -877,24 +887,29 @@ class FrontendSettings(BaseSettings):
         return urlparse(self.FRONTEND_URL).hostname or ""
 
     @property
-    def passkey_origin(self) -> str:
-        """The origin a `clientDataJSON` from that frontend will carry.
+    def frontend_origin(self) -> str:
+        """The frontend's origin, as a browser writes it in `Origin` and `clientDataJSON`.
 
         **Rebuilt from the parse, never the raw setting.** Browsers write a bare
         `scheme://host[:port]`, so a `FRONTEND_URL` with a trailing slash - the most
-        ordinary way to write a URL variable - would fail every ceremony's origin check
-        with a 401 while magic links (plain concatenation) kept working, pointing nowhere
-        near the cause.
+        ordinary way to write a URL variable - would match no request's origin: CORS would
+        refuse every split-origin call and every passkey ceremony would 401, while magic
+        links (plain concatenation) kept working, pointing nowhere near the cause.
         """
         parsed = urlparse(self.FRONTEND_URL)
         return f"{parsed.scheme}://{parsed.netloc}"
+
+    @property
+    def passkey_origin(self) -> str:
+        """The origin a `clientDataJSON` from that frontend will carry."""
+        return self.frontend_origin
 
     @property
     def google_redirect_uri(self) -> str:
         """Where Google sends the visitor back after they approve the sign-in, and the
         `redirect_uri` this server will exchange an authorization code against.
 
-        Rebuilt from the parse rather than concatenated, for the reason `passkey_origin`
+        Rebuilt from the parse rather than concatenated, for the reason `frontend_origin`
         above gives: a `FRONTEND_URL` with a trailing slash is the most ordinary way to
         write a URL variable, and `{FRONTEND_URL}/auth/google/callback` would then produce
         a double slash that Google matches against nothing it has registered.
@@ -907,8 +922,7 @@ class FrontendSettings(BaseSettings):
         the origin the visitor actually reached fails in this app's own error, naming this
         setting, instead of as a `redirect_uri_mismatch` from Google that names neither.
         """
-        parsed = urlparse(self.FRONTEND_URL)
-        return f"{parsed.scheme}://{parsed.netloc}/auth/google/callback"
+        return f"{self.frontend_origin}/auth/google/callback"
 
 
 class PasskeySettings(BaseSettings):
@@ -1001,9 +1015,12 @@ class RedisSettings(BaseSettings):
 class RedisCacheSettings(RedisSettings):
     REDIS_CACHE_HOST: str = config("REDIS_CACHE_HOST", default="localhost")
     REDIS_CACHE_PORT: int = config("REDIS_CACHE_PORT", default=6379)
-    REDIS_CACHE_URL: SecretStr = SecretStr(
-        redis_url(REDIS_CACHE_HOST, REDIS_CACHE_PORT, _REDIS_PASSWORD.get_secret_value() if _REDIS_PASSWORD else None)
-    )
+
+    @property
+    def REDIS_CACHE_URL(self) -> SecretStr:
+        """Built from the parts, as `POSTGRES_URI` is."""
+        password = self.REDIS_PASSWORD.get_secret_value() if self.REDIS_PASSWORD else None
+        return SecretStr(redis_url(self.REDIS_CACHE_HOST, self.REDIS_CACHE_PORT, password))
 
 
 class ClientSideCacheSettings(BaseSettings):
@@ -1032,7 +1049,8 @@ class CRUDAdminSettings(BaseSettings):
     # and wrong for anything else - two workers race to create the tables and to insert
     # the initial admin, and a one-shot init container would write a file the API
     # container can never see. Point this at Postgres and all of that goes away.
-    CRUD_ADMIN_DB_URL: str | None = config("CRUD_ADMIN_DB_URL", default=None)
+    # A `SecretStr`: pointed at Postgres, it is a DSN carrying the password.
+    CRUD_ADMIN_DB_URL: SecretStr | None = config("CRUD_ADMIN_DB_URL", default=None, cast=SecretStr)
 
     # Who may reach the panel at all, comma-separated and parsed by `split_csv`, e.g.
     # CRUD_ADMIN_ALLOWED_IPS="203.0.113.7,203.0.113.8" or
@@ -1131,6 +1149,10 @@ class Settings(
     EnvironmentSettings,
     LoggingSettings,
 ):
+    # A validator's refusal otherwise prints `input_value=` - the whole environment dict,
+    # truncated, which can end in the tail of a password.
+    model_config = SettingsConfigDict(hide_input_in_errors=True)
+
     @model_validator(mode="after")
     def _reject_placeholder_secret_key(self) -> Self:
         """Refuses to boot on a `SECRET_KEY` that is published somewhere.

@@ -194,14 +194,14 @@ VesselWorkingPressure = Annotated[
 
 
 class GearItemCreate(GearItemBase):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     volume: VesselVolume
     working_pressure: VesselWorkingPressure
 
 
 class GearItemCreateInternal(GearItemBase):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     user_id: int
     volume: VesselVolume
@@ -213,7 +213,7 @@ class GearItemUpdate(RejectsExplicitNulls):
     derives `archived_at` from it rather than letting callers set the timestamp directly.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     # `brand` and `type` are genuinely nullable, so clearing either is a real edit -
     # `patch_gear_item` reads an explicit `brand` null through `model_fields_set` when it

@@ -4,7 +4,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import StoredVocabulary
+from ..core.schemas import POSTGRES_INTEGER_MAX, StoredVocabulary
 from .gear_item import GearItemInfo
 
 
@@ -86,8 +86,8 @@ class DiveMixtureBase(BaseModel):
     therefore live on `DiveMixtureCreate`/`DiveMixtureUpdate` and on the DB `CHECK`s,
     which together are what keep the table clean; a row that somehow slips past both
     still reaches the diver as a field with a message rather than as a 500. The two
-    bounds declared here, `po2_limit`'s and `gas_number`'s, are exactly their `CHECK`s',
-    so no stored row can fail them.
+    bounds declared here, `po2_limit`'s and `gas_number`'s, are exactly their `CHECK`s' -
+    and `gas_number`'s column width - so no stored row can fail them.
 
     The same reasoning is why `volume`, `oxygen` and `helium` are typed `float | None`
     here rather than only on the write schemas: their columns are nullable, this class is
@@ -147,6 +147,7 @@ class DiveMixtureBase(BaseModel):
         Field(
             default=None,
             ge=0,
+            le=POSTGRES_INTEGER_MAX,
             examples=[1],
             description="How the source export identifies this cylinder, and the join key to the profile's "
             "per-cylinder pressure channels. A label, not an index - some devices number from 0. Clients are "
@@ -175,7 +176,7 @@ class DiveMixtureBase(BaseModel):
 class _DiveMixtureWrite(DiveMixtureBase):
     """The bounds both write shapes carry: the API's create and CRUDAdmin's."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     start_pressure: Annotated[
         float | None,
@@ -269,7 +270,7 @@ def as_create(row: DiveMixtureRead) -> DiveMixtureCreate:
 
 
 class DiveMixtureUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     volume: Annotated[float | None, Field(default=None, description="Cylinder volume in liters")]
     start_pressure: Annotated[
@@ -286,7 +287,10 @@ class DiveMixtureUpdate(BaseModel):
         float | None, Field(default=None, ge=0.4, le=2.0, description="Planned ppO2 for this gas, in bar")
     ]
     gas_number: Annotated[
-        int | None, Field(default=None, ge=0, description="How the source export identifies this cylinder")
+        int | None,
+        Field(
+            default=None, ge=0, le=POSTGRES_INTEGER_MAX, description="How the source export identifies this cylinder"
+        ),
     ]
     role: Annotated[GasRole | None, Field(default=None, description="What the cylinder was carried for")]
     usage: Annotated[TankUsage | None, Field(default=None, description="How the cylinder was breathed")]

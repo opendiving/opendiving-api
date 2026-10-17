@@ -57,6 +57,8 @@ from .dive_profiles import (
     store_profile,
 )
 from .dive_recordings import (
+    DECO_MODEL_COLUMNS,
+    DEVICE_COLUMNS,
     READOUT_COLUMNS,
     DeviceIdentity,
     delta_seconds,
@@ -270,6 +272,17 @@ def _folds(survivor: _Recording, absorbed: _Recording) -> bool:
     )
 
 
+# What the absorbed record's row fills on the surviving one: everything a second file of one
+# recording fills through `fill_device_fields`, `fill_recording_settings` and `fill_readouts`.
+_FOLDED_COLUMNS = (
+    *DEVICE_COLUMNS.values(),
+    "mode",
+    "salinity",
+    *DECO_MODEL_COLUMNS.values(),
+    *READOUT_COLUMNS,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _Fold:
     """Two records of one computer, resolved onto one axis and ready to write."""
@@ -353,9 +366,10 @@ async def _write_fold(db: AsyncSession, fold: _Fold, *, dive_id: int) -> None:
     later gate comparing an incoming file against half a dive. The column is seconds, so the
     span is divided into it.
 
-    **The absorbed recording's readouts and salinity fill the surviving one's blanks** before
-    its row goes, on the rule every second record of one recording follows: fill, never
-    overwrite.
+    **The absorbed recording's device, settings and readouts fill the surviving one's
+    blanks** before its row goes, on the rule every second record of one recording follows:
+    fill, never overwrite. The gradient factors fill per column and still land whole, since
+    each row stores the pair whole or not at all.
     """
     await db.execute(
         update(DiveFile)
@@ -369,7 +383,7 @@ async def _write_fold(db: AsyncSession, fold: _Fold, *, dive_id: int) -> None:
         .values(
             {
                 getattr(DiveRecording, column): func.coalesce(getattr(DiveRecording, column), getattr(absorbed, column))
-                for column in (*READOUT_COLUMNS, "salinity")
+                for column in _FOLDED_COLUMNS
             }
         )
     )

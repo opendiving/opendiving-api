@@ -75,9 +75,10 @@ class TestSendSupportRequest:
             _make_support_client().post("/support", json=VALID_BODY)
 
             assert mock_send.await_args.kwargs["email"] == "jacques@example.com"
-            assert mock_limit.await_args_list[0].args[0] == "support:email:jacques@example.com"
+            assert mock_limit.await_args_list[1].args[0] == "support:email:jacques@example.com"
 
-    def test_rate_limits_by_email_and_by_ip(self):
+    def test_rate_limits_by_ip_before_by_email(self):
+        """Per-IP first: a request it refuses must not have spent the address's bucket."""
         with (
             patch("src.app.api.v1.support.send_support_request_email", new_callable=AsyncMock),
             patch("src.app.api.v1.support.enforce_rate_limit", new_callable=AsyncMock) as mock_limit,
@@ -85,8 +86,8 @@ class TestSendSupportRequest:
             _make_support_client().post("/support", json=VALID_BODY)
 
             keys = [call.args[0] for call in mock_limit.await_args_list]
-            assert keys[0].startswith("support:email:")
-            assert keys[1].startswith("support:ip:")
+            assert keys[0].startswith("support:ip:")
+            assert keys[1].startswith("support:email:")
 
     def test_does_not_send_when_rate_limited(self):
         with (

@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Response
-from sqlalchemy import select, update
+from sqlalchemy import null, select, update
 from sqlalchemy.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import Session, undefer
 from starlette.requests import Request
@@ -40,6 +40,7 @@ from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
 from src.app.schemas.dive import DiveListSort
 from src.app.schemas.dive_profile import DepthOutline, GasAttribution
+from src.app.services.dive_files import apply_gas_mapping
 from src.app.services.dive_profiles import (
     READER_VERSION,
     NormalizedProfile,
@@ -49,6 +50,7 @@ from src.app.services.dive_profiles import (
     derive_depth_outline,
     get_depth_outlines_for_dives,
     get_gas_attribution_for_dives,
+    load_stored_profile,
     replace_profile_samples,
     store_profile,
 )
@@ -118,6 +120,64 @@ class TestGasAttributionRoundTrip:
         # The span the fraction is taken against comes off the same row, so it has to
         # survive the same trip: the profile's own duration, not the dive's 1800.
         assert attribution[dive.id].duration == 100
+
+    @pytest.mark.asyncio
+    async def test_a_relabel_carries_the_stored_attribution_rather_than_deriving_it_again(
+        self, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        """The stored entries were derived from samples the stored payload has since thinned,
+        so a relabel maps them. These samples carry no switch at all: deriving again would
+        come back empty."""
+        await store_profile(
+            async_db,
+            recording_id=recording.id,
+            dive_id=dive.id,
+            profile=_profile(GasAttribution(gas_number=0, seconds=2075, mean_depth_cm=3399)),
+            source_sha256="a" * 64,
+            parser_key="suunto_json",
+            reader_version=READER_VERSION,
+            commit=True,
+        )
+        stored = await load_stored_profile(async_db, recording_id=recording.id)
+        assert stored is not None
+        relabelled = apply_gas_mapping(stored.profile, {0: 5})
+        assert relabelled is not None
+
+        await replace_profile_samples(async_db, recording_id=recording.id, profile=relabelled)
+        await async_db.commit()
+
+        attribution = await get_gas_attribution_for_dives(async_db, dive_ids=[dive.id])
+        assert attribution[dive.id].entries == [GasAttribution(gas_number=5, seconds=2075, mean_depth_cm=3399)]
+
+    @pytest.mark.asyncio
+    async def test_a_relabel_leaves_a_null_attribution_null(
+        self, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        """NULL is "no extractor has looked yet", which a relabel does not change."""
+        await store_profile(
+            async_db,
+            recording_id=recording.id,
+            dive_id=dive.id,
+            profile=_profile(),
+            source_sha256="a" * 64,
+            parser_key="suunto_json",
+            reader_version=READER_VERSION,
+            commit=False,
+        )
+        await async_db.execute(
+            update(DiveProfile).where(DiveProfile.recording_id == recording.id).values(gas_attribution=null())
+        )
+        await async_db.commit()
+
+        await replace_profile_samples(async_db, recording_id=recording.id, profile=_profile())
+        await async_db.commit()
+
+        still_null = (
+            await async_db.execute(
+                select(DiveProfile.gas_attribution.is_(None)).where(DiveProfile.recording_id == recording.id)
+            )
+        ).scalar_one()
+        assert still_null
 
     @pytest.mark.asyncio
     async def test_a_profile_with_nothing_to_attribute_stores_an_empty_list_not_null(

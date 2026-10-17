@@ -19,7 +19,7 @@ direct-to-uvicorn deployment stays correct without configuring anything.
 """
 
 from functools import lru_cache
-from ipaddress import ip_address, ip_network
+from ipaddress import IPv6Address, ip_address, ip_network
 
 from fastapi import Request
 
@@ -69,3 +69,25 @@ def client_ip(request: Request) -> str:
 
     # Every hop claims to be trusted infrastructure - nothing attributable to a caller.
     return peer
+
+
+def client_ip_bucket(request: Request) -> str:
+    """What a per-IP rate limit is keyed on: `client_ip`, with an IPv6 address widened to
+    its /64.
+
+    A /64 is the smallest block an IPv6 host is normally handed, so a single machine holds
+    2^64 addresses and can present a fresh one per request. Keyed on the full address, a
+    per-IP limit bounds nothing for that caller - and on the anonymous forms it is the limit
+    that keeps one caller from spending every address's own bucket. IPv4, an IPv4-mapped
+    IPv6 address, and `"unknown"` are keyed as they are.
+    """
+    ip = client_ip(request)
+    try:
+        parsed = ip_address(ip)
+    except ValueError:
+        return ip
+    if not isinstance(parsed, IPv6Address):
+        return ip
+    if parsed.ipv4_mapped is not None:
+        return str(parsed.ipv4_mapped)
+    return str(ip_network(f"{parsed}/64", strict=False))

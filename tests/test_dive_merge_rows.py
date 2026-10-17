@@ -272,6 +272,36 @@ class TestOneComputersTwoRecordsFoldIntoOne:
         assert (recording.cns_start, recording.cns_end, recording.otu_end) == (3.0, 5.0, 22.0)
 
     @pytest.mark.asyncio
+    async def test_the_absorbed_records_device_and_settings_fill_the_survivors_blanks(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """What a second file of one recording fills, the fold fills too: the firmware and the
+        deco model only the second half's export named, beside the mode the first half's did."""
+        first, second = await _two_halves(async_db, db, diver)
+        await async_db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.dive_id == first.id)
+            .values(device_firmware=None, mode="open_circuit", deco_algorithm=None, deco_gf_low=None, deco_gf_high=None)
+        )
+        await async_db.execute(
+            update(DiveRecording)
+            .where(DiveRecording.dive_id == second.id)
+            .values(device_firmware="2.1.4", mode="ccr", deco_algorithm="buhlmann", deco_gf_low=40, deco_gf_high=85)
+        )
+        await async_db.commit()
+
+        await _merge(async_db, diver, first, second)
+
+        [recording] = await _recordings(async_db, first)
+        assert (
+            recording.device_firmware,
+            recording.mode,
+            recording.deco_algorithm,
+            recording.deco_gf_low,
+            recording.deco_gf_high,
+        ) == ("2.1.4", "open_circuit", "buhlmann", 40, 85)
+
+    @pytest.mark.asyncio
     async def test_the_folded_samples_are_marked_as_a_merge(
         self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
     ) -> None:

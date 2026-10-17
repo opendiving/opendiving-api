@@ -282,6 +282,11 @@ class TestEveryDoorHandsTheGateItsSlug:
             patch("src.app.services.auth_service.crud_users") as users,
             patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
             patch("src.app.api.v1.auth.refuse_uninvited", new_callable=AsyncMock) as gate,
+            patch(
+                "src.app.api.v1.auth.charge_code_attempt",
+                new_callable=AsyncMock,
+                return_value=hash_sign_in_code("481052"),
+            ),
         ):
             requests.get = AsyncMock(return_value=row)
             users.get = AsyncMock(return_value=None)

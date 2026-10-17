@@ -58,9 +58,13 @@ class ServiceStatus(StrEnum):
 
 LABEL_MAX_LENGTH = 120
 
-# The hours interval's ceiling, a million as the import caps the dive interval: the threshold
-# is `dive_time_at_start + 3600 * interval_hours`, so an unbounded interval could overflow its
-# column into a 500. The other two carry a floor alone, as they always have.
+# Ceilings for the write shapes alone - the read shapes inherit `GearServiceScheduleBase`, and
+# the importer admits a month interval past this one. The dive and hours ceilings are the
+# import's (`_SCHEDULE_BOUNDS`): each threshold is a snapshot plus the interval (`3600 *` it
+# for hours), written to a column an unbounded interval would overflow into a 500. A century
+# of months is past any service rule; `add_months` clamps whatever still runs past 9999.
+INTERVAL_MONTHS_MAX = 1_200
+INTERVAL_DIVES_MAX = 1_000_000
 INTERVAL_HOURS_MAX = 1_000_000
 
 NEEDS_AN_INTERVAL = "A service schedule needs an interval in months, in dives or in hours of diving"
@@ -72,6 +76,20 @@ _INTERVAL_HOURS_DESCRIPTION = "Service every N hours of diving - the item's summ
 # Matched to a schedule on the unique index's `coalesce(lower(label), '')`, so a record's is
 # trimmed exactly as a schedule's is.
 ServiceLabel = Annotated[str, Trimmed, Field(max_length=LABEL_MAX_LENGTH)]
+
+
+WriteIntervalMonths = Annotated[
+    int | None,
+    Field(default=None, gt=0, le=INTERVAL_MONTHS_MAX, examples=[12], description="Service every N months"),
+]
+WriteIntervalDives = Annotated[
+    int | None,
+    Field(default=None, gt=0, le=INTERVAL_DIVES_MAX, examples=[100], description="Service every N dives"),
+]
+WriteIntervalHours = Annotated[
+    int | None,
+    Field(default=None, gt=0, le=INTERVAL_HOURS_MAX, examples=[50], description=_INTERVAL_HOURS_DESCRIPTION),
+]
 
 
 class GearServiceScheduleBase(BaseModel):
@@ -198,16 +216,18 @@ class GearServiceScheduleCreate(GearServiceScheduleBase):
     model_config = ConfigDict(extra="forbid")
 
     gear_item_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the gear item this schedule is for")]
-    interval_hours: Annotated[
-        int | None,
-        Field(default=None, gt=0, le=INTERVAL_HOURS_MAX, examples=[50], description=_INTERVAL_HOURS_DESCRIPTION),
-    ]
+    interval_months: WriteIntervalMonths
+    interval_dives: WriteIntervalDives
+    interval_hours: WriteIntervalHours
 
 
 class GearServiceScheduleCreateInternal(GearServiceScheduleBase):
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
+    interval_months: WriteIntervalMonths
+    interval_dives: WriteIntervalDives
+    interval_hours: WriteIntervalHours
     gear_item_id: int
     dive_count_at_start: int = 0
     dive_time_at_start: int = 0
@@ -233,8 +253,8 @@ class GearServiceScheduleUpdate(RejectsExplicitNulls):
     kind: Annotated[ServiceKind | None, Field(default=None)]
     label: Annotated[ServiceLabel | None, BlankIsNone, Field(default=None)]
     starts_on: Annotated[date | None, Field(default=None)]
-    interval_months: Annotated[int | None, Field(default=None, gt=0)]
-    interval_dives: Annotated[int | None, Field(default=None, gt=0)]
+    interval_months: Annotated[int | None, Field(default=None, gt=0, le=INTERVAL_MONTHS_MAX)]
+    interval_dives: Annotated[int | None, Field(default=None, gt=0, le=INTERVAL_DIVES_MAX)]
     interval_hours: Annotated[int | None, Field(default=None, gt=0, le=INTERVAL_HOURS_MAX)]
     is_active: Annotated[bool | None, Field(default=None, description="Set to pause/resume reminders")]
 
