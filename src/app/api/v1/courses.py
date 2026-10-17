@@ -121,7 +121,7 @@ _course_cache: OwnedResourceCache[CourseReadInternal, CourseRead] = OwnedResourc
 def _validate_merged_agency_pairing(agency: str | None, agency_other: str | None) -> None:
     """Enforce the `agency`/`agency_other` pairing on a PATCH's merged result.
 
-    `CourseBase` already does this for whole-object writes, but a PATCH may carry either
+    `CourseCreate` already does this for whole-object writes, but a PATCH may carry either
     field alone, so the check can only be made once the incoming values have been merged
     over the stored ones - the same shape `patch_certification` uses.
 

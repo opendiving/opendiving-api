@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
 from ...core.utils.datetime_offset import combine_dive_start_time, combine_start_time
+from ...models.certification import Certification
 from ...models.contact import Contact
 from ...models.course import Course
 from ...models.dive import Dive
@@ -290,11 +291,29 @@ def _course_agency(course: Course) -> tuple[CertificationAgency | None, str | No
     `_course_agency`), and a stray `agency_other` beside a named agency is dropped there
     too.
     """
-    agency = _sayable(course.agency, CertificationAgency)
-    if agency is not CertificationAgency.OTHER:
-        return agency, None
-    named = course.agency_other
-    return (agency, named) if (named or "").strip() else (None, None)
+    return _agency_pair(course.agency, course.agency_other) or (None, None)
+
+
+def _certification_agency(certification: Certification) -> tuple[CertificationAgency, str | None] | None:
+    """A certification's pair as `$defs/certification` admits it, or `None` when it names no
+    agency - which omits the record, `agency` being REQUIRED there (spec §6.16).
+
+    A value the vocabulary has no word for and an `other` naming nobody reach `None`, as on a
+    course, and a stray `agency_other` beside a named agency is dropped the same way. A stored
+    pair can break the rule because the admin panel writes through `CertificationUpdate`,
+    which cannot check one.
+    """
+    return _agency_pair(certification.agency, certification.agency_other)
+
+
+def _agency_pair(agency: str | None, agency_other: str | None) -> tuple[CertificationAgency, str | None] | None:
+    """The pairing rule both records share: `agency_other` beside `other` and nowhere else."""
+    sayable = _sayable(agency, CertificationAgency)
+    if sayable is None:
+        return None
+    if sayable is not CertificationAgency.OTHER:
+        return sayable, None
+    return (sayable, agency_other) if (agency_other or "").strip() else None
 
 
 def _text(value: str | None) -> str | None:
@@ -652,7 +671,8 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
             if (digest := bundle.cert_file_sha256.get((certification.id, info.side.value))) is not None
         }
         # REQUIRED, and the certification carries nothing that survives without it.
-        if not _speakable(certification.agency, CertificationAgency):
+        agency = _certification_agency(certification)
+        if agency is None:
             continue
         course = bundle.course_for(certification)
         contact = bundle.contact_for(certification)
@@ -660,8 +680,8 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
         exported.append(
             ExportCertification(
                 uuid=certification.uuid,
-                agency=certification.agency,
-                agency_other=certification.agency_other,
+                agency=agency[0],
+                agency_other=agency[1],
                 name=certification.name,
                 number=certification.certification_number,
                 certified_on=certification.certified_on,

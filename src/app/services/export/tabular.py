@@ -48,6 +48,7 @@ from typing import Any
 from ...core.utils.datetime_offset import combine_dive_start_time
 from ...core.utils.trip_span import trip_span
 from ...models.dive import Dive
+from ...schemas.certification import CertificationAgency
 from ...schemas.dive_mixture import DiveMixtureRead
 from ..dive_gas import resolve_gas_use
 from .loader import ExportBundle, ExportReference
@@ -121,6 +122,19 @@ def _people_cell(references: list[ExportReference]) -> str | None:
         for reference in references
     )
     return cell or None
+
+
+def _agency_cell(agency: str | None, agency_other: str | None) -> str | None:
+    """The agency the diver named: `agency_other` stands in for `other` and for nothing else.
+
+    `agency_other` is the whole point of `other`, so that cell shows what the diver typed
+    rather than the enum's escape hatch. Beside any other agency it is a stray value the
+    admin panel can store and the write schemas refuse, and showing it would name the wrong
+    agency for the record.
+    """
+    if agency == CertificationAgency.OTHER and (agency_other or "").strip():
+        return agency_other
+    return agency
 
 
 def _rows_to_csv(header: tuple[str, ...], rows: Iterable[tuple[Any, ...]]) -> Iterator[str]:
@@ -385,13 +399,10 @@ def write_courses_csv(bundle: ExportBundle) -> Iterator[str]:
         for course in bundle.courses:
             yield (
                 course.name,
-                # `agency_other` is the whole point of `OTHER`, so the column shows the
-                # agency the diver actually named rather than the enum's escape hatch -
-                # the same rule `write_certifications_csv` applies. A course that ran under
-                # no agency yields `None` and so an empty cell, which is how every other
-                # unrecorded value in these files reads; the certification column never
-                # can, its column being `NOT NULL`.
-                course.agency_other or course.agency,
+                # A course that ran under no agency yields `None` and so an empty cell,
+                # which is how every other unrecorded value in these files reads; the
+                # certification column never can, its column being `NOT NULL`.
+                _agency_cell(course.agency, course.agency_other),
                 course.status,
                 None if course.start_date is None else course.start_date.isoformat(),
                 None if course.end_date is None else course.end_date.isoformat(),
@@ -651,9 +662,7 @@ def write_certifications_csv(bundle: ExportBundle) -> Iterator[str]:
     def rows() -> Iterator[tuple[Any, ...]]:
         for certification in bundle.certifications:
             yield (
-                # `agency_other` is the whole point of `OTHER`, so the column shows the
-                # agency the diver actually named rather than the enum's escape hatch.
-                certification.agency_other or certification.agency,
+                _agency_cell(certification.agency, certification.agency_other),
                 certification.name,
                 certification.certification_number,
                 None if certification.certified_on is None else certification.certified_on.isoformat(),

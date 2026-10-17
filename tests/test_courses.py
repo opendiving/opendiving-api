@@ -225,9 +225,19 @@ class TestCourseSchema:
 
     def test_agency_other_alongside_a_named_agency_is_refused(self) -> None:
         """Rejected rather than ignored, so a stored row can never carry both - the same
-        rule `CertificationBase` applies, from the same function."""
+        rule `CertificationCreate` applies, from the same function."""
         with pytest.raises(ValidationError, match="agency_other may only be set"):
             CourseCreate.model_validate({"name": "Cave 1", "agency": "padi", "agency_other": "NSS-CDS"})
+
+    @pytest.mark.parametrize(("agency", "agency_other"), [("other", None), ("padi", "NSS-CDS"), (None, "NSS-CDS")])
+    def test_a_read_takes_a_stored_pair_the_writes_refuse(self, agency: str | None, agency_other: str | None) -> None:
+        """The admin panel writes through `CourseUpdate`, which cannot check a pair, so a
+        stored row can hold one - and a read refusing it would 500 the PATCH that repairs it."""
+        internal = _internal_course(agency=agency, agency_other=agency_other)
+
+        public = courses_module._to_public_course(internal, user_uuid=uuid7())
+
+        assert (public.agency, public.agency_other) == (agency, agency_other)
 
     def test_an_unknown_status_is_refused(self) -> None:
         with pytest.raises(ValidationError):

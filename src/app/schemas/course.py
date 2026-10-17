@@ -72,13 +72,19 @@ class CourseBase(BaseModel):
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
     @model_validator(mode="after")
-    def _check_agency_other(self) -> Self:
-        validate_agency_pairing(self.agency, self.agency_other)
-        return self
-
-    @model_validator(mode="after")
     def _check_date_range(self) -> Self:
         validate_date_range(self.start_date, self.end_date)
+        return self
+
+
+class _CourseWrite(CourseBase):
+    """The agency pairing, on the whole-object writes only - for `_CertificationWrite`'s
+    reason. The date ordering stays on the base: `ck_course_date_range` keeps a stored row
+    from ever breaking it."""
+
+    @model_validator(mode="after")
+    def _check_agency_other(self) -> Self:
+        validate_agency_pairing(self.agency, self.agency_other)
         return self
 
 
@@ -116,7 +122,7 @@ class CourseReadInternal(CourseBase, PublicUUIDSchema):
     created_at: datetime
 
 
-class CourseCreate(CourseBase):
+class CourseCreate(_CourseWrite):
     """Request body for creating a course.
 
     `contact_uuid` and `people` sit here and on `CourseUpdateRequest`, never on
@@ -130,7 +136,7 @@ class CourseCreate(CourseBase):
     people: PeopleWrite
 
 
-class CourseCreateInternal(CourseBase):
+class CourseCreateInternal(_CourseWrite):
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
@@ -141,7 +147,7 @@ class CourseCreateInternal(CourseBase):
 class CourseUpdate(RejectsExplicitNulls):
     """Partial update.
 
-    Unlike `CourseBase` this validates neither the `agency`/`agency_other` pairing nor the
+    Unlike `CourseCreate` this validates neither the `agency`/`agency_other` pairing nor the
     date ordering: a PATCH may carry either half of either pair alone, so both can only be
     checked against the merged result. `patch_course` does that once it has the stored row
     in hand - and the `ck_course_date_range` constraint stands behind the admin panel,

@@ -124,7 +124,7 @@ def _to_public_certification(
 def _validate_agency_pairing(agency: str, agency_other: str | None) -> None:
     """Enforce the `agency`/`agency_other` pairing on a PATCH's merged result.
 
-    `CertificationBase` already does this for whole-object writes, but a PATCH may carry
+    `CertificationCreate` already does this for whole-object writes, but a PATCH may carry
     either field alone, so the check can only be made once the incoming values have been
     merged over the stored ones. The comparison itself stays in the schema layer so this
     path and the whole-object one cannot drift apart; only the way it is reported differs,

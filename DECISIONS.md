@@ -906,11 +906,15 @@ page should say even though no `certification` column moved.
 
 ## `agency_other` is validated against `agency` in two places
 
-`CertificationBase` rejects `agency_other` unless `agency` is `other`, and requires it when it is —
-both directions, so a stored row never carries a second agency name some future read path might
-display. `CertificationUpdate` cannot do this: a PATCH may carry either field alone, so the pairing
-is only checkable once merged over the stored row, which `patch_certification` does with
+`CertificationCreate` rejects `agency_other` unless `agency` is `other`, and requires it when it is,
+so a row the API writes never carries a second agency name some future read path might display.
+`CertificationUpdate` cannot do this: a PATCH may carry either field alone, so the pairing is only
+checkable once merged over the stored row, which `patch_certification` does with
 `_validate_agency_pairing`.
+
+The read schemas do not check it, and neither do the course's. CRUDAdmin writes through the update
+schema, so a stored row can hold a broken pair, and a read that refused one would 500 the PATCH that
+repairs it. The export drops a stray `agency_other` and omits a card whose `other` names nobody.
 
 The asymmetry for clients: switching a certification away from `other` must send
 `agency_other: null` explicitly, or the merged result still has both set and 422s.
