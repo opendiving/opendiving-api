@@ -13,9 +13,15 @@ from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.search import search_clause, search_multi
 from ...crud.crud_dive_mixtures import set_volume_of_linked_cylinders
-from ...crud.crud_gear_items import GEAR_ITEM_INFO_COLUMNS, crud_gear_items, gear_item_name_exists
+from ...crud.crud_gear_items import (
+    GEAR_ITEM_INFO_COLUMNS,
+    GEAR_ITEM_NAME_KEY,
+    crud_gear_items,
+    gear_item_name_exists,
+)
 from ...crud.crud_gear_service_schedules import get_schedules_for_gear_item, get_schedules_for_gear_items
 from ...crud.crud_lookups import get_lookup_page
+from ...crud.unique_keys import write_or_duplicate
 from ...models.dive_gear_item import DiveGearItem
 from ...models.dive_mixture import DiveMixture
 from ...models.gear_item import GearItem
@@ -33,6 +39,8 @@ from ...schemas.lookup import LookupUntil, lookup_bound
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
 
 router = APIRouter(tags=["gear"])
+
+_NAME_TAKEN = "A gear item with this brand and name already exists"
 
 # Brand rather than type: divers name their kit inconsistently ("MK25", "my reg"), but
 # reach for the brand when they can't recall what they called it. Type is already a
@@ -91,11 +99,16 @@ async def write_gear_item(
     fine; a genuine repeat is a 422.
     """
     if await gear_item_name_exists(db=db, user_id=current_user["id"], name=gear_item.name, brand=gear_item.brand):
-        raise DuplicateValueException("A gear item with this brand and name already exists")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     gear_item_internal = GearItemCreateInternal(**gear_item.model_dump(), user_id=current_user["id"])
-    created_gear_item = await crud_gear_items.create(
-        db=db, object=gear_item_internal, schema_to_select=GearItemReadInternal, return_as_model=True
+    created_gear_item = await write_or_duplicate(
+        db,
+        crud_gear_items.create(
+            db=db, object=gear_item_internal, schema_to_select=GearItemReadInternal, return_as_model=True
+        ),
+        GEAR_ITEM_NAME_KEY,
+        _NAME_TAKEN,
     )
     await invalidate_gear_caches(current_user["id"])
 
@@ -357,14 +370,19 @@ async def patch_gear_item(
         brand=effective_brand,
         exclude_id=db_gear_item.id,
     ):
-        raise DuplicateValueException("A gear item with this brand and name already exists")
+        raise DuplicateValueException(_NAME_TAKEN)
 
     update_data = values.model_dump(exclude_unset=True)
     if values.is_archived is not None and values.is_archived != db_gear_item.is_archived:
         update_data["archived_at"] = datetime.now(UTC) if values.is_archived else None
 
     if update_data:
-        await crud_gear_items.update(db=db, object=update_data, uuid=uuid, commit=False)
+        await write_or_duplicate(
+            db,
+            crud_gear_items.update(db=db, object=update_data, uuid=uuid, commit=False),
+            GEAR_ITEM_NAME_KEY,
+            _NAME_TAKEN,
+        )
         if values.volume is not None and values.volume != db_gear_item.volume:
             await set_volume_of_linked_cylinders(db, gear_item_id=db_gear_item.id, volume=values.volume)
         await db.commit()

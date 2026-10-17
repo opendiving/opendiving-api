@@ -196,7 +196,7 @@ class TestTheRoutes:
                 uuid=uuid7(),
                 values=PersonUpdateRequest.model_validate({"name": "Sam"}),
                 current_user=_current_user(),
-                db=MagicMock(),
+                db=AsyncMock(),
             )
 
         assert route_collaborators["exists"].await_args.kwargs["exclude_id"] == 5
@@ -212,7 +212,7 @@ class TestTheRoutes:
             uuid=uuid7(),
             values=PersonUpdateRequest.model_validate(body),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
         route_collaborators["update"].assert_awaited_once()
@@ -231,7 +231,7 @@ class TestTheRoutes:
             uuid=uuid7(),
             values=PersonUpdateRequest.model_validate({"username": None}),
             current_user=_current_user(),
-            db=MagicMock(),
+            db=AsyncMock(),
         )
 
         assert route_collaborators["update"].await_args.kwargs["object"] == {"linked_user_id": None}
