@@ -70,18 +70,6 @@ def test_a_trip_whose_parts_carry_no_dates_attributes_no_day() -> None:
 class TestTheListKey:
     @pytest.mark.asyncio
     async def test_is_under_the_dives_prefix_every_dive_write_sweeps(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        written: list[str] = []
-
-        class _Recording:
-            async def get(self, key: str) -> None:
-                return None
-
-            async def set(self, key: str, value: str, ex: int | None = None) -> None:
-                written.append(key)
-
-            async def expire(self, key: str, seconds: int) -> None:
-                return None
-
         async def _page(*_: Any, **__: Any) -> dict[str, Any]:
             return {"data": [], "total_count": 0}
 
@@ -90,7 +78,8 @@ class TestTheListKey:
 
         monkeypatch.setattr(trips_module, "get_parts_for_trip", _parts)
         monkeypatch.setattr(trips_module, "get_dives_page", _page)
-        monkeypatch.setattr(cache_module, "client", _Recording())
+        redis = FakeRedis()
+        monkeypatch.setattr(cache_module, "client", redis)
         request = MagicMock()
         request.method = "GET"
 
@@ -98,7 +87,7 @@ class TestTheListKey:
             request, user_id=USER_ID, user_uuid=uuid7(), db=MagicMock(), trip_id=11, page=2, items_per_page=25
         )
 
-        (key,) = written
+        (key,) = redis.store
         assert key == namespaced(f"user_{USER_ID}_dives:trip_11:page_2:items_per_page:25:{USER_ID}")
         assert fnmatch(key, across_builds(f"user_{USER_ID}_dives:*"))
 

@@ -2921,11 +2921,10 @@ Substitution is fine: `test_client_cache_middleware.py`, `test_geocoding.py` and
 `test_export_endpoints.py` define their own `client` over a purpose-built `FastAPI()`.
 `async_sessions` builds and disposes an engine per test, and `async_db` is one session from it:
 pytest-asyncio gives each test its own event loop, and a pooled asyncpg connection is bound to its
-opening loop. `db_available()` is a plain function because `pytest.mark.skipif` calls it at import.
-`POSTGRES_SERVER=localhost` runs them, and the skip is silent: a worktree lacks the gitignored
-`src/.env`, so credentials fall back to `postgres`/`postgres` and the tests skip identically; copy
-it in and check the skip count. Rows written are permanent (`unique_username`); the traps in that
-are under *"Species are a global catalog, filled one pick at a time"*.
+opening loop. `db_available()` is a plain function because `pytest.mark.skipif` calls it at import;
+the skip is silent, and `CONTRIBUTING.md` says what makes them run. Rows written are permanent
+(`unique_username`); the traps in that are under *"Species are a global catalog, filled one pick at
+a time"*.
 
 ## The suite has its own database, and builds it with the migrations
 
