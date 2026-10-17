@@ -21,6 +21,7 @@ from ...core.exceptions.http_exceptions import (
     UnprocessableEntityException,
 )
 from ...core.security import create_dive_file_token
+from ...core.utils.binary_responses import not_modified, stored_bytes_response
 from ...core.utils.cache import cache
 from ...core.utils.datetime_offset import (
     combine_start_time,
@@ -1632,35 +1633,23 @@ async def read_dive_file(
 
     etag = f'"{sha256}"'
     if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=300"})
+        return not_modified(etag, cache_control="private, max-age=300")
 
     file = await load_dive_file(db=db, file_id=file_id)
     if file is None:
         raise NotFoundException("This dive has no such file")
 
-    return Response(
-        content=file.data,
+    # `attachment`, not `inline`: the web app fetches this through its API client and hands it
+    # to the browser as a download, so it never navigates here. XML opened in a tab at the
+    # app's own origin is exactly what we don't want. `private` because this is one diver's
+    # file and no shared cache should keep a copy; the `ETag` makes re-validation after 5
+    # minutes cheap.
+    return stored_bytes_response(
+        file.data,
         media_type=file.content_type,
-        headers={
-            # `attachment`, not `inline`: the web app fetches this through its API client
-            # and hands it to the browser as a download, so it never navigates here. XML
-            # opened in a tab at the app's own origin is exactly what we don't want.
-            "Content-Disposition": content_disposition_attachment(file.original_filename, default="dive-file"),
-            # The stored type comes from this app's table for the format that read the file
-            # (`dive_reader.FORMAT_CONTENT_TYPES`), but say so
-            # explicitly: the browser must not be free to re-interpret user-uploaded
-            # content as something scriptable.
-            "X-Content-Type-Options": "nosniff",
-            # `frame-ancestors` is spelled out because it does not fall back to
-            # `default-src`: a response with its own policy opts out of
-            # `SecurityHeadersMiddleware`'s default and would otherwise be framable
-            # however strict the rest of this is.
-            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
-            # `private` because this is one diver's file and no shared cache should keep
-            # a copy; the `ETag` makes re-validation after 5 minutes cheap.
-            "Cache-Control": "private, max-age=300",
-            "ETag": etag,
-        },
+        etag=etag,
+        cache_control="private, max-age=300",
+        disposition=content_disposition_attachment(file.original_filename, default="dive-file"),
     )
 
 
@@ -1724,9 +1713,7 @@ async def read_dive_profile(
 
     etag = f'"{version}"'
     if request.headers.get("if-none-match") == etag:
-        # Returning a bare `Response` bypasses `response_model` validation, which a 304
-        # with no body would otherwise fail - the same thing `read_dive_file` relies on.
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=300"})
+        return not_modified(etag, cache_control="private, max-age=300")
 
     profile = await load_profile(db=db, recording_id=recording_id)
     if profile is None:

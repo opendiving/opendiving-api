@@ -33,6 +33,7 @@ from ...api.dependencies import get_current_user
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
+from ...core.utils.binary_responses import not_modified, stored_bytes_response
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...models.species import Species
 from ...schemas.species import SpeciesRead, SpeciesResolveRequest, SpeciesSearchResponse
@@ -189,18 +190,8 @@ async def read_species_photo(
 
     etag = f'"{stored.sha256}"'
     if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": _PHOTO_CACHE_CONTROL})
+        return not_modified(etag, cache_control=_PHOTO_CACHE_CONTROL)
 
-    return Response(
-        content=await read_photo_bytes(stored),
-        media_type=PHOTO_CONTENT_TYPE,
-        headers={
-            "X-Content-Type-Options": "nosniff",
-            # `frame-ancestors` is spelled out because it does not fall back to `default-src`:
-            # a response carrying its own policy opts out of `SecurityHeadersMiddleware`'s
-            # default and would otherwise be framable however strict the rest of this is.
-            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
-            "Cache-Control": _PHOTO_CACHE_CONTROL,
-            "ETag": etag,
-        },
+    return stored_bytes_response(
+        await read_photo_bytes(stored), media_type=PHOTO_CONTENT_TYPE, etag=etag, cache_control=_PHOTO_CACHE_CONTROL
     )

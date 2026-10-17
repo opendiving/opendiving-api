@@ -62,7 +62,7 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 CURRENT_USER = {"id": 7, "uuid": uuid7(), "username": "ada", "is_superuser": False}
 
-# Copied verbatim from the avatar and card responses. `frame-ancestors` is the load-bearing
+# `BINARY_CSP`, spelled out so a shortened constant fails here. `frame-ancestors` is the load-bearing
 # clause: a response that sets its own policy opts out of `SecurityHeadersMiddleware`'s
 # default, so a shorter CSP here would silently make the photo framable.
 EXPECTED_CSP = "default-src 'none'; sandbox; frame-ancestors 'none'"

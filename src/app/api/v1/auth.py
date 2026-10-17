@@ -307,8 +307,7 @@ async def request_email_link(
     # rather than leaving them valid alongside the new one. FastCRUD's `update(...,
     # allow_multiple=True)` raises `NoResultFound` when zero rows match (the common
     # case - most emails won't have one), so check first rather than treating
-    # "nothing to invalidate" as an error (mirrors the token-blacklist purge job's
-    # `count()`-before-`delete()` pattern in `core.worker.functions`).
+    # "nothing to invalidate" as an error.
     pending_count = await crud_authentication_requests.count(db, email=email, purpose="sign_in", invalidated_at=None)
     if pending_count > 0:
         await crud_authentication_requests.update(

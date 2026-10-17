@@ -29,6 +29,7 @@ from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException, RateLimitException
+from ...core.utils.binary_responses import uncacheable_not_found
 from ...core.utils.client_ip import client_ip
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.rate_limit import enforce_rate_limit
@@ -399,14 +400,7 @@ async def erase_invite_link(
 
 
 def _no_such_invite_link() -> JSONResponse:
-    """Returned rather than raised, so it carries `private, no-store`: a raised 404 reaches
-    `ClientCacheMiddleware` unlabelled, and it labels a credential-free `GET` publicly
-    cacheable."""
-    return JSONResponse(
-        status_code=404,
-        content={"detail": "This invite link is not active."},
-        headers={"Cache-Control": "private, no-store"},
-    )
+    return uncacheable_not_found("This invite link is not active.")
 
 
 @router.get(
