@@ -184,7 +184,7 @@ async def measure_unsized_renditions() -> None:
 
 # -------------- cache --------------
 async def create_redis_cache_pool() -> None:
-    cache.pool = redis.ConnectionPool.from_url(settings.REDIS_CACHE_URL)
+    cache.pool = redis.ConnectionPool.from_url(settings.REDIS_CACHE_URL.get_secret_value())
     cache.client = redis.Redis.from_pool(cache.pool)  # type: ignore
 
 

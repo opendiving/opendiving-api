@@ -71,7 +71,7 @@ from src.app.main import app
 if TYPE_CHECKING:
     from src.app.models.user import User
 
-DATABASE_URI = settings.POSTGRES_URI
+DATABASE_URI = settings.POSTGRES_URI.get_secret_value()
 DATABASE_PREFIX = settings.POSTGRES_SYNC_PREFIX
 
 sync_engine = create_engine(DATABASE_PREFIX + DATABASE_URI)
@@ -107,7 +107,7 @@ def _create_test_database() -> None:
         DATABASE_PREFIX
         + postgres_uri(
             settings.POSTGRES_USER,
-            settings.POSTGRES_PASSWORD,
+            settings.POSTGRES_PASSWORD.get_secret_value(),
             settings.POSTGRES_SERVER,
             settings.POSTGRES_PORT,
             CONFIGURED_DATABASE,
@@ -257,7 +257,7 @@ async def async_sessions() -> AsyncGenerator[async_sessionmaker[AsyncSession]]:
     that predates this fixture had worked that out separately; see *"The Postgres test
     fixtures are shared, and a local copy silently wins"* in `DECISIONS.md`.
     """
-    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI)
+    engine = create_async_engine(settings.POSTGRES_ASYNC_PREFIX + settings.POSTGRES_URI.get_secret_value())
     yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
     await engine.dispose()
 

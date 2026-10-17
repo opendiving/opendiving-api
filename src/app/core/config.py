@@ -156,13 +156,17 @@ def postgres_uri(user: str, password: str, server: str, port: int, database: str
 
 class PostgresSettings(DatabaseSettings):
     POSTGRES_USER: str = config("POSTGRES_USER", default="postgres")
-    POSTGRES_PASSWORD: str = config("POSTGRES_PASSWORD", default="postgres")
+    POSTGRES_PASSWORD: SecretStr = SecretStr(config("POSTGRES_PASSWORD", default="postgres"))
     POSTGRES_SERVER: str = config("POSTGRES_SERVER", default="localhost")
     POSTGRES_PORT: int = config("POSTGRES_PORT", default=5432)
     POSTGRES_DB: str = config("POSTGRES_DB", default="postgres")
     POSTGRES_SYNC_PREFIX: str = config("POSTGRES_SYNC_PREFIX", default="postgresql://")
     POSTGRES_ASYNC_PREFIX: str = config("POSTGRES_ASYNC_PREFIX", default="postgresql+asyncpg://")
-    POSTGRES_URI: str = postgres_uri(POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_SERVER, POSTGRES_PORT, POSTGRES_DB)
+    # A `SecretStr` like the password it embeds: a plain-string DSN would print the password
+    # in every `repr(settings)` the password's own type keeps it out of.
+    POSTGRES_URI: SecretStr = SecretStr(
+        postgres_uri(POSTGRES_USER, POSTGRES_PASSWORD.get_secret_value(), POSTGRES_SERVER, POSTGRES_PORT, POSTGRES_DB)
+    )
 
 
 # The password the upstream boilerplate shipped as `ADMIN_PASSWORD`'s default. It is
@@ -979,7 +983,7 @@ class AccountDeletionSettings(BaseSettings):
 # default is unset, but a managed Redis - or any server with `requirepass` - always wants
 # one, and the cache and the arq queue are the same server in every configuration this app
 # ships. Two variables would be two ways to get one thing half-right.
-_REDIS_PASSWORD: str | None = config("REDIS_PASSWORD", default=None)
+_REDIS_PASSWORD: SecretStr | None = config("REDIS_PASSWORD", default=None, cast=SecretStr)
 
 
 def redis_url(host: str, port: int, password: str | None) -> str:
@@ -991,13 +995,15 @@ def redis_url(host: str, port: int, password: str | None) -> str:
 
 
 class RedisSettings(BaseSettings):
-    REDIS_PASSWORD: str | None = _REDIS_PASSWORD
+    REDIS_PASSWORD: SecretStr | None = _REDIS_PASSWORD
 
 
 class RedisCacheSettings(RedisSettings):
     REDIS_CACHE_HOST: str = config("REDIS_CACHE_HOST", default="localhost")
     REDIS_CACHE_PORT: int = config("REDIS_CACHE_PORT", default=6379)
-    REDIS_CACHE_URL: str = redis_url(REDIS_CACHE_HOST, REDIS_CACHE_PORT, _REDIS_PASSWORD)
+    REDIS_CACHE_URL: SecretStr = SecretStr(
+        redis_url(REDIS_CACHE_HOST, REDIS_CACHE_PORT, _REDIS_PASSWORD.get_secret_value() if _REDIS_PASSWORD else None)
+    )
 
 
 class ClientSideCacheSettings(BaseSettings):
