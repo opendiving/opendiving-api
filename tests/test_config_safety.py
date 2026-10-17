@@ -378,9 +378,6 @@ NOT_IN_THE_TEMPLATE = {
     # `asyncpg` and nothing else for the async side.
     "POSTGRES_SYNC_PREFIX",
     "POSTGRES_ASYNC_PREFIX",
-    # Built from the parts the template does list.
-    "POSTGRES_URI",
-    "REDIS_CACHE_URL",
 }
 
 
@@ -438,10 +435,9 @@ class TestCredentialsDoNotRenderThemselves:
             "GEOCODER_API_KEY",
             "S3_SECRET_ACCESS_KEY",
             "CRUD_ADMIN_REDIS_PASSWORD",
+            "CRUD_ADMIN_DB_URL",
             "POSTGRES_PASSWORD",
             "REDIS_PASSWORD",
-            "POSTGRES_URI",
-            "REDIS_CACHE_URL",
         ],
     )
     def test_neither_repr_nor_str_spills_the_value(self, name: str):
@@ -452,8 +448,8 @@ class TestCredentialsDoNotRenderThemselves:
         assert value.get_secret_value() == "a-real-looking-secret"
 
     def test_the_dsns_carry_the_password_as_configured(self, tmp_path, monkeypatch):
-        """The DSNs are built from the unwrapped passwords at import, so what reaches Postgres
-        and Redis is the configured value - and `repr(settings)` shows neither."""
+        """The DSNs are built from the unwrapped passwords, so what reaches Postgres and
+        Redis is the configured value - and `repr(settings)` shows neither."""
         for name, value in {
             "POSTGRES_USER": "opendive",
             "POSTGRES_PASSWORD": "pg-p@ss",
@@ -471,6 +467,27 @@ class TestCredentialsDoNotRenderThemselves:
         assert loaded.POSTGRES_URI.get_secret_value() == "opendive:pg-p%40ss@db:5432/opendive"
         assert loaded.REDIS_CACHE_URL.get_secret_value() == "redis://:redis-p%40ss@redis:6379"
         assert "p@ss" not in repr(loaded) and "p%40ss" not in repr(loaded)
+
+    def test_a_dsn_in_the_environment_cannot_outrun_its_parts(self, tmp_path, monkeypatch):
+        """A set `POSTGRES_URI` would point the app - and the test suite, past its
+        `POSTGRES_DB` redirect - somewhere the parts do not say."""
+        monkeypatch.setenv("POSTGRES_DB", "opendive_test")
+        monkeypatch.setenv("POSTGRES_URI", "elsewhere:pw@other-host:5432/opendive")
+        monkeypatch.setenv("REDIS_CACHE_URL", "redis://other-host:6379")
+
+        loaded = _config_loaded_without_an_env_file(tmp_path, monkeypatch).settings
+
+        assert loaded.POSTGRES_URI.get_secret_value().endswith("@localhost:5432/opendive_test")
+        assert loaded.REDIS_CACHE_URL.get_secret_value() == "redis://localhost:6379"
+
+    def test_a_refusal_does_not_echo_the_configuration(self):
+        """A validator's error would otherwise print `input_value=` with every setting it
+        was handed, passwords included."""
+        with pytest.raises(ValueError) as excinfo:
+            _settings(SECRET_KEY="change-me", POSTGRES_PASSWORD="hunter2-in-the-log")
+
+        assert "hunter2" not in str(excinfo.value)
+        assert "input_value" not in str(excinfo.value)
 
 
 class TestGeocoderDefaults:

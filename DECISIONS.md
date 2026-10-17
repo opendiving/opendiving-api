@@ -4877,9 +4877,12 @@ signing in again" cannot help there.
 `GOOGLE_CLIENT_SECRET` is typed `SecretStr`, as are `SMTP_PASSWORD`, `GEOCODER_API_KEY`,
 `ADMIN_PASSWORD`, `CRUD_ADMIN_REDIS_PASSWORD`, `POSTGRES_PASSWORD` and `REDIS_PASSWORD`: a value
 that must not reach a log line is better served by a type whose `repr` cannot spill it into a
-traceback. `POSTGRES_URI` and `REDIS_CACHE_URL` embed a password, so they are `SecretStr` too. Each
-consumer unwraps it with `.get_secret_value()`. The boot guard checks `.get_secret_value().strip()`,
-or a whitespace-only variable passes startup and fails at the first sign-in.
+traceback. `POSTGRES_URI` and `REDIS_CACHE_URL` embed a password, so they are `SecretStr` too, and
+are properties built from their parts rather than settings that could disagree with them;
+`CRUD_ADMIN_DB_URL` is a DSN as well. `hide_input_in_errors` keeps a validator's refusal from
+echoing the raw configuration. Each consumer unwraps with `.get_secret_value()`. The boot guard
+checks `.get_secret_value().strip()`, or a whitespace-only variable passes startup and fails at the
+first sign-in.
 
 The secret travels only in the request body, and httpx's request log line is URL and status.
 Google's response is not logged above DEBUG: a refusal writes its HTTP status at WARNING and the
