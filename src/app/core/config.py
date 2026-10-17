@@ -177,7 +177,7 @@ class FirstUserSettings(BaseSettings):
     # (see `admin.views`), so an unset password must mean "no admin account", never
     # "a well-known one". `admin.initialize.create_admin_interface` skips
     # `initial_admin` entirely when this is `None`.
-    ADMIN_PASSWORD: str | None = config("ADMIN_PASSWORD", default=None)
+    ADMIN_PASSWORD: SecretStr | None = config("ADMIN_PASSWORD", default=None, cast=SecretStr)
 
 
 class GoogleAuthSettings(BaseSettings):
@@ -196,11 +196,9 @@ class GoogleAuthSettings(BaseSettings):
     # https://github.com/opendiving/opendiving/blob/main/docker-compose.yml, which names
     # `GOOGLE_CLIENT_ID` and deliberately not this).
     #
-    # `SecretStr` rather than the bare `str | None` that `SMTP_PASSWORD` and
-    # `GEOCODER_API_KEY` beside it use: those predate this, and a value that must not
-    # reach a log line is better served by a type whose `repr` cannot spill it into a
-    # traceback than by everyone remembering. `Settings` is never dumped anywhere, but
-    # "never" is a property to hold structurally.
+    # `SecretStr`, because a value that must not reach a log line is better served by a
+    # type whose `repr` cannot spill it into a traceback than by everyone remembering.
+    # `Settings` is never dumped anywhere, but "never" is a property to hold structurally.
     #
     # Setting `GOOGLE_CLIENT_ID` without this fails startup - see
     # `Settings._require_google_client_secret`.
@@ -373,6 +371,9 @@ class MagicLinkSettings(BaseSettings):
     MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS: int = config("MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS", default=900)
     MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL: int = config("MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL", default=3)
     MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP: int = config("MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP", default=15)
+    # Every endpoint that redeems a proof of an address, each under its own key: the three
+    # sign-in verify routes, the email-change link check and verify, and `/auth/google`,
+    # whose redeemed code is that proof for a Google account.
     MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP: int = config("MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP", default=30)
 
     # Wrong guesses allowed against the six-digit code printed beside the link, after
@@ -387,11 +388,13 @@ class MagicLinkSettings(BaseSettings):
     # again from the email that is already open in front of them.
     SIGN_IN_CODE_ATTEMPTS_MAX: int = config("SIGN_IN_CODE_ATTEMPTS_MAX", default=5)
 
-    # The two remaining auth endpoints, limited per-IP over the same window.
+    # Per-IP over the same window.
     #
     # `/auth/complete` is the username-availability oracle (it answers "Username not
     # available"), so it gets a low ceiling - nobody legitimately creates ten accounts
-    # from one address in a quarter of an hour.
+    # from one address in a quarter of an hour. `/auth/restore` spends the same setting
+    # under its own key: like `/auth/complete`, it turns the short-lived token a verify
+    # step handed back into a session.
     #
     # `/auth/refresh` is deliberately far more generous: it's called on a timer by every
     # open tab, and an office or campus behind one NAT gateway is a single IP as far as
@@ -403,7 +406,9 @@ class MagicLinkSettings(BaseSettings):
     # Email-change confirmation (see `POST /user/email-change/request`/
     # `POST /user/email-change/verify` in `api.v1.users`) reuses the same
     # `AuthenticationRequest` mechanics as sign-in, with its own expiry/rate limit
-    # (keyed per-user, not per-email - it's an authenticated action).
+    # (keyed per-user, not per-email - it's an authenticated action). The request's per-IP
+    # ceiling is five times this rather than a setting of its own: it only stops one
+    # address cycling through many accounts.
     EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES: int = config("EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES", default=30)
     EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER: int = config("EMAIL_CHANGE_REQUEST_RATE_LIMIT_PER_USER", default=3)
 
@@ -437,7 +442,7 @@ class EmailSettings(BaseSettings):
     # Independently optional, because an anonymous relay is a legitimate setup (Mailpit, an
     # internal postfix). The login is attempted only when a username is configured.
     SMTP_USERNAME: str | None = config("SMTP_USERNAME", default=None)
-    SMTP_PASSWORD: str | None = config("SMTP_PASSWORD", default=None)
+    SMTP_PASSWORD: SecretStr | None = config("SMTP_PASSWORD", default=None, cast=SecretStr)
     # `starttls` (587) and `tls` (465) both verify certificates. `none` exists for a relay
     # on the loopback or the compose network - Mailpit, a local postfix - and nothing else.
     SMTP_TLS_MODE: SMTPTLSMode = config("SMTP_TLS_MODE", default=SMTPTLSMode.STARTTLS)
@@ -489,7 +494,7 @@ class GeocodingSettings(BaseSettings):
     GEOCODER_URL: str = config("GEOCODER_URL", default="https://nominatim.openstreetmap.org")
     GEOCODER_SEARCH_URL: str = config("GEOCODER_SEARCH_URL", default="https://photon.komoot.io")
     # Sent to `GEOCODER_URL` only; Photon takes no key.
-    GEOCODER_API_KEY: str | None = config("GEOCODER_API_KEY", default=None)
+    GEOCODER_API_KEY: SecretStr | None = config("GEOCODER_API_KEY", default=None, cast=SecretStr)
 
     # Asked for explicitly, because the alternative is not "no preference" - it is the
     # *local* script. Left unset, a reverse lookup of the Blue Hole answers
@@ -1049,7 +1054,7 @@ class CRUDAdminSettings(BaseSettings):
     # `default=None`, like every other optional setting here, rather than the *string*
     # "None" - a sentinel that silently becomes a real password the moment anyone writes
     # CRUD_ADMIN_REDIS_PASSWORD="None" meaning it literally.
-    CRUD_ADMIN_REDIS_PASSWORD: str | None = config("CRUD_ADMIN_REDIS_PASSWORD", default=None)
+    CRUD_ADMIN_REDIS_PASSWORD: SecretStr | None = config("CRUD_ADMIN_REDIS_PASSWORD", default=None, cast=SecretStr)
 
 
 class EnvironmentOption(Enum):
@@ -1344,7 +1349,8 @@ class Settings(
         if not self.CRUD_ADMIN_ENABLED or self.ENVIRONMENT != EnvironmentOption.PRODUCTION:
             return self
 
-        if not self.ADMIN_PASSWORD or self.ADMIN_PASSWORD == LEGACY_DEFAULT_ADMIN_PASSWORD:
+        password = self.ADMIN_PASSWORD.get_secret_value() if self.ADMIN_PASSWORD else ""
+        if not password or password == LEGACY_DEFAULT_ADMIN_PASSWORD:
             raise ValueError(
                 "CRUD_ADMIN_ENABLED is true in production but ADMIN_PASSWORD is unset or still "
                 "the boilerplate default. Set a real ADMIN_PASSWORD, or set CRUD_ADMIN_ENABLED=false "

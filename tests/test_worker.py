@@ -63,52 +63,6 @@ class _FakeSessionContext:
         return None
 
 
-class TestPurgeExpiredTokens:
-    """Test the periodic token_blacklist cleanup job."""
-
-    @pytest.mark.asyncio
-    async def test_purge_deletes_expired_rows(self):
-        mock_db = AsyncMock()
-
-        with (
-            patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(mock_db)),
-            patch("src.app.core.worker.functions.crud_token_blacklist") as mock_blacklist,
-        ):
-            mock_blacklist.count = AsyncMock(return_value=3)
-            mock_blacklist.delete = AsyncMock(return_value=None)
-
-            result = await purge_expired_tokens(MagicMock())
-
-            mock_blacklist.count.assert_called_once()
-            count_args, count_kwargs = mock_blacklist.count.call_args
-            assert count_args[0] is mock_db
-            assert isinstance(count_kwargs["expires_at__lt"], datetime)
-
-            mock_blacklist.delete.assert_called_once()
-            delete_args, delete_kwargs = mock_blacklist.delete.call_args
-            assert delete_args[0] is mock_db
-            assert delete_kwargs["allow_multiple"] is True
-            assert isinstance(delete_kwargs["expires_at__lt"], datetime)
-
-            assert "3" in result
-
-    @pytest.mark.asyncio
-    async def test_purge_skips_delete_when_nothing_expired(self):
-        mock_db = AsyncMock()
-
-        with (
-            patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(mock_db)),
-            patch("src.app.core.worker.functions.crud_token_blacklist") as mock_blacklist,
-        ):
-            mock_blacklist.count = AsyncMock(return_value=0)
-            mock_blacklist.delete = AsyncMock(return_value=None)
-
-            result = await purge_expired_tokens(MagicMock())
-
-            mock_blacklist.delete.assert_not_called()
-            assert "No expired" in result
-
-
 class _DeletingSession(AsyncMock):
     """`local_session()` stand-in that answers one DELETE with a fixed `rowcount`."""
 
@@ -126,6 +80,35 @@ class _DeletingSession(AsyncMock):
 
     async def commit(self) -> None:
         self.committed = True
+
+
+class TestPurgeExpiredTokens:
+    """Test the periodic token_blacklist cleanup job."""
+
+    @pytest.mark.asyncio
+    async def test_purge_deletes_expired_rows(self) -> None:
+        session = _DeletingSession(3)
+        before = datetime.now(UTC)
+        with patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(session)):
+            result = await purge_expired_tokens(MagicMock())
+
+        assert len(session.statements) == 1
+        compiled = str(session.statements[0])
+        assert compiled.strip().upper().startswith("DELETE FROM TOKEN_BLACKLIST")
+        assert "token_blacklist.expires_at <" in compiled
+        (cutoff,) = session.statements[0].compile().params.values()
+        assert cutoff.tzinfo is not None, "a naive cutoff compares off by the host's UTC offset"
+        assert before <= cutoff <= datetime.now(UTC)
+        assert session.committed
+        assert "3" in result
+
+    @pytest.mark.asyncio
+    async def test_reports_an_empty_sweep_without_erroring(self) -> None:
+        session = _DeletingSession(0)
+        with patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(session)):
+            result = await purge_expired_tokens(MagicMock())
+
+        assert "No expired" in result
 
 
 class TestPurgeExpiredAuthenticationRequests:
@@ -161,8 +144,8 @@ class TestPurgeExpiredAuthenticationRequests:
 
     @pytest.mark.asyncio
     async def test_reports_an_empty_sweep_without_erroring(self) -> None:
-        """The common case on an hourly cron, and the reason the sibling job counts before
-        it deletes - `rowcount` gets this for free."""
+        """The common case on an hourly cron, which `rowcount` reports without counting
+        first."""
         session = _DeletingSession(0)
         with patch("src.app.core.worker.functions.local_session", return_value=_FakeSessionContext(session)):
             result = await purge_expired_authentication_requests(MagicMock())

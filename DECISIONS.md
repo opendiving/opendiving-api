@@ -277,8 +277,8 @@ exist), and work that finishes once, such as a backfill, is a script. `RedisQueu
 
 The housekeeping crons share the hour mark with `run_at_startup=True`, because a restart loop
 changes nothing: each sweep deletes only rows past an absolute cutoff, and `record_sign_in_totals`
-rewrites counts it never lowers. `purge_expired_tokens` calls `count()` before
-`crud_token_blacklist.delete()` because fastcrud's `delete()` raises `NoResultFound` on zero
+rewrites counts it never lowers. Each row-expiry sweep is one Core `DELETE` through `_purge`,
+reading `rowcount` rather than counting first: fastcrud's `delete()` raises `NoResultFound` on zero
 matches, which most runs produce. The account purge and the emails never run at startup: a restart
 loop must not destroy a logbook early or send a round of mail twice.
 
@@ -1434,8 +1434,8 @@ something an operator turns on, not something a fresh deploy inherits — unlike
 `core/setup.py` disables in production and gates behind a superuser in staging, it has no
 `ENVIRONMENT` gate of its own.
 
-1. `ADMIN_PASSWORD` has no default (`str | None = None`). Unset means "no admin account", which
-   `admin/initialize.py` handles.
+1. `ADMIN_PASSWORD` has no default (`SecretStr | None = None`). Unset means "no admin account",
+   which `admin/initialize.py` handles.
 2. `CRUD_ADMIN_ENABLED` defaults to `False`. `src/.env.example` enables it for local development.
 3. `Settings._reject_insecure_admin_config` raises at startup when the panel is enabled in
    production with a missing or boilerplate password (`"!Ch4ng3Th1sP4ssW0rd!"`). Chosen over
@@ -3754,9 +3754,9 @@ bundled `Caddyfile` was rejected: it fixes one deployment shape (the `proxy` pro
 since a `default-src` breaks CRUDAdmin's templates; `X-Frame-Options` for parity with
 `next.config.js`. No `Strict-Transport-Security`: it is host-scoped, the web app sends it, and its
 off-switch `WEB_HSTS` lives there, so an API copy would ignore `WEB_HSTS=off`. Handlers keep their
-own headers; the binary downloads in `dives.py`, `certifications.py` and `export.py` spell out
-`frame-ancestors 'none'` because it never falls back to `default-src`. Registered last, so
-`add_middleware` puts it outside `CORSMiddleware`'s self-answered preflights; only the 500 from
+own headers; every binary response sends `BINARY_CSP` (`core/utils/binary_responses.py`), which
+spells out `frame-ancestors 'none'` because it never falls back to `default-src`. Registered last,
+so `add_middleware` puts it outside `CORSMiddleware`'s self-answered preflights; only the 500 from
 `ServerErrorMiddleware` escapes. The bundled `Caddyfile` still sends `/admin*` to `api:8000` while
 the operator surface moves to the web app's `/admin`; `CRUD_ADMIN_MOUNT_PATH` keeps its `/admin`
 default so existing panel installs keep working.
@@ -4202,10 +4202,9 @@ hash; `purpose="sign_in"` rows carry `user_id IS NULL`, beyond the `ON DELETE CA
 a previous address, so this sweep is the table's primary bound. Deleting at `expires_at` would be
 wrong by a week: `verify_email_change` tolerates a replay of a used link while the address is still
 current (`_replay_result_or_reject`), and that leniency lives only in the row. Not a setting,
-because tuning it tunes that leniency unknowingly. One Core `DELETE` with `rowcount`, where
-`purge_expired_tokens` counts first because FastCRUD's `delete()` raises `NoResultFound` on an empty
-match. `expires_at` is indexed by a hand-written revision. Cost: a link past retention reports
-"invalid" rather than "expired"; `check_email_link` already collapses both to `valid=false`.
+because tuning it tunes that leniency unknowingly. `expires_at` is indexed by a hand-written
+revision. Cost: a link past retention reports "invalid" rather than "expired"; `check_email_link`
+already collapses both to `valid=false`.
 
 ## Every foreign key into `user.id` declares `ondelete="CASCADE"` but one
 
@@ -4874,11 +4873,11 @@ signing in again" cannot help there.
 
 ## Nothing of the token response is logged, and the secret is a `SecretStr`
 
-`GOOGLE_CLIENT_SECRET` is typed `SecretStr` where `SMTP_PASSWORD` and `GEOCODER_API_KEY` beside it
-are bare `str | None`: a value that must not reach a log line is better served by a type whose
-`repr` cannot spill it into a traceback. `SecretStr("")` is truthy (no `__bool__`), so the boot
-guard checks `.get_secret_value().strip()` rather than falsiness, or an empty variable passes
-startup and fails at the first sign-in.
+`GOOGLE_CLIENT_SECRET` is typed `SecretStr`, as are `SMTP_PASSWORD`, `GEOCODER_API_KEY`,
+`ADMIN_PASSWORD` and `CRUD_ADMIN_REDIS_PASSWORD`: a value that must not reach a log line is better
+served by a type whose `repr` cannot spill it into a traceback. Each consumer unwraps it with
+`.get_secret_value()`. The boot guard checks `.get_secret_value().strip()`, or a whitespace-only
+variable passes startup and fails at the first sign-in.
 
 The secret travels only in the request body, and httpx's request log line is URL and status.
 Google's response is not logged above DEBUG: a refusal writes its HTTP status at WARNING and the

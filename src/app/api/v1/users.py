@@ -24,6 +24,7 @@ from ...core.exceptions.http_exceptions import (
     UnprocessableEntityException,
 )
 from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
+from ...core.utils.binary_responses import not_modified, stored_bytes_response
 from ...core.utils.cache import cache, delete_keys_by_pattern
 from ...core.utils.client_ip import client_ip
 from ...core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE, clamp_pagination
@@ -262,26 +263,16 @@ async def _serve_picture(request: Request, stored: StoredPictureFile | None, *, 
 
     etag = f'"{stored.sha256}"'
     if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": _PICTURE_CACHE_CONTROL})
+        return not_modified(etag, cache_control=_PICTURE_CACHE_CONTROL)
 
-    return Response(
-        content=await read_picture_bytes(stored),
+    # `attachment`, not `inline`: the clients fetch this through their API client and render
+    # from a blob URL, so nothing ever navigates here directly.
+    return stored_bytes_response(
+        await read_picture_bytes(stored),
         media_type=stored.content_type,
-        headers={
-            # `attachment`, not `inline`: the clients fetch this through their API client
-            # and render from a blob URL, so nothing ever navigates here directly.
-            "Content-Disposition": content_disposition_attachment(stored.filename, default=kind.value),
-            "X-Content-Type-Options": "nosniff",
-            # `frame-ancestors` is spelled out because it does not fall back to
-            # `default-src`: a response with its own policy opts out of
-            # `SecurityHeadersMiddleware`'s default and would otherwise be framable
-            # however strict the rest of this is.
-            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
-            # `private` because this is one diver's picture and no shared cache should keep
-            # a copy; the `ETag` makes re-validation after 5 minutes cheap.
-            "Cache-Control": _PICTURE_CACHE_CONTROL,
-            "ETag": etag,
-        },
+        etag=etag,
+        cache_control=_PICTURE_CACHE_CONTROL,
+        disposition=content_disposition_attachment(stored.filename, default=kind.value),
     )
 
 
