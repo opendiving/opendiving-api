@@ -7,9 +7,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.schemas import (
     NOTES_MAX_LENGTH,
+    BlankIsNone,
     PublicUUIDSchema,
     RejectsExplicitNulls,
+    StoredName,
     StoredVocabulary,
+    Trimmed,
 )
 from .gear_service import GearServiceScheduleInfo
 
@@ -81,9 +84,12 @@ _WORKING_PRESSURE_DESCRIPTION = "Bar the vessel is rated to, never what was in i
 _MATERIAL_DESCRIPTION = "What the vessel is made of. Meaningful on a cylinder."
 
 
+GearBrand = Annotated[str, Trimmed, Field(max_length=255)]
+
+
 class GearItemBase(BaseModel):
-    name: Annotated[str, Field(min_length=1, max_length=255, examples=["MK25 EVO / S620Ti"])]
-    brand: Annotated[str | None, Field(default=None, max_length=255, examples=["Scubapro"])]
+    name: Annotated[str, Trimmed, Field(max_length=255, examples=["MK25 EVO / S620Ti"])]
+    brand: Annotated[GearBrand | None, BlankIsNone, Field(default=None, examples=["Scubapro"])]
     type: Annotated[
         GearType | None,
         Field(default=None, examples=[GearType.REGULATOR], description="Broad category this item falls into"),
@@ -127,6 +133,8 @@ class GearItemRead(GearItemBase, PublicUUIDSchema):
     sequential internal `id` (which is never exposed over the API).
     """
 
+    name: StoredName
+    brand: StoredName | None = None
     # Overrides `GearItemBase.type`, which stays `GearType` for the writes that base
     # actually validates.
     type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
@@ -163,6 +171,8 @@ class GearItemReadInternal(GearItemBase, PublicUUIDSchema):
     public shape, which additionally resolves `user_id` to the owning user's `uuid`).
     """
 
+    name: StoredName
+    brand: StoredName | None = None
     type: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
     material: StoredVocabulary | None = None  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
 
@@ -210,8 +220,8 @@ class GearItemUpdate(RejectsExplicitNulls):
     # re-checks (brand, name) uniqueness.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes", "rented", "is_archived")
 
-    name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
-    brand: Annotated[str | None, Field(default=None, max_length=255)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None)]
+    brand: Annotated[GearBrand | None, BlankIsNone, Field(default=None)]
     type: Annotated[GearType | None, Field(default=None)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
     rented: Annotated[bool | None, Field(default=None)]

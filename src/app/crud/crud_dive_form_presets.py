@@ -1,5 +1,5 @@
 from fastcrud import FastCRUD
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.dive_form_preset import DiveFormPreset
@@ -9,6 +9,7 @@ from ..schemas.dive_form_preset import (
     DiveFormPresetUpdate,
     DiveFormPresetUpdateInternal,
 )
+from .unique_keys import unique_key_taken
 
 CRUDDiveFormPreset = FastCRUD[
     DiveFormPreset,
@@ -24,18 +25,14 @@ crud_dive_form_presets = CRUDDiveFormPreset(DiveFormPreset)
 async def dive_form_preset_name_exists(
     db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None
 ) -> bool:
-    """Case-insensitive check for whether a preset with the same name already exists for the
-    user. Mirrors the `ux_dive_form_preset_user_id_name_lower` index.
-    """
-    stmt = select(DiveFormPreset.id).where(
-        DiveFormPreset.user_id == user_id,
-        func.lower(DiveFormPreset.name) == name.strip().lower(),
+    """Asked on `ux_dive_form_preset_user_id_name_lower`'s own expressions."""
+    return await unique_key_taken(
+        db,
+        DiveFormPreset,
+        "ux_dive_form_preset_user_id_name_lower",
+        {"user_id": user_id, "name": name},
+        exclude_id=exclude_id,
     )
-    if exclude_id is not None:
-        stmt = stmt.where(DiveFormPreset.id != exclude_id)
-
-    result = await db.execute(stmt.limit(1))
-    return result.first() is not None
 
 
 async def dive_form_preset_names_for_user(db: AsyncSession, user_id: int) -> list[str]:

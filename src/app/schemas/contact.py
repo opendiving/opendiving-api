@@ -7,7 +7,14 @@ from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from ..core.schemas import (
+    NOTES_MAX_LENGTH,
+    PublicUUIDSchema,
+    RejectsExplicitNulls,
+    StoredName,
+    StoredVocabulary,
+    Trimmed,
+)
 
 # DiveJSON §6.18's bounds, and the widths of the columns behind them.
 CONTACT_NAME_MAX = 255
@@ -158,7 +165,7 @@ class ContactBase(BaseModel):
     types differ - `roles`, `email` and `website` - and the address, which the wire nests
     and the table does not."""
 
-    name: Annotated[str, Field(min_length=1, max_length=CONTACT_NAME_MAX, examples=["Blue Ocean Dive Center"])]
+    name: Annotated[str, Trimmed, Field(max_length=CONTACT_NAME_MAX, examples=["Blue Ocean Dive Center"])]
     phone: ContactPhone
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
@@ -195,6 +202,7 @@ class _ContactReadFields(BaseModel):
 class ContactRead(ContactBase, _ContactReadFields, PublicUUIDSchema):
     """Public representation of a contact, keyed by its opaque `uuid`."""
 
+    name: StoredName
     address: ContactAddressRead | None = None
     user_uuid: uuid_pkg.UUID
     created_at: datetime
@@ -204,6 +212,7 @@ class ContactReadInternal(ContactBase, _ContactReadFields, ContactAddressColumns
     """Mirrors the `contact` table's columns (integer PK/FK, flat address), for server-side
     lookups only - `ContactRead` is the public shape."""
 
+    name: StoredName
     id: int
     user_id: int
     created_at: datetime
@@ -236,7 +245,7 @@ class _ContactUpdateFields(RejectsExplicitNulls):
 
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "roles", "notes")
 
-    name: Annotated[str | None, Field(default=None, min_length=1, max_length=CONTACT_NAME_MAX)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(default=None, max_length=CONTACT_NAME_MAX)]
     roles: Annotated[
         list[ContactRole] | None,
         Field(default=None, max_length=len(ContactRole), description="Replaces the contact's roles wholesale"),

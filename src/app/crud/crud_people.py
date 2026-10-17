@@ -21,6 +21,7 @@ from ..schemas.person import (
     PersonUpdate,
     PersonUpdateInternal,
 )
+from .unique_keys import unique_key_taken
 
 CRUDPerson = FastCRUD[
     Person, PersonCreateInternal, PersonUpdate, PersonUpdateInternal, PersonUpdate, PersonReadInternal
@@ -94,12 +95,10 @@ async def get_person_read(db: AsyncSession, *, person_id: int) -> PersonRead | N
 
 
 async def person_name_exists(db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None) -> bool:
-    """Case-insensitive check against `ux_person_user_id_name_lower`, which enforces the same
-    rule as the safety net. Names are stored trimmed."""
-    stmt = select(Person.id).where(Person.user_id == user_id, func.lower(Person.name) == name.strip().lower())
-    if exclude_id is not None:
-        stmt = stmt.where(Person.id != exclude_id)
-    return (await db.execute(stmt.limit(1))).first() is not None
+    """Asked on `ux_person_user_id_name_lower`'s own expressions."""
+    return await unique_key_taken(
+        db, Person, "ux_person_user_id_name_lower", {"user_id": user_id, "name": name}, exclude_id=exclude_id
+    )
 
 
 async def person_linking(db: AsyncSession, *, user_id: int, linked_user_id: int) -> tuple[int, str] | None:
