@@ -2454,7 +2454,7 @@ class TestTheWormsCreditIsALink:
     `DECISIONS.md`'s *"The attribution string is a wire format"* is the rule these assert
     against: the clients read `[label](href)` and render a link, so a credit that only
     prints a domain discharges half of what it owes - naming the source but not offering a
-    way to reach the licence. `_WORMS_ATTRIBUTION` is ours rather than a provider's, so it
+    way to reach the licence. `WORMS_ATTRIBUTION` is ours rather than a provider's, so it
     is written already linked; nothing folds it on the way out, and nothing would notice if
     it silently stopped being a link.
     """
@@ -2462,9 +2462,9 @@ class TestTheWormsCreditIsALink:
     def test_the_worms_credit_is_written_already_linked(self):
         """The same guarantee `test_the_built_in_credits_are_already_folded` gives the
         geocoder's two literals, for the one literal this module owns."""
-        match = re.fullmatch(r"\[([^\]]+)\]\((https://[^)\s]+)\)(.*)", species_service._WORMS_ATTRIBUTION)
+        match = re.fullmatch(r"\[([^\]]+)\]\((https://[^)\s]+)\)(.*)", species_service.WORMS_ATTRIBUTION)
 
-        assert match is not None, species_service._WORMS_ATTRIBUTION
+        assert match is not None, species_service.WORMS_ATTRIBUTION
         label, href, rest = match.groups()
         # Name the origin, offer a way to reach it, name the licence - the three things
         # `DECISIONS.md` says a credit may never be shortened past.
@@ -2477,7 +2477,7 @@ class TestTheWormsCreditIsALink:
         because the client parses a credit into runs and links instead of matching the whole
         string as one link. Pinned here because the API is the half that decides the shape:
         a parser that matched `^\\[…\\]\\(…\\)$` would show a diver the literal brackets."""
-        parts = re.split(r"\[[^\]]+\]\([^)\s]+\)", species_service._WORMS_ATTRIBUTION)
+        parts = re.split(r"\[[^\]]+\]\([^)\s]+\)", species_service.WORMS_ATTRIBUTION)
 
         assert parts[0] == ""
         assert parts[-1].strip() == "(CC BY)"
@@ -2485,7 +2485,7 @@ class TestTheWormsCreditIsALink:
     def test_the_credit_fits_the_field_that_carries_it(self):
         """Growing the credit past `SpeciesSearchResult.attribution` would turn a search into
         a 500 from inside the normalizer rather than a long string."""
-        assert len(species_service._WORMS_ATTRIBUTION) <= 255
+        assert len(species_service.WORMS_ATTRIBUTION) <= 255
         assert len(species_service._WIKIDATA_ATTRIBUTION) <= 255
 
     @pytest.mark.asyncio
@@ -2495,7 +2495,7 @@ class TestTheWormsCreditIsALink:
         with _registers(by_name=[CLOWNFISH_RECORD]):
             response = await species_service.search_species(db, "amphiprion ocellaris")
 
-        assert response.results[0].attribution == species_service._WORMS_ATTRIBUTION
+        assert response.results[0].attribution == species_service.WORMS_ATTRIBUTION
 
     def test_the_cache_prefix_moved_with_the_credit(self):
         """A cached search answer holds the credit the normalizer wrote, for a month. Without
@@ -2867,7 +2867,6 @@ class TestWriteDiveEmbedsSightings:
             seen["sightings"] = sightings
 
         monkeypatch.setattr(dives_module.crud_dives, "create", AsyncMock(return_value=created))
-        monkeypatch.setattr(dives_module.crud_dives, "get", AsyncMock(return_value={}))
         monkeypatch.setattr(dives_module, "resolve_trip_id_for_user", AsyncMock(return_value=77))
         monkeypatch.setattr(dives_module, "resolve_dive_site_ids_for_user", AsyncMock(return_value={}))
         monkeypatch.setattr(dives_module, "resolve_gear_item_ids_for_user", AsyncMock(return_value={}))

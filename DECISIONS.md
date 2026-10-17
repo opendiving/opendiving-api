@@ -2945,16 +2945,17 @@ CI's first is `postgres_test_gw0`.
 
 Deleting a gear item destroys its service records (`gear_service_record.gear_item_id` is
 `ON DELETE CASCADE`); archiving is the only surface for retired kit whose history still reads.
-`_owned_gear_item` and `_get_owned_gear_item` do not filter `is_archived`, so an archived item
-resolves: its detail page loads, `?gear_item_uuid=` works on both listings, and the digest skips it.
-The gear page has a *Show archived* toggle, and the delete route's docstring, published in
-`/openapi.json`, steers to archiving. `/export/*` carries a live or archived item's history; a
-deleted item has nothing to export.
+`_owned_gear_item`, `_get_owned_gear_item` and `resolve_gear_item_ids_for_user` do not filter
+`is_archived`, so an archived item resolves: its detail page loads, `?gear_item_uuid=` works on both
+listings, and the digest skips it. A deleted item's uuid lists an empty page. The gear page has a
+*Show archived* toggle, and the delete route's docstring, published in `/openapi.json`, steers to
+archiving. `/export/*` carries a live or archived item's history; a deleted item has nothing to
+export.
 
 Rejected, and moot now the rows are gone: an `include_deleted_items` flag on
-`GET /gear-service-records`, or relaxing the 422 for a deleted item: both make deleting a lossy
-archive, `is_archived` being the reversible flag. `is_archived=False` on `_owned_gear_item`,
-matching the listing filter, would silently take the history off archived items;
+`GET /gear-service-records`, which makes deleting a lossy archive, `is_archived` being the
+reversible flag. `is_archived=False` on `_owned_gear_item`, matching the listing filter, would
+silently take the history off archived items;
 `tests/test_hard_delete.py::TestArchivingIsTheNonDestructivePath` pins that an archived item
 resolves with its schedules and records.
 
@@ -3209,8 +3210,8 @@ key:
 6. `aphia_id`, for a total order.
 
 `status` (the fold normalises it to `accepted`) and `source` (which register beat the budget) stay
-out. `_local_search` keeps its own three-way `match_rank` and `LIMIT _MAX_RESULTS`, so a catalog
-with more matches than that can cut a row the Python key would rank first; fix with the `pg_trgm`
+out. `_local_search` keeps its own three-way `match_rank` and `LIMIT MAX_RESULTS`, so a catalog with
+more matches than that can cut a row the Python key would rank first; fix with the `pg_trgm`
 escalation.
 
 ## The ajax endpoint annotates rows; it never makes them
@@ -6432,7 +6433,7 @@ collision skip and idempotence: a revision failing partway rolls back without ad
 
 ## The WoRMS credit is a link, and any edit to it is a cache-version change
 
-`_WORMS_ATTRIBUTION` (`services/species_service.py`) is
+`WORMS_ATTRIBUTION` (`services/species_service.py`) is
 `[World Register of Marine Species](https://www.marinespecies.org) (CC BY)`: a credit names origin
 and licence and links to the licence text; WoRMS's text is CC BY. It is written linked, like the
 geocoder's `_DEFAULT_ATTRIBUTION` and `_MARINE_ATTRIBUTION`: a statement this project makes, not a

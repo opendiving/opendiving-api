@@ -71,7 +71,7 @@ from ...schemas.species import (
 )
 from ...services import species_photos, species_service
 from ...services.email_service import send_best_effort, send_invitation_email
-from ...services.species_life_list import _search_clause
+from ...services.species_life_list import species_search_clause
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_current_superuser)])
 
@@ -317,7 +317,7 @@ async def read_admin_species(
 
     clauses = []
     if search and (term := search.strip()):
-        clauses.append(_search_clause(term))
+        clauses.append(species_search_clause(term))
     if chip is not None:
         clauses.append(_SPECIES_FILTERS[chip])
 

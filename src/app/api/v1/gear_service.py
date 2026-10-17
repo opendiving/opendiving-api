@@ -28,7 +28,7 @@ from ...core.exceptions.http_exceptions import (
 from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
 from ...crud.crud_contacts import get_contact_uuids_by_ids
-from ...crud.crud_gear_items import crud_gear_items, get_gear_item_uuids_by_id
+from ...crud.crud_gear_items import crud_gear_items, get_gear_item_uuids_by_id, resolve_gear_item_ids_for_user
 from ...crud.crud_gear_service_records import (
     crud_gear_service_records,
     find_schedule_for_record,
@@ -119,6 +119,18 @@ async def _refuse_a_vanished_contact(db: AsyncSession, exc: IntegrityError) -> N
     raise exc
 
 
+# An id no row has, so a filter naming something unknown or someone else's narrows the list to
+# nothing rather than answering an error that would tell the two apart.
+_MATCHES_NOTHING = -1
+
+
+async def _filter_gear_item_id(db: AsyncSession, gear_item_uuid: uuid_pkg.UUID | None, user_id: int) -> int | None:
+    if gear_item_uuid is None:
+        return None
+    ids = await resolve_gear_item_ids_for_user(db=db, gear_item_uuids=[gear_item_uuid], user_id=user_id)
+    return (ids or {}).get(gear_item_uuid, _MATCHES_NOTHING)
+
+
 async def _owned_gear_item(db: AsyncSession, gear_item_uuid: uuid_pkg.UUID, user_id: int) -> GearItemReadInternal:
     """Fetch a gear item the caller owns, or raise 422.
 
@@ -171,7 +183,7 @@ async def write_gear_service_schedule(
         db=db, object=schedule_internal, schema_to_select=GearServiceScheduleReadInternal, return_as_model=True
     )
     # A brand-new schedule has no records, so this derives the first due date straight
-    # from `starts_on` and the two snapshots.
+    # from `starts_on` and the two snapshots - which is why the row is read back below.
     await recalculate_service_schedule(db=db, schedule_id=created.id)
     await invalidate_gear_caches(current_user["id"])
 
@@ -249,12 +261,11 @@ async def read_gear_service_schedules(
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict:
-    """List the caller's service schedules, optionally narrowed to one gear item."""
+    """List the caller's service schedules, optionally narrowed to one gear item. One that
+    doesn't exist or isn't the caller's returns an empty page, as `GET /dives`' filters do."""
     page, items_per_page = clamp_pagination(page, items_per_page)
 
-    gear_item_id = None
-    if gear_item_uuid is not None:
-        gear_item_id = (await _owned_gear_item(db, gear_item_uuid, current_user["id"])).id
+    gear_item_id = await _filter_gear_item_id(db, gear_item_uuid, current_user["id"])
 
     return await _cached_read_schedules(
         request,
@@ -458,14 +469,8 @@ async def write_gear_service_record(
         await recalculate_service_schedule(db=db, schedule_id=schedule.id)
     await invalidate_gear_caches(current_user["id"])
 
-    record_read = await crud_gear_service_records.get(
-        db=db, id=created.id, schema_to_select=GearServiceRecordReadInternal, return_as_model=True
-    )
-    if record_read is None:
-        raise NotFoundException("Created service record not found")
-
     return _to_public_record(
-        cast(GearServiceRecordReadInternal, record_read),
+        created,
         user_uuid=current_user["uuid"],
         gear_item_uuid=db_gear_item.uuid,
         gear_service_schedule_uuid=schedule.uuid if schedule is not None else None,
@@ -574,21 +579,18 @@ async def read_gear_service_records(
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict:
-    """List the caller's service history, optionally narrowed to one gear item or schedule."""
+    """List the caller's service history, optionally narrowed to one gear item or schedule. One
+    that doesn't exist or isn't the caller's returns an empty page, as `GET /dives`' filters do."""
     page, items_per_page = clamp_pagination(page, items_per_page)
 
-    gear_item_id = None
-    if gear_item_uuid is not None:
-        gear_item_id = (await _owned_gear_item(db, gear_item_uuid, current_user["id"])).id
+    gear_item_id = await _filter_gear_item_id(db, gear_item_uuid, current_user["id"])
 
     schedule_id = None
     if gear_service_schedule_uuid is not None:
         schedule = await resolve_schedule_for_user(
             db=db, schedule_uuid=gear_service_schedule_uuid, user_id=current_user["id"]
         )
-        if schedule is None:
-            raise UnprocessableEntityException("Service schedule not found.")
-        schedule_id = schedule.id
+        schedule_id = schedule.id if schedule is not None else _MATCHES_NOTHING
 
     return await _cached_read_records(
         request,
