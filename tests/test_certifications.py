@@ -149,16 +149,16 @@ class TestPublicShapeConversion:
 class TestAgencyPairing:
     def test_other_requires_a_name(self) -> None:
         with pytest.raises(ValueError):
-            CertificationBase(agency=CertificationAgency.OTHER, name="Plongeur Niveau 2")
+            CertificationCreate(agency=CertificationAgency.OTHER, name="Plongeur Niveau 2")
 
     def test_other_rejects_a_blank_name(self) -> None:
         """Whitespace is not a name - otherwise `agency_other=" "` would store an
         `other`-agency certification with nothing to display."""
         with pytest.raises(ValueError):
-            CertificationBase(agency=CertificationAgency.OTHER, agency_other="   ", name="Plongeur Niveau 2")
+            CertificationCreate(agency=CertificationAgency.OTHER, agency_other="   ", name="Plongeur Niveau 2")
 
     def test_other_accepts_a_name(self) -> None:
-        certification = CertificationBase(
+        certification = CertificationCreate(
             agency=CertificationAgency.OTHER, agency_other="FFESSM", name="Plongeur Niveau 2"
         )
 
@@ -168,7 +168,7 @@ class TestAgencyPairing:
         """Rejected rather than ignored, so a stored row can never carry a second agency
         name that some future read path might decide to display."""
         with pytest.raises(ValueError):
-            CertificationBase(agency=CertificationAgency.PADI, agency_other="FFESSM", name="Open Water Diver")
+            CertificationCreate(agency=CertificationAgency.PADI, agency_other="FFESSM", name="Open Water Diver")
 
     def test_create_forbids_unknown_fields(self) -> None:
         with pytest.raises(ValueError):
@@ -180,6 +180,16 @@ class TestAgencyPairing:
         agency nobody's UI knows how to label."""
         with pytest.raises(ValueError):
             CertificationBase(agency="padi-international", name="Open Water Diver")
+
+    @pytest.mark.parametrize(("agency", "agency_other"), [("other", None), ("padi", "FFESSM")])
+    def test_a_read_takes_a_stored_pair_the_writes_refuse(self, agency: str, agency_other: str | None) -> None:
+        """The admin panel writes through `CertificationUpdate`, which cannot check a pair, so
+        a stored row can hold one - and a read refusing it would 500 the PATCH that repairs it."""
+        internal = _internal_certification(agency=agency, agency_other=agency_other)
+
+        public = _to_public_certification(internal, user_uuid=uuid7(), files=[])
+
+        assert (public.agency, public.agency_other) == (agency, agency_other)
 
 
 # Every body a certification's name arrives in, and what else it needs to be valid.
@@ -788,6 +798,31 @@ class TestListOrderingSql:
         assert "count(*)" in count_statement
         assert "certification.user_id = 7" in count_statement
         assert "certification.is_deleted IS false" in count_statement
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestABrokenStoredPair:
+    """A row the admin panel stored with an `agency_other` its agency forbids."""
+
+    @pytest.mark.asyncio
+    async def test_the_patch_that_repairs_it_goes_through(
+        self, db: Session, async_db: AsyncSession, diver: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        certification = create_certification(db, diver)
+        certification.agency_other = "FFESSM"
+        db.commit()
+        monkeypatch.setattr(certifications_module, "invalidate_certification_caches", AsyncMock())
+
+        await certifications_module.patch_certification(
+            request=MagicMock(),
+            uuid=certification.uuid,
+            values=CertificationUpdateRequest.model_validate({"agency_other": None}),
+            current_user={"id": diver.id, "uuid": diver.uuid},
+            db=async_db,
+        )
+
+        db.refresh(certification)
+        assert certification.agency_other is None
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
