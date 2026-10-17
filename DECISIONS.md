@@ -376,9 +376,7 @@ account's current email equals the token's `new_email`; otherwise it rejects lik
 token.
 
 `admin/views.py`'s `User` view has no `password_transformer`/`PasswordTransformer`; admin-created
-users sign in by `email`. `scripts/create_first_superuser.py` sets no `hashed_password` and inserts
-an `authentication_provider` row (`provider="email"`) so that account can sign in. `create_all()`
-leaves an existing `user` table untouched:
+users sign in by `email`. `create_all()` leaves an existing `user` table untouched:
 
 ```sql
 ALTER TABLE "user" DROP COLUMN hashed_password;
@@ -3635,24 +3633,6 @@ argument.
 `tests/test_config_safety.py` and `tests/test_email_service.py` parametrise both guards over
 `production` and `staging`; the email side pins that the raise precedes the warning.
 
-## `ADMIN_EMAIL` has no default, because `admin.com` belongs to somebody else
-
-`ADMIN_EMAIL` is `str | None` with no default, `src/.env.example` ships it commented out, and
-`create_first_user` exits early naming the setting. Unset means no admin account.
-`scripts/create_first_superuser.py` creates an `is_superuser=True` row keyed on the address, and
-passwordless sign-in delivers that account's magic link to whoever controls the domain;
-`admin@admin.com` has a real owner. The same rule as `EMAIL_FROM_ADDRESS` and `CONTACT_FORM_EMAIL`.
-
-`is_superuser` gates `/docs`, `/redoc` and `/openapi.json` on non-local non-production environments
-(`core/setup.py`) and the `/api/v1/admin/*` routes (`api.v1.admin`); it grants no access to dives.
-
-`ADMIN_NAME` keeps `"admin"`: a display name nothing is keyed on or delivered to.
-
-`config()` resolves defaults at import against the developer's own `src/.env`, so
-`settings.ADMIN_EMAIL is None` on the imported module proves nothing. `tests/test_config_safety.py`
-loads a second copy of `core/config.py` under another name with `starlette.config.Config` pointed at
-a nonexistent file; `config.py` imports nothing from this package, so the copy is isolated.
-
 ## `linting.yml`, `tests.yml` and `type-checking.yml` run on a read-only token, with nothing left in `.git/config`
 
 All three declare `contents: read` at workflow level; a workflow with no `permissions:` block
@@ -4525,20 +4505,6 @@ hands every other reader this app's crop.
 read and a put, since the store has no copy. *Rejected:* one key shared by both rows, which lets
 either picture's replace or remove unlink the other's bytes, and which no per-column index or
 set-union sweep would notice.
-
-## The admin bootstrap's `Table` copy is drift-checked in both directions
-
-`src/scripts/create_first_superuser.py` hand-builds a Core `Table` mirroring `user`, and a column
-with a client-side `default=` goes into the INSERT whether or not the script's `data` dict names it.
-A column dropped from the model makes that INSERT an `UndefinedColumn`, which the bare
-`except Exception` in `create_first_user` logs and swallows, so a fresh install comes up with no
-superuser. Nothing else covers the script: `--cov` is scoped to `src/app` and it runs from a
-one-shot compose service.
-
-The two `Table` definitions are therefore module-level constants so
-`tests/test_create_first_superuser.py` asserts both directions of drift: every column the copy names
-exists on the real table, and every `NOT NULL` column without a server default is named by the copy.
-The next drop fails in CI rather than on somebody's first install.
 
 ## Species photos are the fourth kind on the files volume, and Commons is never hotlinked
 
@@ -5552,8 +5518,7 @@ raise would block every other account creation until the connection returned to 
 
 While `user` is empty, the next address to complete onboarding is admitted whatever
 `REGISTRATION_MODE` says and gets `is_superuser = true`, in `open` mode too. This resolves the
-deadlock of a fresh `invite` instance with no invitations and no superuser;
-`scripts/create_first_superuser.py` is excluded from the published image. Emptiness rather than a
+deadlock of a fresh `invite` instance with no invitations and no superuser. Emptiness rather than a
 flag: `_purge_one_account` hard-deletes the `User` row, so an instance whose last account is purged
 is fresh again. `admit_or_refuse` takes `pg_advisory_xact_lock` on a fixed key before the count, on
 every account creation — transaction-scoped so there is no unlock to forget, unconditional so there
@@ -5561,6 +5526,9 @@ is no race between branch and check. Account creations serialise, no cost for a 
 Rejected: `SERIALIZABLE`, which moves the guarantee into the isolation level and the failure into a
 retryable serialization error. The suite stages the race on two connections and asserts exactly one
 superuser.
+
+`is_superuser` gates `/docs`, `/redoc` and `/openapi.json` on non-local non-production environments
+(`core/setup.py`) and the `/api/v1/admin/*` routes (`api.v1.admin`); it grants no access to dives.
 
 ## The invite-request endpoint stays ignorant, exactly as the sign-in request does
 
@@ -6151,13 +6119,13 @@ sends more entries than the vocabulary has members.
 Every account gets Basic, Recreational and Technical as ordinary rows, created in
 `complete_profile`'s own transaction (`api/v1/auth.py`): registration creates the account with its
 three presets or nothing. Only self-service registration passes through it; accounts from the admin
-panel's insert or `src/scripts/create_first_superuser.py` reach the same three through
-`POST /dive-form-presets/defaults`. Rejected: lazy seeding on the first `GET /dive-form-presets`
-behind a `seeded` flag — a GET that writes and a column on the hottest row; and web-side seeding
-from its own constant, which gives the vocabulary two owners. Restore adds what is missing by name,
-case-insensitively, and never overwrites: idempotent, and an edited or renamed default keeps its
-edit. `services/dive_form_presets.py::seed_default_presets` serves both callers. A changed default
-set reaches new accounts only; no revision rewrites existing rows, since that overwrites a saved
+panel's insert reach the same three through `POST /dive-form-presets/defaults`. Rejected: lazy
+seeding on the first `GET /dive-form-presets` behind a `seeded` flag — a GET that writes and a
+column on the hottest row; and web-side seeding from its own constant, which gives the vocabulary
+two owners. Restore adds what is missing by name, case-insensitively, and never overwrites:
+idempotent, and an edited or renamed default keeps its edit.
+`services/dive_form_presets.py::seed_default_presets` serves both callers. A changed default set
+reaches new accounts only; no revision rewrites existing rows, since that overwrites a saved
 preference and un-marks the preset as current for every diver whose `user.dive_form_hidden_fields`
 still holds the old set.
 

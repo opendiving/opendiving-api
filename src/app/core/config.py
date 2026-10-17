@@ -172,18 +172,6 @@ LEGACY_DEFAULT_ADMIN_PASSWORD = "!Ch4ng3Th1sP4ssW0rd!"
 
 
 class FirstUserSettings(BaseSettings):
-    # A display name, not an identity - nothing is keyed on it and nothing is delivered
-    # to it - so unlike `ADMIN_EMAIL` below it keeps its default.
-    ADMIN_NAME: str = config("ADMIN_NAME", default="admin")
-
-    # No default, for the same reason `CONTACT_FORM_EMAIL` and `EMAIL_FROM_ADDRESS` have
-    # none. It used to be `admin@admin.com`, a domain belonging to a stranger: sign-in is
-    # passwordless and keyed on the email, so `scripts.create_first_superuser` would have
-    # created an `is_superuser` account whose magic link is delivered to whoever runs
-    # that domain. No address is right for somebody else's install, so unset means the
-    # script exits without creating anything rather than guessing.
-    ADMIN_EMAIL: str | None = config("ADMIN_EMAIL", default=None)
-
     ADMIN_USERNAME: str = config("ADMIN_USERNAME", default="admin")
     # No default: the admin panel grants full create/update/delete over every model
     # (see `admin.views`), so an unset password must mean "no admin account", never
@@ -1066,7 +1054,6 @@ class CRUDAdminSettings(BaseSettings):
     # back - a sentinel that silently becomes a real password the moment anyone writes
     # CRUD_ADMIN_REDIS_PASSWORD="None" meaning it literally.
     CRUD_ADMIN_REDIS_PASSWORD: str | None = config("CRUD_ADMIN_REDIS_PASSWORD", default=None)
-    CRUD_ADMIN_REDIS_SSL: bool = config("CRUD_ADMIN_REDIS_SSL", default=False)
 
 
 class EnvironmentOption(Enum):
