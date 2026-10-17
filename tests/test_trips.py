@@ -647,7 +647,7 @@ class TestReadPath:
         # Byte-identical to what `OwnedResourceCache.read_list` wrote before the trips
         # reads were hand-rolled, and inside the `user_{id}_trips:*` pattern
         # `invalidate_trip_caches` sweeps after every trip write and every dive write.
-        (key,) = redis.store
+        (key,) = redis.writes
         assert key == namespaced(f"user_{USER_ID}_trips:page_2:items_per_page:10:search:moalboal:{USER_ID}")
         assert fnmatch(key, across_builds(f"user_{USER_ID}_trips:*"))
 
@@ -678,7 +678,7 @@ class TestReadPath:
         assert [part["location"]["name"] for part in body["parts"]] == ["Moalboal", "Bohol"]
         assert _figures_of(body) == (4, 3, 17, 32.4)
         # Under the user, so the sweep every dive write makes reaches it without naming it.
-        (key,) = redis.store
+        (key,) = redis.writes
         assert key == namespaced(f"user_{USER_ID}_trip:{trip.uuid}")
         assert fnmatch(key, across_builds(f"user_{USER_ID}_trip:*"))
         assert not fnmatch(key, across_builds(f"user_{USER_ID}_trips:*"))

@@ -82,7 +82,7 @@ from ...schemas.trip import TripPartRead
 from ...schemas.user_picture import PictureKind
 from ..certification_files import get_file_infos_for_certifications
 from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
-from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS, get_file_infos_for_recordings
+from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS
 
 
 @dataclass(frozen=True, slots=True)
@@ -599,8 +599,7 @@ async def _recordings_by_dive(db: AsyncSession, dive_ids: list[int]) -> dict[int
         .all()
     )
     recording_ids = [row.id for row in rows]
-    files = await get_file_infos_for_recordings(db, recording_ids=recording_ids)
-    file_ids = await _file_ids_by_recording(db, recording_ids)
+    files = await _files_by_recording(db, recording_ids)
     profiled = set(
         (await db.execute(select(DiveProfile.recording_id).where(DiveProfile.recording_id.in_(recording_ids))))
         .scalars()
@@ -609,8 +608,6 @@ async def _recordings_by_dive(db: AsyncSession, dive_ids: list[int]) -> dict[int
 
     by_dive: dict[int, list[ExportRecordingRow]] = {dive_id: [] for dive_id in dive_ids}
     for row in rows:
-        infos = files.get(row.id, [])
-        ids = file_ids.get(row.id, [])
         by_dive.setdefault(row.dive_id, []).append(
             ExportRecordingRow(
                 id=row.id,
@@ -632,31 +629,50 @@ async def _recordings_by_dive(db: AsyncSession, dive_ids: list[int]) -> dict[int
                 },
                 start_time=row.start_time,
                 utc_offset_minutes=row.utc_offset_minutes,
-                # `zip` is safe rather than lossy here: both come from `dive_file` filtered
-                # on the same recording and ordered by `id`, so they are the same rows in the
-                # same order by construction.
-                files=[ExportFileRow(id=file_id, info=info) for file_id, info in zip(ids, infos, strict=True)],
+                files=files.get(row.id, []),
                 has_profile=row.id in profiled,
             )
         )
     return by_dive
 
 
-async def _file_ids_by_recording(db: AsyncSession, recording_ids: list[int]) -> dict[int, list[int]]:
-    """Each recording's file row ids, in attach order - the join key `get_file_infos_for_
-    recordings` deliberately does not publish, because a response has no business carrying
-    an internal id."""
+async def _files_by_recording(db: AsyncSession, recording_ids: list[int]) -> dict[int, list[ExportFileRow]]:
+    """Each recording's files in attach order, with the row id the digest map and the path
+    plan join on - the one key `get_file_infos_for_recordings` deliberately does not
+    publish. One statement, so a file attached or removed mid-export cannot leave the ids
+    and the metadata disagreeing."""
     if not recording_ids:
         return {}
     rows = await db.execute(
-        select(DiveFile.recording_id, DiveFile.id)
+        select(
+            DiveFile.recording_id,
+            DiveFile.id,
+            DiveFile.uuid,
+            DiveFile.content_type,
+            DiveFile.byte_size,
+            DiveFile.original_filename,
+            DiveFile.parser_key,
+            DiveFile.updated_at,
+        )
         .where(DiveFile.recording_id.in_(recording_ids))
         .order_by(DiveFile.recording_id, DiveFile.id)
     )
-    ids: dict[int, list[int]] = {}
+    files: dict[int, list[ExportFileRow]] = {}
     for row in rows:
-        ids.setdefault(row.recording_id, []).append(row.id)
-    return ids
+        files.setdefault(row.recording_id, []).append(
+            ExportFileRow(
+                id=row.id,
+                info=DiveFileInfo(
+                    uuid=row.uuid,
+                    content_type=row.content_type,
+                    byte_size=row.byte_size,
+                    original_filename=row.original_filename,
+                    parser_key=row.parser_key,
+                    updated_at=row.updated_at,
+                ),
+            )
+        )
+    return files
 
 
 async def _certification_file_digests(db: AsyncSession, certification_ids: list[int]) -> dict[tuple[int, str], str]:

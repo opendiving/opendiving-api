@@ -46,7 +46,7 @@ _ANY_UUID = "01a11779-b240-78e5-b3b6-983bccb45606"
 
 @pytest.fixture(autouse=True)
 def unthrottled() -> Generator[None]:
-    with patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock):
+    with patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock):
         yield
 
 

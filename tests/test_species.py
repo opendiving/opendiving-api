@@ -350,7 +350,7 @@ def no_redis() -> Generator[None]:
 def unthrottled() -> Generator[AsyncMock]:
     """Both limits stubbed by default; the tests that are *about* throttling opt back in."""
     with (
-        patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+        patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
         patch("src.app.api.v1.species.enforce_rate_limit", new_callable=AsyncMock),
     ):
         yield provider_limit
@@ -3240,7 +3240,7 @@ class TestConcurrentResolvesDoNotExhaustThePool:
         try:
             with (
                 patch("src.app.core.utils.outbound.httpx.AsyncClient", side_effect=build),
-                patch("src.app.core.utils.outbound.enforce_rate_limit", new_callable=AsyncMock),
+                patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock),
             ):
                 async with anyio.create_task_group() as tasks:
                     for offset in range(concurrent):

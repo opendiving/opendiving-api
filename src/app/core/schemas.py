@@ -72,10 +72,9 @@ def _blank_is_none(value: object) -> object:
 BlankIsNone = BeforeValidator(_blank_is_none)
 
 # The read-side type for a field a write base declares `Trimmed`. The column holds whatever
-# reached it - an import stores a name as the document spells it, and nothing trims a row
-# already stored - and a read shape inheriting `Trimmed` would refuse an all-whitespace one
-# as a 500 on every list carrying it. Overridden the way `StoredVocabulary` is, so the two
-# say the same thing: a read takes the row as it is.
+# reached it - nothing trims a row stored before writes trimmed - and a read shape inheriting
+# `Trimmed` would refuse an all-whitespace one as a 500 on every list carrying it. Overridden
+# the way `StoredVocabulary` is, so the two say the same thing: a read takes the row as it is.
 StoredName = str
 
 

@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 
 # The key prefix every species photo is stored under, one kind on the volume beside
 # `dive-files`, `certification-files`, `user-avatars` and `user-portraits`. See
-# `blob_store.new_key`, and `src/scripts/sweep_orphaned_files.py`, which has to know about every
-# one of them.
+# `blob_store.new_key`, and `services/blob_keys.py`, whose registry the sweeper and the purge read
+# every stored kind from.
 KEY_KIND = "species-photos"
 
 # **Commons thumbnail widths are bucketed, not arbitrary**, which is the one thing about this

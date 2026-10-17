@@ -11,8 +11,9 @@ byte after the image ends. A metadata kind nobody has heard of yet goes with the
 one rewrite, EXIF cut down to its Orientation tag, is written the same way every time. So an
 original this app wrote reads back with the digest it was stored under.
 
-JPEG and PNG only. Walking the container is the whole technique, and these are the two
-formats an original may be.
+Walking the container is the whole technique. JPEG and PNG are the two formats a picture
+original may be; WebP is here too because a certification card may be one, and a card scan goes
+through the same strip (`services/certification_files.py`).
 """
 
 import struct
@@ -22,6 +23,7 @@ from PIL import Image
 
 JPEG_CONTENT_TYPE = "image/jpeg"
 PNG_CONTENT_TYPE = "image/png"
+WEBP_CONTENT_TYPE = "image/webp"
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _EXIF_HEADER = b"Exif\x00\x00"
@@ -50,6 +52,14 @@ _KEPT_PNG_CHUNKS = {
 }
 
 
+# The chunks a WebP image is drawn from: the extended header, the bitstreams, alpha, animation
+# and the colour profile. EXIF is handled on its own, and XMP and anything unknown are dropped.
+_KEPT_WEBP_CHUNKS = {b"VP8X", b"VP8 ", b"VP8L", b"ALPH", b"ANIM", b"ANMF", b"ICCP"}
+# `VP8X` flag bits announcing an EXIF and an XMP chunk.
+_WEBP_EXIF_FLAG = 0x08
+_WEBP_XMP_FLAG = 0x04
+
+
 class DamagedImageError(ValueError):
     """The container does not parse: a length that runs past the end, or no end at all."""
 
@@ -69,6 +79,8 @@ def strip_metadata(data: bytes, content_type: str) -> bytes:
         return _strip_jpeg(data)
     if content_type == PNG_CONTENT_TYPE:
         return _strip_png(data)
+    if content_type == WEBP_CONTENT_TYPE:
+        return _strip_webp(data)
     raise ValueError(f"no original is kept as {content_type}")
 
 
@@ -185,3 +197,44 @@ def _strip_png(data: bytes) -> bytes:
         position = chunk_end
         if chunk_type == b"IEND":
             return bytes(out)
+
+
+def _strip_webp(data: bytes) -> bytes:
+    """The RIFF container walked chunk by chunk, keeping the image's chunks in order. The
+    `VP8X` header's EXIF and XMP flags are rewritten to match what is kept, since a reader
+    may trust them."""
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        raise DamagedImageError("the WebP has no RIFF header")
+    end = 8 + int.from_bytes(data[4:8], "little")
+    if end > len(data):
+        raise DamagedImageError("the WebP ends before its image does")
+    chunks: list[tuple[bytes, bytes]] = []
+    position = 12
+    exif_seen = False
+    while position < end:
+        if position + 8 > end:
+            raise DamagedImageError("a WebP chunk runs past the end of the file")
+        chunk_type = data[position : position + 4]
+        length = int.from_bytes(data[position + 4 : position + 8], "little")
+        chunk_end = position + 8 + length
+        if chunk_end > end:
+            raise DamagedImageError("a WebP chunk runs past the end of the file")
+        payload = data[position + 8 : chunk_end]
+        if chunk_type == b"EXIF" and not exif_seen:
+            exif_seen = True
+            orientation = _orientation(payload)
+            # Only the extended format can declare an EXIF chunk.
+            if orientation is not None and chunks[:1] and chunks[0][0] == b"VP8X":
+                chunks.append((b"EXIF", _orientation_tiff(orientation)))
+        elif chunk_type in _KEPT_WEBP_CHUNKS:
+            chunks.append((chunk_type, payload))
+        position = chunk_end + (length & 1)
+
+    out = bytearray(b"WEBP")
+    has_exif = any(chunk_type == b"EXIF" for chunk_type, _ in chunks)
+    for chunk_type, payload in chunks:
+        if chunk_type == b"VP8X" and payload:
+            flags = payload[0] & ~(_WEBP_EXIF_FLAG | _WEBP_XMP_FLAG) | (_WEBP_EXIF_FLAG if has_exif else 0)
+            payload = bytes((flags,)) + payload[1:]
+        out += chunk_type + struct.pack("<I", len(payload)) + payload + b"\x00" * (len(payload) & 1)
+    return b"RIFF" + struct.pack("<I", len(out)) + bytes(out)

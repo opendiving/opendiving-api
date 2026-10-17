@@ -241,7 +241,8 @@ class ImportEvent(_ReadModel):
     time: int | None = None
     type: Annotated[ProfileEventType | None, _unknown_is_absent(ProfileEventType), Field(default=None)]
     gas_number: int | None = None
-    label: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
+    # Unbounded in the format; `shape_events` cuts it to what this app stores, and says so.
+    label: str | None = None
 
 
 class ImportProfile(_ReadModel):
@@ -824,7 +825,13 @@ class ImportFileReport(BaseModel):
     referenced: Annotated[int, Field(description="Dive-computer files and card images the document names")]
     restored: Annotated[int, Field(description="Files whose bytes were written to this instance")]
     not_contained: Annotated[int, Field(description="Files with no bytes in this document - import the archive")]
-    skipped: Annotated[int, Field(description="Files whose bytes are here but could not be stored")]
+    skipped: Annotated[
+        int,
+        Field(
+            description="Files whose bytes are here but were not stored - their record was not written, or they "
+            "could not be"
+        ),
+    ]
 
 
 class ConversionConverter(BaseModel):

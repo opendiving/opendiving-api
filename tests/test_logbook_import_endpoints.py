@@ -170,7 +170,7 @@ def signed_in(import_app: Any, monkeypatch: Any) -> Any:
         )
 
     async def fake_write(db: Any, **kwargs: Any) -> WrittenImport:
-        return WrittenImport(dive_ids={}, match_files=[])
+        return WrittenImport(dive_ids={}, match_files=[], retired_bytes=0)
 
     async def fake_resolve(db: Any, **kwargs: Any) -> frozenset[int]:
         return frozenset()

@@ -81,9 +81,10 @@ MAX_PICTURE_PIXELS = 50_000_000
 #
 # - `MAX_PICTURE_PIXELS` judges the declaration, before `draft` has had a chance to make a
 #   dishonest one cheap. Take it away and a bomb is quietly downscaled instead of refused.
-# - This one judges what will actually be rasterized. `draft` reduces only a JPEG - a 12 MP
-#   phone photo arrives here as 1008x756 and a 48 MP one at about the same - so what it bounds in
-#   practice is a PNG, which is decoded whole.
+# - This one judges what will actually be rasterized. `draft` reduces only a JPEG, and only as
+#   far as the crop still covers the frame, deeper where this cap demands it (`_draft_scale`) -
+#   so a JPEG of any size passes, and what it refuses in practice is a PNG, which is decoded
+#   whole.
 #
 # Written as the product it is named for, 4032x3024 (a 12 MP phone photo, 12,192,768
 # pixels), so that image passes whatever its orientation; a phone screenshot is a quarter of
@@ -95,12 +96,12 @@ MAX_PICTURE_PIXELS = 50_000_000
 # API's own container (Linux, Pillow 12.3): that counter is a monotonic high-water mark, and
 # macOS reads it higher. At the cap, through `_prepare_original` with the strip included and
 # either frame: ~110 MB for a 5 MB RGBA PNG, the worst a 5 MB file can be - `resize`
-# premultiplies a full-size copy on the alpha paths, see `_render` - ~60 MB for an RGB one,
-# and ~25 MB for a 10 MB camera JPEG, which `draft` decodes at a quarter. `_DECODE_LIMITER`
-# makes that one decode per worker, so the shipped image's four workers reach ~440 MB above
-# their own resident sets only when four worst-case PNGs arrive at once, against a documented
-# install minimum of 1 GB for the whole stack
-# (https://github.com/opendiving/opendiving/blob/main/docs/install.md).
+# premultiplies a full-size copy on the alpha paths, see `_render` - ~60 MB for an RGB one, and
+# ~70 MB for a 12 MP camera JPEG decoded whole, which a small enough crop needs; a CMYK JPEG gets
+# half the pixels (`_draft_scale`). `_DECODE_LIMITER` makes that one decode per worker, so the
+# shipped image's four workers reach ~440 MB above their own resident sets only when four
+# worst-case PNGs arrive at once, against a documented install minimum of 1 GB for the whole
+# stack (https://github.com/opendiving/opendiving/blob/main/docs/install.md).
 MAX_ORIGINAL_DECODE_PIXELS = 4032 * 3024
 
 # The same question for the avatar that keeps no original - an upload without a crop, from
@@ -137,8 +138,8 @@ _DECODE_LIMITER = anyio.CapacityLimiter(1)
 ALLOWED_FORMATS = ["JPEG", "PNG", "WEBP", "GIF"]
 ORIGINAL_FORMATS = ["JPEG", "PNG"]
 
-# The avatar's square, and the size every decode asks `draft` for: 36-80 px on screen,
-# doubled on a retina display.
+# The avatar's square, and the size an avatar without a crop asks `draft` for: 36-80 px on
+# screen, doubled on a retina display.
 AVATAR_DIMENSION = 512
 RENDITION_CONTENT_TYPE = "image/webp"
 
@@ -291,6 +292,30 @@ def _fits(crop: PictureCrop, size: tuple[int, int], frame: Frame) -> bool:
     return True
 
 
+def _draft_scale(image: Image.Image, crop: PictureCrop, frame: Frame) -> int:
+    """The JPEG reduction to ask `draft` for when rendering `crop` out of `image`: 1, 2, 4
+    or 8.
+
+    The deepest at which the reduced crop still covers the rendition `frame` draws from it,
+    so the reduction costs no output pixel - and deeper still where the reduced raster would
+    otherwise exceed the decode cap, which trades output pixels for staying under it rather
+    than refusing a photo the cap was never meant to refuse. A scalar, so the crop's upright
+    axes need no mapping onto the stored ones.
+
+    A CMYK JPEG gets half the cap: four bands, and three more for its conversion, put one
+    decoded whole at 134 MB, measured as `MAX_ORIGINAL_DECODE_PIXELS` says.
+    """
+    width, height = image.size
+    budget = MAX_ORIGINAL_DECODE_PIXELS // (2 if image.mode == "CMYK" else 1)
+    wanted = min(frame.max_height, crop.height)
+    scale = 1
+    while scale < 8 and crop.height // (scale * 2) >= wanted:
+        scale *= 2
+    while scale < 8 and -(-width // scale) * -(-height // scale) > budget:
+        scale *= 2
+    return scale
+
+
 def _normalize(data: bytes, frame: Frame = AVATAR_FRAME, crop: PictureCrop | None = None) -> bytes:
     """`_render` through a crop the caller already holds, or through none for an avatar."""
     rendition, _ = _render(data, frame, None if crop is None else lambda _upright: crop)
@@ -324,12 +349,13 @@ def _render(
       The two caps answer different questions and neither substitutes for the other; the
       constants say which is which.
 
-    Between the second and the third, `draft` asks the decoder for the smallest raster
-    still no smaller than the avatar. Only JPEG can honour it - it decodes at a fraction of
-    the DCT scale, which is what `Image.thumbnail` uses it for - and that is exactly the
-    format cameras produce. It halves only while the result stays at or above the requested
-    size, so the no-upscaling rule survives it; it also bounds what a rendition can reach,
-    since a crop is drawn from the reduced raster.
+    Between the second and the third, `draft` asks the decoder for a reduced raster. Only
+    JPEG can honour it - it decodes at a fraction of the DCT scale, which is what
+    `Image.thumbnail` uses it for - and that is exactly the format cameras produce. Through a
+    crop it asks for `_draft_scale`, the deepest reduction at which the crop still covers the
+    frame, so the crop is known before it; without one, for the smallest raster still no
+    smaller than the avatar. It halves only while the result stays at or above the requested
+    size, so the no-upscaling rule survives it.
 
     `exif_transpose` next, so a portrait-orientation phone photo comes out upright - the
     orientation is the one thing in the metadata the rendition applies. The WebP encoder
@@ -361,20 +387,24 @@ def _render(
                     f"That image is too large to process ({width}x{height}). Please use a smaller photo."
                 )
 
+            if crop_for is not None:
+                upright = _upright_size(image, width, height)
+                crop = crop_for(upright)
+                _check_crop(crop, upright, frame)
+
             # After the claimed-size cap, never before: that cap has to judge the
             # declaration, which is what makes it a bomb check rather than a resizing hint.
-            image.draft(None, (AVATAR_DIMENSION, AVATAR_DIMENSION))
+            if crop is None:
+                image.draft(None, (AVATAR_DIMENSION, AVATAR_DIMENSION))
+            else:
+                scale = _draft_scale(image, crop, frame)
+                image.draft(None, (max(1, width // scale), max(1, height // scale)))
 
             # And before the first line here that decodes.
             if image.width * image.height > decode_cap:
                 raise UnsupportedPictureError(
                     f"That image is too large to process ({width}x{height}). Please use a smaller photo."
                 )
-
-            if crop_for is not None:
-                upright = _upright_size(image, width, height)
-                crop = crop_for(upright)
-                _check_crop(crop, upright, frame)
 
             ImageOps.exif_transpose(image, in_place=True)
 

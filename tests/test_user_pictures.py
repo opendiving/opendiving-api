@@ -141,6 +141,22 @@ def _open(data: bytes) -> Image.Image:
     return Image.open(io.BytesIO(data))
 
 
+@pytest.fixture
+def opened(monkeypatch: pytest.MonkeyPatch) -> list[Image.Image]:
+    """Every image the pipeline opens, as `draft` left it - the size the decoder was asked to
+    rasterize, which no output can tell you."""
+    images: list[Image.Image] = []
+    real_open = Image.open
+
+    def spy(fp: Any, **kwargs: Any) -> Image.Image:
+        image = real_open(fp, **kwargs)
+        images.append(image)
+        return image
+
+    monkeypatch.setattr(user_pictures.Image, "open", spy)
+    return images
+
+
 def _square(size: tuple[int, int]) -> PictureCrop:
     edge = min(size)
     return PictureCrop(x=(size[0] - edge) // 2, y=(size[1] - edge) // 2, width=edge, height=edge)
@@ -217,7 +233,7 @@ class TestNormalization:
 
         assert result.size == (80, 80)
 
-    def test_a_large_jpeg_is_never_decoded_at_full_resolution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_a_large_jpeg_is_never_decoded_at_full_resolution(self, opened: list[Image.Image]) -> None:
         """The memory half, and it does not show up in any output the other tests read.
 
         The pixel cap bounds what is *accepted*, not what is allocated: a cap-passing
@@ -226,16 +242,6 @@ class TestNormalization:
         scale, so nothing near full resolution is ever materialised. Asserted on the opened
         image's own size, which `draft` rewrites in place before a pixel is read.
         """
-        opened: list[Image.Image] = []
-        real_open = Image.open
-
-        def spy(fp: Any, **kwargs: Any) -> Image.Image:
-            image = real_open(fp, **kwargs)
-            opened.append(image)
-            return image
-
-        monkeypatch.setattr(user_pictures.Image, "open", spy)
-
         result = _open(_normalize(large_jpeg(size=(4000, 4000))))
 
         # A quarter of each edge: `draft` halves while the result stays at or above the
@@ -468,7 +474,7 @@ class TestTheOriginalIsStrippedLosslessly:
 class TestRenderingThroughACrop:
     def test_a_12_mp_phone_photo_turned_by_its_exif_renders_upright_at_700x900(self) -> None:
         """Stored landscape with orientation 6: the crop is in the upright 3024x4032 image,
-        and `draft` decodes it at 756x1008, whose 7:9 is 756x972 - bounded to 900 high."""
+        and `draft` decodes it at a quarter, where the 3888 px crop is 972 high - bounded to 900."""
         rendition = _prepare_original(
             phone_jpeg(size=(4032, 3024), orientation=6), PORTRAIT_FRAME, PORTRAIT_CROP_OF_A_TURNED_PHONE_PHOTO
         ).rendition
@@ -481,12 +487,54 @@ class TestRenderingThroughACrop:
         assert top[1] > top[0], "the orientation tag was not applied"
         assert bottom[0] > bottom[1]
 
-    def test_the_same_photo_without_the_tag_renders_landscape_derived_at_588x756(self) -> None:
+    def test_the_same_photo_without_the_tag_renders_landscape_derived_at_700x900(self) -> None:
         rendition = _prepare_original(
             phone_jpeg(size=(4032, 3024), orientation=None), PORTRAIT_FRAME, PORTRAIT_CROP_OF_A_LANDSCAPE_PHOTO
         ).rendition
 
-        assert _open(rendition).size == (588, 756)
+        assert _open(rendition).size == (700, 900)
+
+    @pytest.mark.parametrize("orientation", [None, 6])
+    @pytest.mark.parametrize(
+        ("frame", "crop", "size"),
+        [
+            (PORTRAIT_FRAME, PictureCrop(x=900, y=800, width=933, height=1200), (700, 900)),
+            (AVATAR_FRAME, PictureCrop(x=1000, y=1000, width=1000, height=1000), (AVATAR_DIMENSION,) * 2),
+        ],
+    )
+    def test_a_crop_that_covers_the_frame_renders_at_the_frame_size(
+        self, frame: user_pictures.Frame, crop: PictureCrop, size: tuple[int, int], orientation: int | None
+    ) -> None:
+        """A crop a quarter the photo's height still holds more pixels than the frame draws, so
+        `draft` may not reduce the photo past the point where the crop stops covering it - a
+        reduction chosen for the whole photo would leave this crop at 300 px or 250."""
+        rendition = _prepare_original(phone_jpeg(size=(4032, 3024), orientation=orientation), frame, crop).rendition
+
+        assert _open(rendition).size == size
+
+    def test_a_small_crop_of_a_photo_over_the_cap_is_drawn_under_the_cap(self, opened: list[Image.Image]) -> None:
+        """At full scale a 24 MP photo is twice the decode cap, so the reduction the crop alone
+        would allow - none - gives way to the one the cap needs, and the crop renders at what
+        survives it rather than the photo being refused."""
+        source = phone_jpeg(size=(5712, 4284), orientation=None)
+        rendition = _prepare_original(source, PORTRAIT_FRAME, PictureCrop(x=0, y=0, width=700, height=900)).rendition
+
+        assert opened[0].size == (2856, 2142)
+        assert opened[0].width * opened[0].height <= MAX_ORIGINAL_DECODE_PIXELS
+        assert _open(rendition).size == (350, 450)
+
+    @pytest.mark.parametrize(("mode", "decoded"), [("RGB", (3000, 2400)), ("CMYK", (1500, 1200))])
+    def test_a_cmyk_jpeg_is_decoded_under_half_the_cap(
+        self, opened: list[Image.Image], mode: str, decoded: tuple[int, int]
+    ) -> None:
+        """Four bands and three more for the conversion: whole at the cap, a CMYK decode
+        outweighs the RGBA PNG the cap was measured against, so 7.2 MP is under the cap as RGB
+        and over the half a CMYK JPEG gets."""
+        buffer = io.BytesIO()
+        Image.new(mode, (3000, 2400)).save(buffer, format="JPEG")
+        _prepare_original(buffer.getvalue(), PORTRAIT_FRAME, PictureCrop(x=0, y=0, width=700, height=900))
+
+        assert opened[0].size == decoded
 
     def test_a_24_mp_phone_photo_is_accepted(self) -> None:
         crop = PictureCrop(x=1190, y=0, width=3332, height=4284)

@@ -19,10 +19,13 @@ crud_contacts = CRUDContact(Contact)
 CONTACT_SEARCH_COLUMNS = ("name", "address_city")
 
 
+CONTACT_NAME_KEY = "ux_contact_user_id_name_lower"
+
+
 async def contact_name_exists(db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None) -> bool:
     """Asked on `ux_contact_user_id_name_lower`'s own expressions."""
     return await unique_key_taken(
-        db, Contact, "ux_contact_user_id_name_lower", {"user_id": user_id, "name": name}, exclude_id=exclude_id
+        db, Contact, CONTACT_NAME_KEY, {"user_id": user_id, "name": name}, exclude_id=exclude_id
     )
 
 
