@@ -5,22 +5,25 @@ defaults, so a header dropped from a handler cannot hide behind `SecurityHeaders
 import io
 import uuid as uuid_pkg
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Request, Response
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.app.api.v1 import certifications, checkin_links, dives, export, invitations, map_tiles, species, users
 from src.app.schemas.certification import CertificationSide
-from src.app.services.map_tiles import ServedMapTile
 from src.app.schemas.user_picture import PictureKind
+from src.app.services.map_tiles import ServedMapTile
 from src.app.services.user_pictures import StoredPictureFile
 
 SHA = "a" * 64
 ETAG = f'"{SHA}"'
 CSP = "default-src 'none'; sandbox; frame-ancestors 'none'"
 DATA = b"\x89PNG-bytes"
+# Every database read the routes make is patched out.
+DB = cast(AsyncSession, None)
 
 
 def _request(if_none_match: str | None = None) -> Request:
@@ -65,7 +68,7 @@ def dive_file(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestDiveFile:
     async def _read(self, if_none_match: str | None = None) -> Response:
         return await dives.read_dive_file(
-            request=_request(if_none_match), uuid=uuid_pkg.uuid4(), fid=uuid_pkg.uuid4(), current_user={}, db=None
+            request=_request(if_none_match), uuid=uuid_pkg.uuid4(), fid=uuid_pkg.uuid4(), current_user={}, db=DB
         )
 
     @pytest.mark.asyncio
@@ -86,7 +89,7 @@ class TestDiveProfile:
         monkeypatch.setattr(dives, "resolve_recording", AsyncMock(return_value=2))
         monkeypatch.setattr(dives, "get_profile_version", AsyncMock(return_value=SHA))
         response = await dives.read_dive_profile(
-            request=_request(ETAG), uuid=uuid_pkg.uuid4(), rid=uuid_pkg.uuid4(), current_user={}, db=None
+            request=_request(ETAG), uuid=uuid_pkg.uuid4(), rid=uuid_pkg.uuid4(), current_user={}, db=DB
         )
         assert isinstance(response, Response)
         assert (response.status_code, _headers(response)) == (304, _not_modified("private, max-age=300"))
@@ -110,7 +113,7 @@ class TestCertificationFile:
             uuid=uuid_pkg.uuid4(),
             side=CertificationSide.FRONT,
             current_user={},
-            db=None,
+            db=DB,
         )
 
     @pytest.mark.asyncio
@@ -132,7 +135,7 @@ def species_photo(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestSpeciesPhoto:
     async def _read(self, if_none_match: str | None = None) -> Response:
-        return await species.read_species_photo(request=_request(if_none_match), uuid=uuid_pkg.uuid4(), db=None)
+        return await species.read_species_photo(request=_request(if_none_match), uuid=uuid_pkg.uuid4(), db=DB)
 
     @pytest.mark.asyncio
     async def test_served(self, species_photo: None) -> None:
@@ -167,7 +170,7 @@ class TestCheckinPortrait:
         monkeypatch.setattr(checkin_links, "resolve_checkin_link", AsyncMock(return_value=SimpleNamespace(user_id=1)))
         monkeypatch.setattr(checkin_links, "get_rendition", AsyncMock(return_value=TestUserPicture.STORED))
         monkeypatch.setattr(checkin_links, "read_picture_bytes", AsyncMock(return_value=DATA))
-        return await checkin_links.read_checkin_portrait(request=_request(if_none_match), token="t", db=None)
+        return await checkin_links.read_checkin_portrait(request=_request(if_none_match), token="t", db=DB)
 
     @pytest.mark.asyncio
     async def test_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,7 +184,7 @@ class TestCheckinPortrait:
     @pytest.mark.asyncio
     async def test_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(checkin_links, "resolve_checkin_link", AsyncMock(return_value=None))
-        response = await checkin_links.read_checkin_portrait(request=_request(), token="t", db=None)
+        response = await checkin_links.read_checkin_portrait(request=_request(), token="t", db=DB)
         assert (response.status_code, response.body, _headers(response)) == (
             404,
             b'{"detail":"Not found"}',
@@ -197,7 +200,7 @@ class TestCheckinCardFront:
         monkeypatch.setattr(checkin_links, "find_card_front", AsyncMock(return_value=self.FRONT))
         monkeypatch.setattr(checkin_links, "load_card_front", AsyncMock(return_value=self.FRONT))
         return await checkin_links.read_checkin_card_front(
-            request=_request(if_none_match), token="t", uuid=str(uuid_pkg.uuid4()), db=None
+            request=_request(if_none_match), token="t", uuid=str(uuid_pkg.uuid4()), db=DB
         )
 
     @pytest.mark.asyncio
@@ -214,7 +217,7 @@ class TestMapTile:
     async def _read(self, monkeypatch: pytest.MonkeyPatch, data: bytes | None) -> Response:
         monkeypatch.setattr(map_tiles, "find_or_draw", AsyncMock(return_value=ServedMapTile(sha256=SHA, data=data)))
         return await map_tiles.read_map_tile(
-            request=_request(), theme="light", z=1, x=0, y=0, current_user={"id": 1}, db=None
+            request=_request(), theme="light", z=1, x=0, y=0, current_user={"id": 1}, db=DB
         )
 
     @pytest.mark.asyncio
@@ -247,7 +250,7 @@ class TestInviteLinkNotFound:
     @pytest.mark.asyncio
     async def test_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(invitations, "registration_is_invite_only", lambda: False)
-        response: Any = await invitations.resolve_invite_link(token="t", response=Response(), db=None)
+        response: Any = await invitations.resolve_invite_link(token="t", response=Response(), db=DB)
         assert (response.status_code, response.body, _headers(response)) == (
             404,
             b'{"detail":"This invite link is not active."}',

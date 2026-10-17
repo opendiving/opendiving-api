@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
+from ...core.utils.binary_responses import not_modified, stored_bytes_response
 from ...core.utils.cache import cache
 from ...core.utils.pagination import clamp_pagination
 from ...core.utils.uploads import content_disposition_attachment
@@ -533,35 +534,22 @@ async def read_certification_file(
 
     etag = f'"{sha256}"'
     if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=300"})
+        return not_modified(etag, cache_control="private, max-age=300")
 
     file = await load_certification_file(db=db, certification_id=db_certification.id, side=side)
     if file is None:
         raise NotFoundException(f"No {side.value} image for this certification")
 
-    return Response(
-        content=file.data,
+    # `attachment`, not `inline`: the web app fetches this through its API client and renders
+    # from a blob URL, so it never navigates here directly. Should someone open the URL in a tab
+    # anyway, `attachment` stops a malicious PDF from executing in the same-origin viewer.
+    # `private` because this is one diver's card and no shared cache should keep a copy.
+    return stored_bytes_response(
+        file.data,
         media_type=file.content_type,
-        headers={
-            # `attachment`, not `inline`: the web app fetches this through its API client
-            # and renders from a blob URL, so it never navigates here directly. Should
-            # someone open the URL in a tab anyway, `attachment` stops a malicious PDF
-            # from executing in the same-origin viewer.
-            "Content-Disposition": content_disposition_attachment(file.original_filename, default="card"),
-            # The stored type is sniffed from the bytes, but say so explicitly: the
-            # browser must not be free to re-interpret user-uploaded content as something
-            # scriptable.
-            "X-Content-Type-Options": "nosniff",
-            # `frame-ancestors` is spelled out because it does not fall back to
-            # `default-src`: a response with its own policy opts out of
-            # `SecurityHeadersMiddleware`'s default and would otherwise be framable
-            # however strict the rest of this is.
-            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
-            # `private` because this is one diver's card and no shared cache should keep
-            # a copy; the `ETag` makes the re-validation after 5 minutes cheap.
-            "Cache-Control": "private, max-age=300",
-            "ETag": etag,
-        },
+        etag=etag,
+        cache_control="private, max-age=300",
+        disposition=content_disposition_attachment(file.original_filename, default="card"),
     )
 
 

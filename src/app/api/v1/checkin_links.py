@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
+from ...core.utils.binary_responses import not_modified, stored_bytes_response, uncacheable_not_found
 from ...schemas.checkin_link import (
     CheckinLinkCreate,
     CheckinLinkMinted,
@@ -49,28 +50,18 @@ _NOT_FOUND: dict[int | str, dict[str, Any]] = {
 
 
 def _not_found() -> JSONResponse:
-    return JSONResponse(status_code=404, content={"detail": "Not found"}, headers={"Cache-Control": _NO_STORE})
+    return uncacheable_not_found("Not found")
 
 
 def _not_modified(sha256: str) -> Response:
-    return Response(status_code=304, headers={"ETag": f'"{sha256}"', "Cache-Control": _NO_STORE})
+    return not_modified(f'"{sha256}"', cache_control=_NO_STORE)
 
 
 def _image(*, sha256: str, content_type: str, data: bytes) -> Response:
     """An image the page shows in an `<img>`: `inline`, where the owner routes say `attachment`
-    because their clients fetch through the API client. The rest is theirs - `nosniff`, a
-    sandboxing CSP, and an `ETag` of the digest."""
-    return Response(
-        content=data,
-        media_type=content_type,
-        headers={
-            "Content-Disposition": "inline",
-            "X-Content-Type-Options": "nosniff",
-            # `frame-ancestors` does not fall back to `default-src`; see the owner routes.
-            "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
-            "Cache-Control": _NO_STORE,
-            "ETag": f'"{sha256}"',
-        },
+    because their clients fetch through the API client."""
+    return stored_bytes_response(
+        data, media_type=content_type, etag=f'"{sha256}"', cache_control=_NO_STORE, disposition="inline"
     )
 
 

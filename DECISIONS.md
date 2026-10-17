@@ -3752,9 +3752,9 @@ bundled `Caddyfile` was rejected: it fixes one deployment shape (the `proxy` pro
 since a `default-src` breaks CRUDAdmin's templates; `X-Frame-Options` for parity with
 `next.config.js`. No `Strict-Transport-Security`: it is host-scoped, the web app sends it, and its
 off-switch `WEB_HSTS` lives there, so an API copy would ignore `WEB_HSTS=off`. Handlers keep their
-own headers; the binary downloads in `dives.py`, `certifications.py` and `export.py` spell out
-`frame-ancestors 'none'` because it never falls back to `default-src`. Registered last, so
-`add_middleware` puts it outside `CORSMiddleware`'s self-answered preflights; only the 500 from
+own headers; every binary response sends `BINARY_CSP` (`core/utils/binary_responses.py`), which
+spells out `frame-ancestors 'none'` because it never falls back to `default-src`. Registered last,
+so `add_middleware` puts it outside `CORSMiddleware`'s self-answered preflights; only the 500 from
 `ServerErrorMiddleware` escapes. The bundled `Caddyfile` still sends `/admin*` to `api:8000` while
 the operator surface moves to the web app's `/admin`; `CRUD_ADMIN_MOUNT_PATH` keeps its `/admin`
 default so existing panel installs keep working.
