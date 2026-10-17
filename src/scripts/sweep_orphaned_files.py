@@ -92,8 +92,8 @@ async def _referenced_keys(session: AsyncSession) -> set[str]:
     """
     referenced: set[str] = set()
     for entry in BLOB_KEY_COLUMNS:
-        keys = (await session.execute(select(entry.column).where(entry.column.is_not(None)))).scalars()
-        referenced.update(keys)
+        rows = await session.execute(select(entry.column))
+        referenced.update(key for key in rows.scalars() if key is not None)
     return referenced
 
 

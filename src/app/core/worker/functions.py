@@ -445,8 +445,8 @@ async def _collect_stored_file_keys(db: AsyncSession, user_id: int) -> list[str]
     for entry in BLOB_KEY_COLUMNS:
         if entry.owner is None:
             continue
-        query = select(entry.column).where(entry.owner(user_id), entry.column.is_not(None))
-        keys.extend((await db.execute(query)).scalars())
+        rows = await db.execute(select(entry.column).where(entry.owner(user_id)))
+        keys.extend(key for key in rows.scalars() if key is not None)
     return keys
 
 

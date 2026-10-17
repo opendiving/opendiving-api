@@ -27,7 +27,7 @@ from ..models.user_picture import UserPicture
 
 @dataclass(frozen=True, slots=True)
 class BlobKeyColumn:
-    column: InstrumentedAttribute[str] | InstrumentedAttribute[str | None]
+    column: InstrumentedAttribute[str | None]
     owner: Callable[[int], ColumnElement[bool]] | None
 
 

@@ -3901,11 +3901,11 @@ under the `tmp/` prefix that `iter_keys` hides. The worker runs it too, since
 `purge_deleted_accounts` is a GDPR erasure and credentials that cannot delete must fail at boot. It
 does not catch a `local` volume that was never mounted: the image creates `/data/files` owned by uid
 1000, so an unmounted container probes its own layer; `docker-compose.yml`'s `files-data` line
-prevents that. After migrations, `warn_if_files_volume_looks_empty` logs CRITICAL when file rows
-exist but `blob_store.has_any_key()` (a bounded `MaxKeys=1` call, not a walk) is false, without
-refusing, because the documented restore order has a legitimate window. `TestClient` enters the real
-lifespan, so `tests/conftest.py` pins `FILE_STORAGE_DIR` to a temp directory before importing
-`src.app.main`, and `.github/workflows/tests.yml` sets it too.
+prevents that. After migrations, `warn_if_files_volume_looks_empty` logs CRITICAL when any column in
+`BLOB_KEY_COLUMNS` holds a key but `blob_store.has_any_key()` (a bounded `MaxKeys=1` call, not a
+walk) is false, without refusing, because the documented restore order has a legitimate window.
+`TestClient` enters the real lifespan, so `tests/conftest.py` pins `FILE_STORAGE_DIR` to a temp
+directory before importing `src.app.main`, and `.github/workflows/tests.yml` sets it too.
 
 ## File payloads: Download routes keep their contract, and `async_engine` is disposed both ways
 
@@ -4677,13 +4677,13 @@ counter slot, or one dialog would starve a diver's resolve, and share a per-proc
 
 ## The sweeper has to learn every new blob kind, and forgetting is destructive
 
-`blob_store.iter_keys()` walks the whole volume while `_referenced_keys()` builds its set from
-columns, so a kind missing there is on disk and referenced by nothing, and every file of it past the
+`blob_store.iter_keys()` walks the whole store while the sweeper's referenced set is read from
+columns, so a kind missing there is stored and referenced by nothing, and every file of it past the
 24-hour grace window is an orphan for `--delete` to unlink. The suspicious-fraction refusal is the
-only brake, `--force` overrides it, and it does not engage below 20 files on the volume, so the
-smallest instances have none. Species photos and map tiles are the worst cases, being kinds on
-global tables. `_referenced_keys`' docstring does not count its sources, because any count goes
-stale at the next kind.
+only brake, `--force` overrides it, and it does not engage below 20 files, so the smallest instances
+have none. Those columns are listed once, in `services/blob_keys.py`, which the sweeper, the account
+purge (entries with an owner) and the startup files-volume check all read. `tests/test_blob_keys.py`
+fails when a model gains a key-named column the registry neither lists nor exempts.
 
 ## Species photos: Backfilling selects on the timestamp, not on the absence of bytes
 
@@ -7040,7 +7040,7 @@ past the draw limit a stored tile's 200 against an unstored one's 429 is an exac
 
 A tile is drawn from the basemap alone and shared by every account, so it counts toward no storage
 limit, is not exported, and no account's purge collects it - taking the tiles one diver was shown
-would take tiles others are shown. The sweeper's `_referenced_keys` reads `map_tile`, and the worker
+would take tiles others are shown. `BLOB_KEY_COLUMNS` lists `map_tile` with no owner, and the worker
 deletes a tile unserved for `UNSERVED_RETENTION`. Rejected: the purge collecting the tiles an
 account's requests drew first, which ties shared files to whoever happened to ask first.
 
