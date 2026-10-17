@@ -3,9 +3,10 @@ import uuid as uuid_pkg
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..core.config import JOIN_CHANNEL_SLUG_PATTERN
+from ..core.schemas import AccountEmail
 
 # -------------- email magic link --------------
 # The join-channel slug a sign-in arrived through, from `/join?via=<slug>`, or the token of
@@ -18,7 +19,7 @@ JoinVia = Annotated[str | None, Field(pattern=JOIN_CHANNEL_SLUG_PATTERN, example
 class EmailAuthRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    email: Annotated[EmailStr, Field(examples=["diver@example.com"])]
+    email: Annotated[AccountEmail, Field(examples=["diver@example.com"])]
     via: JoinVia = None
 
 

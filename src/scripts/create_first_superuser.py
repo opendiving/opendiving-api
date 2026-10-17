@@ -8,6 +8,7 @@ from uuid6 import uuid7  # 126
 
 from ..app.core.config import settings
 from ..app.core.db.database import AsyncSession, async_engine, local_session
+from ..app.core.schemas import EMAIL_MAX_LENGTH
 from ..app.models.user import User
 
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +33,7 @@ USER_TABLE = Table(
     Column("id", Integer, primary_key=True, autoincrement=True, nullable=False),
     Column("name", String(30), nullable=False),
     Column("username", String(20), nullable=False, unique=True, index=True),
-    Column("email", String(50), nullable=False, unique=True, index=True),
+    Column("email", String(EMAIL_MAX_LENGTH), nullable=False, unique=True, index=True),
     Column("uuid", UUID(as_uuid=True), default=uuid7, unique=True),
     Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False),
     Column("updated_at", DateTime),

@@ -3,9 +3,9 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, ClassVar
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from ..core.schemas import AccountEmail, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 from .dive_form_preset import DiveFormField, canonical_hidden_fields
 from .user_picture import PictureCrop
 
@@ -30,7 +30,7 @@ class UnitSystem(StrEnum):
 class UserBase(BaseModel):
     name: Annotated[str, Field(min_length=2, max_length=30, examples=["User Userson"])]
     username: Annotated[str, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userson"])]
-    email: Annotated[EmailStr, Field(examples=["user.userson@example.com"])]
+    email: Annotated[AccountEmail, Field(examples=["user.userson@example.com"])]
 
 
 class UserRead(PublicUUIDSchema):
@@ -40,7 +40,7 @@ class UserRead(PublicUUIDSchema):
 
     name: Annotated[str, Field(min_length=2, max_length=30, examples=["User Userson"])]
     username: Annotated[str, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userson"])]
-    email: Annotated[EmailStr, Field(examples=["user.userson@example.com"])]
+    email: Annotated[AccountEmail, Field(examples=["user.userson@example.com"])]
     # The two pictures, read with the account in one query (`read_account`). Each
     # `*_sha256` is its rendition's digest: null means there is no picture - initials for
     # the avatar, an empty frame for the portrait - and non-null is the version token to
@@ -220,7 +220,7 @@ class UserAdminUpdate(UserUpdate):
 
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (*UserUpdate.NON_NULLABLE_FIELDS, "email")
 
-    email: Annotated[EmailStr | None, Field(examples=["user.userberg@example.com"], default=None)]
+    email: Annotated[AccountEmail | None, Field(examples=["user.userberg@example.com"], default=None)]
 
 
 class AccountDeletionResponse(BaseModel):

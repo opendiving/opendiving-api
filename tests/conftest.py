@@ -171,8 +171,7 @@ def unique_email() -> str:
     `example.com` rather than something under `.test`: both are reserved by RFC 2606 and
     neither can reach a real inbox, but `email-validator` (which backs Pydantic's
     `EmailStr`) rejects `.test` outright as a special-use name - so an address there
-    fails validation in any test that round-trips one through a schema. Comfortably
-    inside the column's 50 characters either way.
+    fails validation in any test that round-trips one through a schema.
     """
     return f"{unique_username()}@example.com"
 

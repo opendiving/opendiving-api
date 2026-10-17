@@ -25,7 +25,7 @@ Four things are worth pinning and the rest is plumbing:
 import asyncio
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -175,10 +175,25 @@ class TestMissingObjectsAndRealFailures:
         the one that exists."""
         s3.bucket = "somebody-elses-bucket"
 
-        with pytest.raises(ClientError):
+        with pytest.raises(blob_store.BlobStoreError) as read:
             await blob_store.get(KEY)
-        with pytest.raises(ClientError):
+        with pytest.raises(blob_store.BlobStoreError) as probe:
             await blob_store.has(KEY)
+        assert not isinstance(read.value, blob_store.BlobMissingError)
+        assert isinstance(read.value.__cause__, ClientError)
+        assert isinstance(probe.value.__cause__, ClientError)
+
+    @pytest.mark.asyncio
+    async def test_a_store_failure_is_an_oserror_on_every_call(self, s3: FakeS3Client) -> None:
+        """What lets a caller degrade without knowing the backend: the local volume fails with
+        an `OSError`, and so does the bucket."""
+        s3.explode_on["put_object"] = ClientError({"Error": {"Code": "InternalError"}}, "PutObject")
+        with pytest.raises(OSError):
+            await blob_store.put(KEY, DATA)
+
+        s3.explode_on["delete_object"] = EndpointConnectionError(endpoint_url="https://r2.example")
+        with pytest.raises(OSError):
+            await blob_store.delete(KEY)
 
 
 class TestEnsureStorageReady:
