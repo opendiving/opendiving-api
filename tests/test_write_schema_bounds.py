@@ -1,6 +1,6 @@
 """Write schemas refuse what their columns cannot honestly store.
 
-Two holes, one per test class below. A request body can carry a bare `NaN` or `Infinity`
+Two holes. A request body can carry a bare `NaN` or `Infinity`
 token - FastAPI parses them, and Pydantic floats allow them by default - and Postgres
 takes a `NaN` past every one-sided `CHECK` (`'NaN'::float8 > 0` is true). And an integer
 past the column's width fails as a `DataError` before any `CHECK` is consulted, so the
@@ -28,7 +28,8 @@ from src.app.api.dependencies import get_current_user
 from src.app.core.config import settings
 from src.app.core.schemas import POSTGRES_INTEGER_MAX
 from src.app.core.setup import create_application
-from src.app.schemas.dive import DiveCreate, DiveUpdate
+from src.app.schemas.dive import DiveCreate, DiveRenumberRequest, DiveUpdate
+from src.app.schemas.dive_mixture import DiveMixtureCreate, DiveMixtureUpdate
 
 NON_FINITE = (math.nan, math.inf, -math.inf)
 
@@ -114,9 +115,18 @@ def test_a_bare_non_finite_token_on_the_wire_is_a_422(signed_in_client: TestClie
 DIVE_INTEGERS = ("dive_number", "submerged_time", "visibility", "altitude", "rating")
 
 
-class TestDiveIntegersStopAtTheColumnsWidth:
-    @pytest.mark.parametrize("schema", [DiveCreate, DiveUpdate], ids=lambda schema: schema.__name__)
-    @pytest.mark.parametrize("field", DIVE_INTEGERS)
+COLUMN_WIDTH_INTEGERS = [
+    *((schema, field) for schema in (DiveCreate, DiveUpdate) for field in DIVE_INTEGERS),
+    (DiveMixtureCreate, "gas_number"),
+    (DiveMixtureUpdate, "gas_number"),
+    (DiveRenumberRequest, "start_at"),
+]
+
+
+class TestIntegersStopAtTheColumnsWidth:
+    @pytest.mark.parametrize(
+        ("schema", "field"), COLUMN_WIDTH_INTEGERS, ids=[f"{s.__name__}.{f}" for s, f in COLUMN_WIDTH_INTEGERS]
+    )
     @pytest.mark.parametrize("value", [POSTGRES_INTEGER_MAX + 1, -(2**31) - 1], ids=["above", "below"])
     def test_a_value_past_the_column_is_refused(self, schema: type[BaseModel], field: str, value: int) -> None:
         with pytest.raises(ValidationError) as excinfo:

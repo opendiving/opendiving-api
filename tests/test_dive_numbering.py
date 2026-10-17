@@ -16,6 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
+from src.app.core.schemas import POSTGRES_INTEGER_MAX
 from src.app.models.dive import Dive
 from src.app.models.user import User
 from src.app.services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
@@ -273,6 +275,20 @@ class TestRenumberDives:
         await renumber_dives(async_db, user_id=diver.id, start_at=47)
 
         assert await _numbers_by_day(async_db, diver) == [47, 48, 49]
+
+    @pytest.mark.asyncio
+    async def test_a_start_whose_last_number_overruns_the_column_is_a_422(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """The schema caps `start_at` alone; the count of dives after it is the service's to add."""
+        create_dive_log(db, diver, (1, 0), (2, 1), (3, 2))
+
+        with pytest.raises(UnprocessableEntityException, match="numbered past"):
+            await renumber_dives(async_db, user_id=diver.id, start_at=POSTGRES_INTEGER_MAX - 1)
+
+        assert await _numbers_by_day(async_db, diver) == [1, 2, 3]
+        result = await renumber_dives(async_db, user_id=diver.id, start_at=POSTGRES_INTEGER_MAX - 2)
+        assert [change.new_dive_number for change in result.changes][-1] == POSTGRES_INTEGER_MAX
 
     @pytest.mark.asyncio
     async def test_scope_leaves_earlier_dives_untouched(self, db: Session, async_db: AsyncSession, diver: User) -> None:

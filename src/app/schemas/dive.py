@@ -1212,7 +1212,13 @@ class DiveRenumberRequest(BaseModel):
 
     start_at: Annotated[
         int,
-        Field(default=1, ge=1, description="Number to give the earliest dive in scope", examples=[1]),
+        Field(
+            default=1,
+            ge=1,
+            le=POSTGRES_INTEGER_MAX,
+            description="Number to give the earliest dive in scope",
+            examples=[1],
+        ),
     ]
     from_start_time: Annotated[
         DiveStartTime | None,
