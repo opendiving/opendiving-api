@@ -1434,8 +1434,8 @@ something an operator turns on, not something a fresh deploy inherits — unlike
 `core/setup.py` disables in production and gates behind a superuser in staging, it has no
 `ENVIRONMENT` gate of its own.
 
-1. `ADMIN_PASSWORD` has no default (`str | None = None`). Unset means "no admin account", which
-   `admin/initialize.py` handles.
+1. `ADMIN_PASSWORD` has no default (`SecretStr | None = None`). Unset means "no admin account",
+   which `admin/initialize.py` handles.
 2. `CRUD_ADMIN_ENABLED` defaults to `False`. `src/.env.example` enables it for local development.
 3. `Settings._reject_insecure_admin_config` raises at startup when the panel is enabled in
    production with a missing or boilerplate password (`"!Ch4ng3Th1sP4ssW0rd!"`). Chosen over
