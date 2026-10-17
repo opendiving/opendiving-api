@@ -112,7 +112,7 @@ from tests.helpers.images import (
 USER_UUID = uuid7()
 CURRENT_USER = {"id": 1, "uuid": USER_UUID, "username": "ada", "is_superuser": False}
 
-# Copied verbatim from `read_certification_file`'s response. `frame-ancestors` is the
+# `BINARY_CSP`, spelled out so a shortened constant fails here. `frame-ancestors` is the
 # load-bearing clause: a response that sets its own policy opts out of
 # `SecurityHeadersMiddleware`'s default, so a shorter CSP here would silently make a picture
 # framable however strict the rest of the app is.

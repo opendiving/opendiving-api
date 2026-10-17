@@ -277,8 +277,8 @@ exist), and work that finishes once, such as a backfill, is a script. `RedisQueu
 
 The housekeeping crons share the hour mark with `run_at_startup=True`, because a restart loop
 changes nothing: each sweep deletes only rows past an absolute cutoff, and `record_sign_in_totals`
-rewrites counts it never lowers. `purge_expired_tokens` calls `count()` before
-`crud_token_blacklist.delete()` because fastcrud's `delete()` raises `NoResultFound` on zero
+rewrites counts it never lowers. Each row-expiry sweep is one Core `DELETE` through `_purge`,
+reading `rowcount` rather than counting first: fastcrud's `delete()` raises `NoResultFound` on zero
 matches, which most runs produce. The account purge and the emails never run at startup: a restart
 loop must not destroy a logbook early or send a round of mail twice.
 
@@ -3752,9 +3752,9 @@ bundled `Caddyfile` was rejected: it fixes one deployment shape (the `proxy` pro
 since a `default-src` breaks CRUDAdmin's templates; `X-Frame-Options` for parity with
 `next.config.js`. No `Strict-Transport-Security`: it is host-scoped, the web app sends it, and its
 off-switch `WEB_HSTS` lives there, so an API copy would ignore `WEB_HSTS=off`. Handlers keep their
-own headers; the binary downloads in `dives.py`, `certifications.py` and `export.py` spell out
-`frame-ancestors 'none'` because it never falls back to `default-src`. Registered last, so
-`add_middleware` puts it outside `CORSMiddleware`'s self-answered preflights; only the 500 from
+own headers; every binary response sends `BINARY_CSP` (`core/utils/binary_responses.py`), which
+spells out `frame-ancestors 'none'` because it never falls back to `default-src`. Registered last,
+so `add_middleware` puts it outside `CORSMiddleware`'s self-answered preflights; only the 500 from
 `ServerErrorMiddleware` escapes. The bundled `Caddyfile` still sends `/admin*` to `api:8000` while
 the operator surface moves to the web app's `/admin`; `CRUD_ADMIN_MOUNT_PATH` keeps its `/admin`
 default so existing panel installs keep working.
@@ -4200,10 +4200,9 @@ hash; `purpose="sign_in"` rows carry `user_id IS NULL`, beyond the `ON DELETE CA
 a previous address, so this sweep is the table's primary bound. Deleting at `expires_at` would be
 wrong by a week: `verify_email_change` tolerates a replay of a used link while the address is still
 current (`_replay_result_or_reject`), and that leniency lives only in the row. Not a setting,
-because tuning it tunes that leniency unknowingly. One Core `DELETE` with `rowcount`, where
-`purge_expired_tokens` counts first because FastCRUD's `delete()` raises `NoResultFound` on an empty
-match. `expires_at` is indexed by a hand-written revision. Cost: a link past retention reports
-"invalid" rather than "expired"; `check_email_link` already collapses both to `valid=false`.
+because tuning it tunes that leniency unknowingly. `expires_at` is indexed by a hand-written
+revision. Cost: a link past retention reports "invalid" rather than "expired"; `check_email_link`
+already collapses both to `valid=false`.
 
 ## Every foreign key into `user.id` declares `ondelete="CASCADE"` but one
 

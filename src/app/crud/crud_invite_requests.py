@@ -47,10 +47,9 @@ async def delete_invite_requests(db: AsyncSession, *, emails: list[str], commit:
     with a live invitation has no request row" true at every instant rather than between
     two commits.
 
-    Core rather than `crud_invite_requests.delete()`, for the reason
-    `purge_expired_authentication_requests` gives: FastCRUD raises `NoResultFound` when
-    nothing matches, and nothing matching is the ordinary case here (an operator inviting
-    an address that never asked).
+    Core rather than `crud_invite_requests.delete()`, for the reason the worker's `_purge`
+    gives: FastCRUD raises `NoResultFound` when nothing matches, and nothing matching is the
+    ordinary case here (an operator inviting an address that never asked).
     """
     if not emails:
         return 0
