@@ -175,7 +175,7 @@ class DiveMixtureBase(BaseModel):
 class _DiveMixtureWrite(DiveMixtureBase):
     """The bounds both write shapes carry: the API's create and CRUDAdmin's."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     start_pressure: Annotated[
         float | None,
@@ -269,7 +269,7 @@ def as_create(row: DiveMixtureRead) -> DiveMixtureCreate:
 
 
 class DiveMixtureUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     volume: Annotated[float | None, Field(default=None, description="Cylinder volume in liters")]
     start_pressure: Annotated[

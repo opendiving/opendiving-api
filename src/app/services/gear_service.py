@@ -69,9 +69,15 @@ def add_months(start: date, months: int) -> date:
     has to land on 28 (or 29) February, not overflow into March. `timedelta` can't do
     this at all - months aren't a fixed number of days - and `dateutil.relativedelta`
     isn't worth a dependency for one function.
+
+    A due date past `date.max` clamps to it rather than raising: a schedule whose next
+    service falls after the year 9999 is one that never comes due, and the importer admits
+    intervals the API would refuse.
     """
     total = start.month - 1 + months
     year = start.year + total // 12
+    if year > date.max.year:
+        return date.max
     month = total % 12 + 1
     day = min(start.day, calendar.monthrange(year, month)[1])
     return date(year, month, day)

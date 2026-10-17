@@ -45,7 +45,7 @@ class GearSetReadInternal(GearSetBase, PublicUUIDSchema):
 
 
 class GearSetCreateInternal(GearSetBase):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     user_id: int
 
@@ -53,7 +53,7 @@ class GearSetCreateInternal(GearSetBase):
 class GearSetCreateRequest(GearSetBase):
     """Request body for creating a gear set, including its member items."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     gear_item_uuids: Annotated[
         list[uuid_pkg.UUID], Field(default_factory=list, description="Public ids of the items in the set, in order")
@@ -61,7 +61,7 @@ class GearSetCreateRequest(GearSetBase):
 
 
 class GearSetUpdate(RejectsExplicitNulls):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     # `weight` is nullable - a set that no longer prefills a ballast figure is a real
     # state, so clearing it stays allowed.

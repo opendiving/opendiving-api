@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import operator
 from collections.abc import AsyncGenerator, Callable
 from contextlib import _AsyncGeneratorContextManager, asynccontextmanager
@@ -9,9 +10,12 @@ from typing import Any
 import anyio
 import fastapi
 import redis.asyncio as redis
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, text
 
 from ..api.dependencies import get_current_superuser
@@ -241,6 +245,23 @@ def lifespan_factory(
 
 
 # -------------- application --------------
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+async def request_validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    """FastAPI's own 422, with a non-finite `input` echoed as its string. A body carrying a
+    bare `NaN` token is refused by the write schemas, and the refusal would otherwise fail
+    `JSONResponse`'s `allow_nan=False` and arrive as a 500."""
+    return JSONResponse(status_code=422, content={"detail": _json_safe(jsonable_encoder(exc.errors()))})
+
+
 def create_application(
     router: APIRouter,
     settings: DatabaseSettings
@@ -336,6 +357,7 @@ def create_application(
 
     application = FastAPI(lifespan=lifespan, **kwargs)
     application.include_router(router)
+    application.add_exception_handler(RequestValidationError, request_validation_error)  # type: ignore[arg-type]
 
     if isinstance(settings, FrontendSettings):
         # The web app is served from a different origin than the API (e.g.
