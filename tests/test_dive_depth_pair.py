@@ -107,7 +107,7 @@ class TestTheMergedPatch:
             uuid=uuid_pkg.UUID(str(uuid7())),
             values=values,
             current_user={"id": 1, "uuid": uuid7()},
-            db=MagicMock(),
+            db=MagicMock(flush=AsyncMock(), commit=AsyncMock()),
         )
 
     @pytest.mark.asyncio

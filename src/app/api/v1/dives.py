@@ -1,5 +1,6 @@
 import hashlib
 import uuid as uuid_pkg
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 from typing import Annotated, Any, cast
 
@@ -317,6 +318,41 @@ def _mixture_error_detail(exc: IntegrityError) -> str:
     return "Invalid gas mixture."
 
 
+async def _write_or_422(
+    db: AsyncSession, write: Awaitable[object], detail: Callable[[IntegrityError], str] = _fk_error_detail
+) -> None:
+    """Run one uncommitted write of a dive request and flush it, so a constraint it breaks
+    is a 422 naming that write rather than surfacing in the next one's statement.
+
+    A failure rolls back the whole request: the dive row, its other children and any tag
+    `resolve_tag_ids` created with it.
+    """
+    try:
+        await write
+        await db.flush()
+    except IntegrityError as e:
+        await db.rollback()
+        raise UnprocessableEntityException(detail(e)) from e
+
+
+async def _after_dive_write(db: AsyncSession, user_id: int) -> None:
+    """Bring everything derived from a diver's dives up to date after a committed dive write.
+
+    Gear reads carry each item's `dive_count`; a trip's read counts its dives and the sites
+    and species on them, and a site's summarises the dives naming it; a contact's and a
+    course's lookup rank by the dives naming them. A write that moves a dive between two of
+    any of these names only one in its request, so each family goes whole.
+    """
+    await recalculate_dive_stats(db=db, user_id=user_id)
+    await recalculate_gear_dive_counts(db=db, user_id=user_id)
+    await invalidate_dive_caches(user_id)
+    await invalidate_gear_caches(user_id)
+    await invalidate_trip_caches(user_id)
+    await invalidate_dive_site_caches(user_id)
+    await invalidate_contact_caches(user_id)
+    await invalidate_course_caches(user_id)
+
+
 async def _resolve_vessels(
     db: AsyncSession, mixtures: list[DiveMixtureCreate], *, owner_id: int, dive_id: int | None
 ) -> dict[uuid_pkg.UUID, int]:
@@ -632,7 +668,8 @@ async def write_dive(
     names in the diver's order: each is trimmed and is the diver's tag it matches once both
     are case-folded, or a new one, and two that fold to one keep the first spelling.
     Values the DB's domain constraints reject (a non-positive submerged time, a mixture over 100%)
-    also come back as 422 with the offending field named.
+    also come back as 422 with the offending field named, and store nothing: the dive and
+    everything on it commit together or not at all.
     """
     trip_id: int | None = None
     if dive.trip_uuid is not None:
@@ -696,58 +733,33 @@ async def write_dive(
     )
     try:
         created_dive = await crud_dives.create(
-            db=db, object=dive_internal, schema_to_select=DiveReadInternal, return_as_model=True
+            db=db, object=dive_internal, commit=False, schema_to_select=DiveReadInternal, return_as_model=True
         )
     except IntegrityError as e:
         await db.rollback()
         raise UnprocessableEntityException(_fk_error_detail(e)) from e
 
-    try:
-        await replace_mixtures_for_dive(
-            db=db, dive_id=created_dive.id, mixtures=dive.mixtures, gear_item_ids=vessel_ids
-        )
-    except IntegrityError as e:
-        await db.rollback()
-        raise UnprocessableEntityException(_mixture_error_detail(e)) from e
-    try:
-        await replace_dive_sites_for_dive(db=db, dive_id=created_dive.id, dive_site_ids=dive_site_ids)
-    except IntegrityError as e:
-        await db.rollback()
-        raise UnprocessableEntityException(_fk_error_detail(e)) from e
-    try:
-        await replace_gear_items_for_dive(db=db, dive_id=created_dive.id, gear_item_ids=gear_item_ids)
-    except IntegrityError as e:
-        await db.rollback()
-        raise UnprocessableEntityException(_fk_error_detail(e)) from e
-    try:
-        await replace_species_for_dive(db=db, dive_id=created_dive.id, sightings=sightings)
-    except IntegrityError as e:
-        await db.rollback()
-        raise UnprocessableEntityException(_fk_error_detail(e)) from e
+    dive_id = created_dive.id
+    await _write_or_422(
+        db,
+        replace_mixtures_for_dive(
+            db=db, dive_id=dive_id, mixtures=dive.mixtures, commit=False, gear_item_ids=vessel_ids
+        ),
+        _mixture_error_detail,
+    )
+    await _write_or_422(
+        db, replace_dive_sites_for_dive(db=db, dive_id=dive_id, dive_site_ids=dive_site_ids, commit=False)
+    )
+    await _write_or_422(
+        db, replace_gear_items_for_dive(db=db, dive_id=dive_id, gear_item_ids=gear_item_ids, commit=False)
+    )
+    await _write_or_422(db, replace_species_for_dive(db=db, dive_id=dive_id, sightings=sightings, commit=False))
     if people:
-        try:
-            await replace_people_for_dive(db=db, dive_id=created_dive.id, references=people)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_fk_error_detail(e)) from e
+        await _write_or_422(db, replace_people_for_dive(db=db, dive_id=dive_id, references=people, commit=False))
     if tag_ids:
-        try:
-            await replace_tags_for_dive(db=db, dive_id=created_dive.id, tag_ids=tag_ids)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_fk_error_detail(e)) from e
-    await recalculate_dive_stats(db=db, user_id=current_user["id"])
-    await recalculate_gear_dive_counts(db=db, user_id=current_user["id"])
-    await invalidate_dive_caches(current_user["id"])
-    # Gear reads carry each item's `dive_count`, which this dive just changed.
-    await invalidate_gear_caches(current_user["id"])
-    # Trip reads count their dives and the sites and species on them, and a site's read
-    # summarises the dives naming it.
-    await invalidate_trip_caches(current_user["id"])
-    await invalidate_dive_site_caches(current_user["id"])
-    # A contact's and a course's lookup rank by the dives naming them.
-    await invalidate_contact_caches(current_user["id"])
-    await invalidate_course_caches(current_user["id"])
+        await _write_or_422(db, replace_tags_for_dive(db=db, dive_id=dive_id, tag_ids=tag_ids, commit=False))
+    await db.commit()
+    await _after_dive_write(db, current_user["id"])
 
     dive_read_internal = await crud_dives.get(db=db, id=created_dive.id, schema_to_select=DiveReadInternal)
     if dive_read_internal is None:
@@ -1261,7 +1273,7 @@ async def patch_dive(
     Passing `null` for `course_uuid` detaches it from its training course the same way, and
     `null` for `contact_uuid` from its contact.
     Referencing anything the caller doesn't own is a 422, as are the DB's domain
-    constraints.
+    constraints, and either leaves the stored dive exactly as it was.
 
     `start_time` normally has to carry a UTC offset. The exception is a dive whose offset
     is already unknown - an imported dive whose source recorded none - where an offsetless
@@ -1351,56 +1363,32 @@ async def patch_dive(
 
     tag_ids = None if values.tags is None else await resolve_tag_ids(db, user_id=owner_id, names=values.tags)
 
-    if update_data:
-        try:
-            await crud_dives.update(db=db, object=update_data, uuid=uuid)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_fk_error_detail(e)) from e
-
     dive_id = db_dive.id
 
+    if update_data:
+        await _write_or_422(db, crud_dives.update(db=db, object=update_data, uuid=uuid, commit=False))
     if values.mixtures is not None:
-        try:
-            await replace_mixtures_for_dive(db=db, dive_id=dive_id, mixtures=values.mixtures, gear_item_ids=vessel_ids)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_mixture_error_detail(e)) from e
-
+        await _write_or_422(
+            db,
+            replace_mixtures_for_dive(
+                db=db, dive_id=dive_id, mixtures=values.mixtures, commit=False, gear_item_ids=vessel_ids
+            ),
+            _mixture_error_detail,
+        )
     if dive_site_ids is not None:
-        try:
-            await replace_dive_sites_for_dive(db=db, dive_id=dive_id, dive_site_ids=dive_site_ids)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_fk_error_detail(e)) from e
-
+        await _write_or_422(
+            db, replace_dive_sites_for_dive(db=db, dive_id=dive_id, dive_site_ids=dive_site_ids, commit=False)
+        )
     if gear_item_ids is not None:
-        try:
-            await replace_gear_items_for_dive(db=db, dive_id=dive_id, gear_item_ids=gear_item_ids)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_fk_error_detail(e)) from e
-
+        await _write_or_422(
+            db, replace_gear_items_for_dive(db=db, dive_id=dive_id, gear_item_ids=gear_item_ids, commit=False)
+        )
     if sightings is not None:
-        try:
-            await replace_species_for_dive(db=db, dive_id=dive_id, sightings=sightings)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_fk_error_detail(e)) from e
-
+        await _write_or_422(db, replace_species_for_dive(db=db, dive_id=dive_id, sightings=sightings, commit=False))
     if people is not None:
-        try:
-            await replace_people_for_dive(db=db, dive_id=dive_id, references=people)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_fk_error_detail(e)) from e
-
+        await _write_or_422(db, replace_people_for_dive(db=db, dive_id=dive_id, references=people, commit=False))
     if tag_ids is not None:
-        try:
-            await replace_tags_for_dive(db=db, dive_id=dive_id, tag_ids=tag_ids)
-        except IntegrityError as e:
-            await db.rollback()
-            raise UnprocessableEntityException(_fk_error_detail(e)) from e
+        await _write_or_422(db, replace_tags_for_dive(db=db, dive_id=dive_id, tag_ids=tag_ids, commit=False))
 
     if (
         update_data
@@ -1411,19 +1399,8 @@ async def patch_dive(
         or people is not None
         or tag_ids is not None
     ):
-        await recalculate_dive_stats(db=db, user_id=owner_id)
-        await recalculate_gear_dive_counts(db=db, user_id=owner_id)
-        await invalidate_dive_caches(owner_id)
-        # Gear reads carry each item's `dive_count`, which this edit may have changed.
-        await invalidate_gear_caches(owner_id)
-        # Trip reads count their dives, sites and species and carry the deepest one's depth. A
-        # dive moved between trips changes both, and the old one is named nowhere in this
-        # request - as a site this dive no longer names is named nowhere, whose summary it
-        # just left.
-        await invalidate_trip_caches(owner_id)
-        await invalidate_dive_site_caches(owner_id)
-        await invalidate_contact_caches(owner_id)
-        await invalidate_course_caches(owner_id)
+        await db.commit()
+        await _after_dive_write(db, owner_id)
 
     return {"message": "Dive updated"}
 
@@ -1453,16 +1430,7 @@ async def erase_dive(
     # `erase_certification`.
     await delete_files_for_dive(db=db, dive_id=db_dive.id, commit=False)
     await crud_dives.delete(db=db, uuid=uuid)
-    await recalculate_dive_stats(db=db, user_id=owner_id)
-    await recalculate_gear_dive_counts(db=db, user_id=owner_id)
-    await invalidate_dive_caches(owner_id)
-    # Gear reads carry each item's `dive_count`, which this dive no longer contributes to.
-    await invalidate_gear_caches(owner_id)
-    # Nor to its trip's counts, nor to its sites' summaries.
-    await invalidate_trip_caches(owner_id)
-    await invalidate_dive_site_caches(owner_id)
-    await invalidate_contact_caches(owner_id)
-    await invalidate_course_caches(owner_id)
+    await _after_dive_write(db, owner_id)
 
     return {"message": "Dive deleted"}
 
@@ -1524,18 +1492,7 @@ async def merge_two_dives(
     await db.commit()
 
     owner_id = first.user_id
-    await recalculate_dive_stats(db=db, user_id=owner_id)
-    # One dive fewer, and its gear items' `dive_count` with it - the same pair `erase_dive`
-    # recalculates, for the same reason.
-    await recalculate_gear_dive_counts(db=db, user_id=owner_id)
-    await invalidate_dive_caches(owner_id)
-    await invalidate_gear_caches(owner_id)
-    # The absorbed dive's trip loses it, and the survivor's gains its sites and species -
-    # which moves both dives' sites' summaries as well.
-    await invalidate_trip_caches(owner_id)
-    await invalidate_dive_site_caches(owner_id)
-    await invalidate_contact_caches(owner_id)
-    await invalidate_course_caches(owner_id)
+    await _after_dive_write(db, owner_id)
 
     return DiveMergeResult(
         dive=await _cached_read_dive(

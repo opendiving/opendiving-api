@@ -21,7 +21,8 @@ snapshot rather than from the database would let one upload unlink another's com
 import base64
 import hashlib
 import io
-from collections.abc import Generator, Iterator
+import time
+from collections.abc import AsyncIterator, Generator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -948,6 +949,27 @@ class TestGoogleImport:
         self._transport(monkeypatch, handler)
 
         assert await import_google_avatar("https://lh3.googleusercontent.com/a/photo") is None
+
+    @pytest.mark.asyncio
+    async def test_a_body_trickling_in_under_the_read_timeout_is_cut_off(
+        self, volume: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every chunk arrives inside the per-read timeout, so only a deadline on the whole
+        fetch ends it - and the sign-up waiting on it."""
+        monkeypatch.setattr(user_pictures, "_GOOGLE_AVATAR_TIMEOUT_SECONDS", 0.2)
+
+        async def trickle() -> AsyncIterator[bytes]:
+            yield b"\xff\xd8\xff"
+            for _ in range(100):
+                await anyio.sleep(0.05)
+                yield b"\x00"
+
+        self._transport(monkeypatch, lambda request: httpx.Response(200, content=trickle()))
+
+        started = time.monotonic()
+        assert await import_google_avatar("https://lh3.googleusercontent.com/a/photo") is None
+        assert time.monotonic() - started < 2
+        assert list(blob_store.iter_keys()) == []
 
     @pytest.mark.asyncio
     async def test_a_response_over_the_size_cap_degrades_to_no_avatar(

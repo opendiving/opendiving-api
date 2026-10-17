@@ -692,10 +692,8 @@ async def complete_profile(
 ) -> AuthOutcome:
     """Creates the `User` row (and its `AuthenticationProvider` link) for a verified
     identity that had no account yet, then signs the new user in. This is the only place
-    *self-service* registration ever creates a `User` row - two operator paths also write
-    one and are not registration: `scripts/create_first_superuser.py`, which is excluded
-    from the shipped image, and the admin panel's `User` view, both of which bypass the
-    gate below by construction.
+    *self-service* registration ever creates a `User` row - the admin panel's `User` view
+    also writes one and is not registration, and bypasses the gate below by construction.
 
     **On an `invite`-mode instance this refuses (403) an address with no live
     invitation**, unless the onboarding token carries a live join-channel slug or the token
@@ -786,11 +784,10 @@ async def complete_profile(
         # The three default dive-form presets, in the same transaction as the account:
         # a registration either creates the account with them or creates nothing. This is
         # the one place self-service registration makes a `User` row, so it is the one
-        # place they can be seeded eagerly - the other two writers (the admin panel's
-        # generic insert and `scripts/create_first_superuser.py`) are not registration and
-        # reach the same three through `POST /dive-form-presets/defaults` instead.
+        # place they can be seeded eagerly - the admin panel's generic insert is not
+        # registration and reaches the same three through `POST /dive-form-presets/defaults`.
         await seed_default_presets(db, user_id=created_user.id, commit=False)
-        # The default tags, on the same terms. The other two writers seed none, and have no
+        # The default tags, on the same terms. The admin panel seeds none, and has no
         # restore to reach for: a tag is typed into being wherever one is used.
         await seed_default_tags(db, user_id=created_user.id)
         if admission.invite_link_owner_id is not None:
