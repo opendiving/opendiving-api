@@ -4,10 +4,13 @@ logic, and `tests/test_security.py` for the underlying token helpers.
 """
 
 import uuid as uuid_pkg
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
+from botocore.exceptions import ClientError
 from fastapi import HTTPException, Response
 from jose import jwt
 from pydantic import ValidationError
@@ -37,7 +40,10 @@ from src.app.schemas.auth import (
     GoogleAuthRequest,
     ProfileCompletionRequest,
 )
+from src.app.services import user_pictures
 from src.app.services.user_pictures import StoredAvatar
+from tests.helpers.fake_s3 import select_s3_backend
+from tests.helpers.images import jpeg_with_exif
 from tests.helpers.mocks import (
     GOOGLE_CODE_VERIFIER,
     claimed_used_at_sql,
@@ -1175,10 +1181,12 @@ class TestCompleteProfile:
             response.set_cookie.assert_called_once()
 
     @staticmethod
-    async def _complete_with_avatar(mock_db, imported, *, avatar="https://lh3.googleusercontent.com/a/photo"):
+    async def _complete_with_avatar(
+        mock_db, imported, *, avatar="https://lh3.googleusercontent.com/a/photo", stub_import=True
+    ):
         """Run `POST /auth/complete` for a Google identity whose token carries `avatar`, with
-        the import itself stubbed, and hand back the seed's mock and the import's. The seed
-        records how many commits had happened when it ran."""
+        the import itself stubbed unless `stub_import` is false, and hand back the seed's mock
+        and the import's. The seed records how many commits had happened when it ran."""
         token_data = OnboardingTokenData(
             email="new@example.com", provider="google", provider_user_id="g-1", name="New Person", avatar=avatar
         )
@@ -1191,14 +1199,17 @@ class TestCompleteProfile:
             patch("src.app.api.v1.auth.seed_default_presets", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.seed_default_tags", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
-            patch("src.app.api.v1.auth.import_google_avatar", new_callable=AsyncMock) as mock_import,
+            patch("src.app.api.v1.auth.import_google_avatar", new_callable=AsyncMock)
+            if stub_import
+            else nullcontext() as mock_import,
             patch("src.app.api.v1.auth.seed_google_avatar", new_callable=AsyncMock) as mock_seed,
         ):
             mock_verify.return_value = token_data
             mock_users.exists = AsyncMock(return_value=False)
             mock_users.create = AsyncMock(return_value=Mock(id=42, uuid=USER_UUID))
             mock_providers.create = AsyncMock(return_value=None)
-            mock_import.return_value = imported
+            if mock_import is not None:
+                mock_import.return_value = imported
             mock_db.commit = AsyncMock(return_value=None)
             mock_seed.side_effect = lambda *args, **kwargs: commits_at_seed.append(mock_db.commit.await_count)
 
@@ -1232,6 +1243,27 @@ class TestCompleteProfile:
         outcome, mock_seed, _, _ = await self._complete_with_avatar(mock_db, None)
 
         assert outcome.status == "authenticated"
+        mock_seed.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_object_store_that_refuses_the_picture_still_creates_the_account(self, mock_db, monkeypatch):
+        """The import run for real, on the hosted instance's backend: Google answers with a
+        picture and the bucket refuses the write. botocore raises its own errors rather than
+        an `OSError`, and the account is created all the same, with initials."""
+        real_client = httpx.AsyncClient
+
+        def google(*args, **kwargs):
+            transport = httpx.MockTransport(lambda request: httpx.Response(200, content=jpeg_with_exif()))
+            return real_client(*args, **{**kwargs, "transport": transport})
+
+        monkeypatch.setattr(user_pictures.httpx, "AsyncClient", google)
+        s3 = select_s3_backend(monkeypatch)
+        s3.explode_on["put_object"] = ClientError({"Error": {"Code": "InternalError"}}, "PutObject")
+
+        outcome, mock_seed, _, _ = await self._complete_with_avatar(mock_db, None, stub_import=False)
+
+        assert outcome.status == "authenticated"
+        assert "put_object" in s3.operations()
         mock_seed.assert_not_awaited()
 
     @pytest.mark.asyncio

@@ -1,4 +1,3 @@
-import logging
 import uuid as uuid_pkg
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -62,6 +61,7 @@ from ...services.dive_gas import gas_use_history
 from ...services.dive_stats import sites_and_dive_days
 from ...services.email_service import (
     send_account_deletion_email,
+    send_best_effort,
     send_email_change_confirmation_email,
     send_email_changed_notification,
 )
@@ -84,8 +84,6 @@ from ...services.user_pictures import (
     store_picture,
 )
 from .species import enforce_species_limit
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["user"])
 
@@ -726,7 +724,11 @@ async def verify_email_change(
         current_email = db_user["email"] if isinstance(db_user, dict) else db_user.email
         return _replay_result_or_reject(current_email=current_email, new_email=new_email)
 
-    await send_email_changed_notification(old_email=current_email, new_email=new_email)
+    await send_best_effort(
+        send_email_changed_notification(old_email=current_email, new_email=new_email),
+        what="the email-changed notice",
+        user_id=user_id,
+    )
 
     return EmailChangeVerifyResponse(email=new_email)
 
@@ -1194,9 +1196,10 @@ async def erase_user(
         # propagated would leave the user locked out *and* never told the purge date,
         # which is strictly worse than no email. `send_gear_service_digests` makes the
         # same trade the other way round, for a job that can safely repeat itself.
-        try:
-            await send_account_deletion_email(current_user["email"], purge_after)
-        except Exception:
-            logger.exception("Could not send the account-deletion confirmation for user %s", current_user["id"])
+        await send_best_effort(
+            send_account_deletion_email(current_user["email"], purge_after),
+            what="the account-deletion confirmation",
+            user_id=current_user["id"],
+        )
 
     return AccountDeletionResponse(message="User deleted", purge_after=purge_after)

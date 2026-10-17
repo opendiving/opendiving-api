@@ -22,6 +22,7 @@ import logging
 import math
 import smtplib
 import ssl
+from collections.abc import Awaitable
 from datetime import datetime
 from email.message import EmailMessage
 
@@ -149,6 +150,23 @@ def _refuse_to_log_credential_outside_local(what: str) -> None:
     """
     if settings.ENVIRONMENT != EnvironmentOption.LOCAL:
         raise EmailDeliveryError(f"No email transport is configured (SMTP_HOST), so {what} cannot be delivered.")
+
+
+async def send_best_effort(notice: Awaitable[None], *, what: str, user_id: int) -> bool:
+    """Await a notice sent after the action it reports has committed, logging a failure
+    rather than raising it, and say whether it went.
+
+    A raise here would answer 500 for a change that already applied, which the caller
+    cannot undo and the person would retry. Every exception is caught, not only the
+    transport's: whatever the notice raises, the action stands. The log names the account
+    rather than the recipient, so an outage does not write a list of addresses to the logs.
+    """
+    try:
+        await notice
+    except Exception:
+        logger.exception("Could not send %s (user %s)", what, user_id)
+        return False
+    return True
 
 
 async def send_magic_link_email(email: str, magic_link_url: str, code: str) -> None:

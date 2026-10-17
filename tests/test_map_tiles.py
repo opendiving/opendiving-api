@@ -281,7 +281,9 @@ class TestTheSettings:
         assert normalize_map_renderer_url(raw) == expected
         assert _settings(MAP_RENDERER_URL=raw).MAP_RENDERER_URL == expected
 
-    @pytest.mark.parametrize("raw", ["ftp://renderer:21", "http://", "://renderer"])
+    @pytest.mark.parametrize(
+        "raw", ["ftp://renderer:21", "http://", "://renderer", "renderer:abc", "http://renderer:99999", "renderer:0"]
+    )
     def test_anything_else_fails_startup_naming_the_setting(self, raw: str) -> None:
         with pytest.raises(ValueError, match="MAP_RENDERER_URL"):
             _settings(MAP_RENDERER_URL=raw)
@@ -380,6 +382,17 @@ class TestTheRendererClient:
                 base_url=RENDERER_URL, transport=httpx.MockTransport(lambda _request: answer)
             ),
         )
+        with pytest.raises(map_renderer.RendererUnavailable):
+            await map_renderer.render(Tile(MapTheme.LIGHT, 0, 0, 0).body(), timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_a_url_httpx_refuses_is_an_unavailable_renderer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The validator refuses this one at startup; what reaches here is whatever it does not
+        know httpx refuses, which must answer as a renderer that cannot be asked rather than
+        a 500 per tile and a traceback per refresh."""
+        monkeypatch.setattr(settings, "MAP_RENDERER_URL", "http://renderer:abc")
+        with pytest.raises(map_renderer.RendererUnavailable):
+            await map_renderer.fetch_signature()
         with pytest.raises(map_renderer.RendererUnavailable):
             await map_renderer.render(Tile(MapTheme.LIGHT, 0, 0, 0).body(), timeout=5)
 

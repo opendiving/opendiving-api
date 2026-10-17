@@ -41,6 +41,7 @@ import logging
 import os
 from collections.abc import Iterator
 from compression import zstd
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -122,6 +123,17 @@ class BlobCorruptError(BlobMissingError):
     def __init__(self, key: str) -> None:
         self.key = key
         Exception.__init__(self, f"The stored file for key {key!r} does not decode")
+
+
+class BlobStoreError(OSError):
+    """The store could not be reached, or refused the request.
+
+    An `OSError` because that is what the local backend raises for the same failures, so a
+    caller that degrades on a storage failure catches one class on either backend. `put`,
+    `get`, `delete` and `has` translate the S3 backend's botocore errors into it. Never a
+    `BlobMissingError`: a store that is down, or a bucket that is not the right one, is not
+    data loss.
+    """
 
 
 def compresses(kind: str) -> bool:
@@ -715,6 +727,14 @@ def ensure_storage_ready() -> None:
     _backend().ensure_ready()
 
 
+@contextmanager
+def _store_errors(key: str) -> Iterator[None]:
+    try:
+        yield
+    except (ClientError, BotoCoreError) as exc:
+        raise BlobStoreError(f"The file store failed on key {key!r}: {exc}") from exc
+
+
 def _write_encoded(backend: Backend, key: str, data: bytes) -> int:
     stored = _encode(key, data)
     backend.write(key, stored)
@@ -734,18 +754,22 @@ async def put(key: str, data: bytes) -> int:
     compressed key: two libzstd versions may encode one input differently, which is why the
     self-heal that re-puts a key records the length again.
     """
-    return await anyio.to_thread.run_sync(_write_encoded, _backend(), key, data)
+    with _store_errors(key):
+        return await anyio.to_thread.run_sync(_write_encoded, _backend(), key, data)
 
 
 async def get(key: str) -> bytes:
     """Fetch the bytes stored under `key`, as uploaded, or raise `BlobMissingError` - its
-    `BlobCorruptError` subclass for a compressed object that does not decode."""
-    return await anyio.to_thread.run_sync(_read_decoded, _backend(), key)
+    `BlobCorruptError` subclass for a compressed object that does not decode - or
+    `BlobStoreError` when the store itself fails."""
+    with _store_errors(key):
+        return await anyio.to_thread.run_sync(_read_decoded, _backend(), key)
 
 
 async def delete(key: str) -> None:
     """Remove `key`. Tolerates an already-absent blob, so retries are free."""
-    await anyio.to_thread.run_sync(_backend().remove, key)
+    with _store_errors(key):
+        await anyio.to_thread.run_sync(_backend().remove, key)
 
 
 def exists(key: str) -> bool:
@@ -770,7 +794,8 @@ async def has(key: str) -> bool:
     `exists` for a raw key, which reads nothing. A compressed one is read and decoded,
     because a frame cut short is there and is still no file.
     """
-    return await anyio.to_thread.run_sync(_intact, _backend(), key)
+    with _store_errors(key):
+        return await anyio.to_thread.run_sync(_intact, _backend(), key)
 
 
 def iter_keys() -> Iterator[str]:
