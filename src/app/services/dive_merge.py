@@ -42,8 +42,9 @@ from ..models.dive_recording import DiveRecording
 from ..models.dive_species import DiveSpecies
 from ..models.dive_tag import DiveTag
 from ..schemas.dive import DiveReadInternal
+from ..schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, as_create
 from ..schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND
-from .dive_files import apply_gas_mapping, relabel_gas_numbers
+from .dive_files import apply_gas_mapping, fold_tank_pressures, relabel_gas_numbers
 from .dive_profiles import (
     MERGE_PARSER_KEY,
     NormalizedProfile,
@@ -201,6 +202,9 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     fold: _Fold | None = None
     if folded:
         fold = await _plan_fold(db, survivor=primary_survivor, absorbed=primary_absorbed, mapping=mapping)
+        cylinders = _with_fold_pressures(
+            cylinders, absorbed_mixtures, survivor_mixtures, survivor_first=fold.survivor_first
+        )
 
     moving = absorbed_recordings[1:] if folded else absorbed_recordings
     figures = dive_figures(
@@ -272,15 +276,40 @@ def _folds(survivor: _Recording, absorbed: _Recording) -> bool:
     )
 
 
-# What the absorbed record's row fills on the surviving one: everything a second file of one
-# recording fills through `fill_device_fields`, `fill_recording_settings` and `fill_readouts`.
-_FOLDED_COLUMNS = (
+# A fold's readouts that belong to one end of the dive: the earlier record has its start, the
+# later its end.
+_START_READOUTS = ("cns_start", "otu_start")
+_END_READOUTS = ("cns_end", "otu_end")
+# What the absorbed record's row only fills on the surviving one: everything else a second file
+# of one recording fills through `fill_device_fields`, `fill_recording_settings` and
+# `fill_readouts`.
+_FILLED_COLUMNS = (
     *DEVICE_COLUMNS.values(),
     "mode",
     "salinity",
     *DECO_MODEL_COLUMNS.values(),
-    *READOUT_COLUMNS,
+    *(column for column in READOUT_COLUMNS if column not in (*_START_READOUTS, *_END_READOUTS)),
 )
+
+
+def _with_fold_pressures(
+    cylinders: list[DiveMixtureCreate] | None,
+    absorbed: Sequence[DiveMixtureRead],
+    survivor: Sequence[DiveMixtureRead],
+    *,
+    survivor_first: bool,
+) -> list[DiveMixtureCreate] | None:
+    """The dive's cylinders to write once a fold's tanks take their start and end pressures
+    by side (`fold_tank_pressures`), over what `relabel_gas_numbers` returned."""
+    pressures = fold_tank_pressures(absorbed, survivor, survivor_first=survivor_first)
+    if not pressures:
+        return cylinders
+    # `relabel_gas_numbers` lists the dive's own rows first, in their stored order.
+    rows = cylinders if cylinders is not None else [as_create(row) for row in survivor]
+    return [
+        *(row.model_copy(update=pressures.get(stored.id, {})) for row, stored in zip(rows, survivor, strict=False)),
+        *rows[len(survivor) :],
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +327,9 @@ class _Fold:
     start_time: datetime
     utc_offset_minutes: int | None
     profile: NormalizedProfile | None
+    # Whether the surviving recording's record is the earlier one, which decides the side a
+    # start-of-dive and an end-of-dive value is taken from.
+    survivor_first: bool
 
 
 async def _plan_fold(db: AsyncSession, *, survivor: _Recording, absorbed: _Recording, mapping: dict[int, int]) -> _Fold:
@@ -347,6 +379,7 @@ async def _plan_fold(db: AsyncSession, *, survivor: _Recording, absorbed: _Recor
         start_time=origin_start,
         utc_offset_minutes=origin_offset,
         profile=attribute_and_cap(joined),
+        survivor_first=survivor_first,
     )
 
 
@@ -366,10 +399,12 @@ async def _write_fold(db: AsyncSession, fold: _Fold, *, dive_id: int) -> None:
     later gate comparing an incoming file against half a dive. The column is seconds, so the
     span is divided into it.
 
-    **The absorbed recording's device, settings and readouts fill the surviving one's
+    **The absorbed recording's device, settings and surface pressure fill the surviving one's
     blanks** before its row goes, on the rule every second record of one recording follows:
     fill, never overwrite. The gradient factors fill per column and still land whole, since
-    each row stores the pair whole or not at all.
+    each row stores the pair whole or not at all. **The CNS and OTU readouts are taken by
+    side instead**: the records run one after the other, so the dive starts on the earlier
+    record's and ends on the later's, each falling back to the other's where it has none.
     """
     await db.execute(
         update(DiveFile)
@@ -377,15 +412,23 @@ async def _write_fold(db: AsyncSession, fold: _Fold, *, dive_id: int) -> None:
         .values(recording_id=fold.recording_id, dive_id=dive_id)
     )
     absorbed = aliased(DiveRecording)
+    earlier, later = (DiveRecording, absorbed) if fold.survivor_first else (absorbed, DiveRecording)
+    values = {
+        getattr(DiveRecording, column): func.coalesce(getattr(DiveRecording, column), getattr(absorbed, column))
+        for column in _FILLED_COLUMNS
+    }
+    values |= {
+        getattr(DiveRecording, column): func.coalesce(getattr(earlier, column), getattr(later, column))
+        for column in _START_READOUTS
+    }
+    values |= {
+        getattr(DiveRecording, column): func.coalesce(getattr(later, column), getattr(earlier, column))
+        for column in _END_READOUTS
+    }
     await db.execute(
         update(DiveRecording)
         .where(DiveRecording.id == fold.recording_id, absorbed.id == fold.absorbed_recording_id)
-        .values(
-            {
-                getattr(DiveRecording, column): func.coalesce(getattr(DiveRecording, column), getattr(absorbed, column))
-                for column in _FOLDED_COLUMNS
-            }
-        )
+        .values(values)
     )
     await db.execute(delete(DiveRecording).where(DiveRecording.id == fold.absorbed_recording_id))
 
