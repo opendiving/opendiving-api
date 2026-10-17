@@ -1,8 +1,8 @@
 """Integration tests for the two hand-written statements in
 `crud/crud_authentication_requests.py`: `claim_authentication_request`, the conditional
 `UPDATE ... WHERE used_at IS NULL` that makes a magic-link token single-use, and
-`register_failed_code_attempt`, the increment-and-maybe-null that bounds guesses at the
-six-digit sign-in code.
+`charge_code_attempt` with `spend_exhausted_code`, the charge-then-compare that bounds
+guesses at the six-digit sign-in code.
 
 Against a live Postgres, because the whole point of the helper is behaviour the database
 supplies and a mocked session cannot: the affected-row count of a predicated `UPDATE`, and
@@ -23,7 +23,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 
 from src.app.core.security import hash_sign_in_code
-from src.app.crud.crud_authentication_requests import claim_authentication_request, register_failed_code_attempt
+from src.app.crud.crud_authentication_requests import (
+    charge_code_attempt,
+    claim_authentication_request,
+    spend_exhausted_code,
+)
 from src.app.models.authentication_request import AuthenticationRequest
 from src.app.models.user import User
 from tests.conftest import db_available, unique_email
@@ -106,49 +110,68 @@ class TestClaimAuthenticationRequest:
         assert sorted(results) == [False, True]
 
 
-class TestRegisterFailedCodeAttempt:
-    """`register_failed_code_attempt` - one statement that charges a wrong guess and, on
-    the guess that reaches the cap, spends the code.
+class TestChargeCodeAttempt:
+    """`charge_code_attempt` - one statement that spends an attempt and hands out the digest
+    to compare against, and `spend_exhausted_code`, which clears it once none are left.
 
-    Also against a live Postgres, and for the same reason: `code_attempts + 1` evaluated
-    inside a `CASE` under concurrent statements is exactly the behaviour a mock cannot
-    supply, and it is the behaviour the attempt cap's usefulness rests on.
+    Also against a live Postgres, and for the same reason: `code_attempts < :max` evaluated
+    under concurrent statements is exactly the behaviour a mock cannot supply, and it is the
+    behaviour the attempt cap's usefulness rests on.
     """
 
     @pytest.mark.asyncio
-    async def test_a_guess_below_the_cap_is_counted_and_the_code_survives(
+    async def test_a_charge_hands_out_the_digest_and_counts(self, db: Session, async_db: AsyncSession) -> None:
+        row = _live_request(db, code="481052")
+
+        assert await charge_code_attempt(async_db, request_id=row.id, max_attempts=5) == hash_sign_in_code("481052")
+
+        attempts = await async_db.scalar(
+            select(AuthenticationRequest.code_attempts).where(AuthenticationRequest.id == row.id)
+        )
+        assert attempts == 1
+
+    @pytest.mark.asyncio
+    async def test_the_last_attempt_still_gets_the_digest_and_the_next_does_not(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The fifth guess is a guess like the others - `RETURNING` reads the new row, which
+        is why the statement leaves the digest alone. The sixth gets nothing to compare."""
+        row = _live_request(db, code="481052")
+
+        for _ in range(4):
+            await charge_code_attempt(async_db, request_id=row.id, max_attempts=5)
+
+        assert await charge_code_attempt(async_db, request_id=row.id, max_attempts=5) is not None
+        assert await charge_code_attempt(async_db, request_id=row.id, max_attempts=5) is None
+
+    @pytest.mark.asyncio
+    async def test_a_claimed_row_hands_out_nothing(self, db: Session, async_db: AsyncSession) -> None:
+        row = _live_request(db, code="481052")
+        await claim_authentication_request(async_db, request_id=row.id)
+
+        assert await charge_code_attempt(async_db, request_id=row.id, max_attempts=5) is None
+
+    @pytest.mark.asyncio
+    async def test_spending_clears_the_digest_only_once_the_attempts_ran_out(
         self, db: Session, async_db: AsyncSession
     ) -> None:
         row = _live_request(db, code="481052")
 
-        await register_failed_code_attempt(async_db, request_id=row.id, max_attempts=5)
+        for _ in range(4):
+            await charge_code_attempt(async_db, request_id=row.id, max_attempts=5)
+        await spend_exhausted_code(async_db, request_id=row.id, max_attempts=5)
+        await async_db.commit()
+        assert await async_db.scalar(
+            select(AuthenticationRequest.code_hash).where(AuthenticationRequest.id == row.id)
+        ) == hash_sign_in_code("481052")
 
-        after = (
-            await async_db.execute(
-                select(AuthenticationRequest.code_attempts, AuthenticationRequest.code_hash).where(
-                    AuthenticationRequest.id == row.id
-                )
-            )
-        ).one()
-        assert after.code_attempts == 1
-        assert after.code_hash == hash_sign_in_code("481052")
-
-    @pytest.mark.asyncio
-    async def test_the_guess_that_reaches_the_cap_spends_the_code(self, db: Session, async_db: AsyncSession) -> None:
-        row = _live_request(db, code="481052")
-
-        for _ in range(5):
-            await register_failed_code_attempt(async_db, request_id=row.id, max_attempts=5)
-
-        after = (
-            await async_db.execute(
-                select(AuthenticationRequest.code_attempts, AuthenticationRequest.code_hash).where(
-                    AuthenticationRequest.id == row.id
-                )
-            )
-        ).one()
-        assert after.code_attempts == 5
-        assert after.code_hash is None
+        await charge_code_attempt(async_db, request_id=row.id, max_attempts=5)
+        await spend_exhausted_code(async_db, request_id=row.id, max_attempts=5)
+        await async_db.commit()
+        assert (
+            await async_db.scalar(select(AuthenticationRequest.code_hash).where(AuthenticationRequest.id == row.id))
+            is None
+        )
 
     @pytest.mark.asyncio
     async def test_a_spent_code_leaves_its_link_claimable(self, db: Session, async_db: AsyncSession) -> None:
@@ -162,26 +185,33 @@ class TestRegisterFailedCodeAttempt:
         row = _live_request(db, code="481052")
 
         for _ in range(5):
-            await register_failed_code_attempt(async_db, request_id=row.id, max_attempts=5)
+            await charge_code_attempt(async_db, request_id=row.id, max_attempts=5)
+        await spend_exhausted_code(async_db, request_id=row.id, max_attempts=5)
+        await async_db.commit()
 
         assert await claim_authentication_request(async_db, request_id=row.id) is True
 
     @pytest.mark.asyncio
-    async def test_concurrent_guesses_are_each_charged(
+    async def test_concurrent_guesses_have_at_most_the_cap_evaluated(
         self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
     ) -> None:
-        """The race the statement exists for. Read-decide-write would let two guesses
-        issued together both store `1`, and an attacker firing five in parallel would be
-        charged for one - which is the difference between a five-guess bound and none.
+        """The race the statement exists for. Comparing first and charging on failure let
+        every guess in flight read the digest before any charge landed, so the bound was the
+        caller's concurrency rather than the cap. Twelve guesses fired together on twelve
+        connections must get the digest back exactly five times.
         """
         row = _live_request(db, code="481052")
-        async with async_sessions() as one, async_sessions() as two:
-            await asyncio.gather(
-                register_failed_code_attempt(one, request_id=row.id, max_attempts=5),
-                register_failed_code_attempt(two, request_id=row.id, max_attempts=5),
+        sessions = [async_sessions() for _ in range(12)]
+        try:
+            handed_out = await asyncio.gather(
+                *(charge_code_attempt(session, request_id=row.id, max_attempts=5) for session in sessions)
             )
-            charged = await one.scalar(
+            charged = await sessions[0].scalar(
                 select(AuthenticationRequest.code_attempts).where(AuthenticationRequest.id == row.id)
             )
+        finally:
+            for session in sessions:
+                await session.close()
 
-        assert charged == 2
+        assert sum(digest is not None for digest in handed_out) == 5
+        assert charged == 5

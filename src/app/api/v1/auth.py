@@ -63,15 +63,16 @@ from ...core.security import (
     verify_restore_token,
     verify_token,
 )
-from ...core.utils.client_ip import client_ip
+from ...core.utils.client_ip import client_ip_bucket
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.request_context import RequestContext
 from ...crud.crud_auth_audit_events import record_auth_event
 from ...crud.crud_authentication_providers import crud_authentication_providers
 from ...crud.crud_authentication_requests import (
+    charge_code_attempt,
     claim_authentication_request,
     crud_authentication_requests,
-    register_failed_code_attempt,
+    spend_exhausted_code,
 )
 from ...crud.crud_daily_totals import count_account_created
 from ...crud.crud_invitations import accept_invitations, record_invite_link_sign_up
@@ -292,14 +293,17 @@ async def request_email_link(
     # First, so a dead link costs nothing: no row, no audit event, no rate-limit charge.
     via = await refuse_a_stale_join_link(db, body.via)
 
+    # Per-IP first. `enforce_rate_limit` spends a slot before it decides, so a request the
+    # per-IP limit refuses would otherwise still have spent the address's own three - and
+    # one caller could keep any number of addresses out of email sign-in.
     await enforce_rate_limit(
-        f"auth:email-request:email:{email}",
-        settings.MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL,
+        f"auth:email-request:ip:{client_ip_bucket(request)}",
+        settings.MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
     await enforce_rate_limit(
-        f"auth:email-request:ip:{client_ip(request)}",
-        settings.MAGIC_LINK_REQUEST_RATE_LIMIT_PER_IP,
+        f"auth:email-request:email:{email}",
+        settings.MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
 
@@ -382,7 +386,7 @@ async def check_email_link(
     response.headers["Cache-Control"] = "private, no-store"
 
     await enforce_rate_limit(
-        f"auth:email-verify-check:ip:{client_ip(request)}",
+        f"auth:email-verify-check:ip:{client_ip_bucket(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -436,7 +440,7 @@ async def verify_email_link(
     recipient clicked it would get a brand-new week-long session.
     """
     await enforce_rate_limit(
-        f"auth:email-verify:ip:{client_ip(request)}",
+        f"auth:email-verify:ip:{client_ip_bucket(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -506,7 +510,7 @@ async def verify_email_code(
     `deletion_pending` while marking nothing used. The code has no such precheck to reach.
     """
     await enforce_rate_limit(
-        f"auth:email-verify-code:ip:{client_ip(request)}",
+        f"auth:email-verify-code:ip:{client_ip_bucket(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -523,14 +527,18 @@ async def verify_email_code(
 
     context = RequestContext.from_request(request)
 
-    if not hmac.compare_digest(auth_request["code_hash"], hash_sign_in_code(body.code)):
-        # Charged before the 401 is raised, and atomically - the cap is the whole defense
-        # of a six-digit secret, so it must not be walkable by firing guesses in parallel.
-        await register_failed_code_attempt(
-            db, request_id=auth_request["id"], max_attempts=settings.SIGN_IN_CODE_ATTEMPTS_MAX
-        )
-        # Committed before the raise, like the attempt charge above it: `async_get_db` does
-        # not commit on unwind, so a row left in flight on this path is silently lost.
+    # Compared against the digest the charge hands back, never the one read above: the
+    # read is a fast path for rows that are plainly dead, and every guess in flight has
+    # already passed it. See `charge_code_attempt`.
+    max_attempts = settings.SIGN_IN_CODE_ATTEMPTS_MAX
+    code_hash = await charge_code_attempt(db, request_id=auth_request["id"], max_attempts=max_attempts)
+    if code_hash is None:
+        raise UnauthorizedException(_CODE_REJECTED)
+
+    if not hmac.compare_digest(code_hash, hash_sign_in_code(body.code)):
+        await spend_exhausted_code(db, request_id=auth_request["id"], max_attempts=max_attempts)
+        # Commits the spend above with it, and before the raise: `async_get_db` does not
+        # commit on unwind, so a row left in flight on this path is silently lost.
         # Never the code or its digest - the fact of the failure, never the artifact.
         await record_auth_event(
             db,
@@ -582,7 +590,7 @@ async def auth_with_google(
       visitor's credential failing.
     """
     await enforce_rate_limit(
-        f"auth:google:ip:{client_ip(request)}",
+        f"auth:google:ip:{client_ip_bucket(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -639,7 +647,7 @@ async def passkey_sign_in_options(request: Request) -> PasskeySignInOptions:
     domains is the design, not an accident.
     """
     await enforce_rate_limit(
-        f"auth:passkey-options:ip:{client_ip(request)}",
+        f"auth:passkey-options:ip:{client_ip_bucket(request)}",
         settings.PASSKEY_OPTIONS_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -673,7 +681,7 @@ async def passkey_sign_in_verify(
     copy to keep in step.
     """
     await enforce_rate_limit(
-        f"auth:passkey-verify:ip:{client_ip(request)}",
+        f"auth:passkey-verify:ip:{client_ip_bucket(request)}",
         settings.PASSKEY_VERIFY_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -725,7 +733,7 @@ async def complete_profile(
     creates nothing.
     """
     await enforce_rate_limit(
-        f"auth:complete:ip:{client_ip(request)}",
+        f"auth:complete:ip:{client_ip_bucket(request)}",
         settings.AUTH_COMPLETE_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -874,7 +882,7 @@ async def restore_account(
     account appears restored.
     """
     await enforce_rate_limit(
-        f"auth:restore:ip:{client_ip(request)}",
+        f"auth:restore:ip:{client_ip_bucket(request)}",
         settings.AUTH_COMPLETE_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -1094,7 +1102,7 @@ async def refresh_access_token(
     which is the property `DECISIONS.md` pins rather than one this change gets to relax.
     """
     await enforce_rate_limit(
-        f"auth:refresh:ip:{client_ip(request)}",
+        f"auth:refresh:ip:{client_ip_bucket(request)}",
         settings.AUTH_REFRESH_RATE_LIMIT_PER_IP,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
