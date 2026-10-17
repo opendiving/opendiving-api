@@ -93,7 +93,8 @@ def validate_agency_pairing(agency: str | None, agency_other: str | None) -> Non
     """The one place the `agency`/`agency_other` pairing is decided.
 
     Public because four callers need the same rule and must not spell it four ways:
-    `CertificationBase` and `CourseBase` check it on a whole-object write, and
+    `CertificationCreate` and `CourseCreate` (and their `Internal` twins) check it on a
+    whole-object write, and
     `patch_certification`/`patch_course` re-check it on a PATCH's merged stored+incoming
     values, which is the case neither schema can see. Only the reporting differs - a
     `ValueError` here is a per-field 422 from the schema, and the flat `{"detail": ...}`
@@ -180,6 +181,13 @@ class CertificationBase(BaseModel):
     ]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
+
+class _CertificationWrite(CertificationBase):
+    """The pairing, on the whole-object writes only. A read must not run it: the admin panel
+    writes through `CertificationUpdate`, which cannot check a pair, so a stored row can hold a
+    broken one - and a read refusing it 500s every read of that row, the repairing PATCH's own
+    ownership fetch included."""
+
     @model_validator(mode="after")
     def _check_agency_other(self) -> Self:
         validate_agency_pairing(self.agency, self.agency_other)
@@ -235,7 +243,7 @@ class CertificationReadInternal(CertificationBase, PublicUUIDSchema):
     created_at: datetime
 
 
-class CertificationCreate(CertificationBase):
+class CertificationCreate(_CertificationWrite):
     """Request body for creating a certification.
 
     `course_uuid` sits here rather than on `CertificationBase`, and that placement is
@@ -255,7 +263,7 @@ class CertificationCreate(CertificationBase):
     instructor_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=INSTRUCTOR_UUID_DESCRIPTION)]
 
 
-class CertificationCreateInternal(CertificationBase):
+class CertificationCreateInternal(_CertificationWrite):
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
@@ -269,7 +277,7 @@ class CertificationCreateInternal(CertificationBase):
 class CertificationUpdate(RejectsExplicitNulls):
     """Partial update.
 
-    Unlike `CertificationBase` this does *not* validate `agency`/`agency_other` against
+    Unlike `CertificationCreate` this does *not* validate `agency`/`agency_other` against
     each other - a PATCH may carry either field alone, so the pairing can only be
     checked against the merged result. `patch_certification` does that once it has the
     stored row in hand.

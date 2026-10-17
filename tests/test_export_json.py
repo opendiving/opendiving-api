@@ -1570,6 +1570,52 @@ class TestAnUnrecognizedVocabularyValueDoesNotFiveHundredTheExport:
         _assert_conforms(document)
 
     @pytest.mark.asyncio
+    async def test_a_card_whose_other_names_nobody_is_omitted(self, monkeypatch) -> None:
+        """`other` without a name claims an agency and produces none, and the card's agency
+        is REQUIRED, so the card goes rather than the document failing `$defs/certification`.
+        The admin panel's update form is how such a row is stored."""
+        certification = _with_id(
+            Certification(
+                user_id=1,
+                agency="other",
+                agency_other="  ",
+                name="Plongeur Niveau 2",
+                notes="",
+                uuid=UUIDS["certification"],
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+
+        document = await _render(build_bundle(certifications=[certification]), monkeypatch)
+
+        assert document["certifications"] == []
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
+    async def test_a_card_with_a_named_agency_drops_a_stray_agency_other(self, monkeypatch) -> None:
+        """The course's rule, on the card: the agency is the load-bearing half."""
+        certification = _with_id(
+            Certification(
+                user_id=1,
+                agency="padi",
+                agency_other="FFESSM",
+                name="Open Water Diver",
+                notes="",
+                uuid=UUIDS["certification"],
+                created_at=CREATED_AT,
+            ),
+            1,
+        )
+
+        document = await _render(build_bundle(certifications=[certification]), monkeypatch)
+
+        [card] = document["certifications"]
+        assert card["agency"] == "padi"
+        assert "agency_other" not in card
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
     async def test_an_unspeakable_status_costs_the_field_not_the_course(self, monkeypatch) -> None:
         """`status` reads like a REQUIRED member and is not - `$defs/course` requires only
         uuid/name, and spec §6.17 marks it O. Classifying it by intuition dropped the

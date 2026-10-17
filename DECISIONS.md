@@ -906,11 +906,15 @@ page should say even though no `certification` column moved.
 
 ## `agency_other` is validated against `agency` in two places
 
-`CertificationBase` rejects `agency_other` unless `agency` is `other`, and requires it when it is —
-both directions, so a stored row never carries a second agency name some future read path might
-display. `CertificationUpdate` cannot do this: a PATCH may carry either field alone, so the pairing
-is only checkable once merged over the stored row, which `patch_certification` does with
+`CertificationCreate` rejects `agency_other` unless `agency` is `other`, and requires it when it is,
+so a row the API writes never carries a second agency name some future read path might display.
+`CertificationUpdate` cannot do this: a PATCH may carry either field alone, so the pairing is only
+checkable once merged over the stored row, which `patch_certification` does with
 `_validate_agency_pairing`.
+
+The read schemas do not check it, and neither do the course's. CRUDAdmin writes through the update
+schema, so a stored row can hold a broken pair, and a read that refused one would 500 the PATCH that
+repairs it. The export drops a stray `agency_other` and omits a card whose `other` names nobody.
 
 The asymmetry for clients: switching a certification away from `other` must send
 `agency_other: null` explicitly, or the merged result still has both set and 422s.
@@ -2538,7 +2542,7 @@ uv run python -c "import ast; ast.parse(open('src/app/services/geocoding_service
 
 `src/app/core/security.py`, `services/dive_files.py` and `services/blob_store.py` carry the same
 form. The parentheses return when the clause binds — `except (A, B) as exc:` — so
-`services/blob_store.py` spells it both ways, and the `httpx` handler in `geocoding_service.py` is
+`services/blob_store.py` spells it both ways, and the `httpx` handler in `core/utils/outbound.py` is
 parenthesized for that reason alone. Unifying breaks whichever half is rewritten: parentheses added
 to the unbound form fail `ruff format --check`, removed from the bound form they are a `SyntaxError`
 ("multiple exception types must be parenthesized when using 'as'"). Check for an `as` before
@@ -3120,7 +3124,7 @@ Search asks `generator=search` with `prop=entityterms` (fifty candidates, terms 
 - Errors are HTTP 200 with a top-level `error` object.
 
 Wikimedia's anonymous throttle 429s `wbgetentities&props=claims` after roughly 28 heavy calls in 90
-s, below the app's own cap; a 429 logs as "request failed (HTTPStatusError)" and drops `ok`.
+s, below the app's own cap; a 429 logs as "A wikidata request answered 429." and drops `ok`.
 `_WIKIDATA_ENRICH_LIMIT` is the lever: lower it, or authenticate.
 
 ## The WoRMS search term goes in the URL *path*, so it must be percent-encoded
@@ -3901,11 +3905,11 @@ under the `tmp/` prefix that `iter_keys` hides. The worker runs it too, since
 `purge_deleted_accounts` is a GDPR erasure and credentials that cannot delete must fail at boot. It
 does not catch a `local` volume that was never mounted: the image creates `/data/files` owned by uid
 1000, so an unmounted container probes its own layer; `docker-compose.yml`'s `files-data` line
-prevents that. After migrations, `warn_if_files_volume_looks_empty` logs CRITICAL when file rows
-exist but `blob_store.has_any_key()` (a bounded `MaxKeys=1` call, not a walk) is false, without
-refusing, because the documented restore order has a legitimate window. `TestClient` enters the real
-lifespan, so `tests/conftest.py` pins `FILE_STORAGE_DIR` to a temp directory before importing
-`src.app.main`, and `.github/workflows/tests.yml` sets it too.
+prevents that. After migrations, `warn_if_files_volume_looks_empty` logs CRITICAL when any column in
+`BLOB_KEY_COLUMNS` holds a key but `blob_store.has_any_key()` (a bounded `MaxKeys=1` call, not a
+walk) is false, without refusing, because the documented restore order has a legitimate window.
+`TestClient` enters the real lifespan, so `tests/conftest.py` pins `FILE_STORAGE_DIR` to a temp
+directory before importing `src.app.main`, and `.github/workflows/tests.yml` sets it too.
 
 ## File payloads: Download routes keep their contract, and `async_engine` is disposed both ways
 
@@ -4677,13 +4681,13 @@ counter slot, or one dialog would starve a diver's resolve, and share a per-proc
 
 ## The sweeper has to learn every new blob kind, and forgetting is destructive
 
-`blob_store.iter_keys()` walks the whole volume while `_referenced_keys()` builds its set from
-columns, so a kind missing there is on disk and referenced by nothing, and every file of it past the
+`blob_store.iter_keys()` walks the whole store while the sweeper's referenced set is read from
+columns, so a kind missing there is stored and referenced by nothing, and every file of it past the
 24-hour grace window is an orphan for `--delete` to unlink. The suspicious-fraction refusal is the
-only brake, `--force` overrides it, and it does not engage below 20 files on the volume, so the
-smallest instances have none. Species photos and map tiles are the worst cases, being kinds on
-global tables. `_referenced_keys`' docstring does not count its sources, because any count goes
-stale at the next kind.
+only brake, `--force` overrides it, and it does not engage below 20 files, so the smallest instances
+have none. Those columns are listed once, in `services/blob_keys.py`, which the sweeper, the account
+purge (entries with an owner) and the startup files-volume check all read. `tests/test_blob_keys.py`
+fails when a model gains a key-named column the registry neither lists nor exempts.
 
 ## Species photos: Backfilling selects on the timestamp, not on the absence of bytes
 
@@ -7040,7 +7044,7 @@ past the draw limit a stored tile's 200 against an unstored one's 429 is an exac
 
 A tile is drawn from the basemap alone and shared by every account, so it counts toward no storage
 limit, is not exported, and no account's purge collects it - taking the tiles one diver was shown
-would take tiles others are shown. The sweeper's `_referenced_keys` reads `map_tile`, and the worker
+would take tiles others are shown. `BLOB_KEY_COLUMNS` lists `map_tile` with no owner, and the worker
 deletes a tile unserved for `UNSERVED_RETENTION`. Rejected: the purge collecting the tiles an
 account's requests drew first, which ties shared files to whoever happened to ask first.
 
