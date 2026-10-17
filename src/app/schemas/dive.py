@@ -8,6 +8,7 @@ from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Fie
 from ..core.schemas import (
     NOTES_MAX_LENGTH,
     POSTGRES_INTEGER_MAX,
+    PostgresInteger,
     PublicUUIDSchema,
     RejectsExplicitNulls,
     StoredVocabulary,
@@ -232,7 +233,7 @@ class DiveBase(BaseModel):
     """Shared by the read shapes and the write ones, which is why `start_time` is the
     permissive spelling here and `DiveCreate` re-declares it as the strict one."""
 
-    dive_number: Annotated[int, Field(examples=[5])]
+    dive_number: Annotated[PostgresInteger, Field(examples=[5])]
     start_time: Annotated[
         DiveLocalStartTime,
         Field(
@@ -243,7 +244,7 @@ class DiveBase(BaseModel):
         ),
     ]
     submerged_time: Annotated[
-        int,
+        PostgresInteger,
         Field(
             examples=[2048],
             description="The dive computer's time in the water, in seconds, surface time excluded",
@@ -253,30 +254,32 @@ class DiveBase(BaseModel):
     max_depth: Annotated[float | None, Field(default=None)]
     avg_depth: Annotated[float | None, Field(default=None)]
     bottom_temperature: Annotated[float | None, Field(default=None)]
-    visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
+    visibility: Annotated[PostgresInteger | None, Field(default=None, description="Underwater visibility in meters")]
     weight: Annotated[
         float | None, Field(default=None, examples=[6.0], description="Total ballast carried, in kilograms")
     ]
     # On `DiveBase` rather than `DiveTechScalars`, so both are writable on create and
     # edit: these are things a diver knows, and an import that re-attached would otherwise
-    # overwrite a correction (see that mixin's docstring). No Pydantic bounds on
-    # `altitude`, matching every other numeric field here - `ck_dive_altitude_range` is
+    # overwrite a correction (see that mixin's docstring). `altitude` is bounded only by
+    # its column's width, matching every other integer here - `ck_dive_altitude_range` is
     # the bound, mirrored by the frontend's Zod schema.
     water_type: Annotated[
         WaterType | None,
         Field(default=None, examples=[WaterType.SALT], description="What the water was, as a dive computer calibrates"),
     ]
     altitude: Annotated[
-        int | None,
+        PostgresInteger | None,
         Field(default=None, examples=[372], description="Elevation of the water surface, in meters above sea level"),
     ]
     # The diver's classification and conditions, on the same terms as the two above.
-    # `rating` has no Pydantic bound either: `ck_dive_rating_range` is the bound.
+    # `rating` likewise: `ck_dive_rating_range` is the bound.
     type: Annotated[
         DiveType | None,
         Field(default=None, examples=[DiveType.OPEN_CIRCUIT], description="What kind of dive it was"),
     ]
-    rating: Annotated[int | None, Field(default=None, examples=[4], description="The diver's rating, 1 to 5")]
+    rating: Annotated[
+        PostgresInteger | None, Field(default=None, examples=[4], description="The diver's rating, 1 to 5")
+    ]
     air_temperature: Annotated[
         float | None, Field(default=None, examples=[24.0], description="Air temperature at the surface, in °C")
     ]
@@ -1209,7 +1212,13 @@ class DiveRenumberRequest(BaseModel):
 
     start_at: Annotated[
         int,
-        Field(default=1, ge=1, description="Number to give the earliest dive in scope", examples=[1]),
+        Field(
+            default=1,
+            ge=1,
+            le=POSTGRES_INTEGER_MAX,
+            description="Number to give the earliest dive in scope",
+            examples=[1],
+        ),
     ]
     from_start_time: Annotated[
         DiveStartTime | None,
@@ -1257,7 +1266,10 @@ class DiveRenumberResult(BaseModel):
 
 
 class DiveCreate(DiveBase):
-    model_config = ConfigDict(extra="forbid")
+    # `allow_inf_nan=False` is on every write shape and on no read one: Postgres takes a `NaN`
+    # past a one-sided `CHECK`, and a read schema must never be able to reject its own table
+    # (`DiveMixtureBase`). `test_write_schema_bounds.py` holds every write shape to it.
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     # Narrowed back from `DiveBase`'s permissive spelling: this is the create side, and a
     # caller creating a dive knows the offset it happened in (the browser reads its own
@@ -1278,7 +1290,7 @@ class DiveCreate(DiveBase):
 
 
 class DiveCreateInternal(DiveBase):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     start_time: datetime  # the column, never the public spelling
     user_id: int
@@ -1310,7 +1322,7 @@ class DiveCreateRequest(DiveCreate):
 
 
 class DiveUpdate(RejectsExplicitNulls):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     # `dive_number`, `start_time`, `submerged_time` and `notes` map to `NOT NULL` columns (see
     # `models/dive.py`), so an explicit null is refused by `RejectsExplicitNulls` rather
@@ -1320,7 +1332,7 @@ class DiveUpdate(RejectsExplicitNulls):
     # describing the *previous* start time.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("dive_number", "start_time", "submerged_time", "notes")
 
-    dive_number: Annotated[int | None, Field(examples=[5], default=None)]
+    dive_number: Annotated[PostgresInteger | None, Field(examples=[5], default=None)]
     # The permissive spelling, unlike `DiveCreate`'s. An update may **preserve** an unknown
     # offset or an unknown time of day - an imported dive stays editable, and the offsetless
     # or date-only `started_at` this app exports for such a dive is a value it will take back
@@ -1335,7 +1347,7 @@ class DiveUpdate(RejectsExplicitNulls):
         ),
     ]
     submerged_time: Annotated[
-        int | None,
+        PostgresInteger | None,
         Field(
             examples=[2048],
             description="The dive computer's time in the water, in seconds, surface time excluded",
@@ -1345,16 +1357,17 @@ class DiveUpdate(RejectsExplicitNulls):
     max_depth: Annotated[float | None, Field(default=None)]
     avg_depth: Annotated[float | None, Field(default=None)]
     bottom_temperature: Annotated[float | None, Field(default=None)]
-    visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
+    visibility: Annotated[PostgresInteger | None, Field(default=None, description="Underwater visibility in meters")]
     weight: Annotated[float | None, Field(default=None, description="Total ballast carried, in kilograms")]
     water_type: Annotated[
         WaterType | None, Field(default=None, description="What the water was, as a dive computer calibrates")
     ]
     altitude: Annotated[
-        int | None, Field(default=None, description="Elevation of the water surface, in meters above sea level")
+        PostgresInteger | None,
+        Field(default=None, description="Elevation of the water surface, in meters above sea level"),
     ]
     type: Annotated[DiveType | None, Field(default=None, description="What kind of dive it was")]
-    rating: Annotated[int | None, Field(default=None, description="The diver's rating, 1 to 5")]
+    rating: Annotated[PostgresInteger | None, Field(default=None, description="The diver's rating, 1 to 5")]
     air_temperature: Annotated[float | None, Field(default=None, description="Air temperature at the surface, in °C")]
     current: Annotated[Current | None, Field(default=None)]
     waves: Annotated[Waves | None, Field(default=None)]
@@ -1411,7 +1424,7 @@ class DiveUpdateRequest(DiveUpdate):
 
 
 class DiveUpdateInternal(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     dive_number: Annotated[int | None, Field(examples=[5], default=None)]
     start_time: Annotated[datetime | None, Field(examples=[datetime.now()], default=None)]

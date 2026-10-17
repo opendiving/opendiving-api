@@ -43,13 +43,13 @@ class UserDiveStatsReadInternal(UserDiveStatsBase):
 
 
 class UserDiveStatsCreateInternal(UserDiveStatsBase):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     user_id: int
 
 
 class UserDiveStatsUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     total_dives: Annotated[int | None, Field(default=None)]
     max_depth: Annotated[float | None, Field(default=None)]
