@@ -28,6 +28,7 @@ from src.app.core.security import blacklist_token, create_refresh_token, token_s
 from src.app.core.utils.request_context import RequestContext
 from src.app.models.user import User
 from src.app.models.user_session import UserSession
+from src.app.schemas.auth import RefreshResponse
 from src.app.schemas.user_session import UserSessionReadInternal
 from src.app.services.auth_service import issue_tokens
 from tests.conftest import db_available
@@ -218,7 +219,7 @@ class TestRefreshAccessToken(SignedInAccount):
 
             result = await refresh_access_token(_request({"refresh_token": "good-token"}), response, mock_db)
 
-            assert result == {"access_token": "new-access-token", "token_type": "bearer"}
+            assert result == RefreshResponse(access_token="new-access-token", token_type="bearer")
             # A fresh refresh cookie is set on the same response, not just an access token.
             # The replacement carries the presented token's subject through unchanged -
             # which is safe only because that subject is an immutable uuid.

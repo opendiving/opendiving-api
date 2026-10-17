@@ -40,7 +40,7 @@ from ...schemas.course import (
     CourseStatus,
     CourseUpdateRequest,
 )
-from ...schemas.lookup import LookupUntil, LookupUuids, lookup_bound
+from ...schemas.lookup import LookupUntil, LookupUuids
 from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
@@ -402,25 +402,7 @@ async def _lookup_courses(
     return response
 
 
-# Under the list's prefix, so every sweep that drops the list drops the lookup with it.
-_LOOKUP_CACHE_KEY_PREFIX = _course_cache.list_cache_key_prefix + ":lookup:until_{until}"
-
-
-@cache(key_prefix=_LOOKUP_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
-async def _cached_lookup_courses(
-    request: Request,
-    user_id: int,
-    db: AsyncSession,
-    page: int,
-    items_per_page: int,
-    search: str | None,
-    until: datetime | None,
-) -> dict:
-    """`_lookup_courses` with no uuids, cached under the list's prefix so that
-    `invalidate_course_caches` drops it with the list."""
-    return await _lookup_courses(
-        user_id=user_id, db=db, page=page, items_per_page=items_per_page, search=search, until=until, uuids=None
-    )
+_lookup = _course_cache.lookup(_lookup_courses)
 
 
 @router.get("/courses/lookup", response_model=PaginatedListResponse[CourseLookupItem])
@@ -446,18 +428,16 @@ async def lookup_courses(
     cached: no two forms hold the same set for long. Out-of-range pagination is clamped.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
-    query: dict[str, Any] = {
-        "user_id": current_user["id"],
-        "db": db,
-        "page": page,
-        "items_per_page": items_per_page,
-        "search": (search or "").strip().lower() or None,
-        "until": lookup_bound(until),
-    }
-
-    if uuid:
-        return await _lookup_courses(**query, uuids=uuid)
-    return await _cached_lookup_courses(request, **query)
+    return await _lookup(
+        request,
+        user_id=current_user["id"],
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        search=search,
+        until=until,
+        uuids=uuid,
+    )
 
 
 @cache(key_prefix="user_{user_id}_course", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)

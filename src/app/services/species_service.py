@@ -121,7 +121,7 @@ _RESOLVE_BUDGET_SECONDS = 25.0
 _ENRICHMENT_BUDGET_SECONDS = 10.0
 
 # What a picker can usefully show before "keep typing" is better advice than another row.
-_MAX_RESULTS = 25
+MAX_RESULTS = 25
 
 # WoRMS pages its list endpoints at 50. Search never asks for page 2: more than fifty raw
 # hits for one typed fragment is what `has_more` exists to say. Resolve is the exception -
@@ -175,7 +175,7 @@ _MISS_TTL_SECONDS = 60 * 60
 #
 # `v7` is the one that is easiest to forget, and it is here for the reason the geocoder's
 # `v2` -> `v3` was: a cached entry carries the `attribution` string the normalizer wrote, for
-# a month. Changing `_WORMS_ATTRIBUTION` without this prefix would leave every query already
+# a month. Changing `WORMS_ATTRIBUTION` without this prefix would leave every query already
 # in the cache serving the old bare-text credit well into next month, at a client that now
 # renders the linked form - and nothing fails, locally or in CI, when the bump is skipped.
 _CACHE_VERSION = "v7"
@@ -280,7 +280,7 @@ _WIKIDATA_RANK_BY_QID = {
 # `(CC BY)` is a plain run *after* the link, which the client's parser handles because it
 # splits a string into runs and links rather than matching one whole; and the result fits
 # `SpeciesSearchResult.attribution`'s 255 characters.
-_WORMS_ATTRIBUTION = "[World Register of Marine Species](https://www.marinespecies.org) (CC BY)"
+WORMS_ATTRIBUTION = "[World Register of Marine Species](https://www.marinespecies.org) (CC BY)"
 _WIKIDATA_ATTRIBUTION = "Wikidata (CC0)"
 
 # Mirror the bounds on `schemas.species` and the column widths behind them. Applied by
@@ -860,7 +860,7 @@ def _worms_result(row: Any, vernames: dict[int, str] | None = None) -> SpeciesSe
         status="accepted" if folded else taxon.status,
         matched_name=matched_name,
         source="worms",
-        attribution=_WORMS_ATTRIBUTION,
+        attribution=WORMS_ATTRIBUTION,
     )
 
 
@@ -1653,7 +1653,7 @@ async def _remote_search(query: str) -> SpeciesSearchResponse:
     # entry keeps the schema's contract rather than repairing it on every read.
     filled = _fill_vernacular_names(list(merged.values()), english_vernames)
     ordered = _ordered(_drop_redundant_hints(filled, query), query)
-    response = SpeciesSearchResponse(results=ordered[:_MAX_RESULTS], has_more=truncated or len(ordered) > _MAX_RESULTS)
+    response = SpeciesSearchResponse(results=ordered[:MAX_RESULTS], has_more=truncated or len(ordered) > MAX_RESULTS)
     await _store_search(key, response, complete=complete)
     return response
 
@@ -1797,8 +1797,8 @@ def _ordered(results: list[SpeciesSearchResult], query: str) -> list[SpeciesSear
 
     **This is no longer the ranking the local catalog's SQL applies**, and the divergence is
     named rather than left for the next reader to assume away. `_local_search` still orders by
-    its own three-way `match_rank` and, worse, applies `LIMIT _MAX_RESULTS` under it - so the
-    moment one instance's catalog holds more than `_MAX_RESULTS` matches for a single query,
+    its own three-way `match_rank` and, worse, applies `LIMIT MAX_RESULTS` under it - so the
+    moment one instance's catalog holds more than `MAX_RESULTS` matches for a single query,
     the SQL can cut a row this key would have ranked first, and nothing here can put it back.
     The catalog is small by construction and a long way from that threshold; the fix belongs
     with the `pg_trgm` escalation in DECISIONS.md whenever that reopens.
@@ -1878,7 +1878,7 @@ async def _local_search(db: AsyncSession, query: str) -> tuple[list[SpeciesSearc
         # species (one per matching alias) and the diver wants one.
         .group_by(Species.id)
         .order_by("match_rank", Species.scientific_name)
-        .limit(_MAX_RESULTS)
+        .limit(MAX_RESULTS)
     )
     rows = (await db.execute(statement)).all()
 
@@ -1900,10 +1900,10 @@ async def _local_search(db: AsyncSession, query: str) -> tuple[list[SpeciesSearc
                 status=row.status,
                 matched_name=hint,
                 source="catalog",
-                attribution=_WORMS_ATTRIBUTION,
+                attribution=WORMS_ATTRIBUTION,
             )
         )
-    return results, len(rows) >= _MAX_RESULTS
+    return results, len(rows) >= MAX_RESULTS
 
 
 async def _attach_catalog_uuids(db: AsyncSession, results: list[SpeciesSearchResult]) -> list[SpeciesSearchResult]:
@@ -1970,8 +1970,8 @@ async def search_species(db: AsyncSession, query: str) -> SpeciesSearchResponse:
     # catalog row can arrive showing a name that matches the query *and* a hint repeating it.
     ordered = _ordered(_drop_redundant_hints(list(merged.values()), normalized), normalized)
     return SpeciesSearchResponse(
-        results=await _attach_catalog_uuids(db, ordered[:_MAX_RESULTS]),
-        has_more=remote.has_more or local_was_full or len(ordered) > _MAX_RESULTS,
+        results=await _attach_catalog_uuids(db, ordered[:MAX_RESULTS]),
+        has_more=remote.has_more or local_was_full or len(ordered) > MAX_RESULTS,
     )
 
 

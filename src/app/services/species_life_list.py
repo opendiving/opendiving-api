@@ -40,7 +40,7 @@ from ..schemas.species import (
     SpeciesSuggestion,
     SpeciesSuggestResponse,
 )
-from .species_service import _MAX_RESULTS, _WORMS_ATTRIBUTION, search_species
+from .species_service import MAX_RESULTS, WORMS_ATTRIBUTION, search_species
 
 
 def _sighting_join(statement: Any, *, user_id: int) -> Any:
@@ -58,7 +58,7 @@ def _sighting_join(statement: Any, *, user_id: int) -> Any:
     )
 
 
-def _search_clause(search: str) -> Any:
+def species_search_clause(search: str) -> Any:
     """Match a species by the same names the catalog search already matches on.
 
     An `EXISTS` over `species_name` rather than a join, so a species with three matching
@@ -145,7 +145,7 @@ async def species_life_list(
     than a `min()`/`max()` - see `offset_of_the`. Ordering is by the UTC instant either way:
     "first seen" means the earliest dive chronologically, whatever local time it read as.
     """
-    conditions = [] if search is None else [_search_clause(search)]
+    conditions = [] if search is None else [species_search_clause(search)]
     if dive_site_id is not None:
         # A dive naming the site at any position, as the site's summary counts it - so a
         # site page's species list is as long as its species count.
@@ -250,7 +250,7 @@ async def suggest_species(
             .group_by(Species.id)
             .order_by(count_at_sites.desc(), _LAST_SEEN.desc(), Species.id)
             # One past the page, to tell a full page from a cut one.
-            .limit(_MAX_RESULTS + 1)
+            .limit(MAX_RESULTS + 1)
         )
     ).all()
     # Built from columns before `search_species` releases the read transaction, so nothing
@@ -266,17 +266,17 @@ async def suggest_species(
             # A visible name explains every own match, so there is never a hidden one to name.
             matched_name=None,
             source="catalog",
-            attribution=_WORMS_ATTRIBUTION,
+            attribution=WORMS_ATTRIBUTION,
             dive_count_at_sites=row.dive_count_at_sites,
             last_seen=combine_dive_start_time(row.last_seen, row.last_offset, row.last_date_only),
         )
         for row in rows
     ]
 
-    if len(own) >= _MAX_RESULTS:
+    if len(own) >= MAX_RESULTS:
         # Cut, or full with the search never asked: either way there is more behind the page,
         # except under an empty query, which has no search behind it.
-        return SpeciesSuggestResponse(results=own[:_MAX_RESULTS], has_more=len(own) > _MAX_RESULTS or bool(normalized))
+        return SpeciesSuggestResponse(results=own[:MAX_RESULTS], has_more=len(own) > MAX_RESULTS or bool(normalized))
     if len(normalized) < 2:
         # One letter is the caller's own species only; the catalog was not asked, so a short
         # list must not read as every species carrying that letter.
@@ -291,5 +291,5 @@ async def suggest_species(
         for result in searched.results
         if result.aphia_id not in shown and (result.uuid is None or result.uuid not in excluded)
     ]
-    room = _MAX_RESULTS - len(own)
+    room = MAX_RESULTS - len(own)
     return SpeciesSuggestResponse(results=own + appended[:room], has_more=searched.has_more or len(appended) > room)

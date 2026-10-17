@@ -34,7 +34,7 @@ from tests.conftest import db_available
 from tests.helpers.generators import create_dive, create_dive_site, create_species, create_user
 
 SUGGEST_PATH = "/api/v1/user/species/suggest"
-PAGE = species_service._MAX_RESULTS
+PAGE = species_service.MAX_RESULTS
 CURRENT_USER = {"id": 7, "uuid": uuid7(), "username": "ada", "is_superuser": False}
 
 
@@ -258,7 +258,7 @@ class TestTheRow:
         }
         assert row.uuid == species.uuid
         assert row.source == "catalog"
-        assert row.attribution == species_service._WORMS_ATTRIBUTION
+        assert row.attribution == species_service.WORMS_ATTRIBUTION
         assert row.matched_name is None
         assert row.dive_count_at_sites == 1
         # The offset the dive was logged in, as the life list reports it.

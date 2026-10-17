@@ -60,7 +60,7 @@ from ...schemas.location import (
     location_columns,
     location_from_row,
 )
-from ...schemas.lookup import LookupUntil, LookupUuids, lookup_bound
+from ...schemas.lookup import LookupUntil, LookupUuids
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches, invalidate_trip_caches
 from ...services.dive_site_catalog import search_sites
@@ -183,16 +183,10 @@ async def write_dive_site(
         await _replace_tags(db, dive_site_id=created_dive_site.id, tag_ids=tag_ids)
     await invalidate_dive_site_caches(current_user["id"])
 
-    dive_site_read = await crud_dive_sites.get(
-        db=db, id=created_dive_site.id, schema_to_select=DiveSiteReadInternal, return_as_model=True
-    )
-    if dive_site_read is None:
-        raise NotFoundException("Created dive site not found")
-
     tags = (await get_tags_for_dive_sites(db, [created_dive_site.id]))[created_dive_site.id] if tag_ids else []
     # No dive can name a site that did not exist, so a new one has nothing to summarise.
     return _to_public_dive_site(
-        cast(DiveSiteReadInternal, dive_site_read),
+        created_dive_site,
         user_uuid=current_user["uuid"],
         tags=tags,
         summary=DiveSiteSummary(),
@@ -349,25 +343,7 @@ async def _lookup_dive_sites(
     return response
 
 
-# Under the list's prefix, so every sweep that drops the list drops the lookup with it.
-_LOOKUP_CACHE_KEY_PREFIX = _dive_site_cache.list_cache_key_prefix + ":lookup:until_{until}"
-
-
-@cache(key_prefix=_LOOKUP_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
-async def _cached_lookup_dive_sites(
-    request: Request,
-    user_id: int,
-    db: AsyncSession,
-    page: int,
-    items_per_page: int,
-    search: str | None,
-    until: datetime | None,
-) -> dict:
-    """`_lookup_dive_sites` with no uuids, cached under the list's prefix so that
-    `invalidate_dive_site_caches` drops it with the list."""
-    return await _lookup_dive_sites(
-        user_id=user_id, db=db, page=page, items_per_page=items_per_page, search=search, until=until, uuids=None
-    )
+_lookup = _dive_site_cache.lookup(_lookup_dive_sites)
 
 
 @router.get("/dive-sites/lookup", response_model=PaginatedListResponse[DiveSiteLookupItem])
@@ -393,18 +369,16 @@ async def lookup_dive_sites(
     pagination is clamped.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
-    query: dict[str, Any] = {
-        "user_id": current_user["id"],
-        "db": db,
-        "page": page,
-        "items_per_page": items_per_page,
-        "search": (search or "").strip().lower() or None,
-        "until": lookup_bound(until),
-    }
-
-    if uuid:
-        return await _lookup_dive_sites(**query, uuids=uuid)
-    return await _cached_lookup_dive_sites(request, **query)
+    return await _lookup(
+        request,
+        user_id=current_user["id"],
+        db=db,
+        page=page,
+        items_per_page=items_per_page,
+        search=search,
+        until=until,
+        uuids=uuid,
+    )
 
 
 @cache(key_prefix="user_{user_id}_dive_site", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)

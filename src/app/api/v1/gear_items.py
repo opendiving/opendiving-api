@@ -99,13 +99,7 @@ async def write_gear_item(
     )
     await invalidate_gear_caches(current_user["id"])
 
-    gear_item_read = await crud_gear_items.get(
-        db=db, id=created_gear_item.id, schema_to_select=GearItemReadInternal, return_as_model=True
-    )
-    if gear_item_read is None:
-        raise NotFoundException("Created gear item not found")
-
-    return _to_public_gear_item(cast(GearItemReadInternal, gear_item_read), user_uuid=current_user["uuid"])
+    return _to_public_gear_item(created_gear_item, user_uuid=current_user["uuid"])
 
 
 @cache(

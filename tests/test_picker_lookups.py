@@ -98,10 +98,21 @@ _SWEPT_BY = {
 }
 
 
+def _owned_cache(module: Any) -> OwnedResourceCache[Any, Any]:
+    (owned,) = [value for value in vars(module).values() if isinstance(value, OwnedResourceCache)]
+    return owned
+
+
+def _lookup_prefix(module: Any) -> str:
+    """The module's own prefix where it hand-rolls the cached lookup, else its list cache's."""
+    prefix: str = getattr(module, "_LOOKUP_CACHE_KEY_PREFIX", None) or _owned_cache(module).lookup_cache_key_prefix
+    return prefix
+
+
 class TestTheCacheKeys:
     @pytest.mark.parametrize("module", list(_SWEPT_BY))
     def test_the_key_sits_under_the_sweep_that_drops_the_list(self, module: Any) -> None:
-        prefix = module._LOOKUP_CACHE_KEY_PREFIX
+        prefix = _lookup_prefix(module)
         key = _format_prefix(
             prefix,
             {"user_id": 7, "page": 1, "items_per_page": 25, "search": None, "type": None, "until": lookup_bound(None)},
@@ -112,10 +123,7 @@ class TestTheCacheKeys:
 
     @pytest.mark.parametrize("module", [trips_module, dive_sites_module, contacts_module, courses_module])
     def test_the_key_extends_the_list_s_own(self, module: Any) -> None:
-        caches = [value for value in vars(module).values() if isinstance(value, OwnedResourceCache)]
-
-        assert len(caches) == 1
-        assert module._LOOKUP_CACHE_KEY_PREFIX == caches[0].list_cache_key_prefix + ":lookup:until_{until}"
+        assert _lookup_prefix(module) == _owned_cache(module).list_cache_key_prefix + ":lookup:until_{until}"
 
     def test_the_people_lookup_is_not_cached(self) -> None:
         source = (V1_DIR / "people.py").read_text()
@@ -195,6 +203,17 @@ async def _page(
     return rows
 
 
+async def _fetched(
+    fetch: Any, async_db: AsyncSession, user: User, search: str | None, bound: datetime | None
+) -> list[dict[str, Any]]:
+    """A page from a lookup's uncached fetch, which `OwnedResourceCache.lookup` wraps."""
+    result = await fetch(
+        user_id=user.id, db=async_db, page=1, items_per_page=50, search=search, until=bound, uuids=None
+    )
+    rows: list[dict[str, Any]] = result["data"]
+    return rows
+
+
 def _uuids(result: dict[str, Any]) -> set[Any]:
     return {row["uuid"] for row in result["data"]}
 
@@ -208,7 +227,7 @@ def _use_trip(db: Session, dive: Dive, trip: Any) -> None:
 
 
 async def _lookup_trips(async_db: AsyncSession, user: User, search: str | None, bound: datetime | None) -> list[Any]:
-    return await _page(trips_module._cached_lookup_trips, async_db, user, search, bound)
+    return await _fetched(trips_module._lookup_trips, async_db, user, search, bound)
 
 
 async def _list_trips(async_db: AsyncSession, user: User, term: str) -> set[Any]:
@@ -233,7 +252,7 @@ def _use_site(db: Session, dive: Dive, site: Any) -> None:
 
 
 async def _lookup_sites(async_db: AsyncSession, user: User, search: str | None, bound: datetime | None) -> list[Any]:
-    return await _page(dive_sites_module._cached_lookup_dive_sites, async_db, user, search, bound)
+    return await _fetched(dive_sites_module._lookup_dive_sites, async_db, user, search, bound)
 
 
 async def _list_sites(async_db: AsyncSession, user: User, term: str) -> set[Any]:
@@ -338,7 +357,7 @@ def _use_course(db: Session, dive: Dive, course: Any) -> None:
 
 
 async def _lookup_courses(async_db: AsyncSession, user: User, search: str | None, bound: datetime | None) -> list[Any]:
-    return await _page(courses_module._cached_lookup_courses, async_db, user, search, bound)
+    return await _fetched(courses_module._lookup_courses, async_db, user, search, bound)
 
 
 async def _list_courses(async_db: AsyncSession, user: User, term: str) -> set[Any]:
