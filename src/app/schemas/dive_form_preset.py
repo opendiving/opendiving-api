@@ -6,7 +6,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredName, StoredVocabulary, Trimmed
 
 
 class DiveFormField(StrEnum):
@@ -125,7 +125,7 @@ def canonical_hidden_fields(values: Iterable[DiveFormField]) -> list[DiveFormFie
 
 
 class DiveFormPresetBase(BaseModel):
-    name: Annotated[str, Field(min_length=1, max_length=255, examples=["Warm water"])]
+    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Warm water"])]
     hidden_fields: Annotated[
         list[DiveFormField],
         Field(
@@ -150,6 +150,7 @@ class DiveFormPresetRead(DiveFormPresetBase, PublicUUIDSchema):
     the sequential internal `id` (which is never exposed over the API).
     """
 
+    name: StoredName
     # `StoredVocabulary`, and the inherited `_canonicalize` turned off with it. Widening the
     # annotation alone would be worse than leaving it: `canonical_hidden_fields` rebuilds the
     # list from `DiveFormField`'s members, so an unrecognized stored name would be *dropped*
@@ -174,6 +175,7 @@ class DiveFormPresetReadInternal(DiveFormPresetBase, PublicUUIDSchema):
     additionally resolves `user_id` to the owning user's `uuid`).
     """
 
+    name: StoredName
     # `StoredVocabulary`, and the inherited `_canonicalize` turned off with it. Widening the
     # annotation alone would be worse than leaving it: `canonical_hidden_fields` rebuilds the
     # list from `DiveFormField`'s members, so an unrecognized stored name would be *dropped*
@@ -212,7 +214,7 @@ class DiveFormPresetUpdate(RejectsExplicitNulls):
     # null.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "hidden_fields")
 
-    name: Annotated[str | None, Field(default=None, min_length=1, max_length=255)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(default=None, max_length=255)]
     hidden_fields: Annotated[
         list[DiveFormField] | None,
         Field(default=None, max_length=len(DiveFormField), description="Replaces the preset's hidden set wholesale"),

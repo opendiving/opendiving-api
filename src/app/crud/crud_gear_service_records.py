@@ -1,7 +1,7 @@
 import uuid as uuid_pkg
 
 from fastcrud import FastCRUD
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.gear_service_record import GearServiceRecord
@@ -13,6 +13,7 @@ from ..schemas.gear_service import (
     GearServiceRecordUpdate,
     GearServiceRecordUpdateInternal,
 )
+from .unique_keys import unique_key_matches
 
 CRUDGearServiceRecord = FastCRUD[
     GearServiceRecord,
@@ -42,9 +43,11 @@ async def find_schedule_for_record(
     """
     result = await db.execute(
         select(GearServiceSchedule).where(
-            GearServiceSchedule.gear_item_id == gear_item_id,
-            GearServiceSchedule.kind == kind,
-            func.coalesce(func.lower(GearServiceSchedule.label), "") == (label or "").strip().lower(),
+            *unique_key_matches(
+                GearServiceSchedule,
+                "ux_gear_service_schedule_item_kind_label",
+                {"gear_item_id": gear_item_id, "kind": kind, "label": label},
+            )
         )
     )
     return result.scalar_one_or_none()

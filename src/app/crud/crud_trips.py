@@ -15,6 +15,7 @@ from ..models.trip_part import TripPart
 from ..schemas.trip import TripCreateInternal, TripReadInternal, TripUpdate, TripUpdateInternal
 from .crud_contacts import get_contact_uuids_by_ids
 from .crud_dives import DatedPart, candidate_of, part_for_day
+from .unique_keys import unique_key_taken
 
 CRUDTrip = FastCRUD[Trip, TripCreateInternal, TripUpdate, TripUpdateInternal, TripUpdate, TripReadInternal]
 crud_trips = CRUDTrip(Trip)
@@ -260,17 +261,7 @@ async def get_trip_uuids_by_ids(db: AsyncSession, trip_ids: list[int], user_id: 
 
 
 async def trip_name_exists(db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None) -> bool:
-    """Case-insensitive check for whether a trip with this name already exists for the user.
-
-    Mirrors the `ux_trip_user_id_name_lower` unique index, which enforces the same rule
-    case-insensitively at the database level as a safety net.
-    """
-    stmt = select(Trip.id).where(
-        Trip.user_id == user_id,
-        func.lower(Trip.name) == name.strip().lower(),
+    """Asked on `ux_trip_user_id_name_lower`'s own expressions."""
+    return await unique_key_taken(
+        db, Trip, "ux_trip_user_id_name_lower", {"user_id": user_id, "name": name}, exclude_id=exclude_id
     )
-    if exclude_id is not None:
-        stmt = stmt.where(Trip.id != exclude_id)
-
-    result = await db.execute(stmt.limit(1))
-    return result.first() is not None

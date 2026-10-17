@@ -16,7 +16,14 @@ from pydantic import (
     model_validator,
 )
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from ..core.schemas import (
+    NOTES_MAX_LENGTH,
+    PublicUUIDSchema,
+    RejectsExplicitNulls,
+    StoredName,
+    StoredVocabulary,
+    Trimmed,
+)
 from .dive import EntryType, WaterType
 from .location import (
     LOCATION_NAME_MAX,
@@ -172,7 +179,7 @@ class DiveSiteBase(BaseModel):
     `location_*` columns behind it so FastCRUD can select them by name.
     """
 
-    name: Annotated[str, Field(min_length=1, max_length=255, examples=["Blue Hole"])]
+    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Blue Hole"])]
     latitude: Latitude
     longitude: Longitude
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
@@ -215,7 +222,7 @@ class DiveSiteLocationColumnsInput(DiveSiteLocationColumns):
     place is corrected back to "not recorded", and a minimum length says nothing about it.
     """
 
-    location_name: Annotated[str | None, Field(default=None, min_length=1, max_length=LOCATION_NAME_MAX)]
+    location_name: Annotated[Annotated[str, Trimmed] | None, Field(default=None, max_length=LOCATION_NAME_MAX)]
 
 
 class _DiveSiteMembersRead(BaseModel):
@@ -255,6 +262,7 @@ class DiveSiteRead(DiveSiteBase, _DiveSiteMembersRead, DiveSiteSummary, PublicUU
     the diver's order and the summary of the diver's dives there.
     """
 
+    name: StoredName
     location: LocationRead | None = None
     tags: Annotated[list[str], Field(default_factory=list)]
     user_uuid: uuid_pkg.UUID
@@ -268,6 +276,7 @@ class DiveSiteReadInternal(DiveSiteBase, _DiveSiteMembersRead, DiveSiteLocationC
     the locality and carries the tags and the summary).
     """
 
+    name: StoredName
     id: int
     user_id: int
     created_at: datetime
@@ -362,7 +371,7 @@ class _DiveSiteUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     # never be corrected back to "not recorded".
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes", "other_names", "external_ids", "entry_types")
 
-    name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
     other_names: Annotated[list[OtherName] | None, Field(default=None, description="Replaces the other names whole")]
     external_ids: Annotated[

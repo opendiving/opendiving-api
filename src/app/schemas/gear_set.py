@@ -4,12 +4,12 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredName, Trimmed
 from .gear_item import GearItemInfo
 
 
 class GearSetBase(BaseModel):
-    name: Annotated[str, Field(min_length=1, max_length=255, examples=["Sidemount"])]
+    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Sidemount"])]
     weight: Annotated[
         float | None,
         Field(
@@ -27,6 +27,7 @@ class GearSetRead(GearSetBase, PublicUUIDSchema):
     items embedded in the order they were added.
     """
 
+    name: StoredName
     user_uuid: uuid_pkg.UUID
     created_at: datetime
     gear_items: Annotated[list[GearItemInfo], Field(default_factory=list, description="Items in the set, in order")]
@@ -37,6 +38,7 @@ class GearSetReadInternal(GearSetBase, PublicUUIDSchema):
     lookups only - never returned directly over the API (use `GearSetRead`).
     """
 
+    name: StoredName
     id: int
     user_id: int
     created_at: datetime
@@ -65,7 +67,7 @@ class GearSetUpdate(RejectsExplicitNulls):
     # state, so clearing it stays allowed.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name",)
 
-    name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None)]
     weight: Annotated[
         float | None, Field(default=None, ge=0, description="Ballast normally carried with this set, in kilograms")
     ]

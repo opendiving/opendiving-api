@@ -23,6 +23,7 @@ from ..schemas.dive_site import (
     DiveSiteUpdateInternal,
 )
 from .crud_dives import date_only_of_the, offset_of_the
+from .unique_keys import unique_key_taken
 
 CRUDDiveSite = FastCRUD[
     DiveSite, DiveSiteCreateInternal, DiveSiteUpdate, DiveSiteUpdateInternal, DiveSiteUpdate, DiveSiteReadInternal
@@ -243,23 +244,13 @@ async def resolve_dive_site_ids_for_user(
 async def dive_site_name_exists(
     db: AsyncSession, user_id: int, name: str, location_name: str | None = None, exclude_id: int | None = None
 ) -> bool:
-    """Case-insensitive check for whether a dive site with the same (name, locality name)
-    already exists for the user.
-
-    Mirrors the `ux_dive_site_user_id_name_location_lower` unique index, which keys on the
-    locality's *name* and none of its other members. Two sites with no locality and the same
-    name are treated as duplicates.
-    """
-    stmt = select(DiveSite.id).where(
-        DiveSite.user_id == user_id,
-        func.lower(DiveSite.name) == name.strip().lower(),
+    """Asked on `ux_dive_site_user_id_name_location_lower`'s own expressions, which key on the
+    locality's *name* and none of its other members: two sites with no locality and the same
+    name are duplicates."""
+    return await unique_key_taken(
+        db,
+        DiveSite,
+        "ux_dive_site_user_id_name_location_lower",
+        {"user_id": user_id, "name": name, "location_name": location_name},
+        exclude_id=exclude_id,
     )
-    if location_name is None:
-        stmt = stmt.where(DiveSite.location_name.is_(None))
-    else:
-        stmt = stmt.where(func.lower(DiveSite.location_name) == location_name.strip().lower())
-    if exclude_id is not None:
-        stmt = stmt.where(DiveSite.id != exclude_id)
-
-    result = await db.execute(stmt.limit(1))
-    return result.first() is not None

@@ -2,7 +2,7 @@ import uuid as uuid_pkg
 from datetime import date, datetime
 from typing import ClassVar, Self
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, BeforeValidator, StringConstraints, model_validator
 
 # Free-text "notes" fields (Dive, DiveSite, Trip) are stored as unbounded `Text`
 # columns in Postgres (VARCHAR(n) and TEXT perform identically there), so this
@@ -43,6 +43,27 @@ DATE_RANGE_MESSAGE = "end_date must be on or after start_date"
 # passes the class object around. Splitting every base in two to say so statically would
 # duplicate twenty fields on `DiveBase` alone.
 StoredVocabulary = str
+
+# A name a per-user unique index keys on is stored trimmed, so the `lower(name)` the index
+# compares is the name the diver sees: "Egypt " is not a second "Egypt", and "   " is no
+# name. Write shapes only - see `StoredName`.
+Trimmed = StringConstraints(strip_whitespace=True, min_length=1)
+
+
+def _blank_is_none(value: object) -> object:
+    return None if isinstance(value, str) and not value.strip() else value
+
+
+# Ahead of `Trimmed` on an optional member an index coalesces (`coalesce(lower(brand), '')`):
+# a blank one is the absent one, stored as NULL rather than refused.
+BlankIsNone = BeforeValidator(_blank_is_none)
+
+# The read-side type for a field a write base declares `Trimmed`. The column holds whatever
+# reached it - an import stores a name as the document spells it, and nothing trims a row
+# already stored - and a read shape inheriting `Trimmed` would refuse an all-whitespace one
+# as a 500 on every list carrying it. Overridden the way `StoredVocabulary` is, so the two
+# say the same thing: a read takes the row as it is.
+StoredName = str
 
 
 def validate_date_range(start_date: date | None, end_date: date | None) -> None:

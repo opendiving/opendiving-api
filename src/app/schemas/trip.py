@@ -8,6 +8,8 @@ from ..core.schemas import (
     NOTES_MAX_LENGTH,
     PublicUUIDSchema,
     RejectsExplicitNulls,
+    StoredName,
+    Trimmed,
     validate_date_range,
 )
 from ..core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE
@@ -73,7 +75,7 @@ class TripPartWithCandidatesRead(TripPartRead):
 
 
 class TripBase(BaseModel):
-    name: Annotated[str, Field(min_length=1, max_length=255, examples=["Red Sea Liveaboard 2024"])]
+    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Red Sea Liveaboard 2024"])]
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
 
@@ -84,6 +86,7 @@ class TripRead(TripBase, PublicUUIDSchema):
     No span of its own: a trip's dates are its parts'.
     """
 
+    name: StoredName
     parts: Annotated[list[TripPartWithCandidatesRead], Field(default_factory=list)]
     # Who came on the trip, which is not a walk of its dives: a companion who never dived is
     # here and on none of them.
@@ -128,6 +131,7 @@ class TripReadInternal(TripBase, PublicUUIDSchema):
     which additionally resolves `user_id` to the owning user's `uuid` and embeds the parts).
     """
 
+    name: StoredName
     id: int
     user_id: int
     created_at: datetime
@@ -157,7 +161,7 @@ class TripUpdate(RejectsExplicitNulls):
 
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes")
 
-    name: Annotated[str | None, Field(min_length=1, max_length=255, default=None)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 
 

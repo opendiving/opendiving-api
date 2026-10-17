@@ -2,7 +2,7 @@ import uuid as uuid_pkg
 from typing import Any
 
 from fastcrud import FastCRUD
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.gear_item import GearItem
@@ -15,6 +15,7 @@ from ..schemas.gear_service import (
     GearServiceScheduleUpdate,
     GearServiceScheduleUpdateInternal,
 )
+from .unique_keys import unique_key_taken
 
 # The `gear_service_schedule` columns making up a `GearServiceScheduleInfo` (the summary
 # shape embedded in a `GearItemRead`), in the order `service_schedule_info_from_row`
@@ -111,25 +112,15 @@ async def get_schedules_for_gear_items(
 async def schedule_kind_exists(
     db: AsyncSession, gear_item_id: int, kind: str, label: str | None = None, exclude_id: int | None = None
 ) -> bool:
-    """Case-insensitive check for whether a schedule of the same (kind, label) already
-    exists on the item.
-
-    Mirrors the `ux_gear_service_schedule_item_kind_label` unique index, so the route can
-    return a friendly 422 instead of a raw integrity error - the same
-    application-level/DB-level pairing as `gear_item_name_exists`. A NULL label and an
-    empty one are treated as the same "unlabelled" slot, matching the index's COALESCE.
-    """
-    normalized = (label or "").strip().lower()
-    stmt = select(GearServiceSchedule.id).where(
-        GearServiceSchedule.gear_item_id == gear_item_id,
-        GearServiceSchedule.kind == kind,
-        func.coalesce(func.lower(GearServiceSchedule.label), "") == normalized,
+    """Asked on `ux_gear_service_schedule_item_kind_label`'s own expressions, so a NULL label
+    and an empty one are the same "unlabelled" slot."""
+    return await unique_key_taken(
+        db,
+        GearServiceSchedule,
+        "ux_gear_service_schedule_item_kind_label",
+        {"gear_item_id": gear_item_id, "kind": kind, "label": label},
+        exclude_id=exclude_id,
     )
-    if exclude_id is not None:
-        stmt = stmt.where(GearServiceSchedule.id != exclude_id)
-
-    result = await db.execute(stmt.limit(1))
-    return result.first() is not None
 
 
 async def get_due_overview_for_user(

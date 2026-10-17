@@ -1,11 +1,12 @@
 import uuid as uuid_pkg
 
 from fastcrud import FastCRUD
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.contact import Contact
 from ..schemas.contact import ContactCreateInternal, ContactReadInternal, ContactUpdate, ContactUpdateInternal
+from .unique_keys import unique_key_taken
 
 CRUDContact = FastCRUD[
     Contact, ContactCreateInternal, ContactUpdate, ContactUpdateInternal, ContactUpdate, ContactReadInternal
@@ -19,16 +20,10 @@ CONTACT_SEARCH_COLUMNS = ("name", "address_city")
 
 
 async def contact_name_exists(db: AsyncSession, user_id: int, name: str, exclude_id: int | None = None) -> bool:
-    """Case-insensitive check for whether this diver already has a contact of this name.
-
-    Mirrors `ux_contact_user_id_name_lower`, which enforces the same rule at the database
-    level as the safety net.
-    """
-    stmt = select(Contact.id).where(Contact.user_id == user_id, func.lower(Contact.name) == name.strip().lower())
-    if exclude_id is not None:
-        stmt = stmt.where(Contact.id != exclude_id)
-    result = await db.execute(stmt.limit(1))
-    return result.first() is not None
+    """Asked on `ux_contact_user_id_name_lower`'s own expressions."""
+    return await unique_key_taken(
+        db, Contact, "ux_contact_user_id_name_lower", {"user_id": user_id, "name": name}, exclude_id=exclude_id
+    )
 
 
 async def resolve_contact_id_for_user(db: AsyncSession, contact_uuid: uuid_pkg.UUID, user_id: int) -> int | None:

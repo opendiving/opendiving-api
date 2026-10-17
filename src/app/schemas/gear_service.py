@@ -5,7 +5,15 @@ from typing import Annotated, ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from ..core.schemas import (
+    NOTES_MAX_LENGTH,
+    BlankIsNone,
+    PublicUUIDSchema,
+    RejectsExplicitNulls,
+    StoredName,
+    StoredVocabulary,
+    Trimmed,
+)
 
 
 class ServiceKind(StrEnum):
@@ -61,6 +69,11 @@ _INTERVAL_HOURS_DESCRIPTION = "Service every N hours of diving - the item's summ
 
 
 # -------------------- schedule --------------------
+# Matched to a schedule on the unique index's `coalesce(lower(label), '')`, so a record's is
+# trimmed exactly as a schedule's is.
+ServiceLabel = Annotated[str, Trimmed, Field(max_length=LABEL_MAX_LENGTH)]
+
+
 class GearServiceScheduleBase(BaseModel):
     kind: Annotated[ServiceKind, Field(examples=[ServiceKind.SERVICE], description="What kind of servicing this is")]
     starts_on: Annotated[
@@ -71,8 +84,9 @@ class GearServiceScheduleBase(BaseModel):
         ),
     ]
     label: Annotated[
-        str | None,
-        Field(default=None, max_length=LABEL_MAX_LENGTH, examples=["First stage"], description="Optional free-text"),
+        ServiceLabel | None,
+        BlankIsNone,
+        Field(default=None, examples=["First stage"], description="Optional free-text"),
     ]
     interval_months: Annotated[
         int | None, Field(default=None, gt=0, examples=[12], description="Service every N months")
@@ -127,6 +141,7 @@ class GearServiceScheduleRead(GearServiceScheduleBase, PublicUUIDSchema):
     # Overrides `GearServiceScheduleBase.kind`, which stays `ServiceKind` for the writes
     # that base actually validates.
     kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    label: StoredName | None = None
 
     user_uuid: uuid_pkg.UUID
     gear_item_uuid: uuid_pkg.UUID
@@ -150,6 +165,7 @@ class GearServiceScheduleReadInternal(GearServiceScheduleBase, PublicUUIDSchema)
     """
 
     kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    label: StoredName | None = None
 
     id: int
     user_id: int
@@ -215,7 +231,7 @@ class GearServiceScheduleUpdate(RejectsExplicitNulls):
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("kind", "starts_on", "is_active")
 
     kind: Annotated[ServiceKind | None, Field(default=None)]
-    label: Annotated[str | None, Field(default=None, max_length=LABEL_MAX_LENGTH)]
+    label: Annotated[ServiceLabel | None, BlankIsNone, Field(default=None)]
     starts_on: Annotated[date | None, Field(default=None)]
     interval_months: Annotated[int | None, Field(default=None, gt=0)]
     interval_dives: Annotated[int | None, Field(default=None, gt=0)]
@@ -244,7 +260,7 @@ class GearServiceScheduleUpdateInternal(GearServiceScheduleUpdate):
 class GearServiceRecordBase(BaseModel):
     kind: Annotated[ServiceKind, Field(examples=[ServiceKind.SERVICE])]
     serviced_on: Annotated[date, Field(examples=["2026-03-14"], description="When the work was done")]
-    label: Annotated[str | None, Field(default=None, max_length=LABEL_MAX_LENGTH)]
+    label: Annotated[ServiceLabel | None, BlankIsNone, Field(default=None)]
     performed_by: Annotated[
         str | None,
         Field(
@@ -259,6 +275,7 @@ class GearServiceRecordBase(BaseModel):
 
 class GearServiceRecordRead(GearServiceRecordBase, PublicUUIDSchema):
     kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    label: StoredName | None = None
 
     user_uuid: uuid_pkg.UUID
     gear_item_uuid: uuid_pkg.UUID
@@ -281,6 +298,7 @@ class GearServiceRecordRead(GearServiceRecordBase, PublicUUIDSchema):
 
 class GearServiceRecordReadInternal(GearServiceRecordBase, PublicUUIDSchema):
     kind: StoredVocabulary  # type: ignore[assignment]  # widening a write base's field; see `StoredVocabulary`
+    label: StoredName | None = None
 
     id: int
     user_id: int
@@ -338,7 +356,7 @@ class GearServiceRecordUpdate(RejectsExplicitNulls):
 
     kind: Annotated[ServiceKind | None, Field(default=None)]
     serviced_on: Annotated[date | None, Field(default=None)]
-    label: Annotated[str | None, Field(default=None, max_length=LABEL_MAX_LENGTH)]
+    label: Annotated[ServiceLabel | None, BlankIsNone, Field(default=None)]
     performed_by: Annotated[str | None, Field(default=None, max_length=255)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
 

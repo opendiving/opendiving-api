@@ -26,6 +26,8 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..core.schemas import Trimmed
+
 # §6.9's own bound, and the width of the column behind it.
 LOCATION_NAME_MAX = 255
 
@@ -97,7 +99,7 @@ class LocationInput(WholeCoordinatePair):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: Annotated[str, Field(min_length=1, max_length=LOCATION_NAME_MAX, examples=["Dahab, South Sinai, Egypt"])]
+    name: Annotated[str, Trimmed, Field(max_length=LOCATION_NAME_MAX, examples=["Dahab, South Sinai, Egypt"])]
     bbox_south: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.89])]
     bbox_north: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.98])]
     bbox_west: Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[123.35])]
