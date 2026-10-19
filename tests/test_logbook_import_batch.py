@@ -997,6 +997,96 @@ class TestTheDiveRows:
         assert row.reason is not None and "start time" in row.reason
 
 
+def _sighted(**dive: Any) -> dict[str, Any]:
+    """One dive for `_logbook_of`, seeing a species the document does not define - which is a
+    note filed under the dive, not the species."""
+    return {"started_at": "2026-08-01T10:00:00+02:00", "sightings": [{"species_uuid": str(uuid_pkg.uuid4())}], **dive}
+
+
+def _on_rows(report: BatchReport) -> list[list[ImportNoteCode]]:
+    return [[report.notes[index].code for index in row.notes] for row in report.dives]
+
+
+class TestTheNotesOfADive:
+    """Each dive row names the notes about that dive by their indexes in the report's `notes`,
+    which still lists every note. The join is on the file and the document's uuid, which is
+    neither the row's uuid nor, across a batch, unique."""
+
+    @pytest.mark.asyncio
+    async def test_a_sighting_s_note_is_on_its_dive_in_the_preview_and_the_result(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        files = [("log.divejson", _logbook_of(_sighted(), {"started_at": "2026-08-02T10:00:00+02:00"}))]
+
+        for report in (await _import(async_db, diver, files, apply=False), await _import(async_db, diver, files)):
+            assert [row.outcome for row in report.dives] == [ImportDiveOutcome.CREATED] * 2
+            assert _on_rows(report) == [[ImportNoteCode.SPECIES_UNRESOLVED], []]
+
+    @pytest.mark.asyncio
+    async def test_a_note_about_no_dive_is_on_no_row(self, volume: Any, async_db: AsyncSession, db: Session) -> None:
+        diver = create_user(db)
+        files = [("log.divejson", _logbook_of({"started_at": "2026-08-02T10:00:00+02:00", "tags": ["wreck"]}))]
+
+        report = await _import(async_db, diver, files, apply=False)
+
+        assert ImportNoteCode.TAGS_CREATED in {note.code for note in report.notes}
+        assert [row.notes for row in report.dives] == [[]]
+
+    @pytest.mark.asyncio
+    async def test_a_dive_the_logbook_already_has_carries_the_notes_of_the_document_s_dive(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The JSON's dive takes its uuid from its own bytes, and its recording joins the dive
+        the FIT already made - whose uuid the FIT's bytes gave it."""
+        diver = create_user(db)
+        [stored] = (await _import(async_db, diver, [PAIR[0]])).dives
+
+        report = await _import(async_db, diver, [PAIR[1]])
+
+        [row] = report.dives
+        assert (row.outcome, row.uuid) == (ImportDiveOutcome.UPDATED, stored.uuid)
+        noted = [report.notes[index] for index in row.notes]
+        assert ImportNoteCode.RECORDING_FILLED in [note.code for note in noted]
+        assert stored.uuid not in {note.uuid for note in noted}
+        assert len(report.notes) == len(row.notes)
+
+    @pytest.mark.asyncio
+    async def test_two_files_giving_one_uuid_to_two_dives_keep_their_own_notes(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        shared = str(uuid_pkg.uuid4())
+        files = [
+            ("a.divejson", _logbook_of({"uuid": shared, "started_at": None})),
+            ("b.divejson", _logbook_of(_sighted(uuid=shared))),
+        ]
+
+        report = await _import(async_db, diver, files, apply=False)
+
+        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.SKIPPED, ImportDiveOutcome.CREATED]
+        assert _on_rows(report) == [[ImportNoteCode.RECORD_SKIPPED], [ImportNoteCode.SPECIES_UNRESOLVED]]
+
+    @pytest.mark.asyncio
+    async def test_a_note_the_cap_left_out_is_on_no_row(
+        self, volume: Any, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """At the cap the second file's skip takes the first file's derived note's place, so
+        every index after it moves."""
+        monkeypatch.setattr("src.app.services.logbook_import.planner.MAX_NOTES", 1)
+        diver = create_user(db)
+        files = [
+            ("a.divejson", _logbook_of(_profiled())),
+            ("b.divejson", _logbook_of({"started_at": None})),
+        ]
+
+        report = await _import(async_db, diver, files, apply=False)
+
+        assert [note.code for note in report.notes] == [ImportNoteCode.RECORD_SKIPPED]
+        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.CREATED, ImportDiveOutcome.SKIPPED]
+        assert [row.notes for row in report.dives] == [[], [0]]
+
+
 class TestAFolderAfterItsFitFiles:
     @pytest.mark.asyncio
     async def test_the_fit_links_and_the_json_adds_its_file(

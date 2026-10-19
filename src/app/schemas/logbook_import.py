@@ -1034,6 +1034,14 @@ class ImportDiveReport(BaseModel):
     members: Annotated[
         list[int], Field(default_factory=list, description="The indexes in `members` of the files the dive came from")
     ]
+    notes: Annotated[
+        list[int],
+        Field(
+            default_factory=list,
+            description="The indexes in `notes` of the notes about this dive, ascending. No note is on two rows, and "
+            "`notes` still lists every one; a note the cap left out of `notes` is on no row.",
+        ),
+    ]
 
 
 # ---------------------------------------------------------------- the check-in details
