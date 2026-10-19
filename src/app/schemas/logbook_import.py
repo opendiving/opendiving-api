@@ -876,6 +876,26 @@ class ConversionNoteGroup(BaseModel):
     ]
 
 
+class ConversionNote(BaseModel):
+    """One thing converting a dive's file could not carry, on that dive's row: a finding of
+    `ConversionReport.groups`, ungrouped, placed within the dive rather than the file."""
+
+    kind: Annotated[
+        str,
+        Field(description="As a group's `kind`: treat an unfamiliar value as a plain finding", examples=["inferred"]),
+    ]
+    message: Annotated[str, Field(description="One sentence, ready to render")]
+    where: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="The path below the dive in its source file, as the converter writes it, e.g. "
+            "`sample/2985.93`; `null` for a finding about the dive itself",
+            examples=["sample/2985.93"],
+        ),
+    ]
+
+
 class ConversionReport(BaseModel):
     """What converting the import's non-DiveJSON files could not carry. `null` when every
     file was DiveJSON already.
@@ -1041,6 +1061,18 @@ class ImportDiveReport(BaseModel):
             description="The indexes in `notes` of the notes about this dive, ascending. No note is on two rows, and "
             "`notes` still lists every one; a note the cap left out of `notes` is on no row.",
         ),
+    ]
+    conversion_notes: Annotated[
+        list[ConversionNote],
+        Field(
+            default_factory=list,
+            description="What converting this dive's files could not carry, in the import's order. Each is also "
+            "counted in `conversion.groups`; a finding about a file, or placed at no dive, is on no row.",
+        ),
+    ]
+    conversion_notes_truncated: Annotated[
+        int,
+        Field(default=0, description="This dive's findings past the row's cap, which `conversion_notes` leaves out"),
     ]
 
 
