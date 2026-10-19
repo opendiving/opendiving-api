@@ -26,6 +26,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+import divejson
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,7 +63,8 @@ from .writer import WrittenImport, write_import
 
 # How many conversion findings one dive's row lists. Far more than any dive's file has raised
 # - a handful - and what keeps a logbook whose every dive repeats one habit from multiplying
-# the report by it; `conversion.groups` counts every one regardless.
+# the report by it. A finding past it stays in `conversion.groups`, which folds a repeated one
+# into a single counted line, so every finding is shown once, on its row or there.
 MAX_DIVE_CONVERSION_NOTES = 20
 
 # Which outcome of one dive says more, where several files reach it: created or restored
@@ -115,7 +117,7 @@ class _Dives:
     # the dive it became, rather than one it only added a recording to.
     _claimed: set[_Source] = field(default_factory=set)
     _plans: list[tuple[int, ImportPlan]] = field(default_factory=list)
-    _conversion_notes: dict[_Source, list[ConversionNote]] = field(default_factory=dict)
+    _conversion_notes: dict[_Source, list[tuple[divejson.Note, ConversionNote]]] = field(default_factory=dict)
 
     def _claim(self, row: _DiveRow, source: _Source) -> None:
         if source not in self._claimed:
@@ -199,8 +201,9 @@ class _Dives:
                 found[(member_of[id(note)], note.uuid)].append(index)
         return found
 
-    async def reports(self, db: AsyncSession, notes: Sequence[ImportNote]) -> list[ImportDiveReport]:
-        """The rows, each read off the dive as the dive read gives it, with its notes."""
+    async def reports(self, db: AsyncSession, notes: Sequence[ImportNote]) -> tuple[list[ImportDiveReport], set[int]]:
+        """The rows, each read off the dive as the dive read gives it, with its notes - and the
+        converter's findings they list, by identity, for `conversion_report` to leave out."""
         by_source = self._notes_by_source(notes)
         ids = [row.dive_id for row in self.rows if row.dive_id is not None]
         dives = (
@@ -235,8 +238,11 @@ class _Dives:
         )
 
         reports = []
+        on_rows: set[int] = set()
         for row in self.rows:
-            converted = [note for source in row.sources for note in self._conversion_notes.get(source, ())]
+            converted = [found for source in row.sources for found in self._conversion_notes.get(source, ())]
+            listed = converted[:MAX_DIVE_CONVERSION_NOTES]
+            on_rows.update(id(note) for note, _ in listed)
             updated = row.outcome is ImportDiveOutcome.UPDATED
             stored = None if row.dive_id is None else dives.get(row.dive_id)
             figures: dict[str, Any] = {}
@@ -265,12 +271,12 @@ class _Dives:
                     reason=row.reason if row.outcome is ImportDiveOutcome.SKIPPED else None,
                     members=row.members,
                     notes=sorted(index for source in row.sources for index in by_source.get(source, ())),
-                    conversion_notes=converted[:MAX_DIVE_CONVERSION_NOTES],
+                    conversion_notes=[shown for _, shown in listed],
                     conversion_notes_truncated=max(len(converted) - MAX_DIVE_CONVERSION_NOTES, 0),
                     **figures,
                 )
             )
-        return reports
+        return reports, on_rows
 
 
 def _stored_device(row: Any) -> RecordingDevice | None:
@@ -425,14 +431,15 @@ async def import_batch(
             await staged.write(db)
         notes, notes_truncated = _notes(plans)
         documents = batch.documents
+        rows, on_rows = await dives.reports(db, notes)
         return BatchReport(
             collections=_collections(plans),
             files=_files(plans),
             notes=notes,
             notes_truncated=notes_truncated,
-            conversion=conversion_report(documents),
+            conversion=conversion_report(documents, on_rows=on_rows),
             members=_members(batch, plans),
-            dives=await dives.reports(db, notes),
+            dives=rows,
             check_in_details=_check_in_details(plans),
             portrait=None if apply else await _portrait_offer(plans),
             first=documents[0].document,

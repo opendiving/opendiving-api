@@ -1106,10 +1106,11 @@ def _messages(row: Any) -> list[str]:
 
 class TestTheConversionFindingsOfADive:
     """Each dive row lists what converting its own files could not carry, joined through the
-    converter's map of where each record came from rather than by a dive's position."""
+    converter's map of where each record came from rather than by a dive's position, and the
+    report's groups keep only what no row lists."""
 
     @pytest.mark.asyncio
-    async def test_each_dive_carries_only_its_own_and_a_dropped_dives_stay_in_the_groups(
+    async def test_each_dive_carries_only_its_own_and_only_a_dropped_dives_stay_in_the_groups(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         diver = create_user(db)
@@ -1123,8 +1124,8 @@ class TestTheConversionFindingsOfADive:
         dropped = "the dive records no date"
         assert not any(dropped in message for row in report.dives for message in _messages(row))
         assert report.conversion is not None
-        assert any(dropped in group.message for group in report.conversion.groups)
-        assert sum(group.count for group in report.conversion.groups) == 6
+        [group] = report.conversion.groups
+        assert dropped in group.message and group.count == 1
 
     @pytest.mark.asyncio
     async def test_a_finding_below_the_dive_is_placed_within_it(
@@ -1173,7 +1174,10 @@ class TestTheConversionFindingsOfADive:
         assert [len(row.conversion_notes) for row in report.dives] == [1, 1]
         assert [row.conversion_notes_truncated for row in report.dives] == [1, 2]
         assert report.conversion is not None
-        assert sum(group.count for group in report.conversion.groups) == 6
+        # The dropped dive's finding, and the three the cap cut.
+        assert sum(group.count for group in report.conversion.groups) == 4
+        listed = {note.message for row in report.dives for note in row.conversion_notes}
+        assert not listed & {group.message for group in report.conversion.groups}
 
 
 class TestAFolderAfterItsFitFiles:

@@ -539,9 +539,9 @@ class TestWhereTheConversionRuns:
         report, convert = batch_module.conversion_report, reader._convert
         seen: dict[str, str] = {}
 
-        def record_report(loaded: Any) -> Any:
+        def record_report(loaded: Any, **kwargs: Any) -> Any:
             seen["loop"] = threading.current_thread().name
-            return report(loaded)
+            return report(loaded, **kwargs)
 
         def record_convert(wrapper: Any) -> Any:
             seen["convert"] = threading.current_thread().name

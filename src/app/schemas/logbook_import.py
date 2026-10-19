@@ -877,8 +877,8 @@ class ConversionNoteGroup(BaseModel):
 
 
 class ConversionNote(BaseModel):
-    """One thing converting a dive's file could not carry, on that dive's row: a finding of
-    `ConversionReport.groups`, ungrouped, placed within the dive rather than the file."""
+    """One thing converting a dive's file could not carry, on that dive's row rather than in
+    `ConversionReport.groups`: ungrouped, and placed within the dive rather than the file."""
 
     kind: Annotated[
         str,
@@ -908,6 +908,10 @@ class ConversionReport(BaseModel):
     live at all, which is also why these are not another `ImportNoteCode`: a conversion
     finding has a source path rather than a uuid and a collection, and none of those codes
     describes it.
+
+    A finding a dive's row lists is not grouped here as well, so each is shown once. What the
+    groups hold is the rest: findings about a file, the logbook or a record below a dive, about
+    a dive the converter dropped, and a dive's findings past its row's cap.
     """
 
     format: Annotated[
@@ -921,7 +925,10 @@ class ConversionReport(BaseModel):
     converter: ConversionConverter
     groups: Annotated[
         list[ConversionNoteGroup],
-        Field(default_factory=list, description="Findings grouped by kind and message, in first-seen order"),
+        Field(
+            default_factory=list,
+            description="Findings on no dive row, grouped by kind and message, in first-seen order",
+        ),
     ]
     groups_truncated: Annotated[
         int,
@@ -1066,13 +1073,17 @@ class ImportDiveReport(BaseModel):
         list[ConversionNote],
         Field(
             default_factory=list,
-            description="What converting this dive's files could not carry, in the import's order. Each is also "
-            "counted in `conversion.groups`; a finding about a file, or placed at no dive, is on no row.",
+            description="What converting this dive's files could not carry, in the import's order. None of these "
+            "is in `conversion.groups`; a finding about a file, or placed at no dive, is there instead.",
         ),
     ]
     conversion_notes_truncated: Annotated[
         int,
-        Field(default=0, description="This dive's findings past the row's cap, which `conversion_notes` leaves out"),
+        Field(
+            default=0,
+            description="This dive's findings past the row's cap, which `conversion_notes` leaves out and "
+            "`conversion.groups` holds",
+        ),
     ]
 
 
