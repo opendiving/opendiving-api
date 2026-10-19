@@ -1087,6 +1087,95 @@ class TestTheNotesOfADive:
         assert [row.notes for row in report.dives] == [[], [0]]
 
 
+# Three dives, the second of which records no date, so the converter drops it - and the third
+# is the document's second dive while its findings still say `dive/2`.
+THREE_DIVES_SSRF = b"""<?xml version="1.0"?>
+<divelog program="subsurface" version="3">
+<dives>
+<dive number="1" date="2026-04-17" time="09:30:00" duration="42:10 min"><depth max="28.4 m"/></dive>
+<dive number="2" duration="40:00 min"><depth max="20.0 m"/></dive>
+<dive number="3" date="2026-04-18" time="10:00:00" duration="0:00 min"><depth max="18.0 m"/></dive>
+</dives>
+</divelog>
+"""
+
+
+def _messages(row: Any) -> list[str]:
+    return [note.message for note in row.conversion_notes]
+
+
+class TestTheConversionFindingsOfADive:
+    """Each dive row lists what converting its own files could not carry, joined through the
+    converter's map of where each record came from rather than by a dive's position."""
+
+    @pytest.mark.asyncio
+    async def test_each_dive_carries_only_its_own_and_a_dropped_dives_stay_in_the_groups(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+
+        report = await _import(async_db, diver, [("log.ssrf", THREE_DIVES_SSRF)], apply=False)
+
+        first, third = report.dives
+        assert len(_messages(first)) == 2 and not any("duration" in message for message in _messages(first))
+        assert any("<dive duration> is 0 seconds" in message for message in _messages(third))
+        assert {note.where for row in report.dives for note in row.conversion_notes} == {None}
+        dropped = "the dive records no date"
+        assert not any(dropped in message for row in report.dives for message in _messages(row))
+        assert report.conversion is not None
+        assert any(dropped in group.message for group in report.conversion.groups)
+        assert sum(group.count for group in report.conversion.groups) == 6
+
+    @pytest.mark.asyncio
+    async def test_a_finding_below_the_dive_is_placed_within_it(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+
+        [row] = (await _import(async_db, diver, [("perdix.uddf", _perdix_uddf())], apply=False)).dives
+        [ocean] = (await _import(async_db, diver, [("dive.json", OCEAN_JSON)], apply=False)).dives
+
+        assert "tankdata/0" in {note.where for note in row.conversion_notes}
+        [exit_fix] = [note for note in ocean.conversion_notes if "taken as the dive's exit" in note.message]
+        assert (exit_fix.where, exit_fix.kind) == ("sample/3421.33", "resolved")
+
+    @pytest.mark.asyncio
+    async def test_a_finding_about_no_dive_is_on_no_row(self, volume: Any, async_db: AsyncSession, db: Session) -> None:
+        diver = create_user(db)
+
+        report = await _import(async_db, diver, [("perdix.uddf", _perdix_uddf())], apply=False)
+
+        owner = "the source records nothing about the logbook's owner"
+        assert report.conversion is not None
+        assert any(owner in group.message for group in report.conversion.groups)
+        assert not any(owner in message for message in _messages(report.dives[0]))
+
+    @pytest.mark.asyncio
+    async def test_a_dive_two_files_reach_carries_both_files_findings(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+
+        [row] = (await _import(async_db, diver, PAIR, apply=False)).dives
+
+        assert row.members == [0, 1]
+        assert len(row.conversion_notes) == 9
+
+    @pytest.mark.asyncio
+    async def test_a_row_past_the_cap_counts_what_it_leaves_out(
+        self, volume: Any, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("src.app.services.logbook_import.batch.MAX_DIVE_CONVERSION_NOTES", 1)
+        diver = create_user(db)
+
+        report = await _import(async_db, diver, [("log.ssrf", THREE_DIVES_SSRF)], apply=False)
+
+        assert [len(row.conversion_notes) for row in report.dives] == [1, 1]
+        assert [row.conversion_notes_truncated for row in report.dives] == [1, 2]
+        assert report.conversion is not None
+        assert sum(group.count for group in report.conversion.groups) == 6
+
+
 class TestAFolderAfterItsFitFiles:
     @pytest.mark.asyncio
     async def test_the_fit_links_and_the_json_adds_its_file(
