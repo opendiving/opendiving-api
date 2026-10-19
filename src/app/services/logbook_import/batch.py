@@ -34,6 +34,7 @@ from ...models.dive import Dive
 from ...models.dive_recording import DiveRecording
 from ...schemas.dive import RecordingDevice
 from ...schemas.logbook_import import (
+    ConversionNote,
     ConversionReport,
     ImportCheckInDetail,
     ImportCheckInSubmission,
@@ -55,9 +56,14 @@ from ..dive_numbering import assign_suggested_numbers
 from ..dive_recordings import DEVICE_COLUMNS
 from ..storage_usage import ensure_room, get_storage_usage, storage_limit_bytes
 from .planner import COLLECTIONS, Action, ImportPlan, add_note, plan_import, portrait_change
-from .reader import LoadedBatch, LoadedImport, conversion_report
+from .reader import LoadedBatch, LoadedImport, conversion_report, dive_conversion_notes
 from .staging import StagedFiles
 from .writer import WrittenImport, write_import
+
+# How many conversion findings one dive's row lists. Far more than any dive's file has raised
+# - a handful - and what keeps a logbook whose every dive repeats one habit from multiplying
+# the report by it; `conversion.groups` counts every one regardless.
+MAX_DIVE_CONVERSION_NOTES = 20
 
 # Which outcome of one dive says more, where several files reach it: created or restored
 # over a file or a recording added, over a link, over a skip.
@@ -109,6 +115,7 @@ class _Dives:
     # the dive it became, rather than one it only added a recording to.
     _claimed: set[_Source] = field(default_factory=set)
     _plans: list[tuple[int, ImportPlan]] = field(default_factory=list)
+    _conversion_notes: dict[_Source, list[ConversionNote]] = field(default_factory=dict)
 
     def _claim(self, row: _DiveRow, source: _Source) -> None:
         if source not in self._claimed:
@@ -141,6 +148,8 @@ class _Dives:
     def add(self, member: int, loaded: LoadedImport, plan: ImportPlan, written: WrittenImport) -> None:
         """What one file's plan and write did to dives, in the document's order."""
         self._plans.append((member, plan))
+        for uuid, found in dive_conversion_notes(loaded).items():
+            self._conversion_notes[(member, uuid)] = found
         matched = {match.source_uuid for match in plan.recording_matches}
         documented = {dive.uuid: dive for dive in loaded.document.dives}
         for record in plan.records.get("dives", {}).values():
@@ -227,6 +236,7 @@ class _Dives:
 
         reports = []
         for row in self.rows:
+            converted = [note for source in row.sources for note in self._conversion_notes.get(source, ())]
             updated = row.outcome is ImportDiveOutcome.UPDATED
             stored = None if row.dive_id is None else dives.get(row.dive_id)
             figures: dict[str, Any] = {}
@@ -255,6 +265,8 @@ class _Dives:
                     reason=row.reason if row.outcome is ImportDiveOutcome.SKIPPED else None,
                     members=row.members,
                     notes=sorted(index for source in row.sources for index in by_source.get(source, ())),
+                    conversion_notes=converted[:MAX_DIVE_CONVERSION_NOTES],
+                    conversion_notes_truncated=max(len(converted) - MAX_DIVE_CONVERSION_NOTES, 0),
                     **figures,
                 )
             )

@@ -47,6 +47,7 @@ import math
 import re
 import shutil
 import tempfile
+import uuid as uuid_pkg
 import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
@@ -74,6 +75,7 @@ from ...schemas.export import (
 )
 from ...schemas.logbook_import import (
     ConversionConverter,
+    ConversionNote,
     ConversionNoteGroup,
     ConversionReport,
     ImportDocument,
@@ -723,16 +725,17 @@ def _renamed(conversion: Conversion, digest: str, name: str) -> Conversion:
     """The conversion with each finding's path under the file's name rather than its digest.
 
     The package prefixes a member's paths with the member's name, which for an import's file
-    is its digest; a diver reading the report knows the file by what they called it.
+    is its digest; a diver reading the report knows the file by what they called it. Each
+    record's source path is renamed alike, so the two still join.
     """
     prefix = f"{digest}/"
-    notes = tuple(
-        divejson.Note(f"{name}/{note.where[len(prefix) :]}", note.message, note.kind)
-        if note.where.startswith(prefix)
-        else note
-        for note in conversion.notes
-    )
-    return Conversion(conversion.document, notes)
+
+    def renamed(where: str) -> str:
+        return f"{name}/{where[len(prefix) :]}" if where.startswith(prefix) else where
+
+    notes = tuple(divejson.Note(renamed(note.where), note.message, note.kind) for note in conversion.notes)
+    sources = {uuid: renamed(where) for uuid, where in conversion.sources.items()}
+    return Conversion(conversion.document, notes, sources)
 
 
 def _convert_file(source: Source, *, digest: str, name: str, claimed: str, size: int) -> LoadedImport:
@@ -933,7 +936,7 @@ def conversion_report(loaded: Sequence[LoadedImport]) -> ConversionReport | None
         return None
     formats = {one.source_format or _UNKNOWN_SOURCE_FORMAT for one in converted}
     notes = tuple(note for one in converted if one.conversion is not None for note in one.conversion.notes)
-    groups = Conversion({}, notes).grouped()
+    groups = Conversion({}, notes, {}).grouped()
     return ConversionReport(
         format=formats.pop() if len(formats) == 1 else MIXED_FORMATS,
         converter=ConversionConverter(name=_CONVERTER_NAME, version=divejson.__version__),
@@ -948,6 +951,34 @@ def conversion_report(loaded: Sequence[LoadedImport]) -> ConversionReport | None
         ],
         groups_truncated=max(len(groups) - MAX_CONVERSION_GROUPS, 0),
     )
+
+
+def dive_conversion_notes(loaded: LoadedImport) -> dict[uuid_pkg.UUID, list[ConversionNote]]:
+    """One converted file's findings about each of its dives, by the dive's document uuid.
+
+    A finding's path counts the *source's* dives, and a dive the converter could not carry
+    keeps its place in that count, so `dive/3` names a dive by `Conversion.sources` and never
+    by position. A finding is about the record with the longest source path its own starts
+    with, segment by segment - the package's rule - so one at `dive/3/buddy/0` is about the
+    person first named there, and one about a file or a dropped dive is about no dive.
+    """
+    if loaded.conversion is None:
+        return {}
+    dives = {dive.uuid for dive in loaded.document.dives}
+    owners = {where: uuid_pkg.UUID(uuid) for uuid, where in loaded.conversion.sources.items()}
+    found: dict[uuid_pkg.UUID, list[ConversionNote]] = {}
+    for note in loaded.conversion.notes:
+        segments = note.where.split("/")
+        for depth in range(len(segments), 0, -1):
+            owner = owners.get("/".join(segments[:depth]))
+            if owner is not None:
+                if owner in dives:
+                    below = "/".join(segments[depth:])
+                    found.setdefault(owner, []).append(
+                        ConversionNote(kind=note.kind, message=note.message, where=below or None)
+                    )
+                break
+    return found
 
 
 # ------------------------------------------------------------------ the batch

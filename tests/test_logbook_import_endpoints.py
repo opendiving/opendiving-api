@@ -624,7 +624,7 @@ class TestWhenTheConversionFails:
         app's own envelope still refused it. Also not a 500."""
 
         def wrong_shape(wrapper: Any) -> Any:
-            return divejson.Conversion({"format": "uddf", "version": "3.2.2"}, ())
+            return divejson.Conversion({"format": "uddf", "version": "3.2.2"}, (), {})
 
         monkeypatch.setattr(reader, "_convert", wrong_shape)
         response = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf"))
@@ -662,7 +662,7 @@ class TestTheConversionReport:
         def with_an_unknown_kind(wrapper: Any) -> Any:
             conversion = convert(wrapper)
             invented = divejson.Note("dive/0", "a kind this build has never seen", "time-shifted")  # type: ignore[arg-type]
-            return divejson.Conversion(conversion.document, (*conversion.notes, invented))
+            return divejson.Conversion(conversion.document, (*conversion.notes, invented), conversion.sources)
 
         monkeypatch.setattr(reader, "_convert", with_an_unknown_kind)
         response = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf"))
@@ -681,7 +681,7 @@ class TestTheConversionReport:
         def with_extra_findings(wrapper: Any) -> Any:
             conversion = convert(wrapper)
             extra = tuple(divejson.Note("dive/0", f"finding {n}", "dropped") for n in range(2))
-            return divejson.Conversion(conversion.document, (*conversion.notes, *extra))
+            return divejson.Conversion(conversion.document, (*conversion.notes, *extra), conversion.sources)
 
         monkeypatch.setattr(reader, "_convert", with_extra_findings)
         whole = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).json()["conversion"]
