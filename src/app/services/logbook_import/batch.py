@@ -20,6 +20,8 @@ preview, and none by an apply until the whole batch has fitted the account's sto
 `DECISIONS.md`, *"An import is its files imported one at a time"*, has the reasoning.
 """
 
+import uuid as uuid_pkg
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -68,6 +70,11 @@ _RANK = {
 }
 
 
+# A document dive, as the batch member it came from and the uuid that document gives it: two
+# files' documents can give one uuid to two dives, and a stored dive's uuid can be neither.
+type _Source = tuple[int, uuid_pkg.UUID]
+
+
 @dataclass(slots=True)
 class _DiveRow:
     outcome: ImportDiveOutcome
@@ -78,6 +85,8 @@ class _DiveRow:
     reason: str | None = None
     # A skipped dive's own figures, where there is no stored dive to read them from.
     source: ImportDive | None = None
+    # The document dives whose notes this row carries, each as (member, the document's uuid).
+    sources: list[_Source] = field(default_factory=list)
 
 
 def _reason(plan: ImportPlan, source_uuid: Any, codes: Iterable[ImportNoteCode]) -> str | None:
@@ -95,17 +104,28 @@ class _Dives:
 
     rows: list[_DiveRow] = field(default_factory=list)
     _by_dive: dict[int, _DiveRow] = field(default_factory=dict)
+    # Which document dives already have a row for their notes. A dive whose recordings partly
+    # matched dives the caller has is its own row and theirs, and its notes go on the first:
+    # the dive it became, rather than one it only added a recording to.
+    _claimed: set[_Source] = field(default_factory=set)
+    _plans: list[tuple[int, ImportPlan]] = field(default_factory=list)
+
+    def _claim(self, row: _DiveRow, source: _Source) -> None:
+        if source not in self._claimed:
+            self._claimed.add(source)
+            row.sources.append(source)
 
     def _touch(
         self,
         dive_id: int,
-        member: int,
+        source: _Source,
         outcome: ImportDiveOutcome,
         *,
         files: int = 0,
         recordings: int = 0,
         reason: str | None = None,
     ) -> None:
+        member = source[0]
         row = self._by_dive.get(dive_id)
         if row is None:
             row = self._by_dive[dive_id] = _DiveRow(outcome=outcome, dive_id=dive_id, members=[], reason=reason)
@@ -116,40 +136,63 @@ class _Dives:
             row.members.append(member)
         row.files_added += files
         row.recordings_added += recordings
+        self._claim(row, source)
 
     def add(self, member: int, loaded: LoadedImport, plan: ImportPlan, written: WrittenImport) -> None:
         """What one file's plan and write did to dives, in the document's order."""
+        self._plans.append((member, plan))
         matched = {match.source_uuid for match in plan.recording_matches}
         documented = {dive.uuid: dive for dive in loaded.document.dives}
         for record in plan.records.get("dives", {}).values():
+            source = (member, record.source_uuid)
             if record.action is Action.CREATE:
-                self._touch(written.dive_ids[record.source_uuid], member, ImportDiveOutcome.CREATED)
+                self._touch(written.dive_ids[record.source_uuid], source, ImportDiveOutcome.CREATED)
             elif record.action is Action.RESTORE:
-                self._touch(written.dive_ids[record.source_uuid], member, ImportDiveOutcome.RESTORED)
+                self._touch(written.dive_ids[record.source_uuid], source, ImportDiveOutcome.RESTORED)
             elif record.action is Action.LINK and record.row_id is not None:
-                self._touch(record.row_id, member, ImportDiveOutcome.LINKED)
+                self._touch(record.row_id, source, ImportDiveOutcome.LINKED)
             elif record.action is Action.SKIP and record.source_uuid not in matched:
-                self.rows.append(
-                    _DiveRow(
-                        outcome=ImportDiveOutcome.SKIPPED,
-                        dive_id=None,
-                        members=[member],
-                        reason=_reason(plan, record.source_uuid, [ImportNoteCode.RECORD_SKIPPED]),
-                        source=documented.get(record.source_uuid),
-                    )
+                row = _DiveRow(
+                    outcome=ImportDiveOutcome.SKIPPED,
+                    dive_id=None,
+                    members=[member],
+                    reason=_reason(plan, record.source_uuid, [ImportNoteCode.RECORD_SKIPPED]),
+                    source=documented.get(record.source_uuid),
                 )
+                self.rows.append(row)
+                self._claim(row, source)
         for match, files in zip(plan.recording_matches, written.match_files, strict=True):
             recordings = 1 if match.kind == "attach" else 0
+            source = (member, match.source_uuid)
             if files or recordings:
-                self._touch(match.dive_id, member, ImportDiveOutcome.UPDATED, files=files, recordings=recordings)
+                self._touch(match.dive_id, source, ImportDiveOutcome.UPDATED, files=files, recordings=recordings)
             else:
                 codes = [ImportNoteCode.RECORDING_FILLED, ImportNoteCode.RECORDING_ATTACHED]
                 self._touch(
-                    match.dive_id, member, ImportDiveOutcome.SKIPPED, reason=_reason(plan, match.source_uuid, codes)
+                    match.dive_id, source, ImportDiveOutcome.SKIPPED, reason=_reason(plan, match.source_uuid, codes)
                 )
 
-    async def reports(self, db: AsyncSession) -> list[ImportDiveReport]:
-        """The rows, each read off the dive as the dive read gives it."""
+    def _notes_by_source(self, notes: Sequence[ImportNote]) -> dict[_Source, list[int]]:
+        """Each document dive's notes, by their indexes in the report's `notes`.
+
+        A note is traced to its file by identity: the report's list holds the plans' own note
+        objects, and the cap may have dropped any of them, so its position says nothing.
+        """
+        member_of = {id(note): member for member, plan in self._plans for note in plan.notes}
+        found: dict[_Source, list[int]] = defaultdict(list)
+        for index, note in enumerate(notes):
+            # The remap names the uuid the first of the two records kept, not this one's.
+            if (
+                note.collection == "dives"
+                and note.uuid is not None
+                and note.code is not ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY
+            ):
+                found[(member_of[id(note)], note.uuid)].append(index)
+        return found
+
+    async def reports(self, db: AsyncSession, notes: Sequence[ImportNote]) -> list[ImportDiveReport]:
+        """The rows, each read off the dive as the dive read gives it, with its notes."""
+        by_source = self._notes_by_source(notes)
         ids = [row.dive_id for row in self.rows if row.dive_id is not None]
         dives = (
             {
@@ -211,6 +254,7 @@ class _Dives:
                     recordings_added=row.recordings_added if updated else 0,
                     reason=row.reason if row.outcome is ImportDiveOutcome.SKIPPED else None,
                     members=row.members,
+                    notes=sorted(index for source in row.sources for index in by_source.get(source, ())),
                     **figures,
                 )
             )
@@ -376,7 +420,7 @@ async def import_batch(
             notes_truncated=notes_truncated,
             conversion=conversion_report(documents),
             members=_members(batch, plans),
-            dives=await dives.reports(db),
+            dives=await dives.reports(db, notes),
             check_in_details=_check_in_details(plans),
             portrait=None if apply else await _portrait_offer(plans),
             first=documents[0].document,
