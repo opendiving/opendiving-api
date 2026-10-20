@@ -114,13 +114,19 @@ def _reason(plan: ImportPlan, source_uuid: Any, codes: Iterable[ImportNoteCode])
 
 @dataclass(slots=True)
 class _File:
-    """One file of the batch as the report reads it: what it planned, and what it found."""
+    """One file of the batch as the report reads it: what it planned and found, each indexed
+    by the document dive it is about once, since a logbook's rows each look theirs up."""
 
     loaded: LoadedImport
     plan: ImportPlan
     findings: list[Finding]
-    # Where each document dive's recordings landed: by the dive's uuid, the recording's index
-    # in the document -> (the stored dive, its ordinal there).
+    # By the document dive's uuid: the import's own notes about it, its findings, its index
+    # in the document - the first, where two dives give one uuid - and where its recordings
+    # landed, by their index in the document -> (the stored dive, its ordinal there).
+    notes_about: dict[uuid_pkg.UUID, list[ImportNote]]
+    found_about: dict[uuid_pkg.UUID, list[Finding]]
+    indexes: dict[uuid_pkg.UUID, int]
+    inferred: frozenset[str]
     recordings: dict[uuid_pkg.UUID, dict[int, tuple[int, int]]]
 
 
@@ -168,10 +174,31 @@ class _Dives:
 
     def add(self, member: int, loaded: LoadedImport, plan: ImportPlan, written: WrittenImport) -> None:
         """What one file's plan and write did to dives, in the document's order."""
+        found = findings(loaded.document, loaded.conversion)
+        notes_about: dict[uuid_pkg.UUID, list[ImportNote]] = defaultdict(list)
+        for note in plan.notes:
+            # The remap names the uuid the first of the two records kept, not this one's.
+            if (
+                note.collection == "dives"
+                and note.uuid is not None
+                and note.code is not ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY
+            ):
+                notes_about[note.uuid].append(note)
+        found_about: dict[uuid_pkg.UUID, list[Finding]] = defaultdict(list)
+        for one in found:
+            if one.owner is not None:
+                found_about[one.owner].append(one)
+        indexes: dict[uuid_pkg.UUID, int] = {}
+        for index, dive in enumerate(loaded.document.dives):
+            indexes.setdefault(dive.uuid, index)
         self._files[member] = _File(
             loaded=loaded,
             plan=plan,
-            findings=findings(loaded.document, loaded.conversion),
+            findings=found,
+            notes_about=notes_about,
+            found_about=found_about,
+            indexes=indexes,
+            inferred=inferred_paths(loaded.document),
             recordings=_placed_recordings(plan, written),
         )
         matched = {match.source_uuid for match in plan.recording_matches}
@@ -208,28 +235,21 @@ class _Dives:
     def _own_notes(self, source: _Source) -> list[ImportNote]:
         """The import's own notes about one document dive, in its plan's order."""
         member, uuid = source
-        return [
-            note
-            for note in self._files[member].plan.notes
-            # The remap names the uuid the first of the two records kept, not this one's.
-            if note.collection == "dives"
-            and note.uuid == uuid
-            and note.code is not ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY
-        ]
+        return self._files[member].notes_about.get(uuid, [])
 
     def _found(self, source: _Source) -> list[Finding]:
         member, uuid = source
-        return [found for found in self._files[member].findings if found.owner == uuid]
+        return self._files[member].found_about.get(uuid, [])
 
     def _dive_source(self, source: _Source) -> DiveSource:
         member, uuid = source
         file = self._files[member]
-        index = next(index for index, dive in enumerate(file.loaded.document.dives) if dive.uuid == uuid)
+        index = file.indexes[uuid]
         return DiveSource(
             dive=file.loaded.document.dives[index],
             index=index,
             converted=file.loaded.conversion is not None,
-            inferred=inferred_paths(file.loaded.document),
+            inferred=file.inferred,
             recordings=file.recordings.get(uuid, {}),
         )
 
