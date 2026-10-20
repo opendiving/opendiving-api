@@ -823,6 +823,21 @@ class TestContacts:
         }
 
     @pytest.mark.asyncio
+    async def test_a_contacts_position_is_one_object_and_absent_without_one(self, monkeypatch):
+        """Nested as a site's pin is, from the two flat columns; a contact with neither writes
+        no member, as the exact dict above already holds for the school."""
+        bundle = full_bundle()
+        resort = bundle.contact_by_uuid[UUIDS["contact-resort"]]
+        resort.latitude, resort.longitude = 28.4931, 34.5164
+
+        document = await _render(bundle, monkeypatch)
+        contacts = {contact["name"]: contact for contact in document["contacts"]}
+
+        assert contacts["Blue Ocean Resort"]["position"] == {"latitude": 28.4931, "longitude": 34.5164}
+        assert "position" not in contacts["Gear Hub"]
+        _assert_conforms(document)
+
+    @pytest.mark.asyncio
     async def test_all_five_hosts_reference_their_contact_by_uuid(self, monkeypatch):
         """A dive, a course, a certification, a service record and a trip part - and a
         conforming document, so every one resolves in `contacts`."""

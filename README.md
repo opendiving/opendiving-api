@@ -89,8 +89,8 @@ else; what is here is the source, and the notes for working on it.
   agency apps tie dives to a course *or* cards to a course, and none of them let the record outlive
   the agency.
 - **Contacts** — the dive centers, schools, shops, clubs and places you stayed, each kept once with
-  its phone, email, website and address and picked for a dive, a course, a card, a gear service or a
-  trip part. Imported from UDDF's dive bases, shops and accommodation.
+  its phone, email, website, address and position and picked for a dive, a course, a card, a gear
+  service or a trip part. Imported from UDDF's dive bases, shops and accommodation.
 - **People** — the buddies, guides, instructors, fellow students and companions you were with, each
   kept once and listed with a role on a dive, a trip or a course; a course's and a card's instructor
   is one. A person can be linked to an account on the same instance by its exact username, which

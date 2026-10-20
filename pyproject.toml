@@ -40,9 +40,12 @@ dependencies = [
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
     #
-    # 0.30.0 is the floor because it is the first release whose `Conversion` carries
-    # `sources`, which the import report joins each conversion finding to its dive's row by.
-    # The floor still carries what 0.29.0's did: a schema that admits a sighting's
+    # 0.32.0 is the floor because it is the first release whose schema admits a contact's
+    # `position`, which the export writes; resolved lower, the export fails the schema the
+    # export tests validate against. The floor still carries what 0.31.0's did: a `Note`'s
+    # `code` and `member`, which the import's notes are worded and placed by; what 0.30.0's
+    # did: a `Conversion` carrying `sources`, which the import report joins each conversion
+    # finding to its dive's row by; and what 0.29.0's did: a schema that admits a sighting's
     # `abundance`, which the export writes; resolved lower, the export fails the schema the
     # export tests validate against. And what 0.28.0's did: a gear item
     # typed `backplate` or `wing`, which `GearType` holds and the export writes; what 0.27.0's did: a species' `external_ids` with a `worms` entry, refusing
@@ -78,7 +81,7 @@ dependencies = [
     # `agency`, and the readers spell a dive's number `number`, so a UDDF or `.ssrf` dive
     # `services/logbook_import/reader.py` converts on the request path keeps its own number
     # rather than the placeholder `0`.
-    "divejson>=0.31.0",
+    "divejson>=0.32.0",
     "webauthn>=3.0.0",
     # Decodes and renders the uploaded pictures (`services/user_pictures.py`) and the species
     # photos (`services/species_photos.py`) - the only image processing in the app. 12.0.0 is the first release with official Python 3.14

@@ -76,6 +76,10 @@ reading the XSD, and each is exported in `logbook.divejson`/CSV instead:
   `<trippart>` links only a dive base and UDDF has no course, so every person still goes
   out as a `<buddy>` and those references do not; on a dive, `instructor`, `student`,
   `companion` and no role at all go out as the plain link a reader takes for `buddy`.
+- **A contact's position.** None of `divebaseType`, `shopType` and a part's
+  `<accomodation>` carries a `<geography>`, and `addressType` holds no coordinates. A trip
+  part's own `<geography>` is the part's place, not the contact's, so the position goes
+  nowhere.
 - **A site's tags, external ids, water type and entry types.** No element for any of them:
   `<sitedata>`'s `<density>` is a number and UDDF names no registry, no entry and no label.
   Its other names, its altitude and its depth range do have a slot, and go out.
@@ -679,7 +683,7 @@ def _contact_element(
 ) -> None:
     """One contact as a `<divebase>` or a `<shop>`.
 
-    `roles` has no element; the slot says `dive_center` or `shop` back and a part's copy
+    `roles` and the position have no element; the slot says `dive_center` or `shop` back and a part's copy
     `accommodation`. A base carrying only a name that no dive links and no copy names reads
     back as the placeholder a reader skips - every school only a course or a card names,
     those having no slot at all - which is the mapping working rather than a loss to hide.

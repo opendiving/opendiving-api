@@ -15,6 +15,7 @@ from ..core.schemas import (
     StoredVocabulary,
     Trimmed,
 )
+from .location import Latitude, Longitude, WholeCoordinatePair
 
 # DiveJSON §6.18's bounds, and the widths of the columns behind them.
 CONTACT_NAME_MAX = 255
@@ -163,10 +164,15 @@ class ContactAddressColumns(BaseModel):
 class ContactBase(BaseModel):
     """What every shape of a contact carries apart from the members whose write and read
     types differ - `roles`, `email` and `website` - and the address, which the wire nests
-    and the table does not."""
+    and the table does not.
+
+    The position is flat on the wire as in the table, as a dive site's pin is. Only the write
+    shapes add `WholeCoordinatePair`, for the reason it gives for staying off a read."""
 
     name: Annotated[str, Trimmed, Field(max_length=CONTACT_NAME_MAX, examples=["Blue Ocean Dive Center"])]
     phone: ContactPhone
+    latitude: Latitude
+    longitude: Longitude
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
 
 
@@ -218,7 +224,7 @@ class ContactReadInternal(ContactBase, _ContactReadFields, ContactAddressColumns
     created_at: datetime
 
 
-class ContactCreate(ContactBase, _ContactWriteFields):
+class ContactCreate(ContactBase, _ContactWriteFields, WholeCoordinatePair):
     model_config = ConfigDict(extra="forbid")
 
     address: Annotated[
@@ -226,7 +232,7 @@ class ContactCreate(ContactBase, _ContactWriteFields):
     ]
 
 
-class ContactCreateInternal(ContactBase, _ContactWriteFields, ContactAddressColumns):
+class ContactCreateInternal(ContactBase, _ContactWriteFields, ContactAddressColumns, WholeCoordinatePair):
     """What reaches FastCRUD, so the address is flat here where `ContactCreate` nests it -
     and CRUDAdmin's create form, which is why it carries columns and nothing else."""
 
@@ -235,12 +241,13 @@ class ContactCreateInternal(ContactBase, _ContactWriteFields, ContactAddressColu
     user_id: int
 
 
-class _ContactUpdateFields(RejectsExplicitNulls):
+class _ContactUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     """What both update shapes carry, which is everything but the address.
 
     `phone`, `email` and `website` are nullable and stay off `NON_NULLABLE_FIELDS`, so an
     explicit null clears them. `roles` is not nullable: a contact with no role is the empty
-    list.
+    list. `latitude` and `longitude` are nullable too, but answer to `WholeCoordinatePair`:
+    they are named together or not at all, and both `null` clears the position.
     """
 
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "roles", "notes")

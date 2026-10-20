@@ -12,7 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -43,14 +43,17 @@ from src.app.models.user import User
 from src.app.schemas.certification import CertificationCreate, CertificationUpdateRequest
 from src.app.schemas.contact import (
     ContactCreate,
+    ContactCreateInternal,
     ContactReadInternal,
     ContactRole,
+    ContactUpdate,
     ContactUpdateRequest,
     address_columns,
 )
 from src.app.schemas.course import CourseCreate, CourseReadInternal, CourseStatus, CourseUpdateRequest
 from src.app.schemas.dive import DiveListSort, DiveUpdateRequest
 from src.app.schemas.gear_service import GearServiceRecordUpdateRequest
+from src.app.schemas.location import COORDINATE_PAIR_MESSAGE
 from src.app.schemas.trip import TripCreate, TripPartInput
 from src.app.services import contact_links
 from tests.conftest import db_available
@@ -148,6 +151,43 @@ class TestTheWriteSchema:
 
         assert field in values.model_fields_set
 
+    def test_a_position_is_a_pair_on_the_create(self) -> None:
+        contact = ContactCreate.model_validate({"name": "Blue Ocean", "latitude": 27.8506, "longitude": 34.3136})
+
+        assert (contact.latitude, contact.longitude) == (27.8506, 34.3136)
+
+    @pytest.mark.parametrize(
+        ("schema", "body"),
+        [
+            (ContactCreate, {"name": "Blue Ocean", "latitude": 27.8506}),
+            (ContactCreate, {"name": "Blue Ocean", "latitude": None, "longitude": 34.3136}),
+            (ContactCreateInternal, {"name": "Blue Ocean", "user_id": USER_ID, "longitude": 34.3136}),
+            (ContactUpdateRequest, {"latitude": 27.8506}),
+            (ContactUpdateRequest, {"latitude": 27.8506, "longitude": None}),
+            (ContactUpdate, {"longitude": 34.3136}),
+        ],
+    )
+    def test_half_a_position_is_refused_on_every_write(self, schema: type[BaseModel], body: dict[str, Any]) -> None:
+        """The admin panel's shapes too: they write the columns flat, and no `CHECK` stands
+        behind them."""
+        with pytest.raises(ValidationError, match=COORDINATE_PAIR_MESSAGE):
+            schema.model_validate(body)
+
+    @pytest.mark.parametrize("body", [{"latitude": 90.5, "longitude": 0}, {"latitude": 0, "longitude": -180.5}])
+    def test_a_position_outside_the_world_is_refused(self, body: dict[str, Any]) -> None:
+        with pytest.raises(ValidationError):
+            ContactCreate.model_validate({"name": "Blue Ocean", **body})
+
+    def test_a_patch_clears_the_position_with_both_halves(self) -> None:
+        values = ContactUpdateRequest.model_validate({"latitude": None, "longitude": None})
+
+        assert values.model_dump(exclude_unset=True) == {"latitude": None, "longitude": None}
+
+    def test_the_position_is_flat_on_the_way_in(self) -> None:
+        """As a dive site's pin is: a nested object is a member this body does not have."""
+        with pytest.raises(ValidationError):
+            ContactCreate.model_validate({"name": "Blue Ocean", "position": {"latitude": 27.8, "longitude": 34.3}})
+
 
 class TestTheReadShape:
     def test_the_address_is_nested_and_absent_without_a_country(self) -> None:
@@ -166,6 +206,15 @@ class TestTheReadShape:
         read = contacts_module._to_public_contact(_internal_contact(roles=["resort"]), user_uuid=USER_UUID)
 
         assert read.roles == ["resort"]
+
+    def test_the_position_is_flat_and_absent_as_nulls(self) -> None:
+        placed = contacts_module._to_public_contact(
+            _internal_contact(latitude=27.8506, longitude=34.3136), user_uuid=USER_UUID
+        )
+        unplaced = contacts_module._to_public_contact(_internal_contact(), user_uuid=USER_UUID)
+
+        assert (placed.latitude, placed.longitude) == (27.8506, 34.3136)
+        assert (unplaced.latitude, unplaced.longitude) == (None, None)
 
 
 @pytest.fixture
@@ -225,6 +274,34 @@ class TestTheRoutes:
         assert (stored.address_city, stored.address_country, stored.user_id) == ("Dahab", "Egypt", USER_ID)
         assert stored.roles == [ContactRole.SCHOOL]
         route_collaborators["invalidate_contact_caches"].assert_awaited_once_with(USER_ID)
+
+    @pytest.mark.asyncio
+    async def test_a_create_stores_the_position(self, route_collaborators: dict[str, Any]) -> None:
+        await contacts_module.write_contact(
+            request=MagicMock(),
+            contact=ContactCreate.model_validate({"name": "Blue Ocean", "latitude": 27.8506, "longitude": 34.3136}),
+            current_user=_current_user(),
+            db=AsyncMock(),
+        )
+
+        stored = route_collaborators["create"].await_args.kwargs["object"]
+        assert (stored.latitude, stored.longitude) == (27.8506, 34.3136)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pair", [(27.8506, 34.3136), (None, None)])
+    async def test_a_patch_writes_the_pair_whole(
+        self, route_collaborators: dict[str, Any], pair: tuple[float | None, float | None]
+    ) -> None:
+        await contacts_module.patch_contact(
+            request=MagicMock(),
+            uuid=uuid7(),
+            values=ContactUpdateRequest.model_validate({"latitude": pair[0], "longitude": pair[1]}),
+            current_user=_current_user(),
+            db=AsyncMock(),
+        )
+
+        written = route_collaborators["update"].await_args.kwargs["object"]
+        assert written == {"latitude": pair[0], "longitude": pair[1]}
 
     @pytest.mark.asyncio
     async def test_naming_the_address_replaces_it_whole(self, route_collaborators: dict[str, Any]) -> None:
@@ -522,6 +599,27 @@ class TestTheDatabase:
         with pytest.raises(IntegrityError, match="ck_contact_address_has_country"):
             db.commit()
         db.rollback()
+
+    @pytest.mark.asyncio
+    async def test_a_position_is_stored_read_back_and_cleared(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """Through the select the single read and the create's response make, so the read
+        shape is proven to name both columns."""
+        contact = create_contact(db, diver)
+
+        async def read() -> tuple[float | None, float | None]:
+            row = await crud_contacts.get(
+                db=async_db, uuid=contact.uuid, schema_to_select=ContactReadInternal, return_as_model=True
+            )
+            assert isinstance(row, ContactReadInternal)
+            return row.latitude, row.longitude
+
+        assert await read() == (None, None)
+        await crud_contacts.update(db=async_db, object={"latitude": 27.8506, "longitude": 34.3136}, uuid=contact.uuid)
+        assert await read() == (27.8506, 34.3136)
+        await crud_contacts.update(db=async_db, object={"latitude": None, "longitude": None}, uuid=contact.uuid)
+        assert await read() == (None, None)
 
     @pytest.mark.asyncio
     async def test_someone_elses_contact_never_resolves(

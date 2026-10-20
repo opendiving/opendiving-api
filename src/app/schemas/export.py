@@ -709,6 +709,7 @@ class ExportContact(PublicUUIDSchema):
     email: str | None = None
     website: str | None = None
     address: ExportAddress | None = None
+    position: ExportPosition | None = None
     notes: str | None = None
     created_at: datetime
 

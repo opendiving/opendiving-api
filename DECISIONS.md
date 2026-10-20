@@ -2249,7 +2249,8 @@ through — a mapping this repo would get quietly wrong; `species.csv` carries t
 contact and the policy number (no elements; `<membership memberid>` is not a policy); the portrait
 (`<owner>` has no image element, and its one route to an image, `<notes><link>` to `<mediadata>`,
 carries no role); a dive's tags, waves, weather and boat name; a site's tags, external ids, water
-type and entry types; a gear item's working pressure and dive time.
+type and entry types; a gear item's working pressure and dive time; a contact's position (no
+`<geography>` on a base, a shop or an accommodation, and none in `addressType`).
 
 Lossy, on the `divejson` package writer's tables: `type` goes out as `<apparatus>`, `semi_closed` as
 `rebreather`, which reads back `closed_circuit`, and `freedive` and `snorkel` not at all;

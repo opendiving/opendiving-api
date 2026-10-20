@@ -96,10 +96,13 @@ SCHEMAS_AND_TABLES: list[tuple[type[RejectsExplicitNulls], Any]] = [
 ]
 
 # Nullable columns that still can't be cleared on their own, because a *different* rule
-# governs them. `DiveSiteUpdate`'s coordinates answer to `WholeCoordinatePair`: half a
-# position is meaningless, so clearing one means clearing both. Driving them singly here
-# would assert the opposite of what that schema promises - see the paired test below.
-CLEARED_ONLY_IN_PAIRS = {(DiveSiteUpdate, "latitude"), (DiveSiteUpdate, "longitude")}
+# governs them. `DiveSiteUpdate`'s and `ContactUpdate`'s coordinates answer to
+# `WholeCoordinatePair`: half a position is meaningless, so clearing one means clearing both.
+# Driving them singly here would assert the opposite of what those schemas promise - see the
+# paired test below.
+CLEARED_ONLY_IN_PAIRS = {
+    (schema, name) for schema in (DiveSiteUpdate, ContactUpdate) for name in ("latitude", "longitude")
+}
 
 # The update schemas that deliberately go unguarded, each for a reason that has to keep
 # being true. `test_every_update_schema_is_accounted_for` fails if a new one appears in
@@ -229,17 +232,16 @@ def test_every_update_schema_is_accounted_for() -> None:
     assert discovered == covered | set(UNGUARDED_UPDATE_SCHEMAS)
 
 
-def test_a_dive_site_position_can_still_be_cleared_as_a_pair() -> None:
+@pytest.mark.parametrize("schema", [DiveSiteUpdate, ContactUpdate])
+def test_a_position_can_still_be_cleared_as_a_pair(schema: type[BaseModel]) -> None:
     """The half of the coordinates `CLEARED_ONLY_IN_PAIRS` exempts from the sweep.
 
     Both columns are nullable, so a mistyped position has to be correctable back to "not
     recorded" - listing them in `NON_NULLABLE_FIELDS` would have made that impossible,
     and the two rules would have contradicted each other.
     """
-    values = DiveSiteUpdate.model_validate({"latitude": None, "longitude": None})
+    values = schema.model_validate({"latitude": None, "longitude": None})
 
-    assert values.latitude is None
-    assert values.longitude is None
     assert values.model_dump(exclude_unset=True) == {"latitude": None, "longitude": None}
 
 
