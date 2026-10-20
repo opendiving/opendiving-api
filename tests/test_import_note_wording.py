@@ -19,7 +19,7 @@ SERVICES = Path(__file__).resolve().parents[1] / "src" / "app" / "services"
 
 # Which calls carry a sentence, per module: the note helpers and the refusals a module raises.
 SITES: dict[Path, frozenset[str]] = {
-    SERVICES / "logbook_import" / "planner.py": frozenset({"_note", "_skip", "_dropped", "Bound"}),
+    SERVICES / "logbook_import" / "planner.py": frozenset({"_note", "_skip", "_dropped", "drop", "Bound"}),
     SERVICES / "logbook_import" / "writer.py": frozenset({"_note", "_file_skipped"}),
     SERVICES / "logbook_import" / "check_in.py": frozenset({"note"}),
     SERVICES / "logbook_import" / "reader.py": frozenset(
