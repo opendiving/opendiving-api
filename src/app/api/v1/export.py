@@ -145,7 +145,7 @@ async def export_uddf(
     the accommodation of each trip part, the people as buddies with a dive's guide under its
     dive base, and the diver's date of birth, phone, check-in email and insurance policies -
     but not the things the format has no slot for (gear sets, service history, c-cards,
-    training courses, a contact's roles, a trip's people and every role but buddy and guide,
+    training courses, a contact's roles and position, a trip's people and every role but buddy and guide,
     a person's link to an account, per-cylinder role and usage, the deco ceiling, the
     emergency contacts, the insurance policy numbers, the portrait, a dive's tags, waves,
     weather and boat name, and the kinds of dive and of entry UDDF has no word for).

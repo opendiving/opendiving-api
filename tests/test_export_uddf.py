@@ -249,6 +249,21 @@ class TestContacts:
         assert resort.findtext(f"{UDDF}notes/{UDDF}para") == "Ask for Ahmed."
 
     @pytest.mark.asyncio
+    async def test_a_contacts_position_has_no_slot_and_changes_nothing(self, schema, monkeypatch):
+        """No base, shop or accommodation carries a `<geography>`, so the file a positioned
+        resort goes out in - its base and its part's copy both - is the file it went out in
+        without one, byte for byte."""
+        unplaced = await _render(full_bundle(), monkeypatch=monkeypatch)
+        bundle = full_bundle()
+        resort = bundle.contact_by_uuid[UUIDS["contact-resort"]]
+        resort.latitude, resort.longitude = 28.4931, 34.5164
+
+        placed = await _render(bundle, monkeypatch=monkeypatch)
+
+        schema.validate(placed)
+        assert placed == unplaced
+
+    @pytest.mark.asyncio
     async def test_a_part_carries_a_copy_of_where_the_diver_stayed(self, monkeypatch):
         tree = _tree(await _render(full_bundle(), monkeypatch=monkeypatch))
         first, second, _ = tree.findall(f"{UDDF}divetrip/{UDDF}trip/{UDDF}trippart")

@@ -244,6 +244,7 @@ def _export_contact(contact: Contact) -> ExportContact:
         email=_filled(contact.email),
         website=_filled(contact.website),
         address=None if address is None else ExportAddress(**address.model_dump()),
+        position=_position(contact.latitude, contact.longitude),
         notes=_text(contact.notes),
         created_at=contact.created_at,
     )
@@ -330,8 +331,9 @@ def _text(value: str | None) -> str | None:
 def _position(latitude: float | None, longitude: float | None) -> ExportPosition | None:
     """Both halves or nothing - half a coordinate is unrepresentable (spec §6).
 
-    The `ck_dive_*_position_pair` constraints already make a half pair unstorable, so this
-    is the same rule stated where the document is built rather than a second guess at it.
+    A dive's `ck_dive_*_position_pair` constraints and a site's or a contact's write schemas
+    already refuse a half pair, so this is the same rule stated where the document is built
+    rather than a second guess at it.
     """
     if latitude is None or longitude is None:
         return None

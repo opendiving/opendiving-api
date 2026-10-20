@@ -641,6 +641,7 @@ class ImportContact(_ReadModel):
     email: Annotated[str | None, Field(default=None, max_length=CONTACT_EMAIL_MAX)]
     website: Annotated[str | None, Field(default=None, max_length=CONTACT_WEBSITE_MAX)]
     address: ImportAddress | None = None
+    position: ImportPosition | None = None
     notes: str | None = None
     created_at: datetime | None = None
 

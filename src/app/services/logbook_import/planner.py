@@ -1455,6 +1455,7 @@ class _Planner:
         if record.action not in (Action.CREATE, Action.RESTORE):
             return record
 
+        latitude, longitude = self._position(collection, contact.uuid, contact.position, "contact's")
         record.values = {
             "user_id": self._user_id,
             "name": name,
@@ -1465,6 +1466,8 @@ class _Planner:
             "email": self._contact_email(contact),
             "website": self._contact_website(contact),
             **self._address(contact),
+            "latitude": latitude,
+            "longitude": longitude,
             "notes": self._notes_text(collection, contact.uuid, contact.notes),
             "created_at": self._created_at(contact.created_at),
         }

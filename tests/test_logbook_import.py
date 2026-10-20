@@ -2788,6 +2788,7 @@ def _seed_contact_logbook(db: Session) -> Any:
     contact = create_contact(db, user, roles=["dive_center", "accommodation"])
     contact.phone = "+20 69 364 0000"
     contact.address_city, contact.address_country = "Dahab", "Egypt"
+    contact.latitude, contact.longitude = 28.4931, 34.5164
     trip = create_trip(db, user)
     course = create_course(db, user)
     dive = create_dive(db, user, trip=trip, course=course)
@@ -2834,6 +2835,7 @@ class TestContacts:
             ["dive_center", "accommodation"],
             "Egypt",
         )
+        assert (imported.latitude, imported.longitude) == (28.4931, 34.5164)
         hosts: tuple[type[Dive | Course | Certification | GearServiceRecord], ...] = (
             Dive,
             Course,
@@ -2927,6 +2929,39 @@ class TestContacts:
         assert contact.address_city is None
         dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalar_one()
         assert dive.contact_id == contact.id
+
+    @pytest.mark.asyncio
+    async def test_a_position_outside_the_world_is_dropped_and_the_contact_kept(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Through the planner's one position reader, the site's and the dive's."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["contacts"] = [
+            {"uuid": str(uuid7()), "name": "Blue Ocean", "position": {"latitude": 200, "longitude": 34.5}}
+        ]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        dropped = "The contact's position was outside the world, and was dropped"
+        assert [note for note in plan.notes if note.collection == "contacts" and note.message == dropped]
+        contact = (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalar_one()
+        assert (contact.name, contact.latitude, contact.longitude) == ("Blue Ocean", None, None)
+
+    @pytest.mark.asyncio
+    async def test_half_a_position_is_a_malformed_document(self) -> None:
+        """`ImportPosition` requires both halves, as it does for a site: half a coordinate is
+        unrepresentable in the format, so the document is refused rather than salvaged."""
+        document = {
+            "format": "divejson",
+            "version": "1.0",
+            "exported_at": "2026-06-01T10:00:00Z",
+            "contacts": [{"uuid": str(uuid7()), "name": "Blue Ocean", "position": {"latitude": 28.4931}}],
+        }
+
+        with pytest.raises(MalformedImportError):
+            await load_one(json.dumps(document).encode())
 
     @pytest.mark.asyncio
     async def test_a_part_staying_somewhere_the_document_does_not_define_imports_without_it(

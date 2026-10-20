@@ -689,6 +689,8 @@ CONTACTS_HEADER = (
     "postcode",
     "region",
     "country",
+    "latitude",
+    "longitude",
     "notes",
     "contact_uuid",
 )
@@ -713,6 +715,8 @@ def write_contacts_csv(bundle: ExportBundle) -> Iterator[str]:
                 contact.address_postcode,
                 contact.address_region,
                 contact.address_country,
+                contact.latitude,
+                contact.longitude,
                 contact.notes,
                 str(contact.uuid),
             )

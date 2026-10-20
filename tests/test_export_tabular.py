@@ -320,6 +320,22 @@ class TestTheNormalizedFiles:
         # A name and a role and nothing else - the school the migration made of a string.
         assert by_name["Blue Ocean"]["country"] == ""
 
+    def test_a_contacts_position_is_two_columns_beside_its_address(self):
+        """As `dive-sites.csv` carries a site's pin; empty for a contact with none."""
+        bundle = full_bundle()
+        resort = bundle.contact_by_uuid[UUIDS["contact-resort"]]
+        resort.latitude, resort.longitude = 28.4931, 34.5164
+
+        rows = _parse(_render(write_contacts_csv(bundle)))
+        by_name = {row[0]: dict(zip(CONTACTS_HEADER, row, strict=True)) for row in rows[1:]}
+
+        assert CONTACTS_HEADER.index("latitude") == CONTACTS_HEADER.index("country") + 1
+        assert (by_name["Blue Ocean Resort"]["latitude"], by_name["Blue Ocean Resort"]["longitude"]) == (
+            "28.4931",
+            "34.5164",
+        )
+        assert (by_name["Gear Hub"]["latitude"], by_name["Gear Hub"]["longitude"]) == ("", "")
+
     def test_people_have_a_file_and_every_host_names_them_by_name_and_role(self):
         """`people.csv` has the uuid; `dives.csv`, `trips.csv` and `courses.csv` name each
         person with the role they had, and a course's and a card's instructor column is the

@@ -99,6 +99,7 @@ async def write_contact(
     Names are unique per user, case-insensitively, so a second "Blue Ocean" is a 422.
     `roles` is a set in any order and comes back in vocabulary order with duplicates
     folded; it may be empty. `address` is optional, and when present needs its `country`.
+    `latitude` and `longitude` are optional and come together, or the create is a 422.
     """
     if await contact_name_exists(db=db, user_id=current_user["id"], name=contact.name):
         raise DuplicateValueException(_NAME_TAKEN)
@@ -276,6 +277,8 @@ async def patch_contact(
     404 unless the caller owns it. Renaming to a name the caller already has on another
     contact is a 422. An explicit `null` clears the phone, the email, the website or the
     address; naming `address` replaces the stored one whole. `roles` replaces the set.
+    `latitude` and `longitude` are named together or not at all - one alone is a 422 - and
+    both `null` clears the position.
     """
     db_contact = await _get_owned_contact(db, uuid, current_user)
 

@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, CheckConstraint, ForeignKey, Index, String, Text, func
+from sqlalchemy import JSON, CheckConstraint, Float, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -44,6 +44,12 @@ class Contact(Base, PublicUUIDMixin, TimestampMixin):
     address_postcode: Mapped[str | None] = mapped_column(String(32), default=None)
     address_region: Mapped[str | None] = mapped_column(String(255), default=None)
     address_country: Mapped[str | None] = mapped_column(String(255), default=None)
+    # Where the contact is - its door, its pier, its mooring - stored as a dive site's pin is,
+    # and never filled from the address. No `CHECK` on the pair, for the reason `dive_site`
+    # has none (`ck_dive_entry_position_pair` is the contrast): a diver types these two
+    # numbers, so the write schemas refuse half a pair as a 422 a form can show, not a 500.
+    latitude: Mapped[float | None] = mapped_column(Float, default=None)
+    longitude: Mapped[float | None] = mapped_column(Float, default=None)
     notes: Mapped[str] = mapped_column(Text, default="")
 
     @declared_attr.directive
