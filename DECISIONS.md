@@ -6044,9 +6044,9 @@ A head starting `{` keeps the 422 "not valid JSON"; other unclaimed bytes are 41
 each uploaded file's name and digest and apply converts again, deterministic except `exported_at`,
 passed in UTC via `_conversion_moment`.
 
-`ImportReport.conversion` (`Conversion.grouped()`, capped by
-`MAX_CONVERSION_GROUPS`/`MAX_CONVERSION_WHERES`) keeps `groups[].kind` an opaque string, never
-`StrEnum` or `Literal`: a dependency bump can add a kind.
+A row's note and a report group keep `code` and `kind` plain strings, never `StrEnum` or `Literal`:
+they carry the package's codes and kinds beside the import's own, and a dependency bump can add
+either.
 
 ## An `Integer` column's real bound is its width, and no `CheckConstraint` census can see one
 
@@ -6055,7 +6055,7 @@ is a bare `{"type": "integer"}`), so a conforming document (a converter with a u
 hold a number a column cannot, and unbounded that is SQLSTATE 22003 mid-transaction, a whole logbook
 refused; the `CheckConstraint` census cannot see it.
 
-Every reachable integer is bounded in `_DIVE_BOUNDS`, `_MIXTURE_BOUNDS`, `_SCHEDULE_BOUNDS`,
+Every reachable integer is bounded in `DIVE_BOUNDS`, `_MIXTURE_BOUNDS`, `_SCHEDULE_BOUNDS`,
 `_Planner._count` and `shape_series`/`_plan_profile` (sample extremes become `Integer` summary
 columns). A second census enumerates `Integer` columns on every table an import writes and requires
 each bounded in the planner or excluded with a reason.
@@ -7101,3 +7101,25 @@ beside `started_at`, `duration` reads as end minus start, which it is not, and t
 "dive time", the word the computer shows on the wrist. *Rejected:* "submerged time" on screen, which
 no vendor prints, and "bottom time", which means two different things to a PADI diver and a Garmin
 one.
+
+## A diver is shown a finding about a value of the dive, never one about how a file writes it
+
+`notes.HIDDEN` leaves out, by code, the reader's findings whose subject is how a file writes a value
+or names a record: readings a device writes as zero or below to mean none, two readings at one
+instant, an identity or a cylinder number taken from a record's place in the file, and gases a
+computer lists as disabled. A sentinel standing for a whole value the diver can fill in - a 0 bar
+start pressure, a 0/0 position - is an absence and is shown. The list is the app's because the kinds
+are the format's, and a sentinel reading the converter drops is honestly `dropped` from its side. A
+test holds each to `divejson.NOTE_CODES`, so a renamed code fails its bump. Rejected: matching
+sentences, which a weekly bump breaks silently.
+
+## A finding goes when the dive's value is not the file's
+
+A finding of kind `absent`, `inferred` or `resolved` naming a member is left out when the dive the
+import leaves holds something else there than this file's own reading - a value, or nothing - both
+read as the planner reads a document; and an `inferred` or `resolved` one also when another file of
+the row states the dive's value outright. A stand-in a reader writes, a FIT's UTC start, is that
+file's own and stays. Members land on the dive's columns, its cylinder rows by `pair_cylinders`
+after the write, its recordings at the ordinal the writer reports; a member the map cannot place is
+shown. Edge: a value the planner derives hides the file's absence line, its own note saying it once.
+Rejected: comparing against the sibling file's document, which cannot see an earlier import.

@@ -71,7 +71,7 @@ from ...models.species import Species
 from ...models.tag import Tag
 from ...models.trip import Trip
 from ...models.user import User
-from ...schemas.certification import AGENCY_OTHER_NOT_ALLOWED_MESSAGE, CertificationAgency, CertificationSide
+from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.contact import ADDRESS_FIELDS, CONTACT_ADDRESS_PREFIX, canonical_roles, check_website
 from ...schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ...schemas.dive_site import (
@@ -169,32 +169,6 @@ COLLECTIONS: tuple[str, ...] = (
 )
 
 _EMAIL = TypeAdapter(EmailStr)
-
-# How many notes a report carries. A logbook whose every record has something to say about
-# it would otherwise produce a response larger than the document it describes; the counts
-# stay complete either way, and `notes_truncated` says how many are missing. Well past any
-# real import - a clean round trip of the demo logbook produces a handful - but for the
-# derived values it reports, one per dive of a dive-computer file, which yield (`add_note`).
-MAX_NOTES = 500
-
-
-def add_note(notes: list[ImportNote], note: ImportNote) -> int:
-    """Append `note` under the cap, and say how many notes that cost: 0, or the 1 dropped.
-
-    At the cap a derived value's note gives way to any other, the latest first. It is the one
-    kind written once per dive of a dive-computer file, so a batch of them would otherwise
-    crowd every other note out of the list, a skipped record's among them.
-    """
-    if len(notes) < MAX_NOTES:
-        notes.append(note)
-        return 0
-    if note.code != ImportNoteCode.VALUE_DERIVED:
-        derived = [index for index, kept in enumerate(notes) if kept.code == ImportNoteCode.VALUE_DERIVED]
-        if derived:
-            del notes[derived[-1]]
-            notes.append(note)
-    return 1
-
 
 # `IMPORT_PARSER_KEY` is **defined in `services/dive_profiles.py`** and imported above rather
 # than declared here, because that module is where the value means something: it is one of
@@ -297,6 +271,10 @@ class PlannedRecording:
     """
 
     ordinal: int
+    # Which of the document dive's recordings this is, by its index there - `None` for the one
+    # made to hold a kept file where the document gives the dive none. What a finding about
+    # `recordings/N` of the file is resolved against, whatever ordinal the write gives it.
+    source_index: int | None = None
     device: dict[str, Any] = field(default_factory=dict)
     # The recording's own settings, keyed by **column** name like `device` above and for the
     # same reason: the writer spreads them into the row and never has to know that the format
@@ -429,7 +407,6 @@ class ImportPlan:
     # earlier file wrote, and the writer walks this list after the dives either way.
     recording_matches: list[PlannedRecordingMatch]
     notes: list[ImportNote]
-    notes_dropped: int
     files_referenced: int
     files_restored: int
     files_not_contained: int
@@ -506,7 +483,7 @@ class _ExistingRow:
 # there is no "the bad value" to drop in a pair, which is the same reason `parsed_dive.py`
 # has no guard for them either. `_plan_dive` handles the depth pair on its own terms, and a
 # position is all-or-nothing by shape.
-_DIVE_BOUNDS: tuple[Bound, ...] = (
+DIVE_BOUNDS: tuple[Bound, ...] = (
     Bound(
         "number",
         lambda value: 0 <= value <= _MAX_DIVE_COUNT,
@@ -589,6 +566,20 @@ _MIXTURE_BOUNDS: tuple[Bound, ...] = (
 )
 
 
+# What a reference names, by the collection it points into, for the note an unresolved one writes.
+_LINKED_RECORDS = {
+    "trips": "a trip",
+    "courses": "a course",
+    "sites": "a dive site",
+    "gear": "a piece of gear",
+    "gear_sets": "a gear set",
+    "certifications": "a certification",
+    "contacts": "a dive base, shop or stay",
+    "people": "a person",
+    "dives": "a dive",
+}
+
+
 # The members the dive form rounds to the two places it shows (`dive_reader._mixture`).
 _ROUNDED_CYLINDER_MEMBERS = ("volume", "oxygen", "helium", "start_pressure", "end_pressure", "ppo2_limit")
 
@@ -600,6 +591,79 @@ def _unpressurized(cylinder: ImportCylinder) -> list[str]:
         for name in ("start_pressure", "end_pressure")
         if (value := getattr(cylinder, name)) is not None and finite(value) and value <= 0
     ]
+
+
+def read_position(position: Any, label: str, drop: Drop) -> tuple[float | None, float | None]:
+    """A Position object as its column pair, or nothing at all.
+
+    All or nothing by shape, which is what `ck_dive_entry_position_pair` and its siblings
+    enforce: half a coordinate is a pin on the equator rather than a partial answer.
+    """
+    if position is None:
+        return None, None
+    latitude, longitude = position.latitude, position.longitude
+    if not (finite(latitude) and finite(longitude)):
+        drop(f"The {label} position was not a pair of numbers, and was dropped")
+        return None, None
+    if abs(latitude) > _LATITUDE_LIMIT or abs(longitude) > _LONGITUDE_LIMIT:
+        drop(f"The {label} position was outside the world, and was dropped")
+        return None, None
+    return latitude, longitude
+
+
+def read_cylinder(source: ImportCylinder, index: int, *, converted: bool, drop: Drop) -> dict[str, Any]:
+    """One of a dive's cylinders as its `dive_mixture` columns, its vessel aside.
+
+    **A cylinder the document did not fully describe is stored as it was recorded, not filled
+    in and not skipped.** `volume`, `oxygen` and `helium` are OPTIONAL in the format - §6.3
+    blesses a cylinder converted from a mix-only source with its vessel members absent, and
+    says of `oxygen` in as many words that absent means not recorded, not 21 - and they are
+    nullable columns here, so absence has somewhere to land. Divers plan gas off these
+    numbers, which is why nothing is guessed.
+
+    A member the document records but this app cannot store still goes: `_MIXTURE_BOUNDS`
+    drops it with a note, exactly as it does an out-of-range pressure or a `NaN`, and the
+    cylinder keeps everything else. So does each of the two cross-field rules - an oxygen and
+    a helium summing past 100 cannot both be right and neither says which is wrong, so both go
+    and the row stays.
+
+    **A converted file's pressure at or below 0 bar is absent**, as the dive form reads the
+    same file (`DiveMixtureSchema._drop_unpressurized`): a Shearwater UDDF writes 0 bar for
+    every tank slot its transmitters never read, and stored as an end pressure that 0 would
+    read as set to every later fill. Dropped without a note, since it is an absent-marker
+    rather than a value. A DiveJSON document keeps the bounds a diver's own record takes,
+    where an end pressure of 0 is an out-of-gas ascent (spec §6.3).
+
+    **The measured members are first rounded as the dive form rounds them**, so one file
+    stores one cylinder through either door, and a value the rounding takes to 0 meets the
+    bounds and the rule above as the 0 it would be stored as.
+
+    The planner's reading, and the one a report compares a dive's stored cylinder against.
+    """
+    cylinder = source.model_copy(update={name: two_places(getattr(source, name)) for name in _ROUNDED_CYLINDER_MEMBERS})
+    if converted:
+        cylinder = cylinder.model_copy(update=dict.fromkeys(_unpressurized(cylinder), None))
+    values = bounded(cylinder, _MIXTURE_BOUNDS, drop)
+    oxygen, helium = values.get("oxygen"), values.get("helium")
+    if oxygen is not None and helium is not None and oxygen + helium > 100:
+        drop(f"Cylinder {index + 1}'s oxygen and helium add up to more than 100 percent, so both went")
+        oxygen = helium = None
+    start_pressure, end_pressure = values.get("start_pressure"), values.get("end_pressure")
+    if start_pressure is not None and end_pressure is not None and end_pressure > start_pressure:
+        drop(f"Cylinder {index + 1} ended at a higher pressure than it started, so both went")
+        start_pressure = end_pressure = None
+    return {
+        "volume": values.get("volume"),
+        "oxygen": oxygen,
+        "helium": helium,
+        "start_pressure": start_pressure,
+        "end_pressure": end_pressure,
+        # The column keeps the app's own spelling; only the format's changed.
+        "po2_limit": values.get("ppo2_limit"),
+        "gas_number": values.get("gas_number"),
+        "role": None if cylinder.role is None else cylinder.role.value,
+        "usage": None if cylinder.usage is None else cylinder.usage.value,
+    }
 
 
 def _site_external_ids(site: ImportDiveSite) -> tuple[list[ExternalId], list[str]]:
@@ -704,7 +768,6 @@ class _Planner:
         self._portrait: PlannedPortrait | None = None
         self._records: dict[str, dict[uuid_pkg.UUID, PlannedRecord]] = {name: {} for name in COLLECTIONS}
         self._notes: list[ImportNote] = []
-        self._notes_dropped = 0
         # Set while `_holding_notes` is.
         self._held_notes: list[ImportNote] | None = None
         self._files_referenced = 0
@@ -765,7 +828,7 @@ class _Planner:
         if self._held_notes is not None:
             self._held_notes.append(note)
         else:
-            self._notes_dropped += add_note(self._notes, note)
+            self._notes.append(note)
 
     @contextmanager
     def _holding_notes(self) -> Iterator[list[ImportNote]]:
@@ -993,7 +1056,8 @@ class _Planner:
         if record is None or record.action is Action.SKIP:
             self._note(
                 ImportNoteCode.REFERENCE_UNRESOLVED,
-                f"A reference to a record in `{target}` could not be resolved, so this record was imported without it.",
+                f"This record links {_LINKED_RECORDS.get(target, 'a record')} this import does not bring, so it was "
+                "imported without that link.",
                 collection=collection,
                 uuid=record_uuid,
             )
@@ -1032,22 +1096,7 @@ class _Planner:
     def _position(
         self, collection: str, record_uuid: uuid_pkg.UUID, position: Any, label: str
     ) -> tuple[float | None, float | None]:
-        """A Position object as its column pair, or nothing at all.
-
-        All or nothing by shape, which is what `ck_dive_entry_position_pair` and its
-        siblings enforce: half a coordinate is a pin on the equator rather than a partial
-        answer.
-        """
-        if position is None:
-            return None, None
-        latitude, longitude = position.latitude, position.longitude
-        if not (finite(latitude) and finite(longitude)):
-            self._dropped(collection, record_uuid, f"The {label} position was not a pair of numbers, and was dropped")
-            return None, None
-        if abs(latitude) > _LATITUDE_LIMIT or abs(longitude) > _LONGITUDE_LIMIT:
-            self._dropped(collection, record_uuid, f"The {label} position was outside the world, and was dropped")
-            return None, None
-        return latitude, longitude
+        return read_position(position, label, self._drop_on(collection, record_uuid))
 
     def _place(
         self,
@@ -1131,7 +1180,11 @@ class _Planner:
                 return None
             return source.agency.value, agency_other
         if agency_other is not None:
-            self._dropped(collection, record_uuid, f"`agency_other` was dropped: {AGENCY_OTHER_NOT_ALLOWED_MESSAGE}")
+            self._dropped(
+                collection,
+                record_uuid,
+                'The agency\'s own name was dropped: a name is kept only where the agency is "other"',
+            )
         return source.agency.value, None
 
     def _course_agency(self, record_uuid: uuid_pkg.UUID, course: ImportCourse) -> tuple[str | None, str | None]:
@@ -1271,7 +1324,6 @@ class _Planner:
             recording_matches=self._recording_matches,
             unnumbered_dives=self._unnumbered_dives,
             notes=self._notes,
-            notes_dropped=self._notes_dropped,
             files_referenced=self._files_referenced,
             files_restored=self._files_restored,
             files_not_contained=self._files_not_contained,
@@ -2531,7 +2583,7 @@ class _Planner:
 
         record = self._resolve(collection, dive.uuid, existing)
 
-        bounded = self._bounded(collection, dive.uuid, dive, _DIVE_BOUNDS)
+        bounded = self._bounded(collection, dive.uuid, dive, DIVE_BOUNDS)
         recordings, sources = self._plan_recordings(dive)
         # The primary recording's profile, for the dive-level jobs a profile still has: standing
         # in for an unrecorded submerged time, average depth and bottom temperature below, and keeping
@@ -2807,7 +2859,7 @@ class _Planner:
                 self._dropped(
                     "dives",
                     dive.uuid,
-                    "A value for `abundance` was dropped: a sighting carries a count or a band, and the count was kept",
+                    "The abundance band was dropped: a sighting carries a count or a band, and the count was kept",
                 )
                 abundance = None
             notes = self._notes_text("dives", dive.uuid, sighting.notes)
@@ -2822,79 +2874,18 @@ class _Planner:
         return sightings
 
     def _plan_cylinders(self, dive: ImportDive) -> list[dict[str, Any]]:
-        """A dive's gas supplies, as `dive_mixture` rows.
-
-        **A cylinder the document did not fully describe is stored as it was recorded, not
-        filled in and no longer skipped.** `volume`, `oxygen` and `helium` are OPTIONAL in
-        the format - §6.3 blesses a cylinder converted from a mix-only source with its
-        vessel members absent, and says of `oxygen` in as many words that absent means not
-        recorded, not 21 - and they are nullable columns here now, so absence has somewhere
-        to land. Divers plan gas off these numbers, which is why nothing is guessed; the
-        cylinder itself is real either way, and dropping it lost the pressures, the role
-        and the gas number it *did* carry along with the member it didn't.
-
-        A member the document records but this app cannot store is a different case and
-        still goes: `_MIXTURE_BOUNDS` drops it with a note, exactly as it does an
-        out-of-range pressure or a `NaN`, and the cylinder keeps everything else. So does
-        each of the two cross-field rules, which is what the pressure pair below has always
-        done - an oxygen and a helium summing past 100 cannot both be right and neither
-        says which is wrong, so both go and the row stays. Nothing in here skips a cylinder
-        any more.
-
-        **A converted file's pressure at or below 0 bar is absent**, as the dive form reads the
-        same file (`DiveMixtureSchema._drop_unpressurized`): a Shearwater UDDF writes 0 bar for
-        every tank slot its transmitters never read, and stored as an end pressure that 0 would
-        read as set to every later fill. Dropped without a note, since it is an absent-marker
-        rather than a value. A DiveJSON document keeps the bounds a diver's own record takes,
-        where an end pressure of 0 is an out-of-gas ascent (spec §6.3).
-
-        **The measured members are first rounded as the dive form rounds them**, so one file
-        stores one cylinder through either door, and a value the rounding takes to 0 meets the
-        bounds and the rule above as the 0 it would be stored as.
-        """
+        """A dive's gas supplies, as `dive_mixture` rows, each read by `read_cylinder` and given
+        its vessel. Nothing in here skips a cylinder."""
         converted = self._loaded.conversion is not None
-        rows: list[dict[str, Any]] = []
+        drop = self._drop_on("dives", dive.uuid)
         linked: set[uuid_pkg.UUID] = set()
-        for index, source in enumerate(dive.cylinders):
-            cylinder = source.model_copy(
-                update={name: two_places(getattr(source, name)) for name in _ROUNDED_CYLINDER_MEMBERS}
-            )
-            if converted:
-                cylinder = cylinder.model_copy(update=dict.fromkeys(_unpressurized(cylinder), None))
-            bounded = self._bounded("dives", dive.uuid, cylinder, _MIXTURE_BOUNDS)
-            volume = bounded.get("volume")
-            oxygen = bounded.get("oxygen")
-            helium = bounded.get("helium")
-            if oxygen is not None and helium is not None and oxygen + helium > 100:
-                self._dropped(
-                    "dives",
-                    dive.uuid,
-                    f"Cylinder {index + 1}'s oxygen and helium add up to more than 100 percent, so both went",
-                )
-                oxygen = helium = None
-            start_pressure = bounded.get("start_pressure")
-            end_pressure = bounded.get("end_pressure")
-            if start_pressure is not None and end_pressure is not None and end_pressure > start_pressure:
-                self._dropped(
-                    "dives", dive.uuid, f"Cylinder {index + 1} ended at a higher pressure than it started, so both went"
-                )
-                start_pressure = end_pressure = None
-            rows.append(
-                {
-                    "volume": volume,
-                    "oxygen": oxygen,
-                    "helium": helium,
-                    "start_pressure": start_pressure,
-                    "end_pressure": end_pressure,
-                    # The column keeps the app's own spelling; only the format's changed.
-                    "po2_limit": bounded.get("ppo2_limit"),
-                    "gas_number": bounded.get("gas_number"),
-                    "role": None if cylinder.role is None else cylinder.role.value,
-                    "usage": None if cylinder.usage is None else cylinder.usage.value,
-                    "gear_item_uuid": self._vessel(dive.uuid, index, cylinder.gear_uuid, linked),
-                }
-            )
-        return rows
+        return [
+            {
+                **read_cylinder(cylinder, index, converted=converted, drop=drop),
+                "gear_item_uuid": self._vessel(dive.uuid, index, cylinder.gear_uuid, linked),
+            }
+            for index, cylinder in enumerate(dive.cylinders)
+        ]
 
     def _vessel(
         self, dive_uuid: uuid_pkg.UUID, index: int, gear_uuid: uuid_pkg.UUID | None, linked: set[uuid_pkg.UUID]
@@ -2956,7 +2947,7 @@ class _Planner:
         """
         planned: list[PlannedRecording] = []
         sources: list[ImportRecording] = []
-        for source in dive.recordings:
+        for index, source in enumerate(dive.recordings):
             shaped = shape_recording(dive, source, self._drop_on("dives", dive.uuid))
             if shaped is None:
                 continue
@@ -2969,6 +2960,7 @@ class _Planner:
             planned.append(
                 PlannedRecording(
                     ordinal=len(planned),
+                    source_index=index,
                     device=shaped.device,
                     mode=shaped.mode,
                     deco_model=shaped.deco_model,

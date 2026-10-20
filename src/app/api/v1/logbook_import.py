@@ -33,8 +33,8 @@ here rather than in the service layer because each is an HTTP concern:
   of the import: the whole request answers with one of those only where no file of it
   reads, and then as its first refused file would on its own. Short of that, a file that is
   *readable* never fails: a record this app cannot store is skipped and reported, a value it
-  cannot hold is dropped and reported, and what a conversion could not carry comes back on
-  `ImportReport.conversion` rather than as a refusal.
+  cannot hold is dropped and reported, and what a file did not record comes back as a note
+  on its dive rather than as a refusal.
 - **Atomic in rows.** Apply is one transaction, committed once at the end, so an import
   that fails or is interrupted writes nothing and a retry cannot half-duplicate a logbook.
 """
@@ -241,7 +241,6 @@ def _report(report: BatchReport) -> dict[str, object]:
         "files": report.files,
         "notes": report.notes,
         "notes_truncated": report.notes_truncated,
-        "conversion": report.conversion,
         "members": report.members,
         "dives": report.dives,
     }
@@ -275,18 +274,18 @@ async def preview_logbook_import(
     Every record lands in one of four buckets, per collection, summed over the files: **created**,
     **linked** (an existing record of yours already carries that identifier, or that name),
     **restored** (a record you deleted here, coming back under its original identifier) or
-    **skipped**. `notes` explains every decision that is not a plain create, one sentence at a
-    time, and `files` says how many files and card images the documents name and how many of
-    them the import actually carries - only the full-export archive carries any.
+    **skipped**, and `files` says how many files and card images the documents name and how
+    many of them the import actually carries - only the full-export archive carries any.
 
     `members` has one row per file - each part and each file a zip held - saying what it was
     read as, whether it is kept and why not, or why it was refused. A file that cannot be read
     stops nothing else. `dives` has one row per dive the import creates or touches, with the
-    most that happens to it and the files it came from.
-
-    `conversion` is present when any file was not DiveJSON already, and says what the
-    conversion could not carry: findings grouped by kind and message, each with up to three
-    paths into your original files. Treat a `kind` you do not recognise as a plain finding.
+    most that happens to it, the files it came from, and its `notes`: each decision that is not
+    a plain create, and what its files did not record, worked out, or read one way of several,
+    one sentence at a time. A line about a value goes when another file of the dive supplied
+    it. Everything about no dive is in the report's `notes`, one group per code and sentence
+    with a count and up to three places in your files. Treat a `code` or `kind` you do not
+    recognise as information.
 
     `check_in_details` has one entry for each member of the check-in details the logbook
     carries - email, phone, date of birth, emergency contacts, insurance policies - keyed by

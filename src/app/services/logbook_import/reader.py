@@ -47,11 +47,10 @@ import math
 import re
 import shutil
 import tempfile
-import uuid as uuid_pkg
 import zipfile
-from collections.abc import Callable, Container, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import IntEnum
 from fractions import Fraction
@@ -73,15 +72,7 @@ from ...schemas.export import (
     PROFILE_AXIS_MILLISECONDS,
     PROFILE_TEMPERATURE_SCALE_MARKER,
 )
-from ...schemas.logbook_import import (
-    ConversionConverter,
-    ConversionNote,
-    ConversionNoteGroup,
-    ConversionReport,
-    ImportDocument,
-    ImportMemberNotKept,
-    ImportNoteCode,
-)
+from ...schemas.logbook_import import ImportDocument, ImportMemberNotKept, ImportNoteCode
 from ..dive_files import MAX_DIVE_FILE_SIZE, FileExtraction, extraction_of
 from ..dive_reader import ReadDive, attach_rank, formats_this_build_reads, inferred_figures, is_logbook_format
 from ..export.archive import DIVEJSON_NAME
@@ -222,10 +213,9 @@ class LoadedImport:
     Owns nothing: the spools and containers it reads from belong to the `LoadedBatch` it is
     part of, which closes them.
 
-    `conversion` and `source_format` are the converter's, and both are `None` for a native
-    DiveJSON document or archive. Nothing below this module reads either: the converted
-    document enters the planner through `ImportDocument` like any other. They are here
-    because the *report* is a route concern and the route has nothing else to build it from.
+    `conversion` is the converter's, and `None` for a native DiveJSON document or archive.
+    The converted document enters the planner through `ImportDocument` like any other; the
+    conversion is here for its findings, which the report places on the dives they are about.
 
     `is_archive` says this file is the full-export archive, whose container carries the
     stored binaries its document names. `kept` is the file itself where it is one
@@ -236,7 +226,6 @@ class LoadedImport:
     digest: str
     is_archive: bool
     conversion: Conversion | None
-    source_format: str | None
     _archive: zipfile.ZipFile | None = None
     # What `read_as_written` read the way a pre-change writer meant it, for the report.
     read_as_written: list[ReaderNote] = field(default_factory=list)
@@ -315,7 +304,7 @@ def _validate_envelope(raw: Any) -> ImportDocument:
         )
     if raw.get("format") != DIVEJSON_FORMAT:
         raise UnsupportedImportError(
-            "This file is not a DiveJSON document - its `format` member says otherwise. "
+            "This file is not a DiveJSON document - it does not say it is one. "
             f"This app also reads: {formats_this_build_reads()}."
         )
 
@@ -582,8 +571,8 @@ def read_as_written(raw: dict[str, Any]) -> list[ReaderNote]:
             ),
             (
                 limits,
-                "This logbook was written before DiveJSON renamed a cylinder's `po2_limit` to `ppo2_limit`, so "
-                f"{limits} cylinder(s) kept their ppO2 limit.",
+                "This logbook was written before DiveJSON renamed a cylinder's ppO2 limit, so "
+                f"{limits} cylinder(s) kept their ppO2 limit under its old name.",
             ),
         )
         if count
@@ -665,23 +654,9 @@ def _conversion_moment() -> datetime:
     return datetime.now(UTC)
 
 
-def _converted_from(document: Any, fallback: str | None) -> str | None:
-    """Which format the converted document says it came from.
-
-    `converting.md`'s *Provenance* block is where the library records which reader read a
-    file, and a document that carries none leaves the fallback - what this module sniffed.
-    """
-    if not isinstance(document, dict):
-        return fallback
-    extensions = document.get("extensions")
-    block = extensions.get(divejson.PRODUCER_KEY) if isinstance(extensions, dict) else None
-    value = block.get("converted_from") if isinstance(block, dict) else None
-    return value if isinstance(value, str) else fallback
-
-
-_CONVERTER_BUG = (
-    "This file was recognised, and converting it produced a logbook this app cannot read. That is a bug in the "
-    "converter rather than anything wrong with your file - please report it."
+_READ_FAULT = (
+    "This file was recognised, and reading it produced a logbook this app cannot take in. That is a fault in this "
+    "app rather than anything wrong with your file - please report it."
 )
 
 
@@ -726,14 +701,15 @@ def _renamed(conversion: Conversion, digest: str, name: str) -> Conversion:
 
     The package prefixes a member's paths with the member's name, which for an import's file
     is its digest; a diver reading the report knows the file by what they called it. Each
-    record's source path is renamed alike, so the two still join.
+    record's source path is renamed alike, so the two still join, and every other field of a
+    finding - its code and the member it is about - rides through as it is.
     """
     prefix = f"{digest}/"
 
     def renamed(where: str) -> str:
         return f"{name}/{where[len(prefix) :]}" if where.startswith(prefix) else where
 
-    notes = tuple(divejson.Note(renamed(note.where), note.message, note.kind) for note in conversion.notes)
+    notes = tuple(replace(note, where=renamed(note.where)) for note in conversion.notes)
     sources = {uuid: renamed(where) for uuid, where in conversion.sources.items()}
     return Conversion(conversion.document, notes, sources)
 
@@ -765,18 +741,18 @@ def _convert_file(source: Source, *, digest: str, name: str, claimed: str, size:
             # A converter bug, not a diver's file: the library validates its own output and
             # this is it saying no. Logged with a traceback because nobody else will see it.
             logger.exception("The converter produced a non-conforming document during a logbook import")
-            raise MalformedImportError(_CONVERTER_BUG) from exc
+            raise MalformedImportError(_READ_FAULT) from exc
         except ConverterError as exc:
-            raise MalformedImportError(f"This file could not be converted: {_named(exc, digest, name)}.") from exc
+            raise MalformedImportError(f"This file could not be read: {_named(exc, digest, name)}.") from exc
         except Exception as exc:
             logger.exception("Unexpected error converting a %s file during a logbook import", claimed)
-            raise MalformedImportError(f"This file could not be converted: {str(exc) or type(exc).__name__}.") from exc
+            raise MalformedImportError(f"This file could not be read: {str(exc) or type(exc).__name__}.") from exc
 
     try:
         document = _validate_envelope(conversion.document)
     except (UnsupportedImportError, MalformedImportError) as exc:
         logger.exception("A converted document did not survive this app's own envelope check")
-        raise MalformedImportError(_CONVERTER_BUG) from exc
+        raise MalformedImportError(_READ_FAULT) from exc
     if _records_nothing(document):
         # A run the same watch recorded, say: the reader reads the file and finds no dive in
         # it, and a file that brings nothing is one the diver should hear about by name. A
@@ -784,13 +760,11 @@ def _convert_file(source: Source, *, digest: str, name: str, claimed: str, size:
         # own UDDF export of an account with no dives - imports what it holds.
         raise MalformedImportError("This file records no dive, so there is nothing in it to import.")
 
-    fmt = _converted_from(conversion.document, claimed) or claimed
     loaded = LoadedImport(
         document=document,
         digest=digest,
         is_archive=False,
         conversion=_renamed(conversion, digest, name),
-        source_format=fmt,
     )
     if not document.dives:
         # A logbook of other records alone: no dive to keep the file on.
@@ -855,7 +829,6 @@ def _load_document(read: Callable[[], bytes], *, digest: str) -> LoadedImport:
         digest=digest,
         is_archive=False,
         conversion=None,
-        source_format=None,
         read_as_written=notes,
     )
 
@@ -891,104 +864,9 @@ def _load_archive(archive: zipfile.ZipFile, *, digest: str) -> LoadedImport:
         digest=digest,
         is_archive=True,
         conversion=None,
-        source_format=None,
         _archive=archive,
         read_as_written=notes,
     )
-
-
-# How many distinct `(kind, message)` pairs a report carries. The converter's own note list
-# is unbounded and a thousand-dive logbook with one habit per record makes thousands of
-# them, so a cap has to live somewhere; grouping is the only place it can, since the counts
-# stay complete either way. Far below `planner.MAX_NOTES` on purpose - a group is a *kind
-# of* finding, and a hundred distinct ones is already more than any adapter emits.
-MAX_CONVERSION_GROUPS = 100
-
-# Enough to point at without becoming the report. A diver who wants every path has the
-# source file; three says "here, and here, and elsewhere".
-MAX_CONVERSION_WHERES = 3
-
-# The *package*, whose version is the pin a report is attributable to - not the document's
-# `generator.name`, which is the CLI's name and already on `ImportPreview.generator`.
-_CONVERTER_NAME = "divejson"
-
-# Only reachable if a converted document arrived without the provenance member that says
-# which format it came from, which the converter writes on every path it has. Named rather
-# than guessed at, so a report that somehow lands here says so instead of claiming a format.
-_UNKNOWN_SOURCE_FORMAT = "unknown"
-
-
-# What `ConversionReport.format` says of an import whose converted files were not all one
-# format.
-MIXED_FORMATS = "mixed"
-
-
-def conversion_report(loaded: Sequence[LoadedImport], *, on_rows: Container[int] = ()) -> ConversionReport | None:
-    """What converting an import's files could not carry, or `None` when none was converted.
-
-    One report over every converted file: its format is theirs where they share one and
-    `mixed` where they do not, and its groups are the union of theirs, grouped by the
-    library's own `grouped` - the one the CLI prints - over their findings in the import's
-    order. Built here rather than in the browser so preview and result render one shape.
-
-    `on_rows` holds the findings a dive's row lists, by identity, and the groups leave those
-    out: each finding is shown once, under its dive where it has one.
-    """
-    converted = [one for one in loaded if one.conversion is not None]
-    if not converted:
-        return None
-    formats = {one.source_format or _UNKNOWN_SOURCE_FORMAT for one in converted}
-    notes = tuple(
-        note
-        for one in converted
-        if one.conversion is not None
-        for note in one.conversion.notes
-        if id(note) not in on_rows
-    )
-    groups = Conversion({}, notes, {}).grouped()
-    return ConversionReport(
-        format=formats.pop() if len(formats) == 1 else MIXED_FORMATS,
-        converter=ConversionConverter(name=_CONVERTER_NAME, version=divejson.__version__),
-        groups=[
-            ConversionNoteGroup(
-                kind=group.kind,
-                message=group.message,
-                count=len(group.wheres),
-                wheres=group.wheres[:MAX_CONVERSION_WHERES],
-            )
-            for group in groups[:MAX_CONVERSION_GROUPS]
-        ],
-        groups_truncated=max(len(groups) - MAX_CONVERSION_GROUPS, 0),
-    )
-
-
-def dive_conversion_notes(loaded: LoadedImport) -> dict[uuid_pkg.UUID, list[tuple[divejson.Note, ConversionNote]]]:
-    """One converted file's findings about each of its dives, by the dive's document uuid, each
-    beside the converter's own note it was made from.
-
-    A finding's path counts the *source's* dives, and a dive the converter could not carry
-    keeps its place in that count, so `dive/3` names a dive by `Conversion.sources` and never
-    by position. A finding is about the record with the longest source path its own starts
-    with, segment by segment - the package's rule - so one at `dive/3/buddy/0` is about the
-    person first named there, and one about a file or a dropped dive is about no dive.
-    """
-    if loaded.conversion is None:
-        return {}
-    dives = {dive.uuid for dive in loaded.document.dives}
-    owners = {where: uuid_pkg.UUID(uuid) for uuid, where in loaded.conversion.sources.items()}
-    found: dict[uuid_pkg.UUID, list[tuple[divejson.Note, ConversionNote]]] = {}
-    for note in loaded.conversion.notes:
-        segments = note.where.split("/")
-        for depth in range(len(segments), 0, -1):
-            owner = owners.get("/".join(segments[:depth]))
-            if owner is not None:
-                if owner in dives:
-                    below = "/".join(segments[depth:])
-                    found.setdefault(owner, []).append(
-                        (note, ConversionNote(kind=note.kind, message=note.message, where=below or None))
-                    )
-                break
-    return found
 
 
 # ------------------------------------------------------------------ the batch
@@ -1141,7 +1019,7 @@ def _listed(archive: zipfile.ZipFile, zip_row: BatchRow) -> list[zipfile.ZipInfo
     ]
     if not infos:
         zip_row.refusal = UnsupportedImportError(
-            "This zip holds no files to convert - only folders, or the files a computer adds beside them."
+            "This zip holds no files to import - only folders, or the files a computer adds beside them."
         )
     zip_row.opened = len(infos) or None
     return infos
@@ -1272,7 +1150,7 @@ def _survey(parts: Sequence[ImportPart]) -> LoadedBatch:
             # itself and reads as a refusal for no reason.
             raise ImportTooLargeError(
                 f"This import holds {-(-planned // (1024 * 1024))} MB of logbooks uncompressed, and at most "
-                f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB are converted in one import. Split it and import the parts."
+                f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB are read in one import. Split it and import the parts."
             )
 
         for row in batch.rows:

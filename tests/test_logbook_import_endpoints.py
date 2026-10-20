@@ -50,6 +50,7 @@ from src.app.schemas.logbook_import import (
 )
 from src.app.services.logbook_import import batch as batch_module
 from src.app.services.logbook_import import batch_digest, reader
+from src.app.services.logbook_import import notes as notes_module
 from src.app.services.logbook_import import parts as import_parts
 from src.app.services.logbook_import.writer import WrittenImport
 from tests.helpers.import_parts import import_request, multipart, part_of
@@ -67,8 +68,8 @@ MINIMAL = json.dumps({"format": "divejson", "version": "1.0", "exported_at": "20
 UDDF_CORPUS = Path(__file__).parent / "fixtures" / "uddf" / "demo-account.uddf"
 
 # A logbook nothing in this app wrote. Deliberately carrying no UTC offset, which is the
-# commonest thing a converter has to report as absent, so the conversion block below has
-# something real in it rather than an empty list.
+# commonest thing a file does not record, so the report's notes below have something real in
+# them rather than an empty list.
 SSRF = b"""<?xml version="1.0"?>
 <divelog program="subsurface" version="3">
 <divesites>
@@ -160,7 +161,6 @@ def signed_in(import_app: Any, monkeypatch: Any) -> Any:
             records={},
             recording_matches=[],
             notes=[],
-            notes_dropped=0,
             files_referenced=0,
             files_restored=0,
             files_not_contained=0,
@@ -170,7 +170,7 @@ def signed_in(import_app: Any, monkeypatch: Any) -> Any:
         )
 
     async def fake_write(db: Any, **kwargs: Any) -> WrittenImport:
-        return WrittenImport(dive_ids={}, match_files=[], retired_bytes=0)
+        return WrittenImport(dive_ids={}, match_files=[], match_ordinals=[], retired_bytes=0)
 
     async def fake_resolve(db: Any, **kwargs: Any) -> frozenset[int]:
         return frozenset()
@@ -316,13 +316,13 @@ class TestTheFormatsItAccepts:
         response = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf"))
 
         assert response.status_code == 200
-        assert response.json()["conversion"]["format"] == "ssrf"
+        assert [row["format"] for row in response.json()["members"]] == ["ssrf"]
 
     def test_a_uddf_logbook_previews(self, signed_in: Any, client: TestClient) -> None:
         response = client.post(PREVIEW_PATH, files=_files(_uddf(), "dives.uddf"))
 
         assert response.status_code == 200
-        assert response.json()["conversion"]["format"] == "uddf"
+        assert [row["format"] for row in response.json()["members"]] == ["uddf"]
 
     def test_the_whole_uddf_export_corpus_previews(self, signed_in: Any, client: TestClient) -> None:
         """A real export of a whole demo account, out of this app's own UDDF writer - so
@@ -331,7 +331,7 @@ class TestTheFormatsItAccepts:
         response = client.post(PREVIEW_PATH, files=_files(UDDF_CORPUS.read_bytes(), "demo-account.uddf"))
 
         assert response.status_code == 200
-        assert response.json()["conversion"]["format"] == "uddf"
+        assert [row["format"] for row in response.json()["members"]] == ["uddf"]
 
     def test_the_bytes_decide_and_not_the_name_or_the_content_type(self, signed_in: Any, client: TestClient) -> None:
         """`_files` sends `application/vnd.dive+json` and a `.divejson` name whatever it is
@@ -339,7 +339,7 @@ class TestTheFormatsItAccepts:
         response = client.post(PREVIEW_PATH, files=_files(_uddf(), "logbook.divejson"))
 
         assert response.status_code == 200
-        assert response.json()["conversion"]["format"] == "uddf"
+        assert [row["format"] for row in response.json()["members"]] == ["uddf"]
 
     def test_a_zip_is_opened_and_each_of_its_files_read(self, signed_in: Any, client: TestClient) -> None:
         """A watch writes one file per dive, so an account export is a zip of them. Its files
@@ -349,7 +349,7 @@ class TestTheFormatsItAccepts:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["conversion"]["format"] == "uddf"
+        assert [row["format"] for row in body["members"]] == ["uddf", "uddf", "zip"]
         assert [row["name"] for row in body["members"]] == ["dive-1.uddf", "dive-2.uddf", "watch-export.zip"]
         # Not the app's own export archive, which is the one container that restores the
         # files its document names.
@@ -374,7 +374,7 @@ class TestTheFormatsItAccepts:
         response = client.post(PREVIEW_PATH, files=_files(payload, "logbooks.zip"))
 
         assert response.status_code == 415
-        assert "no files to convert" in response.json()["detail"]
+        assert "no files to import" in response.json()["detail"]
 
     def test_a_zip_that_cannot_be_opened_is_422(self, signed_in: Any, client: TestClient) -> None:
         response = client.post(PREVIEW_PATH, files=_files(b"PK\x03\x04 and then nothing a zip has", "broken.zip"))
@@ -406,7 +406,6 @@ class TestTheFormatsItAccepts:
         assert (rows["a.uddf"]["format"], rows["b.ssrf"]["format"]) == ("uddf", "ssrf")
         zip_index = body["members"].index(rows["mixed.zip"])
         assert rows["a.uddf"]["container"] == rows["b.ssrf"]["container"] == zip_index
-        assert body["conversion"]["format"] == "mixed"
 
     def test_a_file_no_reader_claims_is_415_naming_the_formats(self, signed_in: Any, client: TestClient) -> None:
         """A 415 rather than the 422 it used to get. "This DiveJSON document is not valid
@@ -491,7 +490,7 @@ class TestTheFormatsItAccepts:
         response = client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip"))
 
         assert response.status_code == 413
-        assert "converted in one import" in response.json()["detail"]
+        assert "are read in one import" in response.json()["detail"]
 
     def test_the_size_it_reports_is_rounded_up(self, signed_in: Any, client: TestClient, monkeypatch: Any) -> None:
         """Floored, an archive a byte over the cap reports the cap back at itself - "holds
@@ -536,18 +535,18 @@ class TestWhereTheConversionRuns:
         rather than against the main thread: `TestClient` drives the app from a portal thread
         of its own, so "not the main thread" would pass even with the hop removed.
         """
-        report, convert = batch_module.conversion_report, reader._convert
+        report, convert = batch_module.findings, reader._convert
         seen: dict[str, str] = {}
 
-        def record_report(loaded: Any, **kwargs: Any) -> Any:
+        def record_report(*args: Any) -> Any:
             seen["loop"] = threading.current_thread().name
-            return report(loaded, **kwargs)
+            return report(*args)
 
         def record_convert(wrapper: Any) -> Any:
             seen["convert"] = threading.current_thread().name
             return convert(wrapper)
 
-        monkeypatch.setattr(batch_module, "conversion_report", record_report)
+        monkeypatch.setattr(batch_module, "findings", record_report)
         monkeypatch.setattr(reader, "_convert", record_convert)
 
         assert client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).status_code == 200
@@ -568,7 +567,7 @@ class TestWhenTheConversionFails:
         response = client.post(PREVIEW_PATH, files=_files(truncated, "dives.uddf"))
 
         assert response.status_code == 422
-        assert "could not be converted" in response.json()["detail"]
+        assert "could not be read:" in response.json()["detail"]
 
     def test_a_single_file_over_an_adapter_cap_is_413_and_is_not_called_an_archive(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
@@ -615,7 +614,7 @@ class TestWhenTheConversionFails:
         response = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf"))
 
         assert response.status_code == 422
-        assert "bug in the converter" in response.json()["detail"]
+        assert "a fault in this app" in response.json()["detail"]
 
     def test_a_converted_document_this_app_cannot_read_is_422(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
@@ -630,68 +629,79 @@ class TestWhenTheConversionFails:
         response = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf"))
 
         assert response.status_code == 422
-        assert "bug in the converter" in response.json()["detail"]
+        assert "a fault in this app" in response.json()["detail"]
 
 
-class TestTheConversionReport:
-    def test_a_native_document_reports_no_conversion(self, signed_in: Any, client: TestClient) -> None:
-        assert client.post(PREVIEW_PATH, files=_files()).json()["conversion"] is None
+def _with_findings(monkeypatch: Any, *extra: divejson.Note) -> None:
+    """Every conversion this test runs, carrying `extra` beside its own findings."""
+    convert = reader._convert
 
-    def test_a_converted_upload_reports_what_could_not_be_carried(self, signed_in: Any, client: TestClient) -> None:
+    def converted(wrapper: Any) -> Any:
+        conversion = convert(wrapper)
+        return divejson.Conversion(conversion.document, (*conversion.notes, *extra), conversion.sources)
+
+    monkeypatch.setattr(reader, "_convert", converted)
+
+
+class TestTheReportsNotes:
+    """Everything on no dive's row - every note here, the planner being stubbed - grouped."""
+
+    def test_the_report_names_no_conversion(self, signed_in: Any, client: TestClient) -> None:
         body = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).json()
 
-        report = body["conversion"]
-        assert report["converter"] == {"name": "divejson", "version": divejson.__version__}
-        assert report["groups_truncated"] == 0
-        assert report["groups"], "the .ssrf above records no UTC offset, which is a finding"
-        group = report["groups"][0]
-        assert set(group) == {"kind", "message", "count", "wheres"}
-        assert group["count"] >= len(group["wheres"])
-        assert len(group["wheres"]) <= reader.MAX_CONVERSION_WHERES
+        assert "conversion" not in body
+        assert body["notes_truncated"] == 0
+        assert body["notes"], "the .ssrf above records no UTC offset, which is a finding"
+        group = body["notes"][0]
+        assert set(group) == {"code", "kind", "collection", "message", "count", "wheres"}
+        assert group["code"] == "start_time_zone_missing" and group["kind"] == "absent"
+        assert group["count"] >= len(group["wheres"]) > 0
+        assert all(where.startswith("logbook.ssrf/") for where in group["wheres"])
 
-    def test_a_kind_from_a_later_release_comes_back_as_itself(
+    def test_a_finding_of_how_a_file_writes_a_value_is_not_shown(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
-        """The invariant the whole block turns on. The converter's kinds went from three to
-        four while this feature was being written, and the pin moves without a change here -
-        so typing `kind` as an enum would turn a readable logbook into a 500 at *response
-        serialisation* on some future Renovate PR, with nothing in between.
-        """
-        convert = reader._convert
+        hidden = divejson.Note("logbook.ssrf/$", "negative readings", "dropped", code="negative_readings")
+        _with_findings(monkeypatch, hidden)
 
-        def with_an_unknown_kind(wrapper: Any) -> Any:
-            conversion = convert(wrapper)
-            invented = divejson.Note("dive/0", "a kind this build has never seen", "time-shifted")  # type: ignore[arg-type]
-            return divejson.Conversion(conversion.document, (*conversion.notes, invented), conversion.sources)
+        body = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).json()
 
-        monkeypatch.setattr(reader, "_convert", with_an_unknown_kind)
+        assert "negative readings" not in {group["message"] for group in body["notes"]}
+
+    def test_a_code_and_a_kind_from_a_later_release_come_back_as_themselves(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """The pin moves without a change here, so typing either as an enum would turn a
+        readable logbook into a 500 at *response serialisation* on some future Renovate PR."""
+        invented = divejson.Note(
+            "logbook.ssrf/$",
+            "a finding this build has never seen",
+            "time-shifted",  # type: ignore[arg-type]
+            code="a_code_from_a_later_release",
+        )
+        _with_findings(monkeypatch, invented)
+
         response = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf"))
 
         assert response.status_code == 200
-        kinds = [group["kind"] for group in response.json()["conversion"]["groups"]]
-        assert "time-shifted" in kinds
+        [group] = [group for group in response.json()["notes"] if group["code"] == "a_code_from_a_later_release"]
+        assert group["kind"] == "time-shifted"
 
     def test_groups_past_the_cap_are_counted_rather_than_listed(
         self, signed_in: Any, client: TestClient, monkeypatch: Any
     ) -> None:
-        """The converter's note list is unbounded and the report's is not, so the cap has to
-        live on the grouping - which is also why these are not another `ImportNoteCode`."""
-        convert = reader._convert
+        _with_findings(
+            monkeypatch,
+            *(divejson.Note("logbook.ssrf/$", f"finding {n}", "dropped", code="text_shortened") for n in range(2)),
+        )
+        whole = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).json()
 
-        def with_extra_findings(wrapper: Any) -> Any:
-            conversion = convert(wrapper)
-            extra = tuple(divejson.Note("dive/0", f"finding {n}", "dropped") for n in range(2))
-            return divejson.Conversion(conversion.document, (*conversion.notes, *extra), conversion.sources)
+        monkeypatch.setattr(notes_module, "MAX_NOTE_GROUPS", 1)
+        capped = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).json()
 
-        monkeypatch.setattr(reader, "_convert", with_extra_findings)
-        whole = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).json()["conversion"]
-
-        monkeypatch.setattr(reader, "MAX_CONVERSION_GROUPS", 1)
-        capped = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).json()["conversion"]
-
-        assert len(whole["groups"]) > 1 and whole["groups_truncated"] == 0
-        assert capped["groups"] == whole["groups"][:1], "what is listed is a prefix of the whole"
-        assert capped["groups_truncated"] == len(whole["groups"]) - 1
+        assert len(whole["notes"]) > 1 and whole["notes_truncated"] == 0
+        assert capped["notes"] == whole["notes"][:1], "what is listed is a prefix of the whole"
+        assert capped["notes_truncated"] == len(whole["notes"]) - 1
 
 
 class TestApply:
@@ -709,19 +719,20 @@ class TestApply:
         assert response.status_code == 200
         assert response.json()["files"]["restored"] == 0
 
-    def test_a_converted_file_imports_and_the_result_carries_the_conversion(
+    def test_a_converted_file_imports_and_the_result_carries_its_notes(
         self, signed_in: Any, client: TestClient
     ) -> None:
         """The token is minted over the *uploaded* files, not the converted document, so it
         names what a diver picked - and apply converts again rather than replaying a stored
-        result. The block is on the result as well as the preview because the result
-        panel is what stays on screen."""
+        result. The notes are on the result as well as the preview because the result panel
+        is what stays on screen."""
         response = client.post(
             APPLY_PATH, files=_files(SSRF, "logbook.ssrf"), data={"token": self._token(SSRF, filename="logbook.ssrf")}
         )
 
         assert response.status_code == 200
-        assert response.json()["conversion"]["format"] == "ssrf"
+        assert [row["format"] for row in response.json()["members"]] == ["ssrf"]
+        assert response.json()["notes"]
 
     def test_a_token_for_other_bytes_is_refused(self, signed_in: Any, client: TestClient) -> None:
         """Without this the apply would import whatever was uploaded second, and the report

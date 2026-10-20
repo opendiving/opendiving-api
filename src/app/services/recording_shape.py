@@ -125,6 +125,55 @@ def within_int32(values: Sequence[int]) -> bool:
     return all(INT32_MIN <= value <= INT32_MAX for value in values)
 
 
+# What a diver calls each bounded value, for the sentence a drop writes: the field names are
+# the format's and this app's, and a note names a value as the dive form does.
+VALUE_LABELS = {
+    "number": "dive number",
+    "submerged_time": "dive time",
+    "max_depth": "maximum depth",
+    "avg_depth": "average depth",
+    "visibility": "visibility",
+    "weight": "weight",
+    "altitude": "altitude",
+    "rating": "rating",
+    "depth_from": "shallowest depth",
+    "depth_to": "deepest depth",
+    "volume": "cylinder size",
+    "working_pressure": "working pressure",
+    "interval_months": "interval in months",
+    "interval_dives": "interval in dives",
+    "interval_hours": "interval in hours",
+    "count": "count",
+    "oxygen": "oxygen share",
+    "helium": "helium share",
+    "start_pressure": "start pressure",
+    "end_pressure": "end pressure",
+    "ppo2_limit": "ppO2 limit",
+    "gas_number": "gas number",
+    "surface_pressure": "surface pressure",
+    "cns_start": "start CNS",
+    "cns_end": "end CNS",
+    "otu_start": "start OTU",
+    "otu_end": "end OTU",
+    "gf_low": "low gradient factor",
+    "gf_high": "high gradient factor",
+    "conservatism": "conservatism setting",
+}
+
+# The same for a profile's sampled channels.
+CHANNEL_LABELS = {
+    "depth": "depth",
+    "ceiling": "ceiling",
+    "temperature": "temperature",
+    "ndl": "no-decompression time",
+    "tts": "time-to-surface",
+    "ppo2": "ppO2",
+    "cns": "CNS",
+    "gradient_factor": "gradient factor",
+    "surface_gradient_factor": "surface gradient factor",
+}
+
+
 def bounded(source: Any, bounds: Sequence[Bound], drop: Drop) -> dict[str, Any]:
     """Every bounded member of one record, with the unstorable ones dropped."""
     kept: dict[str, Any] = {}
@@ -132,11 +181,12 @@ def bounded(source: Any, bounds: Sequence[Bound], drop: Drop) -> dict[str, Any]:
         value = getattr(source, bound.field)
         if value is None:
             continue
+        label = VALUE_LABELS.get(bound.field, bound.field.replace("_", " "))
         if not finite(value):
-            drop(f"A value for `{bound.field}` was not a number, and was dropped")
+            drop(f"The {label} was not a number, and was dropped")
             continue
         if not bound.ok(value):
-            drop(f"A value for `{bound.field}` was dropped: {bound.message}")
+            drop(f"The {label} was dropped: {bound.message}")
             continue
         kept[bound.field] = value
     return kept
@@ -165,6 +215,8 @@ class ShapedRecording:
 def shape_series(series: Any, label: str, drop: Drop, *, unsigned: bool = False) -> ProfileSeries | None:
     """One channel, or `None` with a note. Spec §6.5's rules, exactly.
 
+    `label` is what a diver calls the readings - "depth readings" - since the note is theirs.
+
     `unsigned` is §6.4's floor on the six decompression channels: none of them is a
     quantity that runs below zero, and a negative in one is what several devices write to
     mean "no figure". Depth, ceiling and temperature keep the signed reading - a
@@ -179,22 +231,22 @@ def shape_series(series: Any, label: str, drop: Drop, *, unsigned: bool = False)
         return None
     times, values = series.times, series.values
     if len(times) != len(values):
-        drop(f"The {label} channel had mismatched times and values, and was dropped")
+        drop(f"The {label} had mismatched times and values, and were dropped")
         return None
     if not times:
         # "A channel with no readings must be omitted, not empty" (§6.5).
         return None
     if times[0] < 0 or any(later <= earlier for earlier, later in zip(times, times[1:], strict=False)):
-        drop(f"The {label} channel's times were not increasing from zero, and was dropped")
+        drop(f"The {label} were not in time order from the start of the dive, and were dropped")
         return None
     # The stored `data` payload is JSONB and holds any integer, but the summary columns
     # `store_profile` derives from these - `max_depth_cm` and the extremes beside it, and the
     # span - are `Integer`. A channel carrying a value outside that width goes whole.
     if not (within_int32(times) and within_int32(values)):
-        drop(f"The {label} channel carried readings this app cannot store, and was dropped")
+        drop(f"The {label} held values this app cannot store, and were dropped")
         return None
     if unsigned and any(value < 0 for value in values):
-        drop(f"The {label} channel carried a negative reading, and was dropped")
+        drop(f"The {label} included a negative one, and were dropped")
         return None
     return ProfileSeries(t=list(times), v=list(values))
 
@@ -259,21 +311,26 @@ def shape_profile(source: ImportProfile | None, drop: Drop) -> NormalizedProfile
     # Every single-series channel through the same check, driven by the channel tuple, so a
     # channel added to the format cannot ship here unchecked.
     channels = {
-        channel: shape_series(getattr(source, channel), channel, drop, unsigned=channel in UNSIGNED_CHANNELS)
+        channel: shape_series(
+            getattr(source, channel),
+            f"{CHANNEL_LABELS.get(channel, channel.replace('_', ' '))} readings",
+            drop,
+            unsigned=channel in UNSIGNED_CHANNELS,
+        )
         for channel in SINGLE_SERIES_CHANNELS
     }
     pressures: list[ProfilePressureSeries] = []
     for series in source.pressures:
         if series.gas_number is None or series.gas_number < 0:
-            drop("A pressure channel with no gas number was dropped")
+            drop("Tank pressure readings that name no cylinder were dropped")
             continue
-        checked = shape_series(series, f"pressure (gas {series.gas_number})", drop)
+        checked = shape_series(series, f"tank pressure readings of gas {series.gas_number}", drop)
         if checked is not None:
             pressures.append(ProfilePressureSeries(t=checked.t, v=checked.v, gas_number=series.gas_number))
 
     if not any(channels.values()) and not pressures:
         if any(getattr(source, channel) for channel in SINGLE_SERIES_CHANNELS) or source.pressures:
-            drop("A recording's profile carried no usable channel, and was dropped")
+            drop("A recording's profile held no readings this app can use, and was dropped")
         return None
 
     return with_channels(channels, pressure=pressures, events=shape_events(source, drop))
