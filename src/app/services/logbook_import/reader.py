@@ -49,7 +49,7 @@ import shutil
 import tempfile
 import uuid as uuid_pkg
 import zipfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Container, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -923,19 +923,28 @@ _UNKNOWN_SOURCE_FORMAT = "unknown"
 MIXED_FORMATS = "mixed"
 
 
-def conversion_report(loaded: Sequence[LoadedImport]) -> ConversionReport | None:
+def conversion_report(loaded: Sequence[LoadedImport], *, on_rows: Container[int] = ()) -> ConversionReport | None:
     """What converting an import's files could not carry, or `None` when none was converted.
 
     One report over every converted file: its format is theirs where they share one and
     `mixed` where they do not, and its groups are the union of theirs, grouped by the
     library's own `grouped` - the one the CLI prints - over their findings in the import's
     order. Built here rather than in the browser so preview and result render one shape.
+
+    `on_rows` holds the findings a dive's row lists, by identity, and the groups leave those
+    out: each finding is shown once, under its dive where it has one.
     """
     converted = [one for one in loaded if one.conversion is not None]
     if not converted:
         return None
     formats = {one.source_format or _UNKNOWN_SOURCE_FORMAT for one in converted}
-    notes = tuple(note for one in converted if one.conversion is not None for note in one.conversion.notes)
+    notes = tuple(
+        note
+        for one in converted
+        if one.conversion is not None
+        for note in one.conversion.notes
+        if id(note) not in on_rows
+    )
     groups = Conversion({}, notes, {}).grouped()
     return ConversionReport(
         format=formats.pop() if len(formats) == 1 else MIXED_FORMATS,
@@ -953,8 +962,9 @@ def conversion_report(loaded: Sequence[LoadedImport]) -> ConversionReport | None
     )
 
 
-def dive_conversion_notes(loaded: LoadedImport) -> dict[uuid_pkg.UUID, list[ConversionNote]]:
-    """One converted file's findings about each of its dives, by the dive's document uuid.
+def dive_conversion_notes(loaded: LoadedImport) -> dict[uuid_pkg.UUID, list[tuple[divejson.Note, ConversionNote]]]:
+    """One converted file's findings about each of its dives, by the dive's document uuid, each
+    beside the converter's own note it was made from.
 
     A finding's path counts the *source's* dives, and a dive the converter could not carry
     keeps its place in that count, so `dive/3` names a dive by `Conversion.sources` and never
@@ -966,7 +976,7 @@ def dive_conversion_notes(loaded: LoadedImport) -> dict[uuid_pkg.UUID, list[Conv
         return {}
     dives = {dive.uuid for dive in loaded.document.dives}
     owners = {where: uuid_pkg.UUID(uuid) for uuid, where in loaded.conversion.sources.items()}
-    found: dict[uuid_pkg.UUID, list[ConversionNote]] = {}
+    found: dict[uuid_pkg.UUID, list[tuple[divejson.Note, ConversionNote]]] = {}
     for note in loaded.conversion.notes:
         segments = note.where.split("/")
         for depth in range(len(segments), 0, -1):
@@ -975,7 +985,7 @@ def dive_conversion_notes(loaded: LoadedImport) -> dict[uuid_pkg.UUID, list[Conv
                 if owner in dives:
                     below = "/".join(segments[depth:])
                     found.setdefault(owner, []).append(
-                        ConversionNote(kind=note.kind, message=note.message, where=below or None)
+                        (note, ConversionNote(kind=note.kind, message=note.message, where=below or None))
                     )
                 break
     return found
