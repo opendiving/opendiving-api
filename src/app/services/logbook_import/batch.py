@@ -221,12 +221,10 @@ class _Dives:
         member, uuid = source
         return [found for found in self._files[member].findings if found.owner == uuid]
 
-    def _dive_source(self, source: _Source) -> DiveSource | None:
+    def _dive_source(self, source: _Source) -> DiveSource:
         member, uuid = source
         file = self._files[member]
-        index = next((index for index, dive in enumerate(file.loaded.document.dives) if dive.uuid == uuid), None)
-        if index is None:
-            return None
+        index = next(index for index, dive in enumerate(file.loaded.document.dives) if dive.uuid == uuid)
         return DiveSource(
             dive=file.loaded.document.dives[index],
             index=index,
@@ -244,11 +242,10 @@ class _Dives:
         sources = {source: self._dive_source(source) for source in row.sources}
         for source in row.sources:
             dive = sources[source]
-            others = [other for key, other in sources.items() if key != source and other is not None]
+            others = [other for key, other in sources.items() if key != source]
             for found in self._found(source):
                 if (
                     stored is not None
-                    and dive is not None
                     and row.dive_id is not None
                     and left_out(found.note, dive, others, row.dive_id, stored)
                 ):

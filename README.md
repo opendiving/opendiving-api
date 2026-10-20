@@ -108,10 +108,11 @@ else; what is here is the source, and the notes for working on it.
   and then an apply that writes the lot in one transaction. A DiveJSON document or a full-export
   archive goes in as it is; a UDDF file, a Subsurface `.ssrf`, a FIT file, a Suunto app export, a
   Suunto DM5 XML export, or a `.zip` of any of those is converted on the way in by the
-  [`divejson`](https://pypi.org/project/divejson/) package, and the report says what the conversion
-  could not carry. A file that is one dive is kept on the dive it becomes, and one recording
-  exported twice - a Suunto's FIT beside its JSON - is one recording with both files. Restore a
-  backup, migrate between instances, or bring a logbook across from whatever you were keeping it in.
+  [`divejson`](https://pypi.org/project/divejson/) package, and each dive's row lists what its files
+  did not record, what the import worked out, and which of the dive's values it left out. A file
+  that is one dive is kept on the dive it becomes, and one recording exported twice - a Suunto's FIT
+  beside its JSON - is one recording with both files. Restore a backup, migrate between instances,
+  or bring a logbook across from whatever you were keeping it in.
 - **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
   and passkeys, with automatic account linking, short-lived access tokens, and httpOnly refresh
   cookies. The sign-in email carries a magic link *and* a six-digit code, so reading your mail on a
@@ -286,7 +287,7 @@ curl -OJ http://localhost:8000/api/v1/export/divejson -H "Authorization: Bearer 
 # Back in, in two phases. The preview writes nothing and reports what it would do;
 # the token it returns says which files that report was about. Send `file` once per
 # file, in any format the converter reads - `dives.uddf`, `Dive.fit` beside `Dive.json`,
-# `garmin-export.zip` - and `conversion` in the report says what it could not carry.
+# `garmin-export.zip` - and each dive's row in the report lists what its files did not record.
 curl -X POST http://localhost:8000/api/v1/import/logbook/preview \
   -H "Authorization: Bearer $TOKEN" -F "file=@Dive.fit" -F "file=@Dive.json"
 

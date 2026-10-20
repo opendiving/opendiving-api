@@ -108,7 +108,7 @@ class Finding:
     collection: str | None
 
 
-def findings(loaded_document: ImportDocument, conversion: divejson.Conversion | None) -> list[Finding]:
+def findings(document: ImportDocument, conversion: divejson.Conversion | None) -> list[Finding]:
     """A converted file's findings a diver may be shown, each beside the record it is about.
 
     A finding's path counts the *source's* records, and a dive the converter could not carry
@@ -121,7 +121,7 @@ def findings(loaded_document: ImportDocument, conversion: divejson.Conversion | 
     collections = {
         record.uuid: name
         for name in COLLECTIONS
-        for record in getattr(loaded_document, name)
+        for record in getattr(document, name)
         if isinstance(getattr(record, "uuid", None), uuid_pkg.UUID)
     }
     found = []
