@@ -3,8 +3,9 @@
 
 A converted file - a UDDF file, a `.ssrf`, a FIT, a Suunto app or DM5 XML export, each file
 of a zip of them - arrives here as a DiveJSON document like any other, because the converter's
-output is one. What the report says of the conversion is `ImportReport.conversion`, what the
-conversion could not carry, and each file's row in `ImportReport.members`.
+output is one. What the report says of each file is its row in `ImportReport.members`, and what
+a file did not record, or recorded one way where it could be read another, is a note like the
+import's own: on its dive's row, or in `ImportReport.notes`.
 
 **This is not `schemas/export.py` inverted, and the differences are the whole point.**
 That module is the writer's declaration: it emits exactly what DiveJSON 1.0 defines and a
@@ -770,8 +771,23 @@ class ImportNoteCode(StrEnum):
     TAGS_CREATED = "tags_created"
 
 
+# What each of the import's own codes says of its value, in the file reader's four kinds, so a
+# row's notes carry one tone rule whatever produced them. A code not here is none of the four.
+IMPORT_NOTE_KINDS: dict[ImportNoteCode, str] = {
+    ImportNoteCode.RECORD_SKIPPED: "dropped",
+    ImportNoteCode.VALUE_DROPPED: "dropped",
+    ImportNoteCode.REFERENCE_UNRESOLVED: "dropped",
+    ImportNoteCode.SPECIES_UNRESOLVED: "dropped",
+    ImportNoteCode.FILE_SKIPPED: "dropped",
+    ImportNoteCode.CHECK_IN_DETAIL_DROPPED: "dropped",
+    ImportNoteCode.VALUE_DERIVED: "inferred",
+    ImportNoteCode.READ_AS_WRITTEN: "resolved",
+}
+
+
 class ImportNote(BaseModel):
-    """One thing the import decided, addressed to the diver.
+    """One thing the import decided, addressed to the diver: what a plan carries, before the
+    report puts it on its dive's row or into a group.
 
     `uuid` is the document's own identifier for the record, not the row's: on the remap
     branch there is no row yet at preview time, and the document is what the diver can
@@ -834,107 +850,60 @@ class ImportFileReport(BaseModel):
     ]
 
 
-class ConversionConverter(BaseModel):
-    """What converted the files, so a report can be attributed to a version of it."""
+# **`code` and `kind` on a note the report shows are opaque strings and must stay ones.** A
+# row's note and a group carry the import's own codes and the `divejson` package's in one
+# string, and a dependency bump can add to either the package's codes or its kinds between one
+# deploy and the next. As a `StrEnum` or a `Literal` an unseen value would raise while
+# *serialising the response*, turning a readable logbook into a 500; as a string it renders as
+# itself, and a client treats what it does not know as information.
 
-    name: Annotated[str, Field(examples=["divejson"])]
-    version: Annotated[str, Field(examples=["0.3.0"])]
 
+class ImportDiveNote(BaseModel):
+    """One line about one dive, whatever produced it: the import's own decision, or what one of
+    the dive's files did not record, recorded one way where it could be read another, or lost.
 
-class ConversionNoteGroup(BaseModel):
-    """One thing the conversion could not carry, and everywhere it came up.
+    The sentence stands alone - no path into a file beside it - and names the value as the dive
+    form does."""
 
-    **`kind` is an opaque string and must stay one.** The converter's kind set grew from
-    three to four while this feature was being built, and the pin that decides which set
-    this build sees moves without anybody here touching a line - so a kind this app has
-    never seen can arrive between one deploy and the next. As a `StrEnum` or a `Literal`
-    that would raise while *serialising the response*, turning a readable logbook into a
-    500; as a string it renders as itself and a client styles what it knows. This is the
-    api half of a tolerance the web card relies on, and the deliberate opposite of
-    `ImportNote.code`, which is this app's own closed vocabulary and can be an enum
-    precisely because nothing outside this repository adds to it.
-    """
-
-    kind: Annotated[
+    code: Annotated[
         str,
         Field(
-            description="What sort of finding this is - `absent`, `inferred`, `resolved`, `dropped` at the time of "
-            "writing. Treat an unfamiliar value as a plain finding rather than an error.",
-            examples=["absent"],
+            description="What happened, as a stable code: one of `ImportNoteCode`, or a code of the file reader's. "
+            "Treat an unfamiliar one as information.",
+            examples=["value_derived"],
         ),
     ]
+    kind: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="`absent` (not recorded), `inferred` (worked out), `resolved` (read one way of several), "
+            "`dropped` (lost), or `null` for a decision that is none of those. Treat an unfamiliar one as "
+            "information.",
+            examples=["inferred"],
+        ),
+    ]
+    collection: Annotated[
+        str | None,
+        Field(default=None, description="Which envelope collection this is about, e.g. `dives`", examples=["dives"]),
+    ]
     message: Annotated[str, Field(description="One sentence, ready to render")]
-    count: Annotated[int, Field(description="How many places raised this, which may be more than `wheres` lists")]
+
+
+class ImportNoteGroup(ImportDiveNote):
+    """A note on no dive's row, and every other with the same code, collection and sentence.
+
+    One habit of a file is one line with a count rather than a line per record: eight dives
+    with no time zone are one group of eight."""
+
+    count: Annotated[int, Field(description="How many notes the group holds, which may be more than `wheres` lists")]
     wheres: Annotated[
         list[str],
         Field(
             default_factory=list,
-            description="Up to three paths into the source files, each under the name of the file it is in, e.g. "
-            "`dives.uddf/dive/0/tankdata/1`",
+            description="Up to three places in the files, each under the name of the file it is in, e.g. "
+            "`dives.uddf/dive/0/tankdata/1`; empty for the import's own notes",
             examples=[["dives.uddf/dive/0", "dives.uddf/dive/3"]],
-        ),
-    ]
-
-
-class ConversionNote(BaseModel):
-    """One thing converting a dive's file could not carry, on that dive's row rather than in
-    `ConversionReport.groups`: ungrouped, and placed within the dive rather than the file."""
-
-    kind: Annotated[
-        str,
-        Field(description="As a group's `kind`: treat an unfamiliar value as a plain finding", examples=["inferred"]),
-    ]
-    message: Annotated[str, Field(description="One sentence, ready to render")]
-    where: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description="The path below the dive in its source file, as the converter writes it, e.g. "
-            "`sample/2985.93`; `null` for a finding about the dive itself",
-            examples=["sample/2985.93"],
-        ),
-    ]
-
-
-class ConversionReport(BaseModel):
-    """What converting the import's non-DiveJSON files could not carry. `null` when every
-    file was DiveJSON already.
-
-    One report for the whole import, whatever number of files was converted: the groups are
-    the union over them, and a path names the file it is in. Grouped here rather than in the
-    browser, and rather than folded into `notes`: one source habit makes one finding per
-    record - eight dives with no UTC offset are eight findings - and the converter's list is
-    unbounded, where `notes` has the planner's 500-note cap. The grouping is where a cap can
-    live at all, which is also why these are not another `ImportNoteCode`: a conversion
-    finding has a source path rather than a uuid and a collection, and none of those codes
-    describes it.
-
-    A finding a dive's row lists is not grouped here as well, so each is shown once. What the
-    groups hold is the rest: findings about a file, the logbook or a record below a dive, about
-    a dive the converter dropped, and a dive's findings past its row's cap.
-    """
-
-    format: Annotated[
-        str,
-        Field(
-            description="The format the converted files were read as, as the converter names it, or `mixed` when "
-            "they were not all one format",
-            examples=["uddf"],
-        ),
-    ]
-    converter: ConversionConverter
-    groups: Annotated[
-        list[ConversionNoteGroup],
-        Field(
-            default_factory=list,
-            description="Findings on no dive row, grouped by kind and message, in first-seen order",
-        ),
-    ]
-    groups_truncated: Annotated[
-        int,
-        Field(
-            default=0,
-            description="Groups beyond the cap that are not in `groups`. Non-zero means the list above is a prefix.",
         ),
     ]
 
@@ -1062,27 +1031,19 @@ class ImportDiveReport(BaseModel):
         list[int], Field(default_factory=list, description="The indexes in `members` of the files the dive came from")
     ]
     notes: Annotated[
-        list[int],
+        list[ImportDiveNote],
         Field(
             default_factory=list,
-            description="The indexes in `notes` of the notes about this dive, ascending. No note is on two rows, and "
-            "`notes` still lists every one; a note the cap left out of `notes` is on no row.",
+            description="Everything to say about this dive, in the import's order: its own decisions first, then "
+            "what its files did not record, worked out, or read one way of several. None of these is in the "
+            "report's `notes` as well.",
         ),
     ]
-    conversion_notes: Annotated[
-        list[ConversionNote],
-        Field(
-            default_factory=list,
-            description="What converting this dive's files could not carry, in the import's order. None of these "
-            "is in `conversion.groups`; a finding about a file, or placed at no dive, is there instead.",
-        ),
-    ]
-    conversion_notes_truncated: Annotated[
+    notes_truncated: Annotated[
         int,
         Field(
             default=0,
-            description="This dive's findings past the row's cap, which `conversion_notes` leaves out and "
-            "`conversion.groups` holds",
+            description="This dive's notes past the row's cap, which `notes` leaves out and the report's `notes` holds",
         ),
     ]
 
@@ -1201,10 +1162,10 @@ class ImportReport(BaseModel):
     that order. `members` and `dives` are the report's own rows over the batch, on the
     preview and on the result alike.
 
-    `conversion` is on the report rather than on the preview alone for the same reason: the
-    result panel is what stays on screen after an import, and a diver who was told at
-    preview that their computer's gas mixes could not be carried should still be told it
-    afterwards.
+    `notes` holds what is about no dive's row, and a row's notes past its cap: one line per
+    habit, with a count. It is on the report rather than on the preview alone because the
+    result panel is what stays on screen after an import, and a diver told at preview that a
+    file recorded no gas should still be told it afterwards.
     """
 
     collections: Annotated[
@@ -1213,26 +1174,18 @@ class ImportReport(BaseModel):
     ]
     files: ImportFileReport
     notes: Annotated[
-        list[ImportNote],
+        list[ImportNoteGroup],
         Field(
             default_factory=list,
-            description="Every decision worth telling the diver about, in document order and the import's",
+            description="Every note on no dive's row, grouped by code, collection and sentence, in first-seen order",
         ),
     ]
     notes_truncated: Annotated[
         int,
         Field(
             default=0,
-            description="Notes beyond the cap that are not in `notes`. Non-zero means the list above is not the "
-            "whole story - the counts are still complete. At the cap a `value_derived` note gives way to any "
-            "other, so the list keeps those first.",
-        ),
-    ]
-    conversion: Annotated[
-        ConversionReport | None,
-        Field(
-            default=None,
-            description="Present when any file was converted from another format; `null` when every one was DiveJSON.",
+            description="Groups beyond the cap that are not in `notes`. Non-zero means the list above is a prefix - "
+            "the counts are still complete.",
         ),
     ]
     members: Annotated[
@@ -1258,7 +1211,7 @@ class ImportPreview(ImportReport):
     `format`, `version` and `generator` are the *imported document's* - the first the import
     reads - which for a converted file is the converter's output rather than the file a diver
     picked, so they read `divejson`, `1.0` and `divejson convert` there. What the diver's
-    files were is `conversion.format` and each row of `members`.
+    files were is each row of `members`.
     """
 
     format: Annotated[str, Field(description="The imported document's own `format` marker", examples=["divejson"])]

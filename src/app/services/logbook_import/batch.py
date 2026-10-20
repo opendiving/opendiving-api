@@ -22,11 +22,10 @@ preview, and none by an apply until the whole batch has fitted the account's sto
 
 import uuid as uuid_pkg
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-import divejson
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,13 +34,12 @@ from ...models.dive import Dive
 from ...models.dive_recording import DiveRecording
 from ...schemas.dive import RecordingDevice
 from ...schemas.logbook_import import (
-    ConversionNote,
-    ConversionReport,
     ImportCheckInDetail,
     ImportCheckInSubmission,
     ImportCollectionReport,
     ImportDevice,
     ImportDive,
+    ImportDiveNote,
     ImportDiveOutcome,
     ImportDiveReport,
     ImportDocument,
@@ -49,6 +47,7 @@ from ...schemas.logbook_import import (
     ImportMemberReport,
     ImportNote,
     ImportNoteCode,
+    ImportNoteGroup,
     ImportPortraitChoice,
     ImportPortraitOffer,
     ImportSpecies,
@@ -56,16 +55,23 @@ from ...schemas.logbook_import import (
 from ..dive_numbering import assign_suggested_numbers
 from ..dive_recordings import DEVICE_COLUMNS
 from ..storage_usage import ensure_room, get_storage_usage, storage_limit_bytes
-from .planner import COLLECTIONS, Action, ImportPlan, add_note, plan_import, portrait_change
-from .reader import LoadedBatch, LoadedImport, conversion_report, dive_conversion_notes
+from .notes import (
+    MAX_DIVE_NOTES,
+    DiveSource,
+    Finding,
+    StoredDive,
+    finding_note,
+    findings,
+    grouped,
+    import_note,
+    inferred_paths,
+    left_out,
+    stored_dives,
+)
+from .planner import COLLECTIONS, Action, ImportPlan, plan_import, portrait_change
+from .reader import LoadedBatch, LoadedImport
 from .staging import StagedFiles
 from .writer import WrittenImport, write_import
-
-# How many conversion findings one dive's row lists. Far more than any dive's file has raised
-# - a handful - and what keeps a logbook whose every dive repeats one habit from multiplying
-# the report by it. A finding past it stays in `conversion.groups`, which folds a repeated one
-# into a single counted line, so every finding is shown once, on its row or there.
-MAX_DIVE_CONVERSION_NOTES = 20
 
 # Which outcome of one dive says more, where several files reach it: created or restored
 # over a file or a recording added, over a link, over a skip.
@@ -107,6 +113,18 @@ def _reason(plan: ImportPlan, source_uuid: Any, codes: Iterable[ImportNoteCode])
 
 
 @dataclass(slots=True)
+class _File:
+    """One file of the batch as the report reads it: what it planned, and what it found."""
+
+    loaded: LoadedImport
+    plan: ImportPlan
+    findings: list[Finding]
+    # Where each document dive's recordings landed: by the dive's uuid, the recording's index
+    # in the document -> (the stored dive, its ordinal there).
+    recordings: dict[uuid_pkg.UUID, dict[int, tuple[int, int]]]
+
+
+@dataclass(slots=True)
 class _Dives:
     """One row per dive the batch creates or touches, the most that happens to it winning."""
 
@@ -116,8 +134,9 @@ class _Dives:
     # matched dives the caller has is its own row and theirs, and its notes go on the first:
     # the dive it became, rather than one it only added a recording to.
     _claimed: set[_Source] = field(default_factory=set)
-    _plans: list[tuple[int, ImportPlan]] = field(default_factory=list)
-    _conversion_notes: dict[_Source, list[tuple[divejson.Note, ConversionNote]]] = field(default_factory=dict)
+    _files: dict[int, _File] = field(default_factory=dict)
+    # The findings a row's dive no longer bears out, by identity: on no row and in no group.
+    _left_out: set[int] = field(default_factory=set)
 
     def _claim(self, row: _DiveRow, source: _Source) -> None:
         if source not in self._claimed:
@@ -149,9 +168,12 @@ class _Dives:
 
     def add(self, member: int, loaded: LoadedImport, plan: ImportPlan, written: WrittenImport) -> None:
         """What one file's plan and write did to dives, in the document's order."""
-        self._plans.append((member, plan))
-        for uuid, found in dive_conversion_notes(loaded).items():
-            self._conversion_notes[(member, uuid)] = found
+        self._files[member] = _File(
+            loaded=loaded,
+            plan=plan,
+            findings=findings(loaded.document, loaded.conversion),
+            recordings=_placed_recordings(plan, written),
+        )
         matched = {match.source_uuid for match in plan.recording_matches}
         documented = {dive.uuid: dive for dive in loaded.document.dives}
         for record in plan.records.get("dives", {}).values():
@@ -183,28 +205,61 @@ class _Dives:
                     match.dive_id, source, ImportDiveOutcome.SKIPPED, reason=_reason(plan, match.source_uuid, codes)
                 )
 
-    def _notes_by_source(self, notes: Sequence[ImportNote]) -> dict[_Source, list[int]]:
-        """Each document dive's notes, by their indexes in the report's `notes`.
-
-        A note is traced to its file by identity: the report's list holds the plans' own note
-        objects, and the cap may have dropped any of them, so its position says nothing.
-        """
-        member_of = {id(note): member for member, plan in self._plans for note in plan.notes}
-        found: dict[_Source, list[int]] = defaultdict(list)
-        for index, note in enumerate(notes):
+    def _own_notes(self, source: _Source) -> list[ImportNote]:
+        """The import's own notes about one document dive, in its plan's order."""
+        member, uuid = source
+        return [
+            note
+            for note in self._files[member].plan.notes
             # The remap names the uuid the first of the two records kept, not this one's.
-            if (
-                note.collection == "dives"
-                and note.uuid is not None
-                and note.code is not ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY
-            ):
-                found[(member_of[id(note)], note.uuid)].append(index)
-        return found
+            if note.collection == "dives"
+            and note.uuid == uuid
+            and note.code is not ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY
+        ]
 
-    async def reports(self, db: AsyncSession, notes: Sequence[ImportNote]) -> tuple[list[ImportDiveReport], set[int]]:
+    def _found(self, source: _Source) -> list[Finding]:
+        member, uuid = source
+        return [found for found in self._files[member].findings if found.owner == uuid]
+
+    def _dive_source(self, source: _Source) -> DiveSource | None:
+        member, uuid = source
+        file = self._files[member]
+        index = next((index for index, dive in enumerate(file.loaded.document.dives) if dive.uuid == uuid), None)
+        if index is None:
+            return None
+        return DiveSource(
+            dive=file.loaded.document.dives[index],
+            index=index,
+            converted=file.loaded.conversion is not None,
+            inferred=inferred_paths(file.loaded.document),
+            recordings=file.recordings.get(uuid, {}),
+        )
+
+    def _shown(self, row: _DiveRow, stored: StoredDive | None) -> list[tuple[object, ImportDiveNote]]:
+        """Everything a row says, in the import's order, each beside the note it was made from:
+        the import's own about its dives, then its files' findings the dive still bears out."""
+        shown: list[tuple[object, ImportDiveNote]] = [
+            (note, import_note(note)) for source in row.sources for note in self._own_notes(source)
+        ]
+        sources = {source: self._dive_source(source) for source in row.sources}
+        for source in row.sources:
+            dive = sources[source]
+            others = [other for key, other in sources.items() if key != source and other is not None]
+            for found in self._found(source):
+                if (
+                    stored is not None
+                    and dive is not None
+                    and row.dive_id is not None
+                    and left_out(found.note, dive, others, row.dive_id, stored)
+                ):
+                    self._left_out.add(id(found.note))
+                    continue
+                shown.append((found.note, finding_note(found)))
+        return shown
+
+    async def reports(self, db: AsyncSession) -> tuple[list[ImportDiveReport], list[ImportNoteGroup], int]:
         """The rows, each read off the dive as the dive read gives it, with its notes - and the
-        converter's findings they list, by identity, for `conversion_report` to leave out."""
-        by_source = self._notes_by_source(notes)
+        groups of every note on no row, a row's overflow among them."""
         ids = [row.dive_id for row in self.rows if row.dive_id is not None]
         dives = (
             {
@@ -236,12 +291,20 @@ class _Dives:
             if ids
             else {}
         )
+        compared = await stored_dives(
+            db,
+            [
+                row.dive_id
+                for row in self.rows
+                if row.dive_id is not None and any(self._found(source) for source in row.sources)
+            ],
+        )
 
-        reports = []
         on_rows: set[int] = set()
+        reports = []
         for row in self.rows:
-            converted = [found for source in row.sources for found in self._conversion_notes.get(source, ())]
-            listed = converted[:MAX_DIVE_CONVERSION_NOTES]
+            shown = self._shown(row, None if row.dive_id is None else compared.get(row.dive_id))
+            listed = shown[:MAX_DIVE_NOTES]
             on_rows.update(id(note) for note, _ in listed)
             updated = row.outcome is ImportDiveOutcome.UPDATED
             stored = None if row.dive_id is None else dives.get(row.dive_id)
@@ -270,13 +333,39 @@ class _Dives:
                     recordings_added=row.recordings_added if updated else 0,
                     reason=row.reason if row.outcome is ImportDiveOutcome.SKIPPED else None,
                     members=row.members,
-                    notes=sorted(index for source in row.sources for index in by_source.get(source, ())),
-                    conversion_notes=[shown for _, shown in listed],
-                    conversion_notes_truncated=max(len(converted) - MAX_DIVE_CONVERSION_NOTES, 0),
+                    notes=[note for _, note in listed],
+                    notes_truncated=len(shown) - len(listed),
                     **figures,
                 )
             )
-        return reports, on_rows
+        groups, truncated = grouped(self._unlisted(on_rows | self._left_out))
+        return reports, groups, truncated
+
+    def _unlisted(self, skipped: set[int]) -> Iterator[tuple[ImportDiveNote, str | None]]:
+        """Every note on no row, in the batch's order: each file's own notes, then its findings."""
+        for file in self._files.values():
+            for note in file.plan.notes:
+                if id(note) not in skipped:
+                    yield import_note(note), None
+            for found in file.findings:
+                if id(found.note) not in skipped:
+                    yield finding_note(found), found.note.where
+
+
+def _placed_recordings(plan: ImportPlan, written: WrittenImport) -> dict[uuid_pkg.UUID, dict[int, tuple[int, int]]]:
+    """Where each document dive's recordings landed, by the dive's uuid and the recording's
+    index in the document: a written dive's on it at their planned ordinals, a matched one on
+    the dive it matched at the ordinal the write reports."""
+    placed: dict[uuid_pkg.UUID, dict[int, tuple[int, int]]] = defaultdict(dict)
+    for record in plan.writable("dives"):
+        dive_id = written.dive_ids[record.source_uuid]
+        for recording in record.children.get("recordings") or []:
+            if recording.source_index is not None:
+                placed[record.source_uuid][recording.source_index] = (dive_id, recording.ordinal)
+    for match, ordinal in zip(plan.recording_matches, written.match_ordinals, strict=True):
+        if match.recording.source_index is not None:
+            placed[match.source_uuid][match.recording.source_index] = (match.dive_id, ordinal)
+    return placed
 
 
 def _stored_device(row: Any) -> RecordingDevice | None:
@@ -298,9 +387,8 @@ class BatchReport:
 
     collections: list[ImportCollectionReport]
     files: ImportFileReport
-    notes: list[ImportNote]
+    notes: list[ImportNoteGroup]
     notes_truncated: int
-    conversion: ConversionReport | None
     members: list[ImportMemberReport]
     dives: list[ImportDiveReport]
     check_in_details: list[ImportCheckInDetail]
@@ -340,16 +428,6 @@ def _files(plans: Sequence[ImportPlan]) -> ImportFileReport:
         not_contained=sum(report.not_contained for report in reports),
         skipped=sum(report.skipped for report in reports),
     )
-
-
-def _notes(plans: Sequence[ImportPlan]) -> tuple[list[ImportNote], int]:
-    """Every file's notes in the batch's order, under the one cap a report has."""
-    notes: list[ImportNote] = []
-    dropped = sum(plan.notes_dropped for plan in plans)
-    for plan in plans:
-        for note in plan.notes:
-            dropped += add_note(notes, note)
-    return notes, dropped
 
 
 def _check_in_details(plans: Sequence[ImportPlan]) -> list[ImportCheckInDetail]:
@@ -429,15 +507,13 @@ async def import_batch(
         )
         if apply:
             await staged.write(db)
-        notes, notes_truncated = _notes(plans)
         documents = batch.documents
-        rows, on_rows = await dives.reports(db, notes)
+        rows, notes, notes_truncated = await dives.reports(db)
         return BatchReport(
             collections=_collections(plans),
             files=_files(plans),
             notes=notes,
             notes_truncated=notes_truncated,
-            conversion=conversion_report(documents, on_rows=on_rows),
             members=_members(batch, plans),
             dives=rows,
             check_in_details=_check_in_details(plans),

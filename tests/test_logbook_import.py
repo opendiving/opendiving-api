@@ -101,12 +101,12 @@ from src.app.services.logbook_import import planner as planner_module
 from src.app.services.logbook_import import reader as import_reader
 from src.app.services.logbook_import import writer as writer_module
 from src.app.services.logbook_import.planner import (
-    _DIVE_BOUNDS,
     _GEAR_BOUNDS,
     _MIXTURE_BOUNDS,
     _SCHEDULE_BOUNDS,
     _SIGHTING_BOUNDS,
     _SITE_BOUNDS,
+    DIVE_BOUNDS,
 )
 from src.app.services.logbook_import.reader import DuplicateMemberError, MalformedImportError
 from src.app.services.recording_shape import READOUT_BOUNDS
@@ -1815,8 +1815,8 @@ class TestSpeciesLinks:
 
         [(_, stored_count, notes)] = await self._sightings(async_db, destination.id)
         assert (stored_count, notes) == (None, "On the cleaning station.")
-        assert [note.message for note in plan.notes if "`count`" in note.message] == [
-            f"A value for `count` was dropped: a sighting's count must be between 1 and {2**31 - 1}"
+        assert [note.message for note in plan.notes if "The count" in note.message] == [
+            f"The count was dropped: a sighting's count must be between 1 and {2**31 - 1}"
         ]
 
     @staticmethod
@@ -1876,7 +1876,7 @@ class TestSpeciesLinks:
         assert (count, notes) == (3, "On the cleaning station.")
         assert await self._quantities(async_db, destination.id) == [(3, None)]
         assert [note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED] == [
-            "A value for `abundance` was dropped: a sighting carries a count or a band, and the count was kept"
+            "The abundance band was dropped: a sighting carries a count or a band, and the count was kept"
         ]
 
     @pytest.mark.asyncio
@@ -1894,7 +1894,7 @@ class TestSpeciesLinks:
 
         assert await self._quantities(async_db, destination.id) == [(None, "few")]
         assert [note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED] == [
-            f"A value for `count` was dropped: a sighting's count must be between 1 and {2**31 - 1}"
+            f"The count was dropped: a sighting's count must be between 1 and {2**31 - 1}"
         ]
 
     @pytest.mark.asyncio
@@ -3959,7 +3959,7 @@ class TestDerivedState:
         assert (item.material, item.working_pressure, item.volume) == (None, None, 12.0)
         assert schedule.dive_time_at_start == 0
         dropped = " ".join(note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED)
-        assert all(word in dropped for word in ("titanium", "working_pressure", "dive time"))
+        assert all(word in dropped for word in ("titanium", "working pressure", "dive time"))
 
     @pytest.mark.asyncio
     async def test_the_snapshots_import_as_recorded(self, seeded: Any, db: Session, async_db: AsyncSession) -> None:
@@ -4895,7 +4895,7 @@ class TestTheBoundsCensus:
     # columns are nullable now and each has its own bound, so the exclusion is gone and the
     # census covers them like everything else.
     #
-    # Single-column bounds guarded by `_Planner._position` rather than by `_DIVE_BOUNDS`,
+    # Single-column bounds guarded by `_Planner._position` rather than by `DIVE_BOUNDS`,
     # because a coordinate arrives as a Position object and goes as a pair: dropping half of
     # one would leave a dive pinned to the equator, which `ck_dive_*_position_pair` refuses
     # anyway. Named here rather than silently passing, so a fifth coordinate column would
@@ -4913,7 +4913,7 @@ class TestTheBoundsCensus:
         guarded = {
             bound.field
             for bounds in (
-                _DIVE_BOUNDS,
+                DIVE_BOUNDS,
                 _MIXTURE_BOUNDS,
                 READOUT_BOUNDS,
                 _SIGHTING_BOUNDS,
@@ -5223,11 +5223,11 @@ class TestTheIntegerColumnCensus:
 
     # (table, column) -> why it cannot carry an unstorable number.
     ACCOUNTED: dict[tuple[str, str], str] = {
-        ("dive", "dive_number"): "bounded in `_DIVE_BOUNDS`",
-        ("dive", "submerged_time"): "bounded in `_DIVE_BOUNDS`",
-        ("dive", "visibility"): "bounded in `_DIVE_BOUNDS`",
-        ("dive", "altitude"): "bounded in `_DIVE_BOUNDS`, to the model's own -450..6500",
-        ("dive", "rating"): "bounded in `_DIVE_BOUNDS`, to the model's own 1..5",
+        ("dive", "dive_number"): "bounded in `DIVE_BOUNDS`",
+        ("dive", "submerged_time"): "bounded in `DIVE_BOUNDS`",
+        ("dive", "visibility"): "bounded in `DIVE_BOUNDS`",
+        ("dive", "altitude"): "bounded in `DIVE_BOUNDS`, to the model's own -450..6500",
+        ("dive", "rating"): "bounded in `DIVE_BOUNDS`, to the model's own 1..5",
         ("dive", "id"): "the sequence's, never the document's",
         ("dive", "user_id"): "the caller's",
         ("dive", "trip_id"): "resolved from a row this import wrote",

@@ -128,7 +128,6 @@ from .planner import (
     PlannedRecord,
     PlannedRecording,
     PlannedRecordingMatch,
-    add_note,
 )
 from .reader import LoadedImport
 from .staging import StagedFiles
@@ -152,10 +151,12 @@ class _StoredBlob:
 class WrittenImport:
     """What one file's write did that its plan could not say: the row each dive it created
     or restored went into, by the document's uuid, and how many files each recording match
-    stored - aligned with `ImportPlan.recording_matches`."""
+    stored and the ordinal its recording holds on its dive - both aligned with
+    `ImportPlan.recording_matches`, an attach's slot being assigned only as it is written."""
 
     dive_ids: dict[uuid_pkg.UUID, int]
     match_files: list[int]
+    match_ordinals: list[int]
     # What the restores' cleared files held, as `get_storage_usage` counts it - space the
     # storage limit check gives back.
     retired_bytes: int
@@ -171,6 +172,7 @@ class _Writer:
         self._plan = plan
         self._staged = staged
         self._match_files: list[int] = []
+        self.match_ordinals: list[int] = []
         self.retired_bytes = 0
         self._now = datetime.now(UTC)
         # Document uuid -> row id, per collection. Seeded with everything the plan already
@@ -249,9 +251,7 @@ class _Writer:
     def _note(
         self, code: ImportNoteCode, message: str, *, collection: str | None = None, uuid: uuid_pkg.UUID | None = None
     ) -> None:
-        self._plan.notes_dropped += add_note(
-            self._plan.notes, ImportNote(code=code, collection=collection, uuid=uuid, message=message)
-        )
+        self._plan.notes.append(ImportNote(code=code, collection=collection, uuid=uuid, message=message))
 
     # ------------------------------------------------------------------ blobs
 
@@ -828,6 +828,7 @@ class _Writer:
             if match.kind == "attach":
                 self._match_files.append(await self._attach_recording(match))
             else:
+                self.match_ordinals.append(match.ordinal or 0)
                 self._match_files.append(await self._fill_recording(match))
 
     async def _attach_recording(self, match: PlannedRecordingMatch) -> int:
@@ -839,6 +840,7 @@ class _Writer:
         pairs, fills and appends on the same terms, with samples or without.
         """
         ordinal = await next_ordinal(self._db, dive_id=match.dive_id)
+        self.match_ordinals.append(ordinal)
         stored_mixtures = await get_mixtures_for_dive(db=self._db, dive_id=match.dive_id)
         planned = match.recording
         if planned.kept is None and match.mixtures:
@@ -1066,5 +1068,6 @@ async def write_import(
     return WrittenImport(
         dive_ids={record.source_uuid: writer.dive_id(record.source_uuid) for record in plan.writable("dives")},
         match_files=writer.match_files,
+        match_ordinals=writer.match_ordinals,
         retired_bytes=writer.retired_bytes,
     )
