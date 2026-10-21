@@ -619,7 +619,7 @@ One thing Renovate will not do on its own is move Python. `requires-python` in `
 ruff's `target-version`, `.python-version` and the two `Dockerfile` base tags all have to move
 together, and Renovate can only reach the last three — an auto-opened PR would be wrong by
 construction. So that update is grouped and held behind a checkbox on the **Dependency Dashboard**
-issue: it tells you 3.15 exists and waits for a person.
+issue: it tells you 3.16 exists and waits for a person.
 
 **What none of this watches**, stated so it is not mistaken for coverage:
 
