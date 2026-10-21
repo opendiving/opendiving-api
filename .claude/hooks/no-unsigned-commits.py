@@ -159,7 +159,7 @@ def main() -> int:
         payload = json.load(sys.stdin)
     except ValueError:
         # One type, not the `except A, B:` pair this repo's style would write: the
-        # file runs under whatever `python3` a shell resolves, not the pinned 3.14,
+        # file runs under whatever `python3` a shell resolves, not the pinned 3.15,
         # and PEP 758 syntax on an older one is a SyntaxError - which exits 1, which
         # the hook system treats as non-blocking. The guard would fail *open*.
         # (JSONDecodeError and a UnicodeDecodeError off stdin are both ValueErrors.)

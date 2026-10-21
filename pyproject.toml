@@ -1,7 +1,7 @@
 [project]
 name = "opendiving-api"
 version = "0.6.0"
-requires-python = "~=3.14.0"
+requires-python = "~=3.15.0"
 dependencies = [
     "python-dotenv>=1.0.0",
     "pydantic[email]>=2.6.1",
@@ -84,10 +84,10 @@ dependencies = [
     "divejson>=0.32.0",
     "webauthn>=3.0.0",
     # Decodes and renders the uploaded pictures (`services/user_pictures.py`) and the species
-    # photos (`services/species_photos.py`) - the only image processing in the app. 12.0.0 is the first release with official Python 3.14
-    # support; 11.3.0's cp314 wheels were built against the beta and say so. The manylinux
+    # photos (`services/species_photos.py`) - the only image processing in the app. 13.0.0 is the first release with official Python 3.15
+    # support; 12.3.0's cp315 wheels predate 3.15.0 and its classifiers stop at 3.14. The manylinux
     # wheels bundle libwebp, so the WebP output needs no system library in the image.
-    "pillow>=12.0.0",
+    "pillow>=13.0.0",
     # The client behind `FILE_STORAGE_BACKEND=s3` (`services/blob_store.py`). A main
     # dependency rather than an extra, even though most installs never select that backend:
     # the shipped image is built with `uv sync --locked` and no extras, so an s3-only extra
@@ -139,7 +139,7 @@ include = ["src/"]
 packages = ["src"]
 
 [tool.ruff]
-target-version = "py314"
+target-version = "py315"
 line-length = 120
 fix = true
 
@@ -198,7 +198,7 @@ source = ["src/app"]
 precision = 2
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.15"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true

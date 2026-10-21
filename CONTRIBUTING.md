@@ -29,7 +29,7 @@ That gives you the API on <http://localhost:8000> (docs at `/docs`), PostgreSQL,
 worker. Leave `SMTP_HOST` unset locally — sign-in URLs, and the six-digit code that rides the same
 email, are then written to the API logs instead of emailed, which is what you want for development.
 
-For running the tooling (ruff, mypy, pytest) outside the container you need Python 3.14 and
+For running the tooling (ruff, mypy, pytest) outside the container you need Python 3.15 and
 [uv](https://docs.astral.sh/uv/):
 
 ```bash
@@ -558,7 +558,7 @@ its `X.Y.Z`, `X.Y`, bare major and `latest`, which are one image under four name
 digest so it is scanned once. Both are in the set unconditionally, which is why `edge` is reached
 before the "nothing released yet" skip rather than after it: until the first tag is cut, `edge` is
 the only image that exists. It reports HIGH and CRITICAL findings in both halves of each image: the
-Debian packages that come from `python:3.14-slim-bookworm`, and the Python distributions `uv`
+Debian packages that come from `python:3.15-slim-trixie`, and the Python distributions `uv`
 installed. This is the job that closes the loop with the paragraph above, because the case it
 catches is a release that was clean the day it shipped and grew a CVE three weeks later, with no PR
 in flight and nobody looking.
@@ -619,7 +619,7 @@ One thing Renovate will not do on its own is move Python. `requires-python` in `
 ruff's `target-version`, `.python-version` and the two `Dockerfile` base tags all have to move
 together, and Renovate can only reach the last three — an auto-opened PR would be wrong by
 construction. So that update is grouped and held behind a checkbox on the **Dependency Dashboard**
-issue: it tells you 3.15 exists and waits for a person.
+issue: it tells you 3.16 exists and waits for a person.
 
 **What none of this watches**, stated so it is not mistaken for coverage:
 

@@ -2536,7 +2536,7 @@ asserts the empty body, since axios turns a 204 into `""`. `search_places` still
 ## `except ValueError, TypeError:` is valid, and `ruff format` writes it that way
 
 PEP 758 (Python 3.14) allows an unparenthesized tuple in an `except` clause with no `as` binding,
-and `ruff format` with `target-version = "py314"` (which `requires-python = "~=3.14.0"` earns)
+and `ruff format` with `target-version = "py315"` (which `requires-python = "~=3.15.0"` earns)
 removes the parentheses; putting them back fails `ruff format --check` in CI. It is not a
 `SyntaxError`, and the check that settles it:
 
@@ -3716,10 +3716,10 @@ deliberate. Renovate over Dependabot because Dependabot has no uv ecosystem (`uv
 `uv sync --locked`), cannot read `.python-version`, and cannot group across ecosystems. `pinDigests`
 is `false` and `helpers:pinGitHubActionDigests` is not extended: first-party actions like
 `actions/checkout@v7` ride a major tag, third-party ones like `astral-sh/setup-uv` are SHA-pinned.
-The `Dockerfile` bases `ghcr.io/astral-sh/uv:python3.14-bookworm-slim` and
-`python:3.14-slim-bookworm` float on purpose: the base-image CVE remedy, a Publish Image dispatch at
-the old `v` tag (`CONTRIBUTING.md`), works only because the base resolves at build time.
-`requires-python = "~=3.14.0"`, ruff's `target-version = "py314"`, `.python-version` and the
+The `Dockerfile` bases `ghcr.io/astral-sh/uv:python3.15-trixie-slim` and `python:3.15-slim-trixie`
+float on purpose: the base-image CVE remedy, a Publish Image dispatch at the old `v` tag
+(`CONTRIBUTING.md`), works only because the base resolves at build time.
+`requires-python = "~=3.15.0"`, ruff's `target-version = "py315"`, `.python-version` and the
 `Dockerfile` tags move together; Renovate reaches only the last two, so they sit behind
 `dependencyDashboardApproval`, the rest hand-edited.
 
@@ -3727,7 +3727,7 @@ the old `v` tag (`CONTRIBUTING.md`), works only because the base resolves at bui
 
 `.github/workflows/vulnerability-scan.yml` has two jobs: the PR job asks whether a change is
 vulnerable, the scheduled job whether what people already run is. Trivy, not `pip-audit`:
-rebuild-forcing CVEs are Debian packages in `python:3.14-slim-bookworm`, and Trivy labels OS and
+rebuild-forcing CVEs are Debian packages in `python:3.15-slim-trixie`, and Trivy labels OS and
 Python findings, whose remedies differ — a Publish Image dispatch for OS, a new patch release for
 Python, because a dispatch reinstalls that tag's `uv.lock`. Trivy floats on `latest`; a frozen
 scanner silently misses new advisories. The PR job fails on fixable HIGH/CRITICAL; the scheduled job
