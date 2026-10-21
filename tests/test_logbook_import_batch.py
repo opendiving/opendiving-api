@@ -1200,6 +1200,33 @@ class TestOneListPerDive:
         assert "oxygen_figure_missing" in {note.code for note in row.notes}
 
     @pytest.mark.asyncio
+    async def test_a_line_both_files_of_a_dive_give_is_listed_once(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """Each file's dive takes an identifier another account holds, so each is remapped -
+        and a row's note names no file, so the second sentence would say nothing new."""
+        for file in PAIR:
+            await _import(async_db, create_user(db), [file])
+
+        report = await _import(async_db, create_user(db), PAIR, apply=False)
+
+        [row] = report.dives
+        assert [note.code for note in row.notes].count(ImportNoteCode.RECORD_REMAPPED_REFERENCES_FOLLOW) == 1
+        assert ImportNoteCode.RECORD_REMAPPED_REFERENCES_FOLLOW not in {group.code for group in report.notes}
+
+    @pytest.mark.asyncio
+    async def test_a_line_one_file_gives_twice_is_listed_twice(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """Two sightings the catalog lacks are two sightings not imported."""
+        diver = create_user(db)
+        sightings = [{"species_uuid": str(uuid_pkg.uuid4())} for _ in range(2)]
+
+        report = await _import(async_db, diver, [("log.divejson", _logbook_of(_sighted(sightings=sightings)))])
+
+        assert _on_rows(report) == [[ImportNoteCode.SPECIES_UNRESOLVED] * 2]
+
+    @pytest.mark.asyncio
     async def test_each_dive_carries_its_own_and_a_dropped_dive_is_grouped(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:

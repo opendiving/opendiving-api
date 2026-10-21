@@ -15,7 +15,8 @@ planner reads a document; `DECISIONS.md`, *"A finding goes when the dive's value
 file's"*, has the rest.
 
 **Nothing is shown twice, and nothing vanishes into a cap**: a row lists `MAX_DIVE_NOTES` and
-what it leaves out joins the groups.
+what it leaves out joins the groups. A row's note names no file, so a line one file of the row
+repeats from another is listed once; a line one file gives twice is about two things, and stays.
 """
 
 import uuid as uuid_pkg
@@ -396,12 +397,20 @@ def finding_note(found: Finding) -> ImportDiveNote:
     )
 
 
+type LineKey = tuple[str, str | None, str]
+
+
+def line_key(note: ImportDiveNote) -> LineKey:
+    """What makes two notes the same line to a diver: neither names the file it came from."""
+    return note.code, note.collection, note.message
+
+
 def grouped(notes: Iterable[tuple[ImportDiveNote, str | None]]) -> tuple[list[ImportNoteGroup], int]:
     """Notes on no row as one group per code, collection and sentence, in first-seen order,
     each with up to `MAX_NOTE_WHERES` of its places - and how many groups the cap left out."""
-    groups: dict[tuple[str, str | None, str], ImportNoteGroup] = {}
+    groups: dict[LineKey, ImportNoteGroup] = {}
     for note, where in notes:
-        key = (note.code, note.collection, note.message)
+        key = line_key(note)
         group = groups.get(key)
         if group is None:
             group = groups[key] = ImportNoteGroup(**note.model_dump(), count=0)
