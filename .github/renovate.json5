@@ -49,7 +49,7 @@
   // Load-bearing, and the default only by luck. This repository pins in several styles on
   // purpose, and Renovate's job is to renew whichever it finds rather than to normalise:
   //
-  //   - `Dockerfile` floats on `python:3.14-slim-bookworm` and the uv image because that one
+  //   - `Dockerfile` floats on `python:3.15-slim-trixie` and the uv image because that one
   //     *is* built, and the float is what makes the CVE rebuild in CONTRIBUTING.md work at
   //     all: re-running Publish Image at an old `v` tag picks up the patched Debian packages
   //     precisely because the base is resolved at build time. Digest-pin it and that rebuild
@@ -99,14 +99,14 @@
     {
       // A Python version is a coordinated change across four files, and only two of them are
       // reachable by any bot: `.python-version` (pyenv manager) and the two `Dockerfile`
-      // base tags. The other two are `requires-python = "~=3.14.0"` and ruff's
-      // `target-version = "py314"` in `pyproject.toml`, which Renovate does not update -
+      // base tags. The other two are `requires-python = "~=3.15.0"` and ruff's
+      // `target-version = "py315"` in `pyproject.toml`, which Renovate does not update -
       // there is an open feature request for the first and nothing at all for the second.
       //
       // So an auto-opened PR here would be *wrong by construction*: it would move the
       // interpreter and leave `requires-python` behind, and `uv sync --locked` would refuse
       // to install into it. `dependencyDashboardApproval` is the honest handling - the
-      // dashboard says "Python 3.15 is out", nobody gets a red PR, and the person who ticks
+      // dashboard says "Python 3.16 is out", nobody gets a red PR, and the person who ticks
       // the box does the other two files by hand. Grouping them keeps it one checkbox
       // instead of three.
       "matchManagers": ["pyenv", "dockerfile"],

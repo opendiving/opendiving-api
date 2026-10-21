@@ -1,5 +1,5 @@
 # --------- Builder Stage ---------
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.15-trixie-slim AS builder
 
 # Set environment variables for uv
 ENV UV_COMPILE_BYTECODE=1
@@ -43,7 +43,7 @@ CMD ["pytest", "tests/", "-v"]
 # `runtime-imports` job in `.github/workflows/tests.yml`. The test stage above carries the
 # `dev` extra, so a runtime import of something that only lives there is green everywhere
 # except in the image that ships.
-FROM python:3.14-slim-bookworm AS runtime
+FROM python:3.15-slim-trixie AS runtime
 
 # Create a non-root user for security
 RUN groupadd --gid 1000 app \
