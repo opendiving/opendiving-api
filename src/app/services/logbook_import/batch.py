@@ -21,7 +21,7 @@ preview, and none by an apply until the whole batch has fitted the account's sto
 """
 
 import uuid as uuid_pkg
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -59,6 +59,7 @@ from .notes import (
     MAX_DIVE_NOTES,
     DiveSource,
     Finding,
+    LineKey,
     StoredDive,
     finding_note,
     findings,
@@ -66,6 +67,7 @@ from .notes import (
     import_note,
     inferred_paths,
     left_out,
+    line_key,
     stored_dives,
 )
 from .planner import COLLECTIONS, Action, ImportPlan, plan_import, portrait_change
@@ -253,12 +255,29 @@ class _Dives:
             recordings=file.recordings.get(uuid, {}),
         )
 
-    def _shown(self, row: _DiveRow, stored: StoredDive | None) -> list[tuple[object, ImportDiveNote]]:
-        """Everything a row says, in the import's order, each beside the note it was made from:
-        the import's own about its dives, then its files' findings the dive still bears out."""
-        shown: list[tuple[object, ImportDiveNote]] = [
-            (note, import_note(note)) for source in row.sources for note in self._own_notes(source)
-        ]
+    def _shown(self, row: _DiveRow, stored: StoredDive | None) -> list[tuple[list[object], ImportDiveNote]]:
+        """Everything a row says, in the import's order, each line beside the notes it was made
+        from: the import's own about its dives, then its files' findings the dive still bears out.
+
+        A file's line that an earlier file of the row already gave is that line again: the
+        n-th time one file says a sentence joins the n-th line saying it, if there is one."""
+        shown: list[tuple[list[object], ImportDiveNote]] = []
+        lines: dict[LineKey, list[int]] = defaultdict(list)
+        said: Counter[tuple[_Source, LineKey]] = Counter()
+
+        def say(source: _Source, note: object, line: ImportDiveNote) -> None:
+            key = line_key(line)
+            nth = said[source, key]
+            said[source, key] += 1
+            if nth < len(lines[key]):
+                shown[lines[key][nth]][0].append(note)
+            else:
+                lines[key].append(len(shown))
+                shown.append(([note], line))
+
+        for source in row.sources:
+            for note in self._own_notes(source):
+                say(source, note, import_note(note))
         sources = {source: self._dive_source(source) for source in row.sources}
         for source in row.sources:
             dive = sources[source]
@@ -271,7 +290,7 @@ class _Dives:
                 ):
                     self._left_out.add(id(found.note))
                     continue
-                shown.append((found.note, finding_note(found)))
+                say(source, found.note, finding_note(found))
         return shown
 
     async def reports(self, db: AsyncSession) -> tuple[list[ImportDiveReport], list[ImportNoteGroup], int]:
@@ -322,7 +341,7 @@ class _Dives:
         for row in self.rows:
             shown = self._shown(row, None if row.dive_id is None else compared.get(row.dive_id))
             listed = shown[:MAX_DIVE_NOTES]
-            on_rows.update(id(note) for note, _ in listed)
+            on_rows.update(id(note) for notes, _ in listed for note in notes)
             updated = row.outcome is ImportDiveOutcome.UPDATED
             stored = None if row.dive_id is None else dives.get(row.dive_id)
             figures: dict[str, Any] = {}
