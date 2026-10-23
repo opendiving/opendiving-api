@@ -1176,8 +1176,9 @@ always reporting `examined / extracted / skipped / no_samples / failed`, since s
 hides a broken reader.
 
 It opens the cache pool around its session (`src/scripts/_common.py`'s `session_with_cache`):
-`delete_keys_by_pattern` silently returns when `cache.client is None`, which only the API lifespan
-sets. `src/scripts/` is bind-mounted into `api`, so the host copy runs.
+`delete_keys_by_pattern` silently returns when `cache.client is None`, and a process has a client only
+where it opens the pool itself - the API's lifespan, the worker's startup, and this helper for a
+script. `src/scripts/` is bind-mounted into `api`, so the host copy runs.
 
 ## No manual DDL for the dive-profile feature
 
@@ -4288,11 +4289,10 @@ account's tokens dead. Logs carry the id and request date, never the address.
 
 ## No Redis sweep in the worker, and the absence is the decision
 
-`delete_keys_by_pattern(f"user_{id}_*")` after each purge is deliberately absent. `cache.client` is
-set only by the API's lifespan, which the arq process never runs, so the call would be a permanent
-no-op — the trap *"The profile backfill is a script, not an arq job"* records, in a second process.
-It is also unnecessary: `erase_user` sweeps those keys from inside the API when the account is
-flagged, and nothing repopulates them because every read for a deleted account 401s.
+`delete_keys_by_pattern(f"user_{id}_*")` after each purge is deliberately absent, and the worker's
+cache pool, opened at startup for `fetch_dive_conditions`, does not change that. The call is
+unnecessary: `erase_user` sweeps those keys from inside the API when the account is flagged, and
+nothing repopulates them because every read for a deleted account 401s.
 
 ## The admin panel's own log is a second copy, and the purge leaves it alone
 

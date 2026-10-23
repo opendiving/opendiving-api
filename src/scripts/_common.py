@@ -24,9 +24,10 @@ def log_at_info() -> None:
 async def session_with_cache() -> AsyncIterator[AsyncSession]:
     """A database session with the Redis cache pool open around it.
 
-    `delete_keys_by_pattern` silently returns when `cache.client is None`, and only the API's
-    lifespan sets it - which a script does not go through. Without the pool every dive a
-    backfill rewrites keeps serving its old cached response for up to an hour, silently.
+    `delete_keys_by_pattern` silently returns when `cache.client is None`, and a process has a
+    client only where it opens the pool itself, as the API's lifespan and the worker's startup
+    do and a script otherwise would not. Without the pool every dive a backfill rewrites keeps
+    serving its old cached response for up to an hour, silently.
     """
     await create_redis_cache_pool()
     try:

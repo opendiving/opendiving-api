@@ -92,6 +92,7 @@ from ...schemas.dive import (
     SightingWrite,
     validate_depth_pair,
 )
+from ...schemas.dive_conditions import DiveConditionsRead
 from ...schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, RecentVolumes
 from ...schemas.dive_profile import RecordingProfileRead
 from ...schemas.gear_item import GearItemInfo, GearType
@@ -108,6 +109,7 @@ from ...services.cache_invalidation import (
     invalidate_trip_caches,
 )
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
+from ...services.dive_conditions import apply_diver_edits, get_conditions
 from ...services.dive_files import (
     MAX_DIVE_FILE_SIZE,
     DiveFileAlreadyLinkedError,
@@ -440,6 +442,7 @@ def _to_public_dive_with_mixtures(
     tags: list[str],
     recordings: list[RecordingRead] | None = None,
     attribution: ProfileGasAttribution | None = None,
+    conditions: DiveConditionsRead | None = None,
 ) -> DiveReadWithMixtures:
     """Assemble a dive's public shape from the row plus everything a read embeds.
 
@@ -477,6 +480,7 @@ def _to_public_dive_with_mixtures(
             mixtures=mixtures,
             attribution=attribution,
         ),
+        conditions=conditions,
     )
 
 
@@ -1151,6 +1155,7 @@ async def _cached_read_dive(
     attribution = None
     if len(mixtures) >= 2:
         attribution = (await get_gas_attribution_for_dives(db=db, dive_ids=[db_dive["id"]]))[db_dive["id"]]
+    conditions = await get_conditions(db, db_dive["id"])
 
     return _to_public_dive_with_mixtures(
         db_dive,
@@ -1166,6 +1171,7 @@ async def _cached_read_dive(
         tags=tags,
         recordings=recordings,
         attribution=attribution,
+        conditions=conditions,
     )
 
 
@@ -1325,6 +1331,10 @@ async def patch_dive(
     )
 
     update_data.update(await _link_updates(db, values, owner_id))
+
+    # A different value for a field the fetch filled is the diver's and clears its mark; an
+    # empty one, from a form loaded before the fill arrived, leaves the fill standing.
+    await apply_diver_edits(db, db_dive.id, db_dive.model_dump(), update_data)
 
     dive_site_ids: list[int] | None = None
     if values.dive_site_uuids is not None:

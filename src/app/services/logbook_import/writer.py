@@ -82,6 +82,7 @@ from ..certification_files import (
     sniff_content_type,
     strip_card_image,
 )
+from ..dive_conditions import drop_conditions, restore_conditions
 from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
 from ..dive_files import (
     TECH_SCALAR_FIELDS,
@@ -581,6 +582,9 @@ class _Writer:
                     )
                 )
                 await delete_files_for_dive(self._db, dive_id=record.row_id, commit=False)
+                # The deleted dive's record goes with nothing emptied: the document's values
+                # are the dive's now, and its own record, if it carries one, is written below.
+                await drop_conditions(self._db, record.row_id)
 
             record.values["trip_id"] = self._id("trips", record.children.get("trip_uuid"))
             record.values["course_id"] = self._id("courses", record.children.get("course_uuid"))
@@ -616,6 +620,9 @@ class _Writer:
             )
             for recording in record.children.get("recordings") or []:
                 await self._write_recording(record, dive_id, recording)
+            # After the sites, whose pin the record's position is checked against.
+            if (conditions := record.children.get("conditions")) is not None:
+                await restore_conditions(self._db, dive_id, conditions, record.values)
 
     async def _write_recording(
         self, record: PlannedRecord, dive_id: int, planned: PlannedRecording, *, ordinal: int | None = None
