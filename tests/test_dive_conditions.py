@@ -896,7 +896,13 @@ class TestExportAndImport:
 
     @pytest.mark.parametrize(
         ("member", "value"),
-        [("utc_offset_minutes", 1440), ("provider", "x" * 33), ("sea.tide_state", "slack")],
+        [
+            ("utc_offset_minutes", 1440),
+            ("provider", "x" * 33),
+            ("sea.tide_state", "slack"),
+            ("weather.weather_code", 2**31),
+            ("weather.air_temperature", float("nan")),
+        ],
     )
     @pytest.mark.asyncio
     async def test_a_record_that_would_not_fit_is_left_out(

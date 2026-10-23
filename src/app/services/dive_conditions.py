@@ -33,6 +33,7 @@ whose own request keeps failing.
 """
 
 import logging
+import math
 import typing
 from collections import Counter
 from dataclasses import dataclass
@@ -505,7 +506,9 @@ def _number(hourly: dict[str, list[Any]], name: str, index: int) -> float | None
     if not isinstance(series, list) or index >= len(series):
         return None
     value = series[index]
-    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+    if not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(value):
+        return None
+    return float(value)
 
 
 def _numbers(hourly: dict[str, list[Any]], name: str, length: int) -> list[float | None]:

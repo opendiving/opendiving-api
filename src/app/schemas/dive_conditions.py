@@ -12,7 +12,7 @@ an offset no `timezone` can hold, is refused there and the dive left for the wor
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Strictly inside a day, which is what `datetime.timezone` accepts.
 _OFFSET_BOUND = 24 * 60 - 1
@@ -21,14 +21,20 @@ ExtremeKindName = Literal["high", "low"]
 TideStateName = Literal["high", "low", "rising", "falling"]
 
 
-class ConditionsPosition(BaseModel):
+class _Record(BaseModel):
+    # A document parsed by `json.loads` can carry `NaN`, which no JSON reader of ours could read
+    # back.
+    model_config = ConfigDict(allow_inf_nan=False)
+
+
+class ConditionsPosition(_Record):
     """Where the provider was asked about, rounded to two decimals as the request is."""
 
     latitude: Annotated[float, Field(ge=-90, le=90)]
     longitude: Annotated[float, Field(ge=-180, le=180)]
 
 
-class ConditionsWeather(BaseModel):
+class ConditionsWeather(_Record):
     model: _Name
     air_temperature: Annotated[float | None, Field(default=None, description="In degrees Celsius, 2 m above ground")]
     relative_humidity: Annotated[float | None, Field(default=None, description="In percent")]
@@ -38,16 +44,16 @@ class ConditionsWeather(BaseModel):
     cloud_cover: Annotated[float | None, Field(default=None, description="In percent")]
     precipitation: Annotated[float | None, Field(default=None, description="In millimetres over the preceding hour")]
     pressure: Annotated[float | None, Field(default=None, description="Reduced to mean sea level, in hectopascals")]
-    weather_code: Annotated[int | None, Field(default=None, description="The WMO 4677 code")]
+    weather_code: Annotated[int | None, Field(default=None, ge=0, le=99, description="The WMO 4677 code")]
 
 
-class ConditionsExtreme(BaseModel):
+class ConditionsExtreme(_Record):
     kind: ExtremeKindName
     at: datetime
     height: Annotated[float, Field(description="In metres above the model's mean sea level")]
 
 
-class ConditionsSea(BaseModel):
+class ConditionsSea(_Record):
     model: _Name
     sea_level_height: Annotated[
         float | None,
@@ -62,7 +68,7 @@ class ConditionsSea(BaseModel):
     swell_wave_height: Annotated[float | None, Field(default=None, description="In metres")]
 
 
-class ConditionsFilled(BaseModel):
+class ConditionsFilled(_Record):
     """The dive's own fields the fetch wrote, each with the value it wrote, null where it wrote
     nothing. A field named here is marked as fetched until the diver replaces its value. The two
     vocabulary values are the dive's own `weather` and `waves` members."""
@@ -72,7 +78,7 @@ class ConditionsFilled(BaseModel):
     waves: Annotated[str | None, Field(default=None, max_length=32)]
 
 
-class DiveConditionsRead(BaseModel):
+class DiveConditionsRead(_Record):
     provider: _Name
     fetched_at: datetime
     at: Annotated[datetime, Field(description="The instant described, spelled at `utc_offset_minutes`")]
