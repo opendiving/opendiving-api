@@ -894,6 +894,33 @@ class TestExportAndImport:
         row = _row(db, imported)
         assert row is not None and row.at == datetime(2026, 9, 14, 7, 0, tzinfo=UTC)
 
+    @pytest.mark.parametrize(
+        ("member", "value"),
+        [("utc_offset_minutes", 1440), ("provider", "x" * 33), ("sea.tide_state", "slack")],
+    )
+    @pytest.mark.asyncio
+    async def test_a_record_that_would_not_fit_is_left_out(
+        self, db: Session, async_db: AsyncSession, mine: Callable[..., User], member: str, value: Any
+    ) -> None:
+        """Another tool can write anything under the key; the dive still imports, with no row."""
+        diver = mine(db)
+        _dive(db, diver, site=_site(db, diver))
+        with FakeOpenMeteo():
+            await run_dive_conditions(NOW)
+        document = await self._export(async_db, diver.id)
+        entry = document["dives"][0]["extensions"]["opendiving"]["conditions"]
+        *path, last = member.split(".")
+        for step in path:
+            entry = entry[step]
+        entry[last] = value
+
+        destination = mine(db)
+        await self._import(async_db, destination.id, document)
+
+        imported = db.execute(select(Dive).where(Dive.user_id == destination.id)).scalar_one()
+        assert _row(db, imported) is None
+        assert imported.weather == "clear"
+
     @pytest.mark.asyncio
     async def test_a_dive_without_a_record_carries_no_extension(
         self, db: Session, async_db: AsyncSession, mine: Callable[..., User]

@@ -33,6 +33,7 @@ whose own request keeps failing.
 """
 
 import logging
+import typing
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, timezone
@@ -64,6 +65,8 @@ from ..schemas.dive_conditions import (
     ConditionsSea,
     ConditionsWeather,
     DiveConditionsRead,
+    ExtremeKindName,
+    TideStateName,
 )
 from . import open_meteo
 from .cache_invalidation import invalidate_dive_caches
@@ -428,7 +431,9 @@ def to_read(row: DiveConditions) -> DiveConditionsRead:
     def extreme(kind: str | None, at: datetime | None, height: float | None) -> ConditionsExtreme | None:
         if kind is None or at is None or height is None:
             return None
-        return ConditionsExtreme(kind=kind, at=at.astimezone(_zone(offset)), height=height)
+        return ConditionsExtreme(
+            kind=typing.cast(ExtremeKindName, kind), at=at.astimezone(_zone(offset)), height=height
+        )
 
     weather = None
     if row.weather_model is not None:
@@ -449,7 +454,7 @@ def to_read(row: DiveConditions) -> DiveConditionsRead:
         sea = ConditionsSea(
             model=row.sea_model,
             sea_level_height=row.sea_level_height,
-            tide_state=row.tide_state,
+            tide_state=typing.cast(TideStateName | None, row.tide_state),
             previous_extreme=extreme(row.previous_extreme_kind, row.previous_extreme_at, row.previous_extreme_height),
             next_extreme=extreme(row.next_extreme_kind, row.next_extreme_at, row.next_extreme_height),
             sea_surface_temperature=row.sea_surface_temperature,
