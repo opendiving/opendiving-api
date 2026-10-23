@@ -143,11 +143,14 @@ def _extremes(segment: list[tuple[int, float]]) -> list[Extreme]:
 
 
 def _interpolate(segment: list[tuple[int, float]], instant: int) -> float | None:
+    """The level at `instant`: a sample's own where one falls on it, else linear between the two
+    around it."""
+    for at, level in segment:
+        if at == instant:
+            return level
     for (t0, v0), (t1, v1) in zip(segment, segment[1:], strict=False):
-        if t0 <= instant <= t1:
-            return v0 if t1 == t0 else v0 + (v1 - v0) * (instant - t0) / (t1 - t0)
-    if len(segment) == 1 and segment[0][0] == instant:
-        return segment[0][1]
+        if t0 < instant < t1:
+            return v0 + (v1 - v0) * (instant - t0) / (t1 - t0)
     return None
 
 

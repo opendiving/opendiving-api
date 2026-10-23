@@ -78,6 +78,10 @@ else; what is here is the source, and the notes for working on it.
   key and no outbound call: the file ships with the app, and picking a suggestion makes a dive site
   of your own that you can rename, move and annotate, which keeps the record's OpenStreetMap or
   Wikidata entry. A suggestion you already hold names your site.
+- **Surface conditions** — off until the operator names a provider: the worker then asks
+  [Open-Meteo](https://open-meteo.com/) for the weather, sea state and tide at each dive's place and
+  hour, fills the air temperature, weather and waves the diver left empty, and marks each value it
+  wrote until the diver replaces it. Data CC BY 4.0, credited wherever it is shown.
 - **Gear** — items, a cylinder's capacity, working pressure and material on the item and a dive's
   tank linked to it, gear sets with default weights, service **schedules** (by months, dives or
   hours of diving), service history, a due-soon endpoint, and a scheduled email reminder digest.

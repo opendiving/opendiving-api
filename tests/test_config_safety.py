@@ -837,3 +837,33 @@ class TestAppVersionComesFromPackageMetadata:
         template = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text()
 
         assert not any(line.startswith("APP_VERSION") for line in template.splitlines())
+
+
+class TestDiveConditionsProvider:
+    """`DIVE_CONDITIONS_PROVIDER`: off unless named, and a name it does not know stops the
+    process rather than quietly fetching nothing."""
+
+    def test_an_instance_that_configures_nothing_fetches_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("DIVE_CONDITIONS_PROVIDER", raising=False)
+        module = _config_loaded_without_an_env_file(tmp_path, monkeypatch)
+
+        assert module.settings.DIVE_CONDITIONS_PROVIDER == ""
+        assert module.settings.dive_conditions is False
+
+    def test_open_meteo_switches_it_on(self):
+        assert _settings(DIVE_CONDITIONS_PROVIDER=" open-meteo ").dive_conditions is True
+
+    @pytest.mark.parametrize("value", ["openmeteo", "Open-Meteo", "worldweatheronline"])
+    def test_an_unknown_provider_refuses_to_start_and_names_itself(self, value: str):
+        with pytest.raises(ValueError, match=re.escape(repr(value))):
+            _settings(DIVE_CONDITIONS_PROVIDER=value)
+
+    @pytest.mark.asyncio
+    async def test_the_instance_config_says_whether_conditions_are_fetched(self, monkeypatch):
+        from src.app.api.v1.config import read_instance_config
+        from src.app.core.config import settings
+
+        monkeypatch.setattr(settings, "DIVE_CONDITIONS_PROVIDER", "open-meteo")
+        assert (await read_instance_config()).dive_conditions is True
+        monkeypatch.setattr(settings, "DIVE_CONDITIONS_PROVIDER", "")
+        assert (await read_instance_config()).dive_conditions is False

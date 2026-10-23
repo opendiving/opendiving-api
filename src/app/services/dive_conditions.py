@@ -268,6 +268,15 @@ async def drop_conditions(db: AsyncSession, dive_id: int) -> None:
     await db.execute(delete(DiveConditions).where(DiveConditions.dive_id == dive_id))
 
 
+async def _invalidate(user_id: int) -> None:
+    """Drop the diver's cached dive reads after a committed write. A Redis that is down costs
+    only this: the diver sees the change when the detail cache's hour runs out."""
+    try:
+        await invalidate_dive_caches(user_id)
+    except RedisError as exc:
+        logger.warning("Dive caches not dropped after a conditions write (%s).", type(exc).__name__)
+
+
 def _input_values(candidate: _Candidate) -> dict[str, Any]:
     return {
         "input_start_time": candidate.start_time,
@@ -335,7 +344,7 @@ async def _settle(
             await db.rollback()
             return False
     await db.commit()
-    await invalidate_dive_caches(candidate.user_id)
+    await _invalidate(candidate.user_id)
     return True
 
 
@@ -358,7 +367,7 @@ async def _clear_stale_marks(db: AsyncSession) -> None:
         users.update(result.scalars())
     await db.commit()
     for user_id in users:
-        await invalidate_dive_caches(user_id)
+        await _invalidate(user_id)
 
 
 async def apply_diver_edits(
@@ -373,6 +382,8 @@ async def apply_diver_edits(
     taking those as edits would erase the fill for good. The cost is that a fetched value can be
     replaced and never blanked. Not committed: it joins the PATCH's transaction.
     """
+    if not any(field in update_data for field in FILLABLE):
+        return
     marked = (
         await db.execute(
             select(
@@ -544,7 +555,8 @@ def _sea_values(answer: open_meteo.Answered, instant: datetime) -> dict[str, Any
         return {}
     at = int(instant.timestamp())
     index = nearest_sample(times, at)
-    assert index is not None
+    if index is None:
+        return {}
     reading = tide(times, _numbers(answer.hourly, "sea_level_height_msl", len(times)), at)
     return {
         "sea_model": open_meteo.MODEL,

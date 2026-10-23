@@ -2,7 +2,8 @@
 
 `@cache` and `delete_keys_by_pattern` (`get`/`set`/`delete`/`scan`), the outbound answer
 cache (`get`/`set` with `ex`), the rate limiter (`incr`/`expire`/`ttl`), the map-tile draw
-claim (`set` with `nx`/`px`) and the passkey challenge store (`getdel`). It serves back what
+claim and the conditions run lock (`set` with `nx`/`px`), the passkey challenge store (`getdel`)
+and the lock's release (`eval`, below). It serves back what
 was written and sweeps by pattern the way the real one does, so a read after a write is stale
 unless something actually dropped the key. Expiries are recorded, never enforced: nothing
 here needs a clock. `writes` lists every key `set` stored, in order, so a test can tell one
@@ -98,3 +99,14 @@ class FakeRedis:
     async def scan(self, cursor: int = 0, match: str = "*", count: int | None = None) -> tuple[int, list[str]]:
         self._fail_if_down()
         return 0, [key for key in self.store if fnmatchcase(key, match)]
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        """The one script the app sends: delete `KEYS[1]` only while it holds `ARGV[1]`. Any
+        other script is refused rather than guessed at."""
+        self._fail_if_down()
+        if "redis.call('get', KEYS[1]) == ARGV[1]" not in script or numkeys != 1:
+            raise NotImplementedError(script)
+        key, expected = keys_and_args
+        if self.store.get(key) != _encode(expected):
+            return 0
+        return await self.delete(key)

@@ -1176,9 +1176,9 @@ always reporting `examined / extracted / skipped / no_samples / failed`, since s
 hides a broken reader.
 
 It opens the cache pool around its session (`src/scripts/_common.py`'s `session_with_cache`):
-`delete_keys_by_pattern` silently returns when `cache.client is None`, and a process has a client only
-where it opens the pool itself - the API's lifespan, the worker's startup, and this helper for a
-script. `src/scripts/` is bind-mounted into `api`, so the host copy runs.
+`delete_keys_by_pattern` silently returns when `cache.client is None`, and a process has a client
+only where it opens the pool itself - the API's lifespan, the worker's startup, and this helper for
+a script. `src/scripts/` is bind-mounted into `api`, so the host copy runs.
 
 ## No manual DDL for the dive-profile feature
 
@@ -7124,3 +7124,108 @@ file's own and stays. Members land on the dive's columns, its cylinder rows by `
 after the write, its recordings at the ordinal the writer reports; a member the map cannot place is
 shown. Edge: a value the planner derives hides the file's absence line, its own note saying it once.
 Rejected: comparing against the sibling file's document, which cannot see an earlier import.
+
+## A dive's surface conditions are fetched by a cron, never queued
+
+`fetch_dive_conditions` runs every minute and finds its work in one query
+(`services/dive_conditions.py`): dives with no `dive_conditions` row, rows that no longer describe
+their dive, `failed` rows due a retry and rows an older derivation wrote. A batch constant and a
+45-second stop bound a run; each dive commits on its own. The worker runs crons only, and this keeps
+it so. Rejected: fetching inline after the save, which adds the provider's latency to every save and
+cannot carry an import of hundreds of dives; a shielded task after the save, lost on a restart and
+still needing a cron for the backlog; an arq queued job, the first anything would enqueue.
+
+## A conditions row records its inputs, and no writer is hooked
+
+A row stores the start time, offset, date-only flag, rounded position and effective water type it
+was computed from; a row whose inputs are `IS DISTINCT FROM` the dive's is answered again. That
+covers every writer of those inputs without naming one - the form, a site's pin or water type moved
+under its dives, a site swapped or deleted, a merge, a recording's fix, the backfills, the admin
+panel. Rejected: a hook per writer, which has to find every `update(Dive)`, site-link helper and
+scalar fill across the routes and services and fails silently on the next one added. Only the
+import's restore of a deleted dive touches a row. The position is rounded by one SQL expression
+everywhere it is stored or compared: Python's `round` and Postgres's `round(numeric)` disagree on a
+half-way tie.
+
+## The conditions run holds a Redis lock of its own
+
+Two runs never overlap: `SET … NX PX` under a random token, held for the 45-second stop plus two
+provider deadlines, released by a compare-and-delete script, and lapsing by itself after a kill.
+Without Redis it fails open, and the row's uniqueness on the dive makes two runs a lost race.
+Rejected: a fixed `job_id` on the cron. A run killed mid-flight - every deploy does it, since
+`handle_signals` is off - is parked as a failed result under that id for `keep_result`, an hour,
+during which arq refuses the id; and arq's 60-second in-progress key would hold a fixed id to a run
+every 105 s or so.
+
+## The worker opens the Redis cache pool
+
+`startup` opens it and `shutdown` closes it, as the scripts' `session_with_cache` does. Without it
+`cache.client` is `None` in the worker: a provider's answer is never cached, its budget is never
+spent, and an invalidation after a write is a silent no-op. Every use fails open - a Redis down
+mid-run costs the caching, the budget, the cool-down, the strike counts and the invalidation, and
+the run is bounded by its batch and its 45 seconds alone.
+
+## A fetched value is replaced, never blanked
+
+`PATCH /dive/{uuid}` takes a different, non-empty value for a marked field as the diver's and clears
+the mark (`apply_diver_edits`), and drops an empty one, leaving the fill. The web's edit page and
+Environment dialog submit every field they loaded, so a form opened before the fill arrived carries
+nulls the diver never chose. Accepted: a form opened before a refetch and saved after it sends the
+old fill, which becomes the diver's. Rejected: the client echoing the `fetched_at` it saw, a
+concurrency token on a route that has none; the web leaving untouched fields out, against the form's
+whole-dive rule.
+
+## A fetch's values leave with the fetch
+
+When a row no longer describes its dive, each field still holding the value the row wrote is emptied
+before the dive is answered again, by a conditional update, so a value a diver typed meanwhile
+stays; an unmarked field is never touched. A wrong place's weather left in the field would read as
+the diver's. Every run also clears a mark whose field no longer holds its written value, whichever
+route changed it. The comparison is always with the stored written value, never a re-derivation.
+
+## Weather and waves are derived under one `derivation_version`
+
+The WMO code maps to `weather` by Open-Meteo's published table, 1 ("mainly clear") as `clear` and 95
+to 99 as one band, since 97 is documented and absent from the API's enum; significant wave height
+maps to `waves` by the Douglas sea scale, its fifth degree and up as `rough`. A change to either, or
+to the tide rules, bumps `DERIVATION_VERSION` (`services/conditions_derivations.py`): rows written
+under the old one are refilled from their answer behind the dives with no row. Rejected: a sweep
+that re-derives, which would clear every mark at once.
+
+## The conditions client's timeouts
+
+Measured against Open-Meteo: a warm archive or marine call answers in 0.3 to 1 s, and a cold archive
+call for an unasked place and decade took 31 s to its first byte. The read timeout is 35 s so that
+call lands, and the deadline 40 s. The worker waits for nobody, so the only cost of a long call is
+the run's 45-second stop, which the lock's lifetime covers.
+
+## Provider answers are cached for an hour
+
+Each Open-Meteo answer is cached under a versioned key naming the API, the rounded coordinate, the
+days, the variables and the `timezone` parameter, for one hour whatever the day's age. The cache
+lets an import's burst and a trip's dives share an answer; longer buys little and costs a small
+Redis its memory - a day of answers at the budget's ceiling is about 25 MB.
+
+## A failed conditions row is always safe to delete
+
+A `failed` row sets no mark, so deleting it loses nothing: the dive is pending again and the next
+run asks. That is how a 400 the request caused rather than the dive - a provider renaming a variable
+\- is recovered once the client is fixed. A refused request backs off from an hour, doubling, and
+stops at `ATTEMPTS_CAP`; three instance-wide failures in a row on one dive defer it the same way,
+capped at a day and never counted toward the cap.
+
+## A dive's conditions ride its detail read with no key version
+
+`conditions` is an optional member with a default on `DiveReadWithMixtures`, and the response cache
+is namespaced by build, so no entry the previous build wrote is read by this one: neither a key
+version nor a flush is owed. It is not on `DiveRead`, for `gas_use`'s reason - the list is the
+hottest path and draws nothing from it.
+
+## An export presents a fetched value as the dive's
+
+A fetched value the diver let stand is the logbook's entry, so it leaves in DiveJSON's core members,
+UDDF's `airtemperature` and the CSV like any other. The record rides the dive's
+`extensions.opendiving.conditions`, its `filled` naming each written value, so this app's own import
+marks a field only where the document's member still equals it - a value changed in another tool is
+the diver's. Rejected: leaving a marked value out of the core members, which strands a diver's
+weather on the way to another logbook.
