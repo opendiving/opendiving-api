@@ -672,6 +672,31 @@ class TestFailures:
         assert (row.filled_weather, _fresh(db, dive).weather) == (None, None)
 
     @pytest.mark.asyncio
+    async def test_a_dive_given_up_on_is_asked_afresh_after_an_input_change(
+        self, db: Session, async_db: AsyncSession, mine: Callable[..., User]
+    ) -> None:
+        diver = mine(db)
+        dive = _dive(db, diver, site=_site(db, diver))
+        refused = FakeOpenMeteo(lambda request: httpx.Response(400, json={"error": True, "reason": "range"}))
+        with refused:
+            await run_dive_conditions(NOW)
+        db.execute(
+            update(DiveConditions)
+            .where(DiveConditions.dive_id == dive.id)
+            .values(attempts=dive_conditions.ATTEMPTS_CAP, deferrals=3, next_attempt_at=None)
+        )
+        db.commit()
+        await _patch(async_db, diver, dive, {"start_time": "2026-09-14T10:00:00+03:00"})
+
+        with refused:
+            await run_dive_conditions(NOW)
+
+        row = _row(db, dive)
+        assert row is not None
+        assert (row.attempts, row.deferrals) == (1, 0)
+        assert row.next_attempt_at == NOW + timedelta(hours=1)
+
+    @pytest.mark.asyncio
     async def test_a_429_stops_the_run_and_cools_down(
         self, db: Session, mine: Callable[..., User], redis: FakeRedis
     ) -> None:

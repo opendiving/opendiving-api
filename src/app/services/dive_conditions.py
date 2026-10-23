@@ -232,8 +232,9 @@ async def _candidates(db: AsyncSession, now: datetime, limit: int) -> list[_Cand
             latitude,
             longitude,
             water,
-            func.coalesce(DiveConditions.attempts, 0),
-            func.coalesce(DiveConditions.deferrals, 0),
+            # A count earned by inputs the dive no longer has starts over with the new ones.
+            case((stale, 0), else_=func.coalesce(DiveConditions.attempts, 0)),
+            case((stale, 0), else_=func.coalesce(DiveConditions.deferrals, 0)),
         )
         .select_from(Dive)
         .join(User, User.id == Dive.user_id)
@@ -406,6 +407,9 @@ async def apply_diver_edits(
         elif update_data[field] != stored[field]:
             cleared[f"filled_{field}"] = None
     if cleared:
+        # The dive's row before the conditions row, the order `_settle` takes them in, so a PATCH
+        # and the worker settling the same dive cannot deadlock.
+        await db.execute(select(Dive.id).where(Dive.id == dive_id).with_for_update())
         await db.execute(update(DiveConditions).where(DiveConditions.dive_id == dive_id).values(cleared))
 
 
