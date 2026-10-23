@@ -807,6 +807,31 @@ class TestFailures:
         row = _row(db, dive)
         assert row is not None and row.state == "fetched"
 
+    @pytest.mark.asyncio
+    async def test_a_dive_deferred_for_weeks_waits_a_day(
+        self, db: Session, mine: Callable[..., User], redis: FakeRedis
+    ) -> None:
+        diver = mine(db)
+        dive = _dive(db, diver, site=_site(db, diver))
+
+        def times_out(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("slow", request=request)
+
+        await redis.set(f"conditions:strikes:{dive.id}", 2)
+        with FakeOpenMeteo(times_out):
+            await run_dive_conditions(NOW)
+        db.execute(
+            update(DiveConditions).where(DiveConditions.dive_id == dive.id).values(deferrals=40, next_attempt_at=NOW)
+        )
+        db.commit()
+
+        with FakeOpenMeteo(times_out):
+            await run_dive_conditions(NOW)
+
+        row = _row(db, dive)
+        assert row is not None and row.deferrals == 41
+        assert row.next_attempt_at == NOW + timedelta(days=1)
+
 
 class TestTheRunsOwnLock:
     @pytest.mark.asyncio

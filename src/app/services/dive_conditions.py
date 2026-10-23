@@ -713,7 +713,9 @@ async def _could_not_ask(
             "derivation_version": DERIVATION_VERSION,
             "attempts": candidate.attempts,
             "deferrals": deferrals,
-            "next_attempt_at": now + min(RETRY_AFTER * 2 ** (deferrals - 1), LONGEST_DEFERRAL),
+            # The exponent is capped before it multiplies: a dive deferred daily for weeks would
+            # otherwise overflow `timedelta` long after the delay had stopped growing.
+            "next_attempt_at": now + min(RETRY_AFTER * 2 ** min(deferrals - 1, 5), LONGEST_DEFERRAL),
         }
         await _settle(db, candidate, row)
     return Handled.STRUCK

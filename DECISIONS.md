@@ -7194,10 +7194,10 @@ that re-derives, which would clear every mark at once.
 
 ## The conditions client's timeouts
 
-Measured against Open-Meteo: a warm archive or marine call answers in 0.3 to 1 s, and a cold archive
-call for an unasked place and decade took 31 s to its first byte. The read timeout is 35 s so that
-call lands, and the deadline 40 s. The worker waits for nobody, so the only cost of a long call is
-the run's 45-second stop, which the lock's lifetime covers.
+Long, because nobody waits on the worker: a cold archive call can take tens of seconds to its first
+byte, and the only cost of a long call is the run's 45-second stop, which the lock's lifetime
+covers. The figures are measured against Open-Meteo and stated at `open_meteo.TIMEOUT_SECONDS`; the
+geocoder's must not be copied there, nor these to the geocoder.
 
 ## Provider answers are cached for an hour
 
