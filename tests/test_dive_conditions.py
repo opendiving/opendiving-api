@@ -292,6 +292,21 @@ class TestAFetchFillsTheEmptyFields:
         assert _fresh(db, dive).weather == "clear"
 
     @pytest.mark.asyncio
+    async def test_a_figure_the_provider_should_not_send_is_no_figure(
+        self, db: Session, async_db: AsyncSession, mine: Callable[..., User]
+    ) -> None:
+        diver = mine(db)
+        dive = _dive(db, diver, site=_site(db, diver))
+
+        with FakeOpenMeteo(_with(weather_code=2**31)):
+            await run_dive_conditions(NOW)
+
+        row = _row(db, dive)
+        assert row is not None and row.weather_code is None
+        assert _fresh(db, dive).weather is None
+        assert (await _read(async_db, diver, dive))["conditions"]["weather"]["weather_code"] is None
+
+    @pytest.mark.asyncio
     async def test_fresh_water_asks_nothing_about_the_sea(self, db: Session, mine: Callable[..., User]) -> None:
         diver = mine(db)
         dive = _dive(db, diver, site=_site(db, diver, water_type="fresh"))

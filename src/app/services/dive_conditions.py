@@ -539,7 +539,8 @@ def _weather_values(answer: open_meteo.Answered, instant: datetime) -> dict[str,
         "cloud_cover": _number(answer.hourly, "cloud_cover", index),
         "precipitation": _number(answer.hourly, "precipitation", index),
         "pressure": _number(answer.hourly, "pressure_msl", index),
-        "weather_code": None if code is None else int(code),
+        # WMO 4677's codes are 0 to 99; anything else is no code, not a row the read refuses.
+        "weather_code": int(code) if code is not None and 0 <= code <= 99 else None,
     }
 
 
