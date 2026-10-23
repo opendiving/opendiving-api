@@ -323,9 +323,10 @@ class TestWhichPartsCover:
 
 
 # opendiving-web's `src/lib/trip-dive-sections.test.ts` places the trip page's dives by the
-# rule `part_for_day` mirrors (`tripPartForDay`). These are its cases, copied as
-# (parts, local day, the part it is placed in): a change to the rule there has to be made here
-# too, since nothing runs across the two repositories.
+# rule `part_for_day` mirrors (`tripPartForDay`), as does opendiving-ios's
+# `TripText.partForDay(_:day:)`. These are the web's cases, copied as (parts, local day, the
+# part it is placed in): a change to the rule in any of the three has to be made in all of
+# them, since nothing runs across the repositories.
 Dated = list[tuple[date | None, date | None]]
 
 PLACEMENT_CASES: dict[str, tuple[Dated, dict[date, int]]] = {

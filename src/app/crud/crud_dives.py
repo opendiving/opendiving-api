@@ -208,9 +208,11 @@ def part_for_day(parts: Sequence[DatedPart]) -> ColumnElement[Any]:
     exactly the dives its card shows. A part with both dates beats an open-ended one, the
     first such part in the diver's order winning a day two cover; among open-ended parts the
     one whose date is nearer wins, and a tie goes to the first. A part never attributed a day
-    - the second of two with the same dates - counts nothing. Copied rather than shared, so a
-    change to the rule on either side has to be made on both: `tests/test_trip_candidates.py`
-    copies the cases of `trip-dive-sections.test.ts`, and nothing runs across the repos.
+    - the second of two with the same dates - counts nothing. opendiving-ios holds a third
+    copy, `TripText.partForDay(_:day:)` in `Packages/OpenDivingKit`, which places a trip's
+    dives the same way in the app. Copied rather than shared, so a change to the rule in any
+    of the three has to be made in all of them: `tests/test_trip_candidates.py` copies the
+    cases of `trip-dive-sections.test.ts`, and nothing runs across the repos.
     """
     whens: list[tuple[ColumnElement[bool], int]] = [
         (DIVE_LOCAL_DAY.between(part.start_date, part.end_date), index)

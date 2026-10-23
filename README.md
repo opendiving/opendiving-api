@@ -334,7 +334,7 @@ curl -X POST http://localhost:8000/api/v1/import/logbook \
 | -------------------------------------------------------------- | --------------------------------------------------- |
 | [opendiving](https://github.com/opendiving/opendiving)         | **The front door** — install, docs, and the release |
 | [opendiving-web](https://github.com/opendiving/opendiving-web) | Next.js web app                                     |
-| [opendiving-ios](https://github.com/opendiving/opendiving-ios) | SwiftUI app (early scaffold, parked)                |
+| [opendiving-ios](https://github.com/opendiving/opendiving-ios) | SwiftUI app, in development, not in the App Store   |
 
 ## License
 
