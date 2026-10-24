@@ -116,7 +116,8 @@ async def export_divejson(
     diver's tags, marine-life sightings, gear and its service history, c-card records and the
     check-in details and portrait a dive shop asks for -
     everything the account holds except the binaries themselves, which the file references
-    by digest, and the profile picture, which it does not name. The diver's `email` is the
+    by digest, the profile picture, which it does not name, and the dive drafts, which have
+    no place in a logbook of dives logged. The diver's `email` is the
     check-in email, absent when none is set; the sign-in address is in no export.
 
     For a copy that carries those binaries too, use `/export/archive`, whose
@@ -173,7 +174,7 @@ async def export_csv(
     open in Excel, Numbers or a notebook. The normalized set (cylinders, trips, courses,
     sites, gear, service history, certifications, contacts, people, tags) ships inside
     `/export/archive`.
-    Deliberately lossy: `/export/divejson` is the one that holds everything.
+    Deliberately lossy: `/export/archive` is the one that holds everything.
     """
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
@@ -203,8 +204,8 @@ async def export_archive(
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> StreamingResponse:
     """Download everything: a zip holding the DiveJSON document, the UDDF one, the
-    full CSV set, every stored dive-computer file, both sides of every c-card, and the
-    originals of the profile picture and the check-in portrait.
+    full CSV set, the dive drafts as `drafts.json`, every stored dive-computer file, both
+    sides of every c-card, and the originals of the profile picture and the check-in portrait.
 
     This is the complete copy - nothing in the account is reachable only through the app
     after taking it. **It includes the certification

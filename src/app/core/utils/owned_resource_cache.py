@@ -97,6 +97,8 @@ class OwnedResourceCache[InternalT, PublicT]:
     - `invitations.py` - uncached: an invitee accepting is a write no key of the inviter's
       sees, and an invitation shown as pending after it was accepted is a wrong answer rather
       than a stale one.
+    - `dive_drafts.py` - uncached: nothing embeds a draft, and a phone writes one each time the
+      diver pauses, so a cache would owe an invalidation per write and save a query per read.
 
     In each of the enriched ones the enrichment is a second query whose results have to be
     zipped back into the page before conversion, which is precisely the step this factory has

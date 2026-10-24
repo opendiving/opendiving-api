@@ -12,6 +12,7 @@ from .daily_total import DailyTotal
 from .dive import Dive
 from .dive_conditions import DiveConditions
 from .dive_dive_site import DiveDiveSite
+from .dive_draft import DiveDraft
 from .dive_file import DiveFile
 from .dive_form_preset import DiveFormPreset
 from .dive_gear_item import DiveGearItem

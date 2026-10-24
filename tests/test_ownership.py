@@ -378,6 +378,23 @@ FETCH_OWNED_ROUTES = [
     *(
         OwnedRoute(
             method,
+            "/api/v1/dive-draft/{uuid}",
+            "src.app.api.v1.dive_drafts:crud_dive_drafts",
+            "Dive draft not found",
+            extra,
+        )
+        for method, extra in _CRUD_METHODS
+    ),
+    OwnedRoute(
+        "POST",
+        "/api/v1/dive-draft/{uuid}/dive",
+        "src.app.api.v1.dives:crud_dive_drafts",
+        "Dive draft not found",
+        {"json": {"dive_number": 1, "start_time": "2026-10-01T10:00:00+02:00", "submerged_time": 2400}},
+    ),
+    *(
+        OwnedRoute(
+            method,
             "/api/v1/dive-form-preset/{uuid}",
             "src.app.api.v1.dive_form_presets:crud_dive_form_presets",
             "Dive form preset not found",

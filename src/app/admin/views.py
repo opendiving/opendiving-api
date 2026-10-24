@@ -6,6 +6,7 @@ from ..models.contact import Contact
 from ..models.course import Course
 from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
+from ..models.dive_draft import DiveDraft
 from ..models.dive_form_preset import DiveFormPreset
 from ..models.dive_gear_item import DiveGearItem
 from ..models.dive_mixture import DiveMixture
@@ -31,6 +32,7 @@ from ..schemas.contact import ContactCreateInternal, ContactUpdate
 from ..schemas.course import CourseCreateInternal, CourseUpdate
 from ..schemas.dive import DiveCreateInternal, DiveUpdateInternal
 from ..schemas.dive_dive_site import DiveDiveSiteCreate, DiveDiveSiteUpdate
+from ..schemas.dive_draft import DiveDraftCreateInternal
 from ..schemas.dive_form_preset import DiveFormPresetCreateInternal, DiveFormPresetUpdate
 from ..schemas.dive_gear_item import DiveGearItemCreate, DiveGearItemUpdate
 from ..schemas.dive_mixture import DiveMixtureCreateInternal, DiveMixtureUpdate
@@ -126,9 +128,10 @@ def register_admin_views(admin: CRUDAdmin) -> None:
     )
 
     # `DiveSite`, `Trip`, `Course`, `Contact`, `Person`, `Tag`, `GearItem`, `GearSet`,
-    # `GearServiceSchedule` and `DiveFormPreset` are registered without `"delete"`, and that is not squeamishness about
-    # a superuser having the power. FastCRUD's `delete` branches on whether the model carries
-    # `is_deleted`, and since they hard-delete it takes the `DELETE FROM` branch - so the button that
+    # `GearServiceSchedule`, `DiveFormPreset` and `DiveDraft` are registered without `"delete"`,
+    # and that is not squeamishness about a superuser having the power. FastCRUD's `delete`
+    # branches on whether the model carries `is_deleted`, and since they hard-delete it takes
+    # the `DELETE FROM` branch - so the button that
     # used to flag one row now destroys the row, its schedules, its service records and
     # every join row pointing at it, through the FK cascades. It would do that with **no
     # cache invalidation**: that lives on the API routes (`services/cache_invalidation.py`)
@@ -194,6 +197,13 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         model=DiveFormPreset,
         create_schema=DiveFormPresetCreateInternal,
         update_schema=DiveFormPresetUpdate,
+        allowed_actions={"view", "create", "update"},
+    )
+
+    admin.add_view(
+        model=DiveDraft,
+        create_schema=DiveDraftCreateInternal,
+        update_schema=DiveDraftCreateInternal,
         allowed_actions={"view", "create", "update"},
     )
 

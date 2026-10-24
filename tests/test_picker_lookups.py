@@ -151,10 +151,14 @@ class TestEveryDiveWriteDropsTheContactAndCourseLookups:
         assert dropping_trips == {"_after_dive_write"}
         assert {"invalidate_contact_caches", "invalidate_course_caches"} <= routes["_after_dive_write"]
         assert {name for name, calls in routes.items() if "_after_dive_write" in calls} == {
-            "write_dive",
+            "_read_logged_dive",
             "patch_dive",
             "erase_dive",
             "merge_two_dives",
+        }
+        assert {name for name, calls in routes.items() if "_read_logged_dive" in calls} == {
+            "write_dive",
+            "log_dive_draft",
         }
 
 

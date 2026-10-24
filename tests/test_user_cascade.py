@@ -39,6 +39,7 @@ from src.app.models.course import Course
 from src.app.models.course_person import CoursePerson
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
+from src.app.models.dive_draft import DiveDraft
 from src.app.models.dive_file import DiveFile
 from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.dive_person import DivePerson
@@ -64,6 +65,7 @@ from tests.helpers.generators import (
     create_contact,
     create_course,
     create_dive,
+    create_dive_draft,
     create_dive_form_preset,
     create_dive_recording,
     create_dive_site,
@@ -145,6 +147,7 @@ class TestDeletingAUserTakesEverythingWithIt:
         create_gear_service_record(db, diver, item, schedule=schedule)
         gear_set = create_gear_set(db, diver)
         create_dive_form_preset(db, diver)
+        create_dive_draft(db, diver, gear_set=gear_set)
         certification = Certification(user_id=diver.id, agency="padi", name="Rescue Diver", notes="")
         db.add_all(
             [
@@ -233,6 +236,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             Contact,
             Course,
             Dive,
+            DiveDraft,
             DiveFile,
             DiveFormPreset,
             DiveSite,

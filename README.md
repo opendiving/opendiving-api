@@ -101,8 +101,8 @@ else; what is here is the source, and the notes for working on it.
   shows you that account's current username and tells it nothing. Imported from UDDF buddies and
   guides and Subsurface's buddy and divemaster fields.
 - **Full export** — everything out in open formats (DiveJSON, UDDF, CSV, and an archive of all three
-  plus your original files) in one request. Owner-only, never cached; the DiveJSON validates against
-  the published 1.0 schema and the UDDF against the 3.2.2 one.
+  plus your dive drafts and your original files) in one request. Owner-only, never cached; the
+  DiveJSON validates against the published 1.0 schema and the UDDF against the 3.2.2 one.
 - **[DiveJSON](https://divejson.org)** — the open dive-log interchange format this project
   maintains, and this is its reference implementation: a lossless structured copy of the whole
   logbook, where UDDF measurably loses trips, gear, weights and UTC offsets.
@@ -265,6 +265,11 @@ each — but nothing checks this paragraph, so a new route family belongs here b
 A record's create — `POST /dive`, `/trip`, `/person` and the like; `/docs` lists the header on each
 — takes an optional `Idempotency-Key` header: a repeat under the same key answers the record the
 first one made, as it now reads, instead of making another.
+
+A **dive draft** is a dive not yet logged, saved and finished from either device:
+`POST /dive-draft`, `GET /dive-drafts`, `GET`/`PATCH`/`DELETE /dive-draft/{uuid}`, and
+`POST /dive-draft/{uuid}/dive`, which logs the dive as `POST /dive` does and deletes the draft in
+the same request.
 
 A typical import flow:
 

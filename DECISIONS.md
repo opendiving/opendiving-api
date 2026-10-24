@@ -7251,3 +7251,32 @@ first that rolls back releases it. Only a success is held: a 4xx rolls the claim
 meets the same validation and a corrected body creates. Rejected: storing the response, which cannot
 commit with a record whose response is built after the commit, and would be a long-lived copy of a
 person's details.
+
+## A dive draft's values are JSON in the dive form's shape, and stored data
+
+`dive_draft.values` holds the form's state as JSON in `DiveCreateRequest`'s member names, every one
+optional, validated member by member by `DiveDraftValues`: the same types and vocabularies, none of
+a dive's bounds or rules between members, because a draft is unfinished and the log route validates
+the dive it becomes. Rejected: a column per member, a migration each time the form moves. The JSON
+is stored data, so renaming or removing a `DiveCreateRequest` member, or narrowing a vocabulary,
+owes a migration of `dive_draft.values` - the rule the hidden-field keys carry.
+`tests/test_dive_drafts.py` holds the draft's member names to `DiveCreateRequest`'s, recursively, so
+a member added to one alone fails CI rather than turning every draft write that sends it into a 422.
+
+## A dive draft's references are checked on the way out
+
+A write stores the uuids in `values` as given; every read keeps only those naming a record the
+account holds, or a species that exists, one query per kind over the rows read. A phone writes from
+a copy that can predate a delete, so a check at write time turns its queued update into a permanent
+failure the diver cannot see. Rejected: scrubbing drafts in the seven delete routes, which couples
+them to the draft's JSON while an offline phone writes the uuid back. `gear_set_id`, a column, is
+resolved on write, a set not the caller's stored as none. Logging validates as `POST /dive` does, so
+a stale reference is that route's 422.
+
+## Logging a draft is one request
+
+`POST /dive-draft/{uuid}/dive` creates the dive as `POST /dive` does and deletes the draft in the
+same transaction, deleting first so a second log of it waits on the row and finds it gone. Two
+requests would let a lost reply leave the dive logged and the draft kept, or the draft gone and no
+dive. Under an `Idempotency-Key` the hold is read before the draft is looked up, so a retried log
+answers the dive it made rather than a 404 for the draft it deleted.

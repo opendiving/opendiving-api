@@ -28,6 +28,7 @@ from src.app.models.user_picture import UserPicture
 from src.app.schemas.certification import CertificationFileInfo, CertificationSide
 from src.app.schemas.checkin_details import CheckinDetailsRead
 from src.app.schemas.dive import DiveFileInfo
+from src.app.schemas.dive_draft import DiveDraftRead, DiveDraftValuesRead
 from src.app.schemas.user_picture import PictureKind
 from src.app.services.blob_store import BlobMissingError
 from src.app.services.certification_files import LoadedCardFile, get_file_infos_for_certifications
@@ -153,6 +154,7 @@ class TestInventory:
             "csv/contacts.csv",
             "csv/people.csv",
             "csv/tags.csv",
+            "drafts.json",
             "files/0002-0-Suunto-Ocean-2026-06-01.json",
             "certifications/open-water-diver-front.jpg",
             "certifications/open-water-diver-back.png",
@@ -202,7 +204,7 @@ class TestInventory:
             if side in cert
         }
         named.add(envelope["diver"]["portrait_file"]["archive_path"])
-        exempt = {"logbook.divejson", "dives.uddf", "avatar.png"}
+        exempt = {"logbook.divejson", "dives.uddf", "drafts.json", "avatar.png"}
         blobs = {name for name in archive.namelist() if name not in exempt and not name.startswith("csv/")}
         assert blobs == named
 
@@ -274,6 +276,26 @@ class TestInventory:
         assert archive.testzip() is None
         assert "logbook.divejson" in archive.namelist()
         assert not [name for name in archive.namelist() if name.startswith(("files/", "certifications/"))]
+
+    @pytest.mark.asyncio
+    async def test_the_drafts_are_their_own_member_as_the_list_serves_them(self, monkeypatch):
+        draft = DiveDraftRead(
+            uuid=UUIDS["dive-air"],
+            created_at=EXPORTED_AT,
+            updated_at=EXPORTED_AT,
+            gear_set_uuid=None,
+            values=DiveDraftValuesRead(notes="Half written", max_depth=400.0, water_type="salt"),
+        )
+
+        archive = await _build(replace(full_bundle(), drafts=[draft]), monkeypatch)
+
+        assert json.loads(archive.read("drafts.json")) == [draft.model_dump(mode="json")]
+
+    @pytest.mark.asyncio
+    async def test_an_account_with_no_drafts_gets_an_empty_list(self, monkeypatch):
+        archive = await _build(build_bundle(), monkeypatch)
+
+        assert json.loads(archive.read("drafts.json")) == []
 
     @pytest.mark.asyncio
     async def test_the_sign_in_address_is_in_no_member(self, monkeypatch):
