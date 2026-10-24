@@ -49,6 +49,7 @@ from ...services.cache_invalidation import (
     invalidate_trip_caches,
 )
 from ...services.person_links import resolve_linked_account, spend_link_attempt
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["people"])
 
@@ -75,7 +76,12 @@ async def _read(db: AsyncSession, person_id: int) -> PersonRead:
     return person
 
 
-@router.post("/person", response_model=PersonRead, status_code=201)
+@router.post(
+    "/person",
+    response_model=PersonRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(Person, read="/person/{uuid}"))],
+)
 async def write_person(
     request: Request,
     person: PersonCreate,

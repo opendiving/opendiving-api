@@ -22,6 +22,7 @@ from ...crud.crud_certifications import (
 from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
 from ...crud.crud_people import get_person_uuids_by_ids
+from ...models.certification import Certification
 from ...schemas.certification import (
     CertificationCreate,
     CertificationCreateInternal,
@@ -46,6 +47,7 @@ from ...services.certification_files import (
 )
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
 from ...services.person_links import resolve_person_reference
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["certifications"])
 
@@ -139,7 +141,12 @@ async def _get_owned_certification(
     )
 
 
-@router.post("/certification", response_model=CertificationRead, status_code=201)
+@router.post(
+    "/certification",
+    response_model=CertificationRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(Certification, read="/certification/{uuid}"))],
+)
 async def write_certification(
     request: Request,
     certification: CertificationCreate,

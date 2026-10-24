@@ -49,6 +49,7 @@ from ...services.cache_invalidation import (
 )
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
 from ...services.person_links import resolve_people_references
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["courses"])
 
@@ -142,7 +143,12 @@ async def _get_owned_course(db: AsyncSession, uuid: uuid_pkg.UUID, current_user:
     )
 
 
-@router.post("/course", response_model=CourseRead, status_code=201)
+@router.post(
+    "/course",
+    response_model=CourseRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(Course, read="/course/{uuid}"))],
+)
 async def write_course(
     request: Request,
     course: CourseCreate,

@@ -37,6 +37,7 @@ from ...schemas.gear_item import (
 from ...schemas.gear_service import GearServiceScheduleInfo
 from ...schemas.lookup import LookupUntil, lookup_bound
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_gear_caches
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["gear"])
 
@@ -86,7 +87,12 @@ def _to_public_gear_item(
     )
 
 
-@router.post("/gear-item", response_model=GearItemRead, status_code=201)
+@router.post(
+    "/gear-item",
+    response_model=GearItemRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(GearItem, read="/gear-item/{uuid}"))],
+)
 async def write_gear_item(
     request: Request,
     gear_item: GearItemCreate,

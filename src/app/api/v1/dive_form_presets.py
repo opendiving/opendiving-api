@@ -15,6 +15,7 @@ from ...crud.crud_dive_form_presets import (
     dive_form_preset_name_exists,
 )
 from ...crud.unique_keys import write_or_duplicate
+from ...models.dive_form_preset import DiveFormPreset
 from ...schemas.dive_form_preset import (
     DiveFormPresetCreate,
     DiveFormPresetCreateInternal,
@@ -23,6 +24,7 @@ from ...schemas.dive_form_preset import (
     DiveFormPresetUpdate,
 )
 from ...services.dive_form_presets import BUILT_IN_PRESET_NAME, is_built_in_preset_name, seed_default_presets
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["dive-form-presets"])
 
@@ -55,7 +57,12 @@ def _to_public(preset: DiveFormPresetReadInternal | dict[str, Any], *, user_uuid
     return DiveFormPresetRead(**{k: v for k, v in data.items() if k not in ("id", "user_id")}, user_uuid=user_uuid)
 
 
-@router.post("/dive-form-preset", response_model=DiveFormPresetRead, status_code=201)
+@router.post(
+    "/dive-form-preset",
+    response_model=DiveFormPresetRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(DiveFormPreset, read="/dive-form-preset/{uuid}"))],
+)
 async def write_dive_form_preset(
     request: Request,
     preset: DiveFormPresetCreate,

@@ -21,6 +21,7 @@ from ...models.checkin_link import CheckinLink
 from ...models.dive import Dive
 from ...models.gear_item import GearItem
 from ...models.gear_service_schedule import GearServiceSchedule
+from ...models.idempotency_hold import IdempotencyHold
 from ...models.invitation import Invitation
 from ...models.invite_request import InviteRequest
 from ...models.user import User
@@ -283,6 +284,16 @@ async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
         "dead session",
         before=lambda db: snapshot_active_accounts(db, now=now),
     )
+
+
+async def purge_expired_idempotency_holds(ctx: dict[Any, Any]) -> str:
+    """Delete `Idempotency-Key` holds made `EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS` ago.
+
+    The longest a session can sit unused: a create a phone queued and first sent that long
+    ago is still answered by its hold, and one retried later than that creates again.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=settings.EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS)
+    return await _purge(delete(IdempotencyHold).where(IdempotencyHold.created_at < cutoff), "expired idempotency hold")
 
 
 async def purge_expired_checkin_links(ctx: dict[Any, Any]) -> str:

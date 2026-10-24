@@ -7245,3 +7245,26 @@ UDDF's `airtemperature` and the CSV like any other. The record rides the dive's
 marks a field only where the document's member still equals it - a value changed in another tool is
 the diver's. Rejected: leaving a marked value out of the core members, which strands a diver's
 weather on the way to another logbook.
+
+## An `Idempotency-Key` hold names its record, in Postgres, for the extended window
+
+A covered create sent with the header writes an `idempotency_hold` row: the account, the request's
+path, the key, a SHA-256 of the body's bytes, the status answered, the new record's uuid and when -
+nothing of the record itself. It goes with the account, and the hourly sweep deletes it
+`EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS` after it was made: how long a session can sit unused, so a
+phone's create retried days later still finds it. Postgres rather than Redis, because the flagship's
+Key Value evicts and restarts at will, and a vanished hold turns a retry into a second record. A
+replay re-reads the record through the route's own read, so it is never a stale copy and never
+namespaced by build: a build that could not find a hold would create again. Per account and per
+path, so another account's key, or the same key on another route, is a hold of its own.
+
+## A hold is claimed before the create and commits with it
+
+`IdempotentCreate` inserts the hold before the route's body runs, and session hooks give it the new
+record's uuid before the commit, which refuses a hold without one: a rolled-back create leaves no
+hold, and a committed one always has its hold. A second request under the key waits on the hold's
+unique index rather than reaching the route's own checks, and answers 409 once the first commits; a
+first that rolls back releases it. Only a success is held: a 4xx rolls the claim back, so a retry
+meets the same validation and a corrected body creates. Rejected: storing the response, which cannot
+commit with a record whose response is built after the commit, and would be a long-lived copy of a
+person's details.

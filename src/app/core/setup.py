@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, text
 
 from ..api.dependencies import get_current_superuser
+from ..api.idempotency import IdempotentReplay, answer_replay
 from ..middleware.client_cache_middleware import ClientCacheMiddleware
 from ..middleware.security_headers_middleware import SecurityHeadersMiddleware
 from ..models import *  # noqa: F403
@@ -372,6 +373,7 @@ def create_application(
     application = FastAPI(lifespan=lifespan, **kwargs)
     application.include_router(router)
     application.add_exception_handler(RequestValidationError, request_validation_error)  # type: ignore[arg-type]
+    application.add_exception_handler(IdempotentReplay, answer_replay)  # type: ignore[arg-type]
 
     if isinstance(settings, FrontendSettings):
         # The web app is served from a different origin than the API (e.g.

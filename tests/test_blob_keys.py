@@ -39,6 +39,7 @@ NOT_BLOB_KEYS = {
     "daily_total.key",  # a metric's breakdown dimension
     "dive_file.parser_key",  # which reader parsed the export
     "dive_profile.parser_key",
+    "idempotency_hold.key",  # a client's Idempotency-Key
     "webauthn_credential.public_key",  # a passkey's public key, stored inline
 }
 

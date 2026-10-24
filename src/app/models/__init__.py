@@ -28,6 +28,7 @@ from .gear_service_record import GearServiceRecord
 from .gear_service_schedule import GearServiceSchedule
 from .gear_set import GearSet
 from .gear_set_item import GearSetItem
+from .idempotency_hold import IdempotencyHold
 from .invitation import Invitation
 from .invite_link import InviteLink
 from .invite_request import InviteRequest

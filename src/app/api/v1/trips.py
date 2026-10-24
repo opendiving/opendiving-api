@@ -71,6 +71,7 @@ from ...services.cache_invalidation import (
 )
 from ...services.dive_list_items import to_dive_list_items
 from ...services.person_links import resolve_people_references
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["trips"])
 
@@ -190,7 +191,12 @@ _trip_cache: OwnedResourceCache[TripReadInternal, TripRead] = OwnedResourceCache
 )
 
 
-@router.post("/trip", response_model=TripRead, status_code=201)
+@router.post(
+    "/trip",
+    response_model=TripRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(Trip, read="/trip/{uuid}"))],
+)
 async def write_trip(
     request: Request,
     trip: TripCreate,

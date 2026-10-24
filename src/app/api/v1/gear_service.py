@@ -43,6 +43,8 @@ from ...crud.crud_gear_service_schedules import (
     schedule_kind_exists,
 )
 from ...crud.unique_keys import write_or_duplicate
+from ...models.gear_service_record import GearServiceRecord
+from ...models.gear_service_schedule import GearServiceSchedule
 from ...schemas.gear_item import GearItemReadInternal
 from ...schemas.gear_service import (
     NEEDS_AN_INTERVAL,
@@ -61,6 +63,7 @@ from ...schemas.gear_service import (
 from ...services.cache_invalidation import invalidate_gear_caches
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
 from ...services.gear_service import recalculate_service_schedule
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["gear"])
 
@@ -152,7 +155,12 @@ async def _owned_gear_item(db: AsyncSession, gear_item_uuid: uuid_pkg.UUID, user
 
 
 # -------------------- schedules --------------------
-@router.post("/gear-service-schedule", response_model=GearServiceScheduleRead, status_code=201)
+@router.post(
+    "/gear-service-schedule",
+    response_model=GearServiceScheduleRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(GearServiceSchedule, read="/gear-service-schedule/{uuid}"))],
+)
 async def write_gear_service_schedule(
     request: Request,
     schedule: GearServiceScheduleCreate,
@@ -417,7 +425,12 @@ async def erase_gear_service_schedule(
 
 
 # -------------------- records --------------------
-@router.post("/gear-service-record", response_model=GearServiceRecordRead, status_code=201)
+@router.post(
+    "/gear-service-record",
+    response_model=GearServiceRecordRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(GearServiceRecord, read="/gear-service-record/{uuid}"))],
+)
 async def write_gear_service_record(
     request: Request,
     record: GearServiceRecordCreate,
