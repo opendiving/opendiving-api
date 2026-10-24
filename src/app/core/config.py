@@ -744,6 +744,14 @@ class DiveConditionsSettings(BaseSettings):
     DIVE_CONDITIONS_OPEN_METEO_RATE_LIMIT_WINDOW_SECONDS: int = config(
         "DIVE_CONDITIONS_OPEN_METEO_RATE_LIMIT_WINDOW_SECONDS", default=3600
     )
+    # What one account may spend on `GET /dive-conditions/lookup`, the dive form's preview, and
+    # the only limit on it that can 429. Cache hits count too. A fifth of the geocoder's: a
+    # lookup the cache cannot answer spends two of the instance's calls above, which the worker
+    # shares, so one diver's evening of logging must leave the worker room.
+    DIVE_CONDITIONS_LOOKUP_RATE_LIMIT_PER_USER: int = config("DIVE_CONDITIONS_LOOKUP_RATE_LIMIT_PER_USER", default=120)
+    DIVE_CONDITIONS_LOOKUP_RATE_LIMIT_WINDOW_SECONDS: int = config(
+        "DIVE_CONDITIONS_LOOKUP_RATE_LIMIT_WINDOW_SECONDS", default=3600
+    )
 
     @field_validator("DIVE_CONDITIONS_PROVIDER")
     @classmethod

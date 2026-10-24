@@ -7226,6 +7226,17 @@ is namespaced by build, so no entry the previous build wrote is read by this one
 version nor a flush is owed. It is not on `DiveRead`, for `gas_use`'s reason - the list is the
 hottest path and draws nothing from it.
 
+## The form's conditions preview writes nothing
+
+`GET /dive-conditions/lookup` answers what the worker would fill for a time and place through the
+worker's own steps - the SQL rounding, the question, the answer cache, the budget and cool-down - so
+the preview equals the save's fill and warms the worker's fetch. It writes nothing, and the web
+submits a previewed field blank: the worker fills and marks it after the save, the mark's only
+writer. Rejected: the form submitting the preview, which lands as the diver's own value, unmarked,
+and outlives a move of the dive; a mark taken from the request, which any client could set on any
+value. Inputs the worker would not ask about, and a request refused for them, answer 200 with every
+value null, so the form empties what it filled; only the instance failing to ask is a 503.
+
 ## An export presents a fetched value as the dive's
 
 A fetched value the diver let stand is the logbook's entry, so it leaves in DiveJSON's core members,

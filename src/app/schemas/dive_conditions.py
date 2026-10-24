@@ -88,3 +88,15 @@ class DiveConditionsRead(_Record):
     weather: ConditionsWeather | None = None
     sea: ConditionsSea | None = None
     filled: ConditionsFilled
+
+
+class DiveConditionsLookupRead(_Record):
+    """What the worker would fill for a time and place, answered without a dive: the dive form's
+    preview, which it shows and never submits. `at` and `utc_offset_minutes` are null, and every
+    member of `filled`, where the inputs cannot be answered."""
+
+    provider: _Name
+    attribution: Annotated[str, Field(description="The source line the data's licence asks for, as markdown links")]
+    at: Annotated[datetime | None, Field(description="The instant described, spelled at `utc_offset_minutes`")] = None
+    utc_offset_minutes: Annotated[int | None, Field(ge=-_OFFSET_BOUND, le=_OFFSET_BOUND)] = None
+    filled: ConditionsFilled

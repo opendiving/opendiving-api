@@ -76,6 +76,12 @@ SEA_VARIABLES = (
 # holds. See *"The conditions client's timeouts"* in `DECISIONS.md`.
 TIMEOUT_SECONDS = 35.0
 DEADLINE_SECONDS = 40.0
+# The dive form's preview (`GET /dive-conditions/lookup`), which a diver is waiting on: five
+# times the slowest warm answer, and two calls inside about ten seconds. A cold archive call is
+# not waited for - the preview is a 503 the form ignores, and the worker's fetch after the
+# save writes the same values.
+PREVIEW_TIMEOUT_SECONDS = 4.0
+PREVIEW_DEADLINE_SECONDS = 5.0
 # An answer is a few kilobytes: nine variables over two days, five over three.
 _MAX_RESPONSE_BYTES = 256 * 1024
 
@@ -158,7 +164,16 @@ def _classify(failed: Failed) -> Refused | CouldNotAsk:
 
 
 async def _ask(
-    kind: str, latitude: float, longitude: float, start: date, end: date, *, extra: dict[str, Any], timezone: str | None
+    kind: str,
+    latitude: float,
+    longitude: float,
+    start: date,
+    end: date,
+    *,
+    extra: dict[str, Any],
+    timezone: str | None,
+    timeout: float,
+    deadline: float,
 ) -> Outcome:
     key = _cache_key(kind, latitude, longitude, start, end, timezone)
     cached = await read_cached(key, _parse)
@@ -192,8 +207,8 @@ async def _ask(
     fetched = await fetch_capped(
         f"{hosts[kind]}{_PATHS[kind]}",
         params=params,
-        timeout=TIMEOUT_SECONDS,
-        deadline=DEADLINE_SECONDS,
+        timeout=timeout,
+        deadline=deadline,
         max_bytes=_MAX_RESPONSE_BYTES,
     )
     if isinstance(fetched, Failed):
@@ -215,7 +230,16 @@ async def _ask(
     return answered
 
 
-async def fetch_weather(latitude: float, longitude: float, start: date, end: date, *, auto_zone: bool) -> Outcome:
+async def fetch_weather(
+    latitude: float,
+    longitude: float,
+    start: date,
+    end: date,
+    *,
+    auto_zone: bool,
+    timeout: float = TIMEOUT_SECONDS,
+    deadline: float = DEADLINE_SECONDS,
+) -> Outcome:
     """The archive's hourly weather from `start` to `end`, inclusive, with wind in m/s like every
     other speed the app stores. `auto_zone` asks the provider to resolve the coordinate's zone -
     days are then read in it, and its name comes back - for a dive that knows only its wall
@@ -228,10 +252,22 @@ async def fetch_weather(latitude: float, longitude: float, start: date, end: dat
         end,
         extra={"wind_speed_unit": "ms"},
         timezone="auto" if auto_zone else None,
+        timeout=timeout,
+        deadline=deadline,
     )
 
 
-async def fetch_sea(latitude: float, longitude: float, start: date, end: date) -> Outcome:
+async def fetch_sea(
+    latitude: float,
+    longitude: float,
+    start: date,
+    end: date,
+    *,
+    timeout: float = TIMEOUT_SECONDS,
+    deadline: float = DEADLINE_SECONDS,
+) -> Outcome:
     """The marine model's hourly sea level, sea temperature and waves from `start` to `end`,
     inclusive, in UTC days."""
-    return await _ask("sea", latitude, longitude, start, end, extra={}, timezone=None)
+    return await _ask(
+        "sea", latitude, longitude, start, end, extra={}, timezone=None, timeout=timeout, deadline=deadline
+    )
