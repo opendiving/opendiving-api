@@ -1122,7 +1122,7 @@ async def _set_dive_fixes(db: AsyncSession, dive: Dive, entry: tuple[float, floa
 
 
 async def _file_id(db: AsyncSession, recording_id: int) -> int:
-    return (await db.execute(select(DiveFile.id).where(DiveFile.recording_id == recording_id))).scalars().first()
+    return (await db.execute(select(DiveFile.id).where(DiveFile.recording_id == recording_id))).scalar_one()
 
 
 async def _promote(db: AsyncSession, diver: User, dive: Dive, rid: uuid_pkg.UUID) -> None:
