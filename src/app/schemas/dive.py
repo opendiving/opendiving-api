@@ -342,25 +342,21 @@ class DiveTechScalars(BaseModel):
     """The entry and exit fixes a dive computer recorded and the diver never typed.
 
     Its own mixin rather than fields on `DiveBase` precisely so it lands on the read
-    shapes and *not* on `DiveCreate`/`DiveUpdate`: these are written only by the import
-    path (`services/dive_files.py::store_recording_file`), and `DiveCreate`'s `extra="forbid"`
-    then makes an attempt to set one a 422 rather than a silently accepted fiction. On the
-    dive rather than the recording because the format keeps its positions there.
+    shapes and *not* on `DiveCreate`/`DiveUpdate`: these are written only from files and logbook
+    documents, and `DiveCreate`'s `extra="forbid"` then makes an attempt to set one a 422 rather
+    than a silently accepted fiction. On the dive rather than the recording because the format
+    keeps its positions there.
 
-    A diver could in principle type a position, but nothing offers to, so these travel the
-    import-owned path. That has one consequence worth stating, because it is what would
-    break first if a form ever did offer them: an upload that **creates** a primary
-    recording writes every field of this mixin outright, `None` included
-    (`store_tech_scalars`), so it overwrites whatever these hold. Every other file of that
-    recording fills instead and cannot overwrite (`fill_tech_scalars`) - but that is a
-    property of which write runs, not a protection these fields have, and the condition is
-    "this upload created the recording" rather than "the recording had no files"
-    (`rederive_recording` on its `change`). Adding a hand-set position means taking it off this
-    mixin, not relying on the fill or adding a special case to the outright write.
+    **Each fix is the first of the dive's files' that has one** (`derive_dive_fixes`), derived
+    again whenever a file is added or removed, and cleared then where none has one; a dive that
+    has never held a file keeps what its logbook document gave. A diver could in principle type
+    a position, but nothing offers to - and a form that did would have its value replaced by
+    the next file attached, so adding a hand-set position means taking it off this mixin.
 
     The membership is load-bearing in the other direction too - `TECH_SCALAR_FIELDS` is
     read off `model_fields`, so a field added here is written by the import and picked up
-    by `backfill_tech_fields` on its next run without either being edited.
+    by `backfill_tech_fields` on its next run without either being edited - and it is a
+    `dive_file` column of the same name too.
 
     On `DiveRead` rather than `DiveReadWithMixtures`, unlike `recordings`/`gas_use`: those
     are kept off the list response because each costs `_cached_read_dives` an extra query,
@@ -679,6 +675,28 @@ class DiveFileInfo(PublicUUIDSchema):
     byte_size: int
     parser_key: Annotated[str, Field(description="Identifier of the parser that read this file, e.g. `suunto_xml`")]
     updated_at: datetime | None = None
+    entry_latitude: Annotated[
+        float | None,
+        Field(
+            default=None,
+            examples=[28.437455],
+            description="Latitude of this file's own entry fix. The dive's `entry_latitude`/`entry_longitude` "
+            "are the first of its files' that has one, by `attach_order`",
+        ),
+    ]
+    entry_longitude: Annotated[
+        float | None,
+        Field(default=None, examples=[34.458997], description="Longitude of this file's own entry fix"),
+    ]
+    attach_order: Annotated[
+        int,
+        Field(
+            examples=[0],
+            description="This file's 0-based rank among all of the dive's files, across every recording, in "
+            "the order they were attached - the order the dive's fixes are taken in. A file attached later "
+            "ranks after every one here",
+        ),
+    ]
 
 
 class RecordingDevice(BaseModel):
@@ -818,7 +836,10 @@ class RecordingRead(RecordingReadouts):
             "dive whose start is a bare date means its axis counts from an unknown time that day.",
         ),
     ]
-    files: Annotated[list[DiveFileInfo], Field(default_factory=list, description="In attach order")]
+    files: Annotated[
+        list[DiveFileInfo],
+        Field(default_factory=list, description="In attach order"),
+    ]
     profile: Annotated[
         DiveProfileInfo | None,
         Field(default=None, description="Summary of this recording's samples, or null when it has none"),

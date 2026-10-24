@@ -186,6 +186,7 @@ def make_file_row(row_id: int, **overrides: Any) -> ExportFileRow:
         "content_type": "application/json",
         "byte_size": 1024,
         "parser_key": "suunto_json",
+        "attach_order": 0,
     }
     defaults.update(overrides)
     return ExportFileRow(id=row_id, info=DiveFileInfo(**defaults))

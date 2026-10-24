@@ -1264,10 +1264,10 @@ Separate from `backfill_dive_profiles` because the selection differs: its versio
 a current profile; these columns have no version, so every recording with a file is a candidate each
 run.
 
-It fills each recording's readouts, device and settings columns; the dive's entry and exit fixes and
-its mixtures come from the primary alone. It fills blanks and never clears a reading the file lacks:
-a logbook-import match can fill one without bytes (*"A profile has one of three provenances, and a
-recording need not have a file"*).
+It fills each recording's readouts, device and settings columns, and the dive's mixtures from the
+primary alone; it rewrites each file's own fixes and derives the dive's without clearing. It fills
+blanks and never clears a reading the file lacks: a logbook-import match can fill one without bytes
+(*"A profile has one of three provenances, and a recording need not have a file"*).
 
 Mixture fields (`po2_limit`, `role`) are best-effort via `merge_mixture_fields` (pure). Saves
 replace mixtures wholesale, so a stored `id` cannot name its parsed cylinder and position alone is
@@ -2005,12 +2005,13 @@ export with no `Gases` block leaves every fraction `None`, so a swap would put o
 The mixture half is fill-only — `po2_limit` and `role` are written only where read — because both
 are client-writable (`DiveMixtureCreate`, `PATCH /dive/{uuid}`), and a reader's `None` means the
 file did not record it. `gas_number` is `label_cylinders`' alone. The dive's own scalars take the
-same rule (`fill_tech_scalars`), for the logbook import's reason in *"The tech-field backfill is a
-second script, not a flag on the profile one"*.
+same fill-only rule, for the logbook import's reason in *"The tech-field backfill is a second
+script, not a flag on the profile one"*; the dive's fixes are derived from its files instead (*"A
+dive's fixes are the first of its files' that has one"*).
 
 ## A parsed value the database refuses must not take the upload — or the backfill run — with it
 
-`store_tech_scalars` writes inside `store_recording_file`'s transaction, where `IntegrityError`
+`store_recording_file` writes the parsed values inside one transaction, where `IntegrityError`
 becomes
 `DiveFileConflictError("This dive's recordings changed while this upload was in flight. Please try again.")`
 — wrong for a `CHECK` violation (a 500 on the `noop` branch). Guards:
@@ -2084,16 +2085,17 @@ reach existing dives through a re-upload, because `should_extract` still answers
 `backfill_tech_fields` re-reads every candidate on every run so that it needs no version to bump; a
 fix of that shape ships with a backfill run, not with instructions to re-upload.
 
-## A dive's fixes stay as the reader that placed them chose
+## A dive's fixes are the first of its files' that has one
 
-A release that changes how the reader chooses a dive's entry or exit fix moves no fix already
-stored. The earlier fix is the previous rule's answer rather than a corrupt value, and every re-read
-of the files - a repeat upload, the profile backfill, the tech-field backfill - fills a blank fix
-and never overwrites one. What re-derives the primary recording outright moves it: the dive or its
-file deleted and uploaded again, a file removed from the primary, another recording made primary. A
-fold moves the entry to the earlier record's dive's and the exit to the later record's. Rejected: a
-backfill that rewrites every stored fix the dive's files yield, a data path the flagship's one
-account does not need.
+Each of `dive`'s entry and exit fixes, taken separately, is the first non-null one among its files
+in attach order (`dive_file.id`) across every recording (`derive_dive_fixes`). The detail read
+publishes each file's rank as `attach_order` beside its entry fix, so the form previews conditions
+by the same rule. Rejected: recordings first, since the form cannot know which recording a picked
+file joins, only that it ranks after every stored one; so a promotion moves no fix. An attach or a
+deletion clears a fix no file has; a merge, a file-less recording's deletion and the data paths keep
+it, the only home of one a logbook document gave. Merged files keep their ids, so the earlier upload
+wins whichever dive held it. The worker reads unread files (`read_unread_file_fixes`). Response
+caches are namespaced by build, so the reshaped read owes no key version.
 
 ## Real dive-computer files are committed, and only the cases no file shows are written
 
@@ -2608,10 +2610,9 @@ response is rejected: a fix pair is not a site — entry and exit are two places
 through, and folding either onto the shared site discards the other — and a prefill is not storage,
 since most imports go into an existing site.
 
-The fields sit on `DiveTechScalars` (`schemas/dive.py`), so `TECH_SCALAR_FIELDS`,
-`store_tech_scalars`, `DiveRead`, the attach path and `backfill_tech_fields` pick them up. That
-write sets every mixin field, `None` included, on every attach, so a position that must survive
-re-attach comes off the mixin.
+The fields sit on `DiveTechScalars` (`schemas/dive.py`), so `TECH_SCALAR_FIELDS`, `DiveRead`,
+`dive_file`'s own columns and `backfill_tech_fields` pick them up. Every file added or removed
+derives them again, so a position that must survive an attach comes off the mixin.
 
 The pair rule is a `CHECK` here, not a `WholeCoordinatePair` validator as on `dive_site`: nobody
 types these, so a half pair is a reader bug the database refuses.
@@ -2976,9 +2977,9 @@ picker; the density a computer was set to, `en13319` among them, is the recordin
 `OTHER` (`NULL` means not recorded) and no `CHECK`, per `GearItem.type`. `altitude` is `Integer`
 metres under `ck_dive_altitude_range` (`-450..6500`), which needs a `_DIVE_CONSTRAINT_MESSAGES`
 entry (`api/v1/dives.py`) or the 422 misdescribes itself. Neither is a `DiveTechScalars` field,
-since `store_tech_scalars` overwrites every field on re-attach, and the prefill seeds each only as
-the document states it of the dive, never from a recording's `salinity`. `METERS_PER_BAR` stays
-10.0: a column `NULL` on most rows would step one diver's trend by 3%. UDDF carries `altitude`
+since an attach derives every field again from the files, and the prefill seeds each only as the
+document states it of the dive, never from a recording's `salinity`. `METERS_PER_BAR` stays 10.0: a
+column `NULL` on most rows would step one diver's trend by 3%. UDDF carries `altitude`
 (`informationbeforediveType`) but no `water_type`, 3.2.2 having no per-dive salinity; `dives.csv`
 gains `water_type` and `altitude_m`. Any future `GET /dives` filter must join `_cached_read_dives`'
 `key_prefix`.
@@ -6272,17 +6273,17 @@ dive; import applies same-recording then strict, never loose.
 ## A second file of one recording fills, and never overwrites
 
 Everything a file says about a recording comes from the first file that recorded it:
-`fill_device_fields`, `fill_gate_figures`, `fill_start`, `fill_tech_scalars`, `fill_channels`,
-`fill_dive_mixtures`; `git grep -n "def fill_" -- src/app/services` is the list. Rejected: later
-wins, losing corrections. Profiles fill by channel, never by sample, a FIT file's channels last
-(`extract_recording`). Fills are a `COALESCE` per column except `fill_start`, whose two columns hold
-one value (filling a NULL `utc_offset_minutes` also converts the stored wall clock to an instant),
-and the dive's cylinders, which fill by the labelling's pairs (*A dive's cylinders fill from
-whichever recording pairs with them*). Gate figures are the exception: every re-derivation rewrites
-them (`store_gate_figures`). The dive's scalars are the primary recording's. `rederive_recording`
-requires a `RecordingChange`: `CREATED` and `REMOVED` write readouts and scalars outright, `JOINED`
-and `REREAD` fill them; `_repeat_upload` and the backfill pass `REREAD`, `delete_dive_file`
-`REMOVED`.
+`fill_device_fields`, `fill_gate_figures`, `fill_start`, `fill_channels`, `fill_dive_mixtures`;
+`git grep -n "def fill_" -- src/app/services` is the list, less `fill_tech_scalars`, which fills a
+file-less dive from a document. Rejected: later wins, losing corrections. Profiles fill by channel,
+never by sample, a FIT file's channels last (`extract_recording`). Fills are a `COALESCE` per column
+except `fill_start`, whose two columns hold one value (filling a NULL `utc_offset_minutes` also
+converts the stored wall clock to an instant), and the dive's cylinders, which fill by the
+labelling's pairs (*A dive's cylinders fill from whichever recording pairs with them*). Gate figures
+are the exception: every re-derivation rewrites them (`store_gate_figures`). The dive's fixes are
+not filled (*"A dive's fixes are the first of its files' that has one"*). `rederive_recording`
+requires a `RecordingChange`: `CREATED` and `REMOVED` write readouts outright, `JOINED` and `REREAD`
+fill them; `_repeat_upload` and the backfill pass `REREAD`, `delete_dive_file` `REMOVED`.
 
 ## A profile has one of three provenances, and a recording need not have a file
 
@@ -6325,11 +6326,14 @@ dives'. The gap stays empty: `join_profiles` is not `fill_channels`; pressure jo
 markers all stay. Provenance is `merge`, so `should_extract` never re-extracts and a later attach or
 file deletion leaves the profile and gate figures alone (`_keeps_stored_profile`); files stay. A
 fold's `submerged_time` and `avg_depth` are its time in the water; side by side they stand;
-`max_depth` is the deepest reading; `None` means leave alone; `start_time` stays,
-`refresh_tech_scalars` uncalled; the absorbed record's device, settings and surface pressure fill
-the survivor's blanks; its CNS, OTU, paired tank pressures and fixes go by side (`_write_fold`,
-`fold_fixes`). Rejected: fill-only, which ends the dive at the restart and halves its SAC; the cost:
-a value the diver typed on the surviving dive's other side is replaced. An `avg_depth` failing
+`max_depth` is the deepest reading; `None` means leave alone; `start_time` stays; the absorbed
+record's device, settings and surface pressure fill the survivor's blanks; its CNS, OTU and paired
+tank pressures go by side (`_write_fold`); the fixes are derived from the merged files in attach
+order without clearing (`derive_dive_fixes`), not by side - one rule is what a client can predict,
+and a record cut off underwater has no surfacing fix, so the later half's file normally gives the
+exit. Where the first half's file carries one and was uploaded first, the fold exits at the restart.
+Rejected: fill-only, which ends the dive at the restart and halves its SAC; the cost: a value the
+diver typed on the surviving dive's other side is replaced. An `avg_depth` failing
 `ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers` precedes the join,
 keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
 as an arrival does, an empty absorbed row not appended; moved profiles use
@@ -6339,12 +6343,12 @@ within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not r
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
 `_fill_recording` in the import writer writes two things that belong to the dive, not the matched
-recording, when the second reading brings no file: the entry and exit fixes (`fill_tech_scalars`)
-and the blanks of the cylinders (`fill_dive_mixtures`). Both go through the primary recording alone:
-the dive's fixes come from its primary, and no check can tell a file-less second reading from a
-logbook re-imported over a value the diver cleared, so the refill it risks is confined to the
-primary. A reading that brings its file joins the recording and fills through `rederive_recording`
-on any ordinal. The readouts are the matched recording's own either way.
+recording, when the second reading brings no file: the entry and exit fixes (`fill_tech_scalars`,
+which writes only to a dive holding no read file) and the blanks of the cylinders
+(`fill_dive_mixtures`). Both go through the primary recording alone: no check can tell a file-less
+second reading from a logbook re-imported over a value the diver cleared, so the refill it risks is
+confined to the primary. A reading that brings its file joins the recording and fills through
+`rederive_recording` on any ordinal. The readouts are the matched recording's own either way.
 
 So `PlannedRecordingMatch` carries `ordinal`: `None` on an `attach`, where no stored recording is
 named and the writer computes the slot with `next_ordinal`, and the file-less branch returns before
@@ -6372,27 +6376,6 @@ serves `RecordingProfileRead`, a subclass adding `provenance`, and `to_recording
 `provenance_of` reads anything but the sentinels as `FILE`, so
 `test_every_unreproducible_provenance_has_a_wire_value` asserts its keys are
 `UNREPRODUCIBLE_PROVENANCES`.
-
-## A deletion re-derives the dive's readings only where it touched the primary recording
-
-`refresh_tech_scalars` rewrites every `DiveTechScalars` field - the entry and exit fixes - outright
-from ordinal 0. After a secondary's file is deleted on a multi-recording dive it is a loss: a
-file-less logbook-import primary (`services/logbook_import/writer.py`) gives `read_recording`
-nothing, so every field goes `None`; a primary with files loses a position only the document
-supplied.
-
-So it takes a required `touched_primary`; `False` is a no-op. The answer cannot be read inside,
-`renumber_ordinals` having closed the gap: `delete_dive_file` uses the ordinal it reads before the
-deleting branch, `erase_dive_recording` asks `primary_recording_ids` before `delete_recording`, a
-promotion answers `True`. Required, not defaulted, like `rederive_recording`'s `change`.
-
-Rejected: filling instead of clearing when the primary has no files
-(`test_the_last_file_takes_its_recording_and_the_dives_readings` pins the last file taking the
-reading), and gating on the primary having files, which misses the second shape. A promotion onto a
-file-less recording still clears: the diver chose it.
-
-Pinned in `tests/test_dive_recordings_rows.py` by `TestDeletingASecondComputersFile`,
-`TestDeletingARecording` and `TestPromotingARecording`.
 
 ## A stored vocabulary is read back as a string
 

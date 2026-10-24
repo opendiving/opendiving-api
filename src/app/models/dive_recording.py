@@ -28,8 +28,7 @@ class DiveRecording(Base, PublicUUIDMixin, TimestampMixin):
     **Ordinal 0 is primary**, which is order rather than a flag - the same choice the
     format makes, and for the format's reason: a flag every writer has to set is a value
     every reader has to default. The primary recording is the one a single-profile
-    consumer takes (the app's own UDDF export does exactly this), and it is the only one
-    whose file writes the dive's entry and exit fixes.
+    consumer takes (the app's own UDDF export does exactly this).
 
     **`user_id` is denormalized off `dive` and the match query is why.** Every gate in
     `services/dive_recordings.py` runs per account over `(user_id, start_time)`, comparing

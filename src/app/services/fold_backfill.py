@@ -2,11 +2,11 @@
 
 `POST /dives/merge` once filled every value a fold's two records share from the surviving one
 first, so a dive merged then ends on the readings at the computer's restart: its end pressure,
-`cns_end`, `otu_end` and exit fix are the first half's while its time and depth cover both.
+`cns_end` and `otu_end` are the first half's while its time and depth cover both.
 This rewrites those values the way `merge_dives` now writes them.
 
 **The inputs are what a merge leaves behind.** The absorbed dive is soft-deleted, never purged,
-and keeps its cylinders and fixes; it is found by its `deleted_at`, written in the same request
+and keeps its cylinders; it is found by its `deleted_at`, written in the same request
 as the folded profile's `created_at`. Its recording row is gone, so the absorbed record's CNS and
 OTU come from its files, which moved onto the folded recording and are told apart from the
 surviving record's by the start each one states.
@@ -21,6 +21,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from pydantic import BaseModel
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,11 +30,10 @@ from ..models.dive import Dive
 from ..models.dive_mixture import DiveMixture
 from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
-from ..schemas.dive import DiveTechScalars
 from . import blob_store
 from .cache_invalidation import invalidate_dive_caches
 from .dive_files import LoadedDiveFile, extract_file, extract_recording, fold_tank_pressures, load_recording_files
-from .dive_merge import END_READOUTS, START_READOUTS, fold_fixes
+from .dive_merge import END_READOUTS, START_READOUTS
 from .dive_profiles import MERGE_PARSER_KEY
 from .dive_recordings import SAME_RECORDING_START_TOLERANCE, delta_seconds
 
@@ -48,8 +48,8 @@ MERGE_WINDOW = timedelta(seconds=60)
 class FoldBackfillReport:
     examined: int = 0
     dives_updated: int = 0
-    # Folds whose cylinders and fixes are left, each logged by dive: their readouts are still
-    # repaired from the files.
+    # Folds whose cylinders are left, each logged by dive: their readouts are still repaired
+    # from the files.
     absorbed_not_found: int = 0
     beside_another_recording: int = 0
     failed: int = 0
@@ -68,8 +68,8 @@ class _Candidate:
     user_id: int
 
 
-class _FoldedDive(DiveTechScalars):
-    """A dive's logged start beside its fixes: what the replay reads off either half."""
+class _FoldedDive(BaseModel):
+    """A dive's logged start: what the replay reads off either half."""
 
     start_time: datetime
     utc_offset_minutes: int | None = None
@@ -121,7 +121,7 @@ async def backfill_folds(db: AsyncSession, *, user_id: int | None = None, dry_ru
         await db.rollback()
         return report
     await db.commit()
-    # Cached dive reads embed the readouts, the fixes and the cylinders.
+    # Cached dive reads embed the readouts and the cylinders.
     for touched in touched_user_ids:
         await invalidate_dive_caches(touched)
     return report
@@ -135,7 +135,7 @@ async def _repair(db: AsyncSession, row: _Candidate, report: FoldBackfillReport)
         else await _repair_readouts(db, recording_id=row.id, start_time=row.start_time, offset=row.utc_offset_minutes)
     )
 
-    # Beside another recording, the dive's cylinders and fixes may be that recording's - a
+    # Beside another recording, the dive's cylinders may be that recording's - a
     # second computer's, or a later merge's that moved the fold here - and nothing stored says
     # which, so they are left for the diver. Alone, the fold is the dive's whole account.
     recordings = (
@@ -143,7 +143,7 @@ async def _repair(db: AsyncSession, row: _Candidate, report: FoldBackfillReport)
     ).scalar_one()
     if recordings > 1:
         logger.warning(
-            "Leaving dive %s's cylinders and fixes: it holds another recording beside its fold (recording %s)",
+            "Leaving dive %s's cylinders: it holds another recording beside its fold (recording %s)",
             row.dive_id,
             row.id,
         )
@@ -152,7 +152,7 @@ async def _repair(db: AsyncSession, row: _Candidate, report: FoldBackfillReport)
     absorbed_id = await _absorbed_dive_id(db, user_id=row.user_id, merged_at=row.created_at)
     if absorbed_id is None:
         logger.warning(
-            "Leaving dive %s's cylinders and fixes: no single deleted dive matches its fold (recording %s)",
+            "Leaving dive %s's cylinders: no single deleted dive matches its fold (recording %s)",
             row.dive_id,
             row.id,
         )
@@ -177,11 +177,6 @@ async def _repair(db: AsyncSession, row: _Candidate, report: FoldBackfillReport)
             for column, value in values.items()
             if getattr(before[mixture_id], column) != value
         )
-
-    fixes = fold_fixes(survivor, absorbed, survivor_first=survivor_first)
-    if fixes:
-        await db.execute(update(Dive).where(Dive.id == row.dive_id).values(**fixes))
-        changes.extend(f"{column}: {getattr(survivor, column)} -> {value}" for column, value in fixes.items())
     return changes
 
 
@@ -238,10 +233,6 @@ async def _dive(db: AsyncSession, dive_id: int) -> _FoldedDive:
             select(
                 Dive.start_time,
                 Dive.utc_offset_minutes,
-                Dive.entry_latitude,
-                Dive.entry_longitude,
-                Dive.exit_latitude,
-                Dive.exit_longitude,
             ).where(Dive.id == dive_id)
         )
     ).one()

@@ -14,6 +14,7 @@ from .functions import (
     purge_expired_tokens,
     purge_expired_user_sessions,
     purge_unserved_map_tiles,
+    read_dive_file_fixes,
     record_sign_in_totals,
     send_gear_service_digests,
     send_renewal_reminders,
@@ -81,6 +82,11 @@ class WorkerSettings:
         # is sized against the other two sending beside it.
         cron(send_renewal_reminders, hour=settings.GEAR_SERVICE_DIGEST_HOUR, minute=0),
         cron(send_year_in_review, hour=settings.GEAR_SERVICE_DIGEST_HOUR, minute=0),
+        # At start, so the stored files of an upgraded instance give their fixes up within
+        # minutes of the deploy rather than at the first hour mark; hourly after, for the files
+        # an archive restores unread. Idempotent - a file is read once - so a restart loop costs
+        # a query that finds nothing. At :15, clear of the sweeps on the hour.
+        cron(read_dive_file_fixes, minute=15, run_at_startup=True),
         # Every minute, with arq's own per-tick ids. Overlap is held off by the run's own Redis
         # lock rather than a fixed `job_id`: a run killed mid-flight by a deploy would park a
         # failed result under that id for `keep_result`, an hour, and silence the cron. Off

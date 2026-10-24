@@ -24,6 +24,7 @@ from enum import StrEnum
 
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Subquery
 from uuid6 import uuid7
 
 from ..core.utils.datetime_offset import combine_start_time
@@ -913,23 +914,6 @@ async def make_primary(db: AsyncSession, *, recording_id: int, dive_id: int) -> 
         await db.execute(update(DiveRecording).where(DiveRecording.id == row_id).values(ordinal=position))
 
 
-async def primary_recording_ids(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, int]:
-    """Each dive's ordinal-0 recording id, for the surfaces that take one profile.
-
-    The app's own UDDF export and the tech scalars are both "the primary recording's", which
-    is the reference writer's rule and this app's: a document with one profile per dive
-    carries the one a reader would show by default rather than an arbitrary one.
-    """
-    if not dive_ids:
-        return {}
-    rows = await db.execute(
-        select(DiveRecording.dive_id, DiveRecording.id).where(
-            DiveRecording.dive_id.in_(set(dive_ids)), DiveRecording.ordinal == 0
-        )
-    )
-    return {row.dive_id: row.id for row in rows}
-
-
 async def recording_counts_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, int]:
     """How many recordings each dive holds, for the dive list; a dive with none is absent."""
     if not dive_ids:
@@ -1036,16 +1020,20 @@ def _read_deco_model(row: DiveRecording) -> RecordingDecoModel | None:
 async def get_file_infos_for_recordings(
     db: AsyncSession, *, recording_ids: Sequence[int]
 ) -> dict[int, list[DiveFileInfo]]:
-    """Each recording's stored files, in attach order.
+    """Each recording's stored files, in attach order, each with its rank across the whole dive.
 
     `id` orders them, which is attach order by construction - a later upload gets a higher
     sequence value - and it is what the fill rule means by "the first file that recorded
-    it", a FIT file's profile channels apart.
+    it", a FIT file's profile channels apart. `attach_order` is the same order taken across
+    every recording of the dive, which is the order `derive_dive_fixes` takes the dive's fixes
+    in: a client applies that rule to these ranks, so the two have to agree.
     """
     if not recording_ids:
         return {}
+    ranks = attach_orders(recording_ids)
     stmt = (
         select(
+            ranks.c.attach_order,
             DiveFile.recording_id,
             DiveFile.uuid,
             DiveFile.content_type,
@@ -1053,7 +1041,10 @@ async def get_file_infos_for_recordings(
             DiveFile.original_filename,
             DiveFile.parser_key,
             DiveFile.updated_at,
+            DiveFile.entry_latitude,
+            DiveFile.entry_longitude,
         )
+        .join(ranks, ranks.c.id == DiveFile.id)
         .where(DiveFile.recording_id.in_(set(recording_ids)))
         .order_by(DiveFile.recording_id, DiveFile.id)
     )
@@ -1067,6 +1058,24 @@ async def get_file_infos_for_recordings(
                 original_filename=row.original_filename,
                 parser_key=row.parser_key,
                 updated_at=row.updated_at,
+                entry_latitude=row.entry_latitude,
+                entry_longitude=row.entry_longitude,
+                attach_order=row.attach_order,
             )
         )
     return infos
+
+
+def attach_orders(recording_ids: Sequence[int]) -> Subquery:
+    """Each file's 0-based rank by `dive_file.id` among *all* its dive's files - of every
+    recording of every dive these recordings belong to, so a caller naming only some of a
+    dive's recordings still gets the dive-wide rank. Joined on `id`."""
+    dive_ids = select(DiveRecording.dive_id).where(DiveRecording.id.in_(set(recording_ids)))
+    return (
+        select(
+            DiveFile.id,
+            (func.row_number().over(partition_by=DiveFile.dive_id, order_by=DiveFile.id) - 1).label("attach_order"),
+        )
+        .where(DiveFile.dive_id.in_(dive_ids))
+        .subquery()
+    )

@@ -325,6 +325,7 @@ def _file_info(original_filename: str) -> DiveFileInfo:
         content_type="application/xml",
         byte_size=10,
         parser_key="suunto_xml",
+        attach_order=0,
     )
 
 

@@ -31,6 +31,7 @@ from ...services import blob_store, map_tiles
 from ...services.blob_keys import BLOB_KEY_COLUMNS
 from ...services.checkin_links import swept_checkin_link_predicate
 from ...services.dive_conditions import run_dive_conditions
+from ...services.dive_files import FIX_READ_BATCH_SIZE, read_unread_file_fixes
 from ...services.email_service import (
     send_gear_service_digest_email,
     send_renewal_reminder_email,
@@ -973,6 +974,23 @@ async def fetch_dive_conditions(ctx: dict[Any, Any]) -> str:
     `services.dive_conditions.run_dive_conditions`.
     """
     return await run_dive_conditions()
+
+
+async def read_dive_file_fixes(ctx: dict[Any, Any]) -> str:
+    """Read the fixes of every stored file not yet read, a batch per transaction until none is
+    left, and derive their dives' fixes - see `read_unread_file_fixes`."""
+    read = 0
+    while True:
+        async with local_session() as db:
+            batch = await read_unread_file_fixes(db, limit=FIX_READ_BATCH_SIZE)
+        read += batch
+        if batch < FIX_READ_BATCH_SIZE:
+            break
+
+    if read == 0:
+        return "No dive files with unread fixes"
+    logger.info("Read the fixes of %d dive file(s)", read)
+    return f"Read the fixes of {read} dive file(s)"
 
 
 # -------- base functions --------
