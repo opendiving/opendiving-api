@@ -1,7 +1,7 @@
 """a create under an Idempotency-Key holds the record it made
 
 Revision ID: 882d72990099
-Revises: f85e5dec6bf9
+Revises: 1f96cf18d60e
 Create Date: 2026-10-24 15:32:03.623767
 
 A new table, and nothing else: a request without the header writes no row, so every existing
@@ -16,7 +16,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "882d72990099"
-down_revision: str | None = "f85e5dec6bf9"
+down_revision: str | None = "1f96cf18d60e"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
