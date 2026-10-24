@@ -101,18 +101,22 @@ from ...schemas.authentication_request import (
     AuthenticationRequestRead,
 )
 from ...schemas.user import UserBootstrapCreateInternal, UserCreateInternal, UserReadInternal
+from ...schemas.user_session import IdleTimeout
 from ...schemas.webauthn_credential import PasskeySignInOptions, PasskeySignInVerifyRequest
 from ...services.auth_service import (
     AuthenticatedUser,
     DeletionPending,
+    IssuedTokens,
     OnboardingRequired,
     issue_tokens,
     resolve_identity,
+    set_refresh_cookie,
 )
 from ...services.default_tags import seed_default_tags
 from ...services.dive_form_presets import seed_default_presets
 from ...services.email_service import send_magic_link_email
 from ...services.passkey_service import finish_sign_in, start_sign_in
+from ...services.refresh_grace import held_successor, hold_successor
 from ...services.registration_gate import admit_or_refuse, refuse_a_stale_join_link, refuse_uninvited
 from ...services.user_pictures import import_google_avatar, seed_google_avatar
 
@@ -153,6 +157,7 @@ async def _start_onboarding_or_sign_in(
     db: AsyncSession,
     context: RequestContext,
     via: str | None = None,
+    idle_timeout: IdleTimeout = IdleTimeout.STANDARD,
 ) -> AuthOutcome:
     """Turn a verified identity into a signed-in session, an onboarding handoff, or the
     offer of a deleted account back.
@@ -189,9 +194,20 @@ async def _start_onboarding_or_sign_in(
     through, if any. It matters only on the onboarding branch, where it can admit an
     uninvited address and is signed into the onboarding token for the completion to count;
     an existing account signing in through either kind of link is simply signed in.
+
+    `idle_timeout` is the window a sign-in asked for, and only the six-digit code asks: it
+    is the one way in a native client can take. It reaches the first branch alone - an
+    onboarding handoff mints no session, and `POST /auth/complete` starts a `standard` one.
     """
     if isinstance(outcome, AuthenticatedUser):
-        tokens = await issue_tokens(response, outcome.user["uuid"], db=db, context=context, user_id=outcome.user["id"])
+        tokens = await issue_tokens(
+            response,
+            outcome.user["uuid"],
+            db=db,
+            context=context,
+            user_id=outcome.user["id"],
+            idle_timeout=idle_timeout,
+        )
         await record_auth_event(
             db,
             event_type=AuthEventType.SIGN_IN_SUCCEEDED,
@@ -199,7 +215,7 @@ async def _start_onboarding_or_sign_in(
             user_id=outcome.user["id"],
             provider=outcome.provider,
         )
-        return AuthOutcome(status="authenticated", **tokens)
+        return AuthOutcome(status="authenticated", **tokens.body())
 
     if isinstance(outcome, DeletionPending):
         # The row's own address rather than whatever was verified to get here: on the
@@ -544,7 +560,9 @@ async def verify_email_code(
         raise UnauthorizedException(_CODE_REJECTED)
 
     outcome = await resolve_identity(db=db, provider="email", email=auth_request["email"], context=context)
-    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context, via=auth_request.get("via"))
+    return await _start_onboarding_or_sign_in(
+        response, outcome, db=db, context=context, via=auth_request.get("via"), idle_timeout=body.idle_timeout
+    )
 
 
 @router.post("/google", response_model=AuthOutcome)
@@ -837,7 +855,7 @@ async def complete_profile(
     await blacklist_token(body.onboarding_token, db)
 
     tokens = await issue_tokens(response, created_user.uuid, db=db, context=context, user_id=created_user.id)
-    return AuthOutcome(status="authenticated", **tokens)
+    return AuthOutcome(status="authenticated", **tokens.body())
 
 
 @router.post("/restore", response_model=AuthOutcome)
@@ -912,7 +930,7 @@ async def restore_account(
     await record_auth_event(db, event_type=AuthEventType.ACCOUNT_RESTORED, context=context, user_id=locked.id)
 
     tokens = await issue_tokens(response, user_uuid, db=db, context=context, user_id=locked.id)
-    return AuthOutcome(status="authenticated", **tokens)
+    return AuthOutcome(status="authenticated", **tokens.body())
 
 
 def _elapsed(since: datetime) -> str:
@@ -929,34 +947,38 @@ def _elapsed(since: datetime) -> str:
     return str(timedelta(seconds=round(seconds)))
 
 
-# How long after a token was revoked a re-presentation stops being explicable as the
-# documented two-tab rotation race and starts being a replay worth acting on.
-#
-# The race resolves in **milliseconds** - two tabs refreshing at the same instant, the
-# loser landing on this exact branch - and is benign, documented and not especially rare
-# (`DECISIONS.md` §"A reused refresh token is a `WARNING`", *The hard part: telling theft
-# from the documented race*). Treating it as a replay would put that same cry-wolf defect
-# straight into the audit table, which is what `token_blacklist.revoked_at` was added to
-# fix in the log line - and now costs more than a spurious row, since past this line the
-# session is revoked and a diver whose two tabs collided would be signed out for it.
-#
-# Five seconds is three orders of magnitude above the race and negligible against theft,
-# which is replayed minutes or hours later. **The `WARNING` is not conditioned on it**:
-# that fires for every presentation, gap attached, so every presentation stays
-# visible. What sits past the threshold is the pair of
-# consequences that assume replay-not-race - the revocation and the audit row.
-_REFRESH_REPLAY_THRESHOLD = timedelta(seconds=5)
+def _reuse_grace() -> timedelta:
+    """How long after a token was revoked a re-presentation stops being explicable as a
+    retried refresh or the documented rotation race, and starts being a replay worth acting
+    on - `REFRESH_TOKEN_REUSE_GRACE_SECONDS`, read per call so a test can move it.
+
+    Two benign things land a spent token here. The rotation race resolves in
+    **milliseconds** - two tabs refreshing at the same instant, the loser presenting the
+    cookie the winner has just spent. A retry takes seconds - a client whose reply was lost
+    on a bad connection, presenting the same cookie again. A stolen cookie is replayed
+    minutes or hours later. Treating either benign case as a replay would sign a diver out
+    for their own tabs or their own boat wifi, and put a cry-wolf row in the audit table
+    (`DECISIONS.md` §"A reused refresh token is a `WARNING`").
+
+    A minute covers a retry on a twenty-second request timeout with room for one more, and
+    stays far below a theft. **The `WARNING` is not conditioned on it**: that fires for every
+    presentation, gap attached. What sits past the grace is the pair of consequences that
+    assume replay-not-retry - the revocation and the audit row.
+    """
+    return timedelta(seconds=settings.REFRESH_TOKEN_REUSE_GRACE_SECONDS)
 
 
-async def _handle_revoked_refresh(refresh_token: str, db: AsyncSession, context: RequestContext) -> None:
+async def _handle_revoked_refresh(refresh_token: str, db: AsyncSession, context: RequestContext) -> IssuedTokens | None:
     """Answer a refresh token that failed verification *because it had been revoked*,
-    which is the strongest evidence available that a refresh cookie has been stolen: log
-    every presentation, and past `_REFRESH_REPLAY_THRESHOLD` revoke the session the token
-    belongs to and record the replay.
+    which is both how a lost reply's retry arrives and the strongest evidence available
+    that a refresh cookie has been stolen: log every presentation; inside the reuse grace
+    hand back the pair its first presentation minted, when that pair is still good; and
+    past the grace revoke the session the token belongs to and record the replay. `None`
+    is the caller's 401.
 
     `verify_token` can't report that difference and shouldn't have to - see
     `core.security.revocation_time` for why - so the question is asked again here, on a
-    path that has already decided to answer 401. A malformed cookie is noise and stays
+    path that has already failed verification. A malformed cookie is noise and stays
     silent; only a token this server actually issued and then spent gets a line.
 
     `WARNING` rather than `info`, and the level is load-bearing: the app configures no
@@ -966,22 +988,22 @@ async def _handle_revoked_refresh(refresh_token: str, db: AsyncSession, context:
     `api.dependencies.fetch_owned_or_raise`.
 
     **The elapsed time is the point, and it is why `token_blacklist.revoked_at` exists.**
-    Rotation's documented two-tab race (see `refresh_access_token`) lands the losing tab
-    on this exact branch, so an unconditional "your token was stolen" would cry wolf on a
-    benign and not-especially-rare event. That race resolves in milliseconds; a stolen
-    cookie is replayed minutes or hours later. The line therefore reports the gap and what
-    it means, and leaves the reading to whoever is looking - both are live, and nothing
-    the server can see distinguishes them beyond this.
+    A retry and rotation's documented race (see `refresh_access_token`) both land here, so
+    an unconditional "your token was stolen" would cry wolf on benign and not especially
+    rare events. The line therefore reports the gap and leaves the reading to whoever is
+    looking - nothing the server can see distinguishes the cases beyond this.
 
-    **Past the threshold the session goes, and that is what actually stops the theft.**
+    **Inside the grace the answer is the held pair or a 401, and nothing is revoked.** See
+    `_held_pair_for_a_retry` for when the pair is handed out; the race's loser, which
+    arrives before the winner's pair is held, gets the 401 it always got.
+
+    **Past the grace the session goes, and that is what actually stops the theft.**
     Rotation already made the presented token worthless; what it could not touch is the
     pair minted *from* it, which is what whichever party got there first is holding. Both
     halves of that pair carry the same `sid`, so revoking the row ends them together - the
     cookie at its next rotation, and the access token on its very next request, since
     `api.dependencies.get_current_user` asks the same question of the same row. The other
-    party signs in again and gets a new session, which is the whole cost and the reason the
-    threshold is not optional: inside it, the only diver being signed out is one whose own
-    two tabs collided.
+    party signs in again and gets a new session.
 
     The revocation is left for the `record_auth_event` below to commit rather than
     committing on its own. They are one event, `async_get_db` does not commit on unwind,
@@ -990,21 +1012,21 @@ async def _handle_revoked_refresh(refresh_token: str, db: AsyncSession, context:
     """
     revoked_at = await revocation_time(refresh_token, db)
     if revoked_at is None:
-        return
+        return None
 
     subject = token_subject(refresh_token)
+    grace = _reuse_grace()
     logger.warning(
         "A revoked refresh token was presented (subject: %s) %s after it was revoked. Under %.0fs is "
-        "the two-tab rotation race POST /auth/refresh documents; a longer gap is worth investigating as "
-        "a stolen cookie.",
+        "a retried refresh or the rotation race POST /auth/refresh documents; a longer gap is worth "
+        "investigating as a stolen cookie.",
         subject or "unknown",
         _elapsed(revoked_at),
-        _REFRESH_REPLAY_THRESHOLD.total_seconds(),
+        grace.total_seconds(),
     )
 
-    if datetime.now(UTC) - revoked_at < _REFRESH_REPLAY_THRESHOLD:
-        # The race, not a replay. See `_REFRESH_REPLAY_THRESHOLD`.
-        return
+    if datetime.now(UTC) - revoked_at < grace:
+        return await _held_pair_for_a_retry(refresh_token, subject, db)
 
     # `token_session_id` enforces the signature and the expiry and nothing else, which is
     # exactly what is wanted here: the blacklist row read above already establishes that
@@ -1021,14 +1043,14 @@ async def _handle_revoked_refresh(refresh_token: str, db: AsyncSession, context:
         await revoke_session(db, session_uuid=session_uuid)
 
     # The subject resolves to an account with one indexed read, and the cost of that read
-    # is bounded by construction: it is only reached past the threshold, which the benign
-    # case never is. `None` when the account has already been purged - that row satisfies
+    # is bounded by construction: it is only reached past the grace, which the benign
+    # cases never are. `None` when the account has already been purged - that row satisfies
     # neither arm of the erasure and is bounded by the user-less retention tier alone.
     #
     # A deliberate amendment to the *Nothing is logged* posture of `DECISIONS.md` §"A
     # refresh token is only as alive as its account": that bullet is about a *deleted
     # account's* devices refreshing on their own schedule, which is recurring and expected.
-    # A replay past this threshold is neither.
+    # A replay past the grace is neither.
     user_id: int | None = None
     if subject is not None:
         try:
@@ -1044,6 +1066,42 @@ async def _handle_revoked_refresh(refresh_token: str, db: AsyncSession, context:
     # vocabulary's rule is one event per site, so this row now means "replay detected and
     # its session ended" rather than earning a second `SESSION_REVOKED` beside it.
     await record_auth_event(db, event_type=AuthEventType.REFRESH_REPLAY_DETECTED, context=context, user_id=user_id)
+    return None
+
+
+async def _held_pair_for_a_retry(refresh_token: str, subject: str | None, db: AsyncSession) -> IssuedTokens | None:
+    """The pair a spent token's first presentation minted, if handing it out again keeps
+    the session's one live refresh token the one it already has.
+
+    Every condition the first presentation passed is asked again, because the grace must
+    not outlive what it continues: the account is live, and the session the token names is
+    live and the subject's - so a session revoked or signed out inside the minute stays
+    ended. Then the held successor must itself still verify: once it has been presented
+    and spent in turn, handing it out would give the caller a dead cookie, and the 401 says
+    so honestly. A hold that is gone - never written, evicted, Redis down - is the same
+    401.
+
+    The *same* pair rather than a fresh one: minting again would spend the successor the
+    first presenter may already hold, whose next refresh would then land past the grace
+    and revoke the session for both.
+    """
+    session_uuid = token_session_id(refresh_token)
+    if session_uuid is None or subject is None:
+        return None
+    try:
+        account = await crud_users.get(db=db, uuid=uuid_pkg.UUID(subject), is_deleted=False)
+    except ValueError:
+        return None
+    if account is None:
+        return None
+    user_id = cast(dict[str, Any], account)["id"]
+    if await live_session_for(db, session_uuid=session_uuid, user_id=user_id) is None:
+        return None
+
+    held = await held_successor(refresh_token)
+    if held is None or await verify_token(held.refresh_token, TokenType.REFRESH, db) is None:
+        return None
+    return held
 
 
 @router.post("/refresh", response_model=RefreshResponse)
@@ -1055,19 +1113,23 @@ async def refresh_access_token(
     cookie-authenticated endpoint in this flow and why that's still CSRF-safe.
 
     The presented refresh token is blacklisted and replaced rather than reused. Without
-    rotation a single leaked cookie stays valid for the whole
-    `REFRESH_TOKEN_EXPIRE_DAYS` window with nothing to revoke it and no way to notice;
-    with rotation, the theft has a much shorter useful life and a second use of the same
-    token fails outright. The trade-off is that two tabs refreshing at the exact same
-    moment will race, and the loser gets a 401 - see `DECISIONS.md`.
+    rotation a single leaked cookie stays valid for the session's whole idle window with
+    nothing to revoke it and no way to notice; with rotation, the theft has a much shorter
+    useful life and a later use of the same token fails outright. Two tabs refreshing at
+    the exact same moment still race, and the loser gets a 401 - see `DECISIONS.md`.
 
-    That second use is also the loudest signal this app gets that a cookie has been
+    **A second presentation inside `REFRESH_TOKEN_REUSE_GRACE_SECONDS` is answered with the
+    pair the first one received** - the same access token and the same refresh cookie -
+    because a reply lost on the way back leaves the client holding a token this server has
+    already spent, and the retry is how it finds out. The pair is held in Redis for the
+    grace (`services.refresh_grace`); see `_held_pair_for_a_retry` for when it is handed out.
+
+    A later presentation is also the loudest signal this app gets that a cookie has been
     stolen, so it is acted on: `_handle_revoked_refresh` separates "a token we revoked,
     presented again" from "garbage", which the 401 deliberately does not - and past the
-    race threshold it revokes the session that token names, so the pair rotated out of it
-    stops working too and whoever holds the cookie signs in again. The *response* is
-    identical either way - it must never become an oracle for whether a token was ever
-    real.
+    grace it revokes the session that token names, so the pair rotated out of it stops
+    working too and whoever holds the cookie signs in again. The *response* is identical
+    either way - it must never become an oracle for whether a token was ever real.
 
     A token that verifies is not the same thing as an account that still exists, so the
     subject is resolved before a replacement pair is minted, and a deleted account 401s
@@ -1100,8 +1162,11 @@ async def refresh_access_token(
     user_data = await verify_token(refresh_token, TokenType.REFRESH, db)
     if not user_data:
         # Only reached on a failure, so the extra lookup costs nothing on the happy path.
-        await _handle_revoked_refresh(refresh_token, db, context)
-        raise UnauthorizedException("Invalid refresh token.")
+        held = await _handle_revoked_refresh(refresh_token, db, context)
+        if held is None:
+            raise UnauthorizedException("Invalid refresh token.")
+        set_refresh_cookie(response, held.refresh_token, max_age=held.max_age)
+        return held.body()
 
     # Neither `verify_token` nor `issue_tokens` touches the `user` table, so without this
     # a refresh cookie outlives its own user row: `DELETE /user` blacklists only the two
@@ -1129,17 +1194,29 @@ async def refresh_access_token(
     # Spend the presented token before minting its replacement, so a crash between the
     # two leaves the caller signed out rather than holding two live refresh tokens. Not
     # spent by this call means another request rotated it first - the two-tab race, lost
-    # after both passed `verify_token` - and one cookie must not be rotated into two.
+    # after both passed `verify_token` - and one cookie must not be rotated into two. That
+    # loser is refused even inside the grace: the grace answers a token already spent and
+    # answered, and this one's pair may not be held yet.
     if not await blacklist_token(refresh_token, db):
         raise UnauthorizedException("Invalid refresh token.")
 
     # The same `sid`, deliberately: rotation replaces the credential and continues the
-    # session, which is the whole difference this table makes. No audit event - an ordinary
-    # rotation is once per access-token lifetime per device, which is the recurring,
-    # expected class the standing rule excludes, and `last_used_at` already records it.
-    return await issue_tokens(
-        response, user_data.user_uuid, db=db, context=context, user_id=user_id, session_uuid=session.uuid
+    # session, which is the whole difference this table makes. The session's own
+    # `idle_timeout`, so an extended session slides by its own window. No audit event - an
+    # ordinary rotation is once per access-token lifetime per device, which is the
+    # recurring, expected class the standing rule excludes, and `last_used_at` already
+    # records it.
+    issued = await issue_tokens(
+        response,
+        user_data.user_uuid,
+        db=db,
+        context=context,
+        user_id=user_id,
+        idle_timeout=session.idle_timeout,
+        session_uuid=session.uuid,
     )
+    await hold_successor(refresh_token, issued)
+    return issued.body()
 
 
 @router.post("/logout", response_model=LogoutResponse)

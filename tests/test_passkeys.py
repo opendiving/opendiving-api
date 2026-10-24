@@ -39,6 +39,7 @@ from src.app.schemas.webauthn_credential import (
     WebauthnCredentialReadInternal,
     WebauthnCredentialUpdate,
 )
+from src.app.services.auth_service import IssuedTokens
 from src.app.services.passkey_challenges import ChallengeStoreUnavailable
 from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.mocks import fake_request, stub_claim
@@ -503,7 +504,7 @@ class TestSignInVerify:
         ):
             crud.get = AsyncMock(return_value=ceremony.stored)
             users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
-            issue.return_value = {"access_token": "at", "token_type": "bearer"}
+            issue.return_value = IssuedTokens(access_token="at", refresh_token="r", max_age=60)
 
             outcome = await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
 
@@ -531,7 +532,7 @@ class TestSignInVerify:
         ):
             crud.get = AsyncMock(return_value=ceremony.stored)
             users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
-            issue.return_value = {"access_token": "at", "token_type": "bearer"}
+            issue.return_value = IssuedTokens(access_token="at", refresh_token="r", max_age=60)
 
             outcome = await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
 
@@ -609,7 +610,7 @@ class TestSignInVerify:
         ):
             crud.get = AsyncMock(return_value=ceremony.stored)
             users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
-            issue.return_value = {"access_token": "at", "token_type": "bearer"}
+            issue.return_value = IssuedTokens(access_token="at", refresh_token="r", max_age=60)
 
             await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
 
@@ -758,7 +759,7 @@ class TestSignInVerify:
         ):
             crud.get = AsyncMock(return_value=ceremony.stored)
             users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
-            issue.return_value = {"access_token": "at", "token_type": "bearer"}
+            issue.return_value = IssuedTokens(access_token="at", refresh_token="r", max_age=60)
 
             await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
 

@@ -19,10 +19,11 @@ class TokenBlacklist(Base):
     # When the row was written, which is a different question from `expires_at` - that one
     # is copied from the token's own `exp` and so says when it was *issued*. Only this
     # column can answer "how long after it was spent was this token presented again?", the
-    # one signal that separates rotation's documented two-tab race (milliseconds) from a
-    # stolen cookie being replayed (minutes or hours) - and so, since that separation is
-    # what a session revocation now hangs off, the column a stolen cookie's blast radius is
-    # measured against. Read by `api.v1.auth._handle_revoked_refresh` and by nothing else.
+    # one signal that separates rotation's documented two-tab race (milliseconds) and a
+    # retried refresh (seconds) from a stolen cookie being replayed (minutes or hours) - and
+    # so, since that separation is what the reuse grace and a session revocation hang off,
+    # the column a stolen cookie's blast radius is measured against. Read by
+    # `api.v1.auth._handle_revoked_refresh` and by nothing else.
     #
     # `server_default` for the same reason `user.units` has one: the column is NOT NULL, so
     # the migration adding it needs a server-side default to backfill existing rows. Every

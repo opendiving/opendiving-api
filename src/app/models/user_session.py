@@ -28,7 +28,7 @@ class UserSession(Base, PublicUUIDMixin):
     carried unchanged across every rotation. That identifier is the prerequisite
     `DECISIONS.md` §"A reused refresh token is a `WARNING`" recorded as missing for its
     *Tier 3 - family revocation*; this table supplies it, and a row here is what that
-    revocation now stamps when a spent refresh token is replayed past the threshold.
+    revocation now stamps when a spent refresh token is replayed past the reuse grace.
 
     Hard-deleted rather than soft-deleted, but `revoked_at` is what a revoke stamps: the
     row has to outlive the revoke long enough for the refresh path to answer 401 on a
@@ -48,7 +48,7 @@ class UserSession(Base, PublicUUIDMixin):
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
 
     # The sliding *inactivity* window, not a session length: every refresh pushes it out by
-    # `REFRESH_TOKEN_EXPIRE_DAYS` so the row and the cookie it backs expire together.
+    # the window `idle_timeout` names, so the row and the cookie it backs expire together.
     # Indexed because it is the sweep's predicate, the same argument
     # `b24933e17c19_index_authentication_request_expires_at` makes for its column.
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -80,3 +80,7 @@ class UserSession(Base, PublicUUIDMixin):
     # after the UTC day of its `last_used_at` has closed - that day's active-account count
     # is snapshotted from the rows still here (`swept_session_predicate`).
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    # `schemas.user_session.IdleTimeout`, chosen at sign-in and never changed: which of the
+    # two operator windows `expires_at` slides by.
+    idle_timeout: Mapped[str] = mapped_column(String(16), default="standard", server_default="standard")

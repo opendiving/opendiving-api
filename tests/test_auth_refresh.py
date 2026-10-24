@@ -18,19 +18,26 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import Response
+from jose import jwt
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from src.app.api.v1.auth import _REFRESH_REPLAY_THRESHOLD, _elapsed, refresh_access_token
+from src.app.api.v1.auth import _elapsed, _reuse_grace, refresh_access_token
+from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import UnauthorizedException
 from src.app.core.schemas import TokenData
 from src.app.core.security import blacklist_token, create_refresh_token, token_session_id
+from src.app.core.utils import cache
 from src.app.core.utils.request_context import RequestContext
+from src.app.crud.crud_user_sessions import revoke_session
 from src.app.models.user import User
 from src.app.models.user_session import UserSession
-from src.app.schemas.user_session import UserSessionReadInternal
-from src.app.services.auth_service import issue_tokens
+from src.app.schemas.auth_audit_event import AuthEventType
+from src.app.schemas.user_session import IdleTimeout, UserSessionReadInternal
+from src.app.services.auth_service import IssuedTokens, issue_tokens
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.mocks import FakeTokenBlacklist, FrozenSecurityClock, awaited_kwargs
 
 USER_UUID = uuid_pkg.uuid4()
@@ -56,11 +63,10 @@ def _request(cookies: dict[str, str]) -> Mock:
 
 
 def _refresh_cookie(response: Response) -> str:
-    """Reads the refresh token back out of `Set-Cookie`, the way the browser will.
+    """Reads the refresh token back out of `Set-Cookie`, the way a client will.
 
-    `issue_tokens` returns only the access token - the refresh token exists solely as an
-    httpOnly cookie on the response, so this is the only way to get at the value the next
-    `/auth/refresh` will present.
+    The response body carries only the access token - the refresh token rides an httpOnly
+    cookie, so this is the value the next `/auth/refresh` will present.
     """
     jar: SimpleCookie = SimpleCookie()
     for header in response.headers.getlist("set-cookie"):
@@ -145,6 +151,7 @@ class FakeSessions:
             created_at=now,
             last_used_at=now,
             revoked_at=None,
+            idle_timeout=IdleTimeout.STANDARD,
         )
 
 
@@ -214,7 +221,7 @@ class TestRefreshAccessToken(SignedInAccount):
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
         ):
             mock_verify.return_value = TokenData(user_uuid=USER_UUID, session_uuid=SESSION_UUID)
-            mock_issue.return_value = {"access_token": "new-access-token", "token_type": "bearer"}
+            mock_issue.return_value = IssuedTokens(access_token="new-access-token", refresh_token="r", max_age=60)
 
             result = await refresh_access_token(_request({"refresh_token": "good-token"}), response, mock_db)
 
@@ -240,7 +247,7 @@ class TestRefreshAccessToken(SignedInAccount):
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
         ):
             mock_verify.return_value = TokenData(user_uuid=USER_UUID, session_uuid=SESSION_UUID)
-            mock_issue.return_value = {"access_token": "new-access-token", "token_type": "bearer"}
+            mock_issue.return_value = IssuedTokens(access_token="new-access-token", refresh_token="r", max_age=60)
 
             await refresh_access_token(_request({"refresh_token": "good-token"}), Mock(), mock_db)
 
@@ -343,7 +350,7 @@ class TestRefreshRotationWithRealTokens(SignedInAccount):
             first_tokens = await issue_tokens(first_device, USER_UUID, db=mock_db, context=CONTEXT, user_id=USER_ID)
             second_tokens = await issue_tokens(second_device, USER_UUID, db=mock_db, context=CONTEXT, user_id=USER_ID)
 
-            assert first_tokens["access_token"] != second_tokens["access_token"]
+            assert first_tokens.access_token != second_tokens.access_token
 
             await refresh_access_token(_request({"refresh_token": _refresh_cookie(first_device)}), Response(), mock_db)
 
@@ -506,7 +513,7 @@ class TestAReusedRefreshTokenRevokesItsSession(SignedInAccount):
             patch("src.app.api.v1.auth.revoke_session", new_callable=AsyncMock) as revoke,
         ):
             spent = await _spend_one_refresh_token(mock_db)
-            blacklist.backdate_revocation(spent, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
+            blacklist.backdate_revocation(spent, by=_reuse_grace() + timedelta(seconds=1))
 
             with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
                 await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
@@ -529,7 +536,7 @@ class TestAReusedRefreshTokenRevokesItsSession(SignedInAccount):
         ):
             sessionless = await create_refresh_token(data={"sub": str(USER_UUID)})
             await blacklist_token(sessionless, mock_db)
-            blacklist.backdate_revocation(sessionless, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
+            blacklist.backdate_revocation(sessionless, by=_reuse_grace() + timedelta(seconds=1))
 
             with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
                 await refresh_access_token(_request({"refresh_token": sessionless}), Response(), mock_db)
@@ -550,7 +557,7 @@ class TestAReusedRefreshTokenRevokesItsSession(SignedInAccount):
             patch("src.app.api.v1.auth.revoke_session", new_callable=AsyncMock),
         ):
             spent = await _spend_one_refresh_token(mock_db)
-            blacklist.backdate_revocation(spent, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
+            blacklist.backdate_revocation(spent, by=_reuse_grace() + timedelta(seconds=1))
 
             with pytest.raises(UnauthorizedException) as replayed:
                 await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
@@ -799,7 +806,7 @@ class TestAReplayEndsTheRotatedPairAgainstPostgres:
             await refresh_access_token(_request({"refresh_token": leaked}), rotated, async_db)
             replacement = _refresh_cookie(rotated)
 
-            blacklist.backdate_revocation(leaked, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
+            blacklist.backdate_revocation(leaked, by=_reuse_grace() + timedelta(seconds=1))
             with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
                 await refresh_access_token(_request({"refresh_token": leaked}), Response(), async_db)
 
@@ -840,7 +847,7 @@ class TestAReplayEndsTheRotatedPairAgainstPostgres:
 
             assert self._live_session_count(db, diver) == 1
 
-            blacklist.backdate_revocation(leaked, by=_REFRESH_REPLAY_THRESHOLD + timedelta(seconds=1))
+            blacklist.backdate_revocation(leaked, by=_reuse_grace() + timedelta(seconds=1))
             with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
                 await refresh_access_token(_request({"refresh_token": leaked}), Response(), async_db)
 
@@ -874,3 +881,276 @@ class TestAReplayEndsTheRotatedPairAgainstPostgres:
 
             assert result["token_type"] == "bearer"
             assert _refresh_cookie(still_working) not in (first, replacement)
+
+
+def _cookie_max_age(response: Response) -> int:
+    jar: SimpleCookie = SimpleCookie()
+    for header in response.headers.getlist("set-cookie"):
+        jar.load(header)
+    return int(jar["refresh_token"]["max-age"])
+
+
+def _days_until_exp(token: str) -> float:
+    exp: int = jwt.get_unverified_claims(token)["exp"]
+    return (datetime.fromtimestamp(exp, UTC) - datetime.now(UTC)) / timedelta(days=1)
+
+
+async def _sign_in_and_rotate(db: Any, **sign_in: Any) -> tuple[str, Response, dict[str, str]]:
+    """Sign in, refresh once, and return the spent cookie with the first refresh's reply -
+    the reply a client on a bad connection never received."""
+    signed_in = Response()
+    await issue_tokens(signed_in, USER_UUID, db=db, context=CONTEXT, user_id=USER_ID, **sign_in)
+    spent = _refresh_cookie(signed_in)
+    first = Response()
+    body = await refresh_access_token(_request({"refresh_token": spent}), first, db)
+    return spent, first, body
+
+
+class TestTheReuseGrace(SignedInAccount):
+    """A spent token presented again inside `REFRESH_TOKEN_REUSE_GRACE_SECONDS` is a client
+    retrying a refresh whose reply it lost, and is answered with that reply.
+
+    The pair is held in Redis (`FakeRedis` here, which records expiries without enforcing
+    them - so "the hold is gone" is staged by removing it). Every retry below is presented
+    without backdating, which is inside the grace by the full minute.
+    """
+
+    @pytest.fixture(autouse=True)
+    def redis(self, monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
+        fake = FakeRedis()
+        monkeypatch.setattr(cache, "client", fake)
+        return fake
+
+    @pytest.fixture(autouse=True)
+    def blacklist(self):
+        fake = FakeTokenBlacklist()
+        with patch("src.app.core.security.crud_token_blacklist", fake):
+            yield fake
+
+    @pytest.mark.asyncio
+    async def test_a_retry_inside_the_grace_gets_the_same_pair(self, mock_db, blacklist):
+        spent, first, first_body = await _sign_in_and_rotate(mock_db)
+
+        with (
+            patch("src.app.api.v1.auth.revoke_session", new_callable=AsyncMock) as revoke,
+            patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock) as recorder,
+        ):
+            retried = Response()
+            retried_body = await refresh_access_token(_request({"refresh_token": spent}), retried, mock_db)
+
+        assert retried_body == first_body
+        assert _refresh_cookie(retried) == _refresh_cookie(first)
+        assert _cookie_max_age(retried) == _cookie_max_age(first)
+        revoke.assert_not_awaited()
+        recorder.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_retry_leaves_one_live_refresh_token(self, mock_db, blacklist):
+        """Both presenters now hold the successor, and it is the only refresh token of the
+        session that has not been spent - so it rotates like any other."""
+        spent, first, _ = await _sign_in_and_rotate(mock_db)
+        successor = _refresh_cookie(first)
+
+        await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+        assert spent in blacklist.tokens
+        assert successor not in blacklist.tokens
+        onward = Response()
+        await refresh_access_token(_request({"refresh_token": successor}), onward, mock_db)
+        assert _refresh_cookie(onward) not in (spent, successor)
+
+    @pytest.mark.asyncio
+    async def test_the_pair_is_held_for_the_grace_under_a_digest_of_the_spent_token(self, mock_db, redis):
+        spent, _, _ = await _sign_in_and_rotate(mock_db)
+
+        (key,) = [key for key in redis.store if key.startswith("auth:refresh-grace:")]
+        assert spent not in key
+        assert redis.expiries[key] == settings.REFRESH_TOKEN_REUSE_GRACE_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_a_repeat_past_the_grace_revokes_the_session_even_with_the_pair_still_held(
+        self, mock_db, blacklist, redis
+    ):
+        """The hold outliving its TTL is what `FakeRedis` stages for free, and the gap
+        alone has to decide: past the grace is today's replay, whatever Redis holds."""
+        spent, _, _ = await _sign_in_and_rotate(mock_db)
+        blacklist.backdate_revocation(spent, by=_reuse_grace() + timedelta(seconds=1))
+
+        with (
+            patch("src.app.api.v1.auth.revoke_session", new_callable=AsyncMock) as revoke,
+            patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock) as recorder,
+            pytest.raises(UnauthorizedException, match="Invalid refresh token."),
+        ):
+            await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+        revoke.assert_awaited_once()
+        assert awaited_kwargs(recorder)["event_type"] is AuthEventType.REFRESH_REPLAY_DETECTED
+
+    @pytest.mark.asyncio
+    async def test_a_retry_against_a_session_no_longer_live_is_refused(self, mock_db):
+        """Signed out, or revoked from the web, inside the minute: the grace continues a
+        session, so it cannot bring an ended one back."""
+        spent, _, _ = await _sign_in_and_rotate(mock_db)
+
+        with (
+            patch("src.app.api.v1.auth.live_session_for", new_callable=AsyncMock, return_value=None),
+            patch("src.app.api.v1.auth.revoke_session", new_callable=AsyncMock) as revoke,
+            pytest.raises(UnauthorizedException, match="Invalid refresh token."),
+        ):
+            await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+        revoke.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_retry_for_a_deleted_account_is_refused(self, mock_db):
+        spent, _, _ = await _sign_in_and_rotate(mock_db)
+
+        with (
+            patch("src.app.api.v1.auth.crud_users", FakeUsers(USER_UUID, is_deleted=True)),
+            pytest.raises(UnauthorizedException, match="Invalid refresh token."),
+        ):
+            await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+    @pytest.mark.asyncio
+    async def test_a_subject_that_is_not_a_uuid_is_refused_rather_than_raising(self, mock_db):
+        spent, _, _ = await _sign_in_and_rotate(mock_db)
+
+        with (
+            patch("src.app.api.v1.auth.token_subject", return_value="not-a-uuid"),
+            pytest.raises(UnauthorizedException, match="Invalid refresh token."),
+        ):
+            await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+    @pytest.mark.asyncio
+    async def test_a_retry_whose_successor_was_already_spent_is_refused(self, mock_db):
+        """The successor rotated on before this presentation arrived, so handing it out
+        would be handing out a dead cookie."""
+        spent, first, _ = await _sign_in_and_rotate(mock_db)
+        await refresh_access_token(_request({"refresh_token": _refresh_cookie(first)}), Response(), mock_db)
+
+        with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+            await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+    @pytest.mark.asyncio
+    async def test_a_retry_with_the_hold_gone_is_refused_and_ends_nothing(self, mock_db, redis):
+        """Evicted, restarted, or never written: the answer the grace did not exist to give,
+        and still no revocation, because the gap says retry rather than theft."""
+        spent, _, _ = await _sign_in_and_rotate(mock_db)
+        redis.store.clear()
+
+        with (
+            patch("src.app.api.v1.auth.revoke_session", new_callable=AsyncMock) as revoke,
+            pytest.raises(UnauthorizedException, match="Invalid refresh token."),
+        ):
+            await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+        revoke.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_redis_down_costs_the_retry_and_never_the_rotation(self, mock_db, monkeypatch):
+        monkeypatch.setattr(cache, "client", FakeRedis(failing=True))
+
+        spent, first, body = await _sign_in_and_rotate(mock_db)
+
+        assert body["token_type"] == "bearer"
+        assert _refresh_cookie(first) != spent
+        with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+            await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+    @pytest.mark.asyncio
+    async def test_a_retry_is_answered_in_the_same_shape_as_a_refresh(self, mock_db):
+        """`RefreshResponse` carries what it carries; the refresh half rides the cookie."""
+        spent, _, first_body = await _sign_in_and_rotate(mock_db)
+
+        retried = await refresh_access_token(_request({"refresh_token": spent}), Response(), mock_db)
+
+        assert set(retried) == set(first_body) == {"access_token", "token_type"}
+
+
+@pytest.mark.skipif(not db_available(), reason="Postgres is not reachable")
+class TestTheIdleTimeoutAgainstPostgres:
+    """The window is the row's, on the sign-in and on every refresh, in the three places it
+    is written: the row's `expires_at`, the cookie's `Max-Age` and the refresh token's
+    `exp`. A refresh reads the kind back off the row, which takes a real one."""
+
+    @staticmethod
+    async def _row_days(async_db: AsyncSession, session_uuid: uuid_pkg.UUID | None) -> float:
+        expires_at: datetime = (
+            await async_db.execute(select(UserSession.expires_at).where(UserSession.uuid == session_uuid))
+        ).scalar_one()
+        return (expires_at - datetime.now(UTC)) / timedelta(days=1)
+
+    @pytest.mark.parametrize(
+        ("idle_timeout", "setting"),
+        [
+            (IdleTimeout.STANDARD, "REFRESH_TOKEN_EXPIRE_DAYS"),
+            (IdleTimeout.EXTENDED, "EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_sign_in_and_every_refresh_write_the_sessions_own_window(
+        self, async_db, diver, idle_timeout: IdleTimeout, setting: str
+    ):
+        days = getattr(settings, setting)
+
+        with patch("src.app.core.security.crud_token_blacklist", FakeTokenBlacklist()):
+            signed_in = Response()
+            await issue_tokens(
+                signed_in, diver.uuid, db=async_db, context=CONTEXT, user_id=diver.id, idle_timeout=idle_timeout
+            )
+            refreshed = Response()
+            await refresh_access_token(_request({"refresh_token": _refresh_cookie(signed_in)}), refreshed, async_db)
+
+        for response in (signed_in, refreshed):
+            cookie = _refresh_cookie(response)
+            assert _cookie_max_age(response) == days * 24 * 60 * 60
+            assert _days_until_exp(cookie) == pytest.approx(days, abs=0.01)
+            assert await self._row_days(async_db, token_session_id(cookie)) == pytest.approx(days, abs=0.01)
+
+        stored = (
+            await async_db.execute(
+                select(UserSession.idle_timeout).where(UserSession.uuid == token_session_id(_refresh_cookie(refreshed)))
+            )
+        ).scalar_one()
+        assert stored == idle_timeout
+
+
+@pytest.mark.skipif(not db_available(), reason="Postgres is not reachable")
+class TestTheReuseGraceAgainstPostgres:
+    """The grace's session check against a row that can really be revoked, with only the
+    blacklist table and Redis faked."""
+
+    @pytest.fixture(autouse=True)
+    def redis(self, monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
+        fake = FakeRedis()
+        monkeypatch.setattr(cache, "client", fake)
+        return fake
+
+    @staticmethod
+    async def _rotate(async_db: Any, diver: User) -> tuple[str, Response]:
+        signed_in = Response()
+        await issue_tokens(signed_in, diver.uuid, db=async_db, context=CONTEXT, user_id=diver.id)
+        spent = _refresh_cookie(signed_in)
+        first = Response()
+        await refresh_access_token(_request({"refresh_token": spent}), first, async_db)
+        return spent, first
+
+    @pytest.mark.asyncio
+    async def test_a_retry_continues_the_live_session(self, db, async_db, diver):
+        with patch("src.app.core.security.crud_token_blacklist", FakeTokenBlacklist()):
+            spent, first = await self._rotate(async_db, diver)
+            retried = Response()
+            await refresh_access_token(_request({"refresh_token": spent}), retried, async_db)
+
+        assert _refresh_cookie(retried) == _refresh_cookie(first)
+        assert TestAReplayEndsTheRotatedPairAgainstPostgres._live_session_count(db, diver) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_retry_against_a_revoked_session_is_refused(self, async_db, diver):
+        with patch("src.app.core.security.crud_token_blacklist", FakeTokenBlacklist()):
+            spent, first = await self._rotate(async_db, diver)
+            await revoke_session(async_db, session_uuid=token_session_id(spent))
+            await async_db.commit()
+
+            with pytest.raises(UnauthorizedException, match="Invalid refresh token."):
+                await refresh_access_token(_request({"refresh_token": spent}), Response(), async_db)

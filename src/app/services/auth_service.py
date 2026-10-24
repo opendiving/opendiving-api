@@ -27,6 +27,47 @@ from ..crud.crud_users import account_for_email, crud_users
 from ..models.user_session import UserSession
 from ..schemas.auth_audit_event import AuthEventType
 from ..schemas.authentication_provider import AuthenticationProviderCreate
+from ..schemas.user_session import IdleTimeout
+
+
+@dataclass(frozen=True)
+class IssuedTokens:
+    """A pair `issue_tokens` minted, and the cookie lifetime it set with it.
+
+    The refresh token travels only in `Set-Cookie`, so a caller that needs the value - the
+    refresh route, which holds the pair for a retried presentation - takes it from here
+    rather than reading its own response's headers back.
+    """
+
+    access_token: str
+    refresh_token: str
+    max_age: int
+
+    def body(self) -> dict[str, str]:
+        """The response body: the access token alone, never the refresh half."""
+        return {"access_token": self.access_token, "token_type": "bearer"}
+
+
+def idle_window(idle_timeout: IdleTimeout) -> timedelta:
+    """The sliding window a session of this kind gets, as the operator configured it."""
+    if idle_timeout is IdleTimeout.EXTENDED:
+        return timedelta(days=settings.EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS)
+    return timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+
+
+def set_refresh_cookie(response: Response, refresh_token: str, *, max_age: int) -> None:
+    """The one spelling of the refresh cookie, for a fresh pair and for a held one alike."""
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        # `AUTH_COOKIE_SECURE` (default true) rather than a literal: a LAN instance with no
+        # certificate serves plain HTTP, where the browser drops a `Secure` cookie without
+        # a word - the user is signed out on the next reload and nothing logs why.
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite="lax",
+        max_age=max_age,
+    )
 
 
 async def issue_tokens(
@@ -36,11 +77,12 @@ async def issue_tokens(
     db: AsyncSession,
     context: RequestContext,
     user_id: int,
+    idle_timeout: IdleTimeout = IdleTimeout.STANDARD,
     session_uuid: uuid_pkg.UUID | None = None,
-) -> dict[str, str]:
+) -> IssuedTokens:
     """Creates a fresh access/refresh token pair for the user with public id
     `user_uuid`, sets the refresh token as an httpOnly cookie on `response`, and
-    returns the access token - the common tail end of every flow that signs a user in.
+    returns the pair - the common tail end of every flow that signs a user in.
 
     The subject is the immutable `uuid` rather than the username these tokens used to
     name. A username is editable (`PATCH /user`) and is released for anyone to claim
@@ -58,17 +100,27 @@ async def issue_tokens(
     continues the row a refresh is rotating - stamping `last_used_at` and sliding
     `expires_at` out to match the cookie that is about to be set.
 
+    `idle_timeout` picks the window, and the caller passes the session's own: the kind a
+    sign-in asked for when it starts a row, the row's stored value when a refresh
+    continues one. The window is then written in all three places it lives - the row's
+    `expires_at`, the cookie's `Max-Age` and the refresh token's `exp` - so an `extended`
+    session keeps sliding by its own window rather than failing `verify_token` at the
+    standard one's end.
+
     Both tokens then carry that row's uuid as `sid`. The refresh half is what
     `/auth/refresh` checks against the database before it will rotate anything; the access
     half exists so `GET /user/sessions` can mark one row "This device" without a second
     credential to keep in step.
     """
     subject = str(user_uuid)
-    max_age = settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
-    expires_at = datetime.now(UTC) + timedelta(seconds=max_age)
+    window = idle_window(idle_timeout)
+    max_age = int(window.total_seconds())
+    expires_at = datetime.now(UTC) + window
 
     if session_uuid is None:
-        session_uuid = await _start_session(db, user_id=user_id, context=context, expires_at=expires_at)
+        session_uuid = await _start_session(
+            db, user_id=user_id, context=context, expires_at=expires_at, idle_timeout=idle_timeout
+        )
     else:
         await touch_session(db, session_uuid=session_uuid, expires_at=expires_at)
         await db.commit()
@@ -78,25 +130,15 @@ async def issue_tokens(
         data={"sub": subject}, expires_delta=access_token_expires, session_uuid=session_uuid
     )
 
-    refresh_token = await create_refresh_token(data={"sub": subject}, session_uuid=session_uuid)
+    refresh_token = await create_refresh_token(data={"sub": subject}, expires_delta=window, session_uuid=session_uuid)
 
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        # `AUTH_COOKIE_SECURE` (default true) rather than a literal: a LAN instance with no
-        # certificate serves plain HTTP, where the browser drops a `Secure` cookie without
-        # a word - the user is signed out on the next reload and nothing logs why.
-        secure=settings.AUTH_COOKIE_SECURE,
-        samesite="lax",
-        max_age=max_age,
-    )
+    set_refresh_cookie(response, refresh_token, max_age=max_age)
 
-    return {"access_token": access_token, "token_type": "bearer"}
+    return IssuedTokens(access_token=access_token, refresh_token=refresh_token, max_age=max_age)
 
 
 async def _start_session(
-    db: AsyncSession, *, user_id: int, context: RequestContext, expires_at: datetime
+    db: AsyncSession, *, user_id: int, context: RequestContext, expires_at: datetime, idle_timeout: IdleTimeout
 ) -> uuid_pkg.UUID:
     """Insert one session row, evicting down to the cap first, in one transaction.
 
@@ -111,7 +153,13 @@ async def _start_session(
     hand it over, so the round trip buys a value we already hold.
     """
     await evict_stalest_sessions(db, user_id=user_id, keep=MAX_LIVE_SESSIONS_PER_USER - 1)
-    session = UserSession(user_id=user_id, expires_at=expires_at, ip=context.ip, user_agent=context.user_agent)
+    session = UserSession(
+        user_id=user_id,
+        expires_at=expires_at,
+        ip=context.ip,
+        user_agent=context.user_agent,
+        idle_timeout=idle_timeout,
+    )
     db.add(session)
     # One commit for the eviction and the insert together: an account must never be left
     # having lost a session to make room for one that then failed to arrive.

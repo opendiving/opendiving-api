@@ -188,7 +188,7 @@ def swept_session_predicate(now: datetime) -> ColumnElement[bool]:
 
     Expressed here rather than in the worker so it sits beside `_live`. Every row it matches
     is outside `_live`, and every row outside `_live` is matched eventually: a row past its
-    `expires_at` at once - it was last used a week ago - and a revoked one at the first sweep
+    `expires_at` at once - it was last used a whole idle window ago - and a revoked one at the first sweep
     after the UTC day of its last use has closed. That wait is the daily active count's:
     the sweep snapshots the day before it deletes, and a signed-out session deleted within
     the hour would be missing from every later snapshot of the day it was used on. Nothing

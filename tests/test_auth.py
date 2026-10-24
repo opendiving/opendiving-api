@@ -41,12 +41,15 @@ from src.app.schemas.auth import (
     GoogleAuthRequest,
     ProfileCompletionRequest,
 )
+from src.app.schemas.user_session import IdleTimeout
+from src.app.services.auth_service import AuthenticatedUser, IssuedTokens
 from src.app.services.user_pictures import StoredAvatar
 from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.fake_s3 import select_s3_backend
 from tests.helpers.images import jpeg_with_exif
 from tests.helpers.mocks import (
     GOOGLE_CODE_VERIFIER,
+    awaited_kwargs,
     claimed_used_at_sql,
     email_lookups_on,
     fake_request,
@@ -839,6 +842,38 @@ class TestVerifyEmailCode:
             assert outcome.email == "new@example.com"
             assert outcome.onboarding_token is not None
 
+    @pytest.mark.parametrize(
+        ("body", "minted"),
+        [
+            ({}, IdleTimeout.STANDARD),
+            ({"idle_timeout": "standard"}, IdleTimeout.STANDARD),
+            ({"idle_timeout": "extended"}, IdleTimeout.EXTENDED),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_session_is_minted_with_the_idle_timeout_the_body_asked_for(
+        self, mock_db, body: dict, minted: IdleTimeout
+    ):
+        """The member reaches the one mint this route makes, and its absence is `standard`:
+        the web sends nothing and keeps the window it always had."""
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.resolve_identity", new_callable=AsyncMock) as mock_resolve,
+            patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request())
+            mock_resolve.return_value = AuthenticatedUser(user={"id": 1, "uuid": USER_UUID}, provider="email")
+            mock_issue.return_value = IssuedTokens(access_token="a", refresh_token="r", max_age=60)
+            stub_claim(mock_db)
+
+            request_body = EmailCodeVerifyRequest.model_validate({"request_id": REQUEST_UUID, "code": CODE, **body})
+            outcome = await verify_email_code(_request(), request_body, Mock(), mock_db)
+
+        assert outcome.status == "authenticated"
+        assert awaited_kwargs(mock_issue)["idle_timeout"] is minted
+
 
 class TestEmailCodeVerifyRequestSchema:
     """The code arrives from a human keyboard, so the schema does the normalizing."""
@@ -854,6 +889,20 @@ class TestEmailCodeVerifyRequestSchema:
         """
         with pytest.raises(ValidationError):
             EmailCodeVerifyRequest(request_id=REQUEST_UUID, code=typed)
+
+    def test_the_idle_timeout_defaults_to_standard(self):
+        assert EmailCodeVerifyRequest(request_id=REQUEST_UUID, code=CODE).idle_timeout is IdleTimeout.STANDARD
+
+    @pytest.mark.parametrize("value", ["standard", "extended"])
+    def test_either_idle_timeout_is_accepted(self, value: str):
+        body = EmailCodeVerifyRequest.model_validate({"request_id": REQUEST_UUID, "code": CODE, "idle_timeout": value})
+
+        assert body.idle_timeout == value
+
+    @pytest.mark.parametrize("value", ["forever", "Extended", "", 90, None])
+    def test_any_other_idle_timeout_is_a_422(self, value: object):
+        with pytest.raises(ValidationError):
+            EmailCodeVerifyRequest.model_validate({"request_id": REQUEST_UUID, "code": CODE, "idle_timeout": value})
 
 
 class TestGoogleAuthRequestShape:

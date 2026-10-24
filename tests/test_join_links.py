@@ -55,6 +55,7 @@ from src.app.schemas.auth import (
 )
 from src.app.schemas.daily_total import DailyMetric
 from src.app.schemas.invitation import AdminInvitationBatchRequest, InvitationCreateRequest
+from src.app.services.auth_service import IssuedTokens
 from src.app.services.registration_gate import (
     NOT_INVITED,
     STALE_JOIN_LINK,
@@ -495,7 +496,7 @@ async def _complete(session: AsyncSession, token_data: OnboardingTokenData, **pa
         patch(
             "src.app.api.v1.auth.issue_tokens",
             new_callable=AsyncMock,
-            return_value={"access_token": "a", "token_type": "bearer"},
+            return_value=IssuedTokens(access_token="a", refresh_token="r", max_age=60),
         ),
     ):
         await complete_profile(

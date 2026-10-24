@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..core.config import JOIN_CHANNEL_SLUG_PATTERN
 from ..core.schemas import AccountEmail
+from .user_session import IdleTimeout
 
 # -------------- email magic link --------------
 # The join-channel slug a sign-in arrived through, from `/join?via=<slug>`, or the token of
@@ -48,12 +49,17 @@ class EmailVerifyRequest(BaseModel):
 class EmailCodeVerifyRequest(BaseModel):
     """`POST /auth/email/verify-code` - the six-digit code from the sign-in email, plus
     the `request_id` that `POST /auth/email/request` handed back to the tab that asked.
+
+    `idle_timeout` is how long the session may then sit unused, and only this route takes
+    it: the code is the one way in a native client has, and the other sign-ins are a
+    browser's. `extended` asks for the operator's longer window; the web sends nothing.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     request_id: Annotated[uuid_pkg.UUID, Field(examples=["0198f0c1-4b6f-7c3a-9d2e-5a1b7c8d9e0f"])]
     code: Annotated[str, Field(examples=["481052"])]
+    idle_timeout: IdleTimeout = IdleTimeout.STANDARD
 
     @field_validator("code")
     @classmethod

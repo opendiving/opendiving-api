@@ -59,7 +59,7 @@ from src.app.crud.crud_user_sessions import (
 )
 from src.app.models.user import User
 from src.app.models.user_session import UserSession
-from src.app.schemas.user_session import UserSessionReadInternal, to_public_session
+from src.app.schemas.user_session import IdleTimeout, UserSessionReadInternal, to_public_session
 from src.app.services.auth_service import issue_tokens
 from tests.conftest import db_available
 from tests.helpers.mocks import FakeTokenBlacklist, awaited_kwargs, fake_request
@@ -70,11 +70,8 @@ needs_a_database = pytest.mark.skipif(not db_available(), reason="No database co
 
 
 def _refresh_cookie(response: Response) -> str:
-    """The refresh token out of `Set-Cookie`, the way the browser reads it.
-
-    `issue_tokens` returns only the access token; the refresh half exists solely as an
-    httpOnly cookie, so this is the only way at the value that carries the `sid`.
-    """
+    """The refresh token out of `Set-Cookie`, the way a client reads it - the response body
+    carries only the access token, so the cookie is the value that carries the `sid`."""
     jar: SimpleCookie = SimpleCookie()
     for header in response.headers.getlist("set-cookie"):
         jar.load(header)
@@ -99,6 +96,7 @@ def _internal(**overrides: Any) -> UserSessionReadInternal:
         "created_at": now,
         "last_used_at": now,
         "revoked_at": None,
+        "idle_timeout": IdleTimeout.STANDARD,
     }
     row.update(overrides)
     return UserSessionReadInternal(**row)
@@ -128,7 +126,23 @@ class TestTheCurrentMarkerComesFromTheToken:
         token-derived by construction, and this is what would fail if one ever did."""
         public = to_public_session(_internal(), current_session_uuid=None)
 
-        assert set(public.model_dump()) == {"uuid", "created_at", "last_used_at", "ip", "user_agent", "current"}
+        assert set(public.model_dump()) == {
+            "uuid",
+            "created_at",
+            "last_used_at",
+            "ip",
+            "user_agent",
+            "idle_timeout",
+            "current",
+        }
+
+    @pytest.mark.parametrize("idle_timeout", list(IdleTimeout))
+    def test_the_public_shape_says_which_window_the_row_slides_by(self, idle_timeout: IdleTimeout) -> None:
+        """The web labels the value; the date it implies stays withheld."""
+        public = to_public_session(_internal(idle_timeout=idle_timeout), current_session_uuid=None)
+
+        assert public.model_dump(mode="json")["idle_timeout"] == idle_timeout.value
+        assert "expires_at" not in public.model_dump()
 
 
 class TestRevokeOneSession:
@@ -484,7 +498,7 @@ class TestEveryMintingPathCreatesExactlyOneSession:
         rows = await live_sessions_for_user(async_db, user_id=diver.id, limit=10)
         refresh_cookie = _refresh_cookie(response)
 
-        assert token_session_id(tokens["access_token"]) == rows[0].uuid
+        assert token_session_id(tokens.access_token) == rows[0].uuid
         assert token_session_id(refresh_cookie) == rows[0].uuid
 
     @pytest.mark.asyncio
@@ -551,9 +565,9 @@ class TestARevokedSessionEndsItsAccessToken:
     @staticmethod
     async def _sign_in(async_db: AsyncSession, diver: User) -> tuple[str, uuid_pkg.UUID]:
         tokens = await issue_tokens(Response(), diver.uuid, db=async_db, context=CONTEXT, user_id=diver.id)
-        session_uuid = token_session_id(tokens["access_token"])
+        session_uuid = token_session_id(tokens.access_token)
         assert session_uuid is not None, "issue_tokens minted an access token with no sid"
-        return tokens["access_token"], session_uuid
+        return tokens.access_token, session_uuid
 
     @pytest.mark.asyncio
     async def test_a_live_sessions_token_authenticates(self, async_db: AsyncSession, diver: User) -> None:

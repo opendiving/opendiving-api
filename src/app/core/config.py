@@ -104,11 +104,24 @@ PLACEHOLDER_SECRET_KEYS = frozenset(
 )
 
 
+MIN_REFRESH_TOKEN_REUSE_GRACE_SECONDS = 5
+
+
 class CryptSettings(BaseSettings):
     SECRET_KEY: SecretStr = config("SECRET_KEY", cast=SecretStr)
     ALGORITHM: str = config("ALGORITHM", default="HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = config("ACCESS_TOKEN_EXPIRE_MINUTES", default=30)
     REFRESH_TOKEN_EXPIRE_DAYS: int = config("REFRESH_TOKEN_EXPIRE_DAYS", default=7)
+    # The same sliding window for a session that asked for `idle_timeout: extended` at
+    # sign-in - a native client, which has no tab to sign in again from and may sit unused
+    # for weeks between trips. Both windows drive the row's `expires_at`, the cookie's
+    # `Max-Age` and the refresh token's `exp` together.
+    EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS: int = config("EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS", default=90)
+    # How long after a refresh token is spent a second presentation of it is answered with
+    # the pair the first one minted, rather than ending the session as a replay: a reply
+    # lost on a bad connection and retried. Held under a minute so that a stolen cookie
+    # replayed later still ends the session (`api.v1.auth._handle_revoked_refresh`).
+    REFRESH_TOKEN_REUSE_GRACE_SECONDS: int = config("REFRESH_TOKEN_REUSE_GRACE_SECONDS", default=60)
     # How long a temporary, post-verification-but-pre-account "onboarding" JWT (see
     # `create_onboarding_token`/`verify_onboarding_token` in `core.security`) stays
     # valid for. Deliberately short - it exists only to carry a verified identity from
@@ -128,6 +141,20 @@ class CryptSettings(BaseSettings):
     # simply dropped by the browser and the symptom is "signed out on every reload" with
     # nothing in any log. Default `true`, so turning it off is a decision someone makes.
     AUTH_COOKIE_SECURE: bool = config("AUTH_COOKIE_SECURE", default=True)
+
+    @field_validator("REFRESH_TOKEN_REUSE_GRACE_SECONDS")
+    @classmethod
+    def _grace_above_the_rotation_race(cls, value: int) -> int:
+        """The grace is also the line past which a spent token revokes its session, so a
+        value at or near zero would sign a diver out for two tabs refreshing at once. Five
+        seconds is three orders of magnitude above that race."""
+        if value < MIN_REFRESH_TOKEN_REUSE_GRACE_SECONDS:
+            raise ValueError(
+                f"REFRESH_TOKEN_REUSE_GRACE_SECONDS is {value}; below "
+                f"{MIN_REFRESH_TOKEN_REUSE_GRACE_SECONDS} a browser's two tabs refreshing at once "
+                "would sign the diver out as a stolen cookie. It cannot be switched off."
+            )
+        return value
 
 
 class DatabaseSettings(BaseSettings):

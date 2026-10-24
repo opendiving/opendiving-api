@@ -45,6 +45,7 @@ from src.app.models.user import User
 from src.app.schemas.auth import EmailAuthRequest, ProfileCompletionRequest
 from src.app.schemas.auth_audit_event import AuthEventType
 from src.app.schemas.daily_total import DailyMetric
+from src.app.services.auth_service import IssuedTokens
 from src.app.services.invite_links import LiveInviteLink, invite_link_exists, new_invite_link_token
 from src.app.services.registration_gate import (
     NOT_INVITED,
@@ -542,7 +543,7 @@ async def _complete(session: AsyncSession, token_data: OnboardingTokenData, *, d
         patch(
             "src.app.api.v1.auth.issue_tokens",
             new_callable=AsyncMock,
-            return_value={"access_token": "a", "token_type": "bearer"},
+            return_value=IssuedTokens(access_token="a", refresh_token="r", max_age=60),
         ),
     ):
         await complete_profile(
