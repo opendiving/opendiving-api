@@ -2087,15 +2087,15 @@ fix of that shape ships with a backfill run, not with instructions to re-upload.
 
 ## A dive's fixes are the first of its files' that has one
 
-Each of `dive`'s entry and exit fixes is the first non-null one among its files, recordings by
-`ordinal`, files by `id` - the order the detail read lists them, with each file's own entry fix, so
-the form previews conditions by the same rule (`derive_dive_fixes`). Each fix is taken on its own.
-An attach or a deletion derives them clearing a fix no file has; a promotion, a merge, a file-less
-recording's deletion and the data paths keep it, being the only home of one a logbook document gave.
-A file-less dive keeps its document's. Files stored before `dive_file` carried fixes, and archive
-restores, are read by the worker's `read_unread_file_fixes`, since a revision has neither the store
-nor the reader. Rejected: the primary-only fill rule, which no client could predict. The reshaped
-read owes no key version: the response cache is namespaced by build.
+Each of `dive`'s entry and exit fixes, taken separately, is the first non-null one among its files
+in attach order (`dive_file.id`) across every recording (`derive_dive_fixes`). The detail read
+publishes each file's rank as `attach_order` beside its entry fix, so the form previews conditions
+by the same rule. Rejected: recordings first, since the form cannot know which recording a picked
+file joins, only that it ranks after every stored one; so a promotion moves no fix. An attach or a
+deletion clears a fix no file has; a merge, a file-less recording's deletion and the data paths keep
+it, the only home of one a logbook document gave. Merged files keep their ids, so the earlier upload
+wins whichever dive held it. The worker reads unread files (`read_unread_file_fixes`). Response
+caches are namespaced by build, so the reshaped read owes no key version.
 
 ## Real dive-computer files are committed, and only the cases no file shows are written
 
@@ -6328,17 +6328,17 @@ file deletion leaves the profile and gate figures alone (`_keeps_stored_profile`
 fold's `submerged_time` and `avg_depth` are its time in the water; side by side they stand;
 `max_depth` is the deepest reading; `None` means leave alone; `start_time` stays; the absorbed
 record's device, settings and surface pressure fill the survivor's blanks; its CNS, OTU and paired
-tank pressures go by side (`_write_fold`); the fixes are derived from the merged files without
-clearing (`derive_dive_fixes`), not by side - one rule is what a client can predict, and a record
-cut off underwater has no surfacing fix, so the later half's file normally gives the exit. Where the
-first half's does carry one, the fold exits at the restart. Rejected: fill-only, which ends the dive
-at the restart and halves its SAC; the cost: a value the diver typed on the surviving dive's other
-side is replaced. An `avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write.
-`relabel_gas_numbers` precedes the join, keeping `usage` and filling the survivor's blank cylinder
-members from the absorbed rows it pairs, as an arrival does, an empty absorbed row not appended;
-moved profiles use `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions
-stay, notes append within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not
-reused.
+tank pressures go by side (`_write_fold`); the fixes are derived from the merged files in attach
+order without clearing (`derive_dive_fixes`), not by side - one rule is what a client can predict,
+and a record cut off underwater has no surfacing fix, so the later half's file normally gives the
+exit. Where the first half's file carries one and was uploaded first, the fold exits at the restart.
+Rejected: fill-only, which ends the dive at the restart and halves its SAC; the cost: a value the
+diver typed on the surviving dive's other side is replaced. An `avg_depth` failing
+`ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers` precedes the join,
+keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
+as an arrival does, an empty absorbed row not appended; moved profiles use
+`replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
+within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 

@@ -84,7 +84,7 @@ from ...schemas.user_picture import PictureKind
 from ..certification_files import get_file_infos_for_certifications
 from ..dive_conditions import get_conditions_for_dives
 from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
-from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS
+from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS, attach_orders
 
 
 @dataclass(frozen=True, slots=True)
@@ -649,8 +649,10 @@ async def _files_by_recording(db: AsyncSession, recording_ids: list[int]) -> dic
     and the metadata disagreeing."""
     if not recording_ids:
         return {}
+    ranks = attach_orders(recording_ids)
     rows = await db.execute(
         select(
+            ranks.c.attach_order,
             DiveFile.recording_id,
             DiveFile.id,
             DiveFile.uuid,
@@ -662,6 +664,7 @@ async def _files_by_recording(db: AsyncSession, recording_ids: list[int]) -> dic
             DiveFile.entry_latitude,
             DiveFile.entry_longitude,
         )
+        .join(ranks, ranks.c.id == DiveFile.id)
         .where(DiveFile.recording_id.in_(recording_ids))
         .order_by(DiveFile.recording_id, DiveFile.id)
     )
@@ -679,6 +682,7 @@ async def _files_by_recording(db: AsyncSession, recording_ids: list[int]) -> dic
                     updated_at=row.updated_at,
                     entry_latitude=row.entry_latitude,
                     entry_longitude=row.entry_longitude,
+                    attach_order=row.attach_order,
                 ),
             )
         )

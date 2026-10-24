@@ -681,12 +681,21 @@ class DiveFileInfo(PublicUUIDSchema):
             default=None,
             examples=[28.437455],
             description="Latitude of this file's own entry fix. The dive's `entry_latitude`/`entry_longitude` "
-            "are the first of its files' that has one, recordings in order and each one's `files` in order",
+            "are the first of its files' that has one, by `attach_order`",
         ),
     ]
     entry_longitude: Annotated[
         float | None,
         Field(default=None, examples=[34.458997], description="Longitude of this file's own entry fix"),
+    ]
+    attach_order: Annotated[
+        int,
+        Field(
+            examples=[0],
+            description="This file's 0-based rank among all of the dive's files, across every recording, in "
+            "the order they were attached - the order the dive's fixes are taken in. A file attached later "
+            "ranks after every one here",
+        ),
     ]
 
 
@@ -829,7 +838,7 @@ class RecordingRead(RecordingReadouts):
     ]
     files: Annotated[
         list[DiveFileInfo],
-        Field(default_factory=list, description="In attach order, which is the order the dive's fixes are taken in"),
+        Field(default_factory=list, description="In attach order"),
     ]
     profile: Annotated[
         DiveProfileInfo | None,

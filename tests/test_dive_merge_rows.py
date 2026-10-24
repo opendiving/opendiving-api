@@ -1255,6 +1255,31 @@ class TestAFoldsFixes:
         assert await _fixes(async_db, first) == (ENTRY_FIRST, EXIT_FIRST)
 
 
+class TestASideBySideMergesFixes:
+    @pytest.mark.asyncio
+    async def test_the_merged_files_keep_their_attach_order(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """The absorbed dive's files are not appended after the surviving dive's: each keeps
+        the place its upload gave it, so the earlier upload gives the fix whichever dive held it."""
+        first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
+        second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 18, 0, tzinfo=UTC), number=215)
+        await _attach(
+            async_db,
+            diver,
+            second,
+            _export(start=FIRST_START, serial="999999999999", samples=_samples(3)),
+            filename="b.json",
+        )
+        await _attach(async_db, diver, first, _export(start=FIRST_START, samples=_samples(3)), filename="a.json")
+        await _set_file_fixes(async_db, second, ENTRY_SECOND, EXIT_SECOND)
+        await _set_file_fixes(async_db, first, ENTRY_FIRST, EXIT_FIRST)
+
+        await _merge(async_db, diver, first, second)
+
+        assert await _fixes(async_db, first) == (ENTRY_SECOND, EXIT_SECOND)
+
+
 class TestBackfillingAFoldMergedBefore:
     """A fold merged under the fill-only rule, stood in for by merging under the current one and
     putting back what the old rule left: the first half's end values."""

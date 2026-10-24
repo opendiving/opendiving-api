@@ -1831,10 +1831,9 @@ async def patch_dive_recording(
     """Make one of a dive's recordings the primary one.
 
     `{"primary": true}` moves it to ordinal 0 and shifts the rest down, keeping their order.
-    That decides three things at once: which profile and readouts a single-chart client
-    shows, which recording's files come first when the dive's entry and exit fixes are
-    derived - again here, keeping a fix no file has - and which one a one-profile-per-dive
-    export writes.
+    That decides two things at once: which profile and readouts a single-chart client shows,
+    and which one a one-profile-per-dive export writes. Not the dive's entry and exit fixes,
+    which follow the files' attach order whatever recording holds them.
 
     `{"primary": false}` is refused with a 422 rather than silently ignored: there is no
     "make this one *not* primary" operation, because something has to be, and the diver means
@@ -1848,8 +1847,6 @@ async def patch_dive_recording(
     except RecordingNotFoundError as exc:
         raise NotFoundException(str(exc)) from exc
 
-    # No file added or removed, only their order: a fix no file has stays.
-    await derive_dive_fixes(db=db, dive_id=db_dive.id, clear=False)
     await db.commit()
     await invalidate_dive_caches(current_user["id"])
 
