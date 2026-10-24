@@ -8,6 +8,8 @@ logbook.divejson     the complete structured export, a DiveJSON 1.0 document -
 dives.uddf           the same bytes GET /export/uddf serves
 csv/dives.csv        the flat spreadsheet view, plus the normalized files beside it
                      (`tabular.CSV_WRITERS`)
+drafts.json          the dives not yet logged, as `GET /dive-drafts` serves them - a JSON
+                     array, empty when there are none; no format above has a slot for one
 avatar.<ext>         the diver's profile picture, if they have one: its original where
                      one is kept, a JPEG or PNG, and otherwise the WebP shown in the app
 portrait.<ext>       the check-in portrait's original, a JPEG or PNG, if there is one
@@ -63,9 +65,11 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import datetime
 from typing import IO
 
+from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...schemas.certification import CertificationSide
+from ...schemas.dive_draft import DiveDraftRead
 from .. import blob_store
 from ..blob_store import BlobMissingError
 from ..certification_files import load_certification_file
@@ -88,7 +92,10 @@ SPOOL_THRESHOLD = 32 * 1024 * 1024
 # container's root member is called this is the format's (spec Appendix A).
 DIVEJSON_NAME = "logbook.divejson"
 UDDF_NAME = "dives.uddf"
+DRAFTS_NAME = "drafts.json"
 CSV_DIRECTORY = "csv"
+
+_DRAFTS = TypeAdapter(list[DiveDraftRead])
 
 
 def new_spool() -> IO[bytes]:
@@ -194,6 +201,10 @@ async def write_archive(db: AsyncSession, bundle: ExportBundle, *, exported_at: 
                     _member(f"{CSV_DIRECTORY}/{filename}", exported_at, compress_type=zipfile.ZIP_DEFLATED),
                     writer(bundle),
                 )
+            archive.writestr(
+                _member(DRAFTS_NAME, exported_at, compress_type=zipfile.ZIP_DEFLATED),
+                _DRAFTS.dump_json(bundle.drafts, indent=2),
+            )
             await _write_blobs(db, archive, bundle, paths, exported_at)
     except BaseException:
         buffer.close()

@@ -303,6 +303,20 @@ def create_dive_form_preset(db: Session, user: models.User) -> models.DiveFormPr
     )
 
 
+def create_dive_draft(
+    db: Session, user: models.User, *, values: dict[str, Any] | None = None, gear_set: models.GearSet | None = None
+) -> models.DiveDraft:
+    """A dive draft of this user's, holding `values` as stored - nothing checks them on the way in."""
+    return _persist(
+        db,
+        models.DiveDraft(
+            user_id=user.id,
+            values={"notes": "Half written"} if values is None else values,
+            gear_set_id=None if gear_set is None else gear_set.id,
+        ),
+    )
+
+
 def create_species(db: Session, *, aphia_id: int | None = None, **overrides: Any) -> models.Species:
     """A catalog row.
 

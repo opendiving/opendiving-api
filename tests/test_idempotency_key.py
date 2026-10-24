@@ -40,6 +40,7 @@ from src.app.models.certification import Certification
 from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.dive import Dive
+from src.app.models.dive_draft import DiveDraft
 from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
@@ -52,7 +53,7 @@ from src.app.models.trip import Trip
 from src.app.models.user import User
 from tests.conftest import db_available
 from tests.helpers.fake_redis import FakeRedis
-from tests.helpers.generators import create_gear_item, create_user
+from tests.helpers.generators import create_dive_draft, create_gear_item, create_user
 from tests.helpers.routes import API_PREFIX, dependency_calls, iter_api_routes
 
 # The `201` creates that take no key, each for its reason.
@@ -84,6 +85,7 @@ COVERED: tuple[Create, ...] = (
     Create("/certification", Certification, _named(agency="padi")),
     Create("/contact", Contact, _named()),
     Create("/course", Course, _named()),
+    Create("/dive-draft", DiveDraft, lambda _gear, name: {"gear_set_uuid": None, "values": {"notes": name}}),
     Create("/dive-form-preset", DiveFormPreset, _named()),
     Create("/dive-site", DiveSite, _named()),
     Create(
@@ -121,6 +123,10 @@ COVERED: tuple[Create, ...] = (
 
 DIVE = next(create for create in COVERED if create.path == "/dive")
 
+# Covered too, and kept out of `COVERED` because its path names a draft and its record is the
+# dive it logs, which `GET /dive/{uuid}` reads; `TestAgainstPostgres` drives it on its own.
+LOG_DRAFT = "/dive-draft/{uuid}/dive"
+
 
 def _creates() -> dict[str, APIRoute]:
     return {
@@ -138,14 +144,27 @@ def _declares_the_key(route: APIRoute) -> bool:
     return any(isinstance(call, IdempotentCreate) for call in dependency_calls(route.dependant))
 
 
+def dependency_of(create: Create) -> IdempotentCreate:
+    route = _creates()[API_PREFIX + create.path]
+    (dependency,) = [call for call in dependency_calls(route.dependant) if isinstance(call, IdempotentCreate)]
+    return dependency
+
+
 class TestEveryCreateIsCoveredOrExcluded:
     """A create route added later is classified here before anything passes."""
 
     def test_the_covered_and_the_excluded_are_every_create(self) -> None:
         covered = {path for path, route in _creates().items() if _declares_the_key(route)}
 
-        assert covered == {API_PREFIX + create.path for create in COVERED}
+        assert covered == {API_PREFIX + create.path for create in COVERED} | {API_PREFIX + LOG_DRAFT}
         assert set(_creates()) - covered == set(EXCLUDED)
+
+    def test_logging_a_draft_names_the_dive_and_replays_through_the_dives_get(self) -> None:
+        route = _creates()[API_PREFIX + LOG_DRAFT]
+        (dependency,) = [call for call in dependency_calls(route.dependant) if isinstance(call, IdempotentCreate)]
+
+        assert dependency.record is Dive
+        assert dependency.read_endpoint(app.routes) is dependency_of(DIVE).read_endpoint(app.routes)
 
     @pytest.mark.parametrize("create", COVERED, ids=repr)
     def test_each_names_its_record_and_replays_through_its_own_get(self, create: Create) -> None:
@@ -366,6 +385,47 @@ class TestAgainstPostgres:
         assert in_flight.json() == {"detail": IN_FLIGHT}
         assert _count(db, create.model, diver) == before + 1
         assert len(_holds(db, diver)) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_retried_log_answers_the_dive_it_made_though_the_draft_is_gone(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        path = LOG_DRAFT.format(uuid=create_dive_draft(db, diver).uuid)
+        body = DIVE.body(uuid_pkg.uuid4(), "Logged")
+
+        first = await _post(http, path, body, "key-1")
+        again = await _post(http, path, body, "key-1")
+
+        assert (first.status_code, again.status_code) == (201, 201), again.text
+        assert again.json() == first.json()
+        assert _count(db, Dive, diver) == 1
+        assert _count(db, DiveDraft, diver) == 0
+
+    @pytest.mark.asyncio
+    async def test_a_retried_log_whose_dive_was_deleted_is_a_410(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        path = LOG_DRAFT.format(uuid=create_dive_draft(db, diver).uuid)
+        body = DIVE.body(uuid_pkg.uuid4(), "Logged")
+        first = await _post(http, path, body, "key-1")
+        assert (await http.delete(f"{API_PREFIX}/dive/{first.json()['uuid']}")).status_code == 200
+
+        again = await _post(http, path, body, "key-1")
+
+        assert again.status_code == 410
+        assert again.json() == {"detail": DELETED}
+
+    @pytest.mark.asyncio
+    async def test_one_key_on_two_drafts_logs_both(self, http: httpx.AsyncClient, db: Session, diver: User) -> None:
+        """The hold keys on the concrete path, so the draft in it is part of what the key names."""
+        body = DIVE.body(uuid_pkg.uuid4(), "Logged")
+        answers = [
+            await _post(http, LOG_DRAFT.format(uuid=create_dive_draft(db, diver).uuid), body, "key-1") for _ in range(2)
+        ]
+
+        assert [answer.status_code for answer in answers] == [201, 201]
+        assert answers[0].json()["uuid"] != answers[1].json()["uuid"]
+        assert len(_holds(db, diver)) == 2
 
     @pytest.mark.asyncio
     async def test_without_the_header_a_repeat_creates_again_and_holds_nothing(

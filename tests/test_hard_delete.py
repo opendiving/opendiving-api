@@ -45,6 +45,7 @@ from src.app.core.db.database import Base
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.crud.crud_contacts import contact_name_exists, crud_contacts
 from src.app.crud.crud_courses import crud_courses
+from src.app.crud.crud_dive_drafts import crud_dive_drafts
 from src.app.crud.crud_dive_form_presets import crud_dive_form_presets, dive_form_preset_name_exists
 from src.app.crud.crud_dive_sites import crud_dive_sites, dive_site_name_exists
 from src.app.crud.crud_gear_items import crud_gear_items, gear_item_name_exists
@@ -60,6 +61,7 @@ from src.app.crud.crud_tags import crud_tags, tag_name_exists
 from src.app.crud.crud_trips import crud_trips, trip_name_exists
 from src.app.models.contact import Contact
 from src.app.models.course import Course
+from src.app.models.dive_draft import DiveDraft
 from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
@@ -71,6 +73,7 @@ from src.app.models.trip import Trip
 from src.app.models.user import User
 from src.app.schemas.contact import ContactReadInternal
 from src.app.schemas.course import CourseReadInternal
+from src.app.schemas.dive_draft import DiveDraftReadInternal
 from src.app.schemas.dive_form_preset import DiveFormPresetReadInternal
 from src.app.schemas.dive_site import DiveSiteReadInternal
 from src.app.schemas.gear_item import GearItemReadInternal
@@ -82,6 +85,7 @@ from tests.conftest import db_available
 from tests.helpers.generators import (
     create_contact,
     create_course,
+    create_dive_draft,
     create_dive_form_preset,
     create_dive_site,
     create_gear_item,
@@ -203,6 +207,12 @@ HARD_DELETED_RESOURCES: dict[type[Base], Resource] = {
         create=create_dive_form_preset,
         resolve=_resolves_through_fetch_owned(crud_dive_form_presets, DiveFormPresetReadInternal),
         name_exists=lambda session, diver, row: dive_form_preset_name_exists(session, user_id=diver.id, name=row.name),
+    ),
+    # No `name_exists`: a draft has no name, only its uuid.
+    DiveDraft: Resource(
+        crud=crud_dive_drafts,
+        create=create_dive_draft,
+        resolve=_resolves_through_fetch_owned(crud_dive_drafts, DiveDraftReadInternal),
     ),
     GearSet: Resource(
         crud=crud_gear_sets,

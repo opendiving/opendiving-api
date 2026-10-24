@@ -28,6 +28,7 @@ from src.app.core.worker.functions import ACCOUNT_PURGE_BATCH_SIZE, purge_delete
 from src.app.models.authentication_request import AuthenticationRequest
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
+from src.app.models.dive_draft import DiveDraft
 from src.app.models.dive_file import DiveFile
 from src.app.models.map_tile import MapTile
 from src.app.models.user import User
@@ -36,6 +37,7 @@ from tests.conftest import db_available
 from tests.helpers.fake_s3 import select_s3_backend
 from tests.helpers.generators import (
     create_dive,
+    create_dive_draft,
     create_dive_recording,
     create_map_tile,
     create_user,
@@ -457,6 +459,17 @@ class TestPurgeDeletedAccountsAgainstPostgres:
         await purge_deleted_accounts({})
 
         assert db.get(User, living_id) is not None
+
+    @pytest.mark.asyncio
+    async def test_the_accounts_dive_drafts_go_with_it(self, db: Session) -> None:
+        diver = create_user(db)
+        draft_id = create_dive_draft(db, diver).id
+        self._request_deletion(db, diver, days_ago=settings.ACCOUNT_DELETION_GRACE_DAYS + 1)
+        db.expunge_all()
+
+        await purge_deleted_accounts({})
+
+        assert db.get(DiveDraft, draft_id) is None
 
     @pytest.mark.asyncio
     async def test_the_accounts_sign_in_requests_go_with_it(self, db: Session) -> None:

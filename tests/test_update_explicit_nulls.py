@@ -40,6 +40,7 @@ from src.app.models.checkin_details import CheckinDetails
 from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.dive import Dive
+from src.app.models.dive_draft import DiveDraft
 from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.dive_site import DiveSite
 from src.app.models.gear_item import GearItem
@@ -56,6 +57,7 @@ from src.app.schemas.checkin_details import CheckinDetailsUpdate
 from src.app.schemas.contact import ContactUpdate
 from src.app.schemas.course import CourseUpdate
 from src.app.schemas.dive import DiveUpdate
+from src.app.schemas.dive_draft import DiveDraftUpdate
 from src.app.schemas.dive_form_preset import DiveFormPresetUpdate
 from src.app.schemas.dive_site import DiveSiteUpdate
 from src.app.schemas.gear_item import GearItemUpdate
@@ -80,6 +82,7 @@ SCHEMAS_AND_TABLES: list[tuple[type[RejectsExplicitNulls], Any]] = [
     (GearItemUpdate, GearItem),
     (GearSetUpdate, GearSet),
     (DiveFormPresetUpdate, DiveFormPreset),
+    (DiveDraftUpdate, DiveDraft),
     (CertificationUpdate, Certification),
     (CourseUpdate, Course),
     (ContactUpdate, Contact),

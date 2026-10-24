@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy import ColumnElement
+from sqlalchemy import ColumnElement, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
@@ -37,6 +37,7 @@ from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     replace_dive_sites_for_dive,
 )
+from ...crud.crud_dive_drafts import crud_dive_drafts
 from ...crud.crud_dive_gear_items import (
     get_gear_items_for_dive,
     replace_gear_items_for_dive,
@@ -68,6 +69,7 @@ from ...crud.crud_species import resolve_species_ids
 from ...crud.crud_tags import get_tags_for_dives, replace_tags_for_dive, resolve_tag_id_for_user, resolve_tag_ids
 from ...crud.crud_trips import get_trip_uuids_by_ids, resolve_trip_id_for_user
 from ...models.dive import Dive
+from ...models.dive_draft import DiveDraft
 from ...schemas.dive import (
     DiveCreateInternal,
     DiveCreateRequest,
@@ -93,6 +95,7 @@ from ...schemas.dive import (
     validate_depth_pair,
 )
 from ...schemas.dive_conditions import DiveConditionsRead
+from ...schemas.dive_draft import DIVE_DRAFT_NOT_FOUND, DiveDraftReadInternal
 from ...schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, RecentVolumes
 from ...schemas.dive_profile import RecordingProfileRead
 from ...schemas.gear_item import GearItemInfo, GearType
@@ -668,6 +671,14 @@ async def write_dive(
     also come back as 422 with the offending field named, and store nothing: the dive and
     everything on it commit together or not at all.
     """
+    created_dive = await _stage_dive(db, dive, current_user)
+    await db.commit()
+    return await _read_logged_dive(db, created_dive, dive, current_user)
+
+
+async def _stage_dive(db: AsyncSession, dive: DiveCreateRequest, current_user: dict) -> DiveReadInternal:
+    """Everything `POST /dive` writes, flushed and uncommitted, so a caller can commit
+    something else with it."""
     trip_id: int | None = None
     if dive.trip_uuid is not None:
         trip_id = await resolve_trip_id_for_user(db=db, trip_uuid=dive.trip_uuid, user_id=current_user["id"])
@@ -765,15 +776,21 @@ async def write_dive(
         await write_or_422(
             db, replace_tags_for_dive(db=db, dive_id=dive_id, tag_ids=tag_ids, commit=False), _fk_error_detail
         )
-    await db.commit()
+    return created_dive
+
+
+async def _read_logged_dive(
+    db: AsyncSession, created_dive: DiveReadInternal, dive: DiveCreateRequest, current_user: dict
+) -> DiveReadWithMixtures:
+    """After `_stage_dive`'s commit: what the dive's derivations owe, and the dive as created."""
     await _after_dive_write(db, current_user["id"])
 
     mixtures = await get_mixtures_for_dive(db=db, dive_id=created_dive.id)
     dive_sites = await get_dive_sites_for_dive(db=db, dive_id=created_dive.id)
     gear_items = await get_gear_items_for_dive(db=db, dive_id=created_dive.id)
     stored_sightings = await get_species_for_dive(db=db, dive_id=created_dive.id)
-    stored_people = (await get_people_for_dives(db, [created_dive.id]))[created_dive.id] if people else []
-    stored_tags = (await get_tags_for_dives(db, [created_dive.id]))[created_dive.id] if tag_ids else []
+    stored_people = (await get_people_for_dives(db, [created_dive.id]))[created_dive.id] if dive.people else []
+    stored_tags = (await get_tags_for_dives(db, [created_dive.id]))[created_dive.id] if dive.tags else []
     return _to_public_dive_with_mixtures(
         created_dive,
         user_uuid=current_user["uuid"],
@@ -787,6 +804,44 @@ async def write_dive(
         people=stored_people,
         tags=stored_tags,
     )
+
+
+@router.post(
+    "/dive-draft/{uuid}/dive",
+    response_model=DiveReadWithMixtures,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(Dive, read="/dive/{uuid}"))],
+)
+async def log_dive_draft(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    dive: DiveCreateRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> DiveReadWithMixtures:
+    """Log a dive draft: create the dive exactly as `POST /dive` does, from the full body the
+    form now holds, and delete the draft in the same transaction.
+
+    One request, so no client can log the dive and leave its draft behind, or the reverse: a
+    dive this refuses - every 422 `POST /dive` gives - leaves the draft as it was. 404 when the
+    draft is not the caller's, or has already been logged or discarded. Under an
+    `Idempotency-Key`, a repeat answers the dive the first one created, before the draft it
+    deleted is looked for.
+    """
+    draft = await fetch_owned_or_raise(
+        db=db,
+        crud=crud_dive_drafts,
+        uuid=uuid,
+        current_user=current_user,
+        schema=DiveDraftReadInternal,
+        not_found_message=DIVE_DRAFT_NOT_FOUND,
+    )
+    # First, so a second log of the same draft waits on this row's lock and then finds it gone.
+    if (await db.execute(delete(DiveDraft).where(DiveDraft.id == draft.id).returning(DiveDraft.id))).first() is None:
+        raise NotFoundException(DIVE_DRAFT_NOT_FOUND)
+    created_dive = await _stage_dive(db, dive, current_user)
+    await db.commit()
+    return await _read_logged_dive(db, created_dive, dive, current_user)
 
 
 # Every filter has to appear in this key, and every placeholder in it is looked up as a

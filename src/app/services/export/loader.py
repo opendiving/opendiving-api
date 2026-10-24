@@ -77,12 +77,14 @@ from ...schemas.certification import CertificationFileInfo
 from ...schemas.checkin_details import CheckinDetailsRead
 from ...schemas.dive import DiveFileInfo
 from ...schemas.dive_conditions import DiveConditionsRead
+from ...schemas.dive_draft import DiveDraftRead
 from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.person import PersonRole
 from ...schemas.trip import TripPartRead
 from ...schemas.user_picture import PictureKind
 from ..certification_files import get_file_infos_for_certifications
 from ..dive_conditions import get_conditions_for_dives
+from ..dive_drafts import read_all_dive_drafts
 from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
 from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS, attach_orders
 
@@ -208,6 +210,9 @@ class ExportBundle:
     # The record a provider answered for a dive, keyed only for the dives that have one - unlike
     # the maps above, absence is the ordinary case and means nothing to write.
     conditions_by_dive: dict[int, DiveConditionsRead]
+    # The account's dive drafts as `GET /dive-drafts` serves them, for the archive's
+    # `drafts.json`: no format this package writes has a slot for a dive not yet logged.
+    drafts: list[DiveDraftRead]
 
     trip_by_id: dict[int, Trip] = field(init=False)
     course_by_id: dict[int, Course] = field(init=False)
@@ -565,6 +570,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
             db, DiveSiteTag.dive_site_id, DiveSiteTag, [site.id for site in dive_sites]
         ),
         conditions_by_dive=await get_conditions_for_dives(db, dive_ids),
+        drafts=await read_all_dive_drafts(db, user_id=user_id),
     )
 
 

@@ -407,7 +407,7 @@ async def send_account_deletion_email(email: str, purge_after: datetime) -> None
     if settings.ACCOUNT_DELETION_GRACE_DAYS <= 0:
         body = (
             "<p>Your OpenDiving account has been deleted.</p>"
-            "<p>This instance keeps no grace period, so your dives, dive sites, "
+            "<p>This instance keeps no grace period, so your dives, dive drafts, dive sites, "
             "courses, certifications, contacts, people, tags and gear are being erased now and cannot "
             "be recovered.</p>"
         )
@@ -416,7 +416,7 @@ async def send_account_deletion_email(email: str, purge_after: datetime) -> None
             "<p>Your OpenDiving account has been deleted, and the app has already stopped "
             "letting you in.</p>"
             "<p><strong>Nothing has been erased yet.</strong> Your account, your dives, your "
-            "dive sites, your courses, your certifications, your contacts, your people, your tags "
+            "dive drafts, your dive sites, your courses, your certifications, your contacts, your people, your tags "
             "and your gear will be permanently erased on "
             f"<strong>{purge_after:%-d %B %Y}</strong>.</p>"
             "<p>If you deleted your account by mistake, sign in again before that date and "

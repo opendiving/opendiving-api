@@ -37,6 +37,7 @@ from src.app.schemas.certification import CertificationFileInfo, CertificationSi
 from src.app.schemas.checkin_details import CheckinDetailsRead
 from src.app.schemas.dive import DiveFileInfo
 from src.app.schemas.dive_conditions import DiveConditionsRead
+from src.app.schemas.dive_draft import DiveDraftRead
 from src.app.schemas.dive_mixture import DiveMixtureRead
 from src.app.schemas.location import LocationRead
 from src.app.schemas.trip import TripPartRead
@@ -247,6 +248,7 @@ def build_bundle(
     tag_ids_by_site: dict[int, list[int]] | None = None,
     checkin_details: CheckinDetailsRead | None = None,
     conditions_by_dive: dict[int, DiveConditionsRead] | None = None,
+    drafts: list[DiveDraftRead] | None = None,
 ) -> ExportBundle:
     """An `ExportBundle` with every per-dive map defaulted to "nothing for any dive".
 
@@ -307,6 +309,7 @@ def build_bundle(
         tag_ids_by_dive={**{dive_id: [] for dive_id in dive_ids}, **(tag_ids_by_dive or {})},
         tag_ids_by_site={**{site.id: [] for site in (dive_sites or [])}, **(tag_ids_by_site or {})},
         conditions_by_dive=conditions_by_dive or {},
+        drafts=drafts or [],
     )
 
 
