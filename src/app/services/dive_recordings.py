@@ -913,23 +913,6 @@ async def make_primary(db: AsyncSession, *, recording_id: int, dive_id: int) -> 
         await db.execute(update(DiveRecording).where(DiveRecording.id == row_id).values(ordinal=position))
 
 
-async def primary_recording_ids(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, int]:
-    """Each dive's ordinal-0 recording id, for the surfaces that take one profile.
-
-    The app's own UDDF export and the tech scalars are both "the primary recording's", which
-    is the reference writer's rule and this app's: a document with one profile per dive
-    carries the one a reader would show by default rather than an arbitrary one.
-    """
-    if not dive_ids:
-        return {}
-    rows = await db.execute(
-        select(DiveRecording.dive_id, DiveRecording.id).where(
-            DiveRecording.dive_id.in_(set(dive_ids)), DiveRecording.ordinal == 0
-        )
-    )
-    return {row.dive_id: row.id for row in rows}
-
-
 async def recording_counts_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, int]:
     """How many recordings each dive holds, for the dive list; a dive with none is absent."""
     if not dive_ids:

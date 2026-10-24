@@ -992,10 +992,8 @@ class TestDeletingASecondComputersFile:
     async def test_the_primarys_own_last_file_still_re_derives_from_the_promotion(
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
     ) -> None:
-        """The other half of the guard: where the deletion *does* reach the primary, the
-        rewrite is owed and still runs. The primary goes with its last file, the second
-        computer's recording is promoted into ordinal 0, and the reading the dive shows becomes
-        that machine's own.
+        """The primary goes with its last file, the second computer's recording is promoted
+        into ordinal 0, and the reading the dive shows becomes that machine's own.
         """
         first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.json")
         other = _export(start="2026-09-08T15:19:38.670+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
@@ -1013,9 +1011,9 @@ class TestDeletingASecondComputersFile:
 class TestDeletingARecording:
     """`DELETE /dive/{uuid}/recording/{rid}`, which is the only way to remove a file-less one.
 
-    Through the real handler rather than a service: the question these pin is *which*
-    recording was removed, and that is decided in the route - before the delete renumbers the
-    ordinals and takes the answer with it.
+    Through the real handler rather than a service: whether the removed recording held files
+    decides whether the dive's fixes clear, and that is asked in the route before the delete
+    takes the files with it.
     """
 
     @pytest.mark.asyncio
@@ -1049,10 +1047,9 @@ class TestDeletingARecording:
 class TestPromotingARecording:
     """`PATCH /dive/{uuid}/recording/{rid}`, the third route the readings follow.
 
-    Its own class rather than a member of the two above, because it deletes nothing: a
-    promotion has touched the primary by definition - it is what it just did - so it is the
-    one caller that always re-derives, and the question the deletion routes answer does not
-    arise here.
+    Its own class rather than a member of the two above, because it deletes nothing: the
+    readings follow the recording it moves to ordinal 0, and the dive's fixes are derived again
+    without clearing, no file having come or gone.
     """
 
     @pytest.mark.asyncio

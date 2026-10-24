@@ -6273,17 +6273,17 @@ dive; import applies same-recording then strict, never loose.
 ## A second file of one recording fills, and never overwrites
 
 Everything a file says about a recording comes from the first file that recorded it:
-`fill_device_fields`, `fill_gate_figures`, `fill_start`, `fill_tech_scalars`, `fill_channels`,
-`fill_dive_mixtures`; `git grep -n "def fill_" -- src/app/services` is the list. Rejected: later
-wins, losing corrections. Profiles fill by channel, never by sample, a FIT file's channels last
-(`extract_recording`). Fills are a `COALESCE` per column except `fill_start`, whose two columns hold
-one value (filling a NULL `utc_offset_minutes` also converts the stored wall clock to an instant),
-and the dive's cylinders, which fill by the labelling's pairs (*A dive's cylinders fill from
-whichever recording pairs with them*). Gate figures are the exception: every re-derivation rewrites
-them (`store_gate_figures`). The dive's scalars are the primary recording's. `rederive_recording`
-requires a `RecordingChange`: `CREATED` and `REMOVED` write readouts and scalars outright, `JOINED`
-and `REREAD` fill them; `_repeat_upload` and the backfill pass `REREAD`, `delete_dive_file`
-`REMOVED`.
+`fill_device_fields`, `fill_gate_figures`, `fill_start`, `fill_channels`, `fill_dive_mixtures`;
+`git grep -n "def fill_" -- src/app/services` is the list, less `fill_tech_scalars`, which fills a
+file-less dive from a document. Rejected: later wins, losing corrections. Profiles fill by channel,
+never by sample, a FIT file's channels last (`extract_recording`). Fills are a `COALESCE` per column
+except `fill_start`, whose two columns hold one value (filling a NULL `utc_offset_minutes` also
+converts the stored wall clock to an instant), and the dive's cylinders, which fill by the
+labelling's pairs (*A dive's cylinders fill from whichever recording pairs with them*). Gate figures
+are the exception: every re-derivation rewrites them (`store_gate_figures`). The dive's fixes are
+not filled (*"A dive's fixes are the first of its files' that has one"*). `rederive_recording`
+requires a `RecordingChange`: `CREATED` and `REMOVED` write readouts outright, `JOINED` and `REREAD`
+fill them; `_repeat_upload` and the backfill pass `REREAD`, `delete_dive_file` `REMOVED`.
 
 ## A profile has one of three provenances, and a recording need not have a file
 
@@ -6329,13 +6329,16 @@ fold's `submerged_time` and `avg_depth` are its time in the water; side by side 
 `max_depth` is the deepest reading; `None` means leave alone; `start_time` stays; the absorbed
 record's device, settings and surface pressure fill the survivor's blanks; its CNS, OTU and paired
 tank pressures go by side (`_write_fold`); the fixes are derived from the merged files without
-clearing (`derive_dive_fixes`). Rejected: fill-only, which ends the dive at the restart and halves
-its SAC; the cost: a value the diver typed on the surviving dive's other side is replaced. An
-`avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write. `relabel_gas_numbers`
-precedes the join, keeping `usage` and filling the survivor's blank cylinder members from the
-absorbed rows it pairs, as an arrival does, an empty absorbed row not appended; moved profiles use
-`replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
-within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
+clearing (`derive_dive_fixes`), not by side - one rule is what a client can predict, and a record
+cut off underwater has no surfacing fix, so the later half's file normally gives the exit. Where the
+first half's does carry one, the fold exits at the restart. Rejected: fill-only, which ends the dive
+at the restart and halves its SAC; the cost: a value the diver typed on the surviving dive's other
+side is replaced. An `avg_depth` failing `ck_dive_avg_depth_within_max` is a 422, not a write.
+`relabel_gas_numbers` precedes the join, keeping `usage` and filling the survivor's blank cylinder
+members from the absorbed rows it pairs, as an arrival does, an empty absorbed row not appended;
+moved profiles use `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions
+stay, notes append within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not
+reused.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
