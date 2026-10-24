@@ -46,13 +46,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anyio
 from redis.exceptions import RedisError
-from sqlalchemy import Float, Numeric, and_, case, cast, delete, func, insert, or_, select, true, update
+from sqlalchemy import Float, Numeric, and_, case, cast, delete, func, insert, literal, or_, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
 from ..core.db.database import local_session, release_read_transaction
 from ..core.utils import cache
+from ..core.utils.datetime_offset import split_dive_start_time
 from ..models.dive import Dive
 from ..models.dive_conditions import DiveConditions
 from ..models.dive_dive_site import DiveDiveSite
@@ -65,6 +66,7 @@ from ..schemas.dive_conditions import (
     ConditionsPosition,
     ConditionsSea,
     ConditionsWeather,
+    DiveConditionsLookupRead,
     DiveConditionsRead,
     ExtremeKindName,
     TideStateName,
@@ -680,23 +682,16 @@ async def _refused(db: AsyncSession, candidate: _Candidate, now: datetime, reaso
     return Handled.FAILED if await _settle(db, candidate, row) else Handled.MOVED
 
 
-async def _could_not_ask(
-    db: AsyncSession, candidate: _Candidate, now: datetime, why: open_meteo.CouldNotAsk
-) -> Handled:
-    """Nothing about the dive: it stays pending with no row, and the run decides whether to go on.
-
-    Over budget or rate-limited, it stops; a refused key stops it and cools down an hour, since
-    a key on a plan without the archive is refused there with a 401. A timeout, a 5xx or a
-    transport failure is struck against the dive, and the third in a row defers it - a `failed`
-    row due an hour later, doubling to a day, with no attempt counted - so a place whose request
-    always fails is not asked every minute at the head of the queue.
-    """
+async def _stop_asking(why: open_meteo.CouldNotAsk) -> bool:
+    """Whether `why` is the instance's, so nothing more should be asked now: over budget, or a
+    rate limit or a refused key, which also cool down - the latter an hour, since a key on a plan
+    without the archive is refused there with a 401."""
     match why:
         case open_meteo.CouldNotAsk.BUDGET:
-            return Handled.STOPPED
+            return True
         case open_meteo.CouldNotAsk.RATE_LIMITED:
             await _cool_down(RATE_LIMITED_COOLDOWN_SECONDS)
-            return Handled.STOPPED
+            return True
         case open_meteo.CouldNotAsk.KEY_REFUSED:
             logger.error(
                 "%s refused this instance's key; check DIVE_CONDITIONS_OPEN_METEO_API_KEY and that its plan "
@@ -704,7 +699,22 @@ async def _could_not_ask(
                 open_meteo.PROVIDER,
             )
             await _cool_down(KEY_REFUSED_COOLDOWN_SECONDS)
-            return Handled.STOPPED
+            return True
+    return False
+
+
+async def _could_not_ask(
+    db: AsyncSession, candidate: _Candidate, now: datetime, why: open_meteo.CouldNotAsk
+) -> Handled:
+    """Nothing about the dive: it stays pending with no row, and the run decides whether to go on.
+
+    Over budget, rate-limited or refused its key, it stops (`_stop_asking`). A timeout, a 5xx or
+    a transport failure is struck against the dive, and the third in a row defers it - a
+    `failed` row due an hour later, doubling to a day, with no attempt counted - so a place
+    whose request always fails is not asked every minute at the head of the queue.
+    """
+    if await _stop_asking(why):
+        return Handled.STOPPED
     if await _strike(candidate.dive_id) >= STRIKES_TO_DEFER:
         deferrals = candidate.deferrals + 1
         row = {
@@ -721,26 +731,119 @@ async def _could_not_ask(
     return Handled.STRUCK
 
 
-def _resolve_instant(candidate: _Candidate, zone_name: str | None) -> tuple[datetime, int] | None:
+def _resolve_instant(
+    start_time: datetime, utc_offset_minutes: int | None, zone_name: str | None
+) -> tuple[datetime, int] | None:
     """The dive's instant and the offset it is spelled at.
 
     The dive's own where it has one. Where only the wall clock is known, that clock placed in the
     zone the provider named for the position, at the offset that zone had on the dive's date -
     never from the answer's hour labels, which carry today's offset for every date.
     """
-    if candidate.utc_offset_minutes is not None:
-        return candidate.start_time.astimezone(UTC), candidate.utc_offset_minutes
+    if utc_offset_minutes is not None:
+        return start_time.astimezone(UTC), utc_offset_minutes
     if zone_name is None:
         return None
     try:
         zone = ZoneInfo(zone_name)
     except ZoneInfoNotFoundError, ValueError:
         return None
-    local = candidate.start_time.replace(tzinfo=None).replace(tzinfo=zone)
+    local = start_time.replace(tzinfo=None).replace(tzinfo=zone)
     offset = local.utcoffset()
     if offset is None:
         return None
     return local.astimezone(UTC), int(offset.total_seconds() // 60)
+
+
+@dataclass(frozen=True, slots=True)
+class _Answer:
+    """What the provider answered for one time and place: the instant read, the offset it is
+    spelled at, and the weather and sea columns at it."""
+
+    instant: datetime
+    offset: int
+    weather: dict[str, Any]
+    sea: dict[str, Any]
+
+    @property
+    def fills(self) -> dict[str, Any]:
+        """The dive's own fields the answer would fill, each `None` where it has no value."""
+        sky = weather_from_code(self.weather.get("weather_code"))
+        sea_state = waves_from_height(self.sea.get("wave_height"))
+        return {
+            "air_temperature": self.weather.get("air_temperature"),
+            "weather": None if sky is None else sky.value,
+            "waves": None if sea_state is None else sea_state.value,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _Refusal:
+    """A request refused for these inputs, `reason` naming which."""
+
+    reason: str
+
+
+async def _answer(
+    start_time: datetime,
+    utc_offset_minutes: int | None,
+    latitude: float,
+    longitude: float,
+    water_type: str | None,
+    today: date,
+    *,
+    timeout: float = open_meteo.TIMEOUT_SECONDS,
+    deadline: float = open_meteo.DEADLINE_SECONDS,
+) -> _Answer | _Refusal | open_meteo.CouldNotAsk:
+    """Ask the provider about a start time as stored - an instant, or a wall clock labelled UTC
+    where the offset is unknown - at a rounded position. The worker and the form's preview both
+    ask through here, so the same dive asks the same question and reads one cached answer."""
+    day = start_time.astimezone(UTC).date()
+    known_offset = utc_offset_minutes is not None
+    # The archive refuses an end date after today and already answers every hour of today. A
+    # wall clock with no offset spans a day either side until its zone says which UTC day it is.
+    start = day if known_offset else day - timedelta(days=1)
+    weather = await open_meteo.fetch_weather(
+        latitude,
+        longitude,
+        start,
+        min(day + timedelta(days=1), today),
+        auto_zone=not known_offset,
+        timeout=timeout,
+        deadline=deadline,
+    )
+    if isinstance(weather, open_meteo.Refused):
+        return _Refusal(f"weather_{weather.status}")
+    if isinstance(weather, open_meteo.CouldNotAsk):
+        return weather
+
+    resolved = _resolve_instant(start_time, utc_offset_minutes, weather.timezone)
+    if resolved is None:
+        return _Refusal("no_zone")
+    instant, offset = resolved
+
+    sea_values: dict[str, Any] = {}
+    # Unknown water is asked about; only fresh water is not. A lake near a coast must not
+    # inherit the coast's tide.
+    if water_type != WaterType.FRESH:
+        sea_day = instant.date()
+        sea = await open_meteo.fetch_sea(
+            latitude,
+            longitude,
+            sea_day - timedelta(days=1),
+            sea_day + timedelta(days=1),
+            timeout=timeout,
+            deadline=deadline,
+        )
+        if isinstance(sea, open_meteo.Refused):
+            return _Refusal(f"sea_{sea.status}")
+        if isinstance(sea, open_meteo.CouldNotAsk):
+            # Left unanswered as a whole: the weather answer is cached, so the retry costs only
+            # this call.
+            return sea
+        sea_values = _sea_values(sea, instant)
+
+    return _Answer(instant=instant, offset=offset, weather=_weather_values(weather, instant), sea=sea_values)
 
 
 async def _handle(db: AsyncSession, candidate: _Candidate, now: datetime) -> Handled:
@@ -754,59 +857,28 @@ async def _handle(db: AsyncSession, candidate: _Candidate, now: datetime) -> Han
         return await _skip(db, candidate, "no_position")
     latitude, longitude = candidate.latitude, candidate.longitude
 
-    day = _day(candidate)
-    known_offset = candidate.utc_offset_minutes is not None
-    # The archive refuses an end date after today and already answers every hour of today. A
-    # wall clock with no offset spans a day either side until its zone says which UTC day it is.
-    start = day if known_offset else day - timedelta(days=1)
-    weather = await open_meteo.fetch_weather(
-        latitude, longitude, start, min(day + timedelta(days=1), today), auto_zone=not known_offset
+    answer = await _answer(
+        candidate.start_time, candidate.utc_offset_minutes, latitude, longitude, candidate.water_type, today
     )
-    if isinstance(weather, open_meteo.Refused):
-        return await _refused(db, candidate, now, f"weather_{weather.status}")
-    if isinstance(weather, open_meteo.CouldNotAsk):
-        return await _could_not_ask(db, candidate, now, weather)
+    if isinstance(answer, _Refusal):
+        return await _refused(db, candidate, now, answer.reason)
+    if isinstance(answer, open_meteo.CouldNotAsk):
+        return await _could_not_ask(db, candidate, now, answer)
 
-    resolved = _resolve_instant(candidate, weather.timezone)
-    if resolved is None:
-        return await _refused(db, candidate, now, "no_zone")
-    instant, offset = resolved
-
-    sea_values: dict[str, Any] = {}
-    # Unknown water is asked about; only fresh water is not. A lake near a coast must not
-    # inherit the coast's tide.
-    if candidate.water_type != WaterType.FRESH:
-        sea_day = instant.date()
-        sea = await open_meteo.fetch_sea(latitude, longitude, sea_day - timedelta(days=1), sea_day + timedelta(days=1))
-        if isinstance(sea, open_meteo.Refused):
-            return await _refused(db, candidate, now, f"sea_{sea.status}")
-        if isinstance(sea, open_meteo.CouldNotAsk):
-            # Left unanswered as a whole: the weather answer is cached, so the retry costs only
-            # this call.
-            return await _could_not_ask(db, candidate, now, sea)
-        sea_values = _sea_values(sea, instant)
-
-    weather_values = _weather_values(weather, instant)
     await _forgive(candidate.dive_id)
     row = {
         "state": FETCHED,
         "derivation_version": DERIVATION_VERSION,
         "provider": open_meteo.PROVIDER,
         "fetched_at": now,
-        "at": instant,
-        "utc_offset_minutes": offset,
+        "at": answer.instant,
+        "utc_offset_minutes": answer.offset,
         "latitude": latitude,
         "longitude": longitude,
-        **weather_values,
-        **sea_values,
+        **answer.weather,
+        **answer.sea,
     }
-    code = weather_values.get("weather_code")
-    fills = {
-        "air_temperature": weather_values.get("air_temperature"),
-        "weather": None if (sky := weather_from_code(code)) is None else sky.value,
-        "waves": None if (sea_state := waves_from_height(sea_values.get("wave_height"))) is None else sea_state.value,
-    }
-    return Handled.FETCHED if await _settle(db, candidate, row, fills) else Handled.MOVED
+    return Handled.FETCHED if await _settle(db, candidate, row, answer.fills) else Handled.MOVED
 
 
 async def _run(now: datetime) -> str:
@@ -853,6 +925,68 @@ async def run_dive_conditions(now: datetime | None = None) -> str:
         await _release_lock(token)
     logger.info("fetch_dive_conditions: %s", summary)
     return summary
+
+
+# -------- the form's preview --------
+
+
+async def preview_conditions(
+    db: AsyncSession,
+    *,
+    start_time: datetime | date,
+    latitude: float | None,
+    longitude: float | None,
+    water_type: str | None,
+    now: datetime,
+) -> DiveConditionsLookupRead | None:
+    """What the worker would fill for a dive with these inputs, for the dive form to show; `None`
+    when the provider could not be asked, which says nothing about the inputs.
+
+    The inputs go through the worker's own steps - its rounding, its question, its derivations -
+    so a dive saved with them is filled with exactly these values, and its fetch reads the answer
+    this one cached. Writes nothing. Inputs the worker would not ask about - a day after today, a
+    date alone, no position - and a request refused for them answer with every value null.
+    A cool-down after the provider limited or refused the instance holds the preview as it holds
+    the run, cached answers included.
+    """
+    stored, offset, date_only = split_dive_start_time(start_time)
+    today = now.astimezone(UTC).date()
+    nothing = DiveConditionsLookupRead(
+        provider=open_meteo.PROVIDER,
+        attribution=open_meteo.ATTRIBUTION,
+        filled=ConditionsFilled(air_temperature=None, weather=None, waves=None),
+    )
+    if stored.astimezone(UTC).date() > today or date_only or latitude is None or longitude is None:
+        return nothing
+    rounded_latitude, rounded_longitude = (
+        await db.execute(select(_rounded(literal(latitude, Float)), _rounded(literal(longitude, Float))))
+    ).one()
+    await release_read_transaction(db)
+
+    if await _cooling_down():
+        return None
+    answer = await _answer(
+        stored,
+        offset,
+        rounded_latitude,
+        rounded_longitude,
+        water_type,
+        today,
+        timeout=open_meteo.PREVIEW_TIMEOUT_SECONDS,
+        deadline=open_meteo.PREVIEW_DEADLINE_SECONDS,
+    )
+    if isinstance(answer, open_meteo.CouldNotAsk):
+        await _stop_asking(answer)
+        return None
+    if isinstance(answer, _Refusal):
+        return nothing
+    return DiveConditionsLookupRead(
+        provider=open_meteo.PROVIDER,
+        attribution=open_meteo.ATTRIBUTION,
+        at=answer.instant.astimezone(_zone(answer.offset)),
+        utc_offset_minutes=answer.offset,
+        filled=ConditionsFilled(**answer.fills),
+    )
 
 
 # -------- the import's restore --------

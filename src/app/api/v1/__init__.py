@@ -8,6 +8,7 @@ from .checkin_links import router as checkin_links_router
 from .config import router as config_router
 from .contacts import router as contacts_router
 from .courses import router as courses_router
+from .dive_conditions import router as dive_conditions_router
 from .dive_form_presets import router as dive_form_presets_router
 from .dive_sites import router as dive_sites_router
 from .dives import router as dives_router
@@ -55,6 +56,7 @@ router.include_router(checkin_details_router)
 router.include_router(checkin_links_router)
 router.include_router(species_router)
 router.include_router(dives_router)
+router.include_router(dive_conditions_router)
 router.include_router(map_tiles_router)
 router.include_router(dive_form_presets_router)
 router.include_router(support_router)
