@@ -1249,25 +1249,19 @@ class TestReExtractionFailureDoesNotFailTheRequest:
         build" is not "the files say nothing" - and a later backfill, or a re-upload after a
         reader fix, can still get them.
 
-        **The asymmetry is now structural rather than conditional**, which is the change worth
-        pinning: the re-derivation picks `store_tech_scalars` (which clears) or
-        `fill_tech_scalars` (which cannot) on its `change` - a re-upload into a recording that
-        already had files is a `REREAD` - so this branch cannot reach the clearing write at all.
+        A re-upload into a recording that already had files is a `REREAD`, which only fills the
+        readouts, and adds no file - so the dive's fixes are not derived at all.
         """
         writes: list[dict] = []
-        cleared: list[dict] = []
-
-        async def capture(db, *, dive_id, scalars):
-            writes.append(scalars)
+        derived: list[int] = []
 
         async def capture_readouts(db, *, recording_id, readouts):
             writes.append(readouts)
 
-        async def clearing(db, *, dive_id, scalars, commit=False):
-            cleared.append(scalars)
+        async def derive(db, *, dive_id, clear):
+            derived.append(dive_id)
 
-        monkeypatch.setattr("src.app.services.dive_files.fill_tech_scalars", capture)
-        monkeypatch.setattr("src.app.services.dive_files.store_tech_scalars", clearing)
+        monkeypatch.setattr("src.app.services.dive_files.derive_dive_fixes", derive)
         monkeypatch.setattr("src.app.services.dive_files.should_extract", lambda *a, **k: "extract")
         monkeypatch.setattr("src.app.services.dive_files.get_existing_profile", AsyncMock(return_value=None))
         monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
@@ -1294,9 +1288,9 @@ class TestReExtractionFailureDoesNotFailTheRequest:
             ),
         )
 
-        # Nothing to write, and - the half that matters - nothing cleared either.
+        # Nothing to write, and - the half that matters - the dive's fixes untouched.
         assert [value for scalars in writes for value in scalars.values() if value is not None] == []
-        assert cleared == []
+        assert derived == []
 
 
 class TestBackfillDoesNotStopOnOneBadDive:
@@ -1372,8 +1366,8 @@ class TestBackfillDoesNotStopOnOneBadDive:
 
 class TestScalarsAreWrittenAtAttach:
     """The import path owns these columns outright - the form cannot set them at all, so this
-    is the only write: a recording's readouts onto that recording, and the primary's entry
-    and exit fixes onto the dive.
+    is the only write: a recording's readouts onto that recording. The dive's fixes are not
+    this re-derivation's to write; the caller that added or removed a file derives them.
 
     **Outright for the upload that created the recording, filled for every other file**, and
     that split is what the tests below are about. A recording with nothing yet has nothing to
@@ -1413,9 +1407,9 @@ class TestScalarsAreWrittenAtAttach:
         """Run the re-derivation over `files` and report which writes it chose and with what.
 
         Captured at the seams rather than by inspecting the emitted `UPDATE`: the decision
-        under test is *what the attach decided to write*. `readouts` is the recording's write
-        and `dive` the dive's, each under `outright` or `fill`; whether the labelling was told
-        to fill the dive's cylinders is captured under `cylinders`.
+        under test is *what the attach decided to write*. `readouts` is the recording's write,
+        under `outright` or `fill`; any write of the dive's fixes is captured under `dive`, and
+        whether the labelling was told to fill the dive's cylinders under `cylinders`.
         """
         chosen: dict = {}
 
@@ -1425,11 +1419,8 @@ class TestScalarsAreWrittenAtAttach:
         async def readouts_fill(db, *, recording_id, readouts):
             chosen["readouts fill"] = {name: readouts.get(name) for name in READOUT_FIELDS}
 
-        async def outright(db, *, dive_id, scalars, commit=False):
-            chosen["dive outright"] = {name: scalars.get(name) for name in TECH_SCALAR_FIELDS}
-
-        async def fill(db, *, dive_id, scalars):
-            chosen["dive fill"] = {name: scalars.get(name) for name in TECH_SCALAR_FIELDS}
+        async def dive(db, **_):
+            chosen["dive"] = True
 
         async def labelling(db, *, dive_id, recording_id, ordinal, mixtures, profile, fill, renumber):
             if fill:
@@ -1440,8 +1431,8 @@ class TestScalarsAreWrittenAtAttach:
 
         monkeypatch.setattr("src.app.services.dive_recordings.store_readouts", readouts_outright)
         monkeypatch.setattr("src.app.services.dive_recordings.fill_readouts", readouts_fill)
-        monkeypatch.setattr("src.app.services.dive_files.store_tech_scalars", outright)
-        monkeypatch.setattr("src.app.services.dive_files.fill_tech_scalars", fill)
+        monkeypatch.setattr("src.app.services.dive_files.derive_dive_fixes", dive)
+        monkeypatch.setattr("src.app.services.dive_files.fill_tech_scalars", dive)
         monkeypatch.setattr("src.app.services.dive_files.label_cylinders", labelling)
         monkeypatch.setattr("src.app.services.dive_files.store_profile", AsyncMock())
         monkeypatch.setattr("src.app.services.dive_files.delete_profile_for_recording", AsyncMock())
@@ -1469,7 +1460,6 @@ class TestScalarsAreWrittenAtAttach:
             "otu_end": None,
             "surface_pressure_bar": 1.057,
         }
-        assert chosen["dive outright"] == dict.fromkeys(TECH_SCALAR_FIELDS)
 
     @pytest.mark.asyncio
     async def test_an_export_that_records_none_clears_what_was_there(self, monkeypatch) -> None:
@@ -1484,7 +1474,6 @@ class TestScalarsAreWrittenAtAttach:
         chosen = await self._rederive(self._files(empty), monkeypatch, change=RecordingChange.REMOVED)
 
         assert chosen["readouts outright"] == dict.fromkeys(READOUT_FIELDS)
-        assert chosen["dive outright"] == dict.fromkeys(TECH_SCALAR_FIELDS)
 
     @pytest.mark.asyncio
     async def test_a_second_file_of_one_recording_fills_and_never_clears(self, monkeypatch) -> None:
@@ -1501,7 +1490,6 @@ class TestScalarsAreWrittenAtAttach:
         )
 
         assert "readouts outright" not in chosen
-        assert "dive outright" not in chosen
         assert chosen["readouts fill"] == dict.fromkeys(READOUT_FIELDS) | {
             "cns_end": 20.0,
             "surface_pressure_bar": 1.057,
@@ -1515,7 +1503,6 @@ class TestScalarsAreWrittenAtAttach:
         chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=RecordingChange.REREAD)
 
         assert "readouts fill" in chosen
-        assert "dive fill" in chosen
         assert "cylinders" not in chosen
 
     @pytest.mark.asyncio
@@ -1555,21 +1542,30 @@ class TestScalarsAreWrittenAtAttach:
         chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=change, existing=merged)
 
         arrival = {"cylinders", "labels kept"} if change is RecordingChange.JOINED else set()
-        assert chosen.keys() == {"readouts fill", "dive fill", *arrival}
+        assert chosen.keys() == {"readouts fill", *arrival}
 
     @pytest.mark.asyncio
     async def test_a_secondary_recording_writes_its_own_readouts_and_none_of_the_dives_figures(
         self, monkeypatch
     ) -> None:
         """A second computer's CNS clock is its own device's arithmetic, so it lands on its
-        own recording - and its positions never reach the dive, whose fixes are the
-        *primary* recording's and nothing else's."""
+        own recording, and on nothing of the dive's."""
         chosen = await self._rederive(
             self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=RecordingChange.CREATED, ordinal=1
         )
 
         assert chosen.keys() == {"readouts outright", "cylinders"}
         assert chosen["readouts outright"]["cns_end"] == 20.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("change", list(RecordingChange))
+    @pytest.mark.parametrize("ordinal", [0, 1])
+    async def test_no_change_writes_the_dives_fixes(self, monkeypatch, change: RecordingChange, ordinal: int) -> None:
+        """They are the whole dive's files', never one recording's: `derive_dive_fixes` runs
+        once the caller has written every recording it changed."""
+        chosen = await self._rederive(self._files(self.XML_WITH_EXPOSURE), monkeypatch, change=change, ordinal=ordinal)
+
+        assert "dive" not in chosen
 
     @pytest.mark.asyncio
     async def test_the_first_file_that_records_a_reading_wins(self, monkeypatch) -> None:
@@ -1760,13 +1756,17 @@ class TestAFitFilesChannelsFillLast:
         assert fit_first.profile is not None and json_alone.profile is not None
         assert fit_first.profile.temperature == json_alone.profile.temperature
 
-    def test_the_fixes_stay_the_first_attached_files(self) -> None:
-        """What `fill_tech_scalars` keeps on a stored dive, so an outright re-derivation agrees."""
+    def test_each_file_keeps_its_own_fixes_whichever_was_attached_first(self) -> None:
+        """Never filled across files: the dive takes each whole, from the first that has one."""
         fit_first, json_first = self._read("fit", "json"), self._read("json", "fit")
+        fit, json = (
+            self._fixture("suunto-ocean-2026.fit", "fit"),
+            self._fixture("suunto-ocean-2026.json", "suunto_json"),
+        )
 
-        assert fit_first.scalars["exit_latitude"] == self._read("fit").scalars["exit_latitude"]
-        assert json_first.scalars["exit_latitude"] == self._read("json").scalars["exit_latitude"]
-        assert fit_first.scalars["exit_latitude"] != json_first.scalars["exit_latitude"]
+        assert fit_first.fixes == json_first.fixes
+        assert fit_first.fixes[fit.sha256] == self._read("fit").fixes[fit.sha256]
+        assert fit_first.fixes[json.sha256]["exit_latitude"] != fit_first.fixes[fit.sha256]["exit_latitude"]
 
 
 class TestTheReadoutFieldsAreTheRecordings:
