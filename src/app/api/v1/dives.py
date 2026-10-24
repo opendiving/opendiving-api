@@ -118,10 +118,11 @@ from ...services.dive_files import (
     InvalidDiveFileTokenError,
     delete_dive_file,
     delete_files_for_dive,
+    derive_dive_fixes,
     ensure_room_to_attach,
     get_dive_file_sha256,
     load_dive_file,
-    refresh_tech_scalars,
+    recording_holds_files,
     resolve_dive_file,
     store_recording_file,
 )
@@ -150,7 +151,6 @@ from ...services.dive_recordings import (
     is_same_recording,
     load_candidates,
     make_primary,
-    primary_recording_ids,
     resolve_recording,
     start_delta,
 )
@@ -1563,7 +1563,8 @@ async def write_dive_recording(
     anything; anything else is a second computer and gets a recording of its own, appended
     after the last. Either way the recording's cylinders may fill blank members of the dive's
     cylinders they pair with, and never overwrite one. The file that creates the dive's first
-    recording fills none: the form has already saved its cylinders.
+    recording fills none: the form has already saved its cylinders. The dive's entry and exit
+    fixes are derived again from all its files, each the first of them that has one.
 
     The same bytes twice is a no-op returning the recording they are already in. Bytes
     already stored against *another* dive of this account are a 409 naming it: the realistic
@@ -1759,10 +1760,10 @@ async def erase_dive_file(
     again when the dive has no such file - so this is not idempotent: a repeat delete reports
     the absence rather than succeeding quietly.
 
-    **What goes with the file is what was only ever read off it**, and how much that is
-    depends on what is left. The recording's profile and readouts are re-derived from its
-    remaining files, and so are the dive's entry and exit fixes if this was the primary
-    recording. A recording whose last file goes normally goes with it. The exception is a
+    **What goes with the file is what was only ever read off it**, and how much that is depends on
+    what is left. The recording's profile and readouts are re-derived from its remaining files, and
+    the dive's entry and exit fixes from the files the dive still holds, each the first of them that
+    has one, else none. A recording whose last file goes normally goes with it. The exception is a
     recording whose profile no file could re-yield - one a merge produced, or one a document
     supplied - which survives its last file's deletion along with its samples.
 
@@ -1794,12 +1795,11 @@ async def erase_dive_recording(
     creates from a document or from a file it does not keep, and what a merge can leave
     behind: there is no file whose deletion would take it.
 
-    Removing the primary recording promotes the next one, and the dive's entry and exit fixes
-    are re-derived from whatever becomes primary. Removing a **secondary** one leaves them
-    exactly as they are: they were never read off that recording, and rewriting them from a
-    primary this deletion did not touch is a loss rather than a repair - see
-    `refresh_tech_scalars`. 404 unless the caller owns the dive, and 404 again when it has no
-    such recording.
+    Removing the primary recording promotes the next one. The dive's entry and exit fixes are
+    derived again from the files it still holds, cleared where none has one if this recording
+    held files, and kept if it held none - removing no file, the deletion has no position to
+    take away (`derive_dive_fixes`). 404 unless the caller owns the dive, and 404 again when it
+    has no such recording.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 
@@ -1808,11 +1808,11 @@ async def erase_dive_recording(
     except RecordingNotFoundError as exc:
         raise NotFoundException(str(exc)) from exc
 
-    # Asked before the delete, which renumbers the ordinals and takes the answer with it.
-    touched_primary = (await primary_recording_ids(db=db, dive_ids=[db_dive.id])).get(db_dive.id) == recording_id
+    # Asked before the delete, which takes the files with it.
+    held_files = await recording_holds_files(db=db, recording_id=recording_id)
 
     await delete_recording(db=db, recording_id=recording_id, dive_id=db_dive.id, commit=False)
-    await refresh_tech_scalars(db=db, dive_id=db_dive.id, touched_primary=touched_primary)
+    await derive_dive_fixes(db=db, dive_id=db_dive.id, clear=held_files)
     await db.commit()
 
     await invalidate_dive_caches(current_user["id"])
@@ -1832,8 +1832,9 @@ async def patch_dive_recording(
 
     `{"primary": true}` moves it to ordinal 0 and shifts the rest down, keeping their order.
     That decides three things at once: which profile and readouts a single-chart client
-    shows, which recording's files write the dive's entry and exit fixes - re-derived here
-    from the new primary - and which one a one-profile-per-dive export writes.
+    shows, which recording's files come first when the dive's entry and exit fixes are
+    derived - again here, keeping a fix no file has - and which one a one-profile-per-dive
+    export writes.
 
     `{"primary": false}` is refused with a 422 rather than silently ignored: there is no
     "make this one *not* primary" operation, because something has to be, and the diver means
@@ -1847,8 +1848,8 @@ async def patch_dive_recording(
     except RecordingNotFoundError as exc:
         raise NotFoundException(str(exc)) from exc
 
-    # A promotion is the one caller that always touched the primary: that is what it did.
-    await refresh_tech_scalars(db=db, dive_id=db_dive.id, touched_primary=True)
+    # No file added or removed, only their order: a fix no file has stays.
+    await derive_dive_fixes(db=db, dive_id=db_dive.id, clear=False)
     await db.commit()
     await invalidate_dive_caches(current_user["id"])
 

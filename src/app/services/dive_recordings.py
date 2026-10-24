@@ -1040,7 +1040,8 @@ async def get_file_infos_for_recordings(
 
     `id` orders them, which is attach order by construction - a later upload gets a higher
     sequence value - and it is what the fill rule means by "the first file that recorded
-    it", a FIT file's profile channels apart.
+    it", a FIT file's profile channels apart, and the order `derive_dive_fixes` takes the
+    dive's fixes in. A client applies that rule to this list, so the two have to agree.
     """
     if not recording_ids:
         return {}
@@ -1053,6 +1054,8 @@ async def get_file_infos_for_recordings(
             DiveFile.original_filename,
             DiveFile.parser_key,
             DiveFile.updated_at,
+            DiveFile.entry_latitude,
+            DiveFile.entry_longitude,
         )
         .where(DiveFile.recording_id.in_(set(recording_ids)))
         .order_by(DiveFile.recording_id, DiveFile.id)
@@ -1067,6 +1070,8 @@ async def get_file_infos_for_recordings(
                 original_filename=row.original_filename,
                 parser_key=row.parser_key,
                 updated_at=row.updated_at,
+                entry_latitude=row.entry_latitude,
+                entry_longitude=row.entry_longitude,
             )
         )
     return infos

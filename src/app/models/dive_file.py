@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Index, Integer, String
+from sqlalchemy import Boolean, CheckConstraint, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -94,6 +94,18 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # The key is *data*, not a rule: a future kind (dive photos, species images) can pick a
     # different layout without moving anything already stored.
     storage_key: Mapped[str] = mapped_column(String(255))
+    # This file's own entry and exit fixes, as its reader placed them - what the dive's are
+    # derived from (`dive_files.derive_dive_fixes`) and what the dive read publishes per file,
+    # so a client can apply the same rule to a set of files it has not saved yet.
+    entry_latitude: Mapped[float | None] = mapped_column(Float, default=None)
+    entry_longitude: Mapped[float | None] = mapped_column(Float, default=None)
+    exit_latitude: Mapped[float | None] = mapped_column(Float, default=None)
+    exit_longitude: Mapped[float | None] = mapped_column(Float, default=None)
+    # Whether the four above have been read off the bytes. A row stored without a read of them -
+    # an archive's restored file, or one stored before the columns existed - says nothing yet,
+    # which is not the same as a file that recorded no position, and the worker reads it
+    # (`read_unread_file_fixes`).
+    fixes_read: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     @declared_attr.directive
     @classmethod
@@ -120,4 +132,10 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
             # freshly minted nonce, and asserted here anyway because that is a property of
             # `blob_store.new_key`, which is a function, not of the schema.
             Index("ux_dive_file_storage_key", "storage_key", unique=True),
+            CheckConstraint(
+                "(entry_latitude IS NULL) = (entry_longitude IS NULL)", name="ck_dive_file_entry_position_pair"
+            ),
+            CheckConstraint(
+                "(exit_latitude IS NULL) = (exit_longitude IS NULL)", name="ck_dive_file_exit_position_pair"
+            ),
         )

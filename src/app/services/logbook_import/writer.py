@@ -90,12 +90,14 @@ from ..dive_files import (
     RecordingChange,
     apply_gas_mapping,
     delete_files_for_dive,
+    derive_dive_fixes,
     extract_recording,
     fill_dive_mixtures,
     fill_tech_scalars,
     load_recording_files,
     rederive_recording,
     relabel_gas_numbers,
+    store_file_fixes,
 )
 from ..dive_profiles import (
     IMPORT_PARSER_KEY,
@@ -748,6 +750,9 @@ class _Writer:
             files=files,
             extraction=extraction,
         )
+        # A file added, so the dive's fixes are its files', as the form's attach leaves them.
+        await store_file_fixes(self._db, recording_id=recording_id, fixes=extraction.fixes)
+        await derive_dive_fixes(self._db, dive_id=dive_id, clear=True)
         return True
 
     async def _write_recording_files(
@@ -766,6 +771,10 @@ class _Writer:
         way. It lived inside `_write_recording` while only that path had files, and the fill
         path then silently dropped every one of them while the report went on saying
         `files.restored`.
+
+        **Their fixes are not read here**, any more than their samples are: the rows are stored
+        unread and the worker reads them (`read_unread_file_fixes`), deriving the dive's fixes
+        then without clearing - so until it does, the dive keeps the ones its document gave.
         """
         digests: list[str] = []
         parser_key: str | None = None
@@ -816,7 +825,8 @@ class _Writer:
         A **fill** writes no recording row. It fills the stored recording's blanks - its
         device columns, its settings, its readouts, its start, the two figures the gates
         compare - and, where that recording had no samples at all, its profile. The stored
-        dive's own blanks fill too: its positions from the primary recording alone, and the
+        dive's own blanks fill too: its positions from the primary recording alone and only
+        while it holds no file (`fill_tech_scalars`), and the
         blank members of its cylinders from the rows the labelling pairs - through the primary
         alone where the fill brings no file. Nothing is ever overwritten, which is the whole
         rule: the diver may have corrected any of it, and a fill that won an argument with an
@@ -989,18 +999,18 @@ class _Writer:
             )
 
         # **Everything below this line is the dive's rather than the recording's, and a second
-        # reading that brings no file writes it through the primary recording alone.** Its
-        # positions are the primary's to give the dive. Its cylinders fill the dive's blanks
-        # only here because nothing tells this reading apart from a logbook re-imported over a
-        # value the diver cleared: a recording past the first fills when it is created and
-        # when it gains bytes the arrival reads, and nowhere else.
+        # reading that brings no file writes it through the primary recording alone.** Its cylinders
+        # fill the dive's blanks only here because nothing tells this reading apart from a logbook
+        # re-imported over a value the diver cleared: a recording past the first fills when it is
+        # created and when it gains bytes the arrival reads, and nowhere else.
         if match.ordinal != 0:
             return len(digests)
 
         # `dive_values` is `PlannedRecord.values`, which is already keyed by column name -
         # the same dict the dive insert would have taken - so `TECH_SCALAR_FIELDS` indexes it
         # directly: the entry and exit fixes. A member the document did not carry is `None`
-        # and `fill_tech_scalars` skips it; one it did carry lands only where the dive has none.
+        # and `fill_tech_scalars` skips it; one it did carry lands only where the dive has none
+        # and holds no file - a dive with files takes its fixes from them alone.
         await fill_tech_scalars(
             self._db,
             dive_id=match.dive_id,
