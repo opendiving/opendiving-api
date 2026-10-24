@@ -7256,7 +7256,7 @@ phone's create retried days later still finds it. Postgres rather than Redis, be
 Key Value evicts and restarts at will, and a vanished hold turns a retry into a second record. A
 replay re-reads the record through the route's own read, so it is never a stale copy and never
 namespaced by build: a build that could not find a hold would create again. Per account and per
-path, so another account's key, or the same key on another route, is a hold of its own.
+path, so another account's key, or one key on another route, is another hold.
 
 ## A hold is claimed before the create and commits with it
 
