@@ -266,7 +266,7 @@ async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
     snapshot to be the day's count rather than the busiest hour's, a revoked row is kept
     until the UTC day of its last use has closed, and the first run after midnight counts
     it into yesterday before deleting it. A row past its `expires_at` goes at the next
-    sweep: it was last used a week ago, never today. `swept_session_predicate` holds both
+    sweep: it was last used a whole idle window ago, never today. `swept_session_predicate` holds both
     arms beside `_live`, which refuses every kept row either way.
 
     The kept revoked row is read by nothing that authenticates. `DELETE /user/session/

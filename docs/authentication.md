@@ -370,9 +370,9 @@ sequenceDiagram
 #### 7. Session refresh & logout
 
 Refresh **rotates**: the presented cookie is spent and an unrelated replacement is minted, so a
-leaked cookie has a much shorter useful life than the `REFRESH_TOKEN_EXPIRE_DAYS` window. What
-survives that rotation is the `sid` claim, which names the `user_session` row rather than the
-issuance — see *Sessions* below for the row and what checks it.
+leaked cookie has a much shorter useful life than the session's idle window. What survives that
+rotation is the `sid` claim, which names the `user_session` row rather than the issuance — see
+*Sessions* below for the row and what checks it.
 
 ```mermaid
 sequenceDiagram
@@ -406,10 +406,16 @@ rather than an accident, is the pair somebody else is holding. Both halves carry
 stamping `revoked_at` on that row ends them together: the cookie at its next rotation and the access
 token on its very next request. Whoever holds either one signs in again and gets a new session.
 
-That fires only past the five-second line the audit event already used, because the same branch is
-where rotation's documented two-tab race lands — two tabs refreshing at the same instant, the loser
-presenting a cookie the winner has just spent, milliseconds apart. Inside that window nothing is
-revoked, since the only person who would be signed out is the diver whose own tabs collided. The
+That fires only past `REFRESH_TOKEN_REUSE_GRACE_SECONDS` (a minute by default), the line the audit
+event uses too, because two benign things land on the same branch. Rotation's documented two-tab
+race — two tabs refreshing at the same instant, the loser presenting a cookie the winner has just
+spent — arrives milliseconds apart and still gets its 401. A **retry** — a client whose reply was
+lost on a bad connection, presenting the cookie again — arrives seconds later and is answered with
+the very pair the first presentation received: the same access token and the same refresh cookie,
+held in Redis for the grace. So the session continues, and it still has one live refresh token. A
+retry is refused instead when the session was revoked meanwhile, when that successor has itself been
+spent, or when the hold is gone (Redis evicted it, restarted, or was down) — a 401 and a sign-in,
+which is what every retry got before the grace existed. Inside the grace nothing is revoked; the
 `WARNING` is not conditioned either way.
 
 #### 8. Changing an account's email
@@ -509,8 +515,9 @@ carry its public uuid as a `sid` claim. That claim is what makes a session a thi
 end:
 
 - `GET /user/sessions` - the caller's live sessions, most recently used first. Each row carries when
-  it was created, when it was last used, the IP it was seen from, the raw `User-Agent` string, and
-  `current` for the one the request itself was made with.
+  it was created, when it was last used, the IP it was seen from, the raw `User-Agent` string, its
+  `idle_timeout` (`standard` or `extended`, below), and `current` for the one the request itself was
+  made with.
 - `DELETE /user/session/{uuid}` - sign one other device out. Someone else's uuid is a 404, exactly
   as for one that does not exist; **the caller's own session is a 409**, because ending your own
   session is what `POST /auth/logout` is - it also has to clear the cookie and blacklist the
@@ -527,8 +534,11 @@ it already held for up to `ACCESS_TOKEN_EXPIRE_MINUTES` - and that window is pre
 button exists for, since the case it is pressed for is a laptop that has just gone missing.
 
 **`expires_at` is an inactivity window, not a session length.** Each refresh stamps `last_used_at`
-and slides the expiry out by `REFRESH_TOKEN_EXPIRE_DAYS`, so a browser in daily use never expires
-and one left alone for that long does. Changing the setting changes both.
+and slides the expiry out by the session's window — `REFRESH_TOKEN_EXPIRE_DAYS` for a `standard`
+session, `EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS` for an `extended` one — so a browser in daily use
+never expires and one left alone for that long does. The row's `expires_at`, the cookie's `Max-Age`
+and the refresh token's `exp` always agree. Changing a setting changes the sessions of its kind,
+from their next refresh.
 
 **Live sessions are capped at 100 per account**, and creating one past the cap revokes the
 least-recently-used row - by `last_used_at`, never by creation order, so a browser in daily use is
@@ -537,8 +547,19 @@ never signed out to make room for a dormant one.
 `sid` does **not** replace `jti`. The `jti` identifies one issuance and is what makes blacklisting a
 token by value a per-issuance revocation; `sid` identifies the device and is carried unchanged
 across every rotation. That is also what a replayed refresh token is now revoked *by*: past the
-replay threshold the session the spent token names is stamped, which ends the pair rotated out of it
-as well - see *Session refresh & logout* above.
+reuse grace the session the spent token names is stamped, which ends the pair rotated out of it as
+well - see *Session refresh & logout* above.
+
+**A native client.** An app with no cookie jar reads the refresh token off the `Set-Cookie` header
+of the sign-in or refresh response, keeps it in its own secure storage, and sends it back as a
+`Cookie: refresh_token=...` header on the two routes that read it, `POST /auth/refresh` and
+`POST /auth/logout`. It signs in with the six-digit code (`POST /auth/email/verify-code`) and asks
+for `"idle_timeout": "extended"`, which buys it a session that survives
+`EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS` (90 by default) of disuse rather than a week — at the cost of a
+stolen device staying signed in that much longer, until the session is revoked from *Sessions*. Only
+that route takes the member; every other sign-in starts a `standard` session, and the web sends
+nothing. A client that loses a refresh reply should retry once with the same cookie within the
+grace, after a short pause, and the server answers with the pair it already minted.
 
 **Upgrading signs everyone out once.** Neither half of a pair minted before this feature carries a
 `sid`, and both halves are now refused for want of one - the access token on its next request, the
@@ -611,4 +632,14 @@ SIGN_IN_CODE_ATTEMPTS_MAX=5
 # pure Postgres, keeps working.
 PASSKEY_CHALLENGE_TTL_SECONDS=600
 PASSKEY_MAX_CREDENTIALS_PER_USER=10
+
+# Optional - how long a session may sit unused. A browser gets the first; a session that asked
+# for `idle_timeout: extended` at sign-in (the iOS app) gets the second.
+REFRESH_TOKEN_EXPIRE_DAYS=7
+EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS=90
+# Optional - a refresh retried this many seconds after the first gets the same tokens back
+# instead of ending the session as a replay. Held in Redis; with Redis down the retry is
+# refused and the client signs in again. Keep it short: a stolen cookie replayed inside it is
+# honoured rather than ending the session.
+REFRESH_TOKEN_REUSE_GRACE_SECONDS=60
 ```

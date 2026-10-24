@@ -1449,13 +1449,17 @@ something an operator turns on, not something a fresh deploy inherits — unlike
 ## `/auth/refresh` rotates the refresh token instead of reusing it
 
 The endpoint blacklists the presented refresh token and issues a fresh pair via `issue_tokens`, as
-every sign-in path does; a reused cookie would stay usable for its full `REFRESH_TOKEN_EXPIRE_DAYS`
-once leaked. `purge_expired_tokens` already cleans the row up.
+every sign-in path does; a reused cookie would stay usable for its session's whole idle window once
+leaked. `purge_expired_tokens` already cleans the row up.
 
-The cost: two tabs refreshing at the same instant race, and the loser gets a 401. Inherent to
-rotation without a grace window; accepted because the access token lives 30 minutes, so collisions
-are rare and the failure is a re-login. If it bites, add a short reuse-detection window rather than
-reverting.
+The cost: two tabs refreshing at the same instant race, and the loser gets a 401. Accepted because
+the access token lives 30 minutes, so collisions are rare and the failure is a re-login.
+
+A retry inside `REFRESH_TOKEN_REUSE_GRACE_SECONDS` - a client whose reply was lost - gets the pair
+the first presentation minted, held in Redis for the grace, and the session continues. The same
+pair, not a fresh one: minting again would spend the successor the first presenter holds, whose next
+refresh would land past the grace and revoke the session. The race's loser arrives before the pair
+is held and keeps its 401.
 
 The token is spent before its replacement is minted, so a crash between leaves the caller signed
 out, not holding two live refresh tokens.
@@ -1488,13 +1492,13 @@ only.
 
 `WARNING`, not `info`, to survive the default level; `tests/test_auth_refresh.py` asserts it.
 
-Elapsed time since the token was spent tells theft from the two-tab race. `expires_at` is the
-token's `exp`, hence `token_blacklist.revoked_at`, stamped by `core.security._blacklist_one`, NOT
-NULL with `server_default now()`; without it a warning cannot say which case fired.
+Elapsed time since the token was spent tells theft from the two-tab race and a retry. `expires_at`
+is the token's `exp`, hence `token_blacklist.revoked_at`, stamped by `core.security._blacklist_one`,
+NOT NULL with `server_default now()`; without it a warning cannot say which case fired.
 
-Sign-out on reuse sits past `_REFRESH_REPLAY_THRESHOLD` (five seconds), never on the branch, so the
-race stays a 401 (*"A replayed refresh token takes its session with it"*). The 401 `detail` is
-identical for revoked token and non-token: no oracle.
+Sign-out on reuse sits past `REFRESH_TOKEN_REUSE_GRACE_SECONDS`, never on the branch, so the race
+stays a 401 and a retry gets the held pair (*"A replayed refresh token takes its session with it"*).
+The 401 `detail` is identical for revoked token and non-token: no oracle.
 
 `purge_expired_tokens` (`core/worker/functions.py`) ends the detection window at the token's `exp`;
 between `exp` and the purge, `token_subject` reports an unknown subject rather than decoding with
@@ -4193,12 +4197,12 @@ plus `!.claude/hooks/`; registration is in untracked `.claude/settings.local.jso
 `verify_token` checks blacklist, expiry, signature and `token_type`, never a row, while
 `get_current_user` filters `is_deleted=False` and every other session source resolves an account.
 Otherwise `erase_user` blacklists only the two tokens it is shown and every other device keeps
-rotating for `REFRESH_TOKEN_EXPIRE_DAYS`. The 401 is the same 401: no oracle for whether a uuid ever
-had an account. Nothing is logged: post-deletion refreshes from other devices are routine. The
-lookup precedes spending the presented token, so a 401 writes nothing and a reversed soft delete
-leaves other sessions working, which `POST /auth/restore` depends on. `tests/test_auth_refresh.py`
-pins it with a fake `crud_users` that filters like FastCRUD and a Postgres-backed class for the real
-SQL; `Mock(spec=AsyncSession)` makes `exists` read as found, so unit tests state `SignedInAccount`
+rotating for its idle window. The 401 is the same 401: no oracle for whether a uuid ever had an
+account. Nothing is logged: post-deletion refreshes from other devices are routine. The lookup
+precedes spending the presented token, so a 401 writes nothing and a reversed soft delete leaves
+other sessions working, which `POST /auth/restore` depends on. `tests/test_auth_refresh.py` pins it
+with a fake `crud_users` that filters like FastCRUD and a Postgres-backed class for the real SQL;
+`Mock(spec=AsyncSession)` makes `exists` read as found, so unit tests state `SignedInAccount`
 explicitly.
 
 ## `authentication_request` is swept on a cron, a week after each row expires
@@ -5177,8 +5181,8 @@ the session row and carried unchanged across every rotation, which gives a sessi
 spend-then-mint destroys. `token_blacklist` stays a deny-list with no `user_id`.
 
 Tier 3 family revocation from *"A reused refresh token is a `WARNING`"* is implemented on this claim
-and no new column: a replay past the threshold stamps `revoked_at` on the row the spent token names
-— *"A replayed refresh token takes its session with it"*.
+and no new column: a replay past the reuse grace stamps `revoked_at` on the row the spent token
+names — *"A replayed refresh token takes its session with it"*.
 
 ## The row is created in `issue_tokens`, which is why "one session per mint" is not a checklist
 
@@ -5282,21 +5286,21 @@ Everything downstream of a resolved identity carries the id it already has. Two 
 both bounded: `POST /auth/logout` authenticates on `oauth2_scheme` alone and resolves its subject
 from the presented access token as `_handle_revoked_refresh` does, and the refresh-replay event
 resolves the token's subject with one indexed read, rare by construction since it is only reached
-past the threshold.
+past the reuse grace.
 
 ## Auth audit: The replay event is conditioned on elapsed time; the log line still is not
 
-The two-tab rotation race lands on the same branch a stolen cookie does, resolves in milliseconds
-and is benign; an unconditioned audit row would put the cry-wolf defect `token_blacklist.revoked_at`
-exists to fix straight into the audit table. So the row is written only past
-`_REFRESH_REPLAY_THRESHOLD` (five seconds — three orders of magnitude above the race, negligible
-against a theft replayed minutes later), and a row's existence means replay-not-race. The `WARNING`
-still fires for every presentation, gap attached.
+The two-tab rotation race and a retried refresh land on the same branch a stolen cookie does, arrive
+within milliseconds or seconds and are benign; an unconditioned audit row would put the cry-wolf
+defect `token_blacklist.revoked_at` exists to fix straight into the audit table. So the row is
+written only past `REFRESH_TOKEN_REUSE_GRACE_SECONDS` (a minute — far above the race and a retry,
+short against a theft replayed minutes later), and a row's existence means replay-not-retry. The
+`WARNING` still fires for every presentation, gap attached.
 
-The same threshold gates the session revocation (*"A replayed refresh token takes its session with
+The same grace gates the session revocation (*"A replayed refresh token takes its session with
 it"*), and the one row means "a replay was detected and its session was ended" rather than earning a
 second `SESSION_REVOKED`: one event per site, and this is one act. Too low a number now means a
-diver signed out for their own two tabs, not merely a spurious row.
+diver signed out for their own two tabs or a lost reply, not merely a spurious row.
 
 ## Auth audit: Retention is two tiers, and the short one is not independently chosen
 
@@ -6550,8 +6554,9 @@ the winner's replacement pair is what a theft is about, and one `UPDATE` on `use
 since the `sid` survives every rotation and `get_current_user` asks the same row. `issue_tokens`
 continues one session per rotation, so `user_session` is the lineage.
 
-The revocation sits past `_REFRESH_REPLAY_THRESHOLD` (five seconds), so a two-tab race gets only the
-401; the `WARNING` logs regardless, and `tests/test_auth_audit.py` bounds the number.
+The revocation sits past `REFRESH_TOKEN_REUSE_GRACE_SECONDS`, so a two-tab race gets only the 401
+and a retry the held pair; the `WARNING` logs regardless, and `tests/test_auth_audit.py` bounds the
+number.
 
 The site emits `REFRESH_REPLAY_DETECTED` alone, and the `UPDATE` rides `record_auth_event`'s commit,
 since `async_get_db` does not commit on unwind before `raise UnauthorizedException`.

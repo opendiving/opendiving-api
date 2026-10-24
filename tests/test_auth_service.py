@@ -30,8 +30,7 @@ class TestIssueTokens:
 
         tokens = await issue_tokens(response, uuid_pkg.uuid4(), db=mock_db, context=CONTEXT, user_id=7)
 
-        assert tokens["token_type"] == "bearer"
-        assert "access_token" in tokens
+        assert tokens.body() == {"access_token": tokens.access_token, "token_type": "bearer"}
         response.set_cookie.assert_called_once()
         kwargs = response.set_cookie.call_args.kwargs
         assert kwargs["key"] == "refresh_token"
@@ -67,7 +66,7 @@ class TestIssueTokens:
 
         tokens = await issue_tokens(response, user_uuid, db=mock_db, context=CONTEXT, user_id=7)
 
-        access_payload = jwt.decode(tokens["access_token"], SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        access_payload = jwt.decode(tokens.access_token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
         refresh_cookie = response.set_cookie.call_args.kwargs["value"]
         refresh_payload = jwt.decode(refresh_cookie, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
 

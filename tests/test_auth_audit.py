@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
-from src.app.api.v1.auth import _REFRESH_REPLAY_THRESHOLD, _handle_revoked_refresh
+from src.app.api.v1.auth import _handle_revoked_refresh, _reuse_grace
 from src.app.core.config import AccountSource
 from src.app.core.db.database import async_engine
 from src.app.core.utils.request_context import RequestContext
@@ -42,6 +42,7 @@ from src.app.models.auth_audit_event import AuthAuditEvent
 from src.app.models.user import User
 from src.app.models.user_session import UserSession
 from src.app.schemas.auth_audit_event import AuthEventType
+from src.app.services.auth_service import IssuedTokens
 from tests.conftest import db_available, unique_email
 from tests.helpers.mocks import awaited_kwargs, email_lookups_on
 
@@ -254,7 +255,7 @@ class TestWhichSitesWriteAnEvent:
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
             patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock) as recorder,
         ):
-            issue.return_value = {"access_token": "a", "token_type": "bearer"}
+            issue.return_value = IssuedTokens(access_token="a", refresh_token="r", max_age=60)
 
             await _start_onboarding_or_sign_in(
                 Mock(),
@@ -482,7 +483,7 @@ class TestTheNamedExclusions:
             users.exists = AsyncMock(return_value=False)
             users.create = AsyncMock(return_value=Mock(id=42, uuid=uuid7()))
             providers.create = AsyncMock()
-            issue.return_value = {"access_token": "a", "token_type": "bearer"}
+            issue.return_value = IssuedTokens(access_token="a", refresh_token="r", max_age=60)
 
             await complete_profile(
                 _request(),
@@ -557,7 +558,7 @@ class TestTheNamedExclusions:
             users.exists = AsyncMock(return_value=False)
             users.create = AsyncMock(return_value=Mock(id=42, uuid=uuid7()))
             providers.create = AsyncMock()
-            issue.return_value = {"access_token": "a", "token_type": "bearer"}
+            issue.return_value = IssuedTokens(access_token="a", refresh_token="r", max_age=60)
 
             await complete_profile(
                 _request(),
@@ -673,7 +674,7 @@ class TestTheRefreshReplayThreshold:
 
     @pytest.mark.asyncio
     async def test_a_gap_past_the_threshold_writes_one(self, mock_db) -> None:
-        long_ago = datetime.now(UTC) - _REFRESH_REPLAY_THRESHOLD - timedelta(seconds=1)
+        long_ago = datetime.now(UTC) - _reuse_grace() - timedelta(seconds=1)
 
         with (
             patch("src.app.api.v1.auth.revocation_time", new_callable=AsyncMock) as revoked,
@@ -697,7 +698,7 @@ class TestTheRefreshReplayThreshold:
     async def test_a_replay_for_a_purged_account_still_writes_a_user_less_row(self, mock_db) -> None:
         """The one row that satisfies neither arm of the erasure - no user to cascade from
         and no email to match - and so is bounded by the user-less retention tier alone."""
-        long_ago = datetime.now(UTC) - _REFRESH_REPLAY_THRESHOLD - timedelta(hours=2)
+        long_ago = datetime.now(UTC) - _reuse_grace() - timedelta(hours=2)
 
         with (
             patch("src.app.api.v1.auth.revocation_time", new_callable=AsyncMock) as revoked,
@@ -731,9 +732,10 @@ class TestTheRefreshReplayThreshold:
         assert caplog.records == []
 
     def test_the_threshold_is_far_above_the_race_and_far_below_a_theft(self) -> None:
-        """Three orders of magnitude above the millisecond-scale race, and negligible
-        against a replay that lands minutes or hours later."""
-        assert timedelta(seconds=1) <= _REFRESH_REPLAY_THRESHOLD <= timedelta(minutes=1)
+        """Far above the millisecond-scale race and a retried refresh's seconds, and short
+        against a replay that lands minutes or hours later - where a stolen cookie must still
+        end the session rather than be handed the pair its first presentation minted."""
+        assert timedelta(seconds=1) <= _reuse_grace() <= timedelta(minutes=1)
 
 
 @needs_a_database

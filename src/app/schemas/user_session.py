@@ -9,10 +9,24 @@ construction - so what the public shape actually withholds is the internal ids, 
 
 import uuid as uuid_pkg
 from datetime import datetime
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
 from ..core.schemas import PublicUUIDSchema
+
+
+class IdleTimeout(StrEnum):
+    """How long a session may sit unused before it ends, chosen once at sign-in.
+
+    A vocabulary rather than a number of days, so the window stays the operator's
+    (`REFRESH_TOKEN_EXPIRE_DAYS` and `EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS`) and a client can
+    only ask for one of the two an instance offers. Backed by a plain `VARCHAR`, like
+    `AuthEventType`: the enum is the enforcement.
+    """
+
+    STANDARD = "standard"
+    EXTENDED = "extended"
 
 
 class UserSessionCreateInternal(BaseModel):
@@ -24,6 +38,7 @@ class UserSessionCreateInternal(BaseModel):
 
     user_id: int
     expires_at: datetime
+    idle_timeout: IdleTimeout
     ip: str
     user_agent: str
 
@@ -36,6 +51,7 @@ class UserSessionReadInternal(PublicUUIDSchema):
     id: int
     user_id: int
     expires_at: datetime
+    idle_timeout: IdleTimeout
     ip: str
     user_agent: str
     created_at: datetime
@@ -51,9 +67,11 @@ class UserSessionRead(PublicUUIDSchema):
     two different things on one settings page.
 
     `expires_at` is deliberately **not** here. It is a sliding inactivity window driven by
-    `REFRESH_TOKEN_EXPIRE_DAYS`, and publishing the computed date would restate a setting
-    as a fact - the privacy copy says "about a week" precisely because the number is the
-    operator's (`DECISIONS.md` §"The operator docs carry the consent duty").
+    `REFRESH_TOKEN_EXPIRE_DAYS`, or `EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS` for an `extended`
+    session, and publishing the computed date would restate a setting as a fact - the
+    privacy copy describes the window in words precisely because the number is the operator's
+    (`DECISIONS.md` §"The operator docs carry the consent duty"). `idle_timeout` says which
+    of the two windows the row slides by, which is the part that is the session's own.
 
     `revoked_at` is absent for a simpler reason: the list only ever contains live rows.
     """
@@ -62,6 +80,7 @@ class UserSessionRead(PublicUUIDSchema):
     last_used_at: datetime
     ip: str
     user_agent: str
+    idle_timeout: IdleTimeout
 
     # Resolved from the requesting access token's `sid`, not from the row - which is why
     # this response is never cached. See `api.v1.sessions.read_sessions`.
@@ -98,5 +117,6 @@ def to_public_session(row: UserSessionReadInternal, *, current_session_uuid: uui
         last_used_at=row.last_used_at,
         ip=row.ip,
         user_agent=row.user_agent,
+        idle_timeout=row.idle_timeout,
         current=current_session_uuid is not None and row.uuid == current_session_uuid,
     )
