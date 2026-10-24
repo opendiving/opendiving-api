@@ -13,6 +13,7 @@ import hashlib
 import io
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
@@ -36,7 +37,12 @@ from src.app.schemas.dive import DecoAlgorithm, DiveListSort, DiveMode, DiveRead
 from src.app.schemas.dive_profile import ProfileProvenance
 from src.app.schemas.parsed_dive import ParsedDecoModel
 from src.app.services import blob_store
-from src.app.services.dive_files import delete_dive_file, store_recording_file
+from src.app.services.dive_files import (
+    delete_dive_file,
+    fill_tech_scalars,
+    read_unread_file_fixes,
+    store_recording_file,
+)
 from src.app.services.dive_profiles import IMPORT_PARSER_KEY, MERGE_PARSER_KEY, NormalizedProfile, ProfileSeries
 from src.app.services.dive_recordings import (
     delete_recording,
@@ -986,10 +992,8 @@ class TestDeletingASecondComputersFile:
     async def test_the_primarys_own_last_file_still_re_derives_from_the_promotion(
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
     ) -> None:
-        """The other half of the guard: where the deletion *does* reach the primary, the
-        rewrite is owed and still runs. The primary goes with its last file, the second
-        computer's recording is promoted into ordinal 0, and the reading the dive shows becomes
-        that machine's own.
+        """The primary goes with its last file, the second computer's recording is promoted
+        into ordinal 0, and the reading the dive shows becomes that machine's own.
         """
         first = await _attach(async_db, diver, dive, _export(cns_end=9.0), filename="first.json")
         other = _export(start="2026-09-08T15:19:38.670+03:00", cns_end=44.0).replace(b"253810000400", b"999999999999")
@@ -1007,9 +1011,8 @@ class TestDeletingASecondComputersFile:
 class TestDeletingARecording:
     """`DELETE /dive/{uuid}/recording/{rid}`, which is the only way to remove a file-less one.
 
-    Through the real handler rather than a service: the question these pin is *which*
-    recording was removed, and that is decided in the route - before the delete renumbers the
-    ordinals and takes the answer with it.
+    Through the real handler rather than a service, since the route is what deletes the
+    recording and renumbers the rest; `TestTheDivesFixes` pins what it does to the dive's fixes.
     """
 
     @pytest.mark.asyncio
@@ -1043,10 +1046,9 @@ class TestDeletingARecording:
 class TestPromotingARecording:
     """`PATCH /dive/{uuid}/recording/{rid}`, the third route the readings follow.
 
-    Its own class rather than a member of the two above, because it deletes nothing: a
-    promotion has touched the primary by definition - it is what it just did - so it is the
-    one caller that always re-derives, and the question the deletion routes answer does not
-    arise here.
+    Its own class rather than a member of the two above, because it deletes nothing: the
+    readings follow the recording it moves to ordinal 0, and the dive's fixes are derived again
+    without clearing, no file having come or gone.
     """
 
     @pytest.mark.asyncio
@@ -1071,6 +1073,243 @@ class TestPromotingARecording:
 
         assert [(row.id, row.ordinal) for row in await _recordings(async_db, dive)][0] == (stored.recording_id, 0)
         assert await _cns_end(async_db, dive) == 44.0
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "dive_files"
+# One Ocean dive's two exports - the JSON has both fixes, the FIT an exit alone - and another
+# dive's JSON, months earlier, which lands as a recording of its own.
+OCEAN_JSON = (FIXTURES / "suunto-ocean-2026.json").read_bytes()
+OCEAN_FIT = (FIXTURES / "suunto-ocean-2026.fit").read_bytes()
+OTHER_JSON = (FIXTURES / "suunto-ocean.json").read_bytes()
+OCEAN_ENTRY, OCEAN_EXIT, FIT_EXIT = (28.496525, 34.5168), (28.496447, 34.516765), (28.496523, 34.516778)
+OTHER_ENTRY, OTHER_EXIT = (28.567251, 34.533257), (28.56723, 34.533233)
+NO_FIX = (None, None)
+DOCUMENT = (27.0, 33.0)
+
+
+async def _attach_as(db: AsyncSession, diver: User, dive: Dive, content: bytes, parser_key: str) -> Any:
+    return await store_recording_file(
+        db,
+        user_id=diver.id,
+        user_uuid=diver.uuid,
+        dive_id=dive.id,
+        upload=UploadFile(filename=f"export.{parser_key}", file=io.BytesIO(content)),
+        file_token=create_dive_file_token(
+            user_uuid=diver.uuid, sha256=hashlib.sha256(content).hexdigest(), parser_key=parser_key
+        ),
+    )
+
+
+async def _dive_fixes(db: AsyncSession, dive: Dive) -> tuple[tuple[float | None, float | None], ...]:
+    row = (
+        await db.execute(
+            select(Dive.entry_latitude, Dive.entry_longitude, Dive.exit_latitude, Dive.exit_longitude).where(
+                Dive.id == dive.id
+            )
+        )
+    ).one()
+    return (row[0], row[1]), (row[2], row[3])
+
+
+async def _set_dive_fixes(db: AsyncSession, dive: Dive, entry: tuple[float, float]) -> None:
+    """A position only a logbook document gave: nothing on this instance can re-derive it."""
+    await db.execute(update(Dive).where(Dive.id == dive.id).values(entry_latitude=entry[0], entry_longitude=entry[1]))
+    await db.commit()
+
+
+async def _file_id(db: AsyncSession, recording_id: int) -> int:
+    return (await db.execute(select(DiveFile.id).where(DiveFile.recording_id == recording_id))).scalar_one()
+
+
+async def _promote(db: AsyncSession, diver: User, dive: Dive, rid: uuid_pkg.UUID) -> None:
+    await patch_dive_recording(
+        request=Mock(),
+        uuid=dive.uuid,
+        rid=rid,
+        values=RecordingUpdateRequest(primary=True),
+        current_user={"id": diver.id, "uuid": diver.uuid, "is_superuser": False},
+        db=db,
+    )
+
+
+class TestTheDivesFixes:
+    """Each fix is the first of the dive's files' that has one: recordings by ordinal, each
+    one's files in attach order, whichever recording that is - and the dive read lists each
+    file's own in that same order, so a client can apply the rule to a set it has not saved."""
+
+    @pytest.mark.asyncio
+    async def test_a_second_computers_fix_is_the_dives_where_the_primary_has_none(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        await _attach(async_db, diver, dive, _export(start="2026-01-02T10:00:00.000+02:00"), filename="no-fix.json")
+        await _attach_as(async_db, diver, dive, OTHER_JSON, "suunto_json")
+
+        assert await _dive_fixes(async_db, dive) == (OTHER_ENTRY, OTHER_EXIT)
+        recordings = (await get_recordings_for_dives(async_db, dive_ids=[dive.id]))[dive.id]
+        assert [
+            [(file.entry_latitude, file.entry_longitude) for file in recording.files] for recording in recordings
+        ] == [[NO_FIX], [OTHER_ENTRY]]
+
+    @pytest.mark.asyncio
+    async def test_within_a_recording_each_fix_is_the_first_file_that_has_it(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """Taken one fix at a time: the FIT came first and has an exit and no entry."""
+        await _attach_as(async_db, diver, dive, OCEAN_FIT, "fit")
+        await _attach_as(async_db, diver, dive, OCEAN_JSON, "suunto_json")
+
+        assert len(await _recordings(async_db, dive)) == 1
+        assert await _dive_fixes(async_db, dive) == (OCEAN_ENTRY, FIT_EXIT)
+
+    @pytest.mark.asyncio
+    async def test_deleting_the_file_that_gave_them_falls_to_the_next_and_then_to_none(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        first = await _attach_as(async_db, diver, dive, OCEAN_JSON, "suunto_json")
+        second = await _attach_as(async_db, diver, dive, OTHER_JSON, "suunto_json")
+        assert await _dive_fixes(async_db, dive) == (OCEAN_ENTRY, OCEAN_EXIT)
+
+        await delete_dive_file(async_db, file_id=await _file_id(async_db, first.recording_id))
+        assert await _dive_fixes(async_db, dive) == (OTHER_ENTRY, OTHER_EXIT)
+
+        await delete_dive_file(async_db, file_id=await _file_id(async_db, second.recording_id))
+        assert await _dive_fixes(async_db, dive) == (NO_FIX, NO_FIX)
+
+    @pytest.mark.asyncio
+    async def test_a_file_added_clears_a_fix_no_file_has(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """The cost of one rule: a dive holding files takes its fixes from them alone."""
+        await _set_dive_fixes(async_db, dive, DOCUMENT)
+
+        await _attach(async_db, diver, dive, _export(), filename="no-fix.json")
+
+        assert await _dive_fixes(async_db, dive) == (NO_FIX, NO_FIX)
+
+    @pytest.mark.asyncio
+    async def test_promoting_a_recording_puts_its_files_first(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive, routed: None
+    ) -> None:
+        await _attach_as(async_db, diver, dive, OCEAN_JSON, "suunto_json")
+        stored = await _attach_as(async_db, diver, dive, OTHER_JSON, "suunto_json")
+        second = next(row for row in await _recordings(async_db, dive) if row.id == stored.recording_id)
+
+        await _promote(async_db, diver, dive, second.uuid)
+
+        assert await _dive_fixes(async_db, dive) == (OTHER_ENTRY, OTHER_EXIT)
+
+    @pytest.mark.asyncio
+    async def test_erasing_a_recording_that_held_no_file_keeps_a_documents_fix(
+        self, volume: Any, async_db: AsyncSession, db: Session, diver: User, dive: Dive, routed: None
+    ) -> None:
+        await _import_recording(async_db, db, diver, dive, cns_end=12.5, otu_end=31.0)
+        second = create_dive_recording(db, diver, dive, ordinal=1)
+        await _set_dive_fixes(async_db, dive, DOCUMENT)
+
+        await _erase_recording(async_db, diver, dive, second.uuid)
+
+        assert await _dive_fixes(async_db, dive) == (DOCUMENT, NO_FIX)
+
+    @pytest.mark.asyncio
+    async def test_erasing_a_recording_that_held_the_fixing_file_derives_again(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive, routed: None
+    ) -> None:
+        await _attach(async_db, diver, dive, _export(start="2026-01-02T10:00:00.000+02:00"), filename="no-fix.json")
+        stored = await _attach_as(async_db, diver, dive, OTHER_JSON, "suunto_json")
+        second = next(row for row in await _recordings(async_db, dive) if row.id == stored.recording_id)
+
+        await _erase_recording(async_db, diver, dive, second.uuid)
+
+        assert await _dive_fixes(async_db, dive) == (NO_FIX, NO_FIX)
+
+
+class TestADocumentsFixFillsOnlyAFileLessDive:
+    @pytest.mark.asyncio
+    async def test_a_dive_with_no_file_takes_it(self, async_db: AsyncSession, dive: Dive) -> None:
+        await fill_tech_scalars(async_db, dive_id=dive.id, scalars={"entry_latitude": 27.0, "entry_longitude": 33.0})
+        await async_db.commit()
+
+        assert await _dive_fixes(async_db, dive) == (DOCUMENT, NO_FIX)
+
+    @pytest.mark.asyncio
+    async def test_a_dive_holding_a_file_does_not(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        await _attach(async_db, diver, dive, _export(), filename="no-fix.json")
+
+        await fill_tech_scalars(async_db, dive_id=dive.id, scalars={"entry_latitude": 27.0, "entry_longitude": 33.0})
+        await async_db.commit()
+
+        assert await _dive_fixes(async_db, dive) == (NO_FIX, NO_FIX)
+
+    @pytest.mark.asyncio
+    async def test_a_dive_holding_only_unread_files_does(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """An archive's restored files are stored unread, and say nothing until the worker reads them."""
+        await _attach(async_db, diver, dive, _export(), filename="no-fix.json")
+        await async_db.execute(update(DiveFile).where(DiveFile.dive_id == dive.id).values(fixes_read=False))
+
+        await fill_tech_scalars(async_db, dive_id=dive.id, scalars={"entry_latitude": 27.0, "entry_longitude": 33.0})
+        await async_db.commit()
+
+        assert await _dive_fixes(async_db, dive) == (DOCUMENT, NO_FIX)
+
+
+class TestReadingUnreadFixes:
+    """The data path for files stored before their fixes were, or restored without a read."""
+
+    @staticmethod
+    async def _unread(db: AsyncSession, dive: Dive, **values: Any) -> None:
+        await db.execute(
+            update(DiveFile)
+            .where(DiveFile.dive_id == dive.id)
+            .values(
+                entry_latitude=None,
+                entry_longitude=None,
+                exit_latitude=None,
+                exit_longitude=None,
+                fixes_read=False,
+                **values,
+            )
+        )
+        await db.commit()
+
+    @pytest.mark.asyncio
+    async def test_a_stored_files_fixes_are_read_and_become_the_dives(
+        self, volume: Any, monkeypatch: pytest.MonkeyPatch, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+        await _attach_as(async_db, diver, dive, OCEAN_JSON, "suunto_json")
+        await self._unread(async_db, dive)
+        await _set_dive_fixes(async_db, dive, DOCUMENT)
+
+        while await read_unread_file_fixes(async_db, limit=50) == 50:
+            pass
+
+        row = (await async_db.execute(select(DiveFile).where(DiveFile.dive_id == dive.id))).scalar_one()
+        await async_db.refresh(row)
+        assert (row.fixes_read, row.entry_latitude, row.exit_longitude) == (True, OCEAN_ENTRY[0], OCEAN_EXIT[1])
+        assert await _dive_fixes(async_db, dive) == (OCEAN_ENTRY, OCEAN_EXIT)
+
+    @pytest.mark.asyncio
+    async def test_a_file_this_build_cannot_read_is_marked_read_and_clears_nothing(
+        self, volume: Any, monkeypatch: pytest.MonkeyPatch, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """Marked, or the worker's loop selects it forever; and the dive keeps a document's fix."""
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+        await _attach_as(async_db, diver, dive, OCEAN_JSON, "suunto_json")
+        await self._unread(async_db, dive, parser_key=IMPORT_PARSER_KEY)
+        await _set_dive_fixes(async_db, dive, DOCUMENT)
+
+        while await read_unread_file_fixes(async_db, limit=50) == 50:
+            pass
+
+        fixes_read = (
+            await async_db.execute(select(DiveFile.fixes_read).where(DiveFile.dive_id == dive.id))
+        ).scalar_one()
+        assert fixes_read is True
+        assert await _dive_fixes(async_db, dive) == (DOCUMENT, OCEAN_EXIT)
 
 
 class TestOrdinals:

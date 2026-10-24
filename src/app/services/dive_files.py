@@ -15,7 +15,7 @@ entry and exit fixes).
 
 *A second file of one recording fills and never overwrites*, and that rule is written once per
 thing it applies to - the device columns, the two match figures, the recording's start, its
-readouts, the dive's tech scalars, the profile's channels and the dive's cylinders. Derive them from
+readouts, the profile's channels and the dive's cylinders. Derive them from
 `git grep -n "def fill_" -- src/app/services` rather than from a count here, which is what
 stops the list going stale; read it as a superset, since `fill_from_pair` matches the same grep
 and is the cylinder rule's pure half rather than a thing the rule applies to. Each takes every
@@ -23,6 +23,11 @@ value from the *first* file that recorded it - and the dive's cylinders, which e
 shares, take a blank member from whichever recording pairs with them at an arrival. The
 rejected alternative is "the later file wins", which silently loses a value a diver corrected
 between two uploads.
+
+**The dive's entry and exit fixes are not filled: they are derived**, each from the first of the
+dive's files that has one, whatever recording it belongs to (`derive_dive_fixes`). One rule a
+client can apply to a list of files it has not saved yet, which is what the dive form's
+conditions preview needs, and so stated over the whole dive rather than per recording.
 """
 
 import hashlib
@@ -95,9 +100,9 @@ KEY_KIND = "dive-files"
 # storage. Exports are small (a few hundred KB); this is headroom, not a target.
 MAX_DIVE_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
-# The `dive` columns an import owns outright - the primary recording's entry and exit fixes.
-# Taken from `DiveTechScalars` rather than listed here, so the schema that publishes them and
-# the write that fills them cannot drift: adding a field to one is adding it to both.
+# The entry and exit fixes, which every `dive_file` carries as its own and `dive` takes from the
+# first file that has each (`derive_dive_fixes`). Taken from `DiveTechScalars` rather than listed
+# here, so the schema that publishes them and the writes cannot drift.
 TECH_SCALAR_FIELDS = tuple(DiveTechScalars.model_fields)
 # And the recording's, which every recording's own files write.
 READOUT_FIELDS = dive_recordings.READOUT_COLUMNS
@@ -238,8 +243,8 @@ class FileExtraction:
     which the gas attribution is computed against the channels it will be stored beside and
     at the resolution `derive_gas_attribution` requires.
 
-    `scalars` are the recording's readouts as the import stores them, beside the dive's
-    entry and exit fixes as the form shows them.
+    `scalars` are the recording's readouts as the import stores them, beside the file's own
+    entry and exit fixes (`fixes_of`).
     """
 
     parsed: ParsedDiveSchema | None
@@ -249,6 +254,11 @@ class FileExtraction:
 
 
 _UNREAD = FileExtraction(parsed=None, profile=None, scalars=None)
+
+
+def fixes_of(extraction: FileExtraction) -> dict[str, float | None]:
+    """One file's entry and exit fixes, as its `dive_file` row stores them."""
+    return {name: (extraction.scalars or {}).get(name) for name in TECH_SCALAR_FIELDS}
 
 
 def extract_file(content: bytes, format: str) -> FileExtraction:
@@ -305,6 +315,9 @@ class RecordingExtraction:
     file after every other, for the reason `extract_recording` gives. `unreadable` says at
     least one file could not be re-read at all, which is a reader regression the backfill
     counts rather than swallows.
+
+    `fixes` is the exception to all of that: each file's own, by digest, never filled across
+    files - the dive takes them whole (`derive_dive_fixes`).
     """
 
     profile: NormalizedProfile | None = None
@@ -315,6 +328,7 @@ class RecordingExtraction:
     salinity: Salinity | None = None
     mixtures: list[DiveMixtureSchema] = field(default_factory=list)
     unreadable: bool = False
+    fixes: dict[str, dict[str, float | None]] = field(default_factory=dict)
 
 
 def _filled[M: BaseModel](earlier: M | None, later: M | None) -> M | None:
@@ -380,7 +394,7 @@ def extract_recording(
     no format is coarser than, and at the profile's stored scales it is no finer on any other
     channel, so a pair's profile takes the other file's whichever arrived first. Only the
     channels: the scalars, the device and the cylinders stay in attach order, because the
-    stored fills (`fill_tech_scalars`) keep the first-attached file's readings and an outright
+    stored fills (`fill_readouts`) keep the first-attached file's readings and an outright
     re-derivation has to agree with them. A file recorded under a format this build no longer
     reads, or which stopped reading, sets `unreadable` and contributes nothing - it is not
     silently treated as a file that said nothing, because those two facts lead to opposite
@@ -427,6 +441,7 @@ def extract_recording(
             salinity=result.salinity or (None if parsed is None else parsed.salinity),
             mixtures=mixtures,
             unreadable=result.unreadable,
+            fixes={**result.fixes, file.sha256: fixes_of(extraction)},
         )
 
     profile = None
@@ -441,35 +456,15 @@ def extract_recording(
     return replace(result, profile=attribute_and_cap(profile))
 
 
-async def store_tech_scalars(
-    db: AsyncSession, *, dive_id: int, scalars: dict[str, float | None], commit: bool = False
-) -> None:
-    """Write a dive's parsed entry and exit fixes **outright**, in the caller's transaction.
-
-    Outright means every field of `DiveTechScalars`, `None` included - so a re-derivation
-    that no longer yields a reading clears the one that is there rather than stranding a
-    number nothing can re-derive. Used where the recording's whole set of files has just
-    been read and the dive had nothing on it to lose: the file that *created* a primary
-    recording, and every re-derivation after a deletion or a promotion. Not a primary
-    recording's first file as such - see `rederive_recording` on what `CREATED` means.
-
-    `commit=False` by default for the same reason as `store_profile`: the attach path writes
-    the file, the profile and these in one transaction, so a dive can never end up
-    describing a recording it does not have.
-    """
-    await db.execute(
-        update(Dive).where(Dive.id == dive_id).values(**{name: scalars.get(name) for name in TECH_SCALAR_FIELDS})
-    )
-    if commit:
-        await db.commit()
-
-
 async def fill_tech_scalars(db: AsyncSession, *, dive_id: int, scalars: dict[str, float | None]) -> None:
-    """Write only the fixes the dive does not already have. **Never overwrites.**
+    """Fill a dive's fixes from a logbook document where no file has been read for them.
+    **Never overwrites.**
 
-    The tech-scalar half of *a second file of one recording fills and never overwrites*: a
-    FIT arriving beside a JSON of one dive leaves the positions the JSON supplied exactly as
-    they are.
+    A dive with no read file has nothing `derive_dive_fixes` could take a fix from, so what a
+    document says is all there is; a dive holding a read file takes its fixes from its files
+    alone, and this writes nothing to it. An *unread* file - an archive's, restored in this same
+    import - says nothing yet, so the document fills and the worker's derivation, which does not
+    clear, later keeps it or replaces it with the file's.
 
     A `COALESCE` per column rather than read-then-write, for `fill_device_fields`' reason:
     one statement, no read to race, and the rule stated once in SQL instead of once in SQL
@@ -480,6 +475,63 @@ async def fill_tech_scalars(db: AsyncSession, *, dive_id: int, scalars: dict[str
         for name, value in scalars.items()
         if name in TECH_SCALAR_FIELDS and value is not None
     }
+    if values:
+        await db.execute(
+            update(Dive)
+            .where(
+                Dive.id == dive_id,
+                ~select(DiveFile.id).where(DiveFile.dive_id == Dive.id, DiveFile.fixes_read.is_(True)).exists(),
+            )
+            .values(**values)
+        )
+
+
+async def store_file_fixes(
+    db: AsyncSession, *, recording_id: int, fixes: Mapping[str, Mapping[str, float | None]]
+) -> None:
+    """Write each file's own fixes, by digest, and mark them read. Outright: they are the file's."""
+    for sha256, values in fixes.items():
+        await db.execute(
+            update(DiveFile)
+            .where(DiveFile.recording_id == recording_id, DiveFile.sha256 == sha256)
+            .values(**{name: values.get(name) for name in TECH_SCALAR_FIELDS}, fixes_read=True)
+        )
+
+
+# Each fix as the pair of columns it moves as (`ck_dive_entry_position_pair`).
+_FIXES = (("entry_latitude", "entry_longitude"), ("exit_latitude", "exit_longitude"))
+
+
+async def derive_dive_fixes(db: AsyncSession, *, dive_id: int, clear: bool) -> None:
+    """Set a dive's entry and exit fixes, each from the first of its files that has one.
+
+    **The order is the dive read's**: recordings by `ordinal`, then each recording's files by
+    `dive_file.id`, which is attach order (`get_file_infos_for_recordings`). Each fix is taken
+    on its own, so the entry may come from one file and the exit from another.
+
+    Called wherever a dive's set of files or their order changes - an attach, a deletion, a
+    merge, a promotion - and by the data paths that read files' fixes. **`clear` says whether
+    a fix no file has is written as null.** True wherever files were added or removed, so the
+    dive stops claiming a position the files it still holds do not give. False where nothing
+    was added or removed - a promotion, a merge, a backfill - so a fix no file on this instance
+    can re-derive, which is one a logbook document wrote, is kept rather than lost. Required,
+    so a new caller has to answer it.
+    """
+    values: dict[str, float | None] = {}
+    for latitude, longitude in _FIXES:
+        found = (
+            await db.execute(
+                select(getattr(DiveFile, latitude), getattr(DiveFile, longitude))
+                .join(DiveRecording, DiveRecording.id == DiveFile.recording_id)
+                .where(DiveFile.dive_id == dive_id, getattr(DiveFile, latitude).is_not(None))
+                .order_by(DiveRecording.ordinal, DiveFile.id)
+                .limit(1)
+            )
+        ).one_or_none()
+        if found is not None:
+            values |= {latitude: found[0], longitude: found[1]}
+        elif clear:
+            values |= {latitude: None, longitude: None}
     if values:
         await db.execute(update(Dive).where(Dive.id == dive_id).values(**values))
 
@@ -1153,6 +1205,8 @@ async def store_recording_file(
                 # instance, and this Core-level INSERT never constructs one.
                 uuid=file_uuid,
                 created_at=now,
+                **fixes_of(extraction),
+                fixes_read=True,
             )
         )
         await rederive_recording(
@@ -1164,6 +1218,7 @@ async def store_recording_file(
             files=files,
             extraction=recording_extraction,
         )
+        await derive_dive_fixes(db, dive_id=dive_id, clear=True)
         await db.commit()
     except IntegrityError as exc:
         # Two uploads for one recording raced. One user per dive and a button disabled while
@@ -1237,10 +1292,9 @@ async def read_recording(
     **`release` says the caller has nothing left in the transaction to lose**, and it has to be
     the caller's answer rather than this function's. `release_read_transaction` rolls back, so
     it can free the connection for the length of the read only where nothing has been written
-    yet - which is true of `_repeat_upload`, whose reads are all lookups, and false of
-    `refresh_tech_scalars`, which every caller reaches after a delete or a promotion has
-    already been issued. There the connection is held for the duration, and that is the
-    accepted cost: what is bought either way is the event loop, which is the scarce thing.
+    yet - which is true of `_repeat_upload`, whose reads are all lookups, and false of a caller
+    that has already issued a delete. There the connection is held for the duration, and that
+    is the accepted cost: what is bought either way is the event loop, which is the scarce thing.
     """
     files = await load_recording_files(db, recording_id=recording_id)
     if not files:
@@ -1296,14 +1350,13 @@ async def rederive_recording(
     so a recording stored with a device's logged figures comes out on the samples' span the
     first time anything re-reads its bytes.
 
-    **Every recording's readouts are its own files'**, written before anything the primary
-    alone may write. **The dive's fixes are the primary recording's, and only the primary's**:
-    a secondary recording is a second computer's account of the same dive, and its positions
-    are not the dive's.
+    **Every recording's readouts are its own files'.** **The dive's fixes are not written here**:
+    they are the whole dive's files' (`derive_dive_fixes`), and the caller that added or removed
+    a file derives them once this recording is written.
 
     **`change` is the caller's answer, and two things follow from it.** A recording `CREATED`
-    or with a file `REMOVED` has nothing to lose, so its readouts and the fixes are written
-    outright, clearing what nothing yields; otherwise they fill. That is true of a recording
+    or with a file `REMOVED` has nothing to lose, so its readouts are written outright,
+    clearing what nothing yields; otherwise they fill. That is true of a recording
     this very upload created and **false of a file-less one a logbook import created
     earlier**, whose first file is a second reading of a record the logbook already holds and
     `JOINED` it - and deliberately not "had no files a moment ago", since a deletion is there
@@ -1318,8 +1371,7 @@ async def rederive_recording(
 
     **A profile no file can re-yield stays** (`_keeps_stored_profile`), and with it the
     labels and the gate figures it was stored with: the dive's cylinders still fill at an
-    arrival, but are never renumbered onto the files' labels, and the readouts and the fixes
-    only fill.
+    arrival, but are never renumbered onto the files' labels, and the readouts only fill.
     """
     arrival = change is RecordingChange.JOINED or (change is RecordingChange.CREATED and ordinal != 0)
     existing = await get_existing_profile(db, recording_id=recording_id)
@@ -1336,8 +1388,6 @@ async def rederive_recording(
                 renumber=False,
             )
         await dive_recordings.fill_readouts(db, recording_id=recording_id, readouts=extraction.scalars)
-        if ordinal == 0:
-            await fill_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars)
         return
 
     if not files:
@@ -1376,13 +1426,6 @@ async def rederive_recording(
         await dive_recordings.store_readouts(db, recording_id=recording_id, readouts=extraction.scalars)
     else:
         await dive_recordings.fill_readouts(db, recording_id=recording_id, readouts=extraction.scalars)
-
-    if ordinal != 0:
-        return
-    if fresh:
-        await store_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars, commit=False)
-    else:
-        await fill_tech_scalars(db, dive_id=dive_id, scalars=extraction.scalars)
 
 
 def _keeps_stored_profile(existing: ExistingProfileRow | None, extraction: RecordingExtraction) -> bool:
@@ -1531,42 +1574,6 @@ async def label_cylinders(
     return profile
 
 
-async def refresh_tech_scalars(db: AsyncSession, *, dive_id: int, touched_primary: bool) -> None:
-    """Rewrite a dive's entry and exit fixes from its primary recording's files, outright.
-
-    The repair after anything that changes *which* recording is primary or which files it
-    holds: a file deleted, a recording deleted, a recording promoted. Outright rather than
-    filled, because the point is to stop claiming a reading the dive no longer has any
-    evidence for - the same reasoning `delete_dive_file` has always applied, now asked of the
-    primary recording rather than of the dive.
-
-    A dive whose primary recording has no files - or which has no recordings at all - has its
-    readings cleared, which is what "nothing here can re-derive them" means.
-
-    **`touched_primary` says the change reached the primary recording, and it is the caller's
-    answer rather than anything readable here.** By the time this runs the delete has been
-    issued and the ordinals renumbered, so the row that would answer it is gone. False makes
-    this a no-op, and that is the whole of the guard: an outright rewrite is only ever owed
-    where the primary's identity or its files just moved. Run against a dive whose primary was
-    untouched it is not a slow no-op but a loss - on a **file-less** primary, the shape a
-    logbook import creates from a document, the extraction is empty and every field is written
-    `None`, clearing figures a document supplied that nothing on this instance can re-derive;
-    and on a primary that *has* files, clearing any field the document supplied and the files
-    do not yield. Either way the recording the diver actually deleted had no bearing on them.
-    `POST /dives/merge` skips this call outright for the same reason - see *"Merging two dives
-    keeps the gap and synthesises nothing"* in `DECISIONS.md`. Required rather than defaulted,
-    so a fourth caller has to answer it.
-    """
-    if not touched_primary:
-        return
-
-    # Never `release=True`: every caller reaches this after a delete or a promotion has been
-    # issued, and rolling the transaction back to free the connection would discard them.
-    primary = (await dive_recordings.primary_recording_ids(db, dive_ids=[dive_id])).get(dive_id)
-    scalars = {} if primary is None else (await read_recording(db, recording_id=primary))[1].scalars
-    await store_tech_scalars(db, dive_id=dive_id, scalars=scalars, commit=False)
-
-
 async def _repeat_upload(
     db: AsyncSession, *, existing: _ExistingRow, data: bytes, dive_id: int, user_id: int
 ) -> StoredRecordingFile:
@@ -1577,9 +1584,9 @@ async def _repeat_upload(
 
     The *profile*, though, is a function of (these bytes, the extractor version, the reader
     version), so a repeated attach after either version moved opportunistically upgrades it
-    from bytes already in hand. The tech scalars ride that same gate, having none of their
-    own, which makes a reader fix that changes only scalars invisible here -
-    `backfill_tech_fields` is what picks those up.
+    from bytes already in hand. The readouts ride that same gate, having none of their own,
+    which makes a reader fix that changes only scalars invisible here - `backfill_tech_fields`
+    is what picks those up. The fixes do not move at all: no file was added or removed.
 
     And re-uploading is the natural repair after a partial loss of the blob store, on
     either backend: without the `has`/`put` below the row says "already stored", the
@@ -1636,9 +1643,9 @@ async def _repeat_upload(
                 files=files,
                 extraction=extraction,
             )
-            # One commit for the profile, the readouts and the fixes: they come out of the
-            # same bytes, and a recording whose readouts were upgraded but whose profile wasn't
-            # would be describing two different extractions. The writes are inside the `try`,
+            # One commit for the profile and the readouts: they come out of the same bytes, and
+            # a recording whose readouts were upgraded but whose profile wasn't would be
+            # describing two different extractions. The writes are inside the `try`,
             # not just the commit: a `CHECK` is not deferrable in Postgres, so `IntegrityError`
             # is raised from `execute()` rather than from `commit()`.
             await db.commit()
@@ -1740,6 +1747,14 @@ async def resolve_dive_file(db: AsyncSession, *, dive_id: int, uuid: uuid_pkg.UU
     return int(row.id), int(row.recording_id)
 
 
+async def recording_holds_files(db: AsyncSession, *, recording_id: int) -> bool:
+    """Whether a recording has any stored file - asked before deleting one, to know whether the
+    deletion removes files and so owes the dive's fixes a clearing derivation."""
+    return bool(
+        (await db.execute(select(select(DiveFile.id).where(DiveFile.recording_id == recording_id).exists()))).scalar()
+    )
+
+
 async def get_dive_file_sha256(db: AsyncSession, *, file_id: int) -> str | None:
     """Fetch just one stored export's content hash, without touching its bytes.
 
@@ -1770,10 +1785,8 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
     The *mixtures* are pointedly not touched: those went through the form, the diver may have
     edited them since, and they are the dive's own record rather than the file's.
 
-    **The dive's readings are re-derived only where the file came off the primary recording.**
-    A secondary recording is a second computer's account of the same dive and the dive's
-    entry and exit fixes were never read off it, so emptying one has nothing to say about
-    them - see `refresh_tech_scalars` on what running it anyway costs.
+    **The dive's fixes are derived again from the files it still holds**, whichever recording
+    this one came off, and a fix none of them has is cleared (`derive_dive_fixes`).
     """
     row = (
         await db.execute(
@@ -1791,11 +1804,6 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
         await db.execute(select(DiveRecording.ordinal).where(DiveRecording.id == row.recording_id))
     ).scalar_one_or_none()
     start_time, utc_offset_minutes = await dive_recordings.recording_start(db, recording_id=row.recording_id)
-    # Read before the branch below can delete the recording, which is the only moment the
-    # question is still answerable. `None` cannot happen - the file row named a live
-    # recording a statement ago - and is read as the primary so that a row that somehow
-    # vanished still gets the repair rather than silently skipping it.
-    touched_primary = (ordinal or 0) == 0
 
     if remaining:
         await rederive_recording(
@@ -1817,7 +1825,7 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
             pass
         else:
             await dive_recordings.delete_recording(db, recording_id=row.recording_id, dive_id=row.dive_id, commit=False)
-        await refresh_tech_scalars(db, dive_id=row.dive_id, touched_primary=touched_primary)
+    await derive_dive_fixes(db, dive_id=row.dive_id, clear=True)
 
     if commit:
         await db.commit()
@@ -1851,7 +1859,7 @@ async def delete_files_for_dive(db: AsyncSession, *, dive_id: int, commit: bool 
     await delete_profiles_for_dive(db, dive_id=dive_id, commit=False)
     await db.execute(delete(DiveFile).where(DiveFile.dive_id == dive_id))
     blob_store.delete_after_commit(db, keys)
-    await store_tech_scalars(db, dive_id=dive_id, scalars={}, commit=False)
+    await derive_dive_fixes(db, dive_id=dive_id, clear=True)
     if commit:
         await db.commit()
 
@@ -2005,11 +2013,14 @@ async def backfill_tech_fields(
     **It walks every recording** for what is the recording's own - its readouts, its device
     and its settings - and is the recovery for recordings stored before the readouts moved
     there: the migration copied the dive's onto the primary alone, reading no file, so every
-    other recording's stay NULL until this runs. **The dive's fixes and the mixture fields it
-    writes stay the primary's**: a second computer's positions are its own, and its cylinder
-    list meets the dive's only through the labelling's pairs, never position for position; see
-    `merge_mixture_fields` for why a dive whose cylinders have been edited is skipped rather
-    than reconciled.
+    other recording's stay NULL until this runs. **The mixture fields it writes stay the
+    primary's**: a second computer's cylinder list meets the dive's only through the labelling's
+    pairs, never position for position; see `merge_mixture_fields` for why a dive whose
+    cylinders have been edited is skipped rather than reconciled.
+
+    **Each file's own fixes are rewritten outright**, being the file's, and the dive's derived
+    from them without clearing (`derive_dive_fixes`) - so a reader fix that moves a file's
+    position reaches the dive, and a fix only a document gave is kept.
     """
     # Imported here rather than at module scope, matching `backfill_profiles`: the crud
     # module is not otherwise part of this module's dependency surface, and keeping the
@@ -2108,8 +2119,9 @@ async def backfill_tech_fields(
                     deco_model=extraction.deco_model,
                     salinity=extraction.salinity,
                 )
+                await store_file_fixes(db, recording_id=row.recording_id, fixes=extraction.fixes)
+                await derive_dive_fixes(db, dive_id=row.dive_id, clear=False)
                 if primary:
-                    await fill_tech_scalars(db, dive_id=row.dive_id, scalars=extraction.scalars)
                     for mixture_id, values in updates or []:
                         await db.execute(update(DiveMixture).where(DiveMixture.id == mixture_id).values(**values))
         except IntegrityError:
@@ -2146,3 +2158,50 @@ async def backfill_tech_fields(
         mixtures_skipped=mixtures_skipped,
         failed=failed,
     )
+
+
+# Files read per transaction by `read_unread_file_fixes`, on `_BACKFILL_BATCH_SIZE`'s trade.
+FIX_READ_BATCH_SIZE = 50
+
+
+async def read_unread_file_fixes(db: AsyncSession, *, limit: int = FIX_READ_BATCH_SIZE) -> int:
+    """Read one batch of stored files whose fixes were never read, and derive their dives' fixes.
+
+    Returns how many files it read, so the caller can loop until a batch comes back short.
+
+    The data path for `dive_file.fixes_read`: a file stored before the columns existed, or
+    restored from an archive without being read, says nothing about its position until this
+    runs. A revision cannot do it, having neither the blob store nor the reader, so the worker
+    runs it at its start and hourly after. The dive's fixes are derived without clearing, so a
+    dive whose files give no position keeps one a logbook document wrote.
+
+    **Every row it selects is marked read**, a file whose bytes are gone or whose format this
+    build does not read included, with no fix: otherwise it is selected again on every pass and
+    the caller's loop never ends. `backfill_tech_fields` re-reads every file whatever this says.
+    """
+    from .cache_invalidation import invalidate_dive_caches
+
+    rows = (
+        await db.execute(
+            select(DiveFile.id, DiveFile.dive_id, DiveFile.user_id, DiveFile.storage_key, DiveFile.parser_key)
+            .where(DiveFile.fixes_read.is_(False))
+            .order_by(DiveFile.id)
+            .limit(limit)
+        )
+    ).all()
+    for row in rows:
+        fixes: dict[str, float | None] = dict.fromkeys(TECH_SCALAR_FIELDS)
+        if reads(row.parser_key):
+            try:
+                data = await blob_store.get(row.storage_key)
+            except blob_store.BlobMissingError:
+                logger.error("Reading no fixes off file %s: it is missing from the store", row.id)
+            else:
+                fixes = fixes_of(await run_in_threadpool(extract_file, data, row.parser_key))
+        await db.execute(update(DiveFile).where(DiveFile.id == row.id).values(**fixes, fixes_read=True))
+    for dive_id in sorted({row.dive_id for row in rows}):
+        await derive_dive_fixes(db, dive_id=dive_id, clear=False)
+    await db.commit()
+    for user_id in sorted({row.user_id for row in rows}):
+        await invalidate_dive_caches(user_id)
+    return len(rows)

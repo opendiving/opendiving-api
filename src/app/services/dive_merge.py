@@ -41,10 +41,10 @@ from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
 from ..models.dive_species import DiveSpecies
 from ..models.dive_tag import DiveTag
-from ..schemas.dive import DiveReadInternal, DiveTechScalars
+from ..schemas.dive import DiveReadInternal
 from ..schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, as_create
 from ..schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND
-from .dive_files import apply_gas_mapping, fold_tank_pressures, relabel_gas_numbers
+from .dive_files import apply_gas_mapping, derive_dive_fixes, fold_tank_pressures, relabel_gas_numbers
 from .dive_profiles import (
     MERGE_PARSER_KEY,
     NormalizedProfile,
@@ -236,9 +236,11 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     for column in ("submerged_time", "avg_depth", "max_depth"):
         if (value := getattr(figures, column)) is not None:
             values[column] = value
-    if fold is not None:
-        values |= fold_fixes(survivor, absorbed, survivor_first=fold.survivor_first)
     await db.execute(update(Dive).where(Dive.id == survivor.id).values(**values))
+    # From every file the dive now holds, in its order, as any other change to its files - and
+    # without clearing, since no file came or went: a fix only a document gave the surviving
+    # dive stays where the files give none.
+    await derive_dive_fixes(db, dive_id=survivor.id, clear=False)
 
     await crud_dives.delete(db=db, uuid=absorbed.uuid, commit=False)
 
@@ -292,27 +294,6 @@ _FILLED_COLUMNS = (
     *DECO_MODEL_COLUMNS.values(),
     *(column for column in READOUT_COLUMNS if column not in (*START_READOUTS, *END_READOUTS)),
 )
-
-
-_ENTRY_FIX = ("entry_latitude", "entry_longitude")
-_EXIT_FIX = ("exit_latitude", "exit_longitude")
-
-
-def fold_fixes(
-    survivor: DiveTechScalars, absorbed: DiveTechScalars, *, survivor_first: bool
-) -> dict[str, float | None]:
-    """The fixes a fold changes on the surviving dive: the entry the earlier record's dive
-    has and the exit the later one's has, each falling back to the other's where it has none.
-
-    A fix is a latitude and a longitude together (`ck_dive_entry_position_pair`), so each one
-    moves whole.
-    """
-    earlier, later = (survivor, absorbed) if survivor_first else (absorbed, survivor)
-    values: dict[str, float | None] = {}
-    for columns, first, second in ((_ENTRY_FIX, earlier, later), (_EXIT_FIX, later, earlier)):
-        source = first if getattr(first, columns[0]) is not None else second
-        values |= {column: getattr(source, column) for column in columns}
-    return {column: value for column, value in values.items() if value != getattr(survivor, column)}
 
 
 def _with_fold_pressures(

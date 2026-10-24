@@ -913,23 +913,6 @@ async def make_primary(db: AsyncSession, *, recording_id: int, dive_id: int) -> 
         await db.execute(update(DiveRecording).where(DiveRecording.id == row_id).values(ordinal=position))
 
 
-async def primary_recording_ids(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, int]:
-    """Each dive's ordinal-0 recording id, for the surfaces that take one profile.
-
-    The app's own UDDF export and the tech scalars are both "the primary recording's", which
-    is the reference writer's rule and this app's: a document with one profile per dive
-    carries the one a reader would show by default rather than an arbitrary one.
-    """
-    if not dive_ids:
-        return {}
-    rows = await db.execute(
-        select(DiveRecording.dive_id, DiveRecording.id).where(
-            DiveRecording.dive_id.in_(set(dive_ids)), DiveRecording.ordinal == 0
-        )
-    )
-    return {row.dive_id: row.id for row in rows}
-
-
 async def recording_counts_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, int]:
     """How many recordings each dive holds, for the dive list; a dive with none is absent."""
     if not dive_ids:
@@ -1040,7 +1023,8 @@ async def get_file_infos_for_recordings(
 
     `id` orders them, which is attach order by construction - a later upload gets a higher
     sequence value - and it is what the fill rule means by "the first file that recorded
-    it", a FIT file's profile channels apart.
+    it", a FIT file's profile channels apart, and the order `derive_dive_fixes` takes the
+    dive's fixes in. A client applies that rule to this list, so the two have to agree.
     """
     if not recording_ids:
         return {}
@@ -1053,6 +1037,8 @@ async def get_file_infos_for_recordings(
             DiveFile.original_filename,
             DiveFile.parser_key,
             DiveFile.updated_at,
+            DiveFile.entry_latitude,
+            DiveFile.entry_longitude,
         )
         .where(DiveFile.recording_id.in_(set(recording_ids)))
         .order_by(DiveFile.recording_id, DiveFile.id)
@@ -1067,6 +1053,8 @@ async def get_file_infos_for_recordings(
                 original_filename=row.original_filename,
                 parser_key=row.parser_key,
                 updated_at=row.updated_at,
+                entry_latitude=row.entry_latitude,
+                entry_longitude=row.entry_longitude,
             )
         )
     return infos

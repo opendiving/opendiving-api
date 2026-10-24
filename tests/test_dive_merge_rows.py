@@ -1188,20 +1188,50 @@ async def _fixes(db: AsyncSession, dive: Dive) -> tuple[tuple[float | None, floa
     return (row[0], row[1]), (row[2], row[3])
 
 
+async def _set_file_fixes(
+    db: AsyncSession, dive: Dive, entry: tuple[float, float] | None, exit_: tuple[float, float] | None
+) -> None:
+    await db.execute(
+        update(DiveFile)
+        .where(DiveFile.dive_id == dive.id)
+        .values(
+            entry_latitude=None if entry is None else entry[0],
+            entry_longitude=None if entry is None else entry[1],
+            exit_latitude=None if exit_ is None else exit_[0],
+            exit_longitude=None if exit_ is None else exit_[1],
+        )
+    )
+    await db.commit()
+
+
 class TestAFoldsFixes:
     @pytest.mark.asyncio
-    async def test_the_dive_enters_where_the_earlier_record_did_and_exits_where_the_later_did(
+    async def test_each_fix_is_the_first_of_the_merged_files_that_has_one(
         self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
     ) -> None:
-        """The first half's exit is where the computer restarted, not where the diver left the
-        water."""
+        """The rule every change to a dive's files follows, over the files the fold put on one
+        recording in attach order: the first half's file has an exit and no entry."""
+        first, second = await _two_halves(async_db, db, diver)
+        await _set_file_fixes(async_db, first, None, EXIT_FIRST)
+        await _set_file_fixes(async_db, second, ENTRY_SECOND, EXIT_SECOND)
+        await _set_fixes(async_db, first, ENTRY_FIRST, EXIT_FIRST)
+
+        await _merge(async_db, diver, first, second)
+
+        assert await _fixes(async_db, first) == (ENTRY_SECOND, EXIT_FIRST)
+
+    @pytest.mark.asyncio
+    async def test_a_fix_no_file_has_stays_the_surviving_dives(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """No file came or went, so nothing clears a position only a logbook document gave."""
         first, second = await _two_halves(async_db, db, diver)
         await _set_fixes(async_db, first, ENTRY_FIRST, EXIT_FIRST)
         await _set_fixes(async_db, second, ENTRY_SECOND, EXIT_SECOND)
 
         await _merge(async_db, diver, first, second)
 
-        assert await _fixes(async_db, first) == (ENTRY_FIRST, EXIT_SECOND)
+        assert await _fixes(async_db, first) == (ENTRY_FIRST, EXIT_FIRST)
 
     @pytest.mark.asyncio
     async def test_two_computers_side_by_side_keep_the_surviving_dives_fixes(
@@ -1280,7 +1310,8 @@ class TestBackfillingAFoldMergedBefore:
         report = await backfill_folds(async_db, user_id=diver.id)
 
         assert (report.examined, report.dives_updated, report.absorbed_not_found) == (1, 1, 0)
-        assert await self._state(async_db, dive, recording_id) == (11.0, (200.0, 50.0), (ENTRY_FIRST, EXIT_SECOND))
+        # The fixes are not the replay's: they are the files', as any merge now leaves them.
+        assert await self._state(async_db, dive, recording_id) == (11.0, (200.0, 50.0), (ENTRY_FIRST, EXIT_FIRST))
 
     @pytest.mark.asyncio
     async def test_a_dry_run_lists_the_changes_and_writes_none(
@@ -1290,7 +1321,7 @@ class TestBackfillingAFoldMergedBefore:
 
         report = await backfill_folds(async_db, user_id=diver.id, dry_run=True)
 
-        assert len(report.changes) == 4
+        assert len(report.changes) == 2
         assert await self._state(async_db, dive, recording_id) == (5.0, (200.0, 120.0), (ENTRY_FIRST, EXIT_FIRST))
 
     @pytest.mark.asyncio
@@ -1378,8 +1409,8 @@ class TestBackfillingAFoldMergedBefore:
         db: Session,
         diver: User,
     ) -> None:
-        """Another dive deleted in the same minute could be either; the cylinders and fixes,
-        which only the absorbed dive holds, are left rather than guessed."""
+        """Another dive deleted in the same minute could be either; the cylinders, which only the
+        absorbed dive holds, are left rather than guessed."""
         monkeypatch.setattr("src.app.services.fold_backfill.invalidate_dive_caches", AsyncMock())
         dive, recording_id = await self._merged_the_old_way(async_db, db, diver)
         other = _dive_at(db, diver, datetime(2026, 9, 1, 9, 0, tzinfo=UTC), number=99)

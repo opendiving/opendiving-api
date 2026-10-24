@@ -659,6 +659,8 @@ async def _files_by_recording(db: AsyncSession, recording_ids: list[int]) -> dic
             DiveFile.original_filename,
             DiveFile.parser_key,
             DiveFile.updated_at,
+            DiveFile.entry_latitude,
+            DiveFile.entry_longitude,
         )
         .where(DiveFile.recording_id.in_(recording_ids))
         .order_by(DiveFile.recording_id, DiveFile.id)
@@ -675,6 +677,8 @@ async def _files_by_recording(db: AsyncSession, recording_ids: list[int]) -> dic
                     original_filename=row.original_filename,
                     parser_key=row.parser_key,
                     updated_at=row.updated_at,
+                    entry_latitude=row.entry_latitude,
+                    entry_longitude=row.entry_longitude,
                 ),
             )
         )
