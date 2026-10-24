@@ -38,6 +38,7 @@ from ...services.cache_invalidation import (
     invalidate_gear_caches,
     invalidate_trip_caches,
 )
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["contacts"])
 
@@ -86,7 +87,12 @@ async def _get_owned_contact(db: AsyncSession, uuid: uuid_pkg.UUID, current_user
     )
 
 
-@router.post("/contact", response_model=ContactRead, status_code=201)
+@router.post(
+    "/contact",
+    response_model=ContactRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(Contact, read="/contact/{uuid}"))],
+)
 async def write_contact(
     request: Request,
     contact: ContactCreate,

@@ -66,6 +66,7 @@ from ...schemas.lookup import LookupUntil, LookupUuids
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches, invalidate_trip_caches
 from ...services.dive_site_catalog import search_sites
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["dive-sites"])
 
@@ -127,7 +128,12 @@ async def _resolved_tag_ids(db: AsyncSession, *, user_id: int, names: list[str])
     return await resolve_tag_ids(db, user_id=user_id, names=names) if names else []
 
 
-@router.post("/dive-site", response_model=DiveSiteRead, status_code=201)
+@router.post(
+    "/dive-site",
+    response_model=DiveSiteRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(DiveSite, read="/dive-site/{uuid}"))],
+)
 async def write_dive_site(
     request: Request,
     dive_site: DiveSiteCreate,

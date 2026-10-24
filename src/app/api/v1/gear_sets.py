@@ -23,6 +23,7 @@ from ...crud.crud_gear_set_items import (
 )
 from ...crud.crud_gear_sets import GEAR_SET_NAME_KEY, crud_gear_sets, gear_set_name_exists
 from ...crud.unique_keys import write_or_duplicate
+from ...models.gear_set import GearSet
 from ...schemas.gear_item import GearItemInfo
 from ...schemas.gear_set import (
     GearSetCreateInternal,
@@ -32,6 +33,7 @@ from ...schemas.gear_set import (
     GearSetUpdateRequest,
 )
 from ...services.cache_invalidation import invalidate_gear_caches
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["gear"])
 
@@ -84,7 +86,12 @@ async def _resolve_item_ids(db: AsyncSession, gear_item_uuids: list[uuid_pkg.UUI
     return [id_by_uuid[u] for u in gear_item_uuids]
 
 
-@router.post("/gear-set", response_model=GearSetRead, status_code=201)
+@router.post(
+    "/gear-set",
+    response_model=GearSetRead,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(GearSet, read="/gear-set/{uuid}"))],
+)
 async def write_gear_set(
     request: Request,
     gear_set: GearSetCreateRequest,

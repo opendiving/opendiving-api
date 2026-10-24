@@ -8,6 +8,7 @@ from .functions import (
     purge_expired_auth_audit_events,
     purge_expired_authentication_requests,
     purge_expired_checkin_links,
+    purge_expired_idempotency_holds,
     purge_expired_invitations,
     purge_expired_invite_requests,
     purge_expired_tokens,
@@ -44,6 +45,9 @@ class WorkerSettings:
         # `purge_deleted_accounts` sits on.
         cron(purge_expired_user_sessions, minute=0, run_at_startup=True),
         cron(purge_expired_auth_audit_events, minute=0, run_at_startup=True),
+        # An `Idempotency-Key` hold past the extended window answers no retry a live session
+        # could send, and joins them on the same criterion.
+        cron(purge_expired_idempotency_holds, minute=0, run_at_startup=True),
         # Writes rather than deletes, and joins them on the same criterion: rerun, it writes
         # the same counts, and it never lowers one, so a restart loop changes nothing.
         cron(record_sign_in_totals, minute=0, run_at_startup=True),

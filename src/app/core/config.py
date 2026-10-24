@@ -115,7 +115,8 @@ class CryptSettings(BaseSettings):
     # The same sliding window for a session that asked for `idle_timeout: extended` at
     # sign-in - a native client, which has no tab to sign in again from and may sit unused
     # for weeks between trips. Both windows drive the row's `expires_at`, the cookie's
-    # `Max-Age` and the refresh token's `exp` together.
+    # `Max-Age` and the refresh token's `exp` together. Also how long an `Idempotency-Key`
+    # hold is kept (`purge_expired_idempotency_holds`).
     EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS: int = config("EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS", default=90)
     # How long after a refresh token is spent a second presentation of it is answered with
     # the pair the first one minted, rather than ending the session as a replay: a reply

@@ -158,6 +158,7 @@ from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
 from ...services.person_links import resolve_people_references
 from ...services.recording_shape import gate_figures
+from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["dives"])
 
@@ -637,7 +638,12 @@ def _match_device(identity: DeviceIdentity) -> ParsedDevice | None:
     )
 
 
-@router.post("/dive", response_model=DiveReadWithMixtures, status_code=201)
+@router.post(
+    "/dive",
+    response_model=DiveReadWithMixtures,
+    status_code=201,
+    dependencies=[Depends(IdempotentCreate(Dive, read="/dive/{uuid}"))],
+)
 async def write_dive(
     request: Request,
     dive: DiveCreateRequest,

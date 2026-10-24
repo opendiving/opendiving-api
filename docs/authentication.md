@@ -633,7 +633,8 @@ PASSKEY_CHALLENGE_TTL_SECONDS=600
 PASSKEY_MAX_CREDENTIALS_PER_USER=10
 
 # Optional - how long a session may sit unused. A browser gets the first; a session that asked
-# for `idle_timeout: extended` at sign-in (the iOS app) gets the second.
+# for `idle_timeout: extended` at sign-in (the iOS app) gets the second, which is also how long a
+# create sent with an `Idempotency-Key` is remembered.
 REFRESH_TOKEN_EXPIRE_DAYS=7
 EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS=90
 # Optional - a refresh retried this many seconds after the first gets the same tokens back

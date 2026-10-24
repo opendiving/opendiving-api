@@ -262,6 +262,10 @@ diver shared as a link, where the token in the path is the credential.
 honest — it compares the app's real route table against its own allowlist and holds the reason for
 each — but nothing checks this paragraph, so a new route family belongs here by hand.
 
+A record's create — `POST /dive`, `/trip`, `/person` and the like; `/docs` lists the header on each
+— takes an optional `Idempotency-Key` header: a repeat under the same key answers the record the
+first one made, as it now reads, instead of making another.
+
 A typical import flow:
 
 ```bash
