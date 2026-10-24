@@ -1047,8 +1047,8 @@ class TestPromotingARecording:
     """`PATCH /dive/{uuid}/recording/{rid}`, the third route the readings follow.
 
     Its own class rather than a member of the two above, because it deletes nothing: the
-    readings follow the recording it moves to ordinal 0, and the dive's fixes are derived again
-    without clearing, no file having come or gone.
+    readings follow the recording it moves to ordinal 0, and the dive's fixes, which follow the
+    files' attach order, do not move.
     """
 
     @pytest.mark.asyncio
@@ -1133,9 +1133,9 @@ async def _promote(db: AsyncSession, diver: User, dive: Dive, rid: uuid_pkg.UUID
 
 
 class TestTheDivesFixes:
-    """Each fix is the first of the dive's files' that has one: recordings by ordinal, each
-    one's files in attach order, whichever recording that is - and the dive read lists each
-    file's own in that same order, so a client can apply the rule to a set it has not saved."""
+    """Each fix is the first of the dive's files' that has one, in attach order across every
+    recording - and the dive read ranks each file's own by that order, so a client can apply
+    the rule to a set it has not saved."""
 
     @pytest.mark.asyncio
     async def test_a_second_computers_fix_is_the_dives_where_the_primary_has_none(
@@ -1187,16 +1187,24 @@ class TestTheDivesFixes:
         assert await _dive_fixes(async_db, dive) == (NO_FIX, NO_FIX)
 
     @pytest.mark.asyncio
-    async def test_promoting_a_recording_puts_its_files_first(
+    async def test_attach_order_wins_over_which_recording_is_primary(
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive, routed: None
     ) -> None:
+        """A client picking a file cannot know which recording it joins, only that it ranks
+        after every stored file - so a promotion moves no fix, and the read ranks each file
+        across the whole dive."""
         await _attach_as(async_db, diver, dive, OCEAN_JSON, "suunto_json")
         stored = await _attach_as(async_db, diver, dive, OTHER_JSON, "suunto_json")
         second = next(row for row in await _recordings(async_db, dive) if row.id == stored.recording_id)
 
         await _promote(async_db, diver, dive, second.uuid)
 
-        assert await _dive_fixes(async_db, dive) == (OTHER_ENTRY, OTHER_EXIT)
+        assert await _dive_fixes(async_db, dive) == (OCEAN_ENTRY, OCEAN_EXIT)
+        recordings = (await get_recordings_for_dives(async_db, dive_ids=[dive.id]))[dive.id]
+        assert [[(file.attach_order, file.entry_latitude) for file in row.files] for row in recordings] == [
+            [(1, OTHER_ENTRY[0])],
+            [(0, OCEAN_ENTRY[0])],
+        ]
 
     @pytest.mark.asyncio
     async def test_erasing_a_recording_that_held_no_file_keeps_a_documents_fix(

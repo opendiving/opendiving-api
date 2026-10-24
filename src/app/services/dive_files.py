@@ -505,26 +505,27 @@ _FIXES = (("entry_latitude", "entry_longitude"), ("exit_latitude", "exit_longitu
 async def derive_dive_fixes(db: AsyncSession, *, dive_id: int, clear: bool) -> None:
     """Set a dive's entry and exit fixes, each from the first of its files that has one.
 
-    **The order is the dive read's**: recordings by `ordinal`, then each recording's files by
-    `dive_file.id`, which is attach order (`get_file_infos_for_recordings`). Each fix is taken
-    on its own, so the entry may come from one file and the exit from another.
+    **The order is attach order across the whole dive** - `dive_file.id`, whatever recording a
+    file belongs to, which the dive read publishes as each file's `attach_order`. Not
+    recordings first: a client picking a file cannot know which recording it will join
+    (`is_same_recording` decides that on the server), but it does know every file it picks
+    ranks after every file already stored. Each fix is taken on its own, so the entry may come
+    from one file and the exit from another.
 
-    Called wherever a dive's set of files or their order changes - an attach, a deletion, a
-    merge, a promotion - and by the data paths that read files' fixes. **`clear` says whether
-    a fix no file has is written as null.** True wherever files were added or removed, so the
-    dive stops claiming a position the files it still holds do not give. False where nothing
-    was added or removed - a promotion, a merge, a backfill - so a fix no file on this instance
-    can re-derive, which is one a logbook document wrote, is kept rather than lost. Required,
-    so a new caller has to answer it.
+    Called wherever a dive's set of files changes - an attach, a deletion, a merge - and by the
+    data paths that read files' fixes. **`clear` says whether a fix no file has is written as
+    null.** True wherever files were added or removed, so the dive stops claiming a position
+    the files it still holds do not give. False for a merge and the backfills, so a fix no file
+    on this instance can re-derive, which is one a logbook document wrote, is kept rather than
+    lost. Required, so a new caller has to answer it.
     """
     values: dict[str, float | None] = {}
     for latitude, longitude in _FIXES:
         found = (
             await db.execute(
                 select(getattr(DiveFile, latitude), getattr(DiveFile, longitude))
-                .join(DiveRecording, DiveRecording.id == DiveFile.recording_id)
                 .where(DiveFile.dive_id == dive_id, getattr(DiveFile, latitude).is_not(None))
-                .order_by(DiveRecording.ordinal, DiveFile.id)
+                .order_by(DiveFile.id)
                 .limit(1)
             )
         ).one_or_none()
