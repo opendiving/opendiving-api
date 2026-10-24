@@ -94,6 +94,10 @@ dependencies = [
     # would be absent from the one place the hosted instance runs. Its cost is botocore's
     # ~26 MB of service models in every image; `DECISIONS.md`, *"A second backend, because the hosted disk is not shared"*, weighs that against signing the requests by hand.
     "boto3>=1.43.93",
+    # The zone database `zoneinfo` falls back to where the system has none, which nothing
+    # establishes for the slim runtime image. `services.dive_conditions` places a dive whose
+    # offset is unknown in its place's zone on its own date, and without one it cannot.
+    "tzdata>=2025.2",
 ]
 
 # An extra, never a `[dependency-groups]` entry: `uv sync` installs the `dev` group by default,

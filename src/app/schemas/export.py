@@ -448,6 +448,11 @@ class ExportDive(PublicUUIDSchema):
         Field(default_factory=list, description="What recorded this dive, in order; the first is primary"),
     ]
     created_at: datetime
+    # `{"opendiving": {"conditions": ...}}` for a dive a weather provider answered for: the
+    # record `GET /dive/{uuid}` returns, so this app's own import can tell a value the diver
+    # recorded from one a service supplied. The dive's `air_temperature`, `weather` and `waves`
+    # above are the dive's whichever it was - every other reader ignores this entry.
+    extensions: ExportExtensions = None
 
 
 class ExportLocation(BaseModel):

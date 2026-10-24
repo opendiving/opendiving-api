@@ -3,6 +3,7 @@ from arq.cron import cron
 
 from ...core.config import settings
 from .functions import (
+    fetch_dive_conditions,
     purge_deleted_accounts,
     purge_expired_auth_audit_events,
     purge_expired_authentication_requests,
@@ -76,6 +77,11 @@ class WorkerSettings:
         # is sized against the other two sending beside it.
         cron(send_renewal_reminders, hour=settings.GEAR_SERVICE_DIGEST_HOUR, minute=0),
         cron(send_year_in_review, hour=settings.GEAR_SERVICE_DIGEST_HOUR, minute=0),
+        # Every minute, with arq's own per-tick ids. Overlap is held off by the run's own Redis
+        # lock rather than a fixed `job_id`: a run killed mid-flight by a deploy would park a
+        # failed result under that id for `keep_result`, an hour, and silence the cron. Off
+        # entirely until `DIVE_CONDITIONS_PROVIDER` names a provider.
+        cron(fetch_dive_conditions),
     ]
     redis_settings = RedisSettings(
         host=REDIS_QUEUE_HOST,

@@ -418,6 +418,9 @@ class ImportDive(_ReadModel):
     # member distinguishing the two shapes, 1.0 being untagged when the members moved.
     recordings: Annotated[list[ImportRecording], Field(default_factory=list), _Collection]
     created_at: datetime | None = None
+    # Read for the surface conditions this app's writer records under its key, which the import
+    # restores rather than asking the provider again (`services.dive_conditions`).
+    extensions: dict[str, Any] | None = None
 
 
 class ImportLocation(_ReadModel):

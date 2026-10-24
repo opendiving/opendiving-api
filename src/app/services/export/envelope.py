@@ -648,6 +648,9 @@ def _dive(
         cylinders=[_mixture(mixture) for mixture in bundle.mixtures_by_dive[dive.id]],
         recordings=recordings,
         created_at=dive.created_at,
+        extensions=None
+        if (conditions := bundle.conditions_by_dive.get(dive.id)) is None
+        else {DIVEJSON_PRODUCER_KEY: {"conditions": conditions.model_dump(mode="json")}},
     )
 
 

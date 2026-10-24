@@ -15,6 +15,7 @@ from ..core.schemas import (
     StoredVocabulary,
 )
 from ..core.utils.datetime_offset import full_date_is_a_date, require_utc_offset
+from .dive_conditions import DiveConditionsRead
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
 from .dive_profile import DepthOutline, DiveProfileInfo
 from .gear_item import GearItemInfo
@@ -1062,6 +1063,14 @@ class DiveReadWithMixtures(DiveRead):
         Field(
             default=None,
             description="Surface-normalized gas consumption, or null when the dive doesn't record enough to derive it",
+        ),
+    ]
+    # Here for `gas_use`'s reason: the list is the hottest path and nothing in it draws this.
+    conditions: Annotated[
+        DiveConditionsRead | None,
+        Field(
+            default=None,
+            description="The surface conditions a provider answered for the dive's place and hour, or null",
         ),
     ]
 

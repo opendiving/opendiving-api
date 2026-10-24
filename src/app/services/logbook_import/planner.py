@@ -73,6 +73,7 @@ from ...models.trip import Trip
 from ...models.user import User
 from ...schemas.certification import CertificationAgency, CertificationSide
 from ...schemas.contact import ADDRESS_FIELDS, CONTACT_ADDRESS_PREFIX, canonical_roles, check_website
+from ...schemas.dive_conditions import DiveConditionsRead
 from ...schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ...schemas.dive_site import (
     WORMS,
@@ -2764,6 +2765,7 @@ class _Planner:
             "tags": self._tag_names(dive.tags, collection=collection, record_uuid=dive.uuid),
             "mixtures": mixtures,
             "recordings": recordings,
+            "conditions": _carried_conditions(dive),
         }
         if number is None:
             self._unnumbered_dives.append(dive.uuid)
@@ -3244,7 +3246,19 @@ def _carries_settings(extensions: dict[str, Any] | None) -> bool:
     return False
 
 
-def _producer_entry(record: ImportStoredFile | ImportPerson | ImportDiver, member: str) -> Any:
+def _carried_conditions(dive: ImportDive) -> DiveConditionsRead | None:
+    """The surface conditions this app wrote beside a dive, or `None` for anything else under the
+    key - another writer's entry there is well-formed and is not ours to read."""
+    entry = _producer_entry(dive, "conditions")
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return DiveConditionsRead.model_validate(entry)
+    except ValidationError:
+        return None
+
+
+def _producer_entry(record: ImportStoredFile | ImportPerson | ImportDiver | ImportDive, member: str) -> Any:
     """One value out of this producer's extension entry (spec §5.5).
 
     Defensive about the shape all the way down: `extensions` is typed as "any JSON value

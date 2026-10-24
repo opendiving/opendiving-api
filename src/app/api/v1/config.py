@@ -43,4 +43,5 @@ async def read_instance_config() -> InstanceConfigRead:
         project_operated=settings.PROJECT_OPERATED,
         join_links=bool(settings.join_channels),
         map_tiles=settings.map_tiles,
+        dive_conditions=settings.dive_conditions,
     )

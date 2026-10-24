@@ -29,6 +29,7 @@ from ...schemas.gear_service import ServiceStatus
 from ...services import blob_store, map_tiles
 from ...services.blob_keys import BLOB_KEY_COLUMNS
 from ...services.checkin_links import swept_checkin_link_predicate
+from ...services.dive_conditions import run_dive_conditions
 from ...services.email_service import (
     send_gear_service_digest_email,
     send_renewal_reminder_email,
@@ -55,6 +56,7 @@ from ...services.year_in_review import YEAR_IN_REVIEW_BATCH_SIZE, reviewed_year,
 from ..config import configure_logging, settings
 from ..db.database import local_session
 from ..db.token_blacklist import TokenBlacklist
+from ..setup import close_redis_cache_pool, create_redis_cache_pool
 
 asyncio.set_event_loop(uvloop.new_event_loop())
 
@@ -501,13 +503,9 @@ async def purge_deleted_accounts(ctx: dict[Any, Any]) -> str:
     capped.
 
     **No Redis sweep here, deliberately**, and it is worth saying why the obvious line is
-    absent. `delete_keys_by_pattern` returns silently when `cache.client is None`, and that
-    global is only ever set by the API's lifespan - which this process does not go through
-    (see *"The profile backfill is a script, not an arq job"* in `DECISIONS.md`, which
-    names the same trap for the same reason). A call here would be a permanent no-op
-    wearing a comment about ordering and failure semantics. It is also unnecessary:
-    `erase_user` swept `user_{id}_*` from inside the API when the account was flagged, and
-    nothing can have repopulated it since, because every read for a deleted account 401s.
+    absent. It is unnecessary: `erase_user` swept `user_{id}_*` from inside the API when the
+    account was flagged, and nothing can have repopulated it since, because every read for a
+    deleted account 401s.
     """
     cutoff = datetime.now(UTC) - timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS)
 
@@ -956,6 +954,16 @@ async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) ->
     return f"Sent {sent} year-in-review email(s) for {year}"
 
 
+async def fetch_dive_conditions(ctx: dict[Any, Any]) -> str:
+    """Fill dives' surface conditions from the configured provider, a batch a minute.
+
+    Returns at once while `DIVE_CONDITIONS_PROVIDER` is unset, writing nothing and asking
+    nobody. Everything else - which dives, in what order, under what lock and budget - is
+    `services.dive_conditions.run_dive_conditions`.
+    """
+    return await run_dive_conditions()
+
+
 # -------- base functions --------
 async def startup(ctx: Worker) -> None:
     """Prove the blob store is reachable and writable before any cron runs.
@@ -978,8 +986,14 @@ async def startup(ctx: Worker) -> None:
     instead of quietly doing half its job.
     """
     await asyncio.to_thread(blob_store.ensure_storage_ready)
+    # The Redis cache pool, which the API's lifespan opens for itself and this process never
+    # went through: `fetch_dive_conditions` needs its answer cache, its provider budget and the
+    # dive caches it drops after a write, and without the pool all three are silent no-ops.
+    # Lazy, so a Redis that is down costs those three and not the worker's start.
+    await create_redis_cache_pool()
     logger.info("Worker Started")
 
 
 async def shutdown(ctx: Worker) -> None:
+    await close_redis_cache_pool()
     logger.info("Worker end")

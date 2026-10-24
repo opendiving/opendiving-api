@@ -692,6 +692,48 @@ class SpeciesSettings(BaseSettings):
     SPECIES_COMMONS_RATE_LIMIT_REQUESTS: int = config("SPECIES_COMMONS_RATE_LIMIT_REQUESTS", default=120)
 
 
+DIVE_CONDITIONS_PROVIDERS = ("open-meteo",)
+
+
+class DiveConditionsSettings(BaseSettings):
+    # The provider the worker asks for a dive's surface weather, sea state and tide
+    # (`services.dive_conditions`). Empty, the default, asks nobody: the cron returns before
+    # it reads a row, so no install calls a third party whose terms its operator has not
+    # read. Open-Meteo's free API is for non-commercial use only.
+    DIVE_CONDITIONS_PROVIDER: str = config("DIVE_CONDITIONS_PROVIDER", default="")
+    # A subscriber's key, which moves every call to Open-Meteo's `customer-` hosts. It has to
+    # be on a plan that includes the Historical Weather API: a key without it is refused on
+    # the archive and nothing is filled.
+    DIVE_CONDITIONS_OPEN_METEO_API_KEY: SecretStr | None = config(
+        "DIVE_CONDITIONS_OPEN_METEO_API_KEY", default=None, cast=SecretStr
+    )
+    # What the whole instance may spend on Open-Meteo, charged only to calls that leave. The
+    # default sits under the free API's hourly, daily and monthly caps together - 9,600 a day
+    # against 10,000, 288,000 a month against 300,000 - which leaves room for one instance
+    # behind an address, not two. Over it, the run stops and the rest wait for a later one.
+    DIVE_CONDITIONS_OPEN_METEO_RATE_LIMIT_REQUESTS: int = config(
+        "DIVE_CONDITIONS_OPEN_METEO_RATE_LIMIT_REQUESTS", default=400
+    )
+    DIVE_CONDITIONS_OPEN_METEO_RATE_LIMIT_WINDOW_SECONDS: int = config(
+        "DIVE_CONDITIONS_OPEN_METEO_RATE_LIMIT_WINDOW_SECONDS", default=3600
+    )
+
+    @field_validator("DIVE_CONDITIONS_PROVIDER")
+    @classmethod
+    def _known_dive_conditions_provider(cls, value: str) -> str:
+        value = value.strip()
+        if value and value not in DIVE_CONDITIONS_PROVIDERS:
+            raise ValueError(
+                f"DIVE_CONDITIONS_PROVIDER is {value!r}. Set it in your .env to one of "
+                f"{', '.join(DIVE_CONDITIONS_PROVIDERS)}, or leave it empty to fetch no conditions."
+            )
+        return value
+
+    @property
+    def dive_conditions(self) -> bool:
+        return bool(self.DIVE_CONDITIONS_PROVIDER)
+
+
 class ExportSettings(BaseSettings):
     # Fixed-window rate limit (see `core.utils.rate_limit`) on the four `/export/*`
     # endpoints, keyed per user and shared between them - the budget bounds total export
@@ -1134,6 +1176,7 @@ class Settings(
     GeocodingSettings,
     MapRendererSettings,
     SpeciesSettings,
+    DiveConditionsSettings,
     ExportSettings,
     LogbookImportSettings,
     FileStorageSettings,

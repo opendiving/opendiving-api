@@ -836,12 +836,14 @@ class TestTheConfigRoute:
             _operated(False),
             patch.object(settings, "JOIN_CHANNELS", None),
             patch.object(settings, "MAP_RENDERER_URL", ""),
+            patch.object(settings, "DIVE_CONDITIONS_PROVIDER", ""),
         ):
             assert (await read_instance_config()).model_dump(mode="json") == {
                 "registration_mode": "invite",
                 "project_operated": False,
                 "join_links": False,
                 "map_tiles": False,
+                "dive_conditions": False,
             }
 
 

@@ -39,3 +39,6 @@ class InstanceConfigRead(BaseModel):
     # Whether this instance names a map renderer, so the web knows whether to ask for tiles at
     # all and what its privacy page owes without probing a service only the API can reach.
     map_tiles: bool
+    # Whether this instance asks a weather provider about its dives (`DIVE_CONDITIONS_PROVIDER`),
+    # so the privacy page discloses the provider only where it is in use.
+    dive_conditions: bool

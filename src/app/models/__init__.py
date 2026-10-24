@@ -10,6 +10,7 @@ from .course import Course
 from .course_person import CoursePerson
 from .daily_total import DailyTotal
 from .dive import Dive
+from .dive_conditions import DiveConditions
 from .dive_dive_site import DiveDiveSite
 from .dive_file import DiveFile
 from .dive_form_preset import DiveFormPreset
