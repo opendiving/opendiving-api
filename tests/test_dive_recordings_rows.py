@@ -1011,9 +1011,8 @@ class TestDeletingASecondComputersFile:
 class TestDeletingARecording:
     """`DELETE /dive/{uuid}/recording/{rid}`, which is the only way to remove a file-less one.
 
-    Through the real handler rather than a service: whether the removed recording held files
-    decides whether the dive's fixes clear, and that is asked in the route before the delete
-    takes the files with it.
+    Through the real handler rather than a service, since the route is what deletes the
+    recording and renumbers the rest; `TestTheDivesFixes` pins what it does to the dive's fixes.
     """
 
     @pytest.mark.asyncio
