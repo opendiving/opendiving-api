@@ -5767,7 +5767,7 @@ class TestTheImportGates:
         A technical diver wearing two computers logs the dive from the Shearwater and then
         imports the Suunto's export as a document: a second reading of the *secondary*
         recording, which fills that recording's blanks like any other. Its readouts are that
-        machine's own. The dive's fixes are the primary's to give. And its cylinders fill
+        machine's own. It gives the dive no fix. And its cylinders fill
         nothing here, though a recording past the first does fill them when it is created or
         gains bytes: nothing tells this reading apart from a logbook re-imported over a value
         the diver cleared, so the refill it risks is confined to the primary.
