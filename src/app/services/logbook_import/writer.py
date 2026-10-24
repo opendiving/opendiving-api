@@ -826,8 +826,8 @@ class _Writer:
         device columns, its settings, its readouts, its start, the two figures the gates
         compare - and, where that recording had no samples at all, its profile. The stored
         dive's own blanks fill too: its positions from the primary recording alone and only
-        while it holds no file (`fill_tech_scalars`), and the
-        blank members of its cylinders from the rows the labelling pairs - through the primary
+        while it holds no file read for them (`fill_tech_scalars`), and the blank members of its
+        cylinders from the rows the labelling pairs - through the primary
         alone where the fill brings no file. Nothing is ever overwritten, which is the whole
         rule: the diver may have corrected any of it, and a fill that won an argument with an
         edit would be the silent loss this repository already refuses on the backfill path. A
@@ -1010,7 +1010,7 @@ class _Writer:
         # the same dict the dive insert would have taken - so `TECH_SCALAR_FIELDS` indexes it
         # directly: the entry and exit fixes. A member the document did not carry is `None`
         # and `fill_tech_scalars` skips it; one it did carry lands only where the dive has none
-        # and holds no file - a dive with files takes its fixes from them alone.
+        # and holds no file read for its fixes - a dive with such files takes them from those.
         await fill_tech_scalars(
             self._db,
             dive_id=match.dive_id,

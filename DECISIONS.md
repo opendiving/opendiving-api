@@ -6344,11 +6344,11 @@ reused.
 
 `_fill_recording` in the import writer writes two things that belong to the dive, not the matched
 recording, when the second reading brings no file: the entry and exit fixes (`fill_tech_scalars`,
-which writes only to a dive holding no file) and the blanks of the cylinders (`fill_dive_mixtures`).
-Both go through the primary recording alone: no check can tell a file-less second reading from a
-logbook re-imported over a value the diver cleared, so the refill it risks is confined to the
-primary. A reading that brings its file joins the recording and fills through `rederive_recording`
-on any ordinal. The readouts are the matched recording's own either way.
+which writes only to a dive holding no read file) and the blanks of the cylinders
+(`fill_dive_mixtures`). Both go through the primary recording alone: no check can tell a file-less
+second reading from a logbook re-imported over a value the diver cleared, so the refill it risks is
+confined to the primary. A reading that brings its file joins the recording and fills through
+`rederive_recording` on any ordinal. The readouts are the matched recording's own either way.
 
 So `PlannedRecordingMatch` carries `ordinal`: `None` on an `attach`, where no stored recording is
 named and the writer computes the slot with `next_ordinal`, and the file-less branch returns before

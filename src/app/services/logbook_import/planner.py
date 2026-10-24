@@ -324,10 +324,10 @@ class PlannedRecordingMatch:
     recording: PlannedRecording
     # **The matched recording's position on its dive, and it decides what the writer may
     # touch beyond the recording itself.** A fill that brings no file writes the dive's entry
-    # and exit fixes and fills its cylinders only through the *primary* recording: the dive's
-    # columns come from its primary, and nothing tells a second reading without a file from a
-    # logbook re-imported over a value the diver cleared. `None` on an `attach`, where no
-    # stored recording is named and the writer computes the slot.
+    # and exit fixes (where no file of the dive gives them) and fills its cylinders only through
+    # the *primary* recording: nothing tells a second reading without a file from a logbook
+    # re-imported over a value the diver cleared. `None` on an `attach`, where no stored
+    # recording is named and the writer computes the slot.
     ordinal: int | None
     # The incoming *dive's* values, carried for a `fill` only: a match that writes no dive
     # row can still supply readings the existing dive has none of. Ignored on `attach`, where

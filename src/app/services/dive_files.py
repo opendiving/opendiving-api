@@ -457,11 +457,14 @@ def extract_recording(
 
 
 async def fill_tech_scalars(db: AsyncSession, *, dive_id: int, scalars: dict[str, float | None]) -> None:
-    """Fill a **file-less** dive's fixes from a logbook document. **Never overwrites.**
+    """Fill a dive's fixes from a logbook document where no file has been read for them.
+    **Never overwrites.**
 
-    A dive with no file has nothing `derive_dive_fixes` could take a fix from, so what a
-    document says is all there is; a dive holding any file takes its fixes from its files alone,
-    and this writes nothing to it.
+    A dive with no read file has nothing `derive_dive_fixes` could take a fix from, so what a
+    document says is all there is; a dive holding a read file takes its fixes from its files
+    alone, and this writes nothing to it. An *unread* file - an archive's, restored in this same
+    import - says nothing yet, so the document fills and the worker's derivation, which does not
+    clear, later keeps it or replaces it with the file's.
 
     A `COALESCE` per column rather than read-then-write, for `fill_device_fields`' reason:
     one statement, no read to race, and the rule stated once in SQL instead of once in SQL
@@ -475,7 +478,10 @@ async def fill_tech_scalars(db: AsyncSession, *, dive_id: int, scalars: dict[str
     if values:
         await db.execute(
             update(Dive)
-            .where(Dive.id == dive_id, ~select(DiveFile.id).where(DiveFile.dive_id == Dive.id).exists())
+            .where(
+                Dive.id == dive_id,
+                ~select(DiveFile.id).where(DiveFile.dive_id == Dive.id, DiveFile.fixes_read.is_(True)).exists(),
+            )
             .values(**values)
         )
 

@@ -1242,6 +1242,19 @@ class TestADocumentsFixFillsOnlyAFileLessDive:
 
         assert await _dive_fixes(async_db, dive) == (NO_FIX, NO_FIX)
 
+    @pytest.mark.asyncio
+    async def test_a_dive_holding_only_unread_files_does(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """An archive's restored files are stored unread, and say nothing until the worker reads them."""
+        await _attach(async_db, diver, dive, _export(), filename="no-fix.json")
+        await async_db.execute(update(DiveFile).where(DiveFile.dive_id == dive.id).values(fixes_read=False))
+
+        await fill_tech_scalars(async_db, dive_id=dive.id, scalars={"entry_latitude": 27.0, "entry_longitude": 33.0})
+        await async_db.commit()
+
+        assert await _dive_fixes(async_db, dive) == (DOCUMENT, NO_FIX)
+
 
 class TestReadingUnreadFixes:
     """The data path for files stored before their fixes were, or restored without a read."""
