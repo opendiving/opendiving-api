@@ -1079,7 +1079,7 @@ async def _held_pair_for_a_retry(refresh_token: str, subject: str | None, db: As
     ended. Then the held successor must itself still verify: once it has been presented
     and spent in turn, handing it out would give the caller a dead cookie, and the 401 says
     so honestly. A hold that is gone - never written, evicted, Redis down - is the same
-    401, which is the answer this path gave before it had a grace.
+    401.
 
     The *same* pair rather than a fresh one: minting again would spend the successor the
     first presenter may already hold, whose next refresh would then land past the grace

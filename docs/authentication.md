@@ -414,9 +414,8 @@ lost on a bad connection, presenting the cookie again — arrives seconds later 
 the very pair the first presentation received: the same access token and the same refresh cookie,
 held in Redis for the grace. So the session continues, and it still has one live refresh token. A
 retry is refused instead when the session was revoked meanwhile, when that successor has itself been
-spent, or when the hold is gone (Redis evicted it, restarted, or was down) — a 401 and a sign-in,
-which is what every retry got before the grace existed. Inside the grace nothing is revoked; the
-`WARNING` is not conditioned either way.
+spent, or when the hold is gone (Redis evicted it, restarted, or was down) — a 401 and a sign-in.
+Inside the grace nothing is revoked; the `WARNING` is not conditioned either way.
 
 #### 8. Changing an account's email
 
