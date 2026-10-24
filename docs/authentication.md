@@ -640,6 +640,7 @@ EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS=90
 # Optional - a refresh retried this many seconds after the first gets the same tokens back
 # instead of ending the session as a replay. Held in Redis; with Redis down the retry is
 # refused and the client signs in again. Keep it short: a stolen cookie replayed inside it is
-# honoured rather than ending the session.
+# honoured rather than ending the session. At least 5 - startup refuses less, because the same
+# line keeps two tabs refreshing at once from signing the diver out.
 REFRESH_TOKEN_REUSE_GRACE_SECONDS=60
 ```

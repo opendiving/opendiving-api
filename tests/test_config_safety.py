@@ -802,6 +802,25 @@ class TestAuthCookieSecure:
         assert _settings(AUTH_COOKIE_SECURE=False).AUTH_COOKIE_SECURE is False
 
 
+class TestTheSessionWindows:
+    def test_the_defaults_are_a_week_ninety_days_and_a_minute(self, tmp_path, monkeypatch):
+        module = _config_loaded_without_an_env_file(tmp_path, monkeypatch)
+
+        assert module.settings.REFRESH_TOKEN_EXPIRE_DAYS == 7
+        assert module.settings.EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS == 90
+        assert module.settings.REFRESH_TOKEN_REUSE_GRACE_SECONDS == 60
+
+    @pytest.mark.parametrize("value", [-1, 0, 4])
+    def test_a_grace_inside_the_rotation_race_fails_startup(self, value: int):
+        """The grace is also where a spent token starts revoking its session, so a value
+        near zero is not "off" - it signs a diver out for their own two tabs."""
+        with pytest.raises(ValueError, match="REFRESH_TOKEN_REUSE_GRACE_SECONDS"):
+            _settings(REFRESH_TOKEN_REUSE_GRACE_SECONDS=value)
+
+    def test_the_floor_itself_is_accepted(self):
+        assert _settings(REFRESH_TOKEN_REUSE_GRACE_SECONDS=5).REFRESH_TOKEN_REUSE_GRACE_SECONDS == 5
+
+
 class TestAppVersionComesFromPackageMetadata:
     """`APP_VERSION` used to be duplicated into `src/.env.example`, so a released image
     reported whatever version the operator's `.env` happened to carry. It reaches

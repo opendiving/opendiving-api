@@ -20,6 +20,7 @@ import pytest
 from fastapi import Response
 from jose import jwt
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from src.app.api.v1.auth import _elapsed, _reuse_grace, refresh_access_token
@@ -1073,8 +1074,8 @@ class TestTheIdleTimeoutAgainstPostgres:
     `exp`. A refresh reads the kind back off the row, which takes a real one."""
 
     @staticmethod
-    async def _row_days(async_db: Any, session_uuid: uuid_pkg.UUID | None) -> float:
-        expires_at = (
+    async def _row_days(async_db: AsyncSession, session_uuid: uuid_pkg.UUID | None) -> float:
+        expires_at: datetime = (
             await async_db.execute(select(UserSession.expires_at).where(UserSession.uuid == session_uuid))
         ).scalar_one()
         return (expires_at - datetime.now(UTC)) / timedelta(days=1)

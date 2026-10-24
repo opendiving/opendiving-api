@@ -37,7 +37,7 @@ def _key(spent_token: str) -> str:
 
 async def hold_successor(spent_token: str, pair: IssuedTokens) -> None:
     """Hold `pair` as the answer to `spent_token` for the grace, or do nothing."""
-    if cache.client is None or settings.REFRESH_TOKEN_REUSE_GRACE_SECONDS <= 0:
+    if cache.client is None:
         return
     payload = json.dumps(
         {"access_token": pair.access_token, "refresh_token": pair.refresh_token, "max_age": pair.max_age}
