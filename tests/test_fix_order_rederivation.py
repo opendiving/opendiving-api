@@ -19,6 +19,7 @@ from src.app.core.db.migrations import MIGRATIONS_PATH
 from src.app.models.dive import Dive
 from src.app.models.dive_file import DiveFile
 from src.app.models.user import User
+from src.app.services import blob_store
 from tests.conftest import db_available
 from tests.helpers.generators import create_dive, create_dive_recording, create_user
 
@@ -60,7 +61,7 @@ def _file(
             stored_byte_size=1,
             original_filename=f"{n}.json",
             parser_key="suunto_json",
-            storage_key=f"dive-files/{digest}",
+            storage_key=blob_store.new_key("dive-files", sha256=digest),
             entry_latitude=None if entry is None else entry[0],
             entry_longitude=None if entry is None else entry[1],
             exit_latitude=None if exit_ is None else exit_[0],
