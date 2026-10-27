@@ -94,6 +94,8 @@ TWO_TANK_JSON = _fixture("suunto-ocean.json")
 PAIR = [("dive.fit", OCEAN_FIT), ("dive.json", OCEAN_JSON)]
 POOR_FIX_FIT = _fixture("ocean-poor-first-fix.fit")
 POOR_FIX_JSON = _fixture("ocean-poor-first-fix.json")
+CLOUD_DATABASE = _fixture("perdix3-dives-1-and-8.db")
+CLOUD_XML = _fixture("perdix3-dive-8.xml")
 
 
 def _unique_export(start: str = "2026-09-10T09:30:00.000+03:00") -> bytes:
@@ -1123,6 +1125,85 @@ class TestARicherReadingOfADive:
         assert "replaced" in note.message
         profile = await self._profile_of(async_db, stored.uuid)
         assert (profile.parser_key, profile.depth_sample_count) == ("suunto_json", 4)
+
+
+class TestShearwaterCloud:
+    """Shearwater Cloud Desktop's database of a Perdix's dives and its XML export of the second:
+    the database a logbook kept on no dive, the XML one computer's file, and one Perdix one
+    recording whichever arrives first."""
+
+    async def _profiles(self, db: AsyncSession, user: User) -> list[DiveProfile]:
+        rows = await db.execute(
+            select(DiveProfile)
+            .join(Dive, Dive.id == DiveProfile.dive_id)
+            .where(Dive.user_id == user.id, Dive.is_deleted.is_(False))
+            .order_by(Dive.start_time)
+        )
+        return list(rows.scalars())
+
+    @pytest.mark.asyncio
+    async def test_the_database_is_every_dive_with_its_computer_and_no_file(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+
+        report = await _import(async_db, diver, [("Perdix 3 2026-9-21.db", CLOUD_DATABASE)])
+
+        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.CREATED] * 2
+        [member] = report.members
+        assert (member.format, member.kept, member.not_kept) == (
+            "shearwater_db",
+            False,
+            ImportMemberNotKept.SEVERAL_DIVES,
+        )
+        assert await _count(async_db, DiveFile, diver) == 0
+        serials = await async_db.execute(
+            select(DiveRecording.device_serial, DiveRecording.device_firmware)
+            .join(Dive, Dive.id == DiveRecording.dive_id)
+            .where(Dive.user_id == diver.id)
+        )
+        assert set(serials.all()) == {("D9772626", "39")}
+        eighth = (await self._profiles(async_db, diver))[1]
+        assert (
+            eighth.depth_sample_count,
+            eighth.max_depth_cm,
+            eighth.max_tts_s,
+            eighth.max_cns_pct10,
+            eighth.max_gradient_factor_pct,
+        ) == (402, 2180, 360, 20, 45)
+
+    @pytest.mark.asyncio
+    async def test_the_database_after_the_xml_fills_its_dive_with_the_richer_log(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        [stored] = (await _import(async_db, diver, [("Perdix 3 2026-9-21.xml", CLOUD_XML)])).dives
+
+        report = await _import(async_db, diver, [("Perdix 3 2026-9-21.db", CLOUD_DATABASE)])
+
+        assert sorted((row.outcome, row.uuid == stored.uuid) for row in report.dives) == [
+            (ImportDiveOutcome.CREATED, False),
+            (ImportDiveOutcome.UPDATED, True),
+        ]
+        assert len(await _dive_ids(async_db, diver)) == 2
+        eighth = (await self._profiles(async_db, diver))[1]
+        assert (eighth.parser_key, eighth.depth_sample_count, eighth.max_cns_pct10) == (IMPORT_PARSER_KEY, 402, 20)
+        assert await _count(async_db, DiveFile, diver) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_xml_after_the_database_joins_its_dive_and_keeps_the_log(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        await _import(async_db, diver, [("Perdix 3 2026-9-21.db", CLOUD_DATABASE)])
+
+        report = await _import(async_db, diver, [("Perdix 3 2026-9-21.xml", CLOUD_XML)])
+
+        [row] = report.dives
+        assert (row.outcome, row.files_added) == (ImportDiveOutcome.UPDATED, 1)
+        assert len(await _dive_ids(async_db, diver)) == 2
+        eighth = (await self._profiles(async_db, diver))[1]
+        assert (eighth.parser_key, eighth.depth_sample_count, eighth.max_cns_pct10) == (IMPORT_PARSER_KEY, 402, 20)
 
 
 class TestTheNotesOfADive:

@@ -1,11 +1,11 @@
 """The shapes logbook import reads and reports - a DiveJSON document seen from the
 *reader* side, and the report that says what importing one would do.
 
-A converted file - a UDDF file, a `.ssrf`, a FIT, a Suunto app or DM5 XML export, each file
-of a zip of them - arrives here as a DiveJSON document like any other, because the converter's
-output is one. What the report says of each file is its row in `ImportReport.members`, and what
-a file did not record, or recorded one way where it could be read another, is a note like the
-import's own: on its dive's row, or in `ImportReport.notes`.
+A converted file - a UDDF file, a `.ssrf`, a FIT, a Suunto app or DM5 XML export, a Shearwater
+Cloud database or XML export, each file of a zip of them - arrives here as a DiveJSON document
+like any other, because the converter's output is one. What the report says of each file is its
+row in `ImportReport.members`, and what a file did not record, or recorded one way where it could
+be read another, is a note like the import's own: on its dive's row, or in `ImportReport.notes`.
 
 **This is not `schemas/export.py` inverted, and the differences are the whole point.**
 That module is the writer's declaration: it emits exactly what DiveJSON 1.0 defines and a

@@ -11,10 +11,10 @@ here rather than in the service layer because each is an HTTP concern:
   as the diver confirms them in the preview, and its tag list is the diver's tags.
 - **Any number of files, in any mix of the formats this build reads.** A DiveJSON document,
   the full-export archive, a UDDF file, a Subsurface `.ssrf`, a FIT, a Suunto app export, a
-  Suunto DM5 XML export, or a zip of any of those, each sent as a `file` part - a watch
-  writes one file per dive, and one file per import would cap a diver at ten dives an hour
-  against the rate limit below. Which formats exactly is `divejson.read_formats()` and never
-  a list written out here.
+  Suunto DM5 XML export, a Shearwater Cloud database or XML export, or a zip of any of those,
+  each sent as a `file` part - a watch writes one file per dive, and one file per import would
+  cap a diver at ten dives an hour against the rate limit below. Which formats exactly is
+  `divejson.read_formats()` and never a list written out here.
 - **Two phases, mirroring the parse-then-attach flow.** `POST /import/logbook/preview`
   reads, converts, plans and reports, storing nothing; `POST /import/logbook` re-uploads the
   same files with the preview's token and writes. The token attests which bytes the report

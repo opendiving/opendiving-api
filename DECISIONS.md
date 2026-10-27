@@ -6043,8 +6043,12 @@ DiveJSON document, any format in `divejson.read_formats()`, or a `.zip` of those
 
 `divejson.sniff` decides each file on `divejson.SNIFF_BYTES`. A zip without `logbook.divejson` is
 opened one level deep; every document and every file a reader claims sum, by declared size, under
-`MAX_DOCUMENT_SIZE` before anything converts, each converted document being held until planning.
-Conversion and parsing run in `run_in_threadpool`.
+`MAX_DOCUMENT_SIZE` before anything converts, each converted document being held until planning. A
+file whose records are compressed inside it, a Shearwater Cloud database, counts at the larger of
+its size and `INFLATED_SIZE_WEIGHT` times what its records declare they unpack to, and converts with
+`max_inflated_size` set to that declaration plus the batch's remainder divided back by the weight:
+the package's inflation cap is the caller's, and a fixed one in the reader would refuse a large
+account that the api's own limits admit. Conversion and parsing run in `run_in_threadpool`.
 
 A head starting `{` keeps the 422 "not valid JSON"; other unclaimed bytes are 415. The token covers
 each uploaded file's name and digest and apply converts again, deterministic except `exported_at`,

@@ -24,7 +24,7 @@ body:
     attributes:
       label: Export format
       description: What the file is, and which app or desktop tool produces it.
-      placeholder: UDDF 3.2.2 out of Subsurface, .db export from Shearwater Cloud…
+      placeholder: UDDF 3.2.2 out of Subsurface, an XML export from MacDive…
     validations:
       required: true
 

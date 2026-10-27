@@ -6,6 +6,7 @@ README there for which were recorded whole and which were built by hand).
 """
 
 import json
+import sqlite3
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -135,6 +136,66 @@ class TestTheReader:
     def test_an_archive_is_refused_before_anything_converts(self) -> None:
         with pytest.raises(UnsupportedDiveFileError, match="one dive-computer file"):
             read_dive_file(b"PK\x03\x04" + b"\x00" * 64)
+
+
+def _sqlite_of(*tables: str) -> bytes:
+    """A SQLite database holding `tables` and nothing else - another program's `.db`."""
+    connection = sqlite3.connect(":memory:")
+    try:
+        for table in tables:
+            connection.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, data BLOB)")
+        return connection.serialize()
+    finally:
+        connection.close()
+
+
+class TestShearwaterCloud:
+    """The two exports Shearwater Cloud Desktop writes: a database of every dive, which the form
+    sends to import, and one dive's XML, which it reads."""
+
+    def test_the_xml_is_one_dive_with_its_computer_and_profile(self) -> None:
+        fmt, parsed, profile = read_prefill(_fixture("perdix3-dive-8.xml"))
+
+        assert fmt == "shearwater_xml"
+        # The XML writes the depth as Shearwater's float, `21.8000011`, and the form is handed it as written.
+        assert (parsed.start_time, parsed.submerged_time) == ("2026-09-21T10:48:17", 3718)
+        assert parsed.max_depth == pytest.approx(21.8)
+        assert parsed.device is not None and parsed.device.serial == "D9772626"
+        # The XML carries neither CNS nor the gradient factor - the database is the richer export.
+        assert profile is not None and profile.depth is not None and profile.tts is not None
+        assert profile.cns is None and profile.gradient_factor is None
+
+    def test_the_database_is_a_logbook_the_form_sends_to_import(self) -> None:
+        with pytest.raises(DiveFileReadError, match="holds 2 dives") as refusal:
+            read_dive_file(_fixture("perdix3-dives-1-and-8.db"))
+        assert "logbook" in str(refusal.value)
+
+    def test_another_programs_database_is_claimed_and_refused(self) -> None:
+        """The reader claims every SQLite header, the schema that would tell a Cloud export
+        from anything else lying far past the head - so a DM5 or Subsurface `.db` is a 422
+        with the reader's sentence, not a 415."""
+        with pytest.raises(DiveFileReadError, match="could not be read"):
+            read_dive_file(_sqlite_of("Dive", "DiveSamples"))
+
+    def test_one_file_unpacks_under_the_one_file_figure(self, monkeypatch) -> None:
+        real, seen = divejson.convert, []
+
+        def recorded(source: bytes, **kwargs: Any) -> Conversion:
+            seen.append(kwargs.get("max_inflated_size"))
+            return real(source, **kwargs)
+
+        monkeypatch.setattr(divejson, "convert", recorded)
+        read_dive_file(_fixture("perdix3-dive-8.xml"))
+
+        assert seen == [dive_reader.ONE_FILE_INFLATED_SIZE]
+
+    def test_a_database_past_the_one_file_figure_is_pointed_at_import(self, monkeypatch) -> None:
+        """Refused before a log inflates, by the package, and told where a whole account goes."""
+        monkeypatch.setattr(dive_reader, "ONE_FILE_INFLATED_SIZE", 1024)
+
+        with pytest.raises(DiveFileReadError, match="Import it as a logbook") as refusal:
+            read_dive_file(_fixture("perdix3-dives-1-and-8.db"))
+        assert "activity log" not in str(refusal.value)
 
 
 class TestThePrefill:

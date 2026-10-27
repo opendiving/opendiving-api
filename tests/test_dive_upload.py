@@ -6,6 +6,7 @@ parse route's one read - the recordings a file might belong to - gets for a new 
 """
 
 import io
+import sqlite3
 import uuid as uuid_pkg
 import zipfile
 from dataclasses import replace
@@ -197,6 +198,35 @@ class TestTheReadersRefusals:
 
         assert status == 415
         assert "UDDF (.uddf)" in body["detail"] and "FIT (.fit)" in body["detail"]
+
+    def test_a_shearwater_cloud_xml_is_one_dive(self) -> None:
+        status, body = _parse("Perdix 3 2026-9-21.xml", (FIXTURES / "dive_files" / "perdix3-dive-8.xml").read_bytes())
+
+        assert status == 200
+        claims = verify_dive_file_token(body["file_token"])
+        assert claims is not None and claims.parser_key == "shearwater_xml"
+        assert body["submerged_time"] == 3718
+
+    def test_a_shearwater_cloud_database_is_a_422_naming_the_count_and_logbook_import(self) -> None:
+        database = (FIXTURES / "dive_files" / "perdix3-dives-1-and-8.db").read_bytes()
+
+        status, body = _parse("Perdix 3.db", database)
+
+        assert status == 422
+        assert "2 dives" in body["detail"] and "logbook" in body["detail"]
+
+    def test_another_programs_database_is_a_422_not_a_415(self) -> None:
+        """The SQLite header is claimed whole, so a `.db` no reader here reads is refused by the
+        reader that claimed it, with its sentence."""
+        connection = sqlite3.connect(":memory:")
+        connection.execute("CREATE TABLE Dive (id INTEGER PRIMARY KEY)")
+        database = connection.serialize()
+        connection.close()
+
+        status, body = _parse("DM5.db", database)
+
+        assert status == 422
+        assert "could not be read" in body["detail"]
 
     def test_a_file_of_several_dives_is_a_422_naming_the_count_and_logbook_import(self) -> None:
         status, body = _parse("demo-account.uddf", (FIXTURES / "uddf" / "demo-account.uddf").read_bytes())

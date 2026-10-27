@@ -2,9 +2,9 @@
 
 Real inputs to the one reader, copied from the `divejson` package's own conformance corpus
 (`divejson/divejson-py`, `fixtures/`, at the commit released as `divejson` 0.16.0, and
-`suunto-ocean-2026.json` and the two `ocean-poor-first-fix` files at the one released as 0.21.0)
-under its MIT licence. Each keeps the package's file name; the package's `fixtures/README.md` says
-what each one exercises there.
+`suunto-ocean-2026.json` and the two `ocean-poor-first-fix` files at the one released as 0.21.0, and
+the two `perdix3` files at the one released as 0.33.0) under its MIT licence. Each keeps the
+package's file name; the package's `fixtures/README.md` says what each one exercises there.
 
 | File                                          | Recorded whole or built by hand                                                                       |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
@@ -16,6 +16,8 @@ what each one exercises there.
 | `nitrox-deco.xml`                             | Reduced from a Suunto DM5 export: two cylinders, a stated bottom temperature                          |
 | `not-a-dive.json`                             | Constructed: a Suunto app export of an activity that is not a dive                                    |
 | `two-computers.ssrf`                          | Reduced from a Subsurface save: one dive, two computers' records                                      |
+| `perdix3-dives-1-and-8.db`                    | Reduced from a Shearwater Cloud Desktop database export: two of a Perdix 3's dives                    |
+| `perdix3-dive-8.xml`                          | Reduced from Shearwater Cloud Desktop's XML export of the second of those dives                       |
 
 The two `suunto-ocean-2026` files are one dive exported twice by one computer, and so are the two
 `suunto-ocean` files: the pairs the door, label and fill tests run over. The second pair's JSON
