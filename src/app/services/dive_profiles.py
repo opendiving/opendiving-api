@@ -434,24 +434,83 @@ class StoredProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class ProfileBreadth:
+    """What a profile carries, for choosing between two profiles of one recording: the curves
+    a chart would draw (`NormalizedProfile.channels`) and how many depth samples it holds."""
+
+    channels: frozenset[str]
+    samples: int
+
+    def richer_than(self, other: ProfileBreadth) -> bool:
+        """Every channel the other has and one more, or the same channels over more samples.
+
+        A strict superset rather than a count of channels, so a profile trading one channel
+        for another is no richer either way.
+        """
+        if self.channels > other.channels:
+            return True
+        return self.channels == other.channels and self.samples > other.samples
+
+
+def breadth_of(profile: NormalizedProfile) -> ProfileBreadth:
+    return ProfileBreadth(channels=frozenset(profile.channels), samples=profile.depth_sample_count)
+
+
+@dataclass(frozen=True, slots=True)
 class ExistingProfileRow:
     """The extraction-idempotency lookup's result - summary columns only, never `data`.
 
     `parser_key` rides along because the *provenance* question and the *currency* question
     are asked in the same breath now: a profile a document supplied or a merge produced is
     never re-extracted, whatever its digest says. `reader_version` is NULL on every row no
-    reader wrote - those two, and every row stored before the column existed.
+    reader wrote - those two, and every row stored before the column existed. `breadth` is
+    what `replaces_stored_profile` weighs, derived from the summary columns as the read's
+    `channels` are.
     """
 
     source_sha256: str
     extractor_version: int
     parser_key: str
     reader_version: str | None = None
+    breadth: ProfileBreadth = ProfileBreadth(channels=frozenset(), samples=0)
 
     @property
     def is_reproducible(self) -> bool:
         """Whether a stored file could produce these samples again."""
         return self.parser_key not in UNREPRODUCIBLE_PROVENANCES
+
+
+def replaces_stored_profile(
+    existing: ExistingProfileRow | None, incoming: NormalizedProfile | None, *, from_files: bool
+) -> bool:
+    """Whether `incoming`, another profile of the same recording, takes the stored one's place.
+
+    **The richer one wins, whichever arrived first** (`ProfileBreadth.richer_than`), and a
+    tie between a document's profile and one read from files goes to the files', which a
+    backfill can derive again; every other tie keeps what is stored. In both directions,
+    because one account meets them in either order: a whole-database export imported over a
+    dive's UDDF, or the UDDF arriving after it. `from_files` says whether `incoming` was read
+    from the recording's files (a re-derivation) or supplied by a document (an import's fill).
+
+    Outside that comparison: a merge's profile is always kept, its files being halves of what
+    it describes, and a profile read from the recording's own files is replaced by any
+    re-derivation of them, as a deletion or a backfill requires. No incoming samples replace
+    nothing that is stored.
+    """
+    if existing is None:
+        return incoming is not None
+    if existing.parser_key == MERGE_PARSER_KEY:
+        return False
+    if from_files and existing.is_reproducible:
+        return True
+    if incoming is None:
+        return False
+    arriving = breadth_of(incoming)
+    if arriving.richer_than(existing.breadth):
+        return True
+    if existing.breadth.richer_than(arriving):
+        return False
+    return from_files
 
 
 @dataclass(frozen=True, slots=True)
@@ -1273,14 +1332,54 @@ async def replace_profile_samples(db: AsyncSession, *, recording_id: int, profil
     )
 
 
+# What `_channels_present` reads off a row: the presence column of every channel.
+_PRESENCE_COLUMNS: tuple[str, ...] = (
+    "depth_sample_count",
+    "min_pressure_bar10",
+    *(columns[0][0] for channel, columns in _SUMMARY_COLUMNS.items() if channel != "depth"),
+)
+
+
+def _channels_present(row: object) -> set[str]:
+    """The channels a stored row has readings for, off its summary columns alone.
+
+    A channel whose extreme came back NULL is a channel this profile has no readings for - a
+    dive that never owed a decompression stop has no ceiling to draw, and one whose computer
+    reported no gradient factor has no gradient factor. The same derivation for all ten, and
+    the reason a ceiling of zero is stored as no reading.
+    """
+    present = {
+        channel
+        for channel, columns in _SUMMARY_COLUMNS.items()
+        if channel != "depth" and getattr(row, columns[0][0]) is not None
+    }
+    if row.depth_sample_count > 0:  # type: ignore[attr-defined]
+        present.add("depth")
+    if row.min_pressure_bar10 is not None:  # type: ignore[attr-defined]
+        present.add("pressure")
+    return present
+
+
 async def get_existing_profile(db: AsyncSession, *, recording_id: int) -> ExistingProfileRow | None:
-    """The columns `should_extract` and the backfill guard need. Explicit columns, so `data`
-    can't ride along."""
+    """The columns `should_extract`, the backfill guard and `replaces_stored_profile` need.
+    Explicit columns, so `data` can't ride along."""
     stmt = select(
-        DiveProfile.source_sha256, DiveProfile.extractor_version, DiveProfile.parser_key, DiveProfile.reader_version
+        DiveProfile.source_sha256,
+        DiveProfile.extractor_version,
+        DiveProfile.parser_key,
+        DiveProfile.reader_version,
+        *(getattr(DiveProfile, column) for column in _PRESENCE_COLUMNS),
     ).where(DiveProfile.recording_id == recording_id)
     row = (await db.execute(stmt)).one_or_none()
-    return None if row is None else ExistingProfileRow(*row)
+    if row is None:
+        return None
+    return ExistingProfileRow(
+        source_sha256=row.source_sha256,
+        extractor_version=row.extractor_version,
+        parser_key=row.parser_key,
+        reader_version=row.reader_version,
+        breadth=ProfileBreadth(channels=frozenset(_channels_present(row)), samples=row.depth_sample_count),
+    )
 
 
 async def get_profile_version(db: AsyncSession, *, recording_id: int) -> str | None:
@@ -1467,19 +1566,7 @@ async def get_profile_infos_for_recordings(
 
     infos: dict[int, DiveProfileInfo] = {}
     for row in await db.execute(stmt):
-        # A channel whose extreme came back NULL is a channel this profile has no readings
-        # for - a dive that never owed a decompression stop has no ceiling to draw, and one
-        # whose computer reported no gradient factor has no gradient factor. The same
-        # derivation for all ten, and the reason a ceiling of zero is stored as no reading.
-        present = {
-            channel
-            for channel, columns in _SUMMARY_COLUMNS.items()
-            if channel != "depth" and getattr(row, columns[0][0]) is not None
-        }
-        if row.depth_sample_count > 0:
-            present.add("depth")
-        if row.min_pressure_bar10 is not None:
-            present.add("pressure")
+        present = _channels_present(row)
         channels = [channel for channel in PROFILE_CHANNEL_ORDER if channel in present]
 
         infos[row.recording_id] = DiveProfileInfo(

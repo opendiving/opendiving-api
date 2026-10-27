@@ -36,7 +36,7 @@ files before it left it, which is what `batch.py` owns.
 
 import hashlib
 import uuid as uuid_pkg
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -120,12 +120,14 @@ from ...schemas.person import PersonRole
 from ...schemas.tag import TAG_NAME_MAX, tag_key, trim_tag
 from ...schemas.user_picture import PictureCrop
 from ..certification_files import MAX_CARD_FILE_SIZE
-from ..dive_files import MAX_DIVE_FILE_SIZE
+from ..dive_files import MAX_DIVE_FILE_SIZE, first_same_recording
 from ..dive_profiles import (
     IMPORT_PARSER_KEY,
     NormalizedProfile,
     derive_gas_attribution,
     downsample,
+    get_existing_profile,
+    replaces_stored_profile,
 )
 from ..dive_reader import FALLBACK_CONTENT_TYPE, bottom_temperature, content_type_of, reads, two_places
 from ..dive_recordings import (
@@ -133,7 +135,6 @@ from ..dive_recordings import (
     RecordingCandidate,
     RecordingFacts,
     is_same_dive_strict,
-    is_same_recording,
     load_candidates,
 )
 from ..person_links import Account, accounts_by_uuid, claim_link_slot, link_budget_remaining
@@ -329,6 +330,13 @@ class PlannedRecordingMatch:
     # re-imported over a value the diver cleared. `None` on an `attach`, where no stored
     # recording is named and the writer computes the slot.
     ordinal: int | None
+    # **Whether this fill's profile takes the place of the one the recording stores**
+    # (`replaces_stored_profile`), decided here so the report and the write cannot disagree:
+    # the writer stores a file-less fill's samples over the stored ones on this answer alone.
+    # A fill bringing its file is re-derived by `rederive_recording`, which asks the same
+    # question of the file's own reading; this is that answer as the document's reading of
+    # the same file predicts it, for the report. Always `False` on an `attach`.
+    replaces_profile: bool
     # The incoming *dive's* values, carried for a `fill` only: a match that writes no dive
     # row can still supply readings the existing dive has none of. Ignored on `attach`, where
     # the recording is a second computer's and the dive's figures are the primary's.
@@ -745,8 +753,13 @@ class _Planner:
         portrait: ImportPortraitChoice | None = None,
         claim_links: bool = False,
         batch_dive_ids: frozenset[int] = frozenset(),
+        held: Mapping[str, Callable[[], bytes]] | None = None,
     ) -> None:
         self._db = db
+        # The bytes of the files earlier files of the same import stored, by storage key - not
+        # in the store until the import has finished, and read by the same-recording gate when
+        # a pair rests on a shared serial (`first_same_recording`).
+        self._held = held
         self._user_id = user_id
         self._loaded = loaded
         self._document = loaded.document
@@ -2456,6 +2469,23 @@ class _Planner:
             ).scalar_one_or_none() is not None
         return self._account_has_recordings
 
+    async def _replaces_profile(self, recording_id: int, recording: PlannedRecording) -> bool:
+        """Whether a fill's profile takes the place of the matched recording's stored one.
+
+        Not where the recording has none - samples for a record that had none replace nothing
+        - nor where a file joins a recording whose profile its files produced, which the fill
+        rule re-derives from all of them rather than choosing between two.
+        """
+        if recording.profile is None:
+            return False
+        existing = await get_existing_profile(self._db, recording_id=recording_id)
+        if existing is None:
+            return False
+        from_files = recording.kept is not None
+        if from_files and existing.is_reproducible:
+            return False
+        return replaces_stored_profile(existing, recording.profile.profile, from_files=from_files)
+
     async def _match_recordings(
         self,
         dive: ImportDive,
@@ -2508,8 +2538,9 @@ class _Planner:
             )
             candidates = await self._load_candidates(recording.start_time)
 
-            filled = next((candidate for candidate in candidates if is_same_recording(incoming, candidate.facts)), None)
+            filled = await first_same_recording(self._db, incoming, candidates, held=self._held)
             if filled is not None:
+                replaces = await self._replaces_profile(filled.id, recording)
                 self._recording_matches.append(
                     PlannedRecordingMatch(
                         kind="fill",
@@ -2519,16 +2550,22 @@ class _Planner:
                         recording_id=filled.id,
                         recording=recording,
                         ordinal=filled.ordinal,
+                        replaces_profile=replaces,
                         dive_values=values,
                         mixtures=mixtures,
                     )
                 )
                 if filled.dive_id not in self._batch_dive_ids:
+                    kept = (
+                        f"Its profile replaced the one dive {filled.dive_number} had, carrying more of the dive, and "
+                        "the dive kept everything else it already recorded."
+                        if replaces
+                        else f"Dive {filled.dive_number} kept everything it already recorded."
+                    )
                     self._note(
                         ImportNoteCode.RECORDING_FILLED,
                         "A recording of this dive is one your logbook already has - the same device, the same start - "
-                        "so it filled in what that record was missing rather than being added again. Dive "
-                        f"{filled.dive_number} kept everything it already recorded.",
+                        f"so it filled in what that record was missing rather than being added again. {kept}",
                         collection="dives",
                         uuid=dive.uuid,
                     )
@@ -2550,6 +2587,7 @@ class _Planner:
                         # No stored recording to have a position: the writer appends this one
                         # and computes the slot with `next_ordinal`.
                         ordinal=None,
+                        replaces_profile=False,
                         # **Carried on an attach as well as on a fill**, and with one more
                         # job: the writer maps this second computer's `gas_number`s from them
                         # onto the ones the dive already has, as well as filling the blanks of
@@ -3298,6 +3336,7 @@ async def plan_import(
     portrait: ImportPortraitChoice | None = None,
     claim_links: bool = False,
     batch_dive_ids: frozenset[int] = frozenset(),
+    held: Mapping[str, Callable[[], bytes]] | None = None,
 ) -> ImportPlan:
     """Plan an import of `loaded` into `user_id`'s logbook. Writes nothing to the database.
 
@@ -3305,7 +3344,7 @@ async def plan_import(
     them and the preview, which has nothing submitted yet, does not. `claim_links` is the
     apply's too: it spends the link limit for each person it links, where the preview only
     reads what is left of it. `batch_dive_ids` are the dives the files before this one in the
-    same import wrote.
+    same import wrote, and `held` the bytes of the files they stored.
     """
     planner = _Planner(
         db,
@@ -3317,6 +3356,7 @@ async def plan_import(
         portrait=portrait,
         claim_links=claim_links,
         batch_dive_ids=batch_dive_ids,
+        held=held,
     )
     return await planner.plan()
 
