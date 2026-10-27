@@ -54,9 +54,12 @@ from src.app.services.dive_files import (
     RecordingExtraction,
     _admit,
     _ExistingRow,
+    _keeps_stored_profile,
     backfill_tech_fields,
     extract_file,
     extract_recording,
+    first_same_recording,
+    is_same_stored_recording,
     join_file_mixtures,
     merge_mixture_fields,
     primary_fills,
@@ -66,8 +69,16 @@ from src.app.services.dive_files import (
     renumber_onto_labels,
     store_recording_file,
 )
-from src.app.services.dive_profiles import MERGE_PARSER_KEY, ExistingProfileRow
+from src.app.services.dive_profiles import (
+    IMPORT_PARSER_KEY,
+    MERGE_PARSER_KEY,
+    ExistingProfileRow,
+    NormalizedProfile,
+    ProfileBreadth,
+    ProfileSeries,
+)
 from src.app.services.dive_reader import FORMAT_CONTENT_TYPES
+from src.app.services.dive_recordings import DeviceIdentity, RecordingCandidate, RecordingFacts
 
 SUUNTO_NS = "http://schemas.datacontract.org/2004/07/Suunto.Diving.Dal"
 
@@ -1777,3 +1788,115 @@ class TestTheReadoutFieldsAreTheRecordings:
         assert set(READOUT_FIELDS) <= set(ParsedDiveSchema.model_fields)
         assert set(READOUT_FIELDS) <= set(DiveRecording.__table__.columns.keys())
         assert not set(READOUT_FIELDS) & set(Dive.__table__.columns.keys())
+
+
+class TestAJoiningFileAgainstADocumentsProfile:
+    """`_keeps_stored_profile`'s document clause: a file joining a file-less imported recording
+    replaces the document's samples when they are as rich, and leaves them otherwise - a whole
+    database's log is not replaced by the same dive's UDDF arriving after it."""
+
+    DEPTH_AND_TTS = NormalizedProfile(
+        depth=ProfileSeries(t=[0, 1000, 2000], v=[100, 900, 100]), tts=ProfileSeries(t=[1000], v=[60])
+    )
+    DEPTH = NormalizedProfile(depth=ProfileSeries(t=[0, 1000, 2000], v=[100, 900, 100]))
+
+    @staticmethod
+    def _document(*channels: str, samples: int = 3) -> ExistingProfileRow:
+        return ExistingProfileRow(
+            source_sha256="a" * 64,
+            extractor_version=3,
+            parser_key=IMPORT_PARSER_KEY,
+            breadth=ProfileBreadth(channels=frozenset(channels), samples=samples),
+        )
+
+    def test_a_poorer_file_leaves_the_documents_profile(self) -> None:
+        assert _keeps_stored_profile(self._document("depth", "tts"), RecordingExtraction(profile=self.DEPTH))
+
+    def test_a_richer_file_replaces_it(self) -> None:
+        assert not _keeps_stored_profile(self._document("depth"), RecordingExtraction(profile=self.DEPTH_AND_TTS))
+
+    def test_an_equal_file_replaces_it(self) -> None:
+        """A tie goes to the file, which a backfill can derive again."""
+        assert not _keeps_stored_profile(self._document("depth"), RecordingExtraction(profile=self.DEPTH))
+
+    def test_a_file_with_no_samples_leaves_it(self) -> None:
+        assert _keeps_stored_profile(self._document("depth"), RecordingExtraction())
+
+    def test_a_profile_the_files_produced_is_never_kept(self) -> None:
+        produced = ExistingProfileRow(
+            source_sha256="a" * 64,
+            extractor_version=3,
+            parser_key="uddf",
+            breadth=ProfileBreadth(channels=frozenset({"depth", "tts"}), samples=9),
+        )
+
+        assert not _keeps_stored_profile(produced, RecordingExtraction(profile=self.DEPTH))
+
+
+class TestAPairSettledByASharedSerial:
+    """`is_same_stored_recording` reads a candidate's files only when the gate admitted the pair
+    on a shared serial with the spans apart, to tell a merge whose `merge` profile is gone."""
+
+    START = datetime(2026, 9, 21, 10, 48, tzinfo=UTC)
+    DEVICE = DeviceIdentity(brand="Shearwater Research, Inc", model="Perdix 3", serial="D9772626")
+    INCOMING = RecordingFacts(device=DEVICE, start_time=START, sampled_span=4_010_000)
+
+    def _candidate(self, sampled_span: int = 3_730_000) -> RecordingCandidate:
+        return RecordingCandidate(
+            id=5,
+            uuid=uuid7(),
+            dive_id=7,
+            dive_uuid=uuid7(),
+            dive_number=8,
+            ordinal=0,
+            facts=RecordingFacts(device=self.DEVICE, start_time=self.START, sampled_span=sampled_span),
+        )
+
+    def _files(self, monkeypatch, *starts: datetime) -> AsyncMock:
+        loaded = AsyncMock(
+            return_value=[
+                LoadedDiveFile(data=str(index).encode(), content_type="", original_filename="", sha256=str(index))
+                for index in range(len(starts))
+            ]
+        )
+        monkeypatch.setattr(dive_files_module, "load_recording_files", loaded)
+        monkeypatch.setattr(
+            dive_files_module,
+            "extract_file",
+            lambda data, _format: FileExtraction(
+                parsed=None, profile=None, scalars=None, start=(starts[int(data)], None)
+            ),
+        )
+        return loaded
+
+    @pytest.mark.asyncio
+    async def test_files_of_one_start_let_the_serial_settle_it(self, monkeypatch) -> None:
+        self._files(monkeypatch, self.START)
+
+        assert await is_same_stored_recording(AsyncMock(), self.INCOMING, self._candidate())
+
+    @pytest.mark.asyncio
+    async def test_a_file_of_the_second_half_marks_a_merge(self, monkeypatch) -> None:
+        """Decision 12's fallback: neither half of an interrupted dive fills the merged one."""
+        self._files(monkeypatch, self.START, self.START + timedelta(seconds=223))
+        candidate = self._candidate()
+
+        assert not await is_same_stored_recording(AsyncMock(), self.INCOMING, candidate)
+        assert await first_same_recording(AsyncMock(), self.INCOMING, [candidate]) is None
+
+    @pytest.mark.asyncio
+    async def test_spans_that_agree_read_no_file(self, monkeypatch) -> None:
+        loaded = self._files(monkeypatch, self.START + timedelta(seconds=223))
+
+        assert await is_same_stored_recording(AsyncMock(), self.INCOMING, self._candidate(sampled_span=4_010_000))
+        loaded.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_missing_file_holds_the_pair_to_the_span(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            dive_files_module,
+            "load_recording_files",
+            AsyncMock(side_effect=dive_files_module.blob_store.BlobMissingError("gone")),
+        )
+
+        assert not await is_same_stored_recording(AsyncMock(), self.INCOMING, self._candidate())

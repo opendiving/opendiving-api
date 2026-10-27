@@ -7,6 +7,7 @@ arrays. How a file's samples come to be a `NormalizedProfile` is `test_dive_read
 
 import logging
 import random
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -33,11 +34,13 @@ from src.app.services.dive_profiles import (
     ExistingProfileRow,
     LoadedProfile,
     NormalizedProfile,
+    ProfileBreadth,
     ProfileEvent,
     ProfileGasAttribution,
     ProfilePressureSeries,
     ProfileSeries,
     attribute_and_cap,
+    breadth_of,
     derive_depth_outline,
     derive_gas_attribution,
     dive_end_time,
@@ -47,6 +50,7 @@ from src.app.services.dive_profiles import (
     join_profiles,
     profile_from_data,
     provenance_of,
+    replaces_stored_profile,
     shift_profile,
     should_extract,
     summary_extremes,
@@ -545,6 +549,109 @@ def _row(
         parser_key=parser_key,
         reader_version=reader_version,
     )
+
+
+def _breadth(*channels: str, samples: int) -> ProfileBreadth:
+    return ProfileBreadth(channels=frozenset(channels), samples=samples)
+
+
+def _stored(parser_key: str, *channels: str, samples: int) -> ExistingProfileRow:
+    return ExistingProfileRow(
+        source_sha256="a" * 64,
+        extractor_version=3,
+        parser_key=parser_key,
+        breadth=_breadth(*channels, samples=samples),
+    )
+
+
+def _depth_and(
+    samples: int,
+    *,
+    tts: ProfileSeries | None = None,
+    cns: ProfileSeries | None = None,
+    gradient_factor: ProfileSeries | None = None,
+) -> NormalizedProfile:
+    times = [float(second) for second in range(samples)]
+    return NormalizedProfile(depth=_series(times, [100] * samples), tts=tts, cns=cns, gradient_factor=gradient_factor)
+
+
+class TestTheRicherProfile:
+    """Two profiles of one recording - a whole database's log and the same dive's UDDF - and
+    which of them the recording keeps: the richer, whichever arrived first."""
+
+    def test_every_channel_and_one_more_is_richer_whatever_the_samples(self) -> None:
+        assert _breadth("depth", "tts", samples=10).richer_than(_breadth("depth", samples=400))
+
+    def test_the_same_channels_over_more_samples_is_richer(self) -> None:
+        """402 log samples against the UDDF's 374, on one dive."""
+        assert _breadth("depth", "ndl", samples=402).richer_than(_breadth("depth", "ndl", samples=374))
+        assert not _breadth("depth", "ndl", samples=374).richer_than(_breadth("depth", "ndl", samples=402))
+
+    def test_trading_a_channel_is_richer_neither_way(self) -> None:
+        cns, gradient = _breadth("depth", "cns", samples=402), _breadth("depth", "gradient_factor", samples=402)
+
+        assert not cns.richer_than(gradient)
+        assert not gradient.richer_than(cns)
+
+    def test_an_equal_profile_is_not_richer(self) -> None:
+        assert not _breadth("depth", samples=3).richer_than(_breadth("depth", samples=3))
+
+    def test_breadth_is_what_a_chart_would_draw(self) -> None:
+        profile = replace(
+            _depth_and(3, tts=_series([1.0], [60])), pressure=[ProfilePressureSeries(t=[0], v=[2000], gas_number=1)]
+        )
+
+        assert breadth_of(profile) == _breadth("depth", "tts", "pressure", samples=3)
+
+    @pytest.mark.parametrize(
+        ("stored", "incoming", "from_files", "expected"),
+        [
+            # Nothing stored: anything with samples lands, nothing lands nothing.
+            (None, _depth_and(3), False, True),
+            (None, None, True, False),
+            # A merge's is always kept, however rich what arrives.
+            (_stored(MERGE_PARSER_KEY, "depth", samples=3), _depth_and(9, tts=_series([1.0], [60])), True, False),
+            (_stored(MERGE_PARSER_KEY, "depth", samples=3), _depth_and(9, tts=_series([1.0], [60])), False, False),
+            # A profile its files produced is replaced by any re-derivation of them, poorer too.
+            (_stored("suunto_json", "depth", "tts", samples=9), _depth_and(3), True, True),
+            (_stored("suunto_json", "depth", "tts", samples=9), None, True, True),
+            # A document's fill weighs it like any other.
+            (_stored("uddf", "depth", samples=3), _depth_and(4), False, True),
+            (_stored("uddf", "depth", "tts", samples=3), _depth_and(9), False, False),
+            # A document's profile against what the files yield, in both directions.
+            (_stored(IMPORT_PARSER_KEY, "depth", samples=3), _depth_and(3, tts=_series([1.0], [60])), True, True),
+            (_stored(IMPORT_PARSER_KEY, "depth", "tts", samples=3), _depth_and(9), True, False),
+            (_stored(IMPORT_PARSER_KEY, "depth", samples=3), None, True, False),
+            # Two documents' readings of one record.
+            (_stored(IMPORT_PARSER_KEY, "depth", samples=3), _depth_and(4), False, True),
+            (_stored(IMPORT_PARSER_KEY, "depth", samples=4), _depth_and(3), False, False),
+        ],
+    )
+    def test_the_richer_wins_in_both_directions(
+        self, stored: ExistingProfileRow | None, incoming: NormalizedProfile | None, from_files: bool, expected: bool
+    ) -> None:
+        assert replaces_stored_profile(stored, incoming, from_files=from_files) is expected
+
+    @pytest.mark.parametrize(
+        ("parser_key", "from_files", "expected"),
+        [
+            # A file's reading against a document's goes to the file's, which a backfill can
+            # derive again ...
+            (IMPORT_PARSER_KEY, True, True),
+            # ... and so does a document's against a file's, by keeping what is stored.
+            ("uddf", False, False),
+            # Two documents keep what is stored.
+            (IMPORT_PARSER_KEY, False, False),
+        ],
+    )
+    def test_a_tie_goes_to_the_files(self, parser_key: str, from_files: bool, expected: bool) -> None:
+        stored = _stored(parser_key, "depth", "cns", samples=3)
+        traded = _depth_and(3, gradient_factor=_series([1.0], [40]))
+
+        assert replaces_stored_profile(stored, _depth_and(3, cns=_series([1.0], [10])), from_files=from_files) is (
+            expected
+        )
+        assert replaces_stored_profile(stored, traded, from_files=from_files) is expected
 
 
 class TestShouldExtract:

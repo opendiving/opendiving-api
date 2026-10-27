@@ -829,9 +829,11 @@ class _Writer:
         dive's own blanks fill too: its positions from the primary recording alone and only
         while it holds no file read for them (`fill_tech_scalars`), and the blank members of its
         cylinders from the rows the labelling pairs - through the primary
-        alone where the fill brings no file. Nothing is ever overwritten, which is the whole
-        rule: the diver may have corrected any of it, and a fill that won an argument with an
-        edit would be the silent loss this repository already refuses on the backfill path. A
+        alone where the fill brings no file. Nothing the diver can edit is ever overwritten,
+        which is the whole rule: the diver may have corrected any of it, and a fill that won an
+        argument with an edit would be the silent loss this repository already refuses on the
+        backfill path. Samples are not such a value, and richer ones replace the recording's
+        profile and the gate figures read off it (`PlannedRecordingMatch.replaces_profile`). A
         fill that brings the imported file itself is the one exception, and it is the form's:
         the recording is derived from its files, a second file of one recording filling and
         never overwriting, and the dive's cylinders filling on any ordinal.

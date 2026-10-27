@@ -2469,19 +2469,21 @@ class _Planner:
             ).scalar_one_or_none() is not None
         return self._account_has_recordings
 
-    async def _replaces_profile(self, recording_id: int, recording: PlannedRecording) -> bool:
+    async def _replaces_profile(self, recording_id: int, recording: PlannedRecording, *, from_files: bool) -> bool:
         """Whether a fill's profile takes the place of the matched recording's stored one.
 
-        Not where the recording has none - samples for a record that had none replace nothing
-        - nor where a file joins a recording whose profile its files produced, which the fill
-        rule re-derives from all of them rather than choosing between two.
+        `from_files` says the imported file joins the recording, which is then re-derived from
+        its files and decided by `_keeps_stored_profile` on the file's own reading - predicted
+        here from the document's reading of the same file, for the report. Never where the
+        recording has no profile - samples for a record that had none replace nothing - nor
+        where a file joins one its files produced, which the fill rule re-derives from all of
+        them rather than choosing between two.
         """
         if recording.profile is None:
             return False
         existing = await get_existing_profile(self._db, recording_id=recording_id)
         if existing is None:
             return False
-        from_files = recording.kept is not None
         if from_files and existing.is_reproducible:
             return False
         return replaces_stored_profile(existing, recording.profile.profile, from_files=from_files)
@@ -2518,6 +2520,8 @@ class _Planner:
         """
         remaining: list[PlannedRecording] = []
         taken = 0
+        # Each match's index in `_recording_matches`, beside the stored recording it reached.
+        matches: list[tuple[int, RecordingCandidate]] = []
         for recording in recordings:
             if recording.start_time is None:
                 remaining.append(recording)
@@ -2540,7 +2544,6 @@ class _Planner:
 
             filled = await first_same_recording(self._db, incoming, candidates, held=self._held)
             if filled is not None:
-                replaces = await self._replaces_profile(filled.id, recording)
                 self._recording_matches.append(
                     PlannedRecordingMatch(
                         kind="fill",
@@ -2550,25 +2553,13 @@ class _Planner:
                         recording_id=filled.id,
                         recording=recording,
                         ordinal=filled.ordinal,
-                        replaces_profile=replaces,
+                        # Settled below, once it is known whether the imported file joins it.
+                        replaces_profile=False,
                         dive_values=values,
                         mixtures=mixtures,
                     )
                 )
-                if filled.dive_id not in self._batch_dive_ids:
-                    kept = (
-                        f"Its profile replaced the one dive {filled.dive_number} had, carrying more of the dive, and "
-                        "the dive kept everything else it already recorded."
-                        if replaces
-                        else f"Dive {filled.dive_number} kept everything it already recorded."
-                    )
-                    self._note(
-                        ImportNoteCode.RECORDING_FILLED,
-                        "A recording of this dive is one your logbook already has - the same device, the same start - "
-                        f"so it filled in what that record was missing rather than being added again. {kept}",
-                        collection="dives",
-                        uuid=dive.uuid,
-                    )
+                matches.append((len(self._recording_matches) - 1, filled))
                 taken += 1
                 continue
 
@@ -2598,18 +2589,48 @@ class _Planner:
                         mixtures=mixtures,
                     )
                 )
-                if attached.dive_id not in self._batch_dive_ids:
-                    self._note(
-                        ImportNoteCode.RECORDING_ATTACHED,
-                        "A different computer recorded a dive your logbook already has, so this recording was added "
-                        f"to dive {attached.dive_number} rather than a second dive being created for it.",
-                        collection="dives",
-                        uuid=dive.uuid,
-                    )
+                matches.append((len(self._recording_matches) - 1, attached))
                 taken += 1
                 continue
 
             remaining.append(recording)
+
+        # The imported file joins the first match where every recording matched and it is not
+        # stored already (`_keep_on_match`), and a fill it joins is re-derived from its files.
+        kept = self._loaded.kept
+        joins = kept is not None and taken > 0 and not remaining and kept.sha256 not in self._claimed_digests
+        for index, candidate in matches:
+            match = self._recording_matches[index]
+            noted = candidate.dive_id not in self._batch_dive_ids
+            if match.kind == "attach":
+                if noted:
+                    self._note(
+                        ImportNoteCode.RECORDING_ATTACHED,
+                        "A different computer recorded a dive your logbook already has, so this recording was added "
+                        f"to dive {candidate.dive_number} rather than a second dive being created for it.",
+                        collection="dives",
+                        uuid=dive.uuid,
+                    )
+                continue
+            replaces = await self._replaces_profile(
+                candidate.id, match.recording, from_files=joins and index == matches[0][0]
+            )
+            self._recording_matches[index] = replace(match, replaces_profile=replaces)
+            if not noted:
+                continue
+            outcome = (
+                f"Its profile replaced the one dive {candidate.dive_number} had, carrying more of the dive, and the "
+                "dive kept everything else it already recorded."
+                if replaces
+                else f"Dive {candidate.dive_number} kept everything it already recorded."
+            )
+            self._note(
+                ImportNoteCode.RECORDING_FILLED,
+                "A recording of this dive is one your logbook already has - the same device, the same start - so it "
+                f"filled in what that record was missing rather than being added again. {outcome}",
+                collection="dives",
+                uuid=dive.uuid,
+            )
         return remaining, taken
 
     async def _plan_dive(self, dive: ImportDive, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:

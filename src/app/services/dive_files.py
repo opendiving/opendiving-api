@@ -1412,9 +1412,10 @@ async def rederive_recording(
     off the very file they were editing away from, on the next repeat upload or backfill.
     Required rather than defaulted, so a caller added later has to say which it is.
 
-    **A profile no file can re-yield stays** (`_keeps_stored_profile`), and with it the
-    labels and the gate figures it was stored with: the dive's cylinders still fill at an
-    arrival, but are never renumbered onto the files' labels, and the readouts only fill.
+    **A profile no file can re-yield stays** unless the files yield a profile as rich
+    (`_keeps_stored_profile`), and with it the labels and the gate figures it was stored with:
+    the dive's cylinders still fill at an arrival, but are never renumbered onto the files'
+    labels, and the readouts only fill.
     """
     arrival = change is RecordingChange.JOINED or (change is RecordingChange.CREATED and ordinal != 0)
     existing = await get_existing_profile(db, recording_id=recording_id)

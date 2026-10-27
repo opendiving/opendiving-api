@@ -44,11 +44,14 @@ from src.app.services.dive_files import apply_gas_mapping
 from src.app.services.dive_profiles import (
     READER_VERSION,
     NormalizedProfile,
+    ProfileBreadth,
+    ProfilePressureSeries,
     ProfileSeries,
     backfill_depth_outlines,
     backfill_profiles,
     derive_depth_outline,
     get_depth_outlines_for_dives,
+    get_existing_profile,
     get_gas_attribution_for_dives,
     load_stored_profile,
     replace_profile_samples,
@@ -335,6 +338,30 @@ async def _store(async_db: AsyncSession, recording: DiveRecording, profile: Norm
         reader_version=READER_VERSION,
         commit=True,
     )
+
+
+class TestTheStoredBreadth:
+    """What `replaces_stored_profile` weighs a stored profile by, read off its summary columns
+    as the read's `channels` are, never off `data`."""
+
+    @pytest.mark.asyncio
+    async def test_the_channels_and_the_depth_samples_come_back(
+        self, async_db: AsyncSession, recording: DiveRecording
+    ) -> None:
+        await _store(
+            async_db,
+            recording,
+            NormalizedProfile(
+                depth=ProfileSeries(t=[0, 100, 200], v=[300, 600, 300]),
+                tts=ProfileSeries(t=[100], v=[60]),
+                pressure=[ProfilePressureSeries(t=[0], v=[2000], gas_number=1)],
+            ),
+        )
+
+        existing = await get_existing_profile(async_db, recording_id=recording.id)
+
+        assert existing is not None
+        assert existing.breadth == ProfileBreadth(channels=frozenset({"depth", "tts", "pressure"}), samples=3)
 
 
 def _second_recording(db: Session, dive: Dive, ordinal: int) -> DiveRecording:
