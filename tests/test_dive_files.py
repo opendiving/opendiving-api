@@ -228,14 +228,15 @@ class TestTheContentTypesAreOnesWeServe:
         The bar is that a browser handed one of these can't be talked into *executing* it
         at the app's own origin - so nothing in the `text/*` family, and nothing `nosniff`
         wouldn't already pin down. `application/vnd.ant.fit` (the ANT+ registered type for
-        a FIT file) clears it more easily than the XML and JSON types: it is opaque binary
-        with no renderer at all. Every value also fits `dive_file.content_type`'s 32
-        characters.
+        a FIT file) and `application/vnd.sqlite3` (IANA's, for a Shearwater Cloud database)
+        clear it more easily than the XML and JSON types: they are opaque binary with no
+        renderer at all. Every value also fits `dive_file.content_type`'s 32 characters.
         """
         assert set(FORMAT_CONTENT_TYPES.values()) <= {
             "application/xml",
             "application/json",
             "application/vnd.ant.fit",
+            "application/vnd.sqlite3",
         }
 
 

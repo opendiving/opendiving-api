@@ -34,7 +34,9 @@ same reason: *"Uploaded files are parsed in a thread, not on the event loop"* in
 `MAX_DOCUMENT_SIZE` is the memory ceiling on every path, and it bounds the batch rather than
 one file: every document and every file a reader claims - a zip's by its declared sizes, and
 the archive's own document - are summed against it before anything converts, because every
-converted document is held until the import is planned. A logbook large enough to matter
+converted document is held until the import is planned. A file whose records are compressed
+inside it counts at what they declare they unpack to, weighted to what that costs converted,
+and converts under what the batch has left. A logbook large enough to matter
 wants a streaming parser or an arq job. `DECISIONS.md`, *"Logbook import spools its upload
 and still parses the document whole"*, carries the trade.
 """
@@ -97,6 +99,18 @@ _MEMBER_READ_FAILURES = (RuntimeError, zipfile.BadZipFile, NotImplementedError, 
 # is tens of megabytes - and the number that actually bounds this endpoint's memory, since
 # every document is parsed whole and held until the import is planned.
 MAX_DOCUMENT_SIZE = 100 * 1024 * 1024  # 100 MB
+
+# What a byte a file declares its records unpack to costs once converted, in the unit
+# `MAX_DOCUMENT_SIZE` counts - a DiveJSON document's text. Measured over the one format that
+# unpacks, a Shearwater Cloud database: the owner's eight-dive export and the package's two-dive
+# fixture convert to 2.1 and 1.9 times their logs' declared bytes as JSON text. Rounded up because
+# both are open-circuit dives with no stop and no transmitter, and a log that records a ceiling or
+# a tank pressure converts to more series per sample.
+INFLATED_SIZE_WEIGHT = 3
+
+# The formats whose files carry compressed records, each with the package's count of what a
+# file's records declare they unpack to, read off the file without unpacking any.
+_DECLARED_INFLATION: dict[str, Callable[[bytes], int]] = {"shearwater_db": divejson.shearwater_db_declared_size}
 
 # A zip part, and a whole request. Five times the document cap because an archive's
 # binaries are what dominate it.
@@ -677,7 +691,7 @@ def _one_member_archive(source: IO[bytes], name: str) -> IO[bytes]:
     return wrapper
 
 
-def _convert(wrapper: IO[bytes]) -> Conversion:
+def _convert(wrapper: IO[bytes], *, max_inflated_size: int) -> Conversion:
     """Convert a one-member archive, with this module's caps on it.
 
     `exported_at` is passed rather than defaulted because the library's default is *now, in
@@ -693,6 +707,7 @@ def _convert(wrapper: IO[bytes]) -> Conversion:
         exported_at=_conversion_moment(),
         max_members=1,
         max_member_size=MAX_DOCUMENT_SIZE,
+        max_inflated_size=max_inflated_size,
     )
 
 
@@ -714,8 +729,12 @@ def _renamed(conversion: Conversion, digest: str, name: str) -> Conversion:
     return Conversion(conversion.document, notes, sources)
 
 
-def _convert_file(source: Source, *, digest: str, name: str, claimed: str, size: int) -> LoadedImport:
+def _convert_file(
+    source: Source, *, digest: str, name: str, claimed: str, size: int, max_inflated_size: int
+) -> LoadedImport:
     """One file a reader claims, converted alone and read as one recording's file where it is one.
+
+    `max_inflated_size` is what the batch has left for the file's records to unpack to.
 
     Pure CPU and file reads, so the caller runs it in a thread. Every refusal below is the
     converter's, translated into this module's three so the route keeps one taxonomy; the
@@ -725,7 +744,7 @@ def _convert_file(source: Source, *, digest: str, name: str, claimed: str, size:
     """
     with source() as stream, _one_member_archive(stream, digest) as wrapper:
         try:
-            conversion = _convert(wrapper)
+            conversion = _convert(wrapper, max_inflated_size=max_inflated_size)
         except SourceTooLargeError as exc:
             # The converter's own sentence: it names which of its bounds fired - the FIT
             # reader refuses past a hundred thousand messages - and restating them here would
@@ -902,7 +921,8 @@ class BatchRow:
 
     `loaded` is set for a file that reads and `refusal` for one that does not. `container`
     is the row index of the zip a member came out of, and `opened` a zip's own count of the
-    files it opened into.
+    files it opened into. `inflates` is what a file's compressed records declare they unpack
+    to, and 0 for every format whose records are not compressed inside it.
     """
 
     part: int
@@ -913,6 +933,7 @@ class BatchRow:
     format: str | None = None
     container: int | None = None
     opened: int | None = None
+    inflates: int = 0
     loaded: LoadedImport | None = None
     refusal: Refusal | None = None
     _source: Source | None = None
@@ -932,6 +953,9 @@ class LoadedBatch:
     """
 
     rows: list[BatchRow] = field(default_factory=list)
+    # What `MAX_DOCUMENT_SIZE` leaves once the batch is planned, which every file's records
+    # may unpack into beyond what that file declared.
+    headroom: int = 0
     _containers: list[zipfile.ZipFile] = field(default_factory=list)
 
     def __enter__(self) -> LoadedBatch:
@@ -1073,23 +1097,59 @@ def _digest_member(row: BatchRow) -> None:
 
 def _planned_size(batch: LoadedBatch) -> int:
     """What the batch would parse into memory: every file a reader claims or that claims to
-    be a document, a zip's by its declared sizes, and the archive's own document."""
+    be a document, a zip's by its declared sizes, and the archive's own document.
+
+    A file whose records unpack counts at the larger of its bytes and what its records cost
+    converted, so a database stuffed with something other than dive logs still counts at
+    what it weighs.
+    """
     total = 0
     for row in batch.rows:
         if row.refusal is not None:
             continue
         if row.kind in (FileKind.DOCUMENT, FileKind.LOGBOOK, FileKind.COMPUTER):
-            total += row.size
+            total += max(row.size, INFLATED_SIZE_WEIGHT * row.inflates)
         elif row.kind is FileKind.ARCHIVE and row._archive is not None:
             total += row._archive.getinfo(DIVEJSON_NAME).file_size
     return total
+
+
+def _bound(batch: LoadedBatch) -> None:
+    """Refuse a batch past `MAX_DOCUMENT_SIZE`, or record what it leaves."""
+    planned = _planned_size(batch)
+    if planned > MAX_DOCUMENT_SIZE:
+        # Rounded *up*: floored, a batch one byte over the cap reports the cap back at
+        # itself and reads as a refusal for no reason.
+        raise ImportTooLargeError(
+            f"This import holds {-(-planned // (1024 * 1024))} MB of logbooks uncompressed, and at most "
+            f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB are read in one import. Split it and import the parts."
+        )
+    batch.headroom = MAX_DOCUMENT_SIZE - planned
+
+
+def _declare_inflation(row: BatchRow) -> None:
+    """What a file's compressed records declare they unpack to, read whole but unpacking nothing.
+
+    A file the count cannot read stays at its own size: its conversion refuses it with the
+    reader's own sentence, which is the one its row should carry.
+    """
+    declared = _DECLARED_INFLATION.get(row.format or "")
+    if declared is None or row.refusal is not None or row._source is None:
+        return
+    try:
+        with row._source() as stream:
+            row.inflates = declared(stream.read())
+    except Exception:
+        row.inflates = 0
 
 
 def _survey(parts: Sequence[ImportPart]) -> LoadedBatch:
     """Classify every part and every file a zip holds, bound the batch, and order it.
 
     Reads heads, directories and digests, and converts nothing: the planning bound is checked
-    before any file is read whole, so an import too large to plan costs no conversion.
+    on the files' sizes before any file is read whole, so an import too large to plan costs no
+    conversion, and again once each file whose records are compressed has said what they unpack
+    to.
     """
     batch = LoadedBatch()
     zips: list[tuple[zipfile.ZipFile, BatchRow, list[zipfile.ZipInfo]]] = []
@@ -1144,14 +1204,10 @@ def _survey(parts: Sequence[ImportPart]) -> LoadedBatch:
         for archive, row, infos in zips:
             batch.rows.extend(_open_zip(archive, row, infos))
 
-        planned = _planned_size(batch)
-        if planned > MAX_DOCUMENT_SIZE:
-            # Rounded *up*: floored, a batch one byte over the cap reports the cap back at
-            # itself and reads as a refusal for no reason.
-            raise ImportTooLargeError(
-                f"This import holds {-(-planned // (1024 * 1024))} MB of logbooks uncompressed, and at most "
-                f"{MAX_DOCUMENT_SIZE // (1024 * 1024)} MB are read in one import. Split it and import the parts."
-            )
+        _bound(batch)
+        for row in batch.rows:
+            _declare_inflation(row)
+        _bound(batch)
 
         for row in batch.rows:
             if row._info is not None:
@@ -1167,7 +1223,7 @@ def _survey(parts: Sequence[ImportPart]) -> LoadedBatch:
         raise
 
 
-async def _load(row: BatchRow, *, archive_read: bool) -> LoadedImport:
+async def _load(row: BatchRow, *, archive_read: bool, headroom: int) -> LoadedImport:
     """One classified file as a document: parsed, or converted, in a thread."""
     if row.kind is FileKind.ARCHIVE:
         if archive_read:
@@ -1182,7 +1238,13 @@ async def _load(row: BatchRow, *, archive_read: bool) -> LoadedImport:
         return await run_in_threadpool(_load_document, lambda: _read_all(source), digest=row.sha256)
     assert row.format is not None
     return await run_in_threadpool(
-        _convert_file, source, digest=row.sha256, name=row.name, claimed=row.format, size=row.size
+        _convert_file,
+        source,
+        digest=row.sha256,
+        name=row.name,
+        claimed=row.format,
+        size=row.size,
+        max_inflated_size=row.inflates + headroom // INFLATED_SIZE_WEIGHT,
     )
 
 
@@ -1204,7 +1266,7 @@ async def load_import(parts: Sequence[ImportPart]) -> LoadedBatch:
             if row.refusal is not None or row.kind in (FileKind.ZIP, FileKind.UNREAD):
                 continue
             try:
-                row.loaded = await _load(row, archive_read=archive_read)
+                row.loaded = await _load(row, archive_read=archive_read, headroom=batch.headroom)
             except (UnsupportedImportError, MalformedImportError, ImportTooLargeError) as exc:
                 row.refusal = exc
                 continue

@@ -20,6 +20,7 @@ check is dropped.
 import hashlib
 import io
 import json
+import sqlite3
 import threading
 import uuid as uuid_pkg
 import zipfile
@@ -511,7 +512,7 @@ class TestTheFormatsItAccepts:
         payload = _zip({"dive-1.uddf": _uddf("dive-1"), "dive-2.uddf": _uddf("dive-2")})
         converted: list[Any] = []
 
-        def record(wrapper: Any) -> Any:
+        def record(wrapper: Any, **kwargs: Any) -> Any:
             converted.append(wrapper)
             raise AssertionError("converted before the batch was bounded")
 
@@ -520,6 +521,105 @@ class TestTheFormatsItAccepts:
 
         assert client.post(PREVIEW_PATH, files=_files(payload, "watch-export.zip")).status_code == 413
         assert converted == []
+
+
+CLOUD_DATABASE = (Path(__file__).parent / "fixtures" / "dive_files" / "perdix3-dives-1-and-8.db").read_bytes()
+CLOUD_XML = (Path(__file__).parent / "fixtures" / "dive_files" / "perdix3-dive-8.xml").read_bytes()
+# What the fixture's two logs declare they unpack to, from their 4-byte length prefixes.
+CLOUD_DECLARED = 20480
+
+
+class TestADatabaseOfCompressedLogs:
+    """A Shearwater Cloud database's dive logs are gzip blobs, so the file's size says nothing
+    of what they cost converted: the batch counts what they declare, weighted, and each
+    conversion unpacks under what the batch has left."""
+
+    def test_both_shearwater_exports_preview(self, signed_in: Any, client: TestClient) -> None:
+        response = client.post(
+            PREVIEW_PATH,
+            files=[
+                ("file", ("Perdix 3.db", io.BytesIO(CLOUD_DATABASE), "application/octet-stream")),
+                ("file", ("Perdix 3.xml", io.BytesIO(CLOUD_XML), "application/xml")),
+            ],
+        )
+
+        assert response.status_code == 200
+        assert [(row["format"], row["not_kept"]) for row in response.json()["members"]] == [
+            ("shearwater_db", "several_dives"),
+            ("shearwater_xml", None),
+        ]
+
+    def test_the_package_counts_what_the_fixture_declares(self) -> None:
+        assert divejson.shearwater_db_declared_size(CLOUD_DATABASE) == CLOUD_DECLARED
+
+    def test_a_database_counts_at_its_weighted_logs_where_they_outweigh_its_bytes(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """Under the cap by its size, over it by its logs: refused before anything converts."""
+        monkeypatch.setattr(reader, "INFLATED_SIZE_WEIGHT", 10)
+        monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", len(CLOUD_DATABASE) + 1)
+        monkeypatch.setattr(reader, "_convert", lambda *args, **kwargs: pytest.fail("converted past the cap"))
+
+        response = client.post(PREVIEW_PATH, files=_files(CLOUD_DATABASE, "Perdix 3.db"))
+
+        assert response.status_code == 413
+        assert "are read in one import" in response.json()["detail"]
+
+    def test_a_database_counts_at_its_bytes_where_they_outweigh_its_logs(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """The fixture's pages outweigh what its two short logs cost converted, and its bytes are what it
+        costs to hold."""
+        assert reader.INFLATED_SIZE_WEIGHT * CLOUD_DECLARED < len(CLOUD_DATABASE)
+        monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", len(CLOUD_DATABASE) - 1)
+
+        assert client.post(PREVIEW_PATH, files=_files(CLOUD_DATABASE, "Perdix 3.db")).status_code == 413
+
+    def test_the_conversion_unpacks_what_the_file_declared_and_the_batch_s_remainder(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        convert, budgets = reader._convert, []
+
+        def recorded(wrapper: Any, **kwargs: Any) -> Any:
+            budgets.append(kwargs["max_inflated_size"])
+            return convert(wrapper, **kwargs)
+
+        monkeypatch.setattr(reader, "_convert", recorded)
+        files = [
+            ("file", ("Perdix 3.db", io.BytesIO(CLOUD_DATABASE), "application/octet-stream")),
+            ("file", ("dives.uddf", io.BytesIO(_uddf()), "application/xml")),
+        ]
+
+        assert client.post(PREVIEW_PATH, files=files).status_code == 200
+        remainder = (reader.MAX_DOCUMENT_SIZE - len(CLOUD_DATABASE) - len(_uddf())) // reader.INFLATED_SIZE_WEIGHT
+        assert budgets == [CLOUD_DECLARED + remainder, remainder]
+
+    def test_a_database_unpacking_past_what_the_batch_left_is_a_413(
+        self, signed_in: Any, client: TestClient, monkeypatch: Any
+    ) -> None:
+        """The budget is the package's to enforce: a count that came back short, and a batch with
+        little room left, and the reader refuses the logs before it inflates one."""
+        monkeypatch.setattr(reader, "_DECLARED_INFLATION", {"shearwater_db": lambda data: 0})
+        monkeypatch.setattr(reader, "MAX_DOCUMENT_SIZE", len(CLOUD_DATABASE) + 1024)
+
+        response = client.post(PREVIEW_PATH, files=_files(CLOUD_DATABASE, "Perdix 3.db"))
+
+        assert response.status_code == 413
+        assert "dive logs unpack to" in response.json()["detail"]
+
+    def test_another_programs_database_is_a_422_carrying_the_readers_sentence(
+        self, signed_in: Any, client: TestClient
+    ) -> None:
+        """The count cannot read it either, so it counts at its size and the conversion refuses it."""
+        connection = sqlite3.connect(":memory:")
+        connection.execute("CREATE TABLE Dive (id INTEGER PRIMARY KEY)")
+        database = connection.serialize()
+        connection.close()
+
+        response = client.post(PREVIEW_PATH, files=_files(database, "DM5.db"))
+
+        assert response.status_code == 422
+        assert "could not be read" in response.json()["detail"]
 
 
 class TestWhereTheConversionRuns:
@@ -542,9 +642,9 @@ class TestWhereTheConversionRuns:
             seen["loop"] = threading.current_thread().name
             return report(*args)
 
-        def record_convert(wrapper: Any) -> Any:
+        def record_convert(wrapper: Any, **kwargs: Any) -> Any:
             seen["convert"] = threading.current_thread().name
-            return convert(wrapper)
+            return convert(wrapper, **kwargs)
 
         monkeypatch.setattr(batch_module, "findings", record_report)
         monkeypatch.setattr(reader, "_convert", record_convert)
@@ -575,7 +675,7 @@ class TestWhenTheConversionFails:
         """`SourceTooLargeError` is not the container's alone: the FIT reader raises it for
         one file past a hundred thousand messages, and there is nothing to split there."""
 
-        def refuse(wrapper: Any) -> Any:
+        def refuse(wrapper: Any, **kwargs: Any) -> Any:
             raise divejson.SourceTooLargeError("this FIT file holds more than 100,000 messages")
 
         monkeypatch.setattr(reader, "_convert", refuse)
@@ -605,7 +705,7 @@ class TestWhenTheConversionFails:
         """A bug in the converter rather than anything wrong with the file, so the message
         says so and the traceback goes to the log where somebody can act on it."""
 
-        def refuse(wrapper: Any) -> Any:
+        def refuse(wrapper: Any, **kwargs: Any) -> Any:
             raise divejson.NonConformingOutputError(
                 [divejson.Issue("$", "something the writer should not have emitted")]
             )
@@ -622,7 +722,7 @@ class TestWhenTheConversionFails:
         """The second backstop: the library validated its output against the format and this
         app's own envelope still refused it. Also not a 500."""
 
-        def wrong_shape(wrapper: Any) -> Any:
+        def wrong_shape(wrapper: Any, **kwargs: Any) -> Any:
             return divejson.Conversion({"format": "uddf", "version": "3.2.2"}, (), {})
 
         monkeypatch.setattr(reader, "_convert", wrong_shape)
@@ -636,8 +736,8 @@ def _with_findings(monkeypatch: Any, *extra: divejson.Note) -> None:
     """Every conversion this test runs, carrying `extra` beside its own findings."""
     convert = reader._convert
 
-    def converted(wrapper: Any) -> Any:
-        conversion = convert(wrapper)
+    def converted(wrapper: Any, **kwargs: Any) -> Any:
+        conversion = convert(wrapper, **kwargs)
         return divejson.Conversion(conversion.document, (*conversion.notes, *extra), conversion.sources)
 
     monkeypatch.setattr(reader, "_convert", converted)

@@ -111,12 +111,13 @@ else; what is here is the source, and the notes for working on it.
   you already have, restored from your deleted records or skipped, file by file and dive by dive,
   and then an apply that writes the lot in one transaction. A DiveJSON document or a full-export
   archive goes in as it is; a UDDF file, a Subsurface `.ssrf`, a FIT file, a Suunto app export, a
-  Suunto DM5 XML export, or a `.zip` of any of those is converted on the way in by the
-  [`divejson`](https://pypi.org/project/divejson/) package, and each dive's row lists what its files
-  did not record, what the import worked out, and which of the dive's values it left out. A file
-  that is one dive is kept on the dive it becomes, and one recording exported twice - a Suunto's FIT
-  beside its JSON - is one recording with both files. Restore a backup, migrate between instances,
-  or bring a logbook across from whatever you were keeping it in.
+  Suunto DM5 XML export, a Shearwater Cloud database or XML export, or a `.zip` of any of those is
+  converted on the way in by the [`divejson`](https://pypi.org/project/divejson/) package, and each
+  dive's row lists what its files did not record, what the import worked out, and which of the
+  dive's values it left out. A file that is one dive is kept on the dive it becomes, and one
+  recording exported twice - a Suunto's FIT beside its JSON - is one recording with both files.
+  Restore a backup, migrate between instances, or bring a logbook across from whatever you were
+  keeping it in.
 - **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
   and passkeys, with automatic account linking, short-lived access tokens, and httpOnly refresh
   cookies. The sign-in email carries a magic link *and* a six-digit code, so reading your mail on a
@@ -128,11 +129,7 @@ else; what is here is the source, and the notes for working on it.
 ## Planned
 
 - **More formats in** — a reader is a contribution to the `divejson` package rather than a change
-  here, and this app reads whatever the release it pins registers. Shearwater Cloud's whole-database
-  export is the one still outstanding, and it is not an adapter's worth of work: the sample data
-  sits in the computer's own binary log rather than in readable rows, so getting at it takes a
-  reader for that log, in the package like every other. Shearwater Cloud's UDDF export of the same
-  dives already imports.
+  here, and this app reads whatever the release it pins registers.
 - **Public share links** — read-only dive/trip pages.
 - **Statistics endpoints** — records, per-year aggregates, site maps, a life list.
 

@@ -33,6 +33,7 @@ from typing import Any
 
 import divejson
 from divejson import ConverterError, NonConformingOutputError, SourceTooLargeError
+from divejson.shearwater_db import MAX_LOG_SIZE
 from pydantic import ValidationError
 
 from ..core.utils.datetime_offset import split_local_start_time
@@ -58,6 +59,8 @@ FORMAT_LABELS = {
     "fit": "FIT (.fit)",
     "suunto_json": "Suunto app JSON (.json)",
     "suunto_xml": "Suunto DM5 XML (.xml)",
+    "shearwater_db": "Shearwater Cloud database (.db)",
+    "shearwater_xml": "Shearwater Cloud XML (.xml)",
 }
 
 # What a stored file of each format is served back as. From here rather than from the
@@ -70,6 +73,8 @@ FORMAT_CONTENT_TYPES = {
     "fit": "application/vnd.ant.fit",
     "suunto_json": "application/json",
     "suunto_xml": "application/xml",
+    "shearwater_db": "application/vnd.sqlite3",
+    "shearwater_xml": "application/xml",
 }
 
 # What a stored file is served as when nothing here names its format: a restored archive
@@ -90,6 +95,8 @@ FORMAT_KINDS = {
     "fit": COMPUTER,
     "suunto_json": COMPUTER,
     "suunto_xml": COMPUTER,
+    "shearwater_db": LOGBOOK,
+    "shearwater_xml": COMPUTER,
 }
 
 
@@ -110,6 +117,13 @@ def attach_rank(fmt: str | None) -> int:
     """Where a file of `fmt` attaches among its kind's in one import."""
     return ATTACHES_FIRST.index(fmt) if fmt in ATTACHES_FIRST else len(ATTACHES_FIRST)
 
+
+# What one file read on its own - on the dive form, attached to a dive, or re-read from storage -
+# may unpack beyond the bytes it arrived as: a Shearwater Cloud database's compressed dive logs.
+# A few of the reader's per-log ceilings, so any one dive's log reads, and a whole account under
+# the form's upload cap - its logs inflate about three to one - still reads far enough to be
+# told how many dives it holds and pointed at import.
+ONE_FILE_INFLATED_SIZE = 4 * MAX_LOG_SIZE
 
 _HUNDREDTHS = Decimal("0.01")
 # Digits enough for any finite float at two places: the default context's 28 signal
@@ -222,11 +236,19 @@ def read_dive_file(content: bytes, *, format: str | None = None) -> ReadDive:
         format = str(claimed)
 
     try:
-        conversion = divejson.convert(content, format=format, exported_at=_conversion_moment())
+        conversion = divejson.convert(
+            content, format=format, exported_at=_conversion_moment(), max_inflated_size=ONE_FILE_INFLATED_SIZE
+        )
     except SourceTooLargeError as exc:
         # A 422 rather than the 413 the words suggest: the file is under the upload cap, and
         # past the reader's own bound on how much one file may ask of it - which no single
-        # dive's record reaches, and a watch's whole activity log does.
+        # dive's record reaches, and a watch's whole activity log or a whole account's
+        # database does.
+        if is_logbook_format(format):
+            raise DiveFileReadError(
+                f"This file holds more dives than the dive form reads - {exc}. Import it as a logbook to bring "
+                "them all in."
+            ) from exc
         raise DiveFileReadError(
             f"This file records an activity log rather than a dive - {exc}. Export the dive on its own."
         ) from exc
