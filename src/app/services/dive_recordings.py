@@ -43,7 +43,7 @@ from ..schemas.dive import (
 )
 from ..schemas.parsed_dive import ParsedDecoModel, ParsedDevice
 from . import blob_store
-from .dive_profiles import get_profile_infos_for_recordings
+from .dive_profiles import MERGE_PARSER_KEY, get_profile_infos_for_recordings
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +304,9 @@ class RecordingFacts:
 
     `start_time` is `None` only on a stored side: a recording whose source stated no start,
     which on a date-only dive is every recording that did not state its own.
+
+    `merged` is a stored side's too: its profile is the merge action's (`MERGE_PARSER_KEY`),
+    which `is_same_recording` holds to its span clause.
     """
 
     device: DeviceIdentity
@@ -312,6 +315,7 @@ class RecordingFacts:
     duration: int | None = None
     max_depth: float | None = None
     sampled_span: int | None = None
+    merged: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,11 +335,19 @@ def is_same_recording(incoming: RecordingFacts, stored: RecordingFacts) -> bool:
     """Whether these are two files of one record - the second-file case.
 
     The same device, starts within two seconds, device counters equal where both carry one,
-    and sampled spans within two seconds where both have samples. The corpus's JSON and FIT
-    of one Ocean dive pass on every clause (0.67 s apart, 3 473 s each); the two halves of
-    the interrupted Perdix dive fail on the start (223 s) and on their spans (180 s against
-    2 940), neither carrying a counter - Shearwater Cloud writes the diver's `<divenumber>`,
-    not the computer's `<internaldivenumber>`.
+    and sampled spans within two seconds where both have samples - **unless both carry one
+    serial**, which with the starts within two seconds settles the pair whatever the spans.
+    The corpus's JSON and FIT of one Ocean dive pass on every clause (0.67 s apart, 3 473 s
+    each, one serial between them); the two halves of the interrupted Perdix dive fail on the
+    start (223 s) before the span is reached, neither carrying a counter - Shearwater Cloud
+    writes the diver's `<divenumber>`, not the computer's `<internaldivenumber>`.
+
+    **A shared serial yields to the span on a recording the merge action produced**
+    (`stored.merged`). It spans both halves of an interrupted dive under the first half's
+    start, so a file of the first half alone shares its serial and start and would fill it
+    from half a dive. Only the profile's parser key marks one here; a merged recording whose
+    key a re-derivation replaced is recognised by its files' starts, which the database
+    cannot answer and `dive_files.is_same_stored_recording` reads (`holds_another_start`).
 
     **A stored recording that names no device at all is matched on start and span alone.**
     That is not a weakening: it is the row a logbook import created before this table
@@ -363,9 +375,44 @@ def is_same_recording(incoming: RecordingFacts, stored: RecordingFacts) -> bool:
         delta = start_delta(incoming, stored)
         if delta is None or delta > SAME_RECORDING_START_TOLERANCE:
             return False
-    if incoming.sampled_span is not None and stored.sampled_span is not None:
-        return abs(incoming.sampled_span - stored.sampled_span) <= SAME_RECORDING_SPAN_TOLERANCE
+    if spans_apart(incoming, stored):
+        return stored.start_time is not None and not stored.merged and shares_serial(incoming, stored)
     return True
+
+
+def spans_apart(incoming: RecordingFacts, stored: RecordingFacts) -> bool:
+    """Whether both sides have samples and their sampled spans differ by more than two seconds."""
+    return (
+        incoming.sampled_span is not None
+        and stored.sampled_span is not None
+        and abs(incoming.sampled_span - stored.sampled_span) > SAME_RECORDING_SPAN_TOLERANCE
+    )
+
+
+def shares_serial(incoming: RecordingFacts, stored: RecordingFacts) -> bool:
+    """Whether both sides carry a serial and the two are one, folded as every device string is.
+
+    What lets two exports of one dive that trimmed it differently be one recording: the
+    Perdix goes on logging at the surface, and its log runs to 4 010 s where Shearwater
+    Cloud's UDDF of the same dive stops at 3 730 s.
+    """
+    serial = _folded(incoming.device.serial)
+    return serial is not None and serial == _folded(stored.device.serial)
+
+
+def holds_another_start(stored: RecordingFacts, file_starts: Sequence[tuple[datetime, int | None]]) -> bool:
+    """Whether a recording's kept files state a start beyond the gate's tolerance of its own.
+
+    No recording this gate built can: it admits a file only within that tolerance of the
+    stored start. A merge's can, holding both halves' files under the first half's start -
+    which is how one is recognised once a re-derivation has replaced its `merge` profile.
+    """
+    if stored.start_time is None:
+        return False
+    return any(
+        delta_seconds(start, offset, stored.start_time, stored.utc_offset_minutes) > SAME_RECORDING_START_TOLERANCE
+        for start, offset in file_starts
+    )
 
 
 def is_same_dive_strict(incoming: RecordingFacts, stored: RecordingFacts) -> bool:
@@ -469,6 +516,7 @@ def _facts(row: object) -> RecordingFacts:
         duration=row.duration,  # type: ignore[attr-defined]
         max_depth=row.max_depth,  # type: ignore[attr-defined]
         sampled_span=row.sampled_span,  # type: ignore[attr-defined]
+        merged=row.parser_key == MERGE_PARSER_KEY,  # type: ignore[attr-defined]
     )
 
 
@@ -479,8 +527,9 @@ async def load_candidates(
 
     One indexed query on `(user_id, start_time)`, joined to `dive` for the two things a
     form needs to name a match and to `dive_profile` for the sampled span the
-    same-recording gate compares. Deleted dives are excluded: a match that attached a file
-    to a dive its owner cannot open would be indistinguishable from the file vanishing.
+    same-recording gate compares and the provenance that marks a merge's. Deleted dives are
+    excluded: a match that attached a file to a dive its owner cannot open would be
+    indistinguishable from the file vanishing.
 
     **The window is compared against the stored column, not against a wall clock.** It has
     to be, because it is an index scan and the wall clock is not a column - which is
@@ -502,6 +551,7 @@ async def load_candidates(
             DiveRecording.duration,
             DiveRecording.max_depth,
             DiveProfile.duration.label("sampled_span"),
+            DiveProfile.parser_key,
             Dive.uuid.label("dive_uuid"),
             Dive.dive_number,
         )
@@ -554,6 +604,7 @@ async def load_recordings_for_dive(db: AsyncSession, *, dive_id: int) -> list[Re
             DiveRecording.duration,
             DiveRecording.max_depth,
             DiveProfile.duration.label("sampled_span"),
+            DiveProfile.parser_key,
             Dive.uuid.label("dive_uuid"),
             Dive.dive_number,
         )

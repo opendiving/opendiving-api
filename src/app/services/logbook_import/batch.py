@@ -226,7 +226,9 @@ class _Dives:
         for match, files in zip(plan.recording_matches, written.match_files, strict=True):
             recordings = 1 if match.kind == "attach" else 0
             source = (member, match.source_uuid)
-            if files or recordings:
+            # A fill whose samples replaced the recording's stored ones changed the dive's curves
+            # even where it brought no file.
+            if files or recordings or match.replaces_profile:
                 self._touch(match.dive_id, source, ImportDiveOutcome.UPDATED, files=files, recordings=recordings)
             else:
                 codes = [ImportNoteCode.RECORDING_FILLED, ImportNoteCode.RECORDING_ATTACHED]
@@ -526,6 +528,7 @@ async def import_batch(
                 portrait=portrait,
                 claim_links=apply,
                 batch_dive_ids=frozenset(written_dives),
+                held=staged.held,
             )
             written = await write_import(db, user_id=user_id, loaded=row.loaded, plan=plan, staged=staged)
             written_dives.update(written.dive_ids.values())

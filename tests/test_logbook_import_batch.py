@@ -51,7 +51,7 @@ from src.app.schemas.logbook_import import (
 from src.app.services import blob_store
 from src.app.services.dive_files import FILLABLE_MIXTURE_FIELDS, delete_dive_file, store_recording_file
 from src.app.services.dive_numbering import suggest_dive_number
-from src.app.services.dive_profiles import backfill_profiles
+from src.app.services.dive_profiles import IMPORT_PARSER_KEY, backfill_profiles
 from src.app.services.dive_reader import read_prefill
 from src.app.services.dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS
 from src.app.services.logbook_import import BatchReport, import_batch, load_import
@@ -1020,6 +1020,109 @@ def _sighted(**dive: Any) -> dict[str, Any]:
 
 def _on_rows(report: BatchReport) -> list[list[str]]:
     return [[note.code for note in row.notes] for row in report.dives]
+
+
+class TestARicherReadingOfADive:
+    """A logbook whose recording is one the account already holds - one Perdix, one start - and
+    whose samples are richer replaces the stored ones, which changes the dive even though no
+    file and no recording arrives; a poorer one changes nothing."""
+
+    @staticmethod
+    def _logbook(span: int, *, tts: bool) -> bytes:
+        profile: dict[str, Any] = {
+            "duration": span,
+            "depth": {"times": [0, 1_000_000, 2_000_000, span], "values": [0, 1904, 1500, 0]},
+        }
+        if tts:
+            profile["tts"] = {"times": [1_000_000], "values": [360]}
+        recording = {
+            "device": {"brand": "Shearwater Research, Inc", "model": "Perdix 3", "serial": "D9772626"},
+            "started_at": "2026-09-21T10:48:00+03:00",
+            "profile": profile,
+        }
+        return _logbook_of({"started_at": "2026-09-21T10:48:00+03:00", "recordings": [recording]})
+
+    @pytest.mark.asyncio
+    async def test_the_richer_updates_the_dive_and_the_poorer_skips_it(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        [stored] = (await _import(async_db, diver, [("uddf.divejson", self._logbook(3_730_000, tts=False))])).dives
+
+        richer = await _import(async_db, diver, [("log.divejson", self._logbook(4_010_000, tts=True))])
+        poorer = await _import(async_db, diver, [("uddf.divejson", self._logbook(3_730_000, tts=False))])
+
+        assert [(row.outcome, row.uuid) for row in richer.dives] == [(ImportDiveOutcome.UPDATED, stored.uuid)]
+        assert [(row.outcome, row.uuid) for row in poorer.dives] == [(ImportDiveOutcome.SKIPPED, stored.uuid)]
+
+    @staticmethod
+    def _documented(serial: str, *, samples: int, tts: bool) -> bytes:
+        """A logbook's reading of the dive `_file` records: one Suunto, one start, a longer
+        span than the file's."""
+        times = [round(index * 2_000_000 / (samples - 1)) for index in range(samples)]
+        profile: dict[str, Any] = {"duration": 2_000_000, "depth": {"times": times, "values": [1200] * samples}}
+        if tts:
+            profile["tts"] = {"times": [times[1]], "values": [120]}
+        recording = {
+            "device": {"brand": "Suunto", "serial": serial},
+            "started_at": "2026-09-10T09:30:00+03:00",
+            "profile": profile,
+        }
+        return _logbook_of({"started_at": "2026-09-10T09:30:00+03:00", "recordings": [recording]})
+
+    @staticmethod
+    def _file(serial: str) -> bytes:
+        """The Suunto's own export: depth alone, four readings over 1 800 s."""
+        return suunto_json(
+            start="2026-09-10T09:30:00.000+03:00",
+            serial=serial,
+            samples=((0, 0.0), (300, 12.0), (1500, 9.0), (1800, 0.0)),
+        )
+
+    async def _profile_of(self, db: AsyncSession, dive_uuid: uuid_pkg.UUID | None) -> DiveProfile:
+        return (
+            await db.execute(
+                select(DiveProfile).join(Dive, Dive.id == DiveProfile.dive_id).where(Dive.uuid == dive_uuid)
+            )
+        ).scalar_one()
+
+    @pytest.mark.asyncio
+    async def test_a_file_joining_a_richer_documents_recording_leaves_its_profile(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver, serial = create_user(db), str(uuid_pkg.uuid4().int)[:12]
+        [stored] = (
+            await _import(async_db, diver, [("log.divejson", self._documented(serial, samples=4, tts=True))])
+        ).dives
+
+        report = await _import(async_db, diver, [("dive.json", self._file(serial))])
+
+        [row] = report.dives
+        assert (row.outcome, row.uuid, row.files_added) == (ImportDiveOutcome.UPDATED, stored.uuid, 1)
+        [note] = [note for note in row.notes if note.code == ImportNoteCode.RECORDING_FILLED]
+        assert "kept everything it already recorded" in note.message
+        profile = await self._profile_of(async_db, stored.uuid)
+        assert (profile.parser_key, profile.max_tts_s) == (IMPORT_PARSER_KEY, 120)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("samples", [2, 4])
+    async def test_a_file_as_rich_joining_a_documents_recording_replaces_its_profile(
+        self, volume: Any, async_db: AsyncSession, db: Session, samples: int
+    ) -> None:
+        """Richer, or tied - the same depth channel over as many readings, which goes to the
+        file a backfill can derive again."""
+        diver, serial = create_user(db), str(uuid_pkg.uuid4().int)[:12]
+        [stored] = (
+            await _import(async_db, diver, [("log.divejson", self._documented(serial, samples=samples, tts=False))])
+        ).dives
+
+        report = await _import(async_db, diver, [("dive.json", self._file(serial))])
+
+        [row] = report.dives
+        [note] = [note for note in row.notes if note.code == ImportNoteCode.RECORDING_FILLED]
+        assert "replaced" in note.message
+        profile = await self._profile_of(async_db, stored.uuid)
+        assert (profile.parser_key, profile.depth_sample_count) == ("suunto_json", 4)
 
 
 class TestTheNotesOfADive:

@@ -60,7 +60,6 @@ from ..schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
 from . import blob_store, dive_recordings
 from .dive_profiles import (
-    MERGE_PARSER_KEY,
     READER_VERSION,
     ExistingProfileRow,
     NormalizedProfile,
@@ -72,6 +71,7 @@ from .dive_profiles import (
     load_stored_profile,
     recording_source_digest,
     replace_profile_samples,
+    replaces_stored_profile,
     shift_profile,
     should_extract,
     store_profile,
@@ -1098,14 +1098,7 @@ async def store_recording_file(
 
     recordings = await dive_recordings.load_recordings_for_dive(db, dive_id=dive_id)
     incoming = _incoming_facts(extraction)
-    matched = next(
-        (
-            candidate
-            for candidate in recordings
-            if incoming is not None and dive_recordings.is_same_recording(incoming, candidate.facts)
-        ),
-        None,
-    )
+    matched = None if incoming is None else await first_same_recording(db, incoming, recordings)
 
     # The matched recording's existing files, and what the whole set says once these bytes
     # join it - **both read before the transaction opens**, so the write below is writes
@@ -1232,6 +1225,55 @@ async def store_recording_file(
         ) from exc
 
     return StoredRecordingFile(recording_id=recording_id, file_uuid=file_uuid)
+
+
+async def is_same_stored_recording(
+    db: AsyncSession,
+    incoming: dive_recordings.RecordingFacts,
+    candidate: dive_recordings.RecordingCandidate,
+    *,
+    held: Mapping[str, Callable[[], bytes]] | None = None,
+) -> bool:
+    """`is_same_recording`, with the one question the candidate query cannot answer.
+
+    A pair the gate admits on a shared serial alone - spans apart - is refused when the
+    candidate is a merge's, and a merge whose `merge` profile a re-derivation replaced is
+    known only by its kept files' starts (`holds_another_start`). So those, and only those,
+    are read here, off the event loop; every other pair is decided off the candidate's row.
+    `held` is logbook import's, whose own files are not in the store until it has finished.
+
+    A recording whose files cannot be read is held to the span clause: a second dive the
+    merge action can fold is the recoverable mistake, half a dive filled into a merge is not.
+    """
+    if not dive_recordings.is_same_recording(incoming, candidate.facts):
+        return False
+    if not dive_recordings.spans_apart(incoming, candidate.facts):
+        return True
+    try:
+        files = await load_recording_files(db, recording_id=candidate.id, held=held)
+    except blob_store.BlobMissingError:
+        logger.warning("Recording %s has a missing file; matching it on its span alone", candidate.id)
+        return False
+    starts = [
+        start
+        for file in files
+        if (start := (await run_in_threadpool(extract_file, file.data, file.parser_key)).start) is not None
+    ]
+    return not dive_recordings.holds_another_start(candidate.facts, starts)
+
+
+async def first_same_recording(
+    db: AsyncSession,
+    incoming: dive_recordings.RecordingFacts,
+    candidates: Sequence[dive_recordings.RecordingCandidate],
+    *,
+    held: Mapping[str, Callable[[], bytes]] | None = None,
+) -> dive_recordings.RecordingCandidate | None:
+    """The first candidate `is_same_stored_recording` admits, in the order given."""
+    for candidate in candidates:
+        if await is_same_stored_recording(db, incoming, candidate, held=held):
+            return candidate
+    return None
 
 
 def _admit(*, user_uuid: uuid_pkg.UUID, digest: str, file_token: str) -> str:
@@ -1370,9 +1412,10 @@ async def rederive_recording(
     off the very file they were editing away from, on the next repeat upload or backfill.
     Required rather than defaulted, so a caller added later has to say which it is.
 
-    **A profile no file can re-yield stays** (`_keeps_stored_profile`), and with it the
-    labels and the gate figures it was stored with: the dive's cylinders still fill at an
-    arrival, but are never renumbered onto the files' labels, and the readouts only fill.
+    **A profile no file can re-yield stays** unless the files yield a profile as rich
+    (`_keeps_stored_profile`), and with it the labels and the gate figures it was stored with:
+    the dive's cylinders still fill at an arrival, but are never renumbered onto the files'
+    labels, and the readouts only fill.
     """
     arrival = change is RecordingChange.JOINED or (change is RecordingChange.CREATED and ordinal != 0)
     existing = await get_existing_profile(db, recording_id=recording_id)
@@ -1434,14 +1477,13 @@ def _keeps_stored_profile(existing: ExistingProfileRow | None, extraction: Recor
 
     **A merge's, always.** Its samples join two records, and its files are the halves: what
     they yield after a deletion, or beside a header-only file, is part of what it describes.
-    **A document's, unless the files yield samples.** A file joining a file-less imported
-    recording is a whole second reading of it (`is_same_recording`), and its samples replace
-    the document's - `_fill_recording` in the import writer relies on that - but no samples
-    at all would delete them.
+    **A document's, when it is richer than what the files yield.** A file joining a file-less
+    imported recording is a whole second reading of it (`is_same_recording`), and its samples
+    replace the document's when they are richer or as rich - `replaces_stored_profile`'s
+    comparison, a tie going to the files - but a poorer reading, or no samples at all, leaves
+    the document's in place.
     """
-    if existing is None or existing.is_reproducible:
-        return False
-    return existing.parser_key == MERGE_PARSER_KEY or extraction.profile is None
+    return existing is not None and not replaces_stored_profile(existing, extraction.profile, from_files=True)
 
 
 def renumber_onto_labels(

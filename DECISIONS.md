@@ -6263,12 +6263,36 @@ and `max_depth`; device columns stay NULL until `backfill_tech_fields` re-parses
 neither, within one account from one indexed read on `(user_id, start_time)`. `same_device` and
 `devices_differ` share one rule — an absent member never makes two devices differ — so a pair may be
 neither; the model branch applies only with at most one serial in play. Gates: same recording — same
-device, starts and sampled spans within 2 s, a stored NULL start skipping its clause; same dive
-strict — Subsurface's `likely_same` on a different device, where one-sided figures block; same dive
-loose — the start window alone. Δ is between instants when both sides carry an offset, else between
-wall clocks; rejected: borrowing the account's or dive's offset, which DiveJSON §5.2 forbids. The
-26-hour candidate window is wider than any gate; attach applies same-recording within the target
-dive; import applies same-recording then strict, never loose.
+device, starts within 2 s and, unless both carry one serial, sampled spans too, a stored NULL start
+skipping its clause; same dive strict — Subsurface's `likely_same` on a different device, where
+one-sided figures block; same dive loose — the start window alone. Δ is between instants when both
+sides carry an offset, else between wall clocks; rejected: borrowing the account's or dive's offset,
+which DiveJSON §5.2 forbids. Attach applies same-recording within the target dive; import applies
+same-recording then strict, never loose.
+
+## A shared serial settles two files of one dive, except on a merge's recording
+
+Two exports of one dive can trim it differently: a Perdix logs on at the surface, so its own log
+runs to 4 010 s where Shearwater Cloud's UDDF stops at 3 730 s. Where both carry a serial and the
+serials match, with starts within 2 s, `is_same_recording` waives the span clause. Not on a
+recording `POST /dives/merge` produced: it spans both halves of an interrupted dive under the first
+half's start, and a file of that half alone would fill it. A merge is known by its `merge` profile
+or, where a re-derivation replaced that, by a kept file starting outside the tolerance
+(`holds_another_start`), the files being read only for a pair resting on the serial. Neither half
+then matches, and the merge action folds them again. Rejected: matching a file whose start falls
+inside a merged span.
+
+## Of two profiles of one recording, the richer is kept
+
+When a file joins a file-less imported recording, or a logbook import fills one that has samples,
+`replaces_stored_profile` keeps the richer: every channel the other has and one more, or the same
+channels over more depth samples. In either order, since an account meets both: a whole-database
+export imported before or after the same dive's UDDF. A tie between a document's profile and a
+file's goes to the file's, which a backfill can re-derive; any other tie keeps what is stored. A
+merge's profile is always kept, and one read from the recording's files is replaced by any
+re-derivation of them. An import that replaces a profile rewrites the gate figures and reports the
+dive updated. Rejected: a file always replacing a document, which lets a UDDF erase a log's
+channels; merging samples across two readings of one sensor.
 
 ## A second file of one recording fills, and never overwrites
 

@@ -117,6 +117,7 @@ from ..dive_recordings import (
     fill_start,
     next_ordinal,
     recording_start,
+    store_gate_figures,
 )
 from ..dive_stats import recalculate_dive_stats
 from ..gear_service import recalculate_service_schedule, reconstruct_dive_time_snapshots
@@ -828,9 +829,11 @@ class _Writer:
         dive's own blanks fill too: its positions from the primary recording alone and only
         while it holds no file read for them (`fill_tech_scalars`), and the blank members of its
         cylinders from the rows the labelling pairs - through the primary
-        alone where the fill brings no file. Nothing is ever overwritten, which is the whole
-        rule: the diver may have corrected any of it, and a fill that won an argument with an
-        edit would be the silent loss this repository already refuses on the backfill path. A
+        alone where the fill brings no file. Nothing the diver can edit is ever overwritten,
+        which is the whole rule: the diver may have corrected any of it, and a fill that won an
+        argument with an edit would be the silent loss this repository already refuses on the
+        backfill path. Samples are not such a value, and richer ones replace the recording's
+        profile and the gate figures read off it (`PlannedRecordingMatch.replaces_profile`). A
         fill that brings the imported file itself is the one exception, and it is the form's:
         the recording is derived from its files, a second file of one recording filling and
         never overwriting, and the dive's cylinders filling on any ordinal.
@@ -948,10 +951,10 @@ class _Writer:
         # and claimed their digests, so dropping them here reported bytes as stored that were
         # never written.
         #
-        # The stored profile is left alone. Its `source_sha256` no longer names what the
-        # recording holds, which makes it a `backfill_profiles` candidate - and re-deriving
-        # from the newly arrived bytes is that script's job, an archive's files being written
-        # as the archive describes them.
+        # The stored profile is not re-derived from them. Its `source_sha256` no longer names
+        # what the recording holds, which makes it a `backfill_profiles` candidate - and
+        # re-deriving from the newly arrived bytes is that script's job, an archive's files
+        # being written as the archive describes them.
         digests, _ = await self._write_recording_files(
             match.source_uuid,
             recording_id=match.recording_id,
@@ -960,8 +963,8 @@ class _Writer:
         )
         # **The imported file itself joins the recording as a second file joins it on the
         # dive form**, and everything read off the recording is then derived from its files -
-        # the profile of a file-less recording replaced by the file's, as the form's attach
-        # replaces it.
+        # the profile of a file-less recording replaced by the file's where it is as rich, as the
+        # form's attach replaces it.
         if planned.kept is not None and await self._keep(
             planned.kept,
             record_uuid=match.source_uuid,
@@ -976,16 +979,19 @@ class _Writer:
         # The recording's own readouts, on every recording and above the primary-only line
         # below: they are this device's figures, whichever position it holds on the dive.
         await fill_readouts(self._db, recording_id=match.recording_id, readouts=planned.readouts)
-        await fill_gate_figures(
+        # The gate figures are the samples', so samples replacing the stored ones rewrite them;
+        # otherwise they fill as every other column of the recording does.
+        write_figures = store_gate_figures if match.replaces_profile else fill_gate_figures
+        await write_figures(
             self._db, recording_id=match.recording_id, duration=planned.duration, max_depth=planned.max_depth
         )
-        if (
-            planned.profile is not None
-            and await get_existing_profile(self._db, recording_id=match.recording_id) is None
+        if planned.profile is not None and (
+            match.replaces_profile or await get_existing_profile(self._db, recording_id=match.recording_id) is None
         ):
             # Samples for a record that had none - a device-only recording an older document
-            # created, meeting the document that carries its curves. A recording that already
-            # has samples keeps them: two readings of one sensor are not merged.
+            # created, meeting the document that carries its curves - or richer than the ones
+            # it has, which the planner decided (`replaces_stored_profile`). Two readings of
+            # one sensor are never merged: one of them is kept whole.
             await store_profile(
                 self._db,
                 recording_id=match.recording_id,

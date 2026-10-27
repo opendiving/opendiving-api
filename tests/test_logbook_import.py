@@ -86,7 +86,13 @@ from src.app.schemas.logbook_import import (
 from src.app.schemas.user_picture import PictureCrop, PictureKind
 from src.app.services import blob_store, certification_files, dive_reader
 from src.app.services.dive_files import store_recording_file
-from src.app.services.dive_profiles import MAX_LABEL_CHARS, READER_VERSION, backfill_profiles
+from src.app.services.dive_profiles import (
+    IMPORT_PARSER_KEY,
+    MAX_LABEL_CHARS,
+    MERGE_PARSER_KEY,
+    READER_VERSION,
+    backfill_profiles,
+)
 from src.app.services.export import load_export_bundle, write_divejson, write_uddf
 from src.app.services.export.archive import DIVEJSON_NAME, write_archive
 from src.app.services.export.paths import plan_archive_paths
@@ -5997,3 +6003,120 @@ class TestTheImportGates:
 
         assert _counts(plan)["dives"] == (1, 0, 0, 0)
         assert not {ImportNoteCode.RECORDING_ATTACHED, ImportNoteCode.RECORDING_FILLED} & _codes(plan)
+
+    PERDIX = {"device_brand": "Shearwater Research, Inc", "device_model": "Perdix 3", "device_serial": "D9772626"}
+
+    def _seed_profile(self, db: Session, dive: Dive, *, parser_key: str, span: int, tts: bool) -> None:
+        """The seeded recording's samples: depth to `span` milliseconds over three readings, and
+        a time-to-surface reading where `tts` - as a stored row, summary columns and all."""
+        recording = db.query(DiveRecording).filter(DiveRecording.dive_id == dive.id).one()
+        data: dict[str, Any] = {"depth": {"t": [0, span // 2, span], "v": [0, 1904, 0]}}
+        if tts:
+            data["tts"] = {"t": [span // 2], "v": [360]}
+        db.add(
+            DiveProfile(
+                recording_id=recording.id,
+                dive_id=dive.id,
+                source_sha256="c" * 64,
+                parser_key=parser_key,
+                extractor_version=3,
+                duration=span,
+                depth_sample_count=3,
+                max_depth_cm=1904,
+                max_tts_s=360 if tts else None,
+                data=data,
+            )
+        )
+        db.commit()
+
+    def _log(self, *, serial: str | None = "D9772626") -> bytes:
+        """The Perdix's own log of the seeded dive: one start, a longer span - the device logs on
+        at the surface - four depth readings and a time to surface."""
+        device = {"brand": "Shearwater Research, Inc", "model": "Perdix 3"} | ({"serial": serial} if serial else {})
+        return self._document(
+            {
+                "device": device,
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {
+                    "duration": 4_010_000,
+                    "depth": {"times": [0, 1_000_000, 2_000_000, 4_010_000], "values": [0, 1904, 1500, 0]},
+                    "tts": {"times": [1_000_000], "values": [360]},
+                },
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_shared_serial_fills_a_recording_another_export_trimmed(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The UDDF stops at 3 730 s and the log runs to 4 010 s, far past the span clause - and
+        one serial and one start make them one recording. The log is richer, so its samples
+        replace the UDDF's and the recording's figures follow them."""
+        user, dive = self._seed(db, **self.PERDIX)
+        self._seed_profile(db, dive, parser_key="uddf", span=3_730_000, tts=False)
+
+        plan = await _apply(async_db, user.id, self._log())
+
+        assert _counts(plan)["dives"] == (0, 0, 0, 1)
+        [match] = plan.recording_matches
+        assert (match.kind, match.replaces_profile) == ("fill", True)
+        [filled] = [note for note in plan.notes if note.code is ImportNoteCode.RECORDING_FILLED]
+        assert "replaced" in filled.message
+        recording = (await async_db.execute(select(DiveRecording).where(DiveRecording.dive_id == dive.id))).scalar_one()
+        profile = (
+            await async_db.execute(select(DiveProfile).where(DiveProfile.recording_id == recording.id))
+        ).scalar_one()
+        assert (profile.parser_key, profile.depth_sample_count, profile.max_tts_s) == (IMPORT_PARSER_KEY, 4, 360)
+        assert recording.duration == 4010
+
+    @pytest.mark.asyncio
+    async def test_a_poorer_export_arriving_second_keeps_the_stored_profile(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The other direction: the log stored first, the UDDF's poorer reading of the same dive
+        fills the recording's blanks and takes nothing away."""
+        user, dive = self._seed(db, **self.PERDIX)
+        self._seed_profile(db, dive, parser_key=IMPORT_PARSER_KEY, span=4_010_000, tts=True)
+        uddf = self._document(
+            {
+                "device": {"brand": "Shearwater Research, Inc", "model": "Perdix 3", "serial": "D9772626"},
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {
+                    "duration": 3_730_000,
+                    "depth": {"times": [0, 1_000_000, 2_000_000, 3_730_000], "values": [0, 1904, 1500, 0]},
+                },
+            }
+        )
+
+        plan = await _apply(async_db, user.id, uddf)
+
+        [match] = plan.recording_matches
+        assert (match.kind, match.replaces_profile) == ("fill", False)
+        [filled] = [note for note in plan.notes if note.code is ImportNoteCode.RECORDING_FILLED]
+        assert "kept everything it already recorded" in filled.message
+        profile = (await async_db.execute(select(DiveProfile).where(DiveProfile.dive_id == dive.id))).scalar_one()
+        assert (profile.duration, profile.max_tts_s, profile.source_sha256) == (4_010_000, 360, "c" * 64)
+
+    @pytest.mark.asyncio
+    async def test_a_serial_missing_on_one_side_leaves_the_span_deciding(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        user, dive = self._seed(db, **self.PERDIX)
+        self._seed_profile(db, dive, parser_key="uddf", span=3_730_000, tts=False)
+
+        plan = await _apply(async_db, user.id, self._log(serial=None))
+
+        assert ImportNoteCode.RECORDING_FILLED not in _codes(plan)
+
+    @pytest.mark.asyncio
+    async def test_a_merged_recording_is_held_to_the_span(self, db: Session, async_db: AsyncSession) -> None:
+        """A merge spans two halves of an interrupted dive under the first half's start, so a
+        serial and a start it shares with one half do not make that half its second file."""
+        user, dive = self._seed(db, **self.PERDIX)
+        self._seed_profile(db, dive, parser_key=MERGE_PARSER_KEY, span=3_730_000, tts=False)
+
+        plan = await _apply(async_db, user.id, self._log())
+
+        assert ImportNoteCode.RECORDING_FILLED not in _codes(plan)
+        profile = (await async_db.execute(select(DiveProfile).where(DiveProfile.dive_id == dive.id))).scalar_one()
+        assert profile.parser_key == MERGE_PARSER_KEY

@@ -25,6 +25,7 @@ from src.app.services.dive_recordings import (
     delta_seconds,
     device_of,
     devices_differ,
+    holds_another_start,
     is_same_dive_loose,
     is_same_dive_strict,
     is_same_recording,
@@ -214,6 +215,73 @@ class TestSameRecording:
     def test_spans_two_seconds_apart_are_the_edge(self) -> None:
         assert is_same_recording(replace(_suunto_fit(), sampled_span=3_475_000), _suunto_json())
         assert not is_same_recording(replace(_suunto_fit(), sampled_span=3_475_001), _suunto_json())
+
+
+class TestASharedSerial:
+    """Two exports of one dive that trimmed it differently: the Perdix logs on at the surface,
+    and Shearwater Cloud's UDDF stops two samples past the dive time where the device's own log
+    does not. One serial on both sides and one start settle the pair whatever the spans."""
+
+    # The owner's dive 1 as the UDDF export carries it and as the log does.
+    UDDF = RecordingFacts(device=PERDIX_DEVICE, start_time=PERDIX_ONE_WALL, sampled_span=180_000)
+    LOG = RecordingFacts(device=PERDIX_DEVICE, start_time=PERDIX_ONE_WALL, sampled_span=220_000)
+
+    def test_the_uddf_and_the_log_of_one_dive_are_one_recording(self) -> None:
+        assert is_same_recording(self.LOG, self.UDDF)
+        assert is_same_recording(self.UDDF, self.LOG)
+
+    def test_the_serial_is_compared_folded(self) -> None:
+        stored = replace(self.UDDF, device=replace(PERDIX_DEVICE, serial=" d9772626 "))
+
+        assert is_same_recording(self.LOG, stored)
+
+    @pytest.mark.parametrize("side", ["incoming", "stored"])
+    def test_a_serial_missing_on_either_side_leaves_the_span_deciding(self, side: str) -> None:
+        unnamed = DeviceIdentity(brand="Shearwater Research, Inc", model="Perdix 3")
+        incoming = replace(self.LOG, device=unnamed) if side == "incoming" else self.LOG
+        stored = replace(self.UDDF, device=unnamed) if side == "stored" else self.UDDF
+
+        assert not is_same_recording(incoming, stored)
+
+    def test_the_start_still_decides(self) -> None:
+        """The interrupted dive's second half shares the first half's serial and is 223 s off."""
+        assert not is_same_recording(replace(self.LOG, start_time=PERDIX_TWO_WALL), self.UDDF)
+
+    def test_a_stored_recording_with_no_start_is_not_settled_by_a_serial(self) -> None:
+        """Its start clause was skipped, not met, so the starts were never within tolerance."""
+        assert not is_same_recording(self.LOG, replace(self.UDDF, start_time=None))
+
+    def test_a_merges_recording_keeps_the_span_clause(self) -> None:
+        """One half of an interrupted dive shares the merged recording's serial and start, and
+        filling it would describe the whole dive with half of it."""
+        merged = replace(self.UDDF, sampled_span=3_343_000, merged=True)
+
+        assert not is_same_recording(self.LOG, merged)
+        # Spans that agree still match it, as they did before a serial could settle anything.
+        assert is_same_recording(replace(self.LOG, sampled_span=3_343_000), merged)
+
+
+class TestAMergeKnownByItsFiles:
+    """A merged recording whose `merge` profile a re-derivation replaced still holds both
+    halves' files under the first half's start - which no recording the gate built can."""
+
+    STORED = RecordingFacts(device=PERDIX_DEVICE, start_time=PERDIX_ONE_WALL)
+
+    def test_a_file_from_the_second_half_marks_it(self) -> None:
+        assert holds_another_start(self.STORED, [(PERDIX_ONE_WALL, None), (PERDIX_TWO_WALL, None)])
+
+    def test_files_within_the_tolerance_do_not(self) -> None:
+        assert not holds_another_start(
+            self.STORED, [(PERDIX_ONE_WALL, None), (PERDIX_ONE_WALL + timedelta(seconds=2), None)]
+        )
+
+    def test_the_clocks_rule_applies(self) -> None:
+        """A file stating an offset against an offset-less recording is compared on the clock
+        face, so the same start in two spellings is one start."""
+        assert not holds_another_start(self.STORED, [(PERDIX_ONE_WALL - timedelta(hours=3), 180)])
+
+    def test_a_recording_with_no_start_holds_none(self) -> None:
+        assert not holds_another_start(replace(self.STORED, start_time=None), [(PERDIX_TWO_WALL, None)])
 
 
 class TestAStoredRecordingWithNoStart:

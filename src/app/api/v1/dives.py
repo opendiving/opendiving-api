@@ -124,6 +124,7 @@ from ...services.dive_files import (
     derive_dive_fixes,
     ensure_room_to_attach,
     get_dive_file_sha256,
+    is_same_stored_recording,
     load_dive_file,
     recording_holds_files,
     resolve_dive_file,
@@ -151,7 +152,6 @@ from ...services.dive_recordings import (
     device_of,
     get_recordings_for_dives,
     is_same_dive_loose,
-    is_same_recording,
     load_candidates,
     make_primary,
     resolve_recording,
@@ -622,7 +622,7 @@ async def _parse_matches(
             ),
             recording_uuid=candidate.uuid,
             device=_match_device(candidate.facts.device),
-            same_recording=is_same_recording(incoming, candidate.facts),
+            same_recording=await is_same_stored_recording(db, incoming, candidate),
         )
         for _, candidate in nearest
     ]
