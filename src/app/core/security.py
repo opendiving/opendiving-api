@@ -91,6 +91,33 @@ def hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode()).hexdigest()
 
 
+# -------------- API keys --------------
+# What every API key begins with, and so what `get_current_user` branches on before any JWT
+# is decoded. Distinct and greppable on purpose: a leaked key can be found by searching for
+# it, and a secret scanner can be given a pattern for it.
+API_KEY_PREFIX = "odk_"
+# How much of a key is kept in clear: the prefix and eight random characters, enough to tell
+# a diver's handful of keys apart and nowhere near enough to guess the rest.
+API_KEY_SHOWN_LENGTH = 12
+
+
+def generate_api_key() -> tuple[str, str]:
+    """A new API key and the SHA-256 it is stored as, together, so no caller hashes by hand.
+
+    The random part is `generate_secure_token`'s - 256 bits - which is what makes the fast
+    hash `hash_token` explains the right one here too. The secret is returned to the caller
+    to show once and is never stored.
+    """
+    secret = API_KEY_PREFIX + generate_secure_token()
+    return secret, hash_token(secret)
+
+
+def is_api_key(token: str) -> bool:
+    """Whether a bearer string is an API key rather than an access token. A JWT's first
+    character is `e` (its header is base64url JSON), so the two can never be confused."""
+    return token.startswith(API_KEY_PREFIX)
+
+
 def generate_sign_in_code() -> str:
     """Generates the six-digit code printed beside the magic link in the same email
     (`POST /auth/email/request`, redeemed by `POST /auth/email/verify-code`).

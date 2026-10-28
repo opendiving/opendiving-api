@@ -24,7 +24,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import current_session_uuid, fetch_owned_or_raise, get_current_user
+from ...api.dependencies import current_session_uuid, fetch_owned_or_raise, get_current_user, refuse_api_keys
 from ...core.db.database import async_get_db
 from ...core.utils.request_context import RequestContext
 from ...crud.crud_auth_audit_events import record_auth_event
@@ -56,7 +56,7 @@ _NOT_FOUND = "Session not found"
 _LIST_LIMIT = MAX_LIVE_SESSIONS_PER_USER * 2
 
 
-@router.get("/user/sessions", response_model=list[UserSessionRead])
+@router.get("/user/sessions", response_model=list[UserSessionRead], dependencies=[Depends(refuse_api_keys)])
 async def read_sessions(
     current_user: Annotated[dict, Depends(get_current_user)],
     session_uuid: Annotated[uuid_pkg.UUID | None, Depends(current_session_uuid)],
@@ -79,7 +79,7 @@ async def read_sessions(
     return [to_public_session(row, current_session_uuid=session_uuid) for row in rows]
 
 
-@router.delete("/user/session/{uuid}", response_model=SessionRevokedResponse)
+@router.delete("/user/session/{uuid}", response_model=SessionRevokedResponse, dependencies=[Depends(refuse_api_keys)])
 async def erase_session(
     request: Request,
     uuid: uuid_pkg.UUID,
@@ -135,7 +135,7 @@ async def erase_session(
     return SessionRevokedResponse(message="Session revoked")
 
 
-@router.delete("/user/sessions", response_model=SessionsRevokedResponse)
+@router.delete("/user/sessions", response_model=SessionsRevokedResponse, dependencies=[Depends(refuse_api_keys)])
 async def erase_other_sessions(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],

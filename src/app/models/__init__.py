@@ -1,3 +1,4 @@
+from .api_key import ApiKey
 from .auth_audit_event import AuthAuditEvent
 from .authentication_provider import AuthenticationProvider
 from .authentication_request import AuthenticationRequest

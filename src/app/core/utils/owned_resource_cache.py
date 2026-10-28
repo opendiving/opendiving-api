@@ -63,6 +63,8 @@ class OwnedResourceCache[InternalT, PublicT]:
       handful of rows registration lets an account accumulate, and nothing anywhere embeds a
       credential - so there is no page to cache and no invalidation obligation to get wrong.
       Caching it would be inventing a thing that can go stale.
+    - `api_keys.py` - uncached for `passkeys.py`'s reason exactly: `GET /user/api-keys` is
+      unpaginated, capped by `API_KEY_MAX_PER_USER`, and embedded by nothing.
     - `dive_form_presets.py` - uncached, and the plainest case of it: the read *would* fit
       this factory exactly, and there is simply nothing to cache for. Nothing embeds a
       preset - no dive, no user payload, no list anywhere carries one - so there is no

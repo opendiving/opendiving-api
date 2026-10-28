@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from .admin import router as admin_router
+from .api_keys import router as api_keys_router
 from .auth import router as auth_router
 from .certifications import router as certifications_router
 from .checkin_details import router as checkin_details_router
@@ -40,6 +41,7 @@ router.include_router(auth_router)
 router.include_router(users_router)
 router.include_router(passkeys_router)
 router.include_router(sessions_router)
+router.include_router(api_keys_router)
 router.include_router(invitations_router)
 router.include_router(admin_router)
 router.include_router(trips_router)

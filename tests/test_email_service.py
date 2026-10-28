@@ -4,7 +4,7 @@ import logging
 import smtplib
 import ssl
 import threading
-from datetime import date
+from datetime import UTC, date, datetime
 from email.message import EmailMessage
 from unittest.mock import MagicMock, patch
 from uuid import UUID
@@ -13,11 +13,14 @@ import pytest
 from pydantic import SecretStr
 
 from src.app.core.config import EnvironmentOption, SMTPTLSMode
+from src.app.core.security import API_KEY_SHOWN_LENGTH, generate_api_key
 from src.app.services.email_service import (
     SMTP_TIMEOUT_SECONDS,
     EmailDeliveryError,
     _build_message,
     _send,
+    send_api_key_created_email,
+    send_api_key_revoked_email,
     send_email_change_confirmation_email,
     send_gear_service_digest_email,
     send_invitation_email,
@@ -278,6 +281,72 @@ class TestSendPasskeyAddedEmail:
         body = mock_transport.call_args.args[0].get_content()
         assert 'href="https://app.example.com/settings/authentication">remove it' in body
         assert "&lt;b&gt;iPhone&lt;/b&gt;" in body
+
+
+class TestSendApiKeyCreatedEmail:
+    @staticmethod
+    async def _body(**overrides: object) -> str:
+        notice: dict[str, object] = {
+            "email": "diver@example.com",
+            "key_name": "<b>laptop</b>",
+            "prefix": "odk_abcdefgh",
+            "scope": "read",
+            "expires_at": datetime(2027, 10, 28, 9, 30, tzinfo=UTC),
+        }
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service._send") as mock_transport,
+        ):
+            _configured(mock_settings)
+            mock_settings.FRONTEND_URL = "https://app.example.com"
+
+            await send_api_key_created_email(**{**notice, **overrides})  # type: ignore[arg-type]
+
+        body: str = mock_transport.call_args.args[0].get_content()
+        return body
+
+    @pytest.mark.asyncio
+    async def test_it_names_the_key_by_name_and_prefix_and_says_where_to_revoke_it(self):
+        body = await self._body()
+
+        assert "&lt;b&gt;laptop&lt;/b&gt;" in body
+        assert "<code>odk_abcdefgh</code>" in body
+        assert "can read your logbook until 28 October 2027" in body
+        assert 'href="https://app.example.com/settings/authentication">revoke it' in body
+
+    @pytest.mark.asyncio
+    async def test_a_write_key_that_never_expires_says_so(self):
+        body = await self._body(scope="write", expires_at=None)
+
+        assert "can read and change your logbook until it is revoked" in body
+
+    @pytest.mark.asyncio
+    async def test_the_body_never_carries_the_secret(self):
+        """It is handed only the prefix, and the prefix is all it may print: the secret was
+        shown once to whoever made the key."""
+        secret, _ = generate_api_key()
+
+        body = await self._body(prefix=secret[:API_KEY_SHOWN_LENGTH])
+
+        assert secret[:API_KEY_SHOWN_LENGTH] in body
+        assert secret not in body
+        assert secret[API_KEY_SHOWN_LENGTH:] not in body
+
+
+class TestSendApiKeyRevokedEmail:
+    @pytest.mark.asyncio
+    async def test_it_names_the_key(self):
+        with (
+            patch("src.app.services.email_service.settings") as mock_settings,
+            patch("src.app.services.email_service._send") as mock_transport,
+        ):
+            _configured(mock_settings)
+
+            await send_api_key_revoked_email("diver@example.com", "<b>laptop</b>")
+
+        message = mock_transport.call_args.args[0]
+        assert message["Subject"] == "An API key was revoked on your OpenDiving account"
+        assert "&lt;b&gt;laptop&lt;/b&gt;" in message.get_content()
 
 
 class TestSendInvitationEmail:

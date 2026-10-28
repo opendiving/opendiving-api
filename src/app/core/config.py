@@ -1036,6 +1036,18 @@ class PasskeySettings(BaseSettings):
     PASSKEY_REGISTER_RATE_LIMIT_PER_USER: int = config("PASSKEY_REGISTER_RATE_LIMIT_PER_USER", default=10)
 
 
+class ApiKeySettings(BaseSettings):
+    # At most this many API keys per account, expired ones included. Abuse hygiene rather
+    # than product policy, as the passkey cap is: a diver with a sync script and a laptop
+    # is nowhere near it.
+    API_KEY_MAX_PER_USER: int = config("API_KEY_MAX_PER_USER", default=10)
+
+    # Creations per account over `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS`, the window every
+    # auth limit shares. Each one sends an email, so this bounds a create-and-revoke loop
+    # as a mailer, as `PASSKEY_REGISTER_RATE_LIMIT_PER_USER` does.
+    API_KEY_CREATE_RATE_LIMIT_PER_USER: int = config("API_KEY_CREATE_RATE_LIMIT_PER_USER", default=10)
+
+
 class GearServiceSettings(BaseSettings):
     # Hour of the day (UTC) the three scheduled emails run - the gear-service digest, the
     # renewal reminders and the year in review (`core/worker/settings.py`). Configurable
@@ -1219,6 +1231,7 @@ class Settings(
     ProxySettings,
     FrontendSettings,
     PasskeySettings,
+    ApiKeySettings,
     GearServiceSettings,
     AccountDeletionSettings,
     RedisCacheSettings,

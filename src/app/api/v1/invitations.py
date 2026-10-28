@@ -25,7 +25,7 @@ from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user, refuse_api_keys
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException, RateLimitException
@@ -332,7 +332,7 @@ async def revoke_invitation(
     return InvitationRevokedResponse()
 
 
-@router.get("/user/invite-link", response_model=InviteLinkRead)
+@router.get("/user/invite-link", response_model=InviteLinkRead, dependencies=[Depends(refuse_api_keys)])
 async def read_own_invite_link(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
@@ -352,7 +352,9 @@ async def read_own_invite_link(
     return InviteLinkRead(token=link.token, created_at=link.created_at)
 
 
-@router.post("/user/invite-link", response_model=InviteLinkRead, status_code=201)
+@router.post(
+    "/user/invite-link", response_model=InviteLinkRead, status_code=201, dependencies=[Depends(refuse_api_keys)]
+)
 async def make_invite_link(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -381,7 +383,7 @@ async def make_invite_link(
     return InviteLinkRead(token=token, created_at=created_at)
 
 
-@router.delete("/user/invite-link", response_model=InviteLinkRemovedResponse)
+@router.delete("/user/invite-link", response_model=InviteLinkRemovedResponse, dependencies=[Depends(refuse_api_keys)])
 async def erase_invite_link(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],

@@ -69,6 +69,12 @@ def addressable_hard_deleted() -> set[type[Base]]:
 
 
 NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
+    "ApiKey": (
+        "A credential, and a row that is only its hash: `DELETE /user/api-key/{uuid}` is the one way it "
+        "goes, and `tests/test_api_keys.py` pins that delete - the 404 for a stranger's, the row gone, the "
+        "next request refused. Exempt from the panel too, and unregistered there: a panel that could "
+        "create a key row could mint a credential."
+    ),
     "AuthenticationRequest": (
         "Sign-in state, not a logbook row. Nothing offers a delete of it - rows expire and are swept "
         "on a cron - so there is no delete for a case to exercise."

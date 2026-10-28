@@ -87,7 +87,8 @@ class UserRead(PublicUUIDSchema):
     # else: `GET /user` returns the caller's row, and of another account no route returns more
     # than the exceptions *"Current-user routes live at a bare `/user`"* names - never this.
     # False for every account but the first one on an empty instance (see
-    # `UserBootstrapCreateInternal`) and any promoted by hand.
+    # `UserBootstrapCreateInternal`) and any promoted by hand - and false under an API key
+    # whatever the column says, since a key's principal is never the operator.
     is_superuser: bool = False
 
 

@@ -15,7 +15,7 @@ from ..core.utils.request_context import MAX_IP_LENGTH, MAX_USER_AGENT_LENGTH
 # `DROP`/`ADD CONSTRAINT` every time an event is added.
 EVENT_TYPE_MAX_LENGTH = 40
 
-# `email` / `google` / `passkey`, same vocabulary as `authentication_provider.provider`.
+# The credential an event was about: `email`, `google`, `passkey` or `api_key`.
 PROVIDER_MAX_LENGTH = 20
 
 
