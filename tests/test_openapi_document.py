@@ -87,9 +87,9 @@ class TestVersion:
 
 class TestTitleAndDescription:
     def test_publishes_the_configured_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        info = _document(monkeypatch, APP_NAME="OpenDiving")["info"]
+        info = _document(monkeypatch, APP_NAME="Example Dive Log")["info"]
 
-        assert info["title"] == "OpenDiving"
+        assert info["title"] == "Example Dive Log"
 
     def test_publishes_the_configured_description(self, monkeypatch: pytest.MonkeyPatch) -> None:
         info = _document(monkeypatch, APP_DESCRIPTION="Backend API for OpenDiving.")["info"]

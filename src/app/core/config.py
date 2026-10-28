@@ -50,7 +50,7 @@ def _installed_version() -> str | None:
 
 
 class AppSettings(BaseSettings):
-    APP_NAME: str = config("APP_NAME", default="FastAPI app")
+    APP_NAME: str = config("APP_NAME", default="OpenDiving")
     APP_DESCRIPTION: str | None = config("APP_DESCRIPTION", default=None)
     APP_VERSION: str | None = config("APP_VERSION", default=_installed_version())
     # The commit the running image was built from, baked in by the `Dockerfile`'s
