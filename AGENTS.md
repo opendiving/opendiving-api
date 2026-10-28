@@ -143,8 +143,8 @@ something to look up, not to restate it.
 - Type hints on all functions (e.g., `def create_user(name: str) -> User:`)
 - Docstrings explain *why*, not the signature — the type hints already document shape, so
   `Args:`/`Returns:` blocks that restate them are noise. Required on every route handler (FastAPI
-  publishes the docstring as the endpoint description in `/openapi.json`) and on non-obvious logic;
-  skip them on self-evident helpers.
+  publishes the docstring as the endpoint description in `/api/v1/openapi.json`) and on non-obvious
+  logic; skip them on self-evident helpers.
 - Models in `src/app/models/` with SQLAlchemy relationships and indexes
 - Dependency injection for database sessions and auth
 

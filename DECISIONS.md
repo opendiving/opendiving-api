@@ -825,7 +825,8 @@ The field is on **both** `UserRead` (so `GET /user` feeds the settings toggle) a
 
 `UserRead`'s `= True` is not a fallback for a database lacking the column: `get_current_user` calls
 `read_account` (`crud/crud_users.py`), which selects every mapped column, so Postgres raises
-`UndefinedColumn` before any response model is reached. The default exists for `/openapi.json`.
+`UndefinedColumn` before any response model is reached. The default exists for
+`/api/v1/openapi.json`.
 
 The column carries `server_default="true"` because it is `NOT NULL`: whatever adds it to a table
 with rows must supply a value, and only a server-side default is part of the DDL. `default=True` is
@@ -2318,7 +2319,7 @@ documents carrying the diver's name, certification number and often a photograph
 `portrait.jpg` or `portrait.png` is an identification photo in its own right. Nothing new leaves the
 owner's hands — the endpoint is owner-only over a bearer token, has no user parameter, and answers
 `no-store` — but a saved export is a folder of identity documents in a downloads directory. That
-changes what "export" implies for a user, so the endpoint's docstring, which `/openapi.json`
+changes what "export" implies for a user, so the endpoint's docstring, which `/api/v1/openapi.json`
 publishes, says so as well as this section. The CSV and UDDF downloads carry no images for the same
 reason: the two files a diver is likely to share contain none of this, and the one that does is the
 one labelled "everything".
@@ -2959,9 +2960,9 @@ Deleting a gear item destroys its service records (`gear_service_record.gear_ite
 `_owned_gear_item`, `_get_owned_gear_item` and `resolve_gear_item_ids_for_user` do not filter
 `is_archived`, so an archived item resolves: its detail page loads, `?gear_item_uuid=` works on both
 listings, and the digest skips it. A deleted item's uuid lists an empty page. The gear page has a
-*Show archived* toggle, and the delete route's docstring, published in `/openapi.json`, steers to
-archiving. `/export/*` carries a live or archived item's history; a deleted item has nothing to
-export.
+*Show archived* toggle, and the delete route's docstring, published in `/api/v1/openapi.json`,
+steers to archiving. `/export/*` carries a live or archived item's history; a deleted item has
+nothing to export.
 
 Rejected, and moot now the rows are gone: an `include_deleted_items` flag on
 `GET /gear-service-records`, which makes deleting a lossy archive, `is_archived` being the

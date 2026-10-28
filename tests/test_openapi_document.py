@@ -147,7 +147,7 @@ class TestWhereItIsServed:
     ) -> None:
         """`production` is the case that matters: it serves no `/docs` or `/redoc`, so this
         document is the only description of the API a caller of a production instance can
-        read, and before it moved under the prefix it was not served there at all."""
+        read."""
         response = _get(monkeypatch, OPENAPI_URL, ENVIRONMENT=environment)
 
         assert response.status_code == 200
