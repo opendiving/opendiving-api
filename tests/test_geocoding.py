@@ -399,7 +399,7 @@ class TestReverseRoute:
         """FastAPI will not infer the 204 from an explicit `Response`, so it is declared - and
         asserted here, since a client generated from the schema is how the web app learns the
         two answers apart."""
-        outcomes = client.get("/openapi.json").json()["paths"]["/api/v1/geocode/reverse"]["get"]["responses"]
+        outcomes = client.get("/api/v1/openapi.json").json()["paths"]["/api/v1/geocode/reverse"]["get"]["responses"]
 
         assert "204" in outcomes
         assert "content" not in outcomes["204"]

@@ -104,7 +104,7 @@ class TestAuthentication:
         contract rather than the signature, so a path, query or header parameter added
         later fails here whatever shape it takes.
         """
-        operation = client.get("/openapi.json").json()["paths"][path]["get"]
+        operation = client.get("/api/v1/openapi.json").json()["paths"][path]["get"]
         assert operation.get("parameters", []) == []
 
     @pytest.mark.parametrize(

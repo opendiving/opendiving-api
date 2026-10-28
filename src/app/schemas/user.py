@@ -57,7 +57,7 @@ class UserRead(PublicUUIDSchema):
     portrait_sha256: str | None = None
     portrait_original_sha256: str | None = None
     portrait_crop: PictureCrop | None = None
-    # Feeds the settings page's gear-reminder toggle. The `= True` is what `/openapi.json`
+    # Feeds the settings page's gear-reminder toggle. The `= True` is what `/api/v1/openapi.json`
     # publishes as the field's default; it is *not* a fallback for a database missing the
     # column, which is what this said for a while. `get_current_user` selects every mapped
     # column, so such a database raises `UndefinedColumn` and the request 500s before

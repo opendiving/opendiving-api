@@ -57,6 +57,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+OPENAPI_URL = "/api/v1/openapi.json"
+
 # -------------- database --------------
 # Arbitrary constant; the only thing that matters is that every process running
 # `apply_migrations` picks the same one. Namespaced mentally as "opendiving schema
@@ -334,7 +336,7 @@ def create_application(
     """
     # --- before creating application ---
     if isinstance(settings, AppSettings):
-        # These reach the served document through `application.openapi()` at the `/openapi.json`
+        # These reach the served document through `application.openapi()` at the `OPENAPI_URL`
         # route below, which reads them back off the app - so this block is the only place any of
         # them is spelled. `version` is here because FastAPI otherwise supplies its own hardcoded
         # `"0.1.0"`, which does not move when a release does; `or "unknown"` is the word
@@ -350,7 +352,7 @@ def create_application(
         # unset by default - `src/.env.example` ships every one of them commented out - and the dict
         # is passed on without being looked inside. Built unconditionally, `{"name": None}` fails the
         # document's own validation, because `name` is *required* wherever a license object appears:
-        # the whole of `/openapi.json` then 500s for every operator who never set `LICENSE`, which is
+        # the whole document then 500s for every operator who never set `LICENSE`, which is
         # the default install. The contact pair fails softer and publishes an empty `"contact": {}`.
         # Neither is worth shipping to get a field nobody filled in.
         contact = {
@@ -363,8 +365,7 @@ def create_application(
 
         kwargs.update(to_update)
 
-    if isinstance(settings, EnvironmentSettings):
-        kwargs.update({"docs_url": None, "redoc_url": None, "openapi_url": None})
+    kwargs.update({"docs_url": None, "redoc_url": None, "openapi_url": None})
 
     # Use custom lifespan if provided, otherwise use default factory
     if lifespan is None:
@@ -415,6 +416,19 @@ def create_application(
     # can be quietly off.
     application.add_middleware(SecurityHeadersMiddleware)
 
+    # Under the API prefix, and on every environment, `production` included: `/api/v1*` is the
+    # one path every proxy shape in front of this app already carries, and the document is how a
+    # caller reads what the API offers. Anonymous by design - `ANONYMOUS_BY_DESIGN` says why.
+    @application.get(OPENAPI_URL, include_in_schema=False)
+    async def openapi() -> dict[str, Any]:
+        # `application.openapi()` rather than a `get_openapi` call of our own: this is the only
+        # OpenAPI route there is (the built-in one is off - `openapi_url=None` above), and a
+        # hand-rolled call publishes exactly the fields somebody remembered to list. This one
+        # passes on everything configured, and re-derives the schema when the route set changes
+        # rather than on every request.
+        out: dict[str, Any] = application.openapi()
+        return out
+
     if isinstance(settings, EnvironmentSettings):
         if settings.ENVIRONMENT != EnvironmentOption.PRODUCTION:
             docs_router = APIRouter()
@@ -423,21 +437,11 @@ def create_application(
 
             @docs_router.get("/docs", include_in_schema=False)
             async def get_swagger_documentation() -> fastapi.responses.HTMLResponse:
-                return get_swagger_ui_html(openapi_url="/openapi.json", title="docs")
+                return get_swagger_ui_html(openapi_url=OPENAPI_URL, title="docs")
 
             @docs_router.get("/redoc", include_in_schema=False)
             async def get_redoc_documentation() -> fastapi.responses.HTMLResponse:
-                return get_redoc_html(openapi_url="/openapi.json", title="docs")
-
-            @docs_router.get("/openapi.json", include_in_schema=False)
-            async def openapi() -> dict[str, Any]:
-                # `application.openapi()` rather than a `get_openapi` call of our own: this is the
-                # only `/openapi.json` there is (the built-in one is off - `openapi_url=None`
-                # above), and a hand-rolled call publishes exactly the fields somebody remembered
-                # to list. This one passes on everything configured, and re-derives the schema when
-                # the route set changes rather than on every request.
-                out: dict[str, Any] = application.openapi()
-                return out
+                return get_redoc_html(openapi_url=OPENAPI_URL, title="docs")
 
             application.include_router(docs_router)
 

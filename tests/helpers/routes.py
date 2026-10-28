@@ -50,10 +50,12 @@ def iter_api_routes(app: FastAPI) -> Iterator[RouteInfo]:
     """Every `APIRoute` under `/api/v1`, one `RouteInfo` per HTTP method.
 
     Scoped to the API prefix on purpose, and the scope is part of what the guards mean.
-    `/docs`, `/redoc` and `/openapi.json` are registered conditionally on `ENVIRONMENT`
-    (`core/setup.py`) - absent on production, superuser-gated on staging, wide open on
-    local, which is what the suite runs as. They would otherwise read as anonymous and
-    need allowlisting for a reason that is really "this is a different property".
+    `/docs` and `/redoc` are registered conditionally on `ENVIRONMENT` (`core/setup.py`) -
+    absent on production, superuser-gated on staging, wide open on local, which is what the
+    suite runs as. They would otherwise read as anonymous and need allowlisting for a
+    reason that is really "this is a different property". The document they render,
+    `/api/v1/openapi.json`, is under the prefix and served on every environment, so it is
+    walked like any other route.
 
     Mounts are skipped explicitly rather than left to fall out of a default. The admin
     panel is a `starlette.routing.Mount` with its own session auth, and while
