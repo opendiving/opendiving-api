@@ -607,7 +607,7 @@ Creating and revoking one each send the account a security notice that no settin
 writes one audit event (below); using one writes none.
 
 None of the app's own 401s carries `WWW-Authenticate: Bearer`, which RFC 6750 asks of a bearer
-resource server - only the missing-header 401 does, from `oauth2_scheme`.
+resource server - only the missing-header 401 does, from `bearer_scheme`.
 
 ### The auth audit trail
 

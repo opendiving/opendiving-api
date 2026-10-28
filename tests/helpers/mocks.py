@@ -146,7 +146,7 @@ def get_current_user(user: models.User) -> dict[str, Any]:
     return encoded
 
 
-def oauth2_scheme() -> str:
+def bearer_scheme() -> str:
     token = fake.sha256()
     if isinstance(token, bytes):
         token = token.decode("utf-8")

@@ -45,6 +45,7 @@ from ...core.exceptions.http_exceptions import (
 from ...core.schemas import OnboardingTokenData
 from ...core.security import (
     TokenType,
+    bearer_scheme,
     blacklist_token,
     blacklist_tokens,
     create_onboarding_token,
@@ -54,7 +55,6 @@ from ...core.security import (
     generate_sign_in_code,
     hash_sign_in_code,
     hash_token,
-    oauth2_scheme,
     revocation_time,
     token_session_id,
     token_subject,
@@ -1223,7 +1223,7 @@ async def refresh_access_token(
 async def logout(
     request: Request,
     response: Response,
-    access_token: Annotated[str, Depends(oauth2_scheme)],
+    access_token: Annotated[str, Depends(bearer_scheme)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     refresh_token: Annotated[str | None, Cookie(alias="refresh_token")] = None,
 ) -> LogoutResponse:
@@ -1235,7 +1235,7 @@ async def logout(
     `GET /user/sessions` on the account's other devices. 401 when no refresh cookie is
     present or either token fails to decode.
 
-    This route authenticates on `oauth2_scheme` alone - no `get_current_user`, so there is
+    This route authenticates on `bearer_scheme` alone - no `get_current_user`, so there is
     no `current_user` dict to take an id from - and resolves its subject from the presented
     access token the way `_handle_revoked_refresh` already does. One indexed read, on a
     route nobody calls in a loop.

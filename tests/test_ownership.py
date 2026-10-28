@@ -562,7 +562,7 @@ def signed_in_client(owned_app: Any) -> Generator[TestClient]:
     """A caller who is signed in, which now means two things rather than one.
 
     `current_session_uuid` is overridden alongside `get_current_user` because
-    `DELETE /user/session/{uuid}` depends on both, and that one reaches `oauth2_scheme`
+    `DELETE /user/session/{uuid}` depends on both, and that one reaches `bearer_scheme`
     directly - so without this the request 401s on a missing `Authorization` header before
     the ownership check it is here to exercise ever runs, and the route reads as broken
     when the fixture is what is incomplete.
