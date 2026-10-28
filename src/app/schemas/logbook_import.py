@@ -252,9 +252,11 @@ class ImportProfile(_ReadModel):
     ceiling: ImportSeries | None = None
     temperature: ImportSeries | None = None
     pressures: Annotated[list[ImportPressureSeries], Field(default_factory=list), _Collection]
+    # Floored at 1, a zero being a sensor's absent-marker; `shape_series` holds it to that.
+    heart_rate: ImportSeries | None = None
     # The six decompression channels, read back on exactly the terms they are written. §6.4
     # floors all six at zero, and the planner re-validates each one under §6.5's rules the
-    # way it does the three above - a document is not trusted for having been written by
+    # way it does the channels above - a document is not trusted for having been written by
     # this app.
     ndl: ImportSeries | None = None
     tts: ImportSeries | None = None

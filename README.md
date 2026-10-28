@@ -38,9 +38,10 @@ else; what is here is the source, and the notes for working on it.
   `divejson` package, reads both doors, and a file either door keeps gives the same recording. A
   file of several dives, or of one dive two computers recorded, goes through logbook import instead.
   Attach the file to the dive afterwards and the **per-sample profile** (depth, temperature, tank
-  pressure, deco ceiling, **the computer's own no-decompression clock, time to surface, ppO₂, CNS
-  clock and both gradient factors**, dive events) is extracted server-side and served with ETag
-  caching.
+  pressure, deco ceiling, the diver's heart rate where the computer measured it, **the computer's
+  own no-decompression clock, time to surface, ppO₂, CNS clock and both gradient factors**, dive
+  events) is extracted server-side and served with ETag caching, its summary stating the maximum and
+  average heart rate.
 - **Recordings** — a dive holds what recorded it, in order, and each of those holds its own files
   and its own profile. So a diver on two computers keeps both accounts of the dive, the same
   computer exported twice fills one record rather than making two, and every device the file named —

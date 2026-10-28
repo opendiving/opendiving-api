@@ -1,9 +1,9 @@
 """Extraction and storage for a dive's per-sample curves and the events alongside them.
 
-Ten channels - depth, deco ceiling, temperature and per-cylinder tank pressure, plus the six
-the computer worked out for itself: the no-decompression clock, the time to surface, the
-computed ppO2, the CNS clock and the two gradient factors - plus the moments a device marked
-rather than sampled: gas switches, stops, bookmarks and alerts.
+The channels - depth, deco ceiling, temperature, per-cylinder tank pressure and the diver's
+heart rate, plus the six the computer worked out for itself: the no-decompression clock, the
+time to surface, the computed ppO2, the CNS clock and the two gradient factors - plus the
+moments a device marked rather than sampled: gas switches, stops, bookmarks and alerts.
 
 **The six computed channels are stored, never derived.** Each depends on the model the
 device ran, on its settings and on the diver's exposure history, none of which a logged dive
@@ -106,10 +106,11 @@ logger = logging.getLogger(__name__)
 #    where it kept its own file's numbering.
 # 9: a FIT file's channels filled after a recording's other files', so a FIT and JSON pair
 #    takes the JSON's temperature, finer than FIT's whole degrees, whichever was attached first.
+# 10: the `heart_rate` channel and the average beside its maximum, which no earlier build stored.
 #
 # A profile stored before a bump stays valid and is served as it is until
 # `backfill_profiles` re-reads it, which an operator runs after the release that moves it.
-PROFILE_EXTRACTOR_VERSION = 9
+PROFILE_EXTRACTOR_VERSION = 10
 
 # The profile route's ETag is the row's `uuid` and this, because a body can change under an
 # unchanged row: a browser revalidating an ETag the previous build issued would be answered 304
@@ -119,6 +120,9 @@ PROFILE_EXTRACTOR_VERSION = 9
 # 2: `dive_end_time`. Version 1 was the bare `uuid`.
 # 3: temperature readings in hundredths of a degree, multiplied in place by revision
 #    `f3a9c1d27b64`.
+#
+# Not bumped for an added optional member, such as `heart_rate`: a client keeping a previous
+# body lacks the member, and reads an absent one as no channel, which is what that body meant.
 PROFILE_READ_VERSION = 3
 
 # The reader's version, stored beside the extractor's: a profile read from stored bytes is a
@@ -208,6 +212,7 @@ _SUMMARY_COLUMNS: Mapping[str, tuple[tuple[str, Callable[[list[int]], int]], ...
     "depth": (("max_depth_cm", max),),
     "ceiling": (("max_ceiling_cm", max),),
     "temperature": (("min_temperature_c100", min), ("max_temperature_c100", max)),
+    "heart_rate": (("max_heart_rate_bpm", max),),
     "ndl": (("min_ndl_s", min),),
     "tts": (("max_tts_s", max),),
     "ppo2": (("max_ppo2_bar100", max),),
@@ -247,16 +252,17 @@ class ProfileEvent:
 class NormalizedProfile:
     """A dive's channels, ready to store: on a millisecond axis, deduped, sorted, capped.
 
-    The nine single-series channels are declared in `SINGLE_SERIES_CHANNELS`' order, which is
-    the format's; `pressure` is a list rather than a series and sits where §6.4 puts it.
-    Every function below that has to touch all nine walks that tuple through `channels_of`
-    and `with_channels` rather than naming them, because naming nine channels a dozen times
-    is how the tenth comes to be missing from one of them.
+    The single-series channels are declared in `SINGLE_SERIES_CHANNELS`' order, which is the
+    format's; `pressure` is a list rather than a series and sits where §6.4 puts it. Every
+    function below that has to touch all of them walks that tuple through `channels_of` and
+    `with_channels` rather than naming them, because naming each channel a dozen times is how
+    a new one comes to be missing from one of them.
     """
 
     depth: ProfileSeries | None = None
     ceiling: ProfileSeries | None = None
     temperature: ProfileSeries | None = None
+    heart_rate: ProfileSeries | None = None
     ndl: ProfileSeries | None = None
     tts: ProfileSeries | None = None
     ppo2: ProfileSeries | None = None
@@ -270,6 +276,10 @@ class NormalizedProfile:
     # still everything `store_profile` needs. Empty on a profile whose file said nothing
     # about which gas was breathed when, which is most of them.
     gas_attribution: list[GasAttribution] = field(default_factory=list)
+    # Not a channel either: the mean heart rate in whole beats per minute, which `downsample`
+    # takes from the series it is about to cap, and `store_profile` writes. None where the
+    # channel is absent, and on every profile that has not passed the cap.
+    average_heart_rate: int | None = None
 
     @property
     def channels(self) -> list[str]:
@@ -278,7 +288,7 @@ class NormalizedProfile:
         `ceiling` sits next to `depth` because it is drawn on depth's axis rather than one
         of its own - a ceiling of 3 m has to land at the same y as a depth of 3 m, or the
         shaded no-ascent region wouldn't bound the curve it describes. `pressure` keeps its
-        place between `temperature` and the computed channels, which is where §6.4 puts it.
+        place between `temperature` and `heart_rate`, which is where §6.4 puts it.
 
         **Nothing in `src` reads this.** What ships is `get_profile_infos_for_recordings`, which
         derives the same list from which summary columns came back non-NULL - a row's own
@@ -342,12 +352,12 @@ class NormalizedProfile:
 
 
 def channels_of(profile: NormalizedProfile) -> dict[str, ProfileSeries | None]:
-    """A profile's nine single-series channels, keyed by member name, in the format's order.
+    """A profile's single-series channels, keyed by member name, in the format's order.
 
-    The read half of the pair that keeps this module's ten-channel functions honest: every
-    one of them walks `SINGLE_SERIES_CHANNELS` through here rather than naming each channel,
-    so adding an eleventh is one tuple entry and one dataclass field instead of a dozen
-    edits one of which is forgotten.
+    The read half of the pair that keeps this module's every-channel functions honest: each
+    of them walks `SINGLE_SERIES_CHANNELS` through here rather than naming each channel, so
+    adding one is one tuple entry and one dataclass field instead of a dozen edits one of
+    which is forgotten.
 
     Includes the absent ones, as `None`. The callers that only want what is present filter;
     the ones rebuilding a profile need every key, because a missing key in `with_channels`
@@ -741,6 +751,13 @@ def downsample(
 ) -> NormalizedProfile:
     """Cap every channel independently. A channel already under the cap is untouched.
 
+    **The average heart rate is taken here, from the series as it arrives**, because the cap
+    keeps each bucket's extremes and a mean over what it keeps is a mean of peaks and troughs.
+    Every door that stores a profile passes through this function - an upload and a merge by
+    way of `attribute_and_cap`, an import directly - so an uploaded file's and an imported
+    document's figure is over every reading they carried. A merge's halves arrive already
+    capped, and its figure is over those.
+
     Events are truncated rather than bucketed. Min/max over a window of markers means
     nothing - there is no "highest" gas switch - and thinning them would leave a chart
     showing some of a dive's switches with no way to tell that it was showing some. So the
@@ -761,7 +778,8 @@ def downsample(
             max_events,
         )
 
-    return with_channels(
+    heart_rate = profile.heart_rate.v if profile.heart_rate is not None else []
+    capped_profile = with_channels(
         {channel: capped(series) for channel, series in channels_of(profile).items()},
         pressure=[
             ProfilePressureSeries(gas_number=cylinder.gas_number, t=t, v=v)
@@ -774,6 +792,7 @@ def downsample(
         # purpose (see `derive_gas_attribution`), so thinning them must not disturb it.
         gas_attribution=profile.gas_attribution,
     )
+    return replace(capped_profile, average_heart_rate=round(sum(heart_rate) / len(heart_rate)) if heart_rate else None)
 
 
 # `divejson.IN_WATER_DEPTH` in the depth channel's integer centimetres, exact: the threshold is
@@ -1236,6 +1255,9 @@ async def store_profile(
             # looked - and the difference is what a later backfill selects on.
             event_count=len(profile.events),
             **summary_extremes(profile),
+            # Here and not in `summary_extremes`, which the relabel rewrite shares: the figure
+            # is the cap's (see `downsample`), and a rewrite that never passes the cap leaves it.
+            avg_heart_rate_bpm=profile.average_heart_rate,
             # A list rather than `None` when there is nothing to attribute, for the same
             # reason `event_count` is a count rather than `None`: this extractor looked.
             gas_attribution=[entry.model_dump() for entry in profile.gas_attribution],
@@ -1345,8 +1367,8 @@ def _channels_present(row: object) -> set[str]:
 
     A channel whose extreme came back NULL is a channel this profile has no readings for - a
     dive that never owed a decompression stop has no ceiling to draw, and one whose computer
-    reported no gradient factor has no gradient factor. The same derivation for all ten, and
-    the reason a ceiling of zero is stored as no reading.
+    reported no gradient factor has no gradient factor. The same derivation for every channel,
+    and the reason a ceiling of zero is stored as no reading.
     """
     present = {
         channel
@@ -1562,6 +1584,8 @@ async def get_profile_infos_for_recordings(
         # one that would otherwise be forgotten, since a curve missing from `channels` fails
         # nothing and shows up only as a toggle the chart never offers.
         *(getattr(DiveProfile, column) for columns in _SUMMARY_COLUMNS.values() for column, _ in columns),
+        # Not an extreme, so not in the table above: the cap's figure, beside the maximum.
+        DiveProfile.avg_heart_rate_bpm,
     ).where(DiveProfile.recording_id.in_(set(recording_ids)))
 
     infos: dict[int, DiveProfileInfo] = {}
@@ -1585,6 +1609,8 @@ async def get_profile_infos_for_recordings(
             max_temperature=_scaled(row.max_temperature_c100, TEMPERATURE_SCALE),
             min_pressure=_scaled(row.min_pressure_bar10, PRESSURE_SCALE),
             max_pressure=_scaled(row.max_pressure_bar10, PRESSURE_SCALE),
+            max_heart_rate=row.max_heart_rate_bpm,
+            average_heart_rate=row.avg_heart_rate_bpm,
             updated_at=row.updated_at,
         )
     return infos
@@ -1605,7 +1631,7 @@ async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]
     builds the `profile` a response carries, this one feeds `compute_multi_tank_gas_use`
     and is never serialized. `gas_use_history` needs this and none of the rest, over every
     dive a user has - so folding it into the other would mean either a second query there
-    anyway or eleven columns fetched to use one.
+    anyway or every summary column fetched to use one.
 
     A dive with no profile, or one extracted before attribution existed, comes back as an
     empty `ProfileGasAttribution` rather than being absent: "nothing to attribute" is what

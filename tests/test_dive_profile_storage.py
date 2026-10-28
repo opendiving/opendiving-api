@@ -50,6 +50,7 @@ from src.app.services.dive_profiles import (
     backfill_depth_outlines,
     backfill_profiles,
     derive_depth_outline,
+    downsample,
     get_depth_outlines_for_dives,
     get_existing_profile,
     get_gas_attribution_for_dives,
@@ -362,6 +363,38 @@ class TestTheStoredBreadth:
 
         assert existing is not None
         assert existing.breadth == ProfileBreadth(channels=frozenset({"depth", "tts", "pressure"}), samples=3)
+
+
+class TestARelabelLeavesTheHeartRate:
+    @pytest.mark.asyncio
+    async def test_both_figures_are_unchanged_by_a_rewrite_that_never_passes_the_cap(
+        self, async_db: AsyncSession, recording: DiveRecording
+    ) -> None:
+        """The stored readings are capped, and a lopsided series puts their mean well above
+        the full one's: an average derived on the rewrite would come back as that."""
+        readings = [150 if second % 100 == 0 else 60 for second in range(9_000)]
+        await _store(
+            async_db,
+            recording,
+            downsample(
+                NormalizedProfile(
+                    depth=ProfileSeries(t=[0], v=[3000]),
+                    heart_rate=ProfileSeries(t=list(range(0, 9_000_000, 1000)), v=readings),
+                    pressure=[ProfilePressureSeries(t=[0], v=[2000], gas_number=0)],
+                )
+            ),
+        )
+        stored = await load_stored_profile(async_db, recording_id=recording.id)
+        assert stored is not None and stored.profile.average_heart_rate is None
+        relabelled = apply_gas_mapping(stored.profile, {0: 5})
+        assert relabelled is not None
+
+        await replace_profile_samples(async_db, recording_id=recording.id, profile=relabelled)
+        await async_db.commit()
+
+        row = await _stored_row(async_db, recording)
+        assert row.data["pressure"][0]["gas_number"] == 5
+        assert (row.max_heart_rate_bpm, row.avg_heart_rate_bpm) == (150, 61)
 
 
 def _second_recording(db: Session, dive: Dive, ordinal: int) -> DiveRecording:

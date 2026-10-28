@@ -26,6 +26,7 @@ from decimal import Decimal
 from typing import Any
 
 from divejson import InWater, in_water
+from divejson.converter import channel_floor
 
 from ..core.utils.datetime_offset import split_local_start_time
 from ..schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND, SINGLE_SERIES_CHANNELS, ProfileEventType
@@ -83,11 +84,15 @@ READOUT_BOUNDS: tuple[Bound, ...] = (
 )
 READOUT_COLUMN = {"surface_pressure": "surface_pressure_bar"}
 
-# The channels §6.4 floors at zero - every one the computer computed rather than measured.
-# Depth, ceiling and temperature are absent because a signed reading is real in all three: a
+# The floor §6.5 puts on each channel's values, read off the format's schema: zero for the six
+# the computer computed, 1 for `heart_rate`, whose zero is a sensor's absent-marker. Depth,
+# ceiling and temperature have none, because a signed reading is real in all three: a
 # temperature below zero is ordinary, and a depth of zero at the surface is what a Suunto
-# Ocean records.
-UNSIGNED_CHANNELS = frozenset(SINGLE_SERIES_CHANNELS) - {"depth", "ceiling", "temperature"}
+# Ocean records. A document is validated by `ImportDocument` and never by the schema, so this
+# is where its floors are held.
+CHANNEL_FLOORS: dict[str, int] = {
+    channel: floor for channel in SINGLE_SERIES_CHANNELS if (floor := channel_floor(channel)) is not None
+}
 
 # The deco model's three integers, from `models/dive_recording.py`. The gradient factors are
 # 0-100 because the member is a whole percent of the M-value and no computer offers a setting
@@ -165,6 +170,7 @@ CHANNEL_LABELS = {
     "depth": "depth",
     "ceiling": "ceiling",
     "temperature": "temperature",
+    "heart_rate": "heart rate",
     "ndl": "no-decompression time",
     "tts": "time-to-surface",
     "ppo2": "ppO2",
@@ -212,16 +218,15 @@ class ShapedRecording:
     profile: NormalizedProfile | None
 
 
-def shape_series(series: Any, label: str, drop: Drop, *, unsigned: bool = False) -> ProfileSeries | None:
+def shape_series(series: Any, label: str, drop: Drop, *, floor: int | None = None) -> ProfileSeries | None:
     """One channel, or `None` with a note. Spec §6.5's rules, exactly.
 
     `label` is what a diver calls the readings - "depth readings" - since the note is theirs.
 
-    `unsigned` is §6.4's floor on the six decompression channels: none of them is a
-    quantity that runs below zero, and a negative in one is what several devices write to
-    mean "no figure". Depth, ceiling and temperature keep the signed reading - a
-    temperature below zero is ordinary, and so is a depth of zero at the surface - which
-    is why this is a parameter rather than a rule applied to every channel.
+    `floor` is the channel's entry in `CHANNEL_FLOORS`: a value below it is what a device
+    writes to mean "no figure" - a negative on a decompression channel, a zero on the heart
+    rate. Depth, ceiling and temperature keep the signed reading, which is why this is a
+    parameter rather than a rule applied to every channel.
 
     The whole channel goes rather than the offending sample: there is no half of a series
     to keep, and a document whose `values` and `times` no longer line up is worse than one
@@ -245,8 +250,10 @@ def shape_series(series: Any, label: str, drop: Drop, *, unsigned: bool = False)
     if not (within_int32(times) and within_int32(values)):
         drop(f"The {label} held values this app cannot store, and were dropped")
         return None
-    if unsigned and any(value < 0 for value in values):
-        drop(f"The {label} included a negative one, and were dropped")
+    if floor is not None and any(value < floor for value in values):
+        # A floor of 1 is the only one above zero the format sets, and its refused reading is a zero.
+        below = "a negative one" if floor == 0 else "a zero or a negative one"
+        drop(f"The {label} included {below}, and were dropped")
         return None
     return ProfileSeries(t=list(times), v=list(values))
 
@@ -315,7 +322,7 @@ def shape_profile(source: ImportProfile | None, drop: Drop) -> NormalizedProfile
             getattr(source, channel),
             f"{CHANNEL_LABELS.get(channel, channel.replace('_', ' '))} readings",
             drop,
-            unsigned=channel in UNSIGNED_CHANNELS,
+            floor=CHANNEL_FLOORS.get(channel),
         )
         for channel in SINGLE_SERIES_CHANNELS
     }

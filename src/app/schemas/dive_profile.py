@@ -52,6 +52,11 @@ PRESSURE_SCALE = 10  # tenths of a bar
 # bounds. Named all the same, so a reader of the payload doesn't have to know that.
 CEILING_SCALE = DEPTH_SCALE
 
+# Whole beats per minute, the grain every source holds it at, and a measurement rather than
+# the device's arithmetic: what its wrist sensor or strap read. Declared here rather than
+# imported for `TEMPERATURE_SCALE`'s reason.
+HEART_RATE_SCALE = 1
+
 # The six channels a computer's own decompression arithmetic produces, each in the scale
 # the format fixes (spec §5.1, §6.4). A scale of 1 is still declared rather than left
 # implicit: `channel / SCALE` is what every consumer writes, and a channel with no constant
@@ -79,17 +84,18 @@ SURFACE_GRADIENT_FACTOR_SCALE = GRADIENT_FACTOR_SCALE
 # Every channel that is a single series, in the order §6.4 lists its members - which is
 # also the order `DiveProfileRead` declares them and therefore the order they are written
 # in an exported document. `pressures` is a list rather than a series and sits between
-# `temperature` and `ndl`; it is absent here because nothing that walks this tuple can
-# treat it like the rest.
+# `temperature` and `heart_rate`; it is absent here because nothing that walks this tuple
+# can treat it like the rest.
 #
 # One tuple because a dozen functions in `services/dive_profiles.py` have to touch every
-# channel, and spelling nine names out a dozen times is how the tenth comes to be missing
+# channel, and spelling each name out a dozen times is how a new one comes to be missing
 # from one of them. The order is load-bearing for the export: a writer emitting channels in
 # whatever order it happened to build them produces a profile that reads down nothing.
 SINGLE_SERIES_CHANNELS: tuple[str, ...] = (
     "depth",
     "ceiling",
     "temperature",
+    "heart_rate",
     "ndl",
     "tts",
     "ppo2",
@@ -108,6 +114,7 @@ PROFILE_CHANNEL_ORDER: tuple[str, ...] = (
     "ceiling",
     "temperature",
     "pressure",
+    "heart_rate",
     "ndl",
     "tts",
     "ppo2",
@@ -356,8 +363,16 @@ class DiveProfileRead(BaseModel):
     # is why `pressures` sits above rather than at the end: this class is what the exported
     # document's `profile` object is serialized from, and a profile whose members arrive in
     # build order reads down nothing. The order here is the format's.
-    #
-    # Each is the device's *own* arithmetic and nothing else can produce it - it depends on
+    heart_rate: Annotated[
+        DiveProfileSeries | None,
+        Field(
+            default=None,
+            description=f"The diver's heart rate in whole beats per minute (scale {HEART_RATE_SCALE}), as the "
+            "device's wrist sensor or strap read it. Present only where it reported a reading: a dropout is a gap "
+            "in `times`, never a zero.",
+        ),
+    ]
+    # From here down, each is the device's *own* arithmetic and nothing else can produce it - it depends on
     # the model the device ran, its settings and the diver's exposure history, none of which
     # a logged dive carries. Nothing in this app derives one from depth and a gas fraction.
     ndl: Annotated[
@@ -471,7 +486,7 @@ class DiveProfileInfo(BaseModel):
         list[str],
         Field(
             description="Which curves this profile carries, in the order a chart stacks them: any of `depth`, "
-            "`ceiling`, `temperature`, `pressure`, `ndl`, `tts`, `ppo2`, `cns`, `gradient_factor`, "
+            "`ceiling`, `temperature`, `pressure`, `heart_rate`, `ndl`, `tts`, `ppo2`, `cns`, `gradient_factor`, "
             "`surface_gradient_factor`",
             examples=[["depth", "ceiling", "temperature", "pressure", "ndl", "gradient_factor"]],
         ),
@@ -491,6 +506,18 @@ class DiveProfileInfo(BaseModel):
     max_temperature: Annotated[float | None, Field(default=None, description="Warmest recorded sample, in Celsius")]
     min_pressure: Annotated[float | None, Field(default=None, description="Lowest recorded tank pressure, in bar")]
     max_pressure: Annotated[float | None, Field(default=None, description="Highest recorded tank pressure, in bar")]
+    max_heart_rate: Annotated[
+        int | None, Field(default=None, description="Highest recorded heart rate, in beats per minute")
+    ]
+    average_heart_rate: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description="Mean of every heart-rate reading the file carried, in whole beats per minute. On a merged "
+            "recording it is the mean of the two halves' stored readings, which are capped, so it can sit a fraction "
+            "of a beat from the full series' mean.",
+        ),
+    ]
     # Half of the `v` cache-buster the client sends to `GET /dive/{uuid}/recording/{rid}/profile`,
     # beside `uuid`, so a re-extraction gets its own cache entry rather than being masked for
     # five minutes by the previous one.

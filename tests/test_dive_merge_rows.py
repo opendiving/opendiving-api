@@ -88,9 +88,16 @@ def _export(
     max_depth: str = "19.04",
     samples: tuple[tuple[float, float] | tuple[float, float, int, int], ...] = (),
     cns_end: float | None = None,
+    heart_rates: tuple[tuple[float, int], ...] = (),
 ) -> bytes:
     return suunto_json(
-        start=start, serial=serial, duration=duration, max_depth=float(max_depth), samples=samples, cns_end=cns_end
+        start=start,
+        serial=serial,
+        duration=duration,
+        max_depth=float(max_depth),
+        samples=samples,
+        cns_end=cns_end,
+        heart_rates=heart_rates,
     )
 
 
@@ -369,6 +376,55 @@ class TestOneComputersTwoRecordsFoldIntoOne:
 
         recording = (await _recordings(async_db, first))[0]
         assert (await _profile(async_db, recording.id)).parser_key == MERGE_PARSER_KEY
+
+    @pytest.mark.asyncio
+    async def test_the_average_heart_rate_is_over_the_two_halves_stored_readings(
+        self, volume: Any, merging: None, async_db: AsyncSession, db: Session, diver: User
+    ) -> None:
+        """A merge folds two stored profiles, each already capped, and nothing re-reads the
+        files - so its figure is the mean of what the halves kept, which on the second half's
+        2 900 lopsided readings is not the mean of the readings themselves."""
+        readings = [150 if index % 100 == 0 else 60 for index in range(2_900)]
+        first = _dive_at(db, diver, datetime(2026, 9, 8, 12, 17, 38, tzinfo=UTC), number=214)
+        second = _dive_at(db, diver, datetime(2026, 9, 8, 12, 21, 38, tzinfo=UTC), number=215)
+        halves = (
+            (first, FIRST_START, 180, ((5.5, 80), (95.5, 90)), "part-one.json"),
+            (
+                second,
+                SECOND_START,
+                2921,
+                tuple((index + 0.5, bpm) for index, bpm in enumerate(readings)),
+                "part-two.json",
+            ),
+        )
+        for dive, start, duration, heart_rates, filename in halves:
+            content = _export(
+                start=start,
+                duration=duration,
+                samples=_samples(duration // 10, depth_cm=1000),
+                heart_rates=heart_rates,
+            )
+            await _attach(async_db, diver, dive, content, filename=filename)
+        kept = [
+            value
+            for dive in (first, second)
+            for value in (await _profile(async_db, (await _recordings(async_db, dive))[0].id)).data["heart_rate"]["v"]
+        ]
+        assert len(kept) < 2 + len(readings)
+
+        await _merge(async_db, diver, first, second)
+
+        recording = (await _recordings(async_db, first))[0]
+        summary = (
+            await async_db.execute(
+                select(DiveProfile.max_heart_rate_bpm, DiveProfile.avg_heart_rate_bpm).where(
+                    DiveProfile.recording_id == recording.id
+                )
+            )
+        ).one()
+        assert summary.max_heart_rate_bpm == 150
+        assert summary.avg_heart_rate_bpm == round(sum(kept) / len(kept))
+        assert summary.avg_heart_rate_bpm != round(sum([80, 90, *readings]) / (2 + len(readings)))
 
     @pytest.mark.asyncio
     async def test_both_halves_files_stay_downloadable_on_the_one_recording(

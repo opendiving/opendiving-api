@@ -57,7 +57,7 @@ from src.app.services.dive_profiles import (
     to_read_schema,
     to_recording_read_schema,
 )
-from src.app.services.recording_shape import in_water_of
+from src.app.services.recording_shape import CHANNEL_FLOORS, in_water_of
 
 FIXTURES = Path(__file__).parent / "fixtures" / "dive_files"
 
@@ -850,6 +850,82 @@ class TestTheDecompressionChannels:
 
         assert profile.gradient_factor.v == [12_575]
         assert summary_extremes(profile)["max_gradient_factor_pct"] == 12_575
+
+
+class TestTheHeartRate:
+    """The one measured channel with a floor, and the one figure taken before the cap."""
+
+    # A resting 60 with a 150 every hundredth reading, past the cap: the cap keeps each
+    # bucket's extremes, so a mean over what it keeps lands well above the dive's.
+    READINGS = [150 if second % 100 == 0 else 60 for second in range(9_000)]
+
+    def _long(self) -> ProfileSeries:
+        return _series([float(second) for second in range(len(self.READINGS))], self.READINGS)
+
+    def test_the_average_is_over_every_reading_the_cap_was_handed(self):
+        profile = downsample(NormalizedProfile(heart_rate=self._long()))
+
+        assert profile.heart_rate is not None and len(profile.heart_rate.v) <= MAX_POINTS_PER_CHANNEL
+        assert profile.average_heart_rate == round(sum(self.READINGS) / len(self.READINGS)) == 61
+        assert round(sum(profile.heart_rate.v) / len(profile.heart_rate.v)) != profile.average_heart_rate
+        assert summary_extremes(profile)["max_heart_rate_bpm"] == 150
+
+    def test_the_upload_door_takes_it_before_the_cap_too(self):
+        """`attribute_and_cap` reaches `downsample` rather than taking a figure of its own."""
+        profile = attribute_and_cap(NormalizedProfile(depth=_series([0], [3000]), heart_rate=self._long()))
+
+        assert profile is not None and profile.average_heart_rate == 61
+
+    def test_a_profile_with_no_heart_rate_has_no_average(self):
+        assert downsample(NormalizedProfile(depth=_series([0], [3000]))).average_heart_rate is None
+
+    def test_a_merges_average_is_over_the_two_halves_stored_readings(self):
+        """What a merge folds is two stored profiles, each already capped, so the figure is a
+        mean of what they kept - stated here rather than disguised as the full series'."""
+        half = profile_from_data(downsample(NormalizedProfile(heart_rate=self._long())).to_data())
+        joined = join_profiles(half, shift_profile(half, len(self.READINGS) * MILLISECONDS_PER_SECOND))
+        assert joined is not None and joined.heart_rate is not None
+
+        merged = attribute_and_cap(joined)
+
+        assert merged is not None
+        assert merged.average_heart_rate == round(sum(joined.heart_rate.v) / len(joined.heart_rate.v))
+
+    def test_the_average_is_not_a_summary_extreme(self):
+        """Both writers share `summary_extremes`, and the relabel never passes the cap - so a
+        figure derived there would be rewritten from the stored points on every relabel."""
+        assert "avg_heart_rate_bpm" not in summary_extremes(downsample(NormalizedProfile(heart_rate=self._long())))
+
+    def test_it_is_not_in_the_payload_and_reads_back_as_none(self):
+        """A summary column, like the attribution: `data` holds the readings alone."""
+        profile = downsample(NormalizedProfile(heart_rate=_series([0, 1], [72, 80])))
+
+        assert profile.average_heart_rate == 76
+        assert set(profile.to_data()) == {"heart_rate"}
+        assert profile_from_data(profile.to_data()) == replace(profile, average_heart_rate=None)
+
+    def test_channels_lists_it_after_the_pressures_and_before_the_computed_ones(self):
+        profile = NormalizedProfile(
+            depth=_series([0], [3000]),
+            pressure=[ProfilePressureSeries(gas_number=1, t=[0], v=[2052])],
+            heart_rate=_series([0], [72]),
+            ndl=_series([0], [5940]),
+        )
+
+        assert profile.channels == ["depth", "pressure", "heart_rate", "ndl"]
+
+    def test_the_floors_are_the_formats(self):
+        """Off the schema: zero for the six the computer computed, 1 for the heart rate, and
+        none for the three whose signed reading is real."""
+        assert CHANNEL_FLOORS == {
+            "heart_rate": 1,
+            "ndl": 0,
+            "tts": 0,
+            "ppo2": 0,
+            "cns": 0,
+            "gradient_factor": 0,
+            "surface_gradient_factor": 0,
+        }
 
 
 class TestToReadSchema:

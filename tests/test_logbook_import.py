@@ -89,6 +89,7 @@ from src.app.services.dive_files import store_recording_file
 from src.app.services.dive_profiles import (
     IMPORT_PARSER_KEY,
     MAX_LABEL_CHARS,
+    MAX_POINTS_PER_CHANNEL,
     MERGE_PARSER_KEY,
     READER_VERSION,
     backfill_profiles,
@@ -1293,6 +1294,7 @@ class TestTheDecompressionMembersRoundTrip:
 
     PROFILE = {
         "depth": {"t": [0, 10, 20], "v": [100, 5200, 300]},
+        "heart_rate": {"t": [0, 10, 20], "v": [72, 101, 95]},
         "ndl": {"t": [0, 10, 20], "v": [5940, 0, 1260]},
         "tts": {"t": [10], "v": [268]},
         "ppo2": {"t": [0, 20], "v": [34, 96]},
@@ -1387,6 +1389,8 @@ class TestTheDecompressionMembersRoundTrip:
         assert profile.max_cns_pct10 == 800
         assert profile.max_gradient_factor_pct == 398
         assert profile.max_surface_gradient_factor_pct == 116
+        # DiveJSON carries no average, so the figure is the arriving readings' own: 268 / 3.
+        assert (profile.max_heart_rate_bpm, profile.avg_heart_rate_bpm) == (101, 89)
 
     @pytest.mark.asyncio
     async def test_the_recordings_mode_and_model_arrive_whole(self, db: Session, async_db: AsyncSession) -> None:
@@ -1524,6 +1528,69 @@ class TestTheDecompressionMembersRoundTrip:
         profile = await self._profile(async_db, imported.id)
         assert "ndl" not in profile.data
         assert profile.data["depth"]["v"] == [100, 5200]
+
+    @pytest.mark.asyncio
+    async def test_a_zero_heart_rate_drops_the_channel_and_keeps_the_dive(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The format floors the heart rate at 1, a zero being a sensor's absent-marker, and the
+        import validates with its own models rather than the schema - so the floor is held here,
+        and the note says zero rather than negative."""
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["dives"][0]["recordings"] = [
+            {
+                "profile": {
+                    "duration": 20,
+                    "depth": {"times": [0, 10], "values": [100, 5200]},
+                    "heart_rate": {"times": [0, 10], "values": [72, 0]},
+                }
+            }
+        ]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert any(
+            note.code is ImportNoteCode.VALUE_DROPPED and "heart rate readings included a zero" in note.message
+            for note in plan.notes
+        )
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        profile = await self._profile(async_db, imported.id)
+        assert "heart_rate" not in profile.data
+        assert (profile.max_heart_rate_bpm, profile.avg_heart_rate_bpm) == (None, None)
+        assert profile.data["depth"]["v"] == [100, 5200]
+
+    @pytest.mark.asyncio
+    async def test_the_average_heart_rate_is_over_every_reading_the_document_carried(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Past the cap, which keeps each bucket's extremes: a mean over the stored points would
+        be a mean of peaks and troughs. A resting 60 with a 150 every hundredth reading puts the
+        two a long way apart."""
+        _, document = seeded
+        readings = [150 if second % 100 == 0 else 60 for second in range(3_000)]
+        parsed = json.loads(document)
+        parsed["dives"][0]["recordings"] = [
+            {
+                "profile": {
+                    "duration": 3_000_000,
+                    "depth": {"times": [0, 3_000_000], "values": [100, 5200]},
+                    "heart_rate": {"times": [second * 1000 for second in range(3_000)], "values": readings},
+                }
+            }
+        ]
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        imported = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().one()
+        profile = await self._profile(async_db, imported.id)
+        stored = profile.data["heart_rate"]["v"]
+        assert len(stored) <= MAX_POINTS_PER_CHANNEL
+        assert profile.avg_heart_rate_bpm == round(sum(readings) / len(readings)) == 61
+        assert round(sum(stored) / len(stored)) != profile.avg_heart_rate_bpm
+        assert profile.max_heart_rate_bpm == 150
 
     @pytest.mark.asyncio
     async def test_a_negative_depth_is_kept_because_depth_is_not_one_of_the_six(
@@ -5298,6 +5365,8 @@ class TestTheIntegerColumnCensus:
         ("dive_profile", "max_cns_pct10"): "an extreme of a channel `shape_series` bounds",
         ("dive_profile", "max_gradient_factor_pct"): "an extreme of a channel `shape_series` bounds",
         ("dive_profile", "max_surface_gradient_factor_pct"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "max_heart_rate_bpm"): "an extreme of a channel `shape_series` bounds",
+        ("dive_profile", "avg_heart_rate_bpm"): "a mean of a channel `shape_series` bounds",
         ("gear_service_schedule", "id"): "the sequence's",
         ("gear_service_schedule", "user_id"): "the caller's",
         ("gear_service_schedule", "gear_item_id"): "resolved from a row this import wrote",

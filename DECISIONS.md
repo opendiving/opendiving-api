@@ -6634,11 +6634,23 @@ figures and follow *"A second file of one recording fills, and never overwrites"
 A zero ceiling is dropped because for that quantity zero means "no ceiling". The six deco channels
 take the opposite rule. A zero is a reading: NDL 0 is the moment a dive became a decompression dive.
 A negative is the absent-marker devices write (`NoDecTime: -1`, `gf99: -100`), and the format floors
-all six; `shape_series` drops a decompression channel that still carries one. A value at a display
-cap (`NoDecTime: 6000`, `<nodecotime>5940</nodecotime>`) is a reading meaning "at least this". A
-zero that means "no figure" in one format is that format's reader's call. Nothing is clamped above;
-`gf99` reaches five digits on real ascents and Suunto publishes no definition, so a cap would be a
+all six at zero. `heart_rate` is floored at 1 by the format itself, no living diver reading 0 beats,
+so there a zero is the absent-marker. `shape_series` drops a channel carrying a value below its
+floor, read off the schema into `CHANNEL_FLOORS`. A value at a display cap (`NoDecTime: 6000`) is a
+reading meaning "at least this". Any other zero that means "no figure" is that format's reader's
+call. Nothing is clamped above; `gf99` reaches five digits on real ascents, so a cap would be a
 guess.
+
+## The average heart rate is the cap's, taken from the series it is handed
+
+`avg_heart_rate_bpm` is the mean of the channel as `downsample` receives it, before the cap keeps
+each bucket's extremes; a mean over the stored points would be a mean of peaks and troughs. Every
+door that stores a profile reaches `downsample`, so an upload's and an import's figure is over every
+reading the source carried. A merge joins two stored, already-capped halves and caps again, so its
+figure is a mean of bucket extremes - within half a beat on the dive it was measured on. Rejected: a
+stored reading count to weight two halves' figures, for that half beat. The column is written in
+`store_profile` alone, never `summary_extremes`: a relabel rewrites samples without passing the cap,
+moves no reading, and leaves the figure.
 
 ## Deco channels: Which summary extreme, per quantity
 
@@ -6831,13 +6843,13 @@ status code as well as its `info` block.
 `envelope.write_divejson` writes every top-level member on its own line with a space after each
 colon, and every record of every collection on a line of its own; `_encode_collection` joins
 per-record encodings with newlines, matching the streamed `dives`. A single-line `sites` runs to
-hundreds of kilobytes. Records stay compact internally: a profile is thousands of samples across up
-to ten channels, and indenting one multiplies the payload for no reader. Collections are small and
-held whole; `dives` is streamed a dive at a time. `format` and `version` remain the first two
-members (spec §3, §4), which `tests/test_export_endpoints.py` asserts against the raw bytes.
-`TestTheLayout` in `tests/test_export_json.py` reads the byte stream, since a parser cannot see
-layout: one test asserts each top-level member opens a line, one walks every collection off the
-parsed document, not a written-out list, and checks each record starts a line.
+hundreds of kilobytes. Records stay compact internally: a profile is thousands of samples across its
+channels, and indenting one multiplies the payload for no reader. Collections are small and held
+whole; `dives` is streamed a dive at a time. `format` and `version` remain the first two members
+(spec §3, §4), which `tests/test_export_endpoints.py` asserts against the raw bytes. `TestTheLayout`
+in `tests/test_export_json.py` reads the byte stream, since a parser cannot see layout: one test
+asserts each top-level member opens a line, one walks every collection off the parsed document, not
+a written-out list, and checks each record starts a line.
 
 ## A request never names its owner; the session does
 

@@ -1358,7 +1358,7 @@ class TestWhatUddfCannotHold:
 
         3.2.2 has no time-to-surface element and no surface gradient factor, so unlike the
         ceiling and the deco model there is no tag to look for and prove absent. What can
-        be pinned is that the waypoints carry *exactly* the eleven children this writer
+        be pinned is that the waypoints carry *exactly* the children this writer
         chose - so a later hand that decides `tts` is close enough to `<remainingbottom
         time>`, or that the surface figure may as well ride in `<gradientfactor>` beside
         the leading tissue's, breaks this rather than shipping a number the file did not
@@ -1375,6 +1375,7 @@ class TestWhatUddfCannotHold:
             "calculatedpo2",
             "depth",
             "divetime",
+            "pulserate",
             "setmarker",
             "switchmix",
             "tankpressure",
@@ -1552,6 +1553,7 @@ class TestDecoReadouts:
             "calculatedpo2",
             "depth",
             "divetime",
+            "pulserate",
             "switchmix",
             "tankpressure",
             "temperature",
@@ -1579,6 +1581,18 @@ class TestDecoReadouts:
         schema.validate(document)
         waypoints = self._waypoints(document)
         assert [_text(w, f"{UDDF}nodecotime") for w in waypoints] == ["900", None, None, "0"]
+
+
+class TestThePulseRate:
+    """`heart_rate` goes out as `<pulserate>`, which 3.2.2 defines in beats per second."""
+
+    @pytest.mark.asyncio
+    async def test_the_heart_rate_is_beats_per_second_where_we_store_beats_per_minute(self, schema, monkeypatch):
+        """72, 101 and 95 bpm divided by 60, and nothing at the 30 s dropout."""
+        document = await _render(full_bundle(), {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}, monkeypatch)
+        schema.validate(document)
+        waypoints = _dive(_tree(document), 1).findall(f"{UDDF}samples/{UDDF}waypoint")
+        assert [_text(w, f"{UDDF}pulserate") for w in waypoints] == ["1.2", None, "1.683333", "1.583333"]
 
 
 class TestDiveMode:

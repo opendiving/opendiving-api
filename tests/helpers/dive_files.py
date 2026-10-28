@@ -25,6 +25,7 @@ def suunto_json(
     cns_end: float | None = None,
     gases: Sequence[dict[str, Any]] = (),
     samples: Sequence[tuple[float, float] | tuple[float, float, int, int]] = (),
+    heart_rates: Sequence[tuple[float, int]] = (),
     activity: int = DIVE_ACTIVITY,
 ) -> bytes:
     """A minimal Suunto app JSON export of one dive.
@@ -34,7 +35,8 @@ def suunto_json(
     or `(seconds, depth, gas number, pressure in Pascal)` for a sample carrying a
     transmitter's reading - which, with no `gases`, is the Ocean's shape: the reader lists a
     cylinder per transmitting slot and labels each by its position from 0. `cns_end` is a
-    percentage, written as the fraction the export states.
+    percentage, written as the fraction the export states. `heart_rates` are `(seconds, beats
+    per minute)`, written as the Ocean writes them: sample objects of their own, in hertz.
     """
     origin = datetime.fromisoformat(start)
     diving: dict[str, Any] = {}
@@ -55,7 +57,17 @@ def suunto_json(
         {
             "DeviceLog": {
                 "Header": header,
-                "Samples": [_sample(origin, sample) for sample in samples],
+                # In time order, as the export interleaves them.
+                "Samples": [
+                    entry
+                    for _, entry in sorted(
+                        [
+                            *((sample[0], _sample(origin, sample)) for sample in samples),
+                            *((second, _heart_rate(origin, second, bpm)) for second, bpm in heart_rates),
+                        ],
+                        key=lambda pair: pair[0],
+                    )
+                ],
             }
         }
     ).encode()
@@ -69,3 +81,10 @@ def _sample(origin: datetime, sample: tuple[float, float] | tuple[float, float, 
     if len(sample) == 4:
         entry["Cylinders"] = [{"GasNumber": sample[2], "Pressure": sample[3]}]
     return entry
+
+
+def _heart_rate(origin: datetime, second: float, bpm: int) -> dict[str, Any]:
+    return {
+        "HR": round(bpm / 60, 2),
+        "TimeISO8601": (origin + timedelta(seconds=second)).isoformat(timespec="milliseconds"),
+    }
