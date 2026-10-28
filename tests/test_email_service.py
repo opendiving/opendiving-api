@@ -13,7 +13,7 @@ import pytest
 from pydantic import SecretStr
 
 from src.app.core.config import EnvironmentOption, SMTPTLSMode
-from src.app.core.security import API_KEY_SHOWN_LENGTH, generate_api_key
+from src.app.core.security import KEY_SHOWN_LENGTH, mint_key
 from src.app.services.email_service import (
     SMTP_TIMEOUT_SECONDS,
     EmailDeliveryError,
@@ -324,13 +324,13 @@ class TestSendApiKeyCreatedEmail:
     async def test_the_body_never_carries_the_secret(self):
         """It is handed only the prefix, and the prefix is all it may print: the secret was
         shown once to whoever made the key."""
-        secret, _ = generate_api_key()
+        secret, _ = mint_key()
 
-        body = await self._body(prefix=secret[:API_KEY_SHOWN_LENGTH])
+        body = await self._body(prefix=secret[:KEY_SHOWN_LENGTH])
 
-        assert secret[:API_KEY_SHOWN_LENGTH] in body
+        assert secret[:KEY_SHOWN_LENGTH] in body
         assert secret not in body
-        assert secret[API_KEY_SHOWN_LENGTH:] not in body
+        assert secret[KEY_SHOWN_LENGTH:] not in body
 
 
 class TestSendApiKeyRevokedEmail:

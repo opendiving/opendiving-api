@@ -34,7 +34,7 @@ from src.app.api.dependencies import get_current_superuser, get_current_user, re
 from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.core.exceptions.http_exceptions import ForbiddenException, UnauthorizedException
-from src.app.core.security import API_KEY_PREFIX, API_KEY_SHOWN_LENGTH, generate_api_key
+from src.app.core.security import KEY_PREFIX, KEY_SHOWN_LENGTH, mint_key
 from src.app.core.setup import create_application
 from src.app.core.utils.request_context import RequestContext
 from src.app.crud.crud_api_keys import API_KEY_LAST_USED_GRANULARITY, LiveApiKey
@@ -139,7 +139,7 @@ class TestWhichRoutesRefuseAKey:
     @pytest.mark.asyncio
     async def test_the_refusal_decides_on_the_prefix(self) -> None:
         with pytest.raises(ForbiddenException) as refused:
-            await refuse_api_keys(f"{API_KEY_PREFIX}anything")
+            await refuse_api_keys(f"{KEY_PREFIX}anything")
 
         assert refused.value.detail == NOT_WITH_A_KEY
         await refuse_api_keys("eyJhbGciOiJIUzI1NiJ9.e30.signature")
@@ -161,7 +161,7 @@ class TestTheBranch:
         ):
             live.return_value = TestTheBranch._live(scope)
             read.return_value = account or {"id": 7, "is_superuser": False}
-            return await get_current_user(_request(method), f"{API_KEY_PREFIX}secret", Mock())
+            return await get_current_user(_request(method), f"{KEY_PREFIX}secret", Mock())
 
     @pytest.mark.asyncio
     async def test_a_key_never_reaches_the_jwt_path(self) -> None:
@@ -172,7 +172,7 @@ class TestTheBranch:
             patch("src.app.api.dependencies.live_api_key", new_callable=AsyncMock, return_value=None),
             pytest.raises(UnauthorizedException) as refused,
         ):
-            await get_current_user(_request(), f"{API_KEY_PREFIX}unknown", Mock())
+            await get_current_user(_request(), f"{KEY_PREFIX}unknown", Mock())
 
         verify.assert_not_called()
         assert refused.value.detail == NOT_AUTHENTICATED["detail"]
@@ -236,17 +236,17 @@ class TestTheBranch:
             patch("src.app.api.dependencies.read_account", new_callable=AsyncMock, return_value=None),
             pytest.raises(UnauthorizedException),
         ):
-            await get_current_user(_request(), f"{API_KEY_PREFIX}secret", Mock())
+            await get_current_user(_request(), f"{KEY_PREFIX}secret", Mock())
 
 
 class TestTheSecret:
     def test_it_is_the_prefix_and_256_random_bits_and_stored_as_its_sha256(self) -> None:
-        secret, token_hash = generate_api_key()
+        secret, token_hash = mint_key()
 
-        assert secret.startswith(API_KEY_PREFIX)
+        assert secret.startswith(KEY_PREFIX)
         assert len(secret) == 47
         assert token_hash == hashlib.sha256(secret.encode()).hexdigest()
-        assert generate_api_key()[0] != secret
+        assert mint_key()[0] != secret
 
     @pytest.mark.parametrize(
         ("lifetime", "days"),
@@ -265,11 +265,11 @@ class TestTheSecret:
 
 
 def _key_row(diver: User, *, scope: str = "write", expires_at: datetime | None = None) -> tuple[str, ApiKey]:
-    secret, token_hash = generate_api_key()
+    secret, token_hash = mint_key()
     row = ApiKey(
         user_id=diver.id,
         name="laptop",
-        prefix=secret[:API_KEY_SHOWN_LENGTH],
+        prefix=secret[:KEY_SHOWN_LENGTH],
         token_hash=token_hash,
         scope=scope,
         expires_at=expires_at,
@@ -325,7 +325,7 @@ class TestAKeyAgainstTheDatabase:
     @pytest.mark.asyncio
     async def test_an_unknown_key_is_refused(self, async_db: AsyncSession) -> None:
         with pytest.raises(UnauthorizedException) as refused:
-            await get_current_user(_request(), generate_api_key()[0], async_db)
+            await get_current_user(_request(), mint_key()[0], async_db)
 
         assert refused.value.detail == NOT_AUTHENTICATED["detail"]
 
@@ -483,8 +483,8 @@ class TestCreatingAKey:
         body = response.json()
         assert set(body) == {"uuid", "name", "prefix", "scope", "created_at", "last_used_at", "expires_at", "secret"}
         secret = body["secret"]
-        assert secret.startswith(API_KEY_PREFIX) and len(secret) == 47
-        assert body["prefix"] == secret[:API_KEY_SHOWN_LENGTH]
+        assert secret.startswith(KEY_PREFIX) and len(secret) == 47
+        assert body["prefix"] == secret[:KEY_SHOWN_LENGTH]
         assert body["scope"] == "read"
         assert body["last_used_at"] is None
         created = datetime.fromisoformat(body["created_at"])
@@ -738,7 +738,7 @@ class TestAKeyOnTheWire:
 
         await http.get("/api/v1/user", headers=_bearer(secret))
         await http.post("/api/v1/dive-site", json={"name": "Refused"}, headers=_bearer(secret))
-        await http.get("/api/v1/user", headers=_bearer(f"{API_KEY_PREFIX}unknown"))
+        await http.get("/api/v1/user", headers=_bearer(f"{KEY_PREFIX}unknown"))
 
         written = db.execute(select(AuthAuditEvent).where(AuthAuditEvent.user_id == diver.id)).scalars().all()
         assert written == []

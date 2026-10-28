@@ -24,7 +24,7 @@ class ApiKey(Base, PublicUUIDMixin):
     # A label the diver chose with the secret, bounded like a passkey's, and not unique: two
     # tools may be "laptop".
     name: Mapped[str] = mapped_column(String(50))
-    # `core.security.API_KEY_SHOWN_LENGTH` characters of the secret in clear - `odk_` and
+    # `core.security.KEY_SHOWN_LENGTH` characters of the secret in clear - `odk_` and
     # eight of the random part - so a list row, an email and a log line can name a key
     # without holding it.
     prefix: Mapped[str] = mapped_column(String(12))
