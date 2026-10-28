@@ -13,7 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import current_session_uuid, get_current_user
+from ...api.dependencies import current_session_uuid, get_current_user, refuse_api_keys
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
@@ -512,7 +512,9 @@ async def erase_user_portrait(
     return {"message": "Portrait removed"}
 
 
-@router.post("/user/email-change/request", response_model=EmailChangeRequestResponse)
+@router.post(
+    "/user/email-change/request", response_model=EmailChangeRequestResponse, dependencies=[Depends(refuse_api_keys)]
+)
 async def request_email_change(
     request: Request,
     body: EmailChangeRequest,
@@ -1088,7 +1090,7 @@ async def read_species_life_list_detail(
     return await _cached_species_life_list_detail(request, user_id=current_user["id"], db=db, species_uuid=uuid)
 
 
-@router.delete("/user", response_model=AccountDeletionResponse)
+@router.delete("/user", response_model=AccountDeletionResponse, dependencies=[Depends(refuse_api_keys)])
 async def erase_user(
     request: Request,
     response: Response,

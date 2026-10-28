@@ -28,7 +28,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from src.app.api import router
-from src.app.api.dependencies import current_session_uuid, fetch_owned_or_raise, get_current_user
+from src.app.api.dependencies import current_session_uuid, fetch_owned_or_raise, get_current_user, refuse_api_keys
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.setup import create_application
@@ -444,6 +444,9 @@ FETCH_OWNED_ROUTES = [
         for method, extra in _CRUD_METHODS
         if method != "GET"
     ),
+    # DELETE alone: an API key has no single-item GET and no rename - `GET /user/api-keys`
+    # returns the caller's whole (capped) list, and a key is revoked rather than edited.
+    OwnedRoute("DELETE", "/api/v1/user/api-key/{uuid}", "src.app.api.v1.api_keys:crud_api_keys", "API key not found"),
     # DELETE alone: a session has no single-item GET or PATCH - `GET /user/sessions` returns
     # the caller's whole live list and there is nothing about a row a diver may edit.
     OwnedRoute(
@@ -564,12 +567,16 @@ def signed_in_client(owned_app: Any) -> Generator[TestClient]:
     the ownership check it is here to exercise ever runs, and the route reads as broken
     when the fixture is what is incomplete.
 
+    `refuse_api_keys` is overridden for the same reason: the credential routes declare it,
+    and it reads the bearer header too.
+
     A uuid nothing else uses, so the route's current-session 409 can never fire here: these
     cases are about somebody *else's* row, and a collision would swap the 404 they assert
     for a conflict.
     """
     owned_app.dependency_overrides[get_current_user] = lambda: OWNER
     owned_app.dependency_overrides[current_session_uuid] = lambda: CALLERS_SESSION
+    owned_app.dependency_overrides[refuse_api_keys] = lambda: None
     try:
         with TestClient(owned_app) as test_client:
             yield test_client

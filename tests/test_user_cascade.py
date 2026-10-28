@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.core.db.database import Base
+from src.app.models.api_key import ApiKey
 from src.app.models.auth_audit_event import AuthAuditEvent
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
@@ -110,11 +111,11 @@ class TestDeletingAUserTakesEverythingWithIt:
 
     Most of them are the ten `48781087b2b3` had to redeclare. The rest are tables added
     since - `course`, then `user_session`, `auth_audit_event`, `contact`, `checkin_link`,
-    `person` and `invite_link` - each of which declared `ON DELETE CASCADE` from the outset,
-    which is exactly the case the metadata sweep above cannot distinguish from a table that got
-    it right by accident, so they are seeded here too. (No count in this sentence on purpose:
-    the previous one said "eleven" and was one model away from being wrong, which
-    `DECISIONS.md` §"The counts in the prose go stale too" is about.)
+    `person`, `invite_link` and `api_key` - each of which declared `ON DELETE CASCADE` from
+    the outset, which is exactly the case the metadata sweep above cannot distinguish from a
+    table that got it right by accident, so they are seeded here too. (No count in this
+    sentence on purpose: the previous one said "eleven" and was one model away from being
+    wrong, which `DECISIONS.md` §"The counts in the prose go stale too" is about.)
 
     Second-order coverage is not decoration. `certification_file`, `dive_file`,
     `dive_dive_site`, `gear_set_item`, `trip_part` and the three `*_person` tables are the
@@ -176,6 +177,14 @@ class TestDeletingAUserTakesEverythingWithIt:
                     last_dive_on=None,
                 ),
                 InviteLink(user_id=diver.id, token=uuid7().hex),
+                ApiKey(
+                    user_id=diver.id,
+                    name="laptop",
+                    prefix="odk_abcdefgh",
+                    token_hash=uuid7().hex * 2,
+                    scope="read",
+                    expires_at=None,
+                ),
                 # The *account-tied* audit row, which is the one the cascade is responsible
                 # for. Its user-less sibling carries no FK to follow and is erased by the
                 # purge's by-email arm instead - pinned in
@@ -230,6 +239,7 @@ class TestDeletingAUserTakesEverythingWithIt:
 
         assert db.get(User, user_id) is None
         for model in (
+            ApiKey,
             AuthAuditEvent,
             Certification,
             CheckinLink,

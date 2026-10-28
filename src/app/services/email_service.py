@@ -371,6 +371,59 @@ async def send_passkey_removed_email(email: str, passkey_name: str) -> None:
     await anyio.to_thread.run_sync(_send, message)
 
 
+async def send_api_key_created_email(
+    email: str, key_name: str, prefix: str, scope: str, expires_at: datetime | None
+) -> None:
+    """Best-effort security notice that an API key was made on an account, on the
+    `send_passkey_added_email` model: a key acts as the account from wherever it is pasted,
+    and one made by a stolen browser session is the event this exists for.
+
+    Names the key by its name and its prefix, never the secret, which is shown once to whoever
+    made it and is not kept - so a missing `SMTP_HOST` logs this everywhere, as the passkey
+    notices do.
+    """
+    access = "read and change" if scope == "write" else "read"
+    until = f"until {expires_at:%-d %B %Y}" if expires_at is not None else "until it is revoked"
+    if not settings.SMTP_HOST:
+        logger.warning(
+            "SMTP_HOST not configured; API-key-created notice for %s: %s (%s..., %s)", email, key_name, prefix, scope
+        )
+        return
+
+    message = _build_message(
+        to=email,
+        subject="An API key was created on your OpenDiving account",
+        html_body=(
+            f"<p>An API key named <strong>{html.escape(key_name)}</strong>, beginning "
+            f"<code>{html.escape(prefix)}</code>, was just created on your OpenDiving account. Whatever "
+            f"holds it can {access} your logbook {until}.</p>"
+            f'<p>If this wasn\'t you, <a href="{settings.FRONTEND_URL}/settings/authentication">revoke it</a> '
+            "and contact support.</p>"
+        ),
+    )
+
+    await anyio.to_thread.run_sync(_send, message)
+
+
+async def send_api_key_revoked_email(email: str, key_name: str) -> None:
+    """The other half of `send_api_key_created_email`, as the passkey pair has one."""
+    if not settings.SMTP_HOST:
+        logger.warning("SMTP_HOST not configured; API-key-revoked notice for %s: %s", email, key_name)
+        return
+
+    message = _build_message(
+        to=email,
+        subject="An API key was revoked on your OpenDiving account",
+        html_body=(
+            f"<p>The API key named <strong>{html.escape(key_name)}</strong> was just revoked on your "
+            "OpenDiving account, and no longer works.</p>"
+            "<p>If this wasn't you, please contact support.</p>"
+        ),
+    )
+
+    await anyio.to_thread.run_sync(_send, message)
+
+
 async def send_account_deletion_email(email: str, purge_after: datetime) -> None:
     """Confirms a deletion request and names the date the account stops being recoverable.
 

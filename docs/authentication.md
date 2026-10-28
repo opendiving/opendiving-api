@@ -8,7 +8,8 @@ sign up flow. See `src/app/api/v1/auth.py` for the endpoints (`/auth/email/reque
 `/auth/email/verify`, `/auth/email/verify-code`, `/auth/google`, `/auth/passkey/options`,
 `/auth/passkey/verify`, `/auth/complete`, `/auth/restore`), `src/app/api/v1/passkeys.py` for
 managing the passkeys on an account, `src/app/api/v1/sessions.py` for listing and revoking the
-devices signed in to one, and `DECISIONS.md` for the full design rationale.
+devices signed in to one, `src/app/api/v1/api_keys.py` for the API keys a diver's own tools use, and
+`DECISIONS.md` for the full design rationale.
 
 The email path offers **two ways to finish, backed by one record**. `POST /auth/email/request`
 emails a magic link *and* a six-digit code, and either completes the sign-in - whichever is used
@@ -521,7 +522,8 @@ end:
   as for one that does not exist; **the caller's own session is a 409**, because ending your own
   session is what `POST /auth/logout` is - it also has to clear the cookie and blacklist the
   presented pair.
-- `DELETE /user/sessions` - sign every *other* device out, and report how many that was.
+- `DELETE /user/sessions` - sign every *other* device out, and report how many that was. API keys
+  are not sessions and keep working; each is revoked on its own (*API keys* below).
 
 Three things are worth knowing about what a revoke does.
 
@@ -558,19 +560,61 @@ for `"idle_timeout": "extended"`, which buys it a session that survives
 stolen device staying signed in that much longer, until the session is revoked from *Sessions*. Only
 that route takes the member; every other sign-in starts a `standard` session, and the web sends
 nothing. A client that loses a refresh reply should retry once with the same cookie within the
-grace, after a short pause, and the server answers with the pair it already minted.
+grace, after a short pause, and the server answers with the pair it already minted. A script or a
+sync job is better served by an API key (below), which needs no refresh at all.
 
 **Upgrading signs everyone out once.** Neither half of a pair minted before this feature carries a
 `sid`, and both halves are now refused for want of one - the access token on its next request, the
 refresh cookie on its next rotation. So the diver signs in again, once. There is no compatibility
 shim, and nothing else about the account is affected.
 
+### API keys
+
+A diver makes an API key in Settings for a tool of their own, and the tool sends it on the same
+header a browser sends its access token: `Authorization: Bearer odk_...`. Every route accepts one,
+because `get_current_user` branches on the `odk_` prefix before any JWT is decoded: the key path
+hashes the string, finds the `api_key` row by that SHA-256, and resolves it to the owner's account.
+The secret is `odk_` and 43 URL-safe characters (256 random bits), returned once - in the `201` of
+`POST /user/api-keys` - and never stored, logged, emailed or audited; the row keeps its hash and its
+first twelve characters, the `prefix` a list row and an email name it by.
+
+- `POST /user/api-keys` - `name`, `scope` (`read` | `write`) and `lifetime` (`30d` | `90d` | `1y` |
+  `never`); the server computes `expires_at`. 409 at `API_KEY_MAX_PER_USER` keys (expired ones
+  count), 429 past `API_KEY_CREATE_RATE_LIMIT_PER_USER` creations in the auth window.
+- `GET /user/api-keys` - every key on the account, oldest first, expired ones included, with
+  `last_used_at` stamped at most once per five minutes.
+- `DELETE /user/api-key/{uuid}` - a real delete; the key is refused from its very next request.
+
+What a key is refused:
+
+- **A `read` key may use `GET`, `HEAD` and `OPTIONS` and nothing else** - any other method is a 403
+  `"This API key is read-only."` before the route runs.
+- **No key may manage credentials, the sign-in address or the account's existence.** The routes
+  under `/user/api-key`, `/user/passkey`, `/user/session`, `/user/checkin-link`, `/user/invite-link`
+  and `/user/email-change`, and `DELETE /user`, answer a key with 403
+  `"This needs a signed-in browser or app, not an API key."` (`refuse_api_keys`), so a stolen key
+  cannot lock its owner out or mint itself a successor.
+- **A key's principal is never a superuser.** The account dict it resolves to carries `is_superuser`
+  false whatever the column says, so the operator's routes answer the superuser gate's own 403 and
+  `GET /user` reports `false`.
+
+An unknown, expired or revoked key, and one whose owner has asked for deletion, gets the same 401 as
+every other credential failure. During the deletion grace period every key is dark, a restore brings
+them back, and the purge deletes them with the account. A key is not a session: it does not appear
+among the signed-in devices, signing other devices out leaves it working, and its use is not account
+activity. It is not signed with `SECRET_KEY` either, so rotating that leaves keys working too.
+Creating and revoking one each send the account a security notice that no setting silences, and each
+writes one audit event (below); using one writes none.
+
+None of the app's own 401s carries `WWW-Authenticate: Bearer`, which RFC 6750 asks of a bearer
+resource server - only the missing-header 401 does, from `oauth2_scheme`.
+
 ### The auth audit trail
 
 Auth events are recorded in `auth_audit_event`: sign-ins with their provider, account creation and
-restore, provider links, passkeys added and removed, email changes, deletion requests, logouts,
-session revocations, and the two failures the app considers rare and meaningful - a replayed refresh
-token and a regressed passkey signature counter.
+restore, provider links, passkeys added and removed, API keys created and revoked, email changes,
+deletion requests, logouts, session revocations, and the two failures the app considers rare and
+meaningful - a replayed refresh token and a regressed passkey signature counter.
 
 A row carries when, where (the request's IP and `User-Agent`) and who - an account id where the
 request had already established one, and an email address for the genuinely pre-account events (an
@@ -631,6 +675,9 @@ SIGN_IN_CODE_ATTEMPTS_MAX=5
 # pure Postgres, keeps working.
 PASSKEY_CHALLENGE_TTL_SECONDS=600
 PASSKEY_MAX_CREDENTIALS_PER_USER=10
+
+# Optional - at most this many API keys per account, expired ones included.
+API_KEY_MAX_PER_USER=10
 
 # Optional - how long a session may sit unused. A browser gets the first; a session that asked
 # for `idle_timeout: extended` at sign-in (the iOS app) gets the second, which is also how long a

@@ -12,10 +12,11 @@ What is here is the store it rotates against, and the one thing the fake there c
 answer: that the lookup really does refuse a dead row.
 
 `TestARevokedSessionEndsItsAccessToken` is the third consumer of that same predicate, and
-the only place in the suite that drives `get_current_user` end to end with a token this app
-actually minted. Every other test overrides that dependency, which is exactly why the gap it
-covers could exist unnoticed: a revoked device went on being authenticated for up to
-`ACCESS_TOKEN_EXPIRE_MINUTES` and no test in the suite was positioned to see it.
+the place in the suite that drives `get_current_user` end to end with a session token this app
+actually minted - `tests/test_api_keys.py` does the same for API keys. Almost every other test
+overrides that dependency, which is exactly why the gap it covers could exist unnoticed: a
+revoked device went on being authenticated for up to `ACCESS_TOKEN_EXPIRE_MINUTES` and no test
+in the suite was positioned to see it.
 
 The Postgres-backed classes skip silently without a reachable database - on a developer's
 machine that means `POSTGRES_SERVER=localhost`, since `src/.env` points at the compose
@@ -575,7 +576,7 @@ class TestARevokedSessionEndsItsAccessToken:
         about anything: a check that refused everything would satisfy every case below."""
         access, _ = await self._sign_in(async_db, diver)
 
-        user = await get_current_user(access, async_db)
+        user = await get_current_user(fake_request(), access, async_db)
 
         assert user is not None
         assert user["id"] == diver.id
@@ -587,13 +588,13 @@ class TestARevokedSessionEndsItsAccessToken:
         """The next request, not the next refresh. The same token authenticates before the
         revoke and is refused after it, with nothing else changed in between."""
         access, session_uuid = await self._sign_in(async_db, diver)
-        assert await get_current_user(access, async_db) is not None
+        assert await get_current_user(fake_request(), access, async_db) is not None
 
         await revoke_session(async_db, session_uuid=session_uuid)
         await async_db.commit()
 
         with pytest.raises(UnauthorizedException):
-            await get_current_user(access, async_db)
+            await get_current_user(fake_request(), access, async_db)
 
     @pytest.mark.asyncio
     async def test_revoking_one_device_leaves_the_others_signed_in(self, async_db: AsyncSession, diver: User) -> None:
@@ -607,8 +608,8 @@ class TestARevokedSessionEndsItsAccessToken:
         await async_db.commit()
 
         with pytest.raises(UnauthorizedException):
-            await get_current_user(first, async_db)
-        assert await get_current_user(second, async_db) is not None
+            await get_current_user(fake_request(), first, async_db)
+        assert await get_current_user(fake_request(), second, async_db) is not None
 
     @pytest.mark.asyncio
     async def test_an_expired_session_is_refused_too(self, db: Session, async_db: AsyncSession, diver: User) -> None:
@@ -627,7 +628,7 @@ class TestARevokedSessionEndsItsAccessToken:
         access = await create_access_token(data={"sub": str(diver.uuid)}, session_uuid=row.uuid)
 
         with pytest.raises(UnauthorizedException):
-            await get_current_user(access, async_db)
+            await get_current_user(fake_request(), access, async_db)
 
     @pytest.mark.asyncio
     async def test_a_token_naming_no_session_is_refused(self, async_db: AsyncSession, diver: User) -> None:
@@ -637,7 +638,7 @@ class TestARevokedSessionEndsItsAccessToken:
         old = await create_access_token(data={"sub": str(diver.uuid)})
 
         with pytest.raises(UnauthorizedException):
-            await get_current_user(old, async_db)
+            await get_current_user(fake_request(), old, async_db)
 
     @pytest.mark.asyncio
     async def test_another_accounts_session_does_not_authenticate(
@@ -650,7 +651,7 @@ class TestARevokedSessionEndsItsAccessToken:
         forged = await create_access_token(data={"sub": str(diver.uuid)}, session_uuid=theirs)
 
         with pytest.raises(UnauthorizedException):
-            await get_current_user(forged, async_db)
+            await get_current_user(fake_request(), forged, async_db)
 
 
 class TestTheSidClaim:

@@ -18,6 +18,7 @@ import inspect
 import uuid as uuid_pkg
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -386,6 +387,73 @@ class TestWhichSitesWriteAnEvent:
         assert written["email"] == "friend@example.com"
         assert written["commit"] is False
 
+    @pytest.mark.asyncio
+    async def test_creating_an_api_key_writes_one_event_in_the_inserts_transaction(self, mock_db) -> None:
+        """Criterion (b): a key is a minted token. `commit=False`, so the event and the row
+        land or roll back as one, as a passkey's registration does."""
+        from src.app.api.v1.api_keys import write_api_key
+        from src.app.schemas.api_key import ApiKeyCreate, ApiKeyReadInternal
+
+        row = ApiKeyReadInternal(
+            id=1,
+            uuid=uuid7(),
+            user_id=7,
+            name="laptop",
+            prefix="odk_abcdefgh",
+            scope="read",
+            created_at=datetime.now(UTC),
+            last_used_at=None,
+            expires_at=None,
+        )
+        mock_db.commit = AsyncMock()
+
+        with (
+            patch("src.app.api.v1.api_keys.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.api_keys.count_api_keys", new_callable=AsyncMock, return_value=0),
+            patch("src.app.api.v1.api_keys.crud_api_keys") as crud,
+            patch("src.app.api.v1.api_keys.send_api_key_created_email", new_callable=AsyncMock),
+            patch("src.app.api.v1.api_keys.record_auth_event", new_callable=AsyncMock) as recorder,
+        ):
+            crud.create = AsyncMock(return_value=row)
+
+            await write_api_key(
+                _request(),
+                ApiKeyCreate(name="laptop", scope="read", lifetime="never"),
+                {"id": 7, "email": "d@example.com"},
+                mock_db,
+            )
+
+        assert self._events(recorder) == [AuthEventType.API_KEY_CREATED]
+        written = awaited_kwargs(recorder)
+        assert written["user_id"] == 7
+        assert written["provider"] == "api_key"
+        assert written["commit"] is False
+        mock_db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_revoking_an_api_key_writes_one_event_that_commits_the_delete(self, mock_db) -> None:
+        """Criterion (c), and the event's own commit is the delete's: the `DELETE` above it is
+        uncommitted Core, so a revoke is never left without its audit row."""
+        from src.app.api.v1.api_keys import erase_api_key
+
+        mock_db.execute = AsyncMock(return_value=Mock(rowcount=1))
+
+        with (
+            patch("src.app.api.v1.api_keys.fetch_owned_or_raise", new_callable=AsyncMock) as owned,
+            patch("src.app.api.v1.api_keys.send_api_key_revoked_email", new_callable=AsyncMock),
+            patch("src.app.api.v1.api_keys.record_auth_event", new_callable=AsyncMock) as recorder,
+        ):
+            # Not `Mock(name=...)`, which names the mock rather than setting the attribute.
+            owned.return_value = SimpleNamespace(name="laptop")
+
+            await erase_api_key(_request(), uuid7(), {"id": 7, "email": "d@example.com"}, mock_db)
+
+        assert self._events(recorder) == [AuthEventType.API_KEY_REVOKED]
+        written = awaited_kwargs(recorder)
+        assert written["user_id"] == 7
+        assert written["provider"] == "api_key"
+        assert written.get("commit", True) is True
+
 
 class TestTheNamedExclusions:
     """Each of these sites satisfies one of the write-based criteria and is deliberately
@@ -413,6 +481,28 @@ class TestTheNamedExclusions:
             )
 
         recorder.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_using_an_api_key_writes_nothing(self, mock_db) -> None:
+        """Every request a tool makes, on the refresh rotation's ground: recurring and
+        expected, and `api_key.last_used_at` already records the liveness a row here would
+        restate."""
+        from src.app.api.dependencies import get_current_user
+        from src.app.crud.crud_api_keys import LiveApiKey
+
+        request = Mock(method="GET")
+        with (
+            patch("src.app.api.dependencies.live_api_key", new_callable=AsyncMock) as live,
+            patch("src.app.api.dependencies.read_account", new_callable=AsyncMock, return_value={"id": 7}),
+            patch("src.app.api.dependencies.stamp_api_key_used", new_callable=AsyncMock),
+            patch("src.app.crud.crud_auth_audit_events.crud_auth_audit_events") as trail,
+        ):
+            live.return_value = LiveApiKey(id=1, scope="read", owner_uuid=uuid7(), last_used_at=None)
+            trail.create = AsyncMock()
+
+            await get_current_user(request, "odk_secret", mock_db)
+
+        trail.create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_an_ordinary_rotation_writes_nothing(self, mock_db) -> None:

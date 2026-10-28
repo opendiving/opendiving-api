@@ -5265,17 +5265,18 @@ exposes these.
 ## Auth audit: Membership is a rule, and the exclusions are half of it
 
 A site emits an event when it (a) commits a row to an auth table, (b) mints a session, onboarding,
-restore or invite-link token, (c) revokes a credential at its owner's request, (d) ends, revokes or
-detects the replay of a session at the caller's request, or (e) logs a `WARNING` for a failure the
-code deems rare and meaningful — its own criterion, and how the passkey counter regression
-qualifies.
+restore or invite-link token or an API key, (c) revokes a credential at its owner's request, (d)
+ends, revokes or detects the replay of a session at the caller's request, or (e) logs a `WARNING`
+for a failure the code deems rare and meaningful — its own criterion, and how the passkey counter
+regression qualifies.
 
 Excluded, following the *Nothing is logged* bullet of *"A refresh token is only as alive as its
-account"*: ordinary refresh rotations (`last_used_at` records liveness), session-cap evictions,
-passkey renames, superseding your own pending auth request, the provider row inside
-`POST /auth/complete`'s transaction, failed passkey ceremonies, the passkey-notice delivery failure,
-and the generic 401/400s across the auth surface. `tests/test_auth_audit.py` tests the exclusions as
-explicitly as the events; a positive-only suite passes against a version that logs every rotation.
+account"*: ordinary refresh rotations (`last_used_at` records liveness), API key use (the key's
+`last_used_at` records it), session-cap evictions, passkey renames, superseding your own pending
+auth request, the provider row inside `POST /auth/complete`'s transaction, failed passkey
+ceremonies, the passkey-notice delivery failure, and the generic 401/400s across the auth surface.
+`tests/test_auth_audit.py` tests the exclusions as explicitly as the events; a positive-only suite
+passes against a version that logs every rotation.
 
 ## Auth audit: `user_id` is set only where the request already holds the account
 
@@ -7313,3 +7314,14 @@ same transaction, deleting first so a second log of it waits on the row and find
 requests would let a lost reply leave the dive logged and the draft kept, or the draft gone and no
 dive. Under an `Idempotency-Key` the hold is read before the draft is looked up, so a retried log
 answers the dive it made rather than a 404 for the draft it deleted.
+
+## An API key is a hashed secret on the bearer header, resolved by prefix
+
+A key is `odk_` and 256 random bits, stored as its SHA-256 - a fast hash suits a secret nobody
+chose. `get_current_user` branches on the prefix before `verify_token`, so every route accepts a key
+and the route-auth guard keeps its meaning; the dict it returns carries `is_superuser` false, so the
+gate and every inline read of the flag see a diver. `refuse_api_keys` keeps keys off credential
+routes, the email change and `DELETE /user`. Rejected: a long-lived JWT, which needs a blacklist row
+until it expires and dies with `SECRET_KEY`; an `X-API-Key` header, which `ClientCacheMiddleware`
+would label publicly cacheable; a parallel dependency routes opt into, which the guard cannot see;
+and a `user_session` row, which the session cap evicts and the active-account counts read.

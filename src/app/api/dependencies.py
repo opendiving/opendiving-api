@@ -1,24 +1,34 @@
 import logging
 import uuid as uuid_pkg
+from datetime import UTC, datetime
 from typing import Annotated, Any, Protocol, cast
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db.database import async_get_db
 from ..core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnauthorizedException
-from ..core.security import TokenType, oauth2_scheme, token_session_id, verify_token
+from ..core.security import TokenType, is_api_key, oauth2_scheme, token_session_id, verify_token
+from ..crud.crud_api_keys import live_api_key, stamp_api_key_used
 from ..crud.crud_user_sessions import live_session_for
 from ..crud.crud_users import read_account
+from ..schemas.api_key import ApiKeyScope
 
 logger = logging.getLogger(__name__)
 
+# The methods a read-only API key may use. Complete because the API is REST-shaped: a safe
+# method never changes stored state, and the odd write-nothing `POST` needs a write key.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
 
 async def get_current_user(
-    token: Annotated[str, Depends(oauth2_scheme)], db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request,
+    token: Annotated[str, Depends(oauth2_scheme)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any] | None:
     """Resolve a Bearer access token to the account it was issued for, and refuse it unless
-    the session it names can still authenticate.
+    the session it names can still authenticate - or, for a bearer string that is an API
+    key, resolve the key instead (`_account_for_api_key`).
 
     The account lookup is the root of the entire ownership model - `fetch_owned_or_raise`
     below compares against the `id` it returns - so it has to name an account that cannot
@@ -48,7 +58,13 @@ async def get_current_user(
     Both refusals answer the same `UnauthorizedException` as every other failure here. There
     is nothing for a caller to tell apart, and no reason to hand one an oracle for whether a
     given `sid` names a real row.
+
+    The branch on the API-key prefix comes before `verify_token`, so a key never reaches the
+    blacklist or the JWT decoder, and every other string takes the path above unchanged.
     """
+    if is_api_key(token):
+        return await _account_for_api_key(request, token, db)
+
     token_data = await verify_token(token, TokenType.ACCESS, db)
     if token_data is None:
         raise UnauthorizedException("User not authenticated.")
@@ -62,6 +78,52 @@ async def get_current_user(
         raise UnauthorizedException("User not authenticated.")
 
     return user
+
+
+async def _account_for_api_key(request: Request, secret: str, db: AsyncSession) -> dict[str, Any]:
+    """The account an API key belongs to, as `read_account` returns it - with `is_superuser`
+    false whatever the account's column says.
+
+    **A key's principal is never a superuser**, and the dict is where that has to be true:
+    `get_current_superuser` reads the flag off it and so refuses a key on its own check, and
+    so does every inline read of the flag - the invitation quota's exemption today - since
+    none of them can tell a key's request from a browser's. An operator's leaked key is a
+    diver's key, and `GET /user` under one reports what that caller may do.
+
+    An unknown, expired or revoked key, and one whose owner has asked for deletion, answer the
+    same 401 as every other credential failure. A read key past a safe method is a 403
+    instead: the caller holds a real key and is told what it cannot do. That refusal is made
+    here rather than per route, so no route can forget it.
+    """
+    now = datetime.now(UTC)
+    key = await live_api_key(db, secret=secret, now=now)
+    if key is None:
+        raise UnauthorizedException("User not authenticated.")
+
+    if key.scope != ApiKeyScope.WRITE and request.method not in _SAFE_METHODS:
+        raise ForbiddenException("This API key is read-only.")
+
+    user = await read_account(db, uuid=key.owner_uuid)
+    if not user:
+        raise UnauthorizedException("User not authenticated.")
+
+    await stamp_api_key_used(db, key=key, now=now)
+    return {**user, "is_superuser": False}
+
+
+async def refuse_api_keys(token: Annotated[str, Depends(oauth2_scheme)]) -> None:
+    """Refuse an API key on a route that manages credentials, the sign-in address or the
+    account's existence, so a stolen key cannot lock its owner out or mint its own successor.
+
+    A sibling of `get_current_user` rather than a change to it, as `current_session_uuid` is,
+    declared on every route under the `/user/api-key`, `/user/passkey`, `/user/session`,
+    `/user/checkin-link`, `/user/invite-link` and `/user/email-change` prefixes that takes a
+    session, and on `DELETE /user` - `tests/test_api_keys.py` holds the set to that rule. It
+    decides on the prefix alone, without verifying the key: it can only ever refuse more, and
+    `get_current_user` still authenticates everything it lets through.
+    """
+    if is_api_key(token):
+        raise ForbiddenException("This needs a signed-in browser or app, not an API key.")
 
 
 async def current_session_uuid(token: Annotated[str, Depends(oauth2_scheme)]) -> uuid_pkg.UUID | None:

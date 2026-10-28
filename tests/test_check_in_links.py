@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.api import router as api_router
-from src.app.api.dependencies import get_current_user
+from src.app.api.dependencies import get_current_user, refuse_api_keys
 from src.app.api.v1.certifications import _cached_read_certifications
 from src.app.core.config import settings
 from src.app.core.db.database import async_engine, async_get_db
@@ -183,6 +183,8 @@ def sign_in(checkin_app: Any, async_db: AsyncSession) -> SignIn:
     async def as_diver(diver: User) -> None:
         account = await read_account(async_db, uuid=diver.uuid)
         checkin_app.dependency_overrides[get_current_user] = lambda: account
+        # The diver's routes refuse an API key off the bearer header, and these send none.
+        checkin_app.dependency_overrides[refuse_api_keys] = lambda: None
 
     return as_diver
 

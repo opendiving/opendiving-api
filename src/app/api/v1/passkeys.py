@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import CursorResult, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user, refuse_api_keys
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
@@ -52,7 +52,9 @@ _LIST_LIMIT = 100
 
 
 # -------------------- registration ceremony (signed in) --------------------
-@router.post("/user/passkey/options", response_model=PasskeyRegistrationOptions)
+@router.post(
+    "/user/passkey/options", response_model=PasskeyRegistrationOptions, dependencies=[Depends(refuse_api_keys)]
+)
 async def passkey_registration_options(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
@@ -78,7 +80,12 @@ async def passkey_registration_options(
     return PasskeyRegistrationOptions(options=options)
 
 
-@router.post("/user/passkey/verify", response_model=WebauthnCredentialRead, status_code=201)
+@router.post(
+    "/user/passkey/verify",
+    response_model=WebauthnCredentialRead,
+    status_code=201,
+    dependencies=[Depends(refuse_api_keys)],
+)
 async def passkey_registration_verify(
     request: Request,
     body: PasskeyRegistrationVerifyRequest,
@@ -115,7 +122,7 @@ async def passkey_registration_verify(
 
 
 # -------------------- management --------------------
-@router.get("/user/passkeys", response_model=list[WebauthnCredentialRead])
+@router.get("/user/passkeys", response_model=list[WebauthnCredentialRead], dependencies=[Depends(refuse_api_keys)])
 async def read_passkeys(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
@@ -140,7 +147,7 @@ async def read_passkeys(
     return list(rows["data"])
 
 
-@router.patch("/user/passkey/{uuid}")
+@router.patch("/user/passkey/{uuid}", dependencies=[Depends(refuse_api_keys)])
 async def patch_passkey(
     uuid: uuid_pkg.UUID,
     values: WebauthnCredentialUpdate,
@@ -167,7 +174,7 @@ async def patch_passkey(
     return {"message": "Passkey updated"}
 
 
-@router.delete("/user/passkey/{uuid}")
+@router.delete("/user/passkey/{uuid}", dependencies=[Depends(refuse_api_keys)])
 async def erase_passkey(
     request: Request,
     uuid: uuid_pkg.UUID,
