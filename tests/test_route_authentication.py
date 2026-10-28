@@ -119,6 +119,12 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/checkin/{token}/certification/{uuid}/front"): (
         "The shared page's card fronts, for an `<img>`: the token's authorization, image fronts only."
     ),
+    # 7. The caller is reading the contract itself, with or without an account.
+    ("GET", "/api/v1/openapi.json"): (
+        "The OpenAPI document describes a public codebase's routes and nothing any account holds, "
+        "and it is how somebody writing a tool of their own reads what they may call - on a "
+        "`production` instance too, where `/docs` and `/redoc` are not served."
+    ),
 }
 
 

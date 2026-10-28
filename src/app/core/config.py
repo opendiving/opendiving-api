@@ -69,9 +69,9 @@ class AppSettings(BaseSettings):
     # build identity frozen at whenever somebody copied it.
     APP_COMMIT: str | None = config("APP_COMMIT", default=None)
     LICENSE_NAME: str | None = config("LICENSE", default=None)
-    # OpenAPI document metadata only ("who maintains this API", shown in `/docs`) -
-    # *not* where the frontend's support form delivers to. That's
-    # `ContactSettings.CONTACT_FORM_EMAIL` below.
+    # OpenAPI document metadata only ("who maintains this API", published at
+    # `/api/v1/openapi.json` on every instance, `production` included) - *not* where the
+    # frontend's support form delivers to. That's `ContactSettings.CONTACT_FORM_EMAIL` below.
     CONTACT_NAME: str | None = config("CONTACT_NAME", default=None)
     CONTACT_EMAIL: str | None = config("CONTACT_EMAIL", default=None)
 

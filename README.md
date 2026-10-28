@@ -223,9 +223,11 @@ environment the container was created with.
 
 ## API overview
 
-Everything is mounted under `/api/v1`, and the interactive OpenAPI docs at `/docs` are the reference
-for it — generated from the routes themselves, so they describe the API as it actually is rather
-than as a list here last remembered it.
+Everything is mounted under `/api/v1`, and the OpenAPI document is the reference for it — generated
+from the routes themselves, so it describes the API as it actually is rather than as a list here
+last remembered it. Every instance serves it at `/api/v1/openapi.json`, `production` included, with
+no token; the interactive pages that render it, `/docs` and `/redoc`, are open on `local`, behind a
+superuser on `staging` and absent on `production`.
 
 The families: **auth** (email link or six-digit code, Google, passkeys, refresh, sign-out, account
 restore) and **user** (profile, avatar, check-in portrait, the check-in details, the check-in link,
@@ -254,10 +256,10 @@ has signed in, `GET /join-channel/{slug}`, which says whether one join link is l
 `GET /invite-link/{token}`, which says whose invite link one token is, `GET /species/{uuid}/photo`,
 which serves a public Commons image to an `<img>` tag that has no way to send a token, and
 `GET /checkin/{token}` with its `/portrait` and `/certification/{uuid}/front`, the check-in page a
-diver shared as a link, where the token in the path is the credential.
-`tests/test_route_authentication.py` is the guard that keeps the *anonymous* half of that list
-honest — it compares the app's real route table against its own allowlist and holds the reason for
-each — but nothing checks this paragraph, so a new route family belongs here by hand.
+diver shared as a link, where the token in the path is the credential, and `GET /openapi.json`, the
+document itself. `tests/test_route_authentication.py` is the guard that keeps the *anonymous* half
+of that list honest — it compares the app's real route table against its own allowlist and holds the
+reason for each — but nothing checks this paragraph, so a new route family belongs here by hand.
 
 A record's create — `POST /dive`, `/trip`, `/person` and the like; `/docs` lists the header on each
 — takes an optional `Idempotency-Key` header: a repeat under the same key answers the record the

@@ -59,7 +59,7 @@ class TestTheWriteSchemaCanSayNotRecorded:
 
     @pytest.mark.parametrize("field", _ABSENT)
     def test_the_published_contract_says_so(self, field: str) -> None:
-        """`/openapi.json` is what the web and iOS clients are generated from, so a client
+        """The OpenAPI document is the contract a client is written against, so a client
         reading `oxygen: number` while the API sends `null` is the failure that survives
         every test in this repo. `anyOf` with a null branch is how Pydantic spells the
         widened type there."""
