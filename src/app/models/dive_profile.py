@@ -10,8 +10,8 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     """One recording's per-sample curves: what the sensors read, and what the computer
     computed from them.
 
-    Five channels are measurements - depth, deco ceiling, temperature, per-cylinder tank
-    pressure and the diver's heart rate - and six are the device's own decompression
+    Some channels are measurements - depth, deco ceiling, temperature, per-cylinder tank
+    pressure and the diver's heart rate - and the rest are the device's own decompression
     arithmetic: the no-deco clock, the time to surface, the computed ppO2, the CNS clock and
     the two gradient factors.
     `schemas/dive_profile.py` holds the scale each is stored in.

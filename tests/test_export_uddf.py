@@ -1358,7 +1358,7 @@ class TestWhatUddfCannotHold:
 
         3.2.2 has no time-to-surface element and no surface gradient factor, so unlike the
         ceiling and the deco model there is no tag to look for and prove absent. What can
-        be pinned is that the waypoints carry *exactly* the twelve children this writer
+        be pinned is that the waypoints carry *exactly* the children this writer
         chose - so a later hand that decides `tts` is close enough to `<remainingbottom
         time>`, or that the surface figure may as well ride in `<gradientfactor>` beside
         the leading tissue's, breaks this rather than shipping a number the file did not
