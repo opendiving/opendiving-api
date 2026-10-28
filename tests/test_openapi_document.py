@@ -1,7 +1,7 @@
 """Regression tests for the `/api/v1/openapi.json` document (`core/setup.py`).
 
 This is the only OpenAPI document the app serves - the built-in route is disabled
-(`openapi_url=None`), and `/docs` and `/redoc` both point at the one registered here,
+(`openapi_url=None`), and `/docs` points at the one registered here,
 which is served anonymously on every environment, `production` included. It
 used to be rebuilt by a hand-rolled `get_openapi(title=..., version=..., routes=...)`
 call, which published exactly three things and silently dropped every other field
@@ -10,7 +10,7 @@ never reached a reader, and `version` was FastAPI's own hardcoded default rather
 running build's.
 
 Both halves of that are asserted below, because neither shows up as a failure anywhere
-else: a document that is missing its metadata still parses, still renders in Swagger, and
+else: a document that is missing its metadata still parses, still renders on `/docs`, and
 still generates clients.
 
 Builds its own app via `create_application` like `test_cors.py` does, with
@@ -19,6 +19,7 @@ needs a live Postgres or Redis - the document is assembled from the route table 
 """
 
 from typing import Any
+from unittest.mock import ANY
 
 import pytest
 from fastapi.testclient import TestClient
@@ -145,7 +146,7 @@ class TestWhereItIsServed:
     def test_anonymously_on_every_environment(
         self, monkeypatch: pytest.MonkeyPatch, environment: EnvironmentOption
     ) -> None:
-        """`production` is the case that matters: it serves no `/docs` or `/redoc`, so this
+        """`production` is the case that matters: it serves no `/docs`, so this
         document is the only description of the API a caller of a production instance can
         read."""
         response = _get(monkeypatch, OPENAPI_URL, ENVIRONMENT=environment)
@@ -164,13 +165,24 @@ class TestWhereItIsServed:
     def test_not_at_the_root(self, monkeypatch: pytest.MonkeyPatch, environment: EnvironmentOption) -> None:
         assert _get(monkeypatch, "/openapi.json", ENVIRONMENT=environment).status_code == 404
 
-    def test_the_interactive_pages_render_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for page in ("/docs", "/redoc"):
-            response = _get(monkeypatch, page, ENVIRONMENT=EnvironmentOption.LOCAL)
+    def test_the_interactive_page_renders_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        response = _get(monkeypatch, "/docs", ENVIRONMENT=EnvironmentOption.LOCAL)
 
-            assert response.status_code == 200
-            assert OPENAPI_URL in response.text
+        assert response.status_code == 200
+        assert OPENAPI_URL in response.text
 
-    def test_production_serves_no_interactive_pages(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for page in ("/docs", "/redoc"):
-            assert _get(monkeypatch, page, ENVIRONMENT=EnvironmentOption.PRODUCTION).status_code == 404
+    def test_production_serves_no_interactive_page(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert _get(monkeypatch, "/docs", ENVIRONMENT=EnvironmentOption.PRODUCTION).status_code == 404
+
+
+class TestSecurityScheme:
+    def test_is_a_bearer_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A docs page builds its credential form from this: an `oauth2` password flow offers
+        a username and password that no route accepts, where `http` bearer offers a token
+        field that takes an access token or an API key alike."""
+        document = _document(monkeypatch)
+
+        assert document["components"]["securitySchemes"] == {
+            "bearer": {"type": "http", "scheme": "bearer", "description": ANY}
+        }
+        assert document["paths"]["/api/v1/user"]["get"]["security"] == [{"bearer": []}]

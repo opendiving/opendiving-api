@@ -3829,7 +3829,7 @@ gear-service routes are checked by asserting `resolve_schedule_for_user`/`resolv
 received the caller's `user_id`. `GET /api/v1/species/{uuid}` is the one ownerless route
 (`crud/crud_species.py`). The walk uses `iter_route_contexts` via `tests/helpers/routes.py`, not
 `app.routes`, because `include_router` stores lazy `_IncludedRouter` wrappers.
-`test_the_bearer_scheme_alone_counts` is the canary that `oauth2_scheme` (`auto_error=True`,
+`test_the_bearer_scheme_alone_counts` is the canary that `bearer_scheme` (`auto_error=True`,
 `core/security.py`) in a `.dependencies` walk counts as authentication. Scope is `/api/v1`; the docs
 routes are `ENVIRONMENT`-gated and mounts are skipped explicitly.
 
@@ -5287,7 +5287,7 @@ flow"*) — and an audit-time lookup to fill a `user_id` would reverse that guar
 `crud_users` call no diff reviewer would connect to the section it contradicts.
 
 Everything downstream of a resolved identity carries the id it already has. Two sites work harder,
-both bounded: `POST /auth/logout` authenticates on `oauth2_scheme` alone and resolves its subject
+both bounded: `POST /auth/logout` authenticates on `bearer_scheme` alone and resolves its subject
 from the presented access token as `_handle_revoked_refresh` does, and the refresh-replay event
 resolves the token's subject with one indexed read, rare by construction since it is only reached
 past the reuse grace.
@@ -5558,9 +5558,9 @@ Rejected: `SERIALIZABLE`, which moves the guarantee into the isolation level and
 retryable serialization error. The suite stages the race on two connections and asserts exactly one
 superuser.
 
-`is_superuser` gates `/docs` and `/redoc` on non-local non-production environments (`core/setup.py`)
-and the `/api/v1/admin/*` routes (`api.v1.admin`); it grants no access to dives. The document those
-pages render, `/api/v1/openapi.json`, is anonymous everywhere.
+`is_superuser` gates `/docs` on non-local non-production environments (`core/setup.py`) and the
+`/api/v1/admin/*` routes (`api.v1.admin`); it grants no access to dives. The document that page
+renders, `/api/v1/openapi.json`, is anonymous everywhere.
 
 ## The invite-request endpoint stays ignorant, exactly as the sign-in request does
 
@@ -6815,14 +6815,14 @@ neither.
 hand-rolled `get_openapi(title=…, version=…, routes=…)` call. FastAPI's own method passes on every
 field it holds (`description`, `contact`, `license_info`, summary, terms, webhooks, tags, servers),
 so a forgotten field cannot drop metadata silently, and it caches until the route set changes. This
-is the only OpenAPI route: the built-in one is off (`openapi_url=None`) and `/docs` and `/redoc`
-point here. It sits under the API prefix, anonymous on every environment, `production` included:
-`/api/v1*` is the one path every proxy shape in front of the app already carries. `version` comes
-from `APP_VERSION` with the `or "unknown"` that `/api/v1/health` uses, because FastAPI's default
-`"0.1.0"` is a plausible answer and `info.version` is required by the spec. Contact and license are
-built conditionally: `src/.env.example` ships `LICENSE`, `CONTACT_NAME` and `CONTACT_EMAIL`
-commented out, and `license_info={"name": None}` fails the document's own validation, so passing it
-straight through 500s the document for every operator who never set `LICENSE`; an all-`None` contact
+is the only OpenAPI route: the built-in one is off (`openapi_url=None`) and `/docs` points here. It
+sits under the API prefix, anonymous on every environment, `production` included: `/api/v1*` is the
+one path every proxy shape in front of the app already carries. `version` comes from `APP_VERSION`
+with the `or "unknown"` that `/api/v1/health` uses, because FastAPI's default `"0.1.0"` is a
+plausible answer and `info.version` is required by the spec. Contact and license are built
+conditionally: `src/.env.example` ships `LICENSE`, `CONTACT_NAME` and `CONTACT_EMAIL` commented out,
+and `license_info={"name": None}` fails the document's own validation, so passing it straight
+through 500s the document for every operator who never set `LICENSE`; an all-`None` contact
 publishes an empty `"contact": {}`. `tests/test_openapi_document.py` pins the unset case on its
 status code as well as its `info` block.
 

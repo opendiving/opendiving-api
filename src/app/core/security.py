@@ -8,8 +8,8 @@ from typing import Any
 
 import anyio
 import httpx
-from fastapi import HTTPException
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import HTTPException, Request
+from fastapi.security import HTTPBearer
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
@@ -37,12 +37,26 @@ ALGORITHM = settings.ALGORITHM
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 REFRESH_TOKEN_EXPIRE_DAYS = settings.REFRESH_TOKEN_EXPIRE_DAYS
 
-# Only used to *validate* a Bearer access token on protected routes (see
-# `api.dependencies.get_current_user`) - there's deliberately no `tokenUrl` endpoint
-# that issues one via a username/password form anymore. `OAuth2PasswordBearer` is used
-# purely for its "extract the Bearer token from the Authorization header, and describe
-# that in the OpenAPI schema" behavior, not its password-grant semantics.
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/email/verify", auto_error=True)
+
+class BearerToken(HTTPBearer):
+    """The `Authorization: Bearer` header as a plain string - a signed-in access token or an API key.
+
+    `HTTPBearer` rather than `OAuth2PasswordBearer` because the schema is what a docs page's
+    request client builds its credential form from, and no route issues a token from a
+    password: an `oauth2` password flow there offers a username form nothing can answer.
+    """
+
+    async def __call__(self, request: Request) -> str:  # type: ignore[override]
+        credentials = await super().__call__(request)
+        if credentials is None:
+            raise self.make_not_authenticated_error()
+        return credentials.credentials
+
+
+bearer_scheme = BearerToken(
+    scheme_name="bearer",
+    description="An access token from signing in, or an API key (`odk_…`) created in Settings.",
+)
 
 
 class TokenType(StrEnum):

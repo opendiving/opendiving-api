@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db.database import async_get_db
 from ..core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnauthorizedException
-from ..core.security import TokenType, is_api_key, oauth2_scheme, token_session_id, verify_token
+from ..core.security import TokenType, bearer_scheme, is_api_key, token_session_id, verify_token
 from ..crud.crud_api_keys import live_api_key, stamp_api_key_used
 from ..crud.crud_user_sessions import live_session_for
 from ..crud.crud_users import read_account
@@ -23,7 +23,7 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 async def get_current_user(
     request: Request,
-    token: Annotated[str, Depends(oauth2_scheme)],
+    token: Annotated[str, Depends(bearer_scheme)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any] | None:
     """Resolve a Bearer access token to the account it was issued for, and refuse it unless
@@ -111,7 +111,7 @@ async def _account_for_api_key(request: Request, secret: str, db: AsyncSession) 
     return {**user, "is_superuser": False}
 
 
-async def refuse_api_keys(token: Annotated[str, Depends(oauth2_scheme)]) -> None:
+async def refuse_api_keys(token: Annotated[str, Depends(bearer_scheme)]) -> None:
     """Refuse an API key on a route that manages credentials, the sign-in address or the
     account's existence, so a stolen key cannot lock its owner out or mint its own successor.
 
@@ -126,7 +126,7 @@ async def refuse_api_keys(token: Annotated[str, Depends(oauth2_scheme)]) -> None
         raise ForbiddenException("This needs a signed-in browser or app, not an API key.")
 
 
-async def current_session_uuid(token: Annotated[str, Depends(oauth2_scheme)]) -> uuid_pkg.UUID | None:
+async def current_session_uuid(token: Annotated[str, Depends(bearer_scheme)]) -> uuid_pkg.UUID | None:
     """The `user_session` row the caller's access token was minted for, or `None`.
 
     **A sibling of `get_current_user`, deliberately not a change to it.** That function's

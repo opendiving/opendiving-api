@@ -226,8 +226,8 @@ environment the container was created with.
 Everything is mounted under `/api/v1`, and the OpenAPI document is the reference for it — generated
 from the routes themselves, so it describes the API as it actually is rather than as a list here
 last remembered it. Every instance serves it at `/api/v1/openapi.json`, `production` included, with
-no token; the interactive pages that render it, `/docs` and `/redoc`, are open on `local`, behind a
-superuser on `staging` and absent on `production`.
+no token; the interactive page that renders it, `/docs`, is open on `local`, behind a superuser on
+`staging` and absent on `production`.
 
 The families: **auth** (email link or six-digit code, Google, passkeys, refresh, sign-out, account
 restore) and **user** (profile, avatar, check-in portrait, the check-in details, the check-in link,

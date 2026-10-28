@@ -19,17 +19,17 @@ caller then serves only that caller's rows. That is the other guard, in
 from typing import Any
 
 from src.app.api.dependencies import get_current_superuser, get_current_user
-from src.app.core.security import oauth2_scheme
+from src.app.core.security import bearer_scheme
 from src.app.main import app
 from tests.helpers.routes import RouteInfo, dependency_calls, iter_api_routes
 
 # Any one of these on a route means a request without credentials never reaches the
-# handler. `oauth2_scheme` counts on its own: it is built `auto_error=True`
+# handler. `bearer_scheme` counts on its own: it is built `auto_error=True`
 # (`core/security.py`), so a missing `Authorization` header is a 401 before the handler
 # runs. `POST /auth/logout` has it and nothing else, and calling that "no auth" would put
 # an authenticated route into an allowlist of anonymous ones - exactly the wrong
 # direction for a guard whose failure mode is fail-open.
-AUTH_MARKERS: set[Any] = {get_current_user, get_current_superuser, oauth2_scheme}
+AUTH_MARKERS: set[Any] = {get_current_user, get_current_superuser, bearer_scheme}
 
 # The reason is the payload here, not the path. It is what a reviewer reads when someone
 # proposes the next entry, and "it needs to be anonymous" is not one of these reasons.
@@ -123,7 +123,7 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/openapi.json"): (
         "The OpenAPI document describes a public codebase's routes and nothing any account holds, "
         "and it is how somebody writing a tool of their own reads what they may call - on a "
-        "`production` instance too, where `/docs` and `/redoc` are not served."
+        "`production` instance too, where `/docs` is not served."
     ),
 }
 
@@ -170,7 +170,7 @@ def test_no_allowlist_entry_is_stale() -> None:
 
 
 def test_the_bearer_scheme_alone_counts() -> None:
-    """`POST /auth/logout` depends on `oauth2_scheme` and on nothing else in `AUTH_MARKERS`.
+    """`POST /auth/logout` depends on `bearer_scheme` and on nothing else in `AUTH_MARKERS`.
 
     That makes it the canary for the walk itself. FastAPI moved security schemes out of
     `Dependant.security_requirements` and into ordinary sub-dependencies in 0.141; if a
@@ -182,6 +182,6 @@ def test_the_bearer_scheme_alone_counts() -> None:
 
     calls = dependency_calls(logout.dependant)
 
-    assert oauth2_scheme in calls
+    assert bearer_scheme in calls
     assert get_current_user not in calls
     assert _is_authenticated(logout)

@@ -14,8 +14,8 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import JSONResponse
+from scalar_fastapi import AgentScalarConfig, get_scalar_api_reference
 from sqlalchemy import func, select, text
 
 from ..api.dependencies import get_current_superuser
@@ -436,12 +436,19 @@ def create_application(
                 docs_router = APIRouter(dependencies=[Depends(get_current_superuser)])
 
             @docs_router.get("/docs", include_in_schema=False)
-            async def get_swagger_documentation() -> fastapi.responses.HTMLResponse:
-                return get_swagger_ui_html(openapi_url=OPENAPI_URL, title="docs")
-
-            @docs_router.get("/redoc", include_in_schema=False)
-            async def get_redoc_documentation() -> fastapi.responses.HTMLResponse:
-                return get_redoc_html(openapi_url=OPENAPI_URL, title="docs")
+            async def get_documentation() -> fastapi.responses.HTMLResponse:
+                # The script is pinned to a major the way FastAPI pins Swagger's, and the
+                # package's own default is the unversioned latest. Off are the parts that talk to
+                # Scalar's service: telemetry on each request the page's client sends, the
+                # AI chat that reads the schema, and the deploy and SDK upsells.
+                return get_scalar_api_reference(
+                    openapi_url=OPENAPI_URL,
+                    title=f"{application.title} API",
+                    scalar_js_url="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1",
+                    telemetry=False,
+                    agent=AgentScalarConfig(disabled=True),
+                    show_developer_tools="never",
+                )
 
             application.include_router(docs_router)
 

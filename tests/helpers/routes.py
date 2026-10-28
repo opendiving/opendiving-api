@@ -50,10 +50,10 @@ def iter_api_routes(app: FastAPI) -> Iterator[RouteInfo]:
     """Every `APIRoute` under `/api/v1`, one `RouteInfo` per HTTP method.
 
     Scoped to the API prefix on purpose, and the scope is part of what the guards mean.
-    `/docs` and `/redoc` are registered conditionally on `ENVIRONMENT` (`core/setup.py`) -
+    `/docs` is registered conditionally on `ENVIRONMENT` (`core/setup.py`) -
     absent on production, superuser-gated on staging, wide open on local, which is what the
-    suite runs as. They would otherwise read as anonymous and need allowlisting for a
-    reason that is really "this is a different property". The document they render,
+    suite runs as. It would otherwise read as anonymous and need allowlisting for a
+    reason that is really "this is a different property". The document it renders,
     `/api/v1/openapi.json`, is under the prefix and served on every environment, so it is
     walked like any other route.
 
@@ -79,7 +79,7 @@ def dependency_calls(dependant: Dependant) -> list[Any]:
 
     Note there is no separate security-scheme list to walk. `Dependant` carried one
     (`security_requirements`) up to FastAPI 0.140; from 0.141 a security scheme is an
-    ordinary sub-dependant whose `call` *is* the scheme instance, so `oauth2_scheme`
+    ordinary sub-dependant whose `call` *is* the scheme instance, so `bearer_scheme`
     turns up here like anything else. `test_the_bearer_scheme_alone_counts` pins that
     down, because the day it stops being true is the day this walk quietly stops seeing
     the only marker two routes have.

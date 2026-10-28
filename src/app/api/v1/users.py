@@ -23,7 +23,7 @@ from ...core.exceptions.http_exceptions import (
     UnauthorizedException,
     UnprocessableEntityException,
 )
-from ...core.security import blacklist_token, blacklist_tokens, generate_secure_token, hash_token, oauth2_scheme
+from ...core.security import bearer_scheme, blacklist_token, blacklist_tokens, generate_secure_token, hash_token
 from ...core.utils.binary_responses import not_modified, stored_bytes_response
 from ...core.utils.cache import cache, delete_keys_by_pattern
 from ...core.utils.client_ip import client_ip_bucket
@@ -1097,7 +1097,7 @@ async def erase_user(
     current_user: Annotated[dict, Depends(get_current_user)],
     session_uuid: Annotated[uuid_pkg.UUID | None, Depends(current_session_uuid)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    access_token: Annotated[str, Depends(oauth2_scheme)],
+    access_token: Annotated[str, Depends(bearer_scheme)],
     refresh_token: Annotated[str | None, Cookie(alias="refresh_token")] = None,
 ) -> AccountDeletionResponse:
     """Delete the authenticated user's own account, reversibly for `ACCOUNT_DELETION_GRACE_DAYS`.

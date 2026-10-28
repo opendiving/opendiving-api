@@ -113,7 +113,7 @@ class TestWhichRoutesRefuseAKey:
         assert not stray, f"these routes refuse an API key outside the rule: {stray}"
 
     def test_the_anonymous_email_change_routes_take_no_bearer(self) -> None:
-        """`refuse_api_keys` reads the header through `oauth2_scheme`, which 401s a request
+        """`refuse_api_keys` reads the header through `bearer_scheme`, which 401s a request
         that carries none - so on the link-authorized routes it would break the link."""
         anonymous = [
             route
