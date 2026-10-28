@@ -1,7 +1,8 @@
-"""Regression tests for the `/openapi.json` document's `info` block (`core/setup.py`).
+"""Regression tests for the `/api/v1/openapi.json` document (`core/setup.py`).
 
 This is the only OpenAPI document the app serves - the built-in route is disabled
-(`openapi_url=None`), and `/docs` and `/redoc` both point at the one registered here. It
+(`openapi_url=None`), and `/docs` and `/redoc` both point at the one registered here,
+which is served anonymously on every environment, `production` included. It
 used to be rebuilt by a hand-rolled `get_openapi(title=..., version=..., routes=...)`
 call, which published exactly three things and silently dropped every other field
 `create_application` had configured: the description, the contact block and the license
@@ -21,10 +22,11 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
 
 from src.app.api import router
 from src.app.core.config import EnvironmentOption, settings
-from src.app.core.setup import create_application
+from src.app.core.setup import OPENAPI_URL, create_application
 
 #: What `application.version` falls back to when nothing sets it, and so what this
 #: document reported at every release until `version` was configured. It is a real
@@ -33,19 +35,19 @@ from src.app.core.setup import create_application
 _FASTAPI_DEFAULT_VERSION = "0.1.0"
 
 
-def _document(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, Any]:
-    """Serve `/openapi.json` from an app built against `settings` plus `overrides`.
-
-    `ENVIRONMENT` is pinned rather than inherited: the docs router carries a superuser
-    dependency on every environment but `local`, so an ambient `staging` would turn every
-    assertion here into a 401 about something else entirely.
-    """
-    monkeypatch.setattr(settings, "ENVIRONMENT", EnvironmentOption.LOCAL)
+def _get(monkeypatch: pytest.MonkeyPatch, path: str, **overrides: Any) -> Response:
+    """Read `path` with no credential from an app built against `settings` plus `overrides`."""
     for name, value in overrides.items():
         monkeypatch.setattr(settings, name, value)
 
     app = create_application(router=router, settings=settings, apply_migrations_on_start=False)
-    response = TestClient(app).get("/openapi.json")
+    response: Response = TestClient(app).get(path)
+    return response
+
+
+def _document(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, Any]:
+    """Serve the document from an app built against `settings` plus `overrides`."""
+    response = _get(monkeypatch, OPENAPI_URL, **overrides)
 
     assert response.status_code == 200
     document: dict[str, Any] = response.json()
@@ -112,7 +114,7 @@ class TestContactAndLicense:
         This is the case that has to be built rather than passed through, and the `200`
         `_document` asserts is half the test. A `license_info` handed over as
         `{"name": None}` does not publish a null - it fails the document's own validation,
-        because `name` is required wherever a license object appears, so `/openapi.json`
+        because `name` is required wherever a license object appears, so the document
         500s outright for anyone who never set `LICENSE`. An all-`None` contact fails
         softer, publishing an empty `"contact": {}`.
         """
@@ -136,3 +138,39 @@ class TestRoutes:
         document = _document(monkeypatch)
 
         assert "/api/v1/health" in document["paths"]
+
+
+class TestWhereItIsServed:
+    @pytest.mark.parametrize("environment", list(EnvironmentOption))
+    def test_anonymously_on_every_environment(
+        self, monkeypatch: pytest.MonkeyPatch, environment: EnvironmentOption
+    ) -> None:
+        """`production` is the case that matters: it serves no `/docs` or `/redoc`, so this
+        document is the only description of the API a caller of a production instance can
+        read, and before it moved under the prefix it was not served there at all."""
+        response = _get(monkeypatch, OPENAPI_URL, ENVIRONMENT=environment)
+
+        assert response.status_code == 200
+        assert "/api/v1/health" in response.json()["paths"]
+
+    def test_is_publicly_cacheable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No credential and a safe method, so `ClientCacheMiddleware` labels it like any
+        anonymous read: the document only changes when a deploy does."""
+        response = _get(monkeypatch, OPENAPI_URL, ENVIRONMENT=EnvironmentOption.PRODUCTION)
+
+        assert response.headers["cache-control"].startswith("public, max-age=")
+
+    @pytest.mark.parametrize("environment", list(EnvironmentOption))
+    def test_not_at_the_root(self, monkeypatch: pytest.MonkeyPatch, environment: EnvironmentOption) -> None:
+        assert _get(monkeypatch, "/openapi.json", ENVIRONMENT=environment).status_code == 404
+
+    def test_the_interactive_pages_render_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for page in ("/docs", "/redoc"):
+            response = _get(monkeypatch, page, ENVIRONMENT=EnvironmentOption.LOCAL)
+
+            assert response.status_code == 200
+            assert OPENAPI_URL in response.text
+
+    def test_production_serves_no_interactive_pages(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for page in ("/docs", "/redoc"):
+            assert _get(monkeypatch, page, ENVIRONMENT=EnvironmentOption.PRODUCTION).status_code == 404

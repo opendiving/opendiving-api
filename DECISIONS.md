@@ -1367,8 +1367,9 @@ SMTP credentials live here, not in the frontend.
   in `services/email_service.py` carrying a stranger's prose; any new one must too.
 
 `CONTACT_FORM_EMAIL` is the recipient, with no default (*"The support form has no default recipient,
-and no recipient means 503"*), and is not `AppSettings.CONTACT_EMAIL`, the OpenAPI metadata for
-`/docs`, so a maintainer address there cannot reroute support mail.
+and no recipient means 503"*), and is not `AppSettings.CONTACT_EMAIL`, the OpenAPI metadata
+published at `/api/v1/openapi.json` on every instance, so a maintainer address there cannot reroute
+support mail.
 
 With `SMTP_HOST` unset the send is a logged no-op, submission included; the endpoint still reports
 acceptance, never delivery.
@@ -5555,8 +5556,9 @@ Rejected: `SERIALIZABLE`, which moves the guarantee into the isolation level and
 retryable serialization error. The suite stages the race on two connections and asserts exactly one
 superuser.
 
-`is_superuser` gates `/docs`, `/redoc` and `/openapi.json` on non-local non-production environments
-(`core/setup.py`) and the `/api/v1/admin/*` routes (`api.v1.admin`); it grants no access to dives.
+`is_superuser` gates `/docs` and `/redoc` on non-local non-production environments (`core/setup.py`)
+and the `/api/v1/admin/*` routes (`api.v1.admin`); it grants no access to dives. The document those
+pages render, `/api/v1/openapi.json`, is anonymous everywhere.
 
 ## The invite-request endpoint stays ignorant, exactly as the sign-in request does
 
@@ -6805,20 +6807,22 @@ reading a draft, `.github/release.yml`'s category order (`breaking` before `feat
 categorisation. The job id is `publish-release` here and in `opendiving-web`; rename both at once or
 neither.
 
-## The `/openapi.json` route serves `application.openapi()`, never a hand-rolled document
+## The `/api/v1/openapi.json` route serves `application.openapi()`, never a hand-rolled document
 
-`create_application` serves `/openapi.json` through `application.openapi()`, not a hand-rolled
-`get_openapi(title=…, version=…, routes=…)` call. FastAPI's own method passes on every field it
-holds (`description`, `contact`, `license_info`, summary, terms, webhooks, tags, servers), so a
-forgotten field cannot drop metadata silently, and it caches until the route set changes. This is
-the only `/openapi.json`: the built-in one is off (`openapi_url=None` for `EnvironmentSettings`) and
-`/docs` and `/redoc` point here. `version` comes from `APP_VERSION` with the `or "unknown"` that
-`/api/v1/health` uses, because FastAPI's default `"0.1.0"` is a plausible answer and `info.version`
-is required by the spec. Contact and license are built conditionally: `src/.env.example` ships
-`LICENSE`, `CONTACT_NAME` and `CONTACT_EMAIL` commented out, and `license_info={"name": None}` fails
-the document's own validation, so passing it straight through 500s `/openapi.json` for every
-operator who never set `LICENSE`; an all-`None` contact publishes an empty `"contact": {}`.
-`tests/test_openapi_document.py` pins the unset case on its status code as well as its `info` block.
+`create_application` serves `/api/v1/openapi.json` through `application.openapi()`, not a
+hand-rolled `get_openapi(title=…, version=…, routes=…)` call. FastAPI's own method passes on every
+field it holds (`description`, `contact`, `license_info`, summary, terms, webhooks, tags, servers),
+so a forgotten field cannot drop metadata silently, and it caches until the route set changes. This
+is the only OpenAPI route: the built-in one is off (`openapi_url=None`) and `/docs` and `/redoc`
+point here. It sits under the API prefix, anonymous on every environment, `production` included:
+`/api/v1*` is the one path every proxy shape in front of the app already carries. `version` comes
+from `APP_VERSION` with the `or "unknown"` that `/api/v1/health` uses, because FastAPI's default
+`"0.1.0"` is a plausible answer and `info.version` is required by the spec. Contact and license are
+built conditionally: `src/.env.example` ships `LICENSE`, `CONTACT_NAME` and `CONTACT_EMAIL`
+commented out, and `license_info={"name": None}` fails the document's own validation, so passing it
+straight through 500s the document for every operator who never set `LICENSE`; an all-`None` contact
+publishes an empty `"contact": {}`. `tests/test_openapi_document.py` pins the unset case on its
+status code as well as its `info` block.
 
 ## The DiveJSON export is laid out a member and a record to a line
 

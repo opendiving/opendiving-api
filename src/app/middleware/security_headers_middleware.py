@@ -8,9 +8,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     Why the app and not the proxy
     -----------------------------
         The bundled `Caddyfile` (https://github.com/opendiving/opendiving/blob/main/Caddyfile)
-        routes `/api/v1*` and the three docs paths straight to this app, so nothing the web
-        container sets reaches them; an operator who enables the CRUDAdmin panel routes its
-        mount path here too; and a bring-your-own-proxy install
+        routes `/api/v1*` - the OpenAPI document among them - and the `/docs` and `/redoc`
+        pages straight to this app, so nothing the web container sets reaches them; an
+        operator who enables the CRUDAdmin panel routes its mount path here too; and a
+        bring-your-own-proxy install
         (https://github.com/opendiving/opendiving/blob/main/docs/reverse-proxy.md) is a
         config file this repository never sees. Setting them here is the only version of this
         that holds for *every* deployment shape, including a developer's `docker compose
@@ -30,7 +31,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         routes in `api.v1.admin` under `/api/v1/admin/*`. The panel mounts at
         `CRUD_ADMIN_MOUNT_PATH`, `/admin` by default, which an operator who enables it has
         to move. What this middleware covers is this app's own responses - `/api/v1*`, the
-        docs paths, and wherever the panel is mounted.
+        `/docs` and `/redoc` pages, and wherever the panel is mounted.
 
     What it deliberately does not do
     --------------------------------
