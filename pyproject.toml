@@ -40,9 +40,12 @@ dependencies = [
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
     #
-    # 0.33.0 is the floor because it is the first release with the Shearwater Cloud readers
-    # and `convert`'s `max_inflated_size` and `shearwater_db_declared_size`, which the import
-    # budgets a database's logs by. The floor still carries what 0.32.0's did: a contact's
+    # 0.34.0 is the floor because it is the first release whose Shearwater Cloud database
+    # reader carries the diver-typed logbook - site and locality, buddy, notes, visibility, air
+    # temperature, weather, entry type - and whose Shearwater readers keep an NDL of 0 as a
+    # reading. The floor still carries what 0.33.0's did: the Shearwater Cloud readers and
+    # `convert`'s `max_inflated_size` and `shearwater_db_declared_size`, which the import
+    # budgets a database's logs by; what 0.32.0's did: a contact's
     # `position`, which the export writes; resolved lower, the export fails the schema the
     # export tests validate against; what 0.31.0's did: a `Note`'s
     # `code` and `member`, which the import's notes are worded and placed by; what 0.30.0's
