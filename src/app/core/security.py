@@ -92,34 +92,30 @@ def hash_token(raw_token: str) -> str:
 
 
 # -------------- API keys --------------
-# The three names below avoid "api key" on purpose: CodeQL's sensitive-data heuristic reads
-# `api.?key` as a password and flags the SHA-256 they feed, which is the right hash for 256
-# random bits (`hash_token`).
-#
 # What every API key begins with, and so what `get_current_user` branches on before any JWT
 # is decoded. Distinct and greppable on purpose: a leaked key can be found by searching for
 # it, and a secret scanner can be given a pattern for it.
-KEY_PREFIX = "odk_"
+API_KEY_PREFIX = "odk_"
 # How much of a key is kept in clear: the prefix and eight random characters, enough to tell
 # a diver's handful of keys apart and nowhere near enough to guess the rest.
-KEY_SHOWN_LENGTH = 12
+API_KEY_SHOWN_LENGTH = 12
 
 
-def mint_key() -> tuple[str, str]:
+def generate_api_key() -> tuple[str, str]:
     """A new API key and the SHA-256 it is stored as, together, so no caller hashes by hand.
 
     The random part is `generate_secure_token`'s - 256 bits - which is what makes the fast
     hash `hash_token` explains the right one here too. The secret is returned to the caller
     to show once and is never stored.
     """
-    secret = KEY_PREFIX + generate_secure_token()
+    secret = API_KEY_PREFIX + generate_secure_token()
     return secret, hash_token(secret)
 
 
 def is_api_key(token: str) -> bool:
     """Whether a bearer string is an API key rather than an access token. A JWT's first
     character is `e` (its header is base64url JSON), so the two can never be confused."""
-    return token.startswith(KEY_PREFIX)
+    return token.startswith(API_KEY_PREFIX)
 
 
 def generate_sign_in_code() -> str:

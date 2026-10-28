@@ -18,7 +18,7 @@ from ...api.dependencies import fetch_owned_or_raise, get_current_user, refuse_a
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
-from ...core.security import KEY_SHOWN_LENGTH, mint_key
+from ...core.security import API_KEY_SHOWN_LENGTH, generate_api_key
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.request_context import RequestContext
 from ...crud.crud_api_keys import count_api_keys, crud_api_keys
@@ -79,7 +79,7 @@ async def write_api_key(
     if await count_api_keys(db, user_id=current_user["id"]) >= settings.API_KEY_MAX_PER_USER:
         raise _at_the_cap()
 
-    secret, token_hash = mint_key()
+    secret, token_hash = generate_api_key()
     created = cast(
         ApiKeyReadInternal,
         await crud_api_keys.create(
@@ -87,7 +87,7 @@ async def write_api_key(
             object=ApiKeyCreateInternal(
                 user_id=current_user["id"],
                 name=body.name,
-                prefix=secret[:KEY_SHOWN_LENGTH],
+                prefix=secret[:API_KEY_SHOWN_LENGTH],
                 token_hash=token_hash,
                 scope=body.scope,
                 expires_at=body.lifetime.expires_at(datetime.now(UTC)),

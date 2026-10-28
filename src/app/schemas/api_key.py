@@ -52,7 +52,7 @@ class ApiKeyCreate(BaseModel):
 
 
 class ApiKeyCreateInternal(BaseModel):
-    """Server-composed only: the prefix and the hash come from `mint_key`, the expiry
+    """Server-composed only: the prefix and the hash come from `generate_api_key`, the expiry
     from the lifetime, and `name` and `scope` are what the diver chose."""
 
     model_config = ConfigDict(extra="forbid")
