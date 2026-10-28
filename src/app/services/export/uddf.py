@@ -12,8 +12,9 @@ the tests widen that element for their XSD pass alone.
 
 **UDDF is SI throughout, and our storage is not.** Depths are meters (ours already are),
 times seconds where the profile axis holds milliseconds, temperatures **Kelvin** where we
-hold hundredths of a degree Celsius, pressures **Pascal** where we hold tenths of a bar and plain bar, and tank
-volumes **cubic meters** where a diver says "twelve litres". Every one of those
+hold hundredths of a degree Celsius, pressures **Pascal** where we hold tenths of a bar and plain bar, tank
+volumes **cubic meters** where a diver says "twelve litres", and a heart rate **beats per second**
+where we hold beats per minute. Every one of those
 conversions is a one-liner with a unit test carrying a hand-computed expectation, because
 a silently wrong factor of 100 000 produces a file that validates perfectly and is
 nonsense.
@@ -126,6 +127,7 @@ from ...schemas.dive_profile import (
     CNS_SCALE,
     DEPTH_SCALE,
     GRADIENT_FACTOR_SCALE,
+    HEART_RATE_SCALE,
     MILLISECONDS_PER_SECOND,
     NDL_SCALE,
     PPO2_SCALE,
@@ -154,6 +156,8 @@ LITRES_PER_CUBIC_METRE = 1000.0
 # - where `gradient_factor` is stored in whole percent. See the module docstring for why
 # the fraction is the only spelling this writer can use.
 PERCENT_PER_FRACTION = 100.0
+# `<pulserate>` is beats per second, where `heart_rate` is stored in beats per minute.
+SECONDS_PER_MINUTE = 60.0
 # The furthest a reading is ever moved to reach a waypoint, in the profile axis's
 # milliseconds - see `_snap_tolerance`.
 MAX_SNAP_MILLISECONDS = 30_000
@@ -1027,6 +1031,7 @@ def _waypoints(
     ppo2 = _snapped(_series_by_moment(data.get("ppo2")), moments, tolerance)
     cns = _snapped(_series_by_moment(data.get("cns")), moments, tolerance)
     gradient_factor = _snapped(_series_by_moment(data.get("gradient_factor")), moments, tolerance)
+    heart_rate = _snapped(_series_by_moment(data.get("heart_rate")), moments, tolerance)
     divemode = _divemode_type(mode)
     pressure: list[tuple[str, dict[int, int]]] = []
     for cylinder in data.get("pressure") or []:
@@ -1099,6 +1104,8 @@ def _waypoints(
         # Seconds, with a fraction where the millisecond is not a whole one: `<divetime>` is
         # `xs:float`, so the axis goes out exact and a whole second writes as it always did.
         _sub(waypoint, "divetime", _num(moment / MILLISECONDS_PER_SECOND))
+        if moment in heart_rate:
+            _sub(waypoint, "pulserate", _num(heart_rate[moment] / HEART_RATE_SCALE / SECONDS_PER_MINUTE))
         if moment in markers_at:
             # One `<setmarker>` per waypoint is all the schema allows, so simultaneous
             # markers are joined rather than dropped.

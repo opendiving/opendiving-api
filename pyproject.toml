@@ -40,10 +40,13 @@ dependencies = [
     # not a validator*). It also carries the JSON Schema and the beyond-schema rules the
     # tests used to reach through a vendored copy.
     #
-    # 0.34.0 is the floor because it is the first release whose Shearwater Cloud database
-    # reader carries the diver-typed logbook - site and locality, buddy, notes, visibility, air
-    # temperature, weather, entry type - and whose Shearwater readers keep an NDL of 0 as a
-    # reading. The floor still carries what 0.33.0's did: the Shearwater Cloud readers and
+    # 0.35.0 is the floor because it is the first release whose schema admits a profile's
+    # `heart_rate`, which the export writes, and whose readers carry it from a Suunto JSON, a
+    # FIT and a UDDF `<pulserate>`; resolved lower, the export fails the schema the export
+    # tests validate against. The floor still carries what 0.34.0's did: a Shearwater Cloud
+    # database reader that carries the diver-typed logbook - site and locality, buddy, notes,
+    # visibility, air temperature, weather, entry type - and Shearwater readers that keep an
+    # NDL of 0 as a reading; what 0.33.0's did: the Shearwater Cloud readers and
     # `convert`'s `max_inflated_size` and `shearwater_db_declared_size`, which the import
     # budgets a database's logs by; what 0.32.0's did: a contact's
     # `position`, which the export writes; resolved lower, the export fails the schema the
@@ -86,7 +89,7 @@ dependencies = [
     # `agency`, and the readers spell a dive's number `number`, so a UDDF or `.ssrf` dive
     # `services/logbook_import/reader.py` converts on the request path keeps its own number
     # rather than the placeholder `0`.
-    "divejson>=0.34.0",
+    "divejson>=0.35.0",
     "webauthn>=3.0.0",
     # Decodes and renders the uploaded pictures (`services/user_pictures.py`) and the species
     # photos (`services/species_photos.py`) - the only image processing in the app. 13.0.0 is the first release with official Python 3.15

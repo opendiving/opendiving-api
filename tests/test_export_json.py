@@ -629,6 +629,7 @@ class TestTheProfileVocabulary:
             "ceiling",
             "temperature",
             "pressures",
+            "heart_rate",
             "ndl",
             "tts",
             "ppo2",
@@ -643,7 +644,7 @@ class TestTheProfileVocabulary:
 
     @pytest.mark.asyncio
     async def test_the_members_are_written_in_the_formats_order(self, monkeypatch):
-        """§6.4 puts `pressures` between `temperature` and `ndl`, so a writer emitting
+        """§6.4 puts `pressures` between `temperature` and `heart_rate`, so a writer emitting
         channels in whatever order it happened to build them produces a profile that reads
         down nothing. The order comes off `DiveProfileRead`'s own declaration."""
         document = await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE})
@@ -654,6 +655,7 @@ class TestTheProfileVocabulary:
             "ceiling",
             "temperature",
             "pressures",
+            "heart_rate",
             "ndl",
             "tts",
             "ppo2",
@@ -679,6 +681,14 @@ class TestTheProfileVocabulary:
         # would be deciding what the device should have written.
         assert profile["gradient_factor"]["values"] == [17, 398]
         assert profile["surface_gradient_factor"]["values"] == [90, 116]
+
+    @pytest.mark.asyncio
+    async def test_the_heart_rate_is_whole_beats_per_minute_with_its_dropout_a_gap(self, monkeypatch):
+        profile = (await _render(full_bundle(), monkeypatch, {PRIMARY_RECORDING_ID: TRIMIX_PROFILE}))["dives"][1][
+            "recordings"
+        ][0]["profile"]
+
+        assert profile["heart_rate"] == {"times": [0, 60_000, 90_000], "values": [72, 101, 95]}
 
     @pytest.mark.asyncio
     async def test_an_unclassified_event_is_written_with_no_type(self, monkeypatch):

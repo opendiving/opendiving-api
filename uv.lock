@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = "==3.15.*"
 
 [[package]]
@@ -470,15 +470,15 @@ wheels = [
 
 [[package]]
 name = "divejson"
-version = "0.34.0"
+version = "0.35.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fitdecode" },
     { name = "jsonschema" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ea/c8/83ed392c7cd96c3dff53bcf6b00923635a1a992f5f70cb7d29da045b25de/divejson-0.34.0.tar.gz", hash = "sha256:9e6a18b25b504c65b8abdf15921c1a31e9ef191b1e7195a72d16408131a25d83", size = 932171, upload-time = "2026-10-28T11:10:29.401Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/b1/8038a0480fc0a7d8e35ae97ea40b5a74a5dc2ac523bc3a4c17ed89e1bb04/divejson-0.35.0.tar.gz", hash = "sha256:8ee99b3610cee5c15432a600fd2530bb39e6b90d8a4b87187c0a011e3c8a848b", size = 993987, upload-time = "2026-10-28T20:18:27.977Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8e/96/971ec63c741b1bc82dd6c3137d6759db0d04257a4352c42639c051d00121/divejson-0.34.0-py3-none-any.whl", hash = "sha256:4788d2fa77552ae5fb1d278f8766173197c7b8ada566c0e640a2ebc6dd227469", size = 269396, upload-time = "2026-10-28T11:10:27.984Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/37/c8515394637f2974e7d449b8bf23d5723cb556c5b5056c7545ffe2522c14/divejson-0.35.0-py3-none-any.whl", hash = "sha256:7c19566384029034f537c6e9f15e124fe29824a3dc9421cbd77340d231845e77", size = 270441, upload-time = "2026-10-28T20:18:26.242Z" },
 ]
 
 [[package]]
@@ -1068,7 +1068,7 @@ requires-dist = [
     { name = "bcrypt", specifier = ">=4.1.1" },
     { name = "boto3", specifier = ">=1.43.93" },
     { name = "crudadmin", specifier = ">=0.4.2" },
-    { name = "divejson", specifier = ">=0.34.0" },
+    { name = "divejson", specifier = ">=0.35.0" },
     { name = "faker", marker = "extra == 'dev'", specifier = ">=26.0.0" },
     { name = "fastapi", specifier = ">=0.109.1" },
     { name = "fastcrud", specifier = ">=0.15.5" },

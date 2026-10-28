@@ -5,7 +5,7 @@ The shape, and why the app's own JSON format became the published one, is docume
 it whole.
 
 **Why it is streamed rather than serialized from `ExportEnvelope`.** Every dive embeds
-its full profile, and a profile is a few thousand samples across up to ten channels. A
+its full profile, and a profile is a few thousand samples across its channels. A
 model instance for a thousand-dive log, plus the encoded JSON of the same, is hundreds of
 megabytes resident - for a file the caller is going to write straight to a socket or a
 temp file. So the envelope's scalars are emitted once, and each dive is loaded, encoded

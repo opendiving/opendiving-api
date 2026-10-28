@@ -1747,11 +1747,11 @@ async def read_dive_profile(
 ) -> Response | RecordingProfileRead:
     """Serve one recording's per-sample curves and the events alongside them.
 
-    Ten channels: what its sensors read - depth, deco ceiling, temperature and per-cylinder
-    tank pressure - and what its computer worked out from them - the no-decompression clock,
-    the time to surface, the computed ppO2, the CNS clock and the two gradient factors. A
-    recording carries whichever of them its files recorded, and `channels` on the dive read
-    says which without fetching the samples.
+    Its channels: what its sensors read - depth, deco ceiling, temperature, per-cylinder tank
+    pressure and the diver's heart rate - and what its computer worked out from them - the
+    no-decompression clock, the time to surface, the computed ppO2, the CNS clock and the two
+    gradient factors. A recording carries whichever of them its files recorded, and `channels`
+    on the dive read says which without fetching the samples.
 
     Per **recording**, not per dive: a diver on two computers has two profiles of one dive
     and neither is a version of the other. `rid` is the recording's uuid, from the dive's

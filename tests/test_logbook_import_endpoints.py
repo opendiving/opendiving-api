@@ -758,15 +758,16 @@ class TestTheReportsNotes:
         assert group["count"] >= len(group["wheres"]) > 0
         assert all(where.startswith("logbook.ssrf/") for where in group["wheres"])
 
+    @pytest.mark.parametrize("code", ["negative_readings", "zero_readings"])
     def test_a_finding_of_how_a_file_writes_a_value_is_not_shown(
-        self, signed_in: Any, client: TestClient, monkeypatch: Any
+        self, signed_in: Any, client: TestClient, monkeypatch: Any, code: str
     ) -> None:
-        hidden = divejson.Note("logbook.ssrf/$", "negative readings", "dropped", code="negative_readings")
+        hidden = divejson.Note("logbook.ssrf/$", "absent-marker readings", "dropped", code=code)
         _with_findings(monkeypatch, hidden)
 
         body = client.post(PREVIEW_PATH, files=_files(SSRF, "logbook.ssrf")).json()
 
-        assert "negative readings" not in {group["message"] for group in body["notes"]}
+        assert "absent-marker readings" not in {group["message"] for group in body["notes"]}
 
     def test_a_code_and_a_kind_from_a_later_release_come_back_as_themselves(
         self, signed_in: Any, client: TestClient, monkeypatch: Any

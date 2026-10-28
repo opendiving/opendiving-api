@@ -70,6 +70,7 @@ HIDDEN = frozenset(
         "identity_from_position",
         "gas_numbers_assigned",
         "negative_readings",
+        "zero_readings",
         "time_to_surface_zero",
         "readings_at_one_instant",
         "disabled_gases",

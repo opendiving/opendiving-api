@@ -10,9 +10,10 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     """One recording's per-sample curves: what the sensors read, and what the computer
     computed from them.
 
-    Ten channels. Four are measurements - depth, deco ceiling, temperature and per-cylinder
-    tank pressure - and six are the device's own decompression arithmetic: the no-deco clock,
-    the time to surface, the computed ppO2, the CNS clock and the two gradient factors.
+    Five channels are measurements - depth, deco ceiling, temperature, per-cylinder tank
+    pressure and the diver's heart rate - and six are the device's own decompression
+    arithmetic: the no-deco clock, the time to surface, the computed ppO2, the CNS clock and
+    the two gradient factors.
     `schemas/dive_profile.py` holds the scale each is stored in.
 
     Derived from the recording's stored exports (`DiveFile`) on every path but one: the
@@ -57,9 +58,10 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
 
     `t` is integer elapsed milliseconds from the recording's start (`dive_recording.start_time`),
     so a first reading keeps the offset its file states; `v` is integer-scaled (depth and
-    ceiling in cm, temperature in 0.01 C, pressure in 0.1 bar, ndl and tts in seconds, ppO2
-    in 0.01 bar, CNS in 0.1 %, both gradient factors in whole percent) so a float round-trip
-    can't reintroduce `20.600000000000023`-class noise several thousand times per dive.
+    ceiling in cm, temperature in 0.01 C, pressure in 0.1 bar, heart rate in beats per minute,
+    ndl and tts in seconds, ppO2 in 0.01 bar, CNS in 0.1 %, both gradient factors in whole
+    percent) so a float round-trip can't reintroduce `20.600000000000023`-class noise several
+    thousand times per dive.
     There are no nulls inside a series - a sensor dropout is a gap in `t`, which the chart
     breaks the polyline across, and on the ceiling channel a gap is a stretch of the dive
     with no decompression obligation. See `services/dive_profiles.py` for the shape's full
@@ -182,6 +184,12 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     max_cns_pct10: Mapped[int | None] = mapped_column(Integer, default=None)
     max_gradient_factor_pct: Mapped[int | None] = mapped_column(Integer, default=None)
     max_surface_gradient_factor_pct: Mapped[int | None] = mapped_column(Integer, default=None)
+    # The heart-rate channel's maximum, its presence test like the extremes above, and its mean,
+    # which is not an extreme: `downsample` takes it from the series before the cap thins it, so
+    # nothing re-derives it from `data`. NULL is "no heart rate", never a zero - the format
+    # floors the channel at 1.
+    max_heart_rate_bpm: Mapped[int | None] = mapped_column(Integer, default=None)
+    avg_heart_rate_bpm: Mapped[int | None] = mapped_column(Integer, default=None)
     # Not an extreme like the columns above, and it is here for the reason they are: to
     # answer "is there anything to draw" for the dive detail response without decoding the
     # payload. Events have no extremes to be derived from, so this is a plain count - `0`

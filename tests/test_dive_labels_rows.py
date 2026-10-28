@@ -24,6 +24,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, undefer
 
+from src.app.api.v1 import dives as dives_module
 from src.app.core.security import create_dive_file_token
 from src.app.crud.crud_dive_mixtures import replace_mixtures_for_dive
 from src.app.models.dive import Dive
@@ -34,7 +35,7 @@ from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
 from src.app.schemas.dive_mixture import DiveMixtureCreate
 from src.app.services import blob_store
-from src.app.services.dive_files import StoredRecordingFile, delete_dive_file, store_recording_file
+from src.app.services.dive_files import StoredRecordingFile, delete_dive_file, extract_file, store_recording_file
 from src.app.services.dive_profiles import (
     READER_VERSION,
     backfill_profiles,
@@ -204,6 +205,57 @@ class TestTheDoorDoesNotMatter:
             column: getattr(imported, column) for column in DOOR_COLUMNS
         }
         assert (await _profile(async_db, attached.id)).data == (await _profile(async_db, imported.id)).data
+
+
+class TestTheHeartRateIsTheFilesWholeSeries:
+    """The heart-rate summary at the attach door and the import door, and on the dive read.
+
+    The FIT carries 4 401 readings, past the cap, so its stored series is thinned and the
+    average could not have been taken from it; the JSON is reduced and under it."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("name", "parser_key"), [("ocean-heart-rate.fit", "fit"), ("ocean-heart-rate.json", "suunto_json")]
+    )
+    async def test_both_doors_store_the_maximum_and_the_mean_of_every_reading(
+        self, volume: Any, async_db: AsyncSession, db: Session, name: str, parser_key: str
+    ) -> None:
+        content = _fixture(name)
+        uncapped = extract_file(content, parser_key).profile
+        assert uncapped is not None and uncapped.heart_rate is not None
+        readings = uncapped.heart_rate.v
+        attaching, importing = create_user(db), create_user(db)
+        attached_dive = create_dive(db, attaching)
+
+        await _attach(async_db, attaching, attached_dive, content)
+        await TestTheDoorDoesNotMatter._import(async_db, importing, content, name)
+
+        [attached] = await _recordings(async_db, attached_dive.id)
+        imported_dive = (await async_db.execute(select(Dive.id).where(Dive.user_id == importing.id))).scalar_one()
+        [imported] = await _recordings(async_db, imported_dive)
+        for recording in (attached, imported):
+            profile = await _profile(async_db, recording.id)
+            assert profile.max_heart_rate_bpm == max(readings)
+            assert profile.avg_heart_rate_bpm == round(sum(readings) / len(readings))
+        if parser_key == "fit":
+            assert (max(readings), round(sum(readings) / len(readings))) == (107, 77)
+            assert len((await _profile(async_db, attached.id)).data["heart_rate"]["v"]) < len(readings)
+
+    @pytest.mark.asyncio
+    async def test_the_dive_read_states_both(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """Nothing fails if the read forgets the average: every figure defaults to null."""
+        await _attach(async_db, diver, dive, _fixture("ocean-heart-rate.fit"))
+
+        read = await dives_module._cached_read_dive.__wrapped__(  # type: ignore[attr-defined]
+            request=None, user_id=diver.id, uuid=dive.uuid, owner_uuid=diver.uuid, db=async_db
+        )
+
+        [recording] = read.recordings
+        assert recording.profile is not None
+        assert "heart_rate" in recording.profile.channels
+        assert (recording.profile.max_heart_rate, recording.profile.average_heart_rate) == (107, 77)
 
 
 class TestAPairOfFilesAgreesOnItsLabels:
