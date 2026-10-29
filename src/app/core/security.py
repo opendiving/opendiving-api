@@ -1,8 +1,8 @@
 import base64
 import hashlib
 import logging
-import re
 import secrets
+import string
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -369,7 +369,7 @@ def _new_jti() -> str:
     return uuid_pkg.uuid4().hex
 
 
-_COMPACT_JWT = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+_BASE64URL_ALPHABET = frozenset(string.ascii_letters + string.digits + "-_")
 
 
 def _decode(token: str) -> dict[str, Any]:
@@ -385,9 +385,10 @@ def _decode(token: str) -> dict[str, Any]:
 
     Raises `JWTError` for a non-canonical token, as `jwt.decode` does for an invalid one.
     """
-    if not _COMPACT_JWT.fullmatch(token):
+    segments = token.split(".")
+    if len(segments) != 3 or not all(segment and _BASE64URL_ALPHABET.issuperset(segment) for segment in segments):
         raise JWTError("Token is not three unpadded base64url segments.")
-    for segment in token.split("."):
+    for segment in segments:
         # Checked before decoding: no padding makes such a segment decode, and the error it
         # raises there is not a `JWTError`.
         if len(segment) % 4 == 1:
