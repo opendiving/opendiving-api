@@ -4013,12 +4013,14 @@ concurrency: `charge_code_attempt` is hand-written Core, one
 `UPDATE … WHERE code_attempts < :max RETURNING code_hash`, and the route compares against the digest
 it returns. Rejected: comparing first and charging on failure, where every guess in flight reads the
 digest before any charge lands and a right one among a hundred parallel guesses claims. Rate
-limiting is no substitute: it fails open on a Redis outage. Residual exposure: only a requester
-holds a `request_id`, and every request emails the victim. `MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL`
-allows 3 per `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS` (900 s), each worth 5 guesses in 10⁶: 15 guesses
-a quarter hour, an expected success in ~694 days of 288 emails a day. The lever, if observation
-disagrees, is eight digits (×100), not the request cap, whose 3 → 1 of headroom every diver with a
-lost first email pays for.
+limiting is no substitute: it fails open on a Redis outage. The per-address request limit therefore
+holds in Postgres too: `request_email_link` counts the address's `sign_in` rows in the window under
+a per-address advisory lock held to the insert's commit, so the arithmetic below survives an outage.
+Residual exposure: only a requester holds a `request_id`, and every request emails the victim.
+`MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL` allows 3 per `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS` (900
+s), each worth 5 guesses in 10⁶: 15 guesses a quarter hour, an expected success in ~694 days of 288
+emails a day. The lever, if observation disagrees, is eight digits (×100), not the request cap,
+whose 3 → 1 of headroom every diver with a lost first email pays for.
 
 ## Sign-in code: Everything else is the shape already there
 

@@ -40,6 +40,7 @@ from ...core.exceptions.http_exceptions import (
     BadRequestException,
     DuplicateValueException,
     ForbiddenException,
+    RateLimitException,
     UnauthorizedException,
 )
 from ...core.schemas import OnboardingTokenData
@@ -72,7 +73,9 @@ from ...crud.crud_authentication_requests import (
     charge_code_attempt,
     claim_authentication_request,
     crud_authentication_requests,
+    hold_sign_in_request_quota,
     invalidate_live_requests,
+    sign_in_requests_since,
     spend_exhausted_code,
 )
 from ...crud.crud_daily_totals import count_account_created
@@ -326,6 +329,14 @@ async def request_email_link(
         settings.MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL,
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
+    # The same per-address limit again, counted in Postgres: the Redis one fails open on an
+    # outage, and the request count is what bounds guesses at an address's codes. Same
+    # refusal, so it says nothing the Redis one doesn't. The lock is held to the insert's
+    # commit below.
+    await hold_sign_in_request_quota(db, email=email)
+    recent = await sign_in_requests_since(db, email=email, window_seconds=settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS)
+    if recent >= settings.MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL:
+        raise RateLimitException("Too many requests. Please try again later.")
 
     # Only one *live* link per email: invalidate any previous, still-live request(s)
     # rather than leaving them valid alongside the new one.
