@@ -1,6 +1,7 @@
 """Unit tests for the SMTP-backed transactional email senders."""
 
 import logging
+import math
 import smtplib
 import ssl
 import threading
@@ -18,6 +19,7 @@ from src.app.services.email_service import (
     SMTP_TIMEOUT_SECONDS,
     EmailDeliveryError,
     _build_message,
+    _round_half_up,
     _send,
     send_api_key_created_email,
     send_api_key_revoked_email,
@@ -96,6 +98,19 @@ class TestBuildMessage:
 
             assert "\n" not in str(message["Subject"])
             assert message["Bcc"] is None
+
+    @pytest.mark.parametrize("line_break", [" ", " ", "\x85", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e"])
+    def test_a_subject_carrying_any_other_line_break_does_not_raise(self, line_break: str):
+        """`EmailMessage` refuses whatever `str.splitlines` splits on, not only CR and LF -
+        and a diver-typed certification name becomes the renewal reminder's subject."""
+        with patch("src.app.services.email_service.settings") as mock_settings:
+            _configured(mock_settings)
+
+            message = _build_message(
+                to="a@example.com", subject=f"PADI Rescue{line_break}Diver expires soon", html_body="<p>b</p>"
+            )
+
+            assert message["Subject"] == "PADI Rescue Diver expires soon"
 
     def test_refuses_to_send_from_nothing(self):
         """The startup validator makes this unreachable; it exists so that a sender
@@ -761,6 +776,35 @@ class TestSendYearInReviewEmail:
 
         assert "<b>Reef</b>" not in body
         assert "&lt;b&gt;Reef&lt;/b&gt;" in body
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("units", ["metric", "imperial"])
+    async def test_a_depth_near_the_float_ceiling_is_still_sent(self, units: str):
+        """A `max_depth` of 1e308 is finite and accepted on write; scaled to centimetres or
+        feet it is infinite, and the rounding must not raise on it."""
+        deepest = ReviewedDive(
+            id=1,
+            uuid=self.DEEPEST.uuid,
+            day=self.DEEPEST.day,
+            max_depth=1e308,
+            submerged_time=60,
+            site_name=None,
+        )
+
+        body = (await self._sent(self._review(deepest=deepest), units=units)).get_content()
+
+        assert "Deepest: " in body
+
+
+class TestRoundHalfUp:
+    def test_ties_go_up(self):
+        assert (_round_half_up(2.5, 0), _round_half_up(0.125, 2)) == (3.0, 0.13)
+
+    @pytest.mark.parametrize("value", [1e308, -1e308, math.inf, math.nan])
+    def test_a_value_that_does_not_scale_to_a_finite_number_is_returned_as_it_is(self, value: float):
+        rounded = _round_half_up(value, 2)
+
+        assert rounded == value or (math.isnan(value) and math.isnan(rounded))
 
 
 class TestSupportFormHeaders:
