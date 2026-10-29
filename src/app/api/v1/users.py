@@ -784,6 +784,10 @@ async def read_storage_usage(
         dive_files_bytes=usage.dive_files_bytes,
         certification_files_bytes=usage.certification_files_bytes,
         pictures_bytes=usage.pictures_bytes,
+        dive_files_count=usage.dive_files_count,
+        dives_with_files_count=usage.dives_with_files_count,
+        certification_files_count=usage.certification_files_count,
+        certifications_with_files_count=usage.certifications_with_files_count,
     )
 
 

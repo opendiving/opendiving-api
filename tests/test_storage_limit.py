@@ -632,6 +632,37 @@ class TestTheUsageRoute:
         assert usage.pictures_bytes > 0
         assert usage.used_bytes == usage.dive_files_bytes + usage.certification_files_bytes + usage.pictures_bytes
         assert usage.limit_bytes == LIMIT
+        assert (usage.dive_files_count, usage.dives_with_files_count) == (1, 1)
+        assert (usage.certification_files_count, usage.certifications_with_files_count) == (1, 1)
+
+    @pytest.mark.asyncio
+    async def test_files_are_counted_apart_from_the_records_they_attach_to(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        diver, other = create_user(db), create_user(db)
+        two_files, one_file = create_dive(db, diver), create_dive(db, diver)
+        create_dive(db, diver)
+        await _attach(async_db, diver, two_files.id, EXPORT)
+        await _attach(async_db, diver, two_files.id, EXPORT.replace(b"25.5", b"26.5"))
+        await _attach(async_db, diver, one_file.id, EXPORT.replace(b"25.5", b"27.5"))
+        await _attach(async_db, other, create_dive(db, other).id)
+        both_sides = create_certification(db, diver)
+        for side in (CertificationSide.FRONT, CertificationSide.BACK):
+            await store_certification_file(
+                async_db,
+                user_id=diver.id,
+                certification_id=both_sides.id,
+                side=side,
+                upload=_upload(plain_png(size=(9, 6)), "card.png"),
+            )
+        _hold(db, diver, 10)
+        create_certification(db, diver)
+        _hold(db, other, 10)
+
+        usage = await get_storage_usage(async_db, user_id=diver.id)
+
+        assert (usage.dive_files_count, usage.dives_with_files_count) == (3, 2)
+        assert (usage.certification_files_count, usage.certifications_with_files_count) == (3, 2)
 
     @pytest.mark.asyncio
     async def test_no_limit_reads_as_null(
@@ -643,6 +674,8 @@ class TestTheUsageRoute:
 
         assert usage.limit_bytes is None
         assert usage.used_bytes == 0
+        assert usage.dive_files_count == usage.dives_with_files_count == 0
+        assert usage.certification_files_count == usage.certifications_with_files_count == 0
 
 
 class TestTheFiguresReadAsTheWebShowsThem:
