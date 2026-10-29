@@ -19,6 +19,7 @@ from src.app.core.worker.functions import (
     AUTHENTICATION_REQUEST_RETENTION,
     INVITATION_RETENTION,
     INVITE_REQUEST_RETENTION,
+    MAIL_FAILURES_TO_STOP,
     _due_text,
     _purge_one_account,
     purge_expired_authentication_requests,
@@ -837,6 +838,59 @@ class TestSendRenewalReminders:
         send.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_a_failed_send_leaves_that_diver_unmarked_and_goes_on(self, caplog: pytest.LogCaptureFixture) -> None:
+        certifications = [
+            _certification_row(user_id=1, certification_id=20),
+            _certification_row(user_id=2, email="other@example.com", certification_id=22),
+        ]
+        session = _RenewalSession(certifications, [])
+        session_patch, email_patch = _renewal_patches(session)
+        with session_patch, email_patch as send:
+            send.side_effect = [ValueError("Header values may not contain linefeed"), None]
+            result = await send_renewal_reminders({}, today=TODAY)
+
+        assert [call.args[0] for call in send.await_args_list] == ["diver@example.com", "other@example.com"]
+        marked = [mark["id"] for _, params in session.update_statements for mark in params]
+        assert marked == [22]
+        session.rollback.assert_awaited_once()
+        assert "Renewal reminder for user 1 failed" in caplog.text
+        assert "Sent 1 renewal reminder(s) covering 1 subject(s); 1 failed" in result
+
+    @staticmethod
+    def _divers(count: int) -> list[SimpleNamespace]:
+        return [
+            _certification_row(user_id=user_id, email=f"diver{user_id}@example.com", certification_id=100 + user_id)
+            for user_id in range(1, count + 1)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_failures_in_a_row_stop_the_run(self, caplog: pytest.LogCaptureFixture) -> None:
+        session = _RenewalSession(self._divers(MAIL_FAILURES_TO_STOP + 2), [])
+        session_patch, email_patch = _renewal_patches(session)
+        with session_patch, email_patch as send:
+            send.side_effect = [*[TimeoutError("relay")] * MAIL_FAILURES_TO_STOP, None, None]
+            result = await send_renewal_reminders({}, today=TODAY)
+
+        assert send.await_count == MAIL_FAILURES_TO_STOP
+        assert session.update_statements == []
+        assert f"stopped after {MAIL_FAILURES_TO_STOP} failures in a row" in caplog.text
+        assert f"Sent 0 renewal reminder(s) covering 0 subject(s); {MAIL_FAILURES_TO_STOP} failed" in result
+
+    @pytest.mark.asyncio
+    async def test_a_send_between_failures_resets_the_count(self, caplog: pytest.LogCaptureFixture) -> None:
+        failures = [TimeoutError("relay")] * (MAIL_FAILURES_TO_STOP - 1)
+        outcomes = [*failures, None, *failures, None]
+        session = _RenewalSession(self._divers(len(outcomes)), [])
+        session_patch, email_patch = _renewal_patches(session)
+        with session_patch, email_patch as send:
+            send.side_effect = outcomes
+            result = await send_renewal_reminders({}, today=TODAY)
+
+        assert send.await_count == len(outcomes)
+        assert "stopped after" not in caplog.text
+        assert f"Sent 2 renewal reminder(s) covering 2 subject(s); {len(failures) * 2} failed" in result
+
+    @pytest.mark.asyncio
     async def test_the_queries_exclude_deleted_cards_deleted_accounts_and_the_opted_out(self) -> None:
         session = _RenewalSession([], [])
         session_patch, email_patch = _renewal_patches(session)
@@ -938,16 +992,65 @@ class TestSendYearInReview:
         assert sent_to[-1] == f"diver{YEAR_IN_REVIEW_BATCH_SIZE + 1}@example.com"
 
     @pytest.mark.asyncio
-    async def test_a_refused_send_leaves_that_diver_unmarked(self) -> None:
-        """The relay's daily ceiling raises; the diver is picked up by the next run."""
-        session = _RecordingSession([_candidate(1), _candidate(2)])
-        session_patch, email_patch, review_patch = _year_in_review_patches(session, [_review(), _review()])
+    async def test_a_failed_send_leaves_that_diver_unmarked_and_goes_on(self) -> None:
+        """The diver is picked up by the next run, and the divers after them are not held up."""
+        session = _RecordingSession([_candidate(1), _candidate(2), _candidate(3)])
+        session_patch, email_patch, review_patch = _year_in_review_patches(session, [_review()] * 3)
         with session_patch, email_patch as send, review_patch:
-            send.side_effect = [None, RuntimeError("daily quota exceeded")]
-            with pytest.raises(RuntimeError):
-                await send_year_in_review({}, today=self.JANUARY)
+            send.side_effect = [None, ValueError("Header values may not contain linefeed"), None]
+            result = await send_year_in_review({}, today=self.JANUARY)
 
+        assert [call.args[0] for call in send.await_args_list] == [
+            "diver1@example.com",
+            "diver2@example.com",
+            "diver3@example.com",
+        ]
+        assert len(session.updates) == 2
+        session.rollback.assert_awaited_once()
+        assert "Sent 2 year-in-review email(s) for 2025; 1 failed" in result
+
+    @pytest.mark.asyncio
+    async def test_a_review_that_raises_is_left_for_the_next_run(self) -> None:
+        session = _RecordingSession([_candidate(1), _candidate(2)])
+        session_patch, email_patch, review_patch = _year_in_review_patches(
+            session, [OverflowError("cannot convert float infinity to integer"), _review()]
+        )
+        with session_patch, email_patch as send, review_patch:
+            result = await send_year_in_review({}, today=self.JANUARY)
+
+        assert [call.args[0] for call in send.await_args_list] == ["diver2@example.com"]
         assert len(session.updates) == 1
+        assert "Sent 1 year-in-review email(s) for 2025; 1 failed" in result
+
+    @pytest.mark.asyncio
+    async def test_failures_in_a_row_stop_the_run(self, caplog: pytest.LogCaptureFixture) -> None:
+        candidates = [_candidate(user_id) for user_id in range(1, MAIL_FAILURES_TO_STOP + 3)]
+        session = _RecordingSession(candidates)
+        session_patch, email_patch, review_patch = _year_in_review_patches(session, [_review() for _ in candidates])
+        with session_patch, email_patch as send, review_patch:
+            send.side_effect = [*[TimeoutError("relay")] * MAIL_FAILURES_TO_STOP, None, None]
+            result = await send_year_in_review({}, today=self.JANUARY)
+
+        assert send.await_count == MAIL_FAILURES_TO_STOP
+        assert session.updates == []
+        assert f"stopped after {MAIL_FAILURES_TO_STOP} failures in a row" in caplog.text
+        assert f"Sent 0 year-in-review email(s) for 2025; {MAIL_FAILURES_TO_STOP} failed" in result
+
+    @pytest.mark.asyncio
+    async def test_a_send_between_failures_resets_the_count(self, caplog: pytest.LogCaptureFixture) -> None:
+        failures = [TimeoutError("relay")] * (MAIL_FAILURES_TO_STOP - 1)
+        outcomes = [*failures, None, *failures, None]
+        candidates = [_candidate(user_id) for user_id in range(1, len(outcomes) + 1)]
+        session = _RecordingSession(candidates)
+        session_patch, email_patch, review_patch = _year_in_review_patches(session, [_review() for _ in candidates])
+        with session_patch, email_patch as send, review_patch:
+            send.side_effect = outcomes
+            result = await send_year_in_review({}, today=self.JANUARY)
+
+        assert send.await_count == len(outcomes)
+        assert len(session.updates) == 2
+        assert "stopped after" not in caplog.text
+        assert f"Sent 2 year-in-review email(s) for 2025; {len(failures) * 2} failed" in result
 
     @pytest.mark.asyncio
     async def test_the_query_asks_for_the_opted_in_living_and_unsent_oldest_first(self) -> None:

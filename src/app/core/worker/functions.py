@@ -770,6 +770,9 @@ async def send_gear_service_digests(ctx: dict[Any, Any]) -> str:
     return f"Sent {sent_users} gear service digest(s) covering {sent_schedules} schedule(s)"
 
 
+MAIL_FAILURES_TO_STOP = 3
+
+
 async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None) -> str:
     """Email each diver one list of the certifications and insurance policies they need to renew.
 
@@ -871,33 +874,52 @@ async def send_renewal_reminders(ctx: dict[Any, Any], today: date | None = None)
 
     sent_users = 0
     sent_subjects = 0
+    failed_users = 0
+    failures_in_a_row = 0
     async with local_session() as db:
         for user_id, bucket in by_user.items():
+            # One diver whose mail always fails cannot hold every diver behind them; three in a
+            # row is the relay, not the divers, and an outage then costs three timeouts rather
+            # than one per diver. Nothing unsent is marked, so the next run retries them.
+            if failures_in_a_row >= MAIL_FAILURES_TO_STOP:
+                logger.warning("Renewal reminders stopped after %d failures in a row", failures_in_a_row)
+                break
             # Soonest first, cards and policies in one list, as the Renewals card orders them.
             lines = [(label, text, path) for _, label, text, path in sorted(bucket["lines"])]
             # Send, then mark, for the digest's reason: a failed send is a duplicate tomorrow
-            # rather than a reminder that never arrives.
-            await send_renewal_reminder_email(bucket["email"], lines)
+            # rather than a reminder that never arrives. A diver whose send or mark fails is
+            # left unmarked for the next run, and the divers after them are still sent to.
+            try:
+                await send_renewal_reminder_email(bucket["email"], lines)
 
-            # An ORM bulk UPDATE by primary key with no `.where()`, as the digest's mark is -
-            # DECISIONS.md, "The digest's mark is an ORM bulk UPDATE by primary key".
-            if bucket["marks"]:
-                await db.execute(update(Certification), bucket["marks"])
-            # One statement per policy rather than the bulk form above: a save replaces the
-            # rows, and a bulk UPDATE by primary key raises on one replaced since the read
-            # where this marks nothing - the reminder then repeats once.
-            for policy_id, stage_value, expires_on in bucket["policies"]:
-                await db.execute(
-                    update(CheckinInsurancePolicy)
-                    .where(CheckinInsurancePolicy.id == policy_id)
-                    .values(notified_stage=stage_value, notified_for=expires_on)
-                )
-            await db.commit()
+                # An ORM bulk UPDATE by primary key with no `.where()`, as the digest's mark is -
+                # DECISIONS.md, "The digest's mark is an ORM bulk UPDATE by primary key".
+                if bucket["marks"]:
+                    await db.execute(update(Certification), bucket["marks"])
+                # One statement per policy rather than the bulk form above: a save replaces the
+                # rows, and a bulk UPDATE by primary key raises on one replaced since the read
+                # where this marks nothing - the reminder then repeats once.
+                for policy_id, stage_value, expires_on in bucket["policies"]:
+                    await db.execute(
+                        update(CheckinInsurancePolicy)
+                        .where(CheckinInsurancePolicy.id == policy_id)
+                        .values(notified_stage=stage_value, notified_for=expires_on)
+                    )
+                await db.commit()
+            except Exception:
+                logger.exception("Renewal reminder for user %d failed; left for the next run", user_id)
+                await db.rollback()
+                failed_users += 1
+                failures_in_a_row += 1
+                continue
+            failures_in_a_row = 0
             sent_users += 1
             sent_subjects += len(lines)
 
-    logger.info("Sent %d renewal reminder(s) covering %d subject(s)", sent_users, sent_subjects)
-    return f"Sent {sent_users} renewal reminder(s) covering {sent_subjects} subject(s)"
+    logger.info(
+        "Sent %d renewal reminder(s) covering %d subject(s); %d failed", sent_users, sent_subjects, failed_users
+    )
+    return f"Sent {sent_users} renewal reminder(s) covering {sent_subjects} subject(s); {failed_users} failed"
 
 
 async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) -> str:
@@ -914,8 +936,9 @@ async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) ->
     decides, and a diver whose only dives in the window fall outside the year is skipped
     without counting against the batch.
 
-    Marked after each send and committed per diver, as the digest is: a send the relay refuses
-    raises before its mark, ends the run, and leaves that diver for the next one.
+    Marked after each send and committed per diver, as the digest is. A diver whose review,
+    send or mark fails is left unmarked for the next run without using a slot in the batch,
+    and the run goes on to the next - until `MAIL_FAILURES_TO_STOP` fail in a row.
     """
     today = today or datetime.now(UTC).date()
     year = reviewed_year(today)
@@ -935,6 +958,8 @@ async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) ->
     )
 
     sent = 0
+    failed = 0
+    failures_in_a_row = 0
     async with local_session() as db:
         candidates = (
             await db.execute(
@@ -952,18 +977,30 @@ async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) ->
         for candidate in candidates:
             if sent == YEAR_IN_REVIEW_BATCH_SIZE:
                 break
-            review = await year_in_review(db, candidate.id, year)
-            if review is None:
+            # As the renewal reminders stop: three failures in a row is the relay, not the divers.
+            if failures_in_a_row >= MAIL_FAILURES_TO_STOP:
+                logger.warning("Year in review stopped after %d failures in a row", failures_in_a_row)
+                break
+            try:
+                review = await year_in_review(db, candidate.id, year)
+                if review is None:
+                    continue
+                await send_year_in_review_email(candidate.email, review, candidate.units)
+                await db.execute(update(User).where(User.id == candidate.id).values(year_in_review_sent_for=year))
+                await db.commit()
+            except Exception:
+                logger.exception("Year in review for user %d failed; left for the next run", candidate.id)
+                await db.rollback()
+                failed += 1
+                failures_in_a_row += 1
                 continue
-            await send_year_in_review_email(candidate.email, review, candidate.units)
-            await db.execute(update(User).where(User.id == candidate.id).values(year_in_review_sent_for=year))
-            await db.commit()
+            failures_in_a_row = 0
             sent += 1
 
     if sent == YEAR_IN_REVIEW_BATCH_SIZE:
         logger.info("Year-in-review batch was full; more divers may be due on the next run")
-    logger.info("Sent %d year-in-review email(s) for %d", sent, year)
-    return f"Sent {sent} year-in-review email(s) for {year}"
+    logger.info("Sent %d year-in-review email(s) for %d; %d failed", sent, year, failed)
+    return f"Sent {sent} year-in-review email(s) for {year}; {failed} failed"
 
 
 async def fetch_dive_conditions(ctx: dict[Any, Any]) -> str:
