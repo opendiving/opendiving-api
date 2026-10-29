@@ -13,7 +13,7 @@ DECISIONS.md for why putting the check inside a cached function is a vulnerabili
 import uuid as uuid_pkg
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +27,7 @@ from ...core.exceptions.http_exceptions import (
     UnprocessableEntityException,
 )
 from ...core.utils.cache import cache
-from ...core.utils.pagination import clamp_pagination
+from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_gear_items import crud_gear_items, get_gear_item_uuids_by_id, resolve_gear_item_ids_for_user
 from ...crud.crud_gear_service_records import (
@@ -274,9 +274,9 @@ async def read_gear_service_schedules(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    gear_item_uuid: uuid_pkg.UUID | None = None,
-    page: int = 1,
-    items_per_page: int = 10,
+    gear_item_uuid: Annotated[uuid_pkg.UUID | None, Query(description="Only the rules for this gear item")] = None,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
 ) -> dict:
     """List the caller's servicing rules, soonest due first, optionally narrowed to one gear
     item. A `gear_item_uuid` that doesn't exist or isn't the caller's answers an empty page."""
@@ -605,10 +605,12 @@ async def read_gear_service_records(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    gear_item_uuid: uuid_pkg.UUID | None = None,
-    gear_service_schedule_uuid: uuid_pkg.UUID | None = None,
-    page: int = 1,
-    items_per_page: int = 10,
+    gear_item_uuid: Annotated[uuid_pkg.UUID | None, Query(description="Only the records for this gear item")] = None,
+    gear_service_schedule_uuid: Annotated[
+        uuid_pkg.UUID | None, Query(description="Only the records kept under this servicing rule")
+    ] = None,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
 ) -> dict:
     """List the caller's service history, most recent `serviced_on` first, optionally narrowed
     to one gear item or one rule. A `gear_item_uuid` or `gear_service_schedule_uuid` that

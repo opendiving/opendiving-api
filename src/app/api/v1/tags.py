@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException
-from ...core.utils.pagination import clamp_pagination
+from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...crud.crud_tags import TAG_NAME_KEY, crud_tags, get_tags_page, tag_name_exists
 from ...crud.unique_keys import write_or_duplicate
 from ...schemas.tag import TAG_NAME_MAX, TagRead, TagReadInternal, TagUpdate
@@ -45,8 +45,8 @@ async def read_tags(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
     search: Annotated[
         str | None, Query(max_length=TAG_NAME_MAX, description="Case-insensitive substring match on the name")
     ] = None,

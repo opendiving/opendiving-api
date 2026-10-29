@@ -121,3 +121,14 @@ def test_descriptions_carry_no_rationale_markers(document: dict[str, Any]) -> No
     assert not offenders, "these descriptions point at the code or its history:\n" + "\n".join(
         f"  {name}: {', '.join(hits)}" for name, hits in sorted(offenders.items())
     )
+
+
+def test_every_query_parameter_is_described(document: dict[str, Any]) -> None:
+    offenders = [
+        f"{name} ?{parameter['name']}"
+        for name, operation in _operations(document)
+        for parameter in operation.get("parameters") or []
+        if parameter["in"] == "query" and not parameter.get("description")
+    ]
+
+    assert not offenders, "these query parameters have no description:\n" + "\n".join(f"  {o}" for o in offenders)

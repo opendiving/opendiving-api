@@ -56,7 +56,7 @@ async def read_dive_conditions_lookup(
     latitude: Annotated[
         float | None, Query(ge=-90, le=90, description="A position that wins over the site's pin")
     ] = None,
-    longitude: Annotated[float | None, Query(ge=-180, le=180)] = None,
+    longitude: Annotated[float | None, Query(ge=-180, le=180, description="Longitude of that position")] = None,
     water_type: Annotated[WaterType | None, Query(description="Wins over the site's")] = None,
 ) -> DiveConditionsLookupRead:
     """What saving a dive with these inputs would fill into its empty air temperature, weather

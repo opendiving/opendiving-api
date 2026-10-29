@@ -29,7 +29,7 @@ import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Cookie, Depends, Request, Response
+from fastapi import APIRouter, Cookie, Depends, Query, Request, Response
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -367,7 +367,10 @@ async def request_email_link(
 
 @router.get("/email/verify/check", response_model=LinkCheckResponse)
 async def check_email_link(
-    request: Request, response: Response, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request,
+    response: Response,
+    token: Annotated[str, Query(description="The `token` from the magic link's URL")],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> LinkCheckResponse:
     """Whether a magic link can still be redeemed, and for which address, without redeeming it.
 

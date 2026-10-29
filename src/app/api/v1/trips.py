@@ -17,7 +17,7 @@ from ...core.exceptions.http_exceptions import (
 )
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
-from ...core.utils.pagination import clamp_pagination
+from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...crud.crud_contacts import resolve_contact_ids_for_user
 from ...crud.crud_dives import (
     assign_candidates_to_trip,
@@ -314,8 +314,8 @@ async def read_trips(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
     search: Annotated[
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on the trip's name or its places"),
@@ -402,8 +402,8 @@ async def lookup_trips(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     until: LookupUntil = None,
-    page: int = 1,
-    items_per_page: int = 10,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
     search: Annotated[
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on the trip's name or its places"),
@@ -509,8 +509,8 @@ async def read_trip_dives(
     uuid: uuid_pkg.UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
 ) -> dict:
     """The trip's live dives and its candidates in one list, newest first, as `GET /dives`
     shapes its rows.

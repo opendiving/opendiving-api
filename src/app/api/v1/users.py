@@ -27,7 +27,7 @@ from ...core.security import bearer_scheme, blacklist_token, blacklist_tokens, g
 from ...core.utils.binary_responses import not_modified, stored_bytes_response
 from ...core.utils.cache import cache, delete_keys_by_pattern
 from ...core.utils.client_ip import client_ip_bucket
-from ...core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE, clamp_pagination
+from ...core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE, ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.request_context import RequestContext
 from ...core.utils.uploads import content_disposition_attachment
@@ -588,7 +588,10 @@ async def request_email_change(
 
 @router.get("/user/email-change/verify/check", response_model=LinkCheckResponse)
 async def check_email_change_link(
-    request: Request, response: Response, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
+    request: Request,
+    response: Response,
+    token: Annotated[str, Query(description="The `token` from the email-change link's URL")],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> LinkCheckResponse:
     """Check an email-change link without using it.
 
@@ -942,8 +945,8 @@ async def read_species_life_list(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
     search: Annotated[
         str | None,
         Query(max_length=255, description="Match by any name the species goes by, as the catalog search does"),

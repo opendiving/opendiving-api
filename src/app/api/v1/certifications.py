@@ -12,7 +12,7 @@ from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
 from ...core.utils.binary_responses import not_modified, stored_bytes_response
 from ...core.utils.cache import cache
-from ...core.utils.pagination import clamp_pagination
+from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.uploads import content_disposition_attachment
 from ...crud.crud_certifications import (
     crud_certifications,
@@ -273,9 +273,9 @@ async def read_certifications(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
-    course_uuid: uuid_pkg.UUID | None = None,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
+    course_uuid: Annotated[uuid_pkg.UUID | None, Query(description="Only the cards this course issued")] = None,
 ) -> dict:
     """List the caller's certifications, most recent `certified_on` first; cards with no date
     sort last.
