@@ -18,6 +18,11 @@ from .person import PeopleRead, PeopleUpdate, PeopleWrite
 
 MAX_TRIP_PARTS = 20
 
+_NAME_DESCRIPTION = "Name of the trip"
+_NOTES_DESCRIPTION = "What the diver wrote about the trip"
+_PART_START_DESCRIPTION = "First day of this part"
+_PART_END_DESCRIPTION = "Last day of this part"
+
 
 class TripPartInput(BaseModel):
     """One stretch of a trip on the way in: an optional date range, an optional place and
@@ -31,9 +36,11 @@ class TripPartInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    start_date: Annotated[date | None, Field(default=None, examples=["2024-06-01"])]
-    end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"])]
-    location: LocationInput | None = None
+    start_date: Annotated[
+        date | None, Field(default=None, examples=["2024-06-01"], description=_PART_START_DESCRIPTION)
+    ]
+    end_date: Annotated[date | None, Field(default=None, examples=["2024-06-08"], description=_PART_END_DESCRIPTION)]
+    location: Annotated[LocationInput | None, Field(default=None, description="Where this part of the trip took place")]
     accommodation_uuid: Annotated[
         uuid_pkg.UUID | None,
         Field(default=None, description="Public id of the contact the diver stayed at during this part"),
@@ -75,8 +82,10 @@ class TripPartWithCandidatesRead(TripPartRead):
 
 
 class TripBase(BaseModel):
-    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Red Sea Liveaboard 2024"])]
-    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
+    name: Annotated[
+        str, Trimmed, Field(max_length=255, examples=["Red Sea Liveaboard 2024"], description=_NAME_DESCRIPTION)
+    ]
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
 
 
 class TripRead(TripBase, PublicUUIDSchema):
@@ -161,8 +170,8 @@ class TripUpdate(RejectsExplicitNulls):
 
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes")
 
-    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None)]
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
+    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
 
 
 class TripUpdateRequest(TripUpdate):
@@ -206,8 +215,8 @@ class TripPartDates(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    start_date: date | None = None
-    end_date: date | None = None
+    start_date: Annotated[date | None, Field(default=None, description=_PART_START_DESCRIPTION)]
+    end_date: Annotated[date | None, Field(default=None, description=_PART_END_DESCRIPTION)]
 
     @model_validator(mode="after")
     def check_a_date_is_named(self) -> TripPartDates:

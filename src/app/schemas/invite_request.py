@@ -7,6 +7,7 @@ would be an account-existence oracle for anyone who can reach the port.
 """
 
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,7 +28,7 @@ class InviteRequestSubmission(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    email: AccountEmail
+    email: Annotated[AccountEmail, Field(description="Address to send an invitation to if one is issued")]
 
 
 class InviteRequestAccepted(BaseModel):
@@ -68,7 +69,11 @@ class AdminInviteRequestDeleteRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    emails: list[AccountEmail] = Field(min_length=1, max_length=MAX_ADDRESSES_PER_BATCH)
+    emails: list[AccountEmail] = Field(
+        min_length=1,
+        max_length=MAX_ADDRESSES_PER_BATCH,
+        description="Addresses of the requests to remove, at most 100",
+    )
 
 
 class AdminInviteRequestDeleteResponse(BaseModel):

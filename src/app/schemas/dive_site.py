@@ -164,6 +164,13 @@ OtherName = Annotated[
     StringConstraints(min_length=1, max_length=OTHER_NAME_MAX),
     Field(examples=["Sunabe Seawall"]),
 ]
+_NAME_DESCRIPTION = "Name of the site"
+_NOTES_DESCRIPTION = "What the diver wrote about the site"
+_WATER_TYPE_DESCRIPTION = "Whether the water at the site is salt, fresh or brackish"
+_LATITUDE_DESCRIPTION = "Latitude of the site's pin in degrees; set together with longitude, or both null"
+_LONGITUDE_DESCRIPTION = "Longitude of the site's pin in degrees; set together with latitude, or both null"
+_LOCATION_DESCRIPTION = "The town or area the site is in, replacing any stored one; null clears it"
+
 SiteDepth = Annotated[float | None, Field(default=None, ge=0, allow_inf_nan=False, description="In metres")]
 # The dive's range, `ck_dive_site_altitude_range`.
 SiteAltitude = Annotated[
@@ -179,10 +186,10 @@ class DiveSiteBase(BaseModel):
     `location_*` columns behind it so FastCRUD can select them by name.
     """
 
-    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Blue Hole"])]
-    latitude: Latitude
-    longitude: Longitude
-    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
+    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Blue Hole"], description=_NAME_DESCRIPTION)]
+    latitude: Annotated[Latitude, Field(description=_LATITUDE_DESCRIPTION)]
+    longitude: Annotated[Longitude, Field(description=_LONGITUDE_DESCRIPTION)]
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
 
 
 class DiveSiteLocationColumns(BaseModel):
@@ -301,7 +308,9 @@ class _DiveSiteMembersWrite(BaseModel):
     ]
     depth_from: SiteDepth
     depth_to: SiteDepth
-    water_type: Annotated[WaterType | None, Field(default=None, examples=[WaterType.SALT])]
+    water_type: Annotated[
+        WaterType | None, Field(default=None, examples=[WaterType.SALT], description=_WATER_TYPE_DESCRIPTION)
+    ]
     altitude: SiteAltitude
     entry_types: Annotated[
         list[EntryType],
@@ -335,7 +344,7 @@ class _DiveSiteMembersWrite(BaseModel):
 class DiveSiteCreate(DiveSiteBase, _DiveSiteMembersWrite, WholeCoordinatePair):
     model_config = ConfigDict(extra="forbid")
 
-    location: LocationInput | None = None
+    location: Annotated[LocationInput | None, Field(default=None, description=_LOCATION_DESCRIPTION)]
     tags: TagsWrite
 
 
@@ -371,15 +380,17 @@ class _DiveSiteUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     # never be corrected back to "not recorded".
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes", "other_names", "external_ids", "entry_types")
 
-    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None)]
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    latitude: Annotated[Latitude, Field(description=_LATITUDE_DESCRIPTION)]
+    longitude: Annotated[Longitude, Field(description=_LONGITUDE_DESCRIPTION)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
+    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
     other_names: Annotated[list[OtherName] | None, Field(default=None, description="Replaces the other names whole")]
     external_ids: Annotated[
         list[ExternalId] | None, Field(default=None, description="Replaces the registry entries whole")
     ]
     depth_from: SiteDepth
     depth_to: SiteDepth
-    water_type: WaterType | None = None
+    water_type: Annotated[WaterType | None, Field(default=None, description=_WATER_TYPE_DESCRIPTION)]
     altitude: SiteAltitude
     entry_types: Annotated[list[EntryType] | None, Field(default=None, description="Replaces the entry types whole")]
 
@@ -423,7 +434,7 @@ class DiveSiteUpdateRequest(_DiveSiteUpdateFields):
 
     model_config = ConfigDict(extra="forbid")
 
-    location: LocationInput | None = None
+    location: Annotated[LocationInput | None, Field(default=None, description=_LOCATION_DESCRIPTION)]
     tags: TagsUpdate
 
 

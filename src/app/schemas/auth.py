@@ -14,13 +14,24 @@ from .user_session import IdleTimeout
 # a member's invite link, which rides the same field and fits the same pattern. Optional on
 # both doors that can create an account; the format is the setting's own, so a value no
 # operator could configure is a 422 rather than a stale link.
-JoinVia = Annotated[str | None, Field(pattern=JOIN_CHANNEL_SLUG_PATTERN, examples=["scubaboard"])]
+JoinVia = Annotated[
+    str | None,
+    Field(
+        pattern=JOIN_CHANNEL_SLUG_PATTERN,
+        examples=["scubaboard"],
+        description="Join-channel slug or invite-link token the visitor arrived through; "
+        "used only if the sign-in creates an account",
+    ),
+]
 
 
 class EmailAuthRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    email: Annotated[AccountEmail, Field(examples=["diver@example.com"])]
+    email: Annotated[
+        AccountEmail,
+        Field(examples=["diver@example.com"], description="Address to send the sign-in link and six-digit code to"),
+    ]
     via: JoinVia = None
 
 
@@ -43,7 +54,7 @@ class EmailAuthRequestResponse(BaseModel):
 class EmailVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    token: str
+    token: Annotated[str, Field(description="Token from the sign-in link in the email")]
 
 
 class EmailCodeVerifyRequest(BaseModel):
@@ -57,9 +68,23 @@ class EmailCodeVerifyRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    request_id: Annotated[uuid_pkg.UUID, Field(examples=["0198f0c1-4b6f-7c3a-9d2e-5a1b7c8d9e0f"])]
-    code: Annotated[str, Field(examples=["481052"])]
-    idle_timeout: IdleTimeout = IdleTimeout.STANDARD
+    request_id: Annotated[
+        uuid_pkg.UUID,
+        Field(
+            examples=["0198f0c1-4b6f-7c3a-9d2e-5a1b7c8d9e0f"],
+            description="Identifier returned by the sign-in request that sent the code",
+        ),
+    ]
+    code: Annotated[
+        str,
+        Field(examples=["481052"], description="Six-digit code from the sign-in email; spaces and hyphens are ignored"),
+    ]
+    idle_timeout: Annotated[
+        IdleTimeout,
+        Field(
+            description="How long the new session may sit unused before it ends: the standard or the extended window"
+        ),
+    ] = IdleTimeout.STANDARD
 
     @field_validator("code")
     @classmethod
@@ -127,20 +152,42 @@ class GoogleAuthRequest(BaseModel):
     # The single-use authorization code from Google's `?code=` parameter. Worthless
     # without `GOOGLE_CLIENT_SECRET` and the verifier below, which is why it is safe for
     # it to have travelled through the browser at all.
-    code: Annotated[str, Field(min_length=1, max_length=2048)]
+    code: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=2048,
+            description="Single-use authorization code Google returned to the redirect URI",
+        ),
+    ]
 
     # The PKCE verifier whose SHA-256 the browser sent to the authorization endpoint as
     # `code_challenge`. Length and alphabet are exactly what RFC 7636 §4.1 specifies, so a
     # malformed one is a 422 naming the field rather than an `invalid_grant` from Google
     # that names nothing - which is the shape a verifier built with standard base64 instead
     # of base64url arrives in, since `+` and `/` are outside the unreserved set.
-    code_verifier: Annotated[str, Field(min_length=43, max_length=128, pattern=r"^[A-Za-z0-9\-._~]+$")]
+    code_verifier: Annotated[
+        str,
+        Field(
+            min_length=43,
+            max_length=128,
+            pattern=r"^[A-Za-z0-9\-._~]+$",
+            description="PKCE code verifier whose SHA-256 challenge started the Google authorization",
+        ),
+    ]
 
     # The `redirect_uri` the browser used, echoed back because Google requires the
     # exchange to repeat it - and checked against `FRONTEND_URL` first, which is what
     # turns a misconfigured deployment into this app's own error. Bounded because the
     # refusal quotes it back.
-    redirect_uri: Annotated[str, Field(min_length=1, max_length=2048)]
+    redirect_uri: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=2048,
+            description="Redirect URI used for the Google authorization; it must be this instance's Google callback",
+        ),
+    ]
 
     # Carried by the browser on the attempt record it keyed by `state`, and sent back here
     # with the code - `state` itself stays an opaque nonce.
@@ -151,9 +198,23 @@ class GoogleAuthRequest(BaseModel):
 class ProfileCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    onboarding_token: str
-    name: Annotated[str, Field(min_length=2, max_length=30, examples=["User Userson"])]
-    username: Annotated[str, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userson"])]
+    onboarding_token: Annotated[
+        str, Field(description="Token from an onboarding_required outcome; it is spent when the account is created")
+    ]
+    name: Annotated[
+        str,
+        Field(min_length=2, max_length=30, examples=["User Userson"], description="Display name for the new account"),
+    ]
+    username: Annotated[
+        str,
+        Field(
+            min_length=2,
+            max_length=20,
+            pattern=r"^[a-z0-9]+$",
+            examples=["userson"],
+            description="Unique username for the new account: lowercase letters and digits only",
+        ),
+    ]
 
 
 # -------------- session --------------
@@ -219,4 +280,4 @@ class RestoreRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    restore_token: str
+    restore_token: Annotated[str, Field(description="Token from a deletion_pending outcome")]

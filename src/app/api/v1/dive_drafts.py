@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
-from ...core.utils.pagination import clamp_pagination
+from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...crud.crud_dive_drafts import crud_dive_drafts
 from ...models.dive_draft import DiveDraft
 from ...schemas.dive_draft import (
@@ -67,8 +67,8 @@ async def read_dive_drafts(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
 ) -> dict:
     """List the caller's dive drafts, the most recently changed first.
 

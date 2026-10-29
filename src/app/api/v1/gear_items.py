@@ -10,7 +10,7 @@ from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, NotFoundException
 from ...core.utils.cache import cache
-from ...core.utils.pagination import clamp_pagination
+from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.search import search_clause, search_multi
 from ...crud.crud_dive_mixtures import set_volume_of_linked_cylinders
 from ...crud.crud_gear_items import (
@@ -203,9 +203,9 @@ async def read_gear_items(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
-    include_archived: bool = False,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
+    include_archived: Annotated[bool, Query(description="Include archived items too")] = False,
     search: Annotated[
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on name or brand"),
@@ -281,8 +281,8 @@ async def lookup_gear_items(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     until: LookupUntil = None,
-    page: int = 1,
-    items_per_page: int = 10,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
     search: Annotated[
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on name or brand"),

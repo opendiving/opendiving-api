@@ -46,7 +46,10 @@ class WebauthnCredentialUpdate(RejectsExplicitNulls):
 
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name",)
 
-    name: Annotated[str | None, Field(default=None, min_length=1, max_length=NAME_MAX_LENGTH)]
+    name: Annotated[
+        str | None,
+        Field(default=None, min_length=1, max_length=NAME_MAX_LENGTH, description="New name for the passkey"),
+    ]
 
 
 class WebauthnCredentialUpdateInternal(BaseModel):
@@ -118,15 +121,29 @@ class PasskeyRegistrationOptions(BaseModel):
 class PasskeySignInVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    flow_id: str
+    flow_id: Annotated[str, Field(description="Identifier returned with the passkey sign-in options")]
     # The raw `PublicKeyCredential` from `navigator.credentials.get()`, passed through
     # untouched: py_webauthn parses and validates it, and re-declaring its shape here
     # would be a second parser to keep in step with the spec.
-    credential: dict[str, Any]
+    credential: Annotated[
+        dict[str, Any],
+        Field(description="Assertion returned by the browser's WebAuthn get() call, passed through unchanged"),
+    ]
 
 
 class PasskeyRegistrationVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    credential: dict[str, Any]
-    name: Annotated[str, Field(min_length=1, max_length=NAME_MAX_LENGTH, examples=["iPhone"])]
+    credential: Annotated[
+        dict[str, Any],
+        Field(description="Attestation returned by the browser's WebAuthn create() call, passed through unchanged"),
+    ]
+    name: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=NAME_MAX_LENGTH,
+            examples=["iPhone"],
+            description="Name to show for the new passkey",
+        ),
+    ]

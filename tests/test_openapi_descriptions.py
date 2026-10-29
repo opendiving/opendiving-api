@@ -121,3 +121,57 @@ def test_descriptions_carry_no_rationale_markers(document: dict[str, Any]) -> No
     assert not offenders, "these descriptions point at the code or its history:\n" + "\n".join(
         f"  {name}: {', '.join(hits)}" for name, hits in sorted(offenders.items())
     )
+
+
+def test_every_query_parameter_is_described(document: dict[str, Any]) -> None:
+    offenders = [
+        f"{name} ?{parameter['name']}"
+        for name, operation in _operations(document)
+        for parameter in operation.get("parameters") or []
+        if parameter["in"] == "query" and not parameter.get("description")
+    ]
+
+    assert not offenders, "these query parameters have no description:\n" + "\n".join(f"  {o}" for o in offenders)
+
+
+def _schema_name(schema: dict[str, Any]) -> str | None:
+    """The component a schema points at, through an `anyOf`/`allOf` wrapper or an array."""
+    if "$ref" in schema:
+        return str(schema["$ref"]).rsplit("/", 1)[-1]
+    for member in (*schema.get("anyOf", []), *schema.get("oneOf", []), *schema.get("allOf", [])):
+        if name := _schema_name(member):
+            return name
+    if schema.get("type") == "array":
+        return _schema_name(schema.get("items", {}))
+    return None
+
+
+def _request_body_schemas(document: dict[str, Any]) -> set[str]:
+    """Every component a request body carries, nested ones included."""
+    components = document["components"]["schemas"]
+    pending = [
+        name
+        for _, operation in _operations(document)
+        for content in (operation.get("requestBody") or {}).get("content", {}).values()
+        if (name := _schema_name(content.get("schema", {})))
+    ]
+    reached: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        pending.extend(n for p in components[name].get("properties", {}).values() if (n := _schema_name(p)))
+    return reached
+
+
+def test_every_request_body_field_is_described(document: dict[str, Any]) -> None:
+    components = document["components"]["schemas"]
+    offenders = [
+        f"{name}.{field}"
+        for name in sorted(_request_body_schemas(document))
+        for field, schema in components[name].get("properties", {}).items()
+        if not schema.get("description")
+    ]
+
+    assert not offenders, "these request body fields have no description:\n" + "\n".join(f"  {o}" for o in offenders)

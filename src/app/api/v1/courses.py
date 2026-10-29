@@ -18,7 +18,7 @@ from ...core.exceptions.http_exceptions import (
 from ...core.schemas import validate_date_range
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
-from ...core.utils.pagination import clamp_pagination
+from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.search import search_clause
 from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import COURSE_SEARCH_COLUMNS, crud_courses, get_courses_page
@@ -277,8 +277,8 @@ async def read_courses(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
     search: Annotated[
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on the course's name"),
@@ -396,8 +396,8 @@ async def lookup_courses(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     until: LookupUntil = None,
-    page: int = 1,
-    items_per_page: int = 10,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
     search: Annotated[
         str | None,
         Query(max_length=255, description="Case-insensitive substring match on the course's name"),

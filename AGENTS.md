@@ -120,7 +120,10 @@ something to look up, not to restate it.
 - **New update schema → `RejectsExplicitNulls`**, listing the fields whose columns are `NOT NULL`.
   Every PATCH field is typed `T | None`, so without it an explicit `null` reaches the UPDATE and
   comes back as a 500. → *"Update schemas refuse an explicit null for a `NOT NULL` column"*
-- **List endpoints clamp pagination.** → `clamp_pagination`
+- **List endpoints clamp pagination.** Declare the parameters as `PageQuery` / `ItemsPerPageQuery`.
+  → `clamp_pagination`
+- **Every query parameter and request-body field carries a `description`** —
+  `tests/test_openapi_descriptions.py` fails on one that doesn't, because `/developers` renders it.
 - **Binary reads use `ETag`/`If-None-Match` → 304.**
 - **Uploaded payloads go in the blob store, never in a column.** `services/blob_store.py` is the
   only module that knows where they are - a filesystem volume or an S3-compatible bucket, on

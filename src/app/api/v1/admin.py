@@ -36,7 +36,7 @@ from ...api.dependencies import get_current_superuser
 from ...core.config import settings
 from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
-from ...core.utils.pagination import clamp_pagination
+from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.request_context import RequestContext
 from ...crud.crud_auth_audit_events import record_auth_event
 from ...crud.crud_daily_totals import daily_totals_between
@@ -78,7 +78,7 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_cu
 
 @router.get("/invite-requests", response_model=PaginatedListResponse[AdminInviteRequestRead])
 async def read_invite_requests(
-    db: Annotated[AsyncSession, Depends(async_get_db)], page: int = 1, items_per_page: int = 10
+    db: Annotated[AsyncSession, Depends(async_get_db)], page: PageQuery = 1, items_per_page: ItemsPerPageQuery = 10
 ) -> dict:
     """The queue: every pending invite request, newest first. Superuser only.
 
@@ -225,8 +225,8 @@ MAX_STATS_DAYS = 92
 @router.get("/stats", response_model=DailyStatsRead)
 async def read_daily_stats(
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    first: Annotated[date, Query(alias="from")],
-    last: Annotated[date, Query(alias="to")],
+    first: Annotated[date, Query(alias="from", description="First UTC day of the range, as YYYY-MM-DD")],
+    last: Annotated[date, Query(alias="to", description="Last UTC day of the range, inclusive")],
 ) -> DailyStatsRead:
     """The daily totals for every UTC day from `from` to `to` inclusive, zero-filled, with
     the instance's join channels and two figures as of now. Superuser only.
@@ -297,10 +297,12 @@ _PHOTO_UNAVAILABLE = "The photo could not be fetched; nothing changed."
 @router.get("/species", response_model=PaginatedListResponse[AdminSpeciesRead])
 async def read_admin_species(
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
     search: Annotated[str | None, Query(max_length=255, description="Any name the species goes by")] = None,
-    chip: Annotated[AdminSpeciesFilter | None, Query(alias="filter")] = None,
+    chip: Annotated[
+        AdminSpeciesFilter | None, Query(alias="filter", description="Only the species of this kind")
+    ] = None,
 ) -> dict:
     """Every species in the catalog, newest first, with what the operator needs to curate its
     photo. Superuser only.

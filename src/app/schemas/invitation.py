@@ -10,6 +10,7 @@ and is in none of these.
 """
 
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -88,7 +89,7 @@ class InvitationCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    email: AccountEmail
+    email: Annotated[AccountEmail, Field(description="Address to invite")]
 
 
 class InvitationRevokedResponse(BaseModel):
@@ -115,7 +116,9 @@ class AdminInvitationBatchRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    emails: list[AccountEmail] = Field(min_length=1, max_length=MAX_ADDRESSES_PER_BATCH)
+    emails: list[AccountEmail] = Field(
+        min_length=1, max_length=MAX_ADDRESSES_PER_BATCH, description="Addresses to invite, at most 100"
+    )
 
 
 class AdminInvitationOutcome(BaseModel):

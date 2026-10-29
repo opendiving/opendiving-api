@@ -35,10 +35,17 @@ class PersonRole(StrEnum):
 
 # Stored trimmed, so the per-diver unique index on `lower(name)` is the trimmed key.
 PersonName = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=PERSON_NAME_MAX), Field(examples=["Alex M."])
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=PERSON_NAME_MAX),
+    Field(examples=["Alex M."], description="Name the diver knows the person by, unique among the diver's people"),
 ]
-PersonEmail = Annotated[EmailStr | None, Field(default=None, max_length=PERSON_EMAIL_MAX)]
-PersonPhone = Annotated[str | None, Field(default=None, max_length=PERSON_PHONE_MAX)]
+PersonEmail = Annotated[
+    EmailStr | None, Field(default=None, max_length=PERSON_EMAIL_MAX, description="Email address of the person")
+]
+PersonPhone = Annotated[
+    str | None,
+    Field(default=None, max_length=PERSON_PHONE_MAX, description="Phone number of the person, free text"),
+]
 LinkedUsername = Annotated[
     str | None,
     Field(
@@ -55,7 +62,7 @@ class PersonReference(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    person_uuid: uuid_pkg.UUID
+    person_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of one of the diver's people")]
     role: Annotated[PersonRole | None, Field(default=None, description="Absent means the person was there")]
 
 
@@ -90,7 +97,9 @@ class PersonBase(BaseModel):
     name: PersonName
     email: PersonEmail
     phone: PersonPhone
-    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
+    notes: Annotated[
+        str, Field(default="", max_length=NOTES_MAX_LENGTH, description="The diver's free-text notes on the person")
+    ]
 
 
 class PersonRead(PublicUUIDSchema):
@@ -149,11 +158,20 @@ class PersonUpdate(RejectsExplicitNulls):
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes")
 
     name: Annotated[
-        str | None, StringConstraints(strip_whitespace=True, min_length=1, max_length=PERSON_NAME_MAX), Field(None)
+        str | None,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=PERSON_NAME_MAX),
+        Field(None, description="Name the diver knows the person by, unique among the diver's people; cannot be null"),
     ]
     email: PersonEmail
     phone: PersonPhone
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    notes: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=NOTES_MAX_LENGTH,
+            description="The diver's free-text notes on the person; cannot be null",
+        ),
+    ]
 
 
 class PersonUpdateRequest(PersonUpdate):

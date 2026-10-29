@@ -1,4 +1,6 @@
-from pydantic import BaseModel, ConfigDict
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.schemas import AccountEmail
 
@@ -6,7 +8,7 @@ from ..core.schemas import AccountEmail
 class EmailChangeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    new_email: AccountEmail
+    new_email: Annotated[AccountEmail, Field(description="Address to change the account's email to")]
 
 
 class EmailChangeRequestResponse(BaseModel):
@@ -20,7 +22,7 @@ class EmailChangeRequestResponse(BaseModel):
 class EmailChangeVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    token: str
+    token: Annotated[str, Field(description="Token from the confirmation link sent to the new address")]
 
 
 class EmailChangeVerifyResponse(BaseModel):

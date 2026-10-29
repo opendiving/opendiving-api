@@ -33,16 +33,22 @@ class DiveDraftMixture(BaseModel):
 
     model_config = _WRITE
 
-    volume: float | None = None
-    start_pressure: float | None = None
-    end_pressure: float | None = None
-    oxygen: float | None = None
-    helium: float | None = None
-    po2_limit: float | None = None
-    gas_number: int | None = None
-    role: GasRole | None = None
-    usage: TankUsage | None = None
-    gear_item_uuid: uuid_pkg.UUID | None = None
+    volume: Annotated[float | None, Field(default=None, description="Cylinder volume in liters")]
+    start_pressure: Annotated[float | None, Field(default=None, description="Starting pressure in bar")]
+    end_pressure: Annotated[float | None, Field(default=None, description="Ending pressure in bar")]
+    oxygen: Annotated[float | None, Field(default=None, description="Oxygen percentage")]
+    helium: Annotated[float | None, Field(default=None, description="Helium percentage")]
+    po2_limit: Annotated[float | None, Field(default=None, description="Planned ppO2 for this gas, in bar")]
+    gas_number: Annotated[int | None, Field(default=None, description="How the source export identifies this cylinder")]
+    role: Annotated[GasRole | None, Field(default=None, description="What the cylinder was carried for")]
+    usage: Annotated[TankUsage | None, Field(default=None, description="How the cylinder was breathed")]
+    gear_item_uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(
+            default=None,
+            description="Public id of the diver's gear item this cylinder is; null for a rental or unrecorded vessel",
+        ),
+    ]
 
 
 class DiveDraftSighting(BaseModel):
@@ -51,45 +57,77 @@ class DiveDraftSighting(BaseModel):
 
     model_config = _WRITE
 
-    species_uuid: uuid_pkg.UUID
-    count: int | None = None
-    abundance: Abundance | None = None
-    notes: str = ""
+    species_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the species seen")]
+    count: Annotated[int | None, Field(default=None, description="How many were counted; null is seen, not counted")]
+    abundance: Annotated[
+        Abundance | None, Field(default=None, description="How many were seen, as a band, where there is no count")
+    ]
+    notes: Annotated[str, Field(default="", description="What the diver wrote about this sighting")]
 
 
 class DiveDraftValues(BaseModel):
     model_config = _WRITE
 
-    dive_number: int | None = None
-    start_time: Annotated[DiveStartTime | None, Field(default=None, examples=["2021-04-04T10:04:47.910+02:00"])]
-    submerged_time: int | None = None
-    max_depth: float | None = None
-    avg_depth: float | None = None
-    bottom_temperature: float | None = None
-    visibility: int | None = None
-    weight: float | None = None
-    water_type: WaterType | None = None
-    altitude: int | None = None
-    type: DiveType | None = None
-    rating: int | None = None
-    air_temperature: float | None = None
-    current: Current | None = None
-    waves: Waves | None = None
-    weather: Weather | None = None
-    entry_type: EntryType | None = None
-    boat_name: str | None = None
-    notes: str | None = None
-    trip_uuid: uuid_pkg.UUID | None = None
-    course_uuid: uuid_pkg.UUID | None = None
-    contact_uuid: uuid_pkg.UUID | None = None
-    mixtures: list[DiveDraftMixture] | None = None
-    dive_site_uuids: list[uuid_pkg.UUID] | None = None
+    dive_number: Annotated[int | None, Field(default=None, description="The diver's own number for this dive")]
+    start_time: Annotated[
+        DiveStartTime | None,
+        Field(
+            default=None,
+            examples=["2021-04-04T10:04:47.910+02:00"],
+            description="When the dive started, with the UTC offset of the timezone it happened in",
+        ),
+    ]
+    submerged_time: Annotated[
+        int | None,
+        Field(default=None, description="The dive computer's time in the water, in seconds, surface time excluded"),
+    ]
+    max_depth: Annotated[float | None, Field(default=None, description="Deepest point reached, in meters")]
+    avg_depth: Annotated[float | None, Field(default=None, description="Average depth over the dive, in meters")]
+    bottom_temperature: Annotated[
+        float | None, Field(default=None, description="Water temperature at the bottom, in °C")
+    ]
+    visibility: Annotated[int | None, Field(default=None, description="Underwater visibility in meters")]
+    weight: Annotated[float | None, Field(default=None, description="Total ballast carried, in kilograms")]
+    water_type: Annotated[
+        WaterType | None, Field(default=None, description="What the water was, as a dive computer calibrates")
+    ]
+    altitude: Annotated[
+        int | None, Field(default=None, description="Elevation of the water surface, in meters above sea level")
+    ]
+    type: Annotated[DiveType | None, Field(default=None, description="What kind of dive it was")]
+    rating: Annotated[int | None, Field(default=None, description="The diver's rating, 1 to 5")]
+    air_temperature: Annotated[float | None, Field(default=None, description="Air temperature at the surface, in °C")]
+    current: Annotated[Current | None, Field(default=None, description="How strong the current was")]
+    waves: Annotated[Waves | None, Field(default=None, description="What the water surface was like")]
+    weather: Annotated[Weather | None, Field(default=None, description="What the sky was doing")]
+    entry_type: Annotated[EntryType | None, Field(default=None, description="Where the diver got in")]
+    boat_name: Annotated[str | None, Field(default=None, description="The boat's name")]
+    notes: Annotated[str | None, Field(default=None, description="The diver's free-text notes on the dive")]
+    trip_uuid: Annotated[
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the trip this dive belongs to")
+    ]
+    course_uuid: Annotated[
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the training course this dive was on")
+    ]
+    contact_uuid: Annotated[
+        uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact that ran the dive")
+    ]
+    mixtures: Annotated[list[DiveDraftMixture] | None, Field(default=None, description="The cylinders breathed from")]
+    dive_site_uuids: Annotated[
+        list[uuid_pkg.UUID] | None,
+        Field(default=None, description="Public ids of the dive sites visited, in the order visited"),
+    ]
     gear_item_uuids: Annotated[
         list[uuid_pkg.UUID] | None, Field(default=None, description="The gear items ticked on the loaded set")
     ]
-    sightings: list[DiveDraftSighting] | None = None
-    people: list[PersonReference] | None = None
-    tags: list[str] | None = None
+    sightings: Annotated[
+        list[DiveDraftSighting] | None, Field(default=None, description="The species spotted, in the order listed")
+    ]
+    people: Annotated[
+        list[PersonReference] | None,
+        Field(default=None, description="The people on the dive, in the diver's order, each with the role they had"),
+    ]
+    tags: Annotated[list[str] | None, Field(default=None, description="The tags by name, in the diver's order")]
 
     def stored(self) -> dict[str, Any]:
         """What `dive_draft.values` holds: the members given, as JSON."""
@@ -160,7 +198,10 @@ class DiveDraftCreate(BaseModel):
     gear_set_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="The gear set loaded as the checklist")
     ]
-    values: Annotated[DiveDraftValues, Field(default_factory=DiveDraftValues)]
+    values: Annotated[
+        DiveDraftValues,
+        Field(default_factory=DiveDraftValues, description="The form's values; every member is optional"),
+    ]
 
 
 class DiveDraftUpdate(RejectsExplicitNulls):
@@ -171,8 +212,14 @@ class DiveDraftUpdate(RejectsExplicitNulls):
 
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("values",)
 
-    gear_set_uuid: uuid_pkg.UUID | None = None
-    values: DiveDraftValues | None = None
+    gear_set_uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(default=None, description="Public id of the gear set loaded as the checklist; null clears it"),
+    ]
+    values: Annotated[
+        DiveDraftValues | None,
+        Field(default=None, description="Replaces the draft's values wholesale. Omit to leave them; null is refused."),
+    ]
 
 
 class DiveDraftRead(BaseModel):

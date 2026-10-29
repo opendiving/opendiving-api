@@ -11,7 +11,22 @@ three of the eight list endpoints and simply missing from the other five - the k
 inconsistency that is invisible until someone finds the endpoint that lacks it.
 """
 
+from typing import Annotated
+
+from fastapi import Query
+
 DEFAULT_MAX_ITEMS_PER_PAGE = 100
+
+# Declared without `ge`/`le` because the bounds are clamped, not enforced: a 422 here would
+# break the callers `clamp_pagination` exists to keep working.
+PageQuery = Annotated[int, Query(description="The page to return, counted from 1; anything lower is read as 1")]
+ItemsPerPageQuery = Annotated[
+    int,
+    Query(
+        description=f"How many items a page holds; anything below 1 is read as 1 and anything above "
+        f"{DEFAULT_MAX_ITEMS_PER_PAGE} as {DEFAULT_MAX_ITEMS_PER_PAGE}"
+    ),
+]
 
 
 def clamp_pagination(

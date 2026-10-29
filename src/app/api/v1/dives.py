@@ -29,7 +29,7 @@ from ...core.utils.datetime_offset import (
     split_start_time,
     split_updated_start_time,
 )
-from ...core.utils.pagination import clamp_pagination
+from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.uploads import content_disposition_attachment, read_upload_within_limit
 from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
@@ -923,15 +923,19 @@ async def read_dives(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
-    trip_uuid: uuid_pkg.UUID | None = None,
-    course_uuid: uuid_pkg.UUID | None = None,
-    dive_site_uuid: uuid_pkg.UUID | None = None,
-    gear_item_uuid: uuid_pkg.UUID | None = None,
-    species_uuid: uuid_pkg.UUID | None = None,
-    person_uuid: uuid_pkg.UUID | None = None,
-    tag_uuid: uuid_pkg.UUID | None = None,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
+    trip_uuid: Annotated[uuid_pkg.UUID | None, Query(description="Only the dives on this trip")] = None,
+    course_uuid: Annotated[uuid_pkg.UUID | None, Query(description="Only the dives of this course")] = None,
+    dive_site_uuid: Annotated[uuid_pkg.UUID | None, Query(description="Only the dives that include this site")] = None,
+    gear_item_uuid: Annotated[
+        uuid_pkg.UUID | None, Query(description="Only the dives that used this gear item")
+    ] = None,
+    species_uuid: Annotated[
+        uuid_pkg.UUID | None, Query(description="Only the dives that recorded this species")
+    ] = None,
+    person_uuid: Annotated[uuid_pkg.UUID | None, Query(description="Only the dives that name this person")] = None,
+    tag_uuid: Annotated[uuid_pkg.UUID | None, Query(description="Only the dives carrying this tag")] = None,
     dive_type: Annotated[DiveType | None, Query(alias="type", description="Only dives of this kind")] = None,
     sort: Annotated[
         DiveListSort,

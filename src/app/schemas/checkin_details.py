@@ -106,8 +106,8 @@ class EmergencyContactInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: Annotated[_Anchor, Field(examples=["Grace Hopper"])]
-    phone: _Phone
+    name: Annotated[_Anchor, Field(examples=["Grace Hopper"], description="Name of the emergency contact")]
+    phone: Annotated[_Phone, Field(description="Phone number to call them on, free text")]
     relationship: Annotated[_ShortText, Field(examples=["Partner"], description="Free text, not a vocabulary")]
 
 
@@ -116,9 +116,12 @@ class InsurancePolicyInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: Annotated[_Anchor, Field(examples=["DAN Europe"])]
-    number: Annotated[_ShortText, Field(examples=["DE-4471902"])]
-    expires_on: Annotated[date | None, Field(default=None, examples=["2027-06-30"])]
+    provider: Annotated[_Anchor, Field(examples=["DAN Europe"], description="Insurer that issued the policy")]
+    number: Annotated[_ShortText, Field(examples=["DE-4471902"], description="Policy number as printed")]
+    expires_on: Annotated[
+        date | None,
+        Field(default=None, examples=["2027-06-30"], description="Date the policy expires, for the renewal reminder"),
+    ]
 
 
 class CheckinDetailsUpdate(RejectsExplicitNulls):
@@ -141,8 +144,11 @@ class CheckinDetailsUpdate(RejectsExplicitNulls):
             examples=["desk@example.org"], description="The address the diver gives out, printed on the check-in sheet"
         ),
     ]
-    phone: Annotated[_Phone, Field(examples=["+20 100 123 4567"])]
-    date_of_birth: Annotated[BirthDate | None, Field(default=None, examples=["1988-04-12"])]
+    phone: Annotated[_Phone, Field(examples=["+20 100 123 4567"], description="The diver's phone number, free text")]
+    date_of_birth: Annotated[
+        BirthDate | None,
+        Field(default=None, examples=["1988-04-12"], description="The diver's date of birth; not in the future"),
+    ]
     emergency_contacts: Annotated[
         list[EmergencyContactInput] | None,
         Field(default=None, max_length=MAX_EMERGENCY_CONTACTS, description="In call order: the first is called first"),

@@ -159,9 +159,20 @@ class UserUpdate(RejectsExplicitNulls):
         "dive_form_hidden_fields",
     )
 
-    name: Annotated[str | None, Field(min_length=2, max_length=30, examples=["User Userberg"], default=None)]
+    name: Annotated[
+        str | None,
+        Field(min_length=2, max_length=30, examples=["User Userberg"], default=None, description="Display name"),
+    ]
     username: Annotated[
-        str | None, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userberg"], default=None)
+        str | None,
+        Field(
+            min_length=2,
+            max_length=20,
+            pattern=r"^[a-z0-9]+$",
+            examples=["userberg"],
+            default=None,
+            description="Unique username: lowercase letters and digits only; changes are rate limited",
+        ),
     ]
     # Must be listed here as well as on `UserRead`: this schema is `extra="forbid"`, so
     # without it the settings page's toggle would 422 rather than save.

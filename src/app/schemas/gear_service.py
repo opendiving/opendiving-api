@@ -70,6 +70,17 @@ INTERVAL_HOURS_MAX = 1_000_000
 NEEDS_AN_INTERVAL = "A service schedule needs an interval in months, in dives or in hours of diving"
 
 _INTERVAL_HOURS_DESCRIPTION = "Service every N hours of diving - the item's summed dive time, not clock hours"
+_KIND_DESCRIPTION = "What kind of servicing this is"
+_LABEL_DESCRIPTION = (
+    "Optional free-text qualifier that tells apart servicing of one kind on the same item, such as a part "
+    "of it. A record satisfies the schedule with the same kind and label."
+)
+_STARTS_ON_DESCRIPTION = "Baseline the first due date is measured from, until a service is logged"
+_INTERVAL_MONTHS_DESCRIPTION = "Service every N months"
+_INTERVAL_DIVES_DESCRIPTION = "Service every N dives"
+_SERVICE_NOTES_DESCRIPTION = "What the diver wrote about this service"
+_SERVICED_ON_DESCRIPTION = "When the work was done"
+_PERFORMED_BY_DESCRIPTION = "Who did the work - a technician's name, or `self`. The shop is `contact_uuid`."
 
 
 # -------------------- schedule --------------------
@@ -80,11 +91,11 @@ ServiceLabel = Annotated[str, Trimmed, Field(max_length=LABEL_MAX_LENGTH)]
 
 WriteIntervalMonths = Annotated[
     int | None,
-    Field(default=None, gt=0, le=INTERVAL_MONTHS_MAX, examples=[12], description="Service every N months"),
+    Field(default=None, gt=0, le=INTERVAL_MONTHS_MAX, examples=[12], description=_INTERVAL_MONTHS_DESCRIPTION),
 ]
 WriteIntervalDives = Annotated[
     int | None,
-    Field(default=None, gt=0, le=INTERVAL_DIVES_MAX, examples=[100], description="Service every N dives"),
+    Field(default=None, gt=0, le=INTERVAL_DIVES_MAX, examples=[100], description=_INTERVAL_DIVES_DESCRIPTION),
 ]
 WriteIntervalHours = Annotated[
     int | None,
@@ -93,24 +104,18 @@ WriteIntervalHours = Annotated[
 
 
 class GearServiceScheduleBase(BaseModel):
-    kind: Annotated[ServiceKind, Field(examples=[ServiceKind.SERVICE], description="What kind of servicing this is")]
-    starts_on: Annotated[
-        date,
-        Field(
-            examples=["2025-04-01"],
-            description="Baseline the first due date is measured from, until a service is logged",
-        ),
-    ]
+    kind: Annotated[ServiceKind, Field(examples=[ServiceKind.SERVICE], description=_KIND_DESCRIPTION)]
+    starts_on: Annotated[date, Field(examples=["2025-04-01"], description=_STARTS_ON_DESCRIPTION)]
     label: Annotated[
         ServiceLabel | None,
         BlankIsNone,
-        Field(default=None, examples=["First stage"], description="Optional free-text"),
+        Field(default=None, examples=["First stage"], description=_LABEL_DESCRIPTION),
     ]
     interval_months: Annotated[
-        int | None, Field(default=None, gt=0, examples=[12], description="Service every N months")
+        int | None, Field(default=None, gt=0, examples=[12], description=_INTERVAL_MONTHS_DESCRIPTION)
     ]
     interval_dives: Annotated[
-        int | None, Field(default=None, gt=0, examples=[100], description="Service every N dives")
+        int | None, Field(default=None, gt=0, examples=[100], description=_INTERVAL_DIVES_DESCRIPTION)
     ]
     interval_hours: Annotated[
         int | None, Field(default=None, gt=0, examples=[50], description=_INTERVAL_HOURS_DESCRIPTION)
@@ -250,12 +255,18 @@ class GearServiceScheduleUpdate(RejectsExplicitNulls):
     # still has at least one (which the DB's own `CheckConstraint` also enforces).
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("kind", "starts_on", "is_active")
 
-    kind: Annotated[ServiceKind | None, Field(default=None)]
-    label: Annotated[ServiceLabel | None, BlankIsNone, Field(default=None)]
-    starts_on: Annotated[date | None, Field(default=None)]
-    interval_months: Annotated[int | None, Field(default=None, gt=0, le=INTERVAL_MONTHS_MAX)]
-    interval_dives: Annotated[int | None, Field(default=None, gt=0, le=INTERVAL_DIVES_MAX)]
-    interval_hours: Annotated[int | None, Field(default=None, gt=0, le=INTERVAL_HOURS_MAX)]
+    kind: Annotated[ServiceKind | None, Field(default=None, description=_KIND_DESCRIPTION)]
+    label: Annotated[ServiceLabel | None, BlankIsNone, Field(default=None, description=_LABEL_DESCRIPTION)]
+    starts_on: Annotated[date | None, Field(default=None, description=_STARTS_ON_DESCRIPTION)]
+    interval_months: Annotated[
+        int | None, Field(default=None, gt=0, le=INTERVAL_MONTHS_MAX, description=_INTERVAL_MONTHS_DESCRIPTION)
+    ]
+    interval_dives: Annotated[
+        int | None, Field(default=None, gt=0, le=INTERVAL_DIVES_MAX, description=_INTERVAL_DIVES_DESCRIPTION)
+    ]
+    interval_hours: Annotated[
+        int | None, Field(default=None, gt=0, le=INTERVAL_HOURS_MAX, description=_INTERVAL_HOURS_DESCRIPTION)
+    ]
     is_active: Annotated[bool | None, Field(default=None, description="Set to pause/resume reminders")]
 
 
@@ -278,19 +289,19 @@ class GearServiceScheduleUpdateInternal(GearServiceScheduleUpdate):
 
 # -------------------- record --------------------
 class GearServiceRecordBase(BaseModel):
-    kind: Annotated[ServiceKind, Field(examples=[ServiceKind.SERVICE])]
-    serviced_on: Annotated[date, Field(examples=["2026-03-14"], description="When the work was done")]
-    label: Annotated[ServiceLabel | None, BlankIsNone, Field(default=None)]
+    kind: Annotated[ServiceKind, Field(examples=[ServiceKind.SERVICE], description="What kind of servicing was done")]
+    serviced_on: Annotated[date, Field(examples=["2026-03-14"], description=_SERVICED_ON_DESCRIPTION)]
+    label: Annotated[ServiceLabel | None, BlankIsNone, Field(default=None, description=_LABEL_DESCRIPTION)]
     performed_by: Annotated[
         str | None,
         Field(
             default=None,
             max_length=255,
             examples=["Ahmed", "self"],
-            description="Who did the work - a technician's name, or `self`. The shop is `contact_uuid`.",
+            description=_PERFORMED_BY_DESCRIPTION,
         ),
     ]
-    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH, description=_SERVICE_NOTES_DESCRIPTION)]
 
 
 class GearServiceRecordRead(GearServiceRecordBase, PublicUUIDSchema):
@@ -372,11 +383,13 @@ class GearServiceRecordUpdate(RejectsExplicitNulls):
 
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("kind", "serviced_on", "notes")
 
-    kind: Annotated[ServiceKind | None, Field(default=None)]
-    serviced_on: Annotated[date | None, Field(default=None)]
-    label: Annotated[ServiceLabel | None, BlankIsNone, Field(default=None)]
-    performed_by: Annotated[str | None, Field(default=None, max_length=255)]
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    kind: Annotated[ServiceKind | None, Field(default=None, description="What kind of servicing was done")]
+    serviced_on: Annotated[date | None, Field(default=None, description=_SERVICED_ON_DESCRIPTION)]
+    label: Annotated[ServiceLabel | None, BlankIsNone, Field(default=None, description=_LABEL_DESCRIPTION)]
+    performed_by: Annotated[str | None, Field(default=None, max_length=255, description=_PERFORMED_BY_DESCRIPTION)]
+    notes: Annotated[
+        str | None, Field(default=None, max_length=NOTES_MAX_LENGTH, description=_SERVICE_NOTES_DESCRIPTION)
+    ]
 
 
 class GearServiceRecordUpdateRequest(GearServiceRecordUpdate):
