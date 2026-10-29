@@ -101,21 +101,23 @@ def _send(message: EmailMessage) -> None:
 
 
 def _header_safe(value: str) -> str:
-    """Flattens CR/LF so a subject can't blow up message construction.
+    """Flattens every line break so a subject can't blow up message construction.
 
-    `EmailMessage` refuses a header containing a newline - it raises rather than emitting
-    it, so there is no injection to prevent here. The problem is whose error it is: the
-    support form's `subject` is typed by an unauthenticated stranger and no schema
-    restricts its characters (`schemas.support`), so a `\\r\\n` in that JSON string would
-    otherwise 500 in our own code before any transport was involved.
+    `EmailMessage` refuses a header that `str.splitlines` would split - NEL, U+2028 and the
+    vertical tab as much as CR and LF - raising rather than emitting it, so there is no
+    injection to prevent here. The problem is whose error it is: the support form's
+    `subject` is typed by an unauthenticated stranger and no schema restricts its characters
+    (`schemas.support`), and a renewal reminder's is a diver-typed certification name, so
+    either would otherwise fail a request or a cron in our own code before any transport
+    was involved.
 
-    Applied in `_build_message` rather than at that one call site, so a later sender that
-    also carries user-supplied text into a subject doesn't have to remember it.
-    Deliberately *not* applied to the addresses: those are `EmailStr`-validated or
-    server-composed, and a newline in one is a broken configuration that should raise
-    rather than be flattened into a malformed address.
+    Applied in `_build_message` rather than at each call site, so a later sender that also
+    carries user-supplied text into a subject doesn't have to remember it. Deliberately
+    *not* applied to the addresses: those are `EmailStr`-validated or server-composed, and
+    a newline in one is a broken configuration that should raise rather than be flattened
+    into a malformed address.
     """
-    return value.replace("\r", " ").replace("\n", " ")
+    return " ".join(value.splitlines())
 
 
 def _refuse_to_log_credential_outside_local(what: str) -> None:
@@ -567,9 +569,15 @@ _METERS_PER_FOOT = 0.3048
 
 def _round_half_up(value: float, places: int) -> float:
     """JavaScript's `Math.round`, which the web's `roundTo` uses: ties go up, where Python's
-    `round` goes to even. The email and the dive page it links to print the same number."""
+    `round` goes to even. The email and the dive page it links to print the same number.
+
+    A value that does not scale to a finite number is returned as it is: a depth near the
+    float ceiling is accepted on write, and `math.floor` raises on the infinity it scales to."""
     factor = 10.0**places
-    return math.floor(value * factor + 0.5) / factor
+    scaled = value * factor
+    if not math.isfinite(scaled):
+        return value
+    return math.floor(scaled + 0.5) / factor
 
 
 def _depth_text(meters: float, units: str) -> str:

@@ -264,6 +264,24 @@ class TestInputsWithNothingToAnswer:
         assert body["attribution"] == open_meteo.ATTRIBUTION
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "start_time",
+        [datetime(1, 1, 1), datetime(1939, 12, 31, 10, 0, tzinfo=timezone(timedelta(hours=3)))],
+        ids=["the calendar's first day with no offset", "the day before the archive"],
+    )
+    async def test_a_day_before_the_archive_is_null_and_nothing_is_asked(
+        self, db: Session, async_db: AsyncSession, start_time: datetime
+    ) -> None:
+        diver = create_user(db)
+        site = _site(db, diver)
+
+        with FakeOpenMeteo() as provider:
+            body = await _lookup(async_db, diver, start_time, site=site)
+
+        assert provider.requests == []
+        assert (body["at"], body["utc_offset_minutes"], body["filled"]) == (None, None, NOTHING)
+
+    @pytest.mark.asyncio
     async def test_no_position_is_null(self, db: Session, async_db: AsyncSession) -> None:
         diver = create_user(db)
         unpinned = _site(db, diver, position=None)

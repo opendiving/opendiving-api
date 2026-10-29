@@ -521,7 +521,15 @@ async def _worms(endpoint: str, segment: str | int, params: dict[str, Any] | Non
     new path segment, and WoRMS's own routes take one segment. Structural rather than a call
     to remember at each site - there is no way to reach `_request` with an unencoded segment
     from here.
+
+    **Encoding cannot help a segment that is exactly `.` or `..`.** Dots are unreserved, so
+    `quote` leaves them as they are and httpx still resolves the segment away - `q=..` would
+    ask for WoRMS's REST root instead of a search. No taxon is called either, so this answers
+    them the way `_request` answers a provider it cannot ask: `None`, which is never cached
+    for long.
     """
+    if str(segment) in {".", ".."}:
+        return None
     quoted = quote(str(segment), safe="")
     url = f"{settings.WORMS_API_URL.rstrip('/')}/{endpoint}/{quoted}"
     return await _request(_PROVIDER_WORMS, url, params or {})

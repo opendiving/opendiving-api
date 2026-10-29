@@ -1,10 +1,12 @@
-"""A dive draft's shapes: the form's values with every member optional and no bound.
+"""A dive draft's shapes: the form's values with every member optional and no bound on a value.
 
 `DiveDraftValues` has exactly `DiveCreateRequest`'s member names, its lists' items' included,
-with the same types and vocabularies and none of the bounds or cross-member rules a dive
+with the same types and vocabularies and none of the value bounds or cross-member rules a dive
 enforces - a draft is unfinished by definition, and `POST /dive-draft/{uuid}/dive` validates the
 dive it becomes. What a draft refuses is a wrong type, a word outside a vocabulary, a naive start
-time and a member the dive does not have. `tests/test_dive_drafts.py` holds the names to
+time, a member the dive does not have, and a text or a list longer than a dive takes - a length
+bound caps what a row stores, not what a finished dive is. Nothing is trimmed and nothing has a
+minimum length, so the form is kept as typed. `tests/test_dive_drafts.py` holds the names to
 `DiveCreateRequest`'s, so a member added to one and not the other fails there rather than turning
 every draft write that carries it into a 422.
 
@@ -18,10 +20,11 @@ from typing import Annotated, Any, ClassVar
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-from ..core.schemas import RejectsExplicitNulls, StoredVocabulary
-from .dive import Abundance, Current, DiveStartTime, DiveType, EntryType, WaterType, Waves, Weather
+from ..core.schemas import MAX_LIST_ITEMS, NOTES_MAX_LENGTH, RejectsExplicitNulls, StoredVocabulary
+from .dive import BOAT_NAME_MAX, Abundance, Current, DiveStartTime, DiveType, EntryType, WaterType, Waves, Weather
 from .dive_mixture import GasRole, TankUsage
 from .person import PersonReference, PersonReferenceRead
+from .tag import TAG_NAME_MAX
 
 DIVE_DRAFT_NOT_FOUND = "Dive draft not found"
 
@@ -52,8 +55,8 @@ class DiveDraftMixture(BaseModel):
 
 
 class DiveDraftSighting(BaseModel):
-    """`SightingWrite`'s members, unbounded and with no rule between count and band. The
-    species is what a sighting is, so it is the one member a draft's sighting needs."""
+    """`SightingWrite`'s members, with no bound on the count and no rule between count and
+    band. The species is what a sighting is, so it is the one member a draft's sighting needs."""
 
     model_config = _WRITE
 
@@ -62,7 +65,9 @@ class DiveDraftSighting(BaseModel):
     abundance: Annotated[
         Abundance | None, Field(default=None, description="How many were seen, as a band, where there is no count")
     ]
-    notes: Annotated[str, Field(default="", description="What the diver wrote about this sighting")]
+    notes: Annotated[
+        str, Field(default="", max_length=NOTES_MAX_LENGTH, description="What the diver wrote about this sighting")
+    ]
 
 
 class DiveDraftValues(BaseModel):
@@ -101,8 +106,11 @@ class DiveDraftValues(BaseModel):
     waves: Annotated[Waves | None, Field(default=None, description="What the water surface was like")]
     weather: Annotated[Weather | None, Field(default=None, description="What the sky was doing")]
     entry_type: Annotated[EntryType | None, Field(default=None, description="Where the diver got in")]
-    boat_name: Annotated[str | None, Field(default=None, description="The boat's name")]
-    notes: Annotated[str | None, Field(default=None, description="The diver's free-text notes on the dive")]
+    boat_name: Annotated[str | None, Field(default=None, max_length=BOAT_NAME_MAX, description="The boat's name")]
+    notes: Annotated[
+        str | None,
+        Field(default=None, max_length=NOTES_MAX_LENGTH, description="The diver's free-text notes on the dive"),
+    ]
     trip_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the trip this dive belongs to")
     ]
@@ -112,22 +120,38 @@ class DiveDraftValues(BaseModel):
     contact_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the contact that ran the dive")
     ]
-    mixtures: Annotated[list[DiveDraftMixture] | None, Field(default=None, description="The cylinders breathed from")]
+    mixtures: Annotated[
+        list[DiveDraftMixture] | None,
+        Field(default=None, max_length=MAX_LIST_ITEMS, description="The cylinders breathed from"),
+    ]
     dive_site_uuids: Annotated[
         list[uuid_pkg.UUID] | None,
-        Field(default=None, description="Public ids of the dive sites visited, in the order visited"),
+        Field(
+            default=None,
+            max_length=MAX_LIST_ITEMS,
+            description="Public ids of the dive sites visited, in the order visited",
+        ),
     ]
     gear_item_uuids: Annotated[
-        list[uuid_pkg.UUID] | None, Field(default=None, description="The gear items ticked on the loaded set")
+        list[uuid_pkg.UUID] | None,
+        Field(default=None, max_length=MAX_LIST_ITEMS, description="The gear items ticked on the loaded set"),
     ]
     sightings: Annotated[
-        list[DiveDraftSighting] | None, Field(default=None, description="The species spotted, in the order listed")
+        list[DiveDraftSighting] | None,
+        Field(default=None, max_length=MAX_LIST_ITEMS, description="The species spotted, in the order listed"),
     ]
     people: Annotated[
         list[PersonReference] | None,
-        Field(default=None, description="The people on the dive, in the diver's order, each with the role they had"),
+        Field(
+            default=None,
+            max_length=MAX_LIST_ITEMS,
+            description="The people on the dive, in the diver's order, each with the role they had",
+        ),
     ]
-    tags: Annotated[list[str] | None, Field(default=None, description="The tags by name, in the diver's order")]
+    tags: Annotated[
+        list[Annotated[str, Field(max_length=TAG_NAME_MAX)]] | None,
+        Field(default=None, max_length=MAX_LIST_ITEMS, description="The tags by name, in the diver's order"),
+    ]
 
     def stored(self) -> dict[str, Any]:
         """What `dive_draft.values` holds: the members given, as JSON."""

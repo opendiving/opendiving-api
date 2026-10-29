@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 from ..core.schemas import (
+    MAX_LIST_ITEMS,
     NOTES_MAX_LENGTH,
     PublicUUIDSchema,
     RejectsExplicitNulls,
@@ -300,11 +301,19 @@ class _DiveSiteMembersWrite(BaseModel):
 
     other_names: Annotated[
         list[OtherName],
-        Field(default_factory=list, description="Other names the site goes by, in the diver's order"),
+        Field(
+            default_factory=list,
+            max_length=MAX_LIST_ITEMS,
+            description="Other names the site goes by, in the diver's order",
+        ),
     ]
     external_ids: Annotated[
         list[ExternalId],
-        Field(default_factory=list, description="The place's entries in registries outside the logbook"),
+        Field(
+            default_factory=list,
+            max_length=MAX_LIST_ITEMS,
+            description="The place's entries in registries outside the logbook",
+        ),
     ]
     depth_from: SiteDepth
     depth_to: SiteDepth
@@ -316,6 +325,7 @@ class _DiveSiteMembersWrite(BaseModel):
         list[EntryType],
         Field(
             default_factory=list,
+            max_length=MAX_LIST_ITEMS,
             examples=[[EntryType.SHORE, EntryType.BOAT]],
             description="Every way divers enter the water there, in any order - stored in vocabulary order",
         ),
@@ -384,15 +394,22 @@ class _DiveSiteUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     longitude: Annotated[Longitude, Field(description=_LONGITUDE_DESCRIPTION)]
     name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
-    other_names: Annotated[list[OtherName] | None, Field(default=None, description="Replaces the other names whole")]
+    other_names: Annotated[
+        list[OtherName] | None,
+        Field(default=None, max_length=MAX_LIST_ITEMS, description="Replaces the other names whole"),
+    ]
     external_ids: Annotated[
-        list[ExternalId] | None, Field(default=None, description="Replaces the registry entries whole")
+        list[ExternalId] | None,
+        Field(default=None, max_length=MAX_LIST_ITEMS, description="Replaces the registry entries whole"),
     ]
     depth_from: SiteDepth
     depth_to: SiteDepth
     water_type: Annotated[WaterType | None, Field(default=None, description=_WATER_TYPE_DESCRIPTION)]
     altitude: SiteAltitude
-    entry_types: Annotated[list[EntryType] | None, Field(default=None, description="Replaces the entry types whole")]
+    entry_types: Annotated[
+        list[EntryType] | None,
+        Field(default=None, max_length=MAX_LIST_ITEMS, description="Replaces the entry types whole"),
+    ]
 
     @field_validator("external_ids")
     @classmethod

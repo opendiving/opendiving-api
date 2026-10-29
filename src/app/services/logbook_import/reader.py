@@ -43,11 +43,13 @@ and still parses the document whole"*, carries the trade.
 
 import codecs
 import hashlib
+import io
 import json
 import logging
 import math
 import re
 import shutil
+import struct
 import tempfile
 import zipfile
 from collections.abc import Callable, Iterator, Sequence
@@ -62,7 +64,6 @@ from typing import IO, TYPE_CHECKING, Any, BinaryIO, cast
 import divejson
 from divejson import Conversion, ConverterError, NonConformingOutputError, SourceTooLargeError, UnsupportedSourceError
 from pydantic import ValidationError
-from starlette.concurrency import run_in_threadpool
 
 from ...core.utils.uploads import safe_filename
 from ...schemas.dive_profile import MILLISECONDS_PER_SECOND, TEMPERATURE_SCALE
@@ -76,7 +77,14 @@ from ...schemas.export import (
 )
 from ...schemas.logbook_import import ImportDocument, ImportMemberNotKept, ImportNoteCode
 from ..dive_files import MAX_DIVE_FILE_SIZE, FileExtraction, extraction_of
-from ..dive_reader import ReadDive, attach_rank, formats_this_build_reads, inferred_figures, is_logbook_format
+from ..dive_reader import (
+    ReadDive,
+    attach_rank,
+    formats_this_build_reads,
+    inferred_figures,
+    is_logbook_format,
+    run_in_conversion_thread,
+)
 from ..export.archive import DIVEJSON_NAME
 
 if TYPE_CHECKING:
@@ -134,12 +142,36 @@ MAX_ARCHIVE_EXTRACTED_SIZE = 2 * MAX_ARCHIVE_SIZE
 # refused off the directory listings, before any file is opened.
 MAX_IMPORT_FILES = 5000
 
+# The most entries one zip's directory may list, counted before `zipfile` builds an object for
+# each. Four times the files an import reads, because folders and `__MACOSX` shadows inflate the
+# listing well past the files it holds.
+MAX_ARCHIVE_ENTRIES = 4 * MAX_IMPORT_FILES
+
+# The most bytes one zip's directory may span, which `zipfile` reads into memory whole: a few
+# entries with huge names, extra fields or comments stay under the entry cap. A real export's is
+# twenty thousand entries at a few hundred bytes each.
+MAX_ARCHIVE_DIRECTORY_SIZE = 16 * 1024 * 1024  # 16 MB
+
 # Zip's local file header. Sniffed rather than trusting the filename or the client's
 # content type, on the same principle as `certification_files.sniff_content_type`: the
 # bytes say what they are.
 _ZIP_MAGIC = b"PK\x03\x04"
 
 _READ_CHUNK_SIZE = 1024 * 1024
+
+# The zip records a directory is found and counted by, laid out as `zipfile` reads them.
+_END_RECORD = struct.Struct("<4s4H2LH")
+_END_RECORD_SIGNATURE = b"PK\x05\x06"
+_MAX_COMMENT = 0xFFFF
+_ZIP64_LOCATOR = struct.Struct("<4sLQL")
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_ZIP64_END_RECORD = struct.Struct("<4sQ2H2L4Q")
+_ZIP64_END_RECORD_SIGNATURE = b"PK\x06\x06"
+_DIRECTORY_ENTRY_SIZE = 46
+_DIRECTORY_ENTRY_SIGNATURE = b"PK\x01\x02"
+# Where an entry's name, extra field and comment lengths sit in its 46-byte header.
+_DIRECTORY_ENTRY_LENGTHS = struct.Struct("<3H")
+_DIRECTORY_ENTRY_LENGTHS_AT = 28
 
 # The major version this reader implements. A reader accepts any document whose *major*
 # version it implements and ignores what it does not recognize (spec §§4, 5.6, 7), so a
@@ -804,13 +836,20 @@ def _convert_file(
             started_at=raw if isinstance(raw, str) else None,
             inferred=inferred_figures(conversion.document),
         )
+        try:
+            extraction = extraction_of(read)
+        except Exception as exc:
+            # The file converted and its dive validated, so what failed is this app's shaping
+            # of it - and one file's failure must not take the import's other files with it.
+            logger.exception("Shaping a converted %s file failed during a logbook import", claimed)
+            raise MalformedImportError(_READ_FAULT) from exc
         loaded.kept = KeptFile(
             key=digest,
             sha256=digest,
             filename=safe_filename(name, default="dive-file"),
             format=claimed,
             size=size,
-            extraction=extraction_of(read),
+            extraction=extraction,
         )
         loaded._read_kept = lambda: _read_all(source)
     return loaded
@@ -831,6 +870,11 @@ def _read_all(source: Source) -> bytes:
         return stream.read()
 
 
+# The parser recurses once per level of nesting, and no logbook nests anywhere near deep enough
+# to run out of stack.
+_TOO_DEEP = "This logbook document nests too deeply to read."
+
+
 def _load_document(read: Callable[[], bytes], *, digest: str) -> LoadedImport:
     """A bare DiveJSON document: parsed, read as its writer meant it, and validated."""
     raw_bytes = read()
@@ -842,6 +886,8 @@ def _load_document(read: Callable[[], bytes], *, digest: str) -> LoadedImport:
         raise MalformedImportError("This logbook document is not valid JSON: it is not UTF-8 text.") from exc
     except json.JSONDecodeError as exc:
         raise MalformedImportError(f"This logbook document is not valid JSON: {exc.msg} at line {exc.lineno}.") from exc
+    except RecursionError as exc:
+        raise MalformedImportError(_TOO_DEEP) from exc
     notes = read_as_written(raw) if isinstance(raw, dict) else []
     return LoadedImport(
         document=_validate_envelope(raw),
@@ -877,6 +923,8 @@ def _load_archive(archive: zipfile.ZipFile, *, digest: str) -> LoadedImport:
         raise MalformedImportError("This logbook document is not valid JSON: it is not UTF-8 text.") from exc
     except json.JSONDecodeError as exc:
         raise MalformedImportError(f"This logbook document is not valid JSON: {exc.msg} at line {exc.lineno}.") from exc
+    except RecursionError as exc:
+        raise MalformedImportError(_TOO_DEEP) from exc
     notes = read_as_written(raw) if isinstance(raw, dict) else []
     return LoadedImport(
         document=_validate_envelope(raw),
@@ -993,8 +1041,101 @@ def _hidden(name: str) -> bool:
     return "__MACOSX" in parts or parts[-1].startswith(".")
 
 
+def _directory_extent(buffer: IO[bytes]) -> tuple[int, int] | None:
+    """Where a zip's central directory starts and how many bytes it spans, or `None` where no
+    end record says.
+
+    Found as `zipfile` finds it - the end record at the very tail, else the last signature in a
+    comment's reach of it, and the zip64 record wherever a locator precedes that - because what
+    `zipfile` would build is what is being counted, and a second reading of the archive is one
+    a crafted file could tell apart from the first. A file this cannot place is left to
+    `zipfile`, which refuses it.
+    """
+    size = buffer.seek(0, io.SEEK_END)
+    reach = min(size, _END_RECORD.size + _MAX_COMMENT)
+    buffer.seek(size - reach)
+    tail = buffer.read(reach)
+    last = tail[-_END_RECORD.size :]
+    if len(last) == _END_RECORD.size and last.startswith(_END_RECORD_SIGNATURE) and last.endswith(b"\0\0"):
+        at = len(tail) - _END_RECORD.size
+    else:
+        at = tail.rfind(_END_RECORD_SIGNATURE)
+        if at < 0 or len(tail) - at < _END_RECORD.size:
+            return None
+    record_at = size - reach + at
+    directory_size = _END_RECORD.unpack_from(tail, at)[5]
+
+    locator_at = record_at - _ZIP64_LOCATOR.size
+    if locator_at >= 0:
+        buffer.seek(locator_at)
+        locator = buffer.read(_ZIP64_LOCATOR.size)
+        if locator.startswith(_ZIP64_LOCATOR_SIGNATURE):
+            pointed_at = _ZIP64_LOCATOR.unpack(locator)[2]
+            latest = locator_at - _ZIP64_END_RECORD.size
+            # `zipfile` refuses a locator pointing past the record's latest place, and an
+            # unchecked one can be too large to seek to at all.
+            if not 0 <= pointed_at <= latest:
+                return None
+            # Where the locator points, else right before it, which is where it sits when
+            # something was prepended to the archive.
+            for candidate in (pointed_at, latest):
+                if candidate < 0:
+                    continue
+                buffer.seek(candidate)
+                record = buffer.read(_ZIP64_END_RECORD.size)
+                if len(record) == _ZIP64_END_RECORD.size and record.startswith(_ZIP64_END_RECORD_SIGNATURE):
+                    record_at, directory_size = candidate, _ZIP64_END_RECORD.unpack(record)[8]
+                    break
+            else:
+                return None
+    start = record_at - directory_size
+    return None if start < 0 else (start, directory_size)
+
+
+def _measure_directory(buffer: IO[bytes], *, limit: int) -> tuple[int, int]:
+    """The bytes a zip's central directory spans and the entries it lists, these counted off
+    their fixed headers and no further than `limit + 1`; `(0, 0)` where there is no directory
+    to measure.
+
+    Counted rather than read off the end record's total, which `zipfile` never consults: it
+    builds an entry for every header in the directory's span, so the span is what has to be
+    walked. Leaves the buffer where it found it.
+    """
+    position = buffer.tell()
+    try:
+        extent = _directory_extent(buffer)
+        if extent is None:
+            return 0, 0
+        at, end = extent[0], extent[0] + extent[1]
+        count = 0
+        while at < end and count <= limit:
+            buffer.seek(at)
+            header = buffer.read(_DIRECTORY_ENTRY_SIZE)
+            if len(header) < _DIRECTORY_ENTRY_SIZE or not header.startswith(_DIRECTORY_ENTRY_SIGNATURE):
+                # `zipfile` stops at the same header, and refuses the archive there.
+                break
+            count += 1
+            at += _DIRECTORY_ENTRY_SIZE + sum(_DIRECTORY_ENTRY_LENGTHS.unpack_from(header, _DIRECTORY_ENTRY_LENGTHS_AT))
+        return extent[1], count
+    finally:
+        buffer.seek(position)
+
+
 def _open_archive(buffer: IO[bytes]) -> zipfile.ZipFile:
     try:
+        # Before `zipfile` reads the directory and builds an object per entry, which for a part
+        # of empty entries is gigabytes of memory long before `MAX_IMPORT_FILES` is checked.
+        size, entries = _measure_directory(buffer, limit=MAX_ARCHIVE_ENTRIES)
+        if size > MAX_ARCHIVE_DIRECTORY_SIZE:
+            raise ImportTooLargeError(
+                f"This archive's list of files is larger than {MAX_ARCHIVE_DIRECTORY_SIZE // (1024 * 1024)} MB and was "
+                "not opened. Split it and import the parts."
+            )
+        if entries > MAX_ARCHIVE_ENTRIES:
+            raise ImportTooLargeError(
+                f"This archive lists more than {MAX_ARCHIVE_ENTRIES} entries and was not opened. Split it and import "
+                "the parts."
+            )
         archive = zipfile.ZipFile(buffer)
     except (zipfile.BadZipFile, OSError, EOFError) as exc:
         raise MalformedImportError("This looks like a zip archive but could not be opened.") from exc
@@ -1231,13 +1372,13 @@ async def _load(row: BatchRow, *, archive_read: bool, headroom: int) -> LoadedIm
                 "This is a second full-export archive, and one import restores one. Import it on its own."
             )
         assert row._archive is not None
-        return await run_in_threadpool(_load_archive, row._archive, digest=row.sha256)
+        return await run_in_conversion_thread(_load_archive, row._archive, digest=row.sha256)
     source = row._source
     assert source is not None
     if row.kind is FileKind.DOCUMENT:
-        return await run_in_threadpool(_load_document, lambda: _read_all(source), digest=row.sha256)
+        return await run_in_conversion_thread(_load_document, lambda: _read_all(source), digest=row.sha256)
     assert row.format is not None
-    return await run_in_threadpool(
+    return await run_in_conversion_thread(
         _convert_file,
         source,
         digest=row.sha256,
@@ -1259,7 +1400,7 @@ async def load_import(parts: Sequence[ImportPart]) -> LoadedBatch:
     The caller owns the result and must close it - `with await load_import(...) as batch` -
     which releases the containers it opened.
     """
-    batch = await run_in_threadpool(_survey, parts)
+    batch = await run_in_conversion_thread(_survey, parts)
     try:
         archive_read = False
         for row in batch.rows:

@@ -66,6 +66,14 @@ from tests.helpers.import_parts import import_request, part_of
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
+
+@pytest.fixture(autouse=True)
+def no_dive_file_read_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The read budget's own tests are in `tests/test_dive_file_read_bounds.py`; in CI, Redis
+    is real and bound to whichever event loop opened it first."""
+    monkeypatch.setattr("src.app.api.v1.dives.enforce_rate_limit", AsyncMock())
+
+
 LIMIT = 1024 * 1024
 REFUSAL = "of 1.0 MB used"
 

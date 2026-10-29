@@ -69,8 +69,8 @@ async def read_dive_conditions_lookup(
     all, else a 422. Fresh water asks nothing of the sea. Rate limited per account.
 
     `200` with `at`, `utc_offset_minutes` and every `filled` member null where the inputs cannot
-    be answered - no position, a date alone, a day after today, a request the provider refused
-    for them - so the form empties what it filled. `503` when the provider could not be asked,
+    be answered - no position, a date alone, a day after today or before 1940, a request the
+    provider refused for them - so the form empties what it filled. `503` when the provider could not be asked,
     which says nothing about the inputs: over the instance's budget, cooling down, slow or down.
     404 when this instance fetches no conditions, or when `dive_site_uuid` is not the caller's.
     """

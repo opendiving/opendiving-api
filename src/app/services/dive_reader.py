@@ -18,19 +18,22 @@ of the format is a diver's logbook or one computer's recording all live in the t
 keyed by format id. A pin bump that adds a reader owes all three, and
 `test_every_read_format_has_a_label` fails the build until it has them.
 
-Pure CPU and never on the event loop: every caller on a request path hands these to
-`run_in_threadpool` (*"Uploaded files are parsed in a thread, not on the event loop"* in
+Pure CPU and never on a request's event loop: every caller on a request path hands these to
+`run_in_conversion_thread` (*"Uploaded files are parsed in a thread, not on the event loop"* in
 `DECISIONS.md`).
 """
 
 import logging
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Context, Decimal
+from functools import partial
 from typing import Any
 
+import anyio
+import anyio.to_thread
 import divejson
 from divejson import ConverterError, NonConformingOutputError, SourceTooLargeError
 from divejson.shearwater_db import MAX_LOG_SIZE
@@ -46,6 +49,17 @@ from .dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS
 from .recording_shape import Drop, ShapedRecording, recording_start, shape_recording
 
 logger = logging.getLogger(__name__)
+
+# Two at a time per process: a conversion holds about twenty times its input, and threads alone admit dozens.
+CONVERT_LIMITER = anyio.CapacityLimiter(2)
+
+
+async def run_in_conversion_thread[**P, R](fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
+    """Run `fn` in a thread behind `CONVERT_LIMITER`: the hop for whatever converts, reads or
+    parses a dive file or a logbook document, and for nothing else - blob I/O and image work
+    would only queue behind a conversion. `fn` must not itself wait on the limiter."""
+    return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs), limiter=CONVERT_LIMITER)
+
 
 # How each registered format is named to a diver. An id the library grows past this table
 # falls back to the id itself, so a sentence stays true and only gets terser - but that

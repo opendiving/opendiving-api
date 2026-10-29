@@ -539,6 +539,13 @@ OWNER = {"id": OWNER_ID, "uuid": uuid_pkg.uuid4(), "username": "ada", "is_superu
 CALLERS_SESSION = uuid_pkg.uuid4()
 
 
+@pytest.fixture(autouse=True)
+def no_dive_file_read_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The read budget's own tests are in `tests/test_dive_file_read_bounds.py`; in CI, Redis
+    is real and bound to whichever event loop opened it first."""
+    monkeypatch.setattr("src.app.api.v1.dives.enforce_rate_limit", AsyncMock())
+
+
 @pytest.fixture(scope="module")
 def owned_app() -> Any:
     """Its own app with `apply_migrations_on_start=False`, like `test_export_endpoints.py`.

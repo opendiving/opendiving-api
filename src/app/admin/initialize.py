@@ -12,7 +12,7 @@ def create_admin_interface() -> CRUDAdmin | None:
     """Create and configure the admin interface.
 
     Returns `None` - and so `main` never mounts anything at `CRUD_ADMIN_MOUNT_PATH` -
-    unless `CRUD_ADMIN_ENABLED` is explicitly on. Production additionally requires a
+    unless `CRUD_ADMIN_ENABLED` is explicitly on. Every environment but `local` requires a
     real `ADMIN_PASSWORD`, enforced at startup by `Settings._reject_insecure_admin_config`
     rather than here, so the failure is loud instead of a silently absent panel.
 

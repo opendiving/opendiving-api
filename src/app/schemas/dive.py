@@ -6,6 +6,7 @@ from typing import Annotated, ClassVar, Literal, Self
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, model_validator
 
 from ..core.schemas import (
+    MAX_LIST_ITEMS,
     NOTES_MAX_LENGTH,
     POSTGRES_INTEGER_MAX,
     PostgresInteger,
@@ -174,7 +175,8 @@ class EntryType(StrEnum):
 
 
 # Stored trimmed and never blank, the person name's shape: DiveJSON's 1-255.
-BoatName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
+BOAT_NAME_MAX = 255
+BoatName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=BOAT_NAME_MAX)]
 
 
 class Salinity(StrEnum):
@@ -542,25 +544,30 @@ def _one_cylinder_per_vessel(mixtures: list[DiveMixtureCreate] | None) -> list[D
     return mixtures
 
 
+# Bounded inside the `| None`: a `max_length` beside the `AfterValidator` is applied to the
+# union after it, and raises a `TypeError` on a null rather than letting it through.
+_MixtureList = Annotated[list[DiveMixtureCreate], Field(max_length=MAX_LIST_ITEMS)]
+_SightingList = Annotated[list[SightingWrite], Field(max_length=MAX_LIST_ITEMS)]
+
 Mixtures = Annotated[
-    list[DiveMixtureCreate],
+    _MixtureList,
     AfterValidator(_one_cylinder_per_vessel),
     Field(default_factory=list, description="The cylinders breathed from, each vessel linked at most once"),
 ]
 MixturesUpdate = Annotated[
-    list[DiveMixtureCreate] | None,
+    _MixtureList | None,
     AfterValidator(_one_cylinder_per_vessel),
     Field(default=None, description="Replaces the cylinders wholesale. Omit to leave them."),
 ]
 
 
 Sightings = Annotated[
-    list[SightingWrite],
+    _SightingList,
     AfterValidator(_one_sighting_per_species),
     Field(default_factory=list, description="The species spotted, in the order listed, each at most once"),
 ]
 SightingsUpdate = Annotated[
-    list[SightingWrite] | None,
+    _SightingList | None,
     AfterValidator(_one_sighting_per_species),
     Field(default=None, description="Replaces the sightings wholesale. Omit to leave them."),
 ]
@@ -1359,11 +1366,19 @@ class DiveCreateRequest(DiveCreate):
     mixtures: Mixtures
     dive_site_uuids: Annotated[
         list[uuid_pkg.UUID],
-        Field(default_factory=list, description="Public ids of the dive sites visited, in the order visited"),
+        Field(
+            default_factory=list,
+            max_length=MAX_LIST_ITEMS,
+            description="Public ids of the dive sites visited, in the order visited",
+        ),
     ]
     gear_item_uuids: Annotated[
         list[uuid_pkg.UUID],
-        Field(default_factory=list, description="Public ids of the gear items used, in the order listed"),
+        Field(
+            default_factory=list,
+            max_length=MAX_LIST_ITEMS,
+            description="Public ids of the gear items used, in the order listed",
+        ),
     ]
     sightings: Sightings
     people: PeopleWrite
@@ -1466,11 +1481,19 @@ class DiveUpdateRequest(DiveUpdate):
     mixtures: MixturesUpdate
     dive_site_uuids: Annotated[
         list[uuid_pkg.UUID] | None,
-        Field(default=None, description="Public ids of the dive sites visited, in the order visited"),
+        Field(
+            default=None,
+            max_length=MAX_LIST_ITEMS,
+            description="Public ids of the dive sites visited, in the order visited",
+        ),
     ]
     gear_item_uuids: Annotated[
         list[uuid_pkg.UUID] | None,
-        Field(default=None, description="Public ids of the gear items used, in the order listed"),
+        Field(
+            default=None,
+            max_length=MAX_LIST_ITEMS,
+            description="Public ids of the gear items used, in the order listed",
+        ),
     ]
     sightings: SightingsUpdate
     people: PeopleUpdate

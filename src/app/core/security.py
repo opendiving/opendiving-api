@@ -1,6 +1,8 @@
+import base64
 import hashlib
 import logging
 import secrets
+import string
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -359,11 +361,44 @@ def _new_jti() -> str:
       same identity in the same second (a magic link opened twice, say) are spent
       together and the second `/auth/complete` fails.
 
-    A random `jti` makes each issuance distinct, which is what makes keying the blacklist
-    on the token string correct. Nothing ever reads the claim back, so tokens minted
-    before it existed keep verifying and deploying this signs nobody out.
+    A random `jti` makes each issuance distinct, which - with `_decode` accepting each
+    issuance under one spelling - is what makes keying the blacklist on the token string
+    correct. Nothing ever reads the claim back, so tokens minted before it existed keep
+    verifying and deploying this signs nobody out.
     """
     return uuid_pkg.uuid4().hex
+
+
+_BASE64URL_ALPHABET = frozenset(string.ascii_letters + string.digits + "-_")
+
+
+def _decode(token: str) -> dict[str, Any]:
+    """`jwt.decode`, accepting only the one spelling of a token that this module mints.
+
+    The decoder reads base64url leniently: it drops characters outside the alphabet,
+    accepts trailing `=` padding, and ignores the spare low bits of a segment's last
+    character - so one signed token verifies under many strings. Revocation is keyed on the
+    string (see `_blacklist_one`), and every extra spelling of a spent refresh, onboarding
+    or restore token is a string the blacklist has never seen. Three segments of unpadded
+    base64url that each re-encode to themselves is one spelling per token, which is what
+    makes the string a sound revocation key alongside the `jti`.
+
+    Raises `JWTError` for a non-canonical token, as `jwt.decode` does for an invalid one.
+    """
+    segments = token.split(".")
+    if len(segments) != 3 or not all(segment and _BASE64URL_ALPHABET.issuperset(segment) for segment in segments):
+        raise JWTError("Token is not three unpadded base64url segments.")
+    for segment in segments:
+        # Checked before decoding: no padding makes such a segment decode, and the error it
+        # raises there is not a `JWTError`.
+        if len(segment) % 4 == 1:
+            raise JWTError("Token segment is not canonical base64url.")
+        decoded = base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
+        if base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii") != segment:
+            raise JWTError("Token segment is not canonical base64url.")
+
+    payload: dict[str, Any] = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+    return payload
 
 
 def _session_claim(session_uuid: uuid_pkg.UUID) -> dict[str, str]:
@@ -440,7 +475,7 @@ async def verify_token(token: str, expected_token_type: TokenType, db: AsyncSess
         return None
 
     try:
-        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        payload = _decode(token)
         subject: str | None = payload.get("sub")
         token_type: str | None = payload.get("token_type")
 
@@ -479,7 +514,7 @@ def _session_id(payload: dict[str, Any]) -> uuid_pkg.UUID | None:
 def token_session_id(token: str) -> uuid_pkg.UUID | None:
     """The `sid` of a token whose validity has *already been established elsewhere*.
 
-    Signature and expiry are still enforced (`jwt.decode` does both), but the blacklist and
+    Signature and expiry are still enforced (`_decode` does both), but the blacklist and
     `token_type` checks are not - so this must never be the basis of an authorization
     decision, exactly as `token_subject` must not.
 
@@ -500,7 +535,7 @@ def token_session_id(token: str) -> uuid_pkg.UUID | None:
     permission to do anything but name the row.
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        payload = _decode(token)
     except JWTError:
         return None
 
@@ -534,7 +569,7 @@ def token_subject(token: str) -> str | None:
     line that can name the account involved.
 
     Every check `verify_token` makes is skipped bar the signature and expiry that
-    `jwt.decode` enforces on its own, so this must never become an authorization
+    `_decode` enforces on its own, so this must never become an authorization
     decision - it exists to make a `WARNING` legible, and nothing more.
 
     `None` covers every way a token can fail to yield a subject, expiry included. The case
@@ -545,7 +580,7 @@ def token_subject(token: str) -> str | None:
     rather than letting an exception escape a path that is already returning a 401.
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        payload = _decode(token)
     except JWTError:
         return None
 
@@ -588,7 +623,7 @@ async def verify_onboarding_token(token: str, db: AsyncSession) -> OnboardingTok
         return None
 
     try:
-        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        payload = _decode(token)
     except JWTError:
         return None
 
@@ -656,7 +691,7 @@ async def verify_restore_token(token: str, db: AsyncSession) -> uuid_pkg.UUID | 
         return None
 
     try:
-        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        payload = _decode(token)
     except JWTError:
         return None
 
@@ -716,7 +751,7 @@ def verify_dive_file_token(token: str) -> DiveFileTokenData | None:
     and which is signed with the same key - from being presented here as a parse receipt.
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        payload = _decode(token)
     except JWTError:
         return None
 
@@ -774,7 +809,7 @@ def verify_logbook_import_token(token: str) -> LogbookImportTokenData | None:
     and which is signed with the same key - from being presented here as a preview receipt.
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        payload = _decode(token)
     except JWTError:
         return None
 
@@ -796,7 +831,9 @@ async def _blacklist_one(token: str, db: AsyncSession) -> bool:
 
     The row is keyed on the whole token string (`TokenBlacklist.token` is unique), which
     is only a per-issuance key because every revocable token carries a `jti` - see
-    `_new_jti`. Anything minted here that should be revocable needs that claim.
+    `_new_jti` - and because every decode here accepts that token under exactly one
+    spelling - see `_decode`. Anything minted here that should be revocable needs the claim,
+    and anything that verifies one needs `_decode` rather than `jwt.decode`.
 
     The same token arriving twice is ordinary - two tabs rotating one refresh cookie, a
     double-clicked sign-out or account deletion - so each caller decides what an
@@ -822,7 +859,7 @@ async def _blacklist_one(token: str, db: AsyncSession) -> bool:
     transaction.
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY.get_secret_value(), algorithms=[ALGORITHM])
+        payload = _decode(token)
     except JWTError:
         raise UnauthorizedException("Invalid token.") from None
 

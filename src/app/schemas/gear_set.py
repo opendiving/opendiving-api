@@ -4,7 +4,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredName, Trimmed
+from ..core.schemas import MAX_LIST_ITEMS, PublicUUIDSchema, RejectsExplicitNulls, StoredName, Trimmed
 from .gear_item import GearItemInfo
 
 _NAME_DESCRIPTION = "Name of this gear set"
@@ -58,7 +58,10 @@ class GearSetCreateRequest(GearSetBase):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     gear_item_uuids: Annotated[
-        list[uuid_pkg.UUID], Field(default_factory=list, description="Public ids of the items in the set, in order")
+        list[uuid_pkg.UUID],
+        Field(
+            default_factory=list, max_length=MAX_LIST_ITEMS, description="Public ids of the items in the set, in order"
+        ),
     ]
 
 
@@ -84,7 +87,7 @@ class GearSetUpdateRequest(GearSetUpdate):
 
     gear_item_uuids: Annotated[
         list[uuid_pkg.UUID] | None,
-        Field(default=None, description="Public ids of the items in the set, in order"),
+        Field(default=None, max_length=MAX_LIST_ITEMS, description="Public ids of the items in the set, in order"),
     ]
 
 

@@ -601,6 +601,30 @@ class TestWhatIsPassedOver:
         assert row is not None and (row.state, row.reason) == ("skipped", "no_time")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("start_time", "offset"),
+        [(datetime(1, 1, 1, tzinfo=UTC), None), (datetime(1939, 12, 31, 7, 0, tzinfo=UTC), 180)],
+        ids=["the calendar's first day with no offset", "the day before the archive"],
+    )
+    async def test_a_dive_before_the_archive_is_skipped(
+        self, db: Session, mine: Callable[..., User], start_time: datetime, offset: int | None
+    ) -> None:
+        diver = mine(db)
+        dive = _dive(db, diver, site=_site(db, diver), start_time=start_time, offset=offset)
+
+        with FakeOpenMeteo() as provider:
+            summary = await run_dive_conditions(NOW)
+
+        assert provider.requests == []
+        assert summary == "1 candidate(s): 1 skipped"
+        # The two columns alone: psycopg reads a timestamp in the connection's zone, and the
+        # row's stored start can fall before year 1 there.
+        state = db.execute(
+            select(DiveConditions.state, DiveConditions.reason).where(DiveConditions.dive_id == dive.id)
+        ).one()
+        assert tuple(state) == ("skipped", "before_archive")
+
+    @pytest.mark.asyncio
     async def test_a_dive_with_no_position_is_skipped_and_logged(
         self, db: Session, mine: Callable[..., User], caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -831,6 +855,51 @@ class TestFailures:
         row = _row(db, dive)
         assert row is not None and row.deferrals == 41
         assert row.next_attempt_at == NOW + timedelta(days=1)
+
+    @pytest.mark.asyncio
+    async def test_a_dive_the_run_cannot_handle_is_struck_and_the_run_goes_on(
+        self,
+        db: Session,
+        mine: Callable[..., User],
+        monkeypatch: pytest.MonkeyPatch,
+        redis: FakeRedis,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        diver = mine(db)
+        site = _site(db, diver)
+        fine = _dive(db, diver, site=site, start_time=DAHAB_DIVE - timedelta(days=1))
+        # Newer, so it heads the queue.
+        broken = _dive(db, diver, site=site)
+        real = dive_conditions._handle
+
+        async def raising_for_one(session: AsyncSession, candidate: Any, now: datetime) -> Any:
+            if candidate.dive_id != broken.id:
+                return await real(session, candidate, now)
+            # A write left pending when it raises must not ride along on the next dive's commit.
+            await session.execute(update(Dive).where(Dive.id == broken.id).values(notes="half-written"))
+            raise RuntimeError("a value nothing expected")
+
+        monkeypatch.setattr(dive_conditions, "_handle", raising_for_one)
+
+        with FakeOpenMeteo(), caplog.at_level("ERROR"):
+            summary = await run_dive_conditions(NOW)
+
+        assert summary == "2 candidate(s): 1 fetched, 1 struck"
+        assert f"Dive {broken.id} could not be handled; struck." in caplog.text
+        fetched = _row(db, fine)
+        assert fetched is not None and fetched.state == "fetched"
+        assert _row(db, broken) is None
+        assert _fresh(db, broken).notes == ""
+        assert await redis.get(f"conditions:strikes:{broken.id}") == b"1"
+
+        for minute in (1, 2):
+            with FakeOpenMeteo():
+                await run_dive_conditions(NOW + timedelta(minutes=minute))
+
+        row = _row(db, broken)
+        assert row is not None
+        assert (row.state, row.reason, row.attempts, row.deferrals) == ("failed", "deferred", 0, 1)
+        assert row.next_attempt_at == NOW + timedelta(minutes=2, hours=1)
 
 
 class TestTheRunsOwnLock:

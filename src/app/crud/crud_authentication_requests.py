@@ -1,8 +1,8 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from fastcrud import FastCRUD
-from sqlalchemy import CursorResult, update
+from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.authentication_request import AuthenticationRequest
@@ -43,6 +43,40 @@ async def invalidate_live_requests(
         .where(owner, AuthenticationRequest.purpose == purpose, AuthenticationRequest.invalidated_at.is_(None))
         .values(invalidated_at=datetime.now(UTC))
     )
+
+
+# The namespace of the per-address lock `hold_sign_in_request_quota` takes, keyed
+# `(this, hashtext(email))`. The two-integer form is a keyspace of its own, beside
+# `crud_invitations`' `0x0D1E_0002`; a hash collision only makes two addresses take turns.
+_SIGN_IN_REQUEST_LOCK = 0x0D1E_0003
+
+
+async def hold_sign_in_request_quota(db: AsyncSession, *, email: str) -> None:
+    """Take the transaction-scoped lock an address's sign-in requests are counted under.
+
+    `sign_in_requests_since` then the insert is a count and a later write, so two requests
+    for one address at once would both count the same number and both be let through. Taken
+    before the count, the second waits for the first's transaction to end - the insert's
+    commit - and counts its row.
+    """
+    await db.execute(select(func.pg_advisory_xact_lock(_SIGN_IN_REQUEST_LOCK, func.hashtext(email))))
+
+
+async def sign_in_requests_since(db: AsyncSession, *, email: str, window_seconds: int) -> int:
+    """How many sign-in requests this address has made in the trailing window, whatever
+    became of them: a superseded or redeemed request was still a mail sent and a code to
+    guess at."""
+    since = datetime.now(UTC) - timedelta(seconds=window_seconds)
+    count = await db.scalar(
+        select(func.count())
+        .select_from(AuthenticationRequest)
+        .where(
+            AuthenticationRequest.email == email,
+            AuthenticationRequest.purpose == "sign_in",
+            AuthenticationRequest.created_at >= since,
+        )
+    )
+    return int(count or 0)
 
 
 async def claim_authentication_request(db: AsyncSession, *, request_id: int, commit: bool = True) -> bool:

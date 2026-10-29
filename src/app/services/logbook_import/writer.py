@@ -106,6 +106,7 @@ from ..dive_profiles import (
     recording_source_digest,
     store_profile,
 )
+from ..dive_reader import run_in_conversion_thread
 from ..dive_recordings import (
     DECO_MODEL_COLUMNS,
     DEVICE_COLUMNS,
@@ -137,6 +138,13 @@ from .reader import LoadedImport
 from .staging import StagedFiles
 
 logger = logging.getLogger(__name__)
+
+
+def _read_digested(loaded: LoadedImport, path: str) -> tuple[bytes, str] | None:
+    """One file's bytes and their SHA-256, or `None` when they cannot be had - in a thread,
+    since inflating a member and hashing it both take as long as the file is large."""
+    data = loaded.read_member(path)
+    return None if data is None else (data, hashlib.sha256(data).hexdigest())
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,15 +286,15 @@ class _Writer:
         stripped does not bring a card's location back; what is stored, and keyed, is the
         stripped image under its own digest.
         """
-        data = self._loaded.read_member(planned.archive_path)
-        if data is None:
+        read = await run_in_threadpool(_read_digested, self._loaded, planned.archive_path)
+        if read is None:
             # Either the member vanished from the container's index or it would not inflate
             # - a password-protected archive, a CRC failure, a compression method this build
             # has no decoder for. `read_member` collapses them because the answer here is
             # the same for all of them, and it is not "abort a half-written import".
             self._file_skipped(collection, record_uuid, "its bytes could not be read out of the archive")
             return None
-        digest = hashlib.sha256(data).hexdigest()
+        data, digest = read
         if digest != planned.sha256:
             self._file_skipped(collection, record_uuid, "its bytes did not match the digest the document recorded")
             return None
@@ -739,7 +747,7 @@ class _Writer:
         if kept is not None:
             self._staged.extractions[kept.sha256] = kept.extraction
         files = await load_recording_files(self._db, recording_id=recording_id, held=self._staged.held)
-        extraction = await run_in_threadpool(
+        extraction = await run_in_conversion_thread(
             extract_recording, files, self._staged.extractions, start_time=origin[0], utc_offset_minutes=origin[1]
         )
         await rederive_recording(

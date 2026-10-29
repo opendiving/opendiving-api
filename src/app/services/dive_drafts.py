@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy import Row, Select, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.exceptions.http_exceptions import NotFoundException
+from ..core.exceptions.http_exceptions import CustomException, NotFoundException
 from ..models.contact import Contact
 from ..models.course import Course
 from ..models.dive_draft import DiveDraft
@@ -39,6 +39,10 @@ from ..schemas.dive_draft import (
 type Referenced = type[Trip | Course | Contact | DiveSite | GearItem | Person | Species]
 type Held = dict[Referenced, set[uuid_pkg.UUID]]
 
+# Far more dives than anyone leaves unfinished at once: a bound on what one account stores, not
+# a product rule.
+MAX_DIVE_DRAFTS_PER_USER = 200
+
 
 async def _gear_set_id(db: AsyncSession, gear_set_uuid: uuid_pkg.UUID | None, user_id: int) -> int | None:
     """The caller's set, or none: another account's set, or one deleted since the client
@@ -48,8 +52,19 @@ async def _gear_set_id(db: AsyncSession, gear_set_uuid: uuid_pkg.UUID | None, us
     return await db.scalar(select(GearSet.id).where(GearSet.uuid == gear_set_uuid, GearSet.user_id == user_id))
 
 
+async def count_dive_drafts(db: AsyncSession, *, user_id: int) -> int:
+    return await db.scalar(select(func.count()).select_from(DiveDraft).where(DiveDraft.user_id == user_id)) or 0
+
+
 async def create_dive_draft(db: AsyncSession, draft: DiveDraftCreate, *, user_id: int) -> int:
-    """Add and flush the row, uncommitted, and return its id."""
+    """Add and flush the row, uncommitted, and return its id. 409 once the account holds
+    `MAX_DIVE_DRAFTS_PER_USER`. The count is not serialized with the insert, so creates racing
+    at the cap can each land one more: an overshoot bounded by the requests in flight."""
+    if await count_dive_drafts(db, user_id=user_id) >= MAX_DIVE_DRAFTS_PER_USER:
+        raise CustomException(
+            status_code=409,
+            detail=f"You already have {MAX_DIVE_DRAFTS_PER_USER} dive drafts. Log or delete one to save another.",
+        )
     now = datetime.now(UTC)
     row = DiveDraft(
         user_id=user_id,
@@ -101,8 +116,8 @@ async def read_dive_draft(db: AsyncSession, draft_id: int, *, user_id: int) -> D
 async def read_dive_drafts_page(db: AsyncSession, *, user_id: int, offset: int, limit: int) -> dict[str, Any]:
     """`GET /dive-drafts`' page, in the shape `paginated_response` takes."""
     rows = (await db.execute(_drafts(user_id).offset(offset).limit(limit))).all()
-    total = await db.scalar(select(func.count()).select_from(DiveDraft).where(DiveDraft.user_id == user_id))
-    return {"data": await _as_read(db, rows, user_id=user_id), "total_count": total or 0}
+    total = await count_dive_drafts(db, user_id=user_id)
+    return {"data": await _as_read(db, rows, user_id=user_id), "total_count": total}
 
 
 async def read_all_dive_drafts(db: AsyncSession, *, user_id: int) -> list[DiveDraftRead]:

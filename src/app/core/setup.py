@@ -20,6 +20,7 @@ from sqlalchemy import func, select, text
 
 from ..api.dependencies import get_current_superuser
 from ..api.idempotency import IdempotentReplay, answer_replay
+from ..middleware.body_size_limit_middleware import BodySizeLimitMiddleware
 from ..middleware.client_cache_middleware import ClientCacheMiddleware
 from ..middleware.security_headers_middleware import SecurityHeadersMiddleware
 from ..models import *  # noqa: F403
@@ -377,6 +378,10 @@ def create_application(
     application.add_exception_handler(RequestValidationError, request_validation_error)  # type: ignore[arg-type]
     application.add_exception_handler(IdempotentReplay, answer_replay)  # type: ignore[arg-type]
 
+    # Before `CORSMiddleware`, which `add_middleware` then puts outside it: a browser can read
+    # a cross-origin 413 only if it carries the CORS headers.
+    application.add_middleware(BodySizeLimitMiddleware)
+
     if isinstance(settings, FrontendSettings):
         # The web app is served from a different origin than the API (e.g.
         # localhost:3000 vs localhost:8000 in local dev) and sends both an
@@ -407,10 +412,11 @@ def create_application(
 
     # Registered last on purpose. `add_middleware` inserts at the front of the stack, so
     # the last one added is the *outermost* - which is what puts it outside
-    # `CORSMiddleware`, the one piece of the stack that answers a request itself (an
-    # `OPTIONS` preflight) instead of calling through. Registered before it, this would
-    # never see those responses. Everything routed, the admin panel `main.py` mounts
-    # included, is covered either way: a mount lives in the router, inside all of this.
+    # `CORSMiddleware` and `BodySizeLimitMiddleware`, the pieces of the stack that answer a
+    # request themselves (an `OPTIONS` preflight, a 413) instead of calling through.
+    # Registered before them, this would never see those responses. Everything routed, the
+    # admin panel `main.py` mounts included, is covered either way: a mount lives in the
+    # router, inside all of this.
     #
     # Unconditional, unlike the middleware above it, because there is no deployment where
     # these headers are the wrong answer and a setting would only be one more thing that

@@ -4,7 +4,7 @@ from typing import Annotated, Any, ClassVar
 from divejson.validate import WHITE_SPACE, folded
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
 
-from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import MAX_LIST_ITEMS, PublicUUIDSchema, RejectsExplicitNulls
 
 # DiveJSON §6.2's bound on a tag, and the width of the column behind it.
 TAG_NAME_MAX = 64
@@ -52,12 +52,15 @@ TagsWrite = Annotated[
     AfterValidator(_first_of_each_fold),
     Field(
         default_factory=list,
+        max_length=MAX_LIST_ITEMS,
         description="The tags by name, in the diver's order. Each is trimmed and matched to the diver's tag of that "
         "name compared case-folded, or creates one; two that fold to one keep the first spelling.",
     ),
 ]
+# Bounded inside the `| None`: a `max_length` beside the `AfterValidator` is applied to the
+# union after it, and raises a `TypeError` on a null rather than letting it through.
 TagsUpdate = Annotated[
-    list[TagName] | None,
+    Annotated[list[TagName], Field(max_length=MAX_LIST_ITEMS)] | None,
     AfterValidator(_first_of_each_fold),
     Field(default=None, description="Replaces the tags wholesale, by name. Omit to leave them."),
 ]

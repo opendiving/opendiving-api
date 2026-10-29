@@ -29,7 +29,7 @@ value written (`filled_*`). That record is the field's "fetched" mark, and the r
 **Failures are charged to whoever caused them** (`services.open_meteo`): a refused request is
 the dive's, and backs off; anything instance-wide leaves the dive pending with no row, bounded
 by a cool-down after a 429 or a refused key and by a per-dive strike count that defers a dive
-whose own request keeps failing.
+whose own request keeps failing, or that the run cannot handle at all.
 """
 
 import logging
@@ -122,6 +122,11 @@ STRIKES_TTL_SECONDS = 24 * 60 * 60
 ATTEMPTS_CAP = 5
 RETRY_AFTER = timedelta(hours=1)
 LONGEST_DEFERRAL = timedelta(days=1)
+
+# The first day the provider's historical weather answers. A dive before it is not asked
+# about: the question would only be refused, and for the calendar's first day it cannot even
+# be written, the window of a wall clock with no offset opening the day before.
+ARCHIVE_STARTS = date(1940, 1, 1)
 
 
 class Handled(StrEnum):
@@ -709,12 +714,18 @@ async def _could_not_ask(
     """Nothing about the dive: it stays pending with no row, and the run decides whether to go on.
 
     Over budget, rate-limited or refused its key, it stops (`_stop_asking`). A timeout, a 5xx or
-    a transport failure is struck against the dive, and the third in a row defers it - a
-    `failed` row due an hour later, doubling to a day, with no attempt counted - so a place
-    whose request always fails is not asked every minute at the head of the queue.
+    a transport failure is struck against the dive (`_strike_and_defer`).
     """
     if await _stop_asking(why):
         return Handled.STOPPED
+    return await _strike_and_defer(db, candidate, now)
+
+
+async def _strike_and_defer(db: AsyncSession, candidate: _Candidate, now: datetime) -> Handled:
+    """Strike a failure against the dive that is not a refusal of its inputs, leaving it pending
+    with no row; the third in a row defers it - a `failed` row due an hour later, doubling to a
+    day, with no attempt counted - so a dive that always fails is not taken every minute at the
+    head of the queue."""
     if await _strike(candidate.dive_id) >= STRIKES_TO_DEFER:
         deferrals = candidate.deferrals + 1
         row = {
@@ -851,6 +862,8 @@ async def _handle(db: AsyncSession, candidate: _Candidate, now: datetime) -> Han
     if _day(candidate) > today:
         # Only a row that no longer describes a dive moved into the future reaches here.
         return Handled.CLEARED if await _settle(db, candidate, None) else Handled.MOVED
+    if _day(candidate) < ARCHIVE_STARTS:
+        return await _skip(db, candidate, "before_archive")
     if candidate.start_date_only:
         return await _skip(db, candidate, "no_time")
     if candidate.latitude is None or candidate.longitude is None:
@@ -894,7 +907,15 @@ async def _run(now: datetime) -> str:
         for candidate in candidates:
             if monotonic() - started >= RUN_SECONDS:
                 break
-            outcome = await _handle(db, candidate, now)
+            try:
+                outcome = await _handle(db, candidate, now)
+            except Exception:
+                # Unguarded, a dive the code cannot handle ends every run at the same place in
+                # the queue and no dive behind it is ever answered; struck like a dive whose
+                # request keeps failing, it is deferred instead.
+                logger.exception("Dive %d could not be handled; struck.", candidate.dive_id)
+                await db.rollback()
+                outcome = await _strike_and_defer(db, candidate, now)
             handled[outcome] += 1
             if outcome is Handled.STOPPED:
                 break
@@ -944,10 +965,10 @@ async def preview_conditions(
 
     The inputs go through the worker's own steps - its rounding, its question, its derivations -
     so a dive saved with them is filled with exactly these values, and its fetch reads the answer
-    this one cached. Writes nothing. Inputs the worker would not ask about - a day after today, a
-    date alone, no position - and a request refused for them answer with every value null.
-    A cool-down after the provider limited or refused the instance holds the preview as it holds
-    the run, cached answers included.
+    this one cached. Writes nothing. Inputs the worker would not ask about - a day after today or
+    before the provider's archive, a date alone, no position - and a request refused for them
+    answer with every value null. A cool-down after the provider limited or refused the instance
+    holds the preview as it holds the run, cached answers included.
     """
     stored, offset, date_only = split_dive_start_time(start_time)
     today = now.astimezone(UTC).date()
@@ -956,7 +977,8 @@ async def preview_conditions(
         attribution=open_meteo.ATTRIBUTION,
         filled=ConditionsFilled(air_temperature=None, weather=None, waves=None),
     )
-    if stored.astimezone(UTC).date() > today or date_only or latitude is None or longitude is None:
+    day = stored.astimezone(UTC).date()
+    if day > today or day < ARCHIVE_STARTS or date_only or latitude is None or longitude is None:
         return nothing
     rounded_latitude, rounded_longitude = (
         await db.execute(select(_rounded(literal(latitude, Float)), _rounded(literal(longitude, Float))))
