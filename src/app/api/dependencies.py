@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # The methods a read-only API key may use. Complete because the API is REST-shaped: a safe
 # method never changes stored state, and the odd write-nothing `POST` needs a write key.
-_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 async def get_current_user(
@@ -100,7 +100,7 @@ async def _account_for_api_key(request: Request, secret: str, db: AsyncSession) 
     if key is None:
         raise UnauthorizedException("User not authenticated.")
 
-    if key.scope != ApiKeyScope.WRITE and request.method not in _SAFE_METHODS:
+    if key.scope != ApiKeyScope.WRITE and request.method not in SAFE_METHODS:
         raise ForbiddenException("This API key is read-only.")
 
     user = await read_account(db, uuid=key.owner_uuid)

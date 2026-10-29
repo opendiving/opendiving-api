@@ -27,6 +27,7 @@ from httpx import Response
 
 from src.app.api import router
 from src.app.core.config import EnvironmentOption, settings
+from src.app.core.openapi_access import CREDENTIALS, EXTENSION
 from src.app.core.setup import OPENAPI_URL, create_application
 
 #: What `application.version` falls back to when nothing sets it, and so what this
@@ -186,3 +187,54 @@ class TestSecurityScheme:
             "bearer": {"type": "http", "scheme": "bearer", "description": ANY}
         }
         assert document["paths"]["/api/v1/user"]["get"]["security"] == [{"bearer": []}]
+
+
+_METHODS = {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
+
+
+class TestCredentials:
+    def test_every_operation_names_its_credentials(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A docs page filtering on the list drops an operation that lacks one, so a gap here is
+        a route that silently disappears from the reference."""
+        paths = _document(monkeypatch)["paths"]
+
+        unnamed = [
+            f"{method.upper()} {path}"
+            for path, operations in paths.items()
+            for method, operation in operations.items()
+            if method in _METHODS and not operation.get(EXTENSION)
+        ]
+        assert not unnamed
+
+    @pytest.mark.parametrize(
+        ("method", "path", "expected"),
+        [
+            ("get", "/api/v1/health", list(CREDENTIALS)),
+            ("get", "/api/v1/user", ["session", "superuser", "api-key-read", "api-key-write"]),
+            ("patch", "/api/v1/user", ["session", "superuser", "api-key-write"]),
+            # `refuse_api_keys`: a key cannot delete its own account or mint its successor.
+            ("delete", "/api/v1/user", ["session", "superuser"]),
+            ("get", "/api/v1/user/api-keys", ["session", "superuser"]),
+            ("post", "/api/v1/user/api-keys", ["session", "superuser"]),
+            # `bearer_scheme` alone: the access token is read, a key is never resolved.
+            ("post", "/api/v1/auth/logout", ["session", "superuser"]),
+            ("get", "/api/v1/admin/stats", ["superuser"]),
+        ],
+    )
+    def test_follow_the_dependencies_that_enforce_them(
+        self, monkeypatch: pytest.MonkeyPatch, method: str, path: str, expected: list[str]
+    ) -> None:
+        operation = _document(monkeypatch)["paths"][path][method]
+
+        assert operation[EXTENSION] == expected
+
+    def test_a_secured_operation_never_lists_anonymous(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        paths = _document(monkeypatch)["paths"]
+
+        contradicting = [
+            f"{method.upper()} {path}"
+            for path, operations in paths.items()
+            for method, operation in operations.items()
+            if method in _METHODS and bool(operation.get("security")) == ("anonymous" in operation[EXTENSION])
+        ]
+        assert not contradicting
