@@ -1239,8 +1239,8 @@ channel takes a fresh unused label. `merge_mixture_fields` never writes a label.
 ## CNS, OTU and surface pressure are written by the import, never by the form
 
 A recording's `cns_start`/`cns_end`/`otu_start`/`otu_end`/`surface_pressure_bar` are filled
-server-side in `services/dive_files.py::store_recording_file`, in the same `run_in_threadpool` hop
-and transaction as profile extraction, and by logbook import. No write schema carries them.
+server-side in `services/dive_files.py::store_recording_file`, in the same conversion-thread hop and
+transaction as profile extraction, and by logbook import. No write schema carries them.
 
 Mixture fields round-trip through the form; these don't, since CNS and OTU depend on the device's
 algorithm and prior exposure, which nothing in a logged dive reconstructs.
@@ -1845,20 +1845,24 @@ until its TTL expires; see *"A deploy cannot serve the previous build's response
 
 ## Uploaded files are parsed in a thread, not on the event loop
 
-`POST /dive/parse` and `POST /dive/{uuid}/recordings` hand their bytes to `run_in_threadpool`:
-reading is pure CPU, and the pure-Python FIT decoder is two orders of magnitude slower per byte than
-the C `json` module, so inline in an `async def` one upload stalls the worker; XML and JSON go the
-same way.
+`POST /dive/parse` and `POST /dive/{uuid}/recordings` hand their bytes to
+`run_in_conversion_thread`: reading is pure CPU, and the pure-Python FIT decoder is two orders of
+magnitude slower per byte than the C `json` module, so inline in an `async def` one upload stalls
+the worker; XML and JSON go the same way.
 
-The read transaction is released first: `run_in_threadpool` frees the event loop, not the
-connection, and the account, quota and digest lookups have already opened one, so without
-`release_read_transaction` it sits idle-in-transaction. Safe because nothing is written yet and no
-lookup returns a live ORM object; `TestProfileExtractionReleasesTheTransaction` and
+The read transaction is released first: the thread frees the event loop, not the connection, and the
+account, quota and digest lookups have already opened one, so without `release_read_transaction` it
+sits idle-in-transaction. Safe because nothing is written yet and no lookup returns a live ORM
+object; `TestProfileExtractionReleasesTheTransaction` and
 `TestTheParseReleasesTheTransactionBeforeReading` pin the ordering.
 
-A thread is not a bound: a 5 MB file of bare `record` messages takes ~10 s to decode against AnyIO's
-40-thread limiter. The reader bounds the messages it decodes and raises `SourceTooLargeError` rather
-than truncating, since a FIT `session` follows the samples it summarizes.
+The thread is behind `CONVERT_LIMITER`, two conversions per process, because a conversion holds
+about twenty times its input; the default limiter admits a hundred. That bounds memory, not time: a
+5 MB file of bare `record` messages takes ~10 s to decode, so the reader bounds the messages it
+decodes and raises `SourceTooLargeError` rather than truncating, since a FIT `session` follows the
+samples it summarizes, and the two routes share `DIVE_FILE_READS_PER_USER` an hour. A thread frees
+the loop only while the reader releases the GIL: a regex that backtracks in C holds it, and no
+thread or limiter helps there.
 
 ## A zero cylinder pressure is not a reading
 
@@ -6039,7 +6043,9 @@ memory ceiling; a streaming parser, an arq job or a preview-token-keyed spool ar
 
 Zip bombs are refused before a byte inflates: declared sizes must sum under
 `MAX_ARCHIVE_EXTRACTED_SIZE`, `zipfile` verifies the CRC, and `archive_path` is a member name, never
-a path.
+a path. Before `zipfile` reads the directory at all, its span and entries are measured from their
+own headers and refused past `MAX_ARCHIVE_DIRECTORY_SIZE` or `MAX_ARCHIVE_ENTRIES`, since `zipfile`
+builds an object per entry and never consults the end record's total.
 
 `archive.read(...)` raises `RuntimeError` (password-protected), `BadZipFile` (CRC mismatch) and
 `NotImplementedError` (unsupported compression), so it is caught: the `logbook.divejson` member
@@ -6060,7 +6066,8 @@ file whose records are compressed inside it, a Shearwater Cloud database, counts
 its size and `INFLATED_SIZE_WEIGHT` times what its records declare they unpack to, and converts with
 `max_inflated_size` set to that declaration plus the batch's remainder divided back by the weight:
 the package's inflation cap is the caller's, and a fixed one in the reader would refuse a large
-account that the api's own limits admit. Conversion and parsing run in `run_in_threadpool`.
+account that the api's own limits admit. Conversion and parsing run behind `CONVERT_LIMITER`
+(`run_in_conversion_thread`).
 
 A head starting `{` keeps the 422 "not valid JSON"; other unclaimed bytes are 415. The token covers
 each uploaded file's name and digest and apply converts again, deterministic except `exported_at`,
