@@ -1357,25 +1357,23 @@ events not being a curve.
 
 ## The support form is an API endpoint, not a `mailto:`
 
-`POST /api/v1/support` (`api/v1/support.py`) mails a human, not a user, from anonymous input; the
-SMTP credentials live here, not in the frontend.
+`POST /api/v1/support` mails a human from anonymous input; the SMTP credentials stay here, not in
+the frontend.
 
 - Unauthenticated, so rate-limited by submitted email and by client IP (`CONTACT_FORM_RATE_LIMIT_*`,
-  one-hour window); the address is unverified, so `From:` is a claim. Inventing addresses defeats
-  the per-email bucket, so one instance-wide bucket, `SUPPORT_REQUESTS_PER_DAY`, is counted last:
-  the relay's daily quota is shared with sign-in links.
+  one-hour window); the address is unverified, so `From:` is a claim. Invented addresses defeat the
+  per-email bucket, so an instance-wide `SUPPORT_REQUESTS_PER_DAY`, counted last, keeps the relay's
+  quota for sign-in links.
 - Nothing is stored; there is no inbox here.
 - `reply_to`, never a spoofed `from`: `EMAIL_FROM_ADDRESS` is the only address SPF/DKIM covers.
-- `send_support_request_email` runs `html.escape` over name, subject and body, being the only sender
-  in `services/email_service.py` carrying a stranger's prose; any new one must too.
+- `send_support_request_email` escapes name, subject and body, the only sender carrying a stranger's
+  prose; any new one must too.
 
 `CONTACT_FORM_EMAIL` is the recipient, with no default (*"The support form has no default recipient,
-and no recipient means 503"*), and is not `AppSettings.CONTACT_EMAIL`, the OpenAPI metadata
-published at `/api/v1/openapi.json` on every instance, so a maintainer address there cannot reroute
-support mail.
+and no recipient means 503"*), and is not `AppSettings.CONTACT_EMAIL`, the published OpenAPI
+contact, so that address cannot reroute support mail.
 
-With `SMTP_HOST` unset the send is a logged no-op, submission included; the endpoint still reports
-acceptance, never delivery.
+With `SMTP_HOST` unset the send is a logged no-op, still answered as accepted.
 
 ## `dive_number` is a label, not an identity or an ordering key
 
@@ -1445,11 +1443,10 @@ something an operator turns on, not something a fresh deploy inherits — unlike
    which `admin/initialize.py` handles.
 2. `CRUD_ADMIN_ENABLED` defaults to `False`, and `src/.env.example` ships it commented out.
 3. `Settings._reject_insecure_admin_config` raises at startup when the panel is enabled outside
-   `local` with a missing password or one of `PLACEHOLDER_ADMIN_PASSWORDS` - the legacy default, the
-   value both templates ship commented out, stock stand-ins - case-insensitive. Chosen over silently
-   disabling it: an operator who meant to have it wants to know, and boot is the loudest, cheapest
-   place. A missing IP allowlist warns rather than raises, because deployments fronting the panel
-   with a VPN would otherwise refuse to start for no gain.
+   `local` with no password or one of `PLACEHOLDER_ADMIN_PASSWORDS`, published strings matched
+   case-insensitively. Chosen over silently disabling it: an operator who meant to have it wants to
+   know, and boot is the loudest place. A missing IP allowlist warns rather than raises, because
+   deployments fronting the panel with a VPN would otherwise refuse to start for no gain.
 
 ## `/auth/refresh` rotates the refresh token instead of reusing it
 
@@ -1477,18 +1474,16 @@ makes it legible"*). The race is distinct from the same-second collision a `jti`
 `core.security._new_jti` puts a `uuid4().hex` in every access, refresh and onboarding token. Without
 it the claims are `sub`, `token_type` and `exp`, and `exp` has one-second resolution, so two tokens
 for one subject in the same second encode identically. Revocation stores the token string
-(`token_blacklist.token`, unique), so identical tokens share one entry: `refresh_access_token`
-blacklists the presented cookie before minting its replacement, so a collision hands back a revoked
-token and the next refresh is a 401, and `/auth/logout` on one session kills a same-second sibling.
+(`token_blacklist.token`, unique), so identical tokens share one entry: a refresh blacklists the
+presented cookie before minting, so a collision hands back a revoked token, and `/auth/logout` kills
+a same-second sibling.
 
 Anything revocable minted here needs the claim; dive-file tokens deliberately don't, since nothing
-revokes them by value and two identical parse receipts are one receipt.
+revokes them by value.
 
-Nothing reads `jti` back (`verify_token` ignores it), so tokens minted without it verify until
-expiry. The blacklist is keyed on the token string, not a `jti` column, which holds only because
-`core.security._decode` accepts each token under one spelling: python-jose's base64url decoding also
-takes padding, dropped characters and a signature's spare low bits, each a string the blacklist has
-never seen.
+Nothing reads `jti` back, so tokens minted without it verify until expiry. The blacklist is keyed on
+the string, not a `jti` column, which holds only because `core.security._decode` accepts one
+spelling per token; python-jose alone also takes padded, dropped-character and spare-bit variants.
 
 ## A reused refresh token is a `WARNING`, and `revoked_at` is what makes it legible
 
@@ -1527,10 +1522,9 @@ purge.
 
 `page`/`items_per_page` come off the query string, and every list endpoint calls `clamp_pagination`;
 otherwise `GET /dives?items_per_page=999999999` is a request for the whole log and a negative value
-reaches the database as a negative LIMIT. It clamps rather than rejects, so a client asking for too
-much gets the ceiling instead of a 422. One `DEFAULT_MAX_ITEMS_PER_PAGE` replaces per-module
-`MAX_*_PER_PAGE` constants, with a per-call override. `page` is clamped to `MAX_PAGE`, since an
-unbounded one overflows Postgres's bigint `OFFSET` into a 500.
+reaches the database as a negative LIMIT. It clamps rather than rejects: too much gets the ceiling,
+not a 422. One `DEFAULT_MAX_ITEMS_PER_PAGE` replaces per-module `MAX_*_PER_PAGE` constants, with a
+per-call override. `page` stops at `MAX_PAGE`, short of overflowing the bigint `OFFSET`.
 
 The guard is `TestPageSizeCaps` in `tests/test_picker_search.py`. `PAGINATED_LIST_ROUTES` maps a
 filename to a tuple of handler names, and the check is an `ast` parse asking whether that handler's
@@ -1845,24 +1839,21 @@ until its TTL expires; see *"A deploy cannot serve the previous build's response
 
 ## Uploaded files are parsed in a thread, not on the event loop
 
-`POST /dive/parse` and `POST /dive/{uuid}/recordings` hand their bytes to
-`run_in_conversion_thread`: reading is pure CPU, and the pure-Python FIT decoder is two orders of
-magnitude slower per byte than the C `json` module, so inline in an `async def` one upload stalls
-the worker; XML and JSON go the same way.
+`POST /dive/parse` and `POST /dive/{uuid}/recordings` convert in `run_in_conversion_thread`: reading
+is pure CPU, and the pure-Python FIT decoder is a hundred times slower per byte than the C `json`
+module, so inline in an `async def` one upload stalls the worker.
 
-The read transaction is released first: the thread frees the event loop, not the connection, and the
-account, quota and digest lookups have already opened one, so without `release_read_transaction` it
-sits idle-in-transaction. Safe because nothing is written yet and no lookup returns a live ORM
-object; `TestProfileExtractionReleasesTheTransaction` and
-`TestTheParseReleasesTheTransactionBeforeReading` pin the ordering.
+The read transaction is released first: the thread frees the event loop, not the connection the
+lookups opened, so without `release_read_transaction` it sits idle-in-transaction. Safe because
+nothing is written yet and no lookup returns a live ORM object;
+`TestProfileExtractionReleasesTheTransaction` and `TestTheParseReleasesTheTransactionBeforeReading`
+pin the ordering.
 
-The thread is behind `CONVERT_LIMITER`, two conversions per process, because a conversion holds
-about twenty times its input; the default limiter admits a hundred. That bounds memory, not time: a
-5 MB file of bare `record` messages takes ~10 s to decode, so the reader bounds the messages it
-decodes and raises `SourceTooLargeError` rather than truncating, since a FIT `session` follows the
-samples it summarizes, and the two routes share `DIVE_FILE_READS_PER_USER` an hour. A thread frees
-the loop only while the reader releases the GIL: a regex that backtracks in C holds it, and no
-thread or limiter helps there.
+`CONVERT_LIMITER` admits two conversions per process, since one holds about twenty times its input.
+That bounds memory, not time: the reader caps the FIT messages it decodes and raises
+`SourceTooLargeError` rather than truncating, since a `session` follows its samples, and the routes
+share `DIVE_FILE_READS_PER_USER` an hour. A regex backtracking in C holds the GIL, which no thread
+frees.
 
 ## A zero cylinder pressure is not a reading
 
@@ -3373,9 +3364,8 @@ relays only; `SMTP_USERNAME`/`SMTP_PASSWORD` are independently optional.
 
 `EMAIL_FROM_ADDRESS` has no default: `Settings._require_from_address_with_smtp` refuses to boot when
 `SMTP_HOST` is set without it, and `.env.example` ships it commented out, since an active template
-value would pass the check. `_build_message` flattens every break `str.splitlines` splits on in the
-subject (`EmailMessage` raises on any of them; the support form's `subject` and a renewal's
-certification name are typed input) but not in addresses.
+value would pass the check. `_build_message` flattens every `str.splitlines` break in the subject,
+typed input `EmailMessage` would raise on, but not in addresses.
 
 Mailpit is the opt-in `mail` compose profile (`docker compose --profile mail up`, inbox
 `127.0.0.1:8025`) so the logged magic link stays the default sign-in. `docker compose restart` does
@@ -3422,10 +3412,9 @@ Any further non-HTTP service from this image needs its own override; `admin_init
 
 - `SECRET_KEY` is startup-fatal on a placeholder in every environment
   (`Settings._reject_placeholder_secret_key`). The rejected set is `PLACEHOLDER_SECRET_KEYS`,
-  case-insensitive after stripping, not an entropy heuristic that would refuse genuine keys. CI's
-  `test-secret-key-for-testing-only` is outside it, and refused outside `local` with the same
-  message (`CI_SECRET_KEY`), since CI boots as `local`; `tests/test_config_safety.py` reads the
-  shipped value from `.env.example`.
+  case-insensitive, not an entropy heuristic that would refuse genuine keys. CI's
+  `test-secret-key-for-testing-only` is outside it, and refused outside `local` (`CI_SECRET_KEY`);
+  `tests/test_config_safety.py` reads the shipped value from `.env.example`.
 - The admin block (`CRUD_ADMIN_ENABLED`, `ADMIN_PASSWORD`) ships commented out, so enabling the
   panel is an edit.
 - An `ENVIRONMENT` other than `local` without `SMTP_HOST` fails at startup
@@ -4007,20 +3996,18 @@ by uuid each tab names its own.
 
 ## The attempt cap is the boundary, and it is one statement
 
-Six digits is ~20 bits; `code_hash` is SHA-256 for hygiene only, and no key-stretching saves a
-millionfold space. `SIGN_IN_CODE_ATTEMPTS_MAX` (5) is the defence, so it must hold under
-concurrency: `charge_code_attempt` is hand-written Core, one
+Six digits is ~20 bits; `code_hash` is SHA-256 for hygiene only. `SIGN_IN_CODE_ATTEMPTS_MAX` (5) is
+the defence, so it holds under concurrency: `charge_code_attempt` is one
 `UPDATE … WHERE code_attempts < :max RETURNING code_hash`, and the route compares against the digest
-it returns. Rejected: comparing first and charging on failure, where every guess in flight reads the
-digest before any charge lands and a right one among a hundred parallel guesses claims. Rate
-limiting is no substitute: it fails open on a Redis outage. The per-address request limit therefore
-holds in Postgres too: `request_email_link` counts the address's `sign_in` rows in the window under
-a per-address advisory lock held to the insert's commit, so the arithmetic below survives an outage.
-Residual exposure: only a requester holds a `request_id`, and every request emails the victim.
-`MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL` allows 3 per `MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS` (900
-s), each worth 5 guesses in 10⁶: 15 guesses a quarter hour, an expected success in ~694 days of 288
-emails a day. The lever, if observation disagrees, is eight digits (×100), not the request cap,
-whose 3 → 1 of headroom every diver with a lost first email pays for.
+it returns. Rejected: comparing first and charging on failure, where a right guess among a hundred
+parallel ones claims before any charge lands.
+
+Only a requester holds a `request_id`, so requests bound the guesses:
+`MAGIC_LINK_REQUEST_RATE_LIMIT_PER_EMAIL` allows 3 per 900 s, each worth 5 guesses in 10⁶ and each
+emailing the victim, an expected success in ~694 days of 288 emails a day. Redis fails open, so
+`request_email_link` also counts the address's recent `sign_in` rows, under a per-address advisory
+lock held to the insert's commit. The lever, if observation disagrees, is eight digits (×100), not
+the request cap, whose headroom every diver with a lost first email pays for.
 
 ## Sign-in code: Everything else is the shape already there
 
@@ -6036,22 +6023,20 @@ certification's requiredness is what governs it.
 
 ## Logbook import spools its upload and still parses the document whole
 
-The routes read their own multipart body, after the session and the rate limit, one
-`SpooledTemporaryFile` per file part, the parts in memory together never past one `SPOOL_THRESHOLD`
-(`services/logbook_import/parts.py` says why the framework's form reader cannot).
+The routes read their own multipart body after the session and the rate limit, one
+`SpooledTemporaryFile` per file part, together never past one `SPOOL_THRESHOLD` in memory
+(`parts.py` says why not the framework's form reader).
 
 Parsing still materializes every document, so `MAX_DOCUMENT_SIZE` over what one import plans is the
 memory ceiling; a streaming parser, an arq job or a preview-token-keyed spool are unbuilt.
 
 Zip bombs are refused before a byte inflates: declared sizes must sum under
 `MAX_ARCHIVE_EXTRACTED_SIZE`, `zipfile` verifies the CRC, and `archive_path` is a member name, never
-a path. Before `zipfile` reads the directory at all, its span and entries are measured from their
-own headers and refused past `MAX_ARCHIVE_DIRECTORY_SIZE` or `MAX_ARCHIVE_ENTRIES`, since `zipfile`
-builds an object per entry and never consults the end record's total.
+a path. Its directory is first measured from its own headers against `MAX_ARCHIVE_DIRECTORY_SIZE`
+and `MAX_ARCHIVE_ENTRIES`, as `zipfile` builds an object per entry.
 
-`archive.read(...)` raises `RuntimeError` (password-protected), `BadZipFile` (CRC mismatch) and
-`NotImplementedError` (unsupported compression), so it is caught: the `logbook.divejson` member
-failing is a 422 naming the password case; a blob member failing has `read_member` return `None`.
+`archive.read(...)` failures (password, CRC, compression) are caught: a failing `logbook.divejson`
+is a 422 naming the password case; a failing blob member reads as `None`.
 
 Both endpoints rate-limit per user on their own budget: twenty, one import being two calls.
 

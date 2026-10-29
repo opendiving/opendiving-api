@@ -1070,9 +1070,15 @@ def _directory_extent(buffer: IO[bytes]) -> tuple[int, int] | None:
         buffer.seek(locator_at)
         locator = buffer.read(_ZIP64_LOCATOR.size)
         if locator.startswith(_ZIP64_LOCATOR_SIGNATURE):
+            pointed_at = _ZIP64_LOCATOR.unpack(locator)[2]
+            latest = locator_at - _ZIP64_END_RECORD.size
+            # `zipfile` refuses a locator pointing past the record's latest place, and an
+            # unchecked one can be too large to seek to at all.
+            if not 0 <= pointed_at <= latest:
+                return None
             # Where the locator points, else right before it, which is where it sits when
             # something was prepended to the archive.
-            for candidate in (_ZIP64_LOCATOR.unpack(locator)[2], locator_at - _ZIP64_END_RECORD.size):
+            for candidate in (pointed_at, latest):
                 if candidate < 0:
                     continue
                 buffer.seek(candidate)

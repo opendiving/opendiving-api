@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import io
 import struct
+import tempfile
 import threading
 import time
 import uuid as uuid_pkg
@@ -245,6 +246,23 @@ class TestAZipIsCountedBeforeItIsOpened:
     def test_bytes_with_no_end_record_are_left_to_zipfile(self) -> None:
         with pytest.raises(MalformedImportError, match="could not be opened"):
             reader._open_archive(io.BytesIO(b"PK\x03\x04" + b"\0" * 64))
+
+    @pytest.mark.parametrize("pointed_at", [2**63, 2**64 - 1])
+    @pytest.mark.parametrize("rolled", [False, True], ids=["in memory", "on disk"])
+    def test_a_locator_pointing_past_the_file_is_left_to_zipfile(self, pointed_at: int, rolled: bool) -> None:
+        """Too far to seek to at all; `zipfile` refuses the locator, as the import does."""
+        data = (
+            b"PK\x03\x04"
+            + struct.pack("<4sLQL", b"PK\x06\x07", 0, pointed_at, 1)
+            + struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 0, 0, 0, 0, 0)
+        )
+        buffer = tempfile.SpooledTemporaryFile(max_size=1)
+        buffer.write(data)
+        if rolled:
+            buffer.rollover()
+
+        with pytest.raises(MalformedImportError, match="could not be opened"):
+            reader._open_archive(buffer if rolled else io.BytesIO(data))
 
     @pytest.mark.asyncio
     async def test_an_import_of_one_is_a_413(self, zip64: bytes) -> None:

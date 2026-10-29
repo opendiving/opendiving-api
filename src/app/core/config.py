@@ -1498,11 +1498,13 @@ class Settings(
 
         password = self.ADMIN_PASSWORD.get_secret_value().strip() if self.ADMIN_PASSWORD else ""
         if not password or password.lower() in PLACEHOLDER_ADMIN_PASSWORDS:
+            # The front door's troubleshooting page files this under its production wording,
+            # `CRUD_ADMIN_ENABLED is true in production but ADMIN_PASSWORD is unset`, so the
+            # prefix keeps that shape: change it only together with that page.
             raise ValueError(
-                f"CRUD_ADMIN_ENABLED is true and ENVIRONMENT is {self.ENVIRONMENT.value}, but "
-                "ADMIN_PASSWORD is unset or still a placeholder. Outside ENVIRONMENT=local, set a "
-                "real ADMIN_PASSWORD, or set CRUD_ADMIN_ENABLED=false to not expose the admin "
-                "panel at all."
+                f"CRUD_ADMIN_ENABLED is true in {self.ENVIRONMENT.value} but ADMIN_PASSWORD is unset "
+                "or still a placeholder. Set a real ADMIN_PASSWORD, or set CRUD_ADMIN_ENABLED=false "
+                "to not expose the admin panel at all."
             )
 
         if not split_csv(self.CRUD_ADMIN_ALLOWED_IPS) and not split_csv(self.CRUD_ADMIN_ALLOWED_NETWORKS):

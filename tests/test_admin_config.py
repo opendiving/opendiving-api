@@ -81,6 +81,14 @@ class TestAdminPasswordIsRequiredOutsideLocal:
         with pytest.raises(ValueError, match="staging"):
             _settings(ENVIRONMENT=EnvironmentOption.STAGING, ADMIN_PASSWORD=None)
 
+    def test_the_refusal_keeps_the_prefix_the_front_door_indexes_on(self):
+        """The install bundle's troubleshooting page is found by pasting this error into it, and
+        files it under the production wording; nothing over there is generated from here."""
+        with pytest.raises(ValueError) as refused:
+            _settings(ENVIRONMENT=EnvironmentOption.PRODUCTION, ADMIN_PASSWORD=None)
+
+        assert "CRUD_ADMIN_ENABLED is true in production but ADMIN_PASSWORD is unset" in str(refused.value)
+
     def test_a_real_password_is_accepted(self):
         # The no-allowlist warning is expected here and asserted on its own below.
         settings = _settings(ADMIN_PASSWORD="a-real-password", CRUD_ADMIN_ALLOWED_IPS="203.0.113.7")
