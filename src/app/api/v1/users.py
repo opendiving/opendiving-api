@@ -1105,7 +1105,8 @@ async def erase_user(
     `purge_after`, which the response carries and a confirmation email repeats; after that,
     every row and stored file the account owns is gone for good. The caller's other sessions
     are not revoked, so a restore brings them back signed in; `DELETE /user/sessions` ends
-    them. A repeated request answers the date the first one set. Rate limited per account.
+    them. A duplicate request racing the first answers the date it set. Rate limited per
+    account.
     """
     # Nothing between dark and deleted: `get_current_user` filters `is_deleted=False`, so every
     # read 401s at once, and `/auth/refresh` re-resolves the row so the other devices' cookies
