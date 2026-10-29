@@ -29,15 +29,17 @@ router = APIRouter(tags=["config"])
 
 @router.get("/config", response_model=InstanceConfigRead)
 async def read_instance_config() -> InstanceConfigRead:
-    """This instance's public configuration.
+    """This instance's public configuration: its registration mode, whether the OpenDiving
+    project operates it, whether join links exist, and which optional services it runs.
 
-    Anonymous, and not a leak: the landing page discloses the mode anyway by which form it
-    shows, the operator by which copy that form carries, and the privacy page whether join
-    links exist and who draws the maps by what it describes, so this only saves a client
-    from inferring them. Nothing here is per-caller, which is what makes it safe for
-    `ClientCacheMiddleware` to mark publicly cacheable - and a minute of caching is right,
-    since the values change only when the operator restarts the API.
+    Anonymous. Nothing in it is per-caller and the response is publicly cacheable, for the
+    time its `Cache-Control` header states; the values change only when the operator
+    restarts the API.
     """
+    # Anonymous without being a leak: the landing page discloses the mode anyway by which form
+    # it shows, the operator by which copy that form carries, and the privacy page whether join
+    # links exist and who draws the maps by what it describes, so this only saves a client from
+    # inferring them. Nothing per-caller is what lets `ClientCacheMiddleware` mark it public.
     return InstanceConfigRead(
         registration_mode=settings.REGISTRATION_MODE,
         project_operated=settings.PROJECT_OPERATED,

@@ -60,17 +60,19 @@ async def read_dive_conditions_lookup(
     water_type: Annotated[WaterType | None, Query(description="Wins over the site's")] = None,
 ) -> DiveConditionsLookupRead:
     """What saving a dive with these inputs would fill into its empty air temperature, weather
-    and waves - the values the conditions worker writes and marks as fetched, derived the same
-    way, for the dive form to show while the diver edits.
+    and waves - the values the instance fetches after a save and marks as fetched, derived the
+    same way, for the dive form to show while the diver edits.
 
     A preview only: nothing is written, and the form sends the previewed fields blank on save so
-    the worker writes and marks them itself. The position is `latitude` and `longitude` where
-    given - a dive's own entry fix - else the site's pin; fresh water asks nothing of the sea.
+    the instance fills and marks them itself. The position is `latitude` and `longitude` where
+    given - a dive's own entry fix - else the site's pin; the two are given together or not at
+    all, else a 422. Fresh water asks nothing of the sea. Rate limited per account.
 
     `200` with `at`, `utc_offset_minutes` and every `filled` member null where the inputs cannot
     be answered - no position, a date alone, a day after today, a request the provider refused
     for them - so the form empties what it filled. `503` when the provider could not be asked,
     which says nothing about the inputs: over the instance's budget, cooling down, slow or down.
+    404 when this instance fetches no conditions, or when `dive_site_uuid` is not the caller's.
     """
     if (latitude is None) != (longitude is None):
         raise UnprocessableEntityException("latitude and longitude are given together or not at all")
