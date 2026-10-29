@@ -169,9 +169,13 @@ async def write_gear_service_schedule(
 ) -> GearServiceScheduleRead:
     """Create a servicing rule for a gear item.
 
-    Ownership comes from the item the schedule hangs off: the caller can't name an item
-    that isn't theirs in the first place, so there is nothing further to check.
+    `gear_item_uuid` must name an item the caller owns; one that doesn't, or doesn't exist,
+    is a 422. An item holds one rule per `kind` and `label`, so a repeat is a 422. The rule's
+    `dive_count_at_start` and `dive_time_at_start` are the item's totals at this moment,
+    never supplied by the caller, and its first due date follows from `starts_on` and them.
     """
+    # Ownership comes from the item the schedule hangs off: the caller can't name an item that
+    # isn't theirs in the first place, so there is nothing further to check.
     db_gear_item = await _owned_gear_item(db, schedule.gear_item_uuid, current_user["id"])
 
     if await schedule_kind_exists(db=db, gear_item_id=db_gear_item.id, kind=schedule.kind.value, label=schedule.label):
@@ -274,8 +278,8 @@ async def read_gear_service_schedules(
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict:
-    """List the caller's service schedules, optionally narrowed to one gear item. One that
-    doesn't exist or isn't the caller's returns an empty page, as `GET /dives`' filters do."""
+    """List the caller's servicing rules, soonest due first, optionally narrowed to one gear
+    item. A `gear_item_uuid` that doesn't exist or isn't the caller's answers an empty page."""
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     gear_item_id = await _filter_gear_item_id(db, gear_item_uuid, current_user["id"])
@@ -320,10 +324,10 @@ async def read_gear_service_schedule(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearServiceScheduleRead:
-    """Return a single service schedule by its public uuid.
+    """Return a single servicing rule by its public uuid.
 
-    Ownership is inherited from the gear item the schedule hangs off, so a schedule on
-    another user's item reads as 404 rather than 403 - its existence isn't disclosed.
+    404 when no such rule exists, and the same 404 for a rule on another user's gear item, so
+    its existence isn't disclosed.
     """
     schedule = await resolve_schedule_for_user(db=db, schedule_uuid=uuid, user_id=current_user["id"])
     if schedule is None:
@@ -355,13 +359,17 @@ async def patch_gear_service_schedule(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Partial update.
+    """Partially update a servicing rule; omitted fields are left untouched.
 
-    The at-least-one-interval invariant can't live on `GearServiceScheduleUpdate` - a
-    patch that sets only `interval_dives` says nothing about the other two - so it's
-    checked here against the merged result instead. An hours arm added here counts from the
-    item's dive time when the rule was created, which is what `dive_time_at_start` holds.
+    404 unless the caller owns it. The result must keep at least one of `interval_months`,
+    `interval_dives` and `interval_hours`, so clearing the last one is a 422; moving `kind`
+    or `label` onto a pair the item already has a rule for is a 422. The due date is
+    recalculated from the result. An hours interval added here counts from the item's dive
+    time when the rule was created, which `dive_time_at_start` holds.
     """
+    # The at-least-one-interval invariant can't live on `GearServiceScheduleUpdate` - a patch
+    # that sets only `interval_dives` says nothing about the other two - so it's checked here
+    # against the merged result instead.
     schedule = await resolve_schedule_for_user(db=db, schedule_uuid=uuid, user_id=current_user["id"])
     if schedule is None:
         raise NotFoundException("Service schedule not found")
@@ -406,14 +414,14 @@ async def erase_gear_service_schedule(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Delete a servicing rule.
+    """Delete a servicing rule. The service records that satisfied it stay in the item's
+    history with their `gear_service_schedule_uuid` now null: deleting a reminder never throws
+    away the receipts.
 
-    Service records that satisfied it stay in the item's history with their
-    `gear_service_schedule_id` nulled - the FK's `ON DELETE SET NULL` finally fires, which
-    is exactly what it was declared for: deleting a reminder must never throw away the
-    receipts. 404 unless the caller owns it, and a second `DELETE` on the same uuid is a
-    404 too.
+    404 unless the caller owns it, and a second `DELETE` on the same uuid is a 404 too.
     """
+    # The records survive by the FK's `ON DELETE SET NULL`, which is exactly what it was
+    # declared for.
     schedule = await resolve_schedule_for_user(db=db, schedule_uuid=uuid, user_id=current_user["id"])
     if schedule is None:
         raise NotFoundException("Service schedule not found")
@@ -437,15 +445,18 @@ async def write_gear_service_record(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearServiceRecordRead:
-    """Log a servicing event.
+    """Log a servicing event on a gear item.
 
-    When `gear_service_schedule_uuid` is omitted the matching rule is inferred from
-    (item, kind, label) - see `find_schedule_for_record` - so logging "annual service
-    done" from the gear page satisfies the reminder without picking anything. A record
-    with no matching rule is fine and simply stands on its own.
+    `gear_item_uuid` must name an item the caller owns, and `gear_service_schedule_uuid`,
+    when given, a rule on that item; either otherwise is a 422. When
+    `gear_service_schedule_uuid` is omitted the rule is inferred from the item, `kind` and
+    `label`, so logging "annual service done" satisfies the reminder without picking one; a
+    record with no matching rule stands on its own. The rule it satisfies has its due date
+    moved on from this service. `dive_count_at_service` and `dive_time_at_service` are the
+    item's totals at this moment, never supplied by the caller.
 
-    `contact_uuid` names the shop that did the work, beside `performed_by`'s person; one
-    that isn't the caller's own - or doesn't exist - is a 422.
+    `contact_uuid` names the shop that did the work, beside the person `performed_by` names;
+    one that isn't the caller's own, or doesn't exist, is a 422.
     """
     db_gear_item = await _owned_gear_item(db, record.gear_item_uuid, current_user["id"])
 
@@ -599,8 +610,9 @@ async def read_gear_service_records(
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict:
-    """List the caller's service history, optionally narrowed to one gear item or schedule. One
-    that doesn't exist or isn't the caller's returns an empty page, as `GET /dives`' filters do."""
+    """List the caller's service history, most recent `serviced_on` first, optionally narrowed
+    to one gear item or one rule. A `gear_item_uuid` or `gear_service_schedule_uuid` that
+    doesn't exist or isn't the caller's answers an empty page."""
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     gear_item_id = await _filter_gear_item_id(db, gear_item_uuid, current_user["id"])
@@ -663,8 +675,8 @@ async def read_gear_service_record(
 ) -> GearServiceRecordRead:
     """Return a single service record by its public uuid.
 
-    Ownership is inherited from the gear item the record belongs to, so another user's
-    record reads as 404 rather than 403 - its existence isn't disclosed.
+    404 when no such record exists, and the same 404 for a record on another user's gear
+    item, so its existence isn't disclosed.
     """
     record = await resolve_record_for_user(db=db, record_uuid=uuid, user_id=current_user["id"])
     if record is None:
@@ -696,14 +708,13 @@ async def patch_gear_service_record(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Partial update. Correcting a `serviced_on` date moves the schedule's next due
-    date, so the linked rule is recalculated afterwards.
+    """Partially update a service record; omitted fields are left untouched.
 
-    `dive_count_at_service` and `dive_time_at_service` aren't editable - each records a
-    moment that has already passed, and rewriting one would silently shift a dive- or
-    hours-based threshold. Passing `null`
-    for `contact_uuid` unlinks the shop, which is distinct from omitting the key; a contact
-    that isn't the caller's own is a 422.
+    404 unless the caller owns it. Correcting `serviced_on` moves the linked rule's next due
+    date. `dive_count_at_service` and `dive_time_at_service` are not editable: each records
+    a moment that has passed, and rewriting one would shift a dive- or hours-based
+    threshold. Passing `null` for `contact_uuid` unlinks the shop, which is distinct from
+    omitting the key; a contact that isn't the caller's own is a 422.
     """
     record = await resolve_record_for_user(db=db, record_uuid=uuid, user_id=current_user["id"])
     if record is None:
@@ -737,9 +748,10 @@ async def erase_gear_service_record(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Soft-deletes a service record. The schedule falls back to the previous record (or
-    to its own `starts_on` if that was the only one), which is exactly what deleting a
-    mistakenly-logged service should do.
+    """Delete a service record. The rule it satisfied falls back to the previous record, or to
+    its own `starts_on` when this was the only one, so a mistakenly logged service is undone.
+
+    404 unless the caller owns it, and a second `DELETE` on the same uuid is a 404 too.
     """
     record = await resolve_record_for_user(db=db, record_uuid=uuid, user_id=current_user["id"])
     if record is None:
@@ -768,11 +780,12 @@ async def read_gear_service_due(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict:
-    """Every active schedule the user owns, with enough of each gear item to render a
-    dashboard line.
+    """Every active servicing rule the caller owns on gear still in service, soonest due
+    first, with enough of each gear item to render a dashboard line.
 
-    Takes no date horizon on purpose: filtering by "due within N days" server-side would
-    bake today's date into the cached response, which then quietly goes wrong at
-    midnight. The client buckets into due-soon/overdue itself.
+    Takes no date horizon: the caller buckets into due-soon and overdue itself. At most 200
+    rules are returned, and `truncated` says whether more exist.
     """
+    # No date horizon on purpose: filtering by "due within N days" server-side would bake
+    # today's date into the cached response, which then quietly goes wrong at midnight.
     return await _cached_read_due(request, user_id=current_user["id"], db=db)

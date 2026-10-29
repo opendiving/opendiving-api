@@ -126,11 +126,11 @@ def _replay_result_or_reject(*, current_email: str, new_email: str) -> EmailChan
 
 @router.get("/user", response_model=UserRead)
 async def read_current_user(request: Request, current_user: Annotated[dict, Depends(get_current_user)]) -> dict:
-    """Return the authenticated user's own profile.
+    """The caller's own profile.
 
-    Served straight from the token-resolved user, so it costs no extra query. There is no
-    endpoint for reading *another* user - see the note below.
+    No operation reads another account's profile.
     """
+    # The token-resolved user as is, so it costs no query of its own.
     return current_user
 
 
@@ -148,24 +148,20 @@ async def patch_user(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Partially update the authenticated user's own profile.
+    """Partially update the caller's own profile.
 
-    Email is deliberately not updatable here - changing it requires the verification
-    round-trip in `POST /user/email-change/request`. Taking a username someone else
-    already holds is a 422.
-
-    A username change is rate limited per-user for the same reason `POST /auth/complete`
-    is per-IP: the availability check below answers a distinguishable "Username not
-    available", so unthrottled it is a wordlist oracle over who exists. The rest of the
-    profile isn't limited.
-
-    `dive_form_preset_uuid` must name one of the caller's own presets, or be null; anything
-    else is a 422. Omitting it leaves it as it is, so a single-field toggle keeps the pick.
-
-    The check-in details are not here: `PATCH /user/checkin-details` writes them.
+    A field absent from the body is left as it is. The email is not among the fields:
+    changing it takes the confirmation round-trip that starts at
+    `POST /user/email-change/request`. The check-in details have
+    `PATCH /user/checkin-details`. A `username` another account holds is a 422, and a
+    username change is rate limited per account; the rest of the profile is not.
+    `dive_form_preset_uuid` names one of the caller's own presets or is `null`; anything
+    else is a 422.
     """
-    # Note: `email` is deliberately not part of `UserUpdate` - see
-    # `POST /user/email-change/request` for how email changes work instead.
+    # `email` is not in `UserUpdate` at all; the change goes through the verified round-trip.
+    # The username change is rate limited for the reason `POST /auth/complete` is per-IP: the
+    # availability check below answers a distinguishable "Username not available", so
+    # unthrottled it is a wordlist oracle over who exists.
     claims_a_username = values.username is not None and values.username != current_user["username"]
     if claims_a_username:
         await enforce_rate_limit(
@@ -299,8 +295,7 @@ async def write_user_avatar(
 ) -> PictureRead:
     """Set or replace the caller's profile picture.
 
-    `PUT` because this is a whole-slot idempotent replace - there is one avatar per account
-    and uploading again overwrites it.
+    One avatar per account: uploading again replaces it, and the operation is idempotent.
 
     **With a crop, the file is kept as the original** - a JPEG or PNG, stripped of its
     metadata (location included) without touching a pixel - and the picture shown everywhere
@@ -331,10 +326,10 @@ async def adjust_user_avatar(
 ) -> PictureRead:
     """Re-crop the caller's profile picture from the original it holds, which is untouched.
 
-    404 when the avatar holds no original - one stored before originals were kept, seeded
-    from Google, or uploaded without a crop - 409 if it is replaced or removed while this
-    renders, and 413 if the new rendition is larger than the old and the account has no room
-    for the difference. Answers the new rendition's digest, as `PUT` does.
+    404 when the avatar holds no original - one seeded from Google, or uploaded without a
+    crop - 409 if it is replaced or removed while this renders, and 413 if the new rendition
+    is larger than the old and the account has no room for the difference. A crop outside
+    the image or off 1:1 is a 422. Answers the new rendition's digest, as `PUT` does.
     """
     with _picture_errors(body.crop):
         digest = await recrop_picture(db=db, user_id=current_user["id"], frame=AVATAR_FRAME, crop=body.crop)
@@ -350,13 +345,14 @@ async def read_user_avatar(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[str | None, Query(description=_VERSION_DESCRIPTION)] = None,
 ) -> Response:
-    """Serve the caller's own avatar - its rendition, one WebP, always.
+    """The caller's own avatar: its rendition, one WebP, always.
 
-    `v` is read by nothing here, and is declared so the contract is visible rather than
-    looking like a stray parameter. The response is cacheable for five minutes and the
-    avatar can be *replaced* at this same URL, so the client passes the digest from
-    `UserRead.avatar_sha256` and each version gets its own cache entry.
+    Privately cacheable for five minutes, with an `ETag`; `If-None-Match` answers 304. The
+    avatar is *replaced* at this same URL, so pass `UserRead.avatar_sha256` as `v`, which
+    the server ignores, and each version gets its own cache entry. 404 when none is set.
     """
+    # `v` is read by nothing here; it is declared so the contract is visible rather than
+    # looking like a stray parameter.
     return await _serve_picture(
         request, await get_rendition(db=db, user_id=current_user["id"], frame=AVATAR_FRAME), kind=PictureKind.AVATAR
     )
@@ -369,11 +365,12 @@ async def read_user_avatar_original(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[str | None, Query(description=_VERSION_DESCRIPTION)] = None,
 ) -> Response:
-    """Serve the original the caller's avatar is rendered from, for adjusting its crop.
+    """The original the caller's avatar is rendered from, for adjusting its crop.
 
     The file as uploaded, less its metadata, under its own name and type; 404 when none is
-    held. Pass `UserRead.avatar_original_sha256` as `v`, since a replaced original is
-    served at this same URL.
+    held. Privately cacheable for five minutes, with an `ETag`; `If-None-Match` answers 304.
+    Pass `UserRead.avatar_original_sha256` as `v`, since a replaced original is served at
+    this same URL.
     """
     return await _serve_picture(
         request, await get_original(db=db, user_id=current_user["id"], frame=AVATAR_FRAME), kind=PictureKind.AVATAR
@@ -388,9 +385,10 @@ async def erase_user_avatar(
 ) -> dict[str, str]:
     """Remove the caller's profile picture, its original with it, leaving the account alone.
 
-    404 when there was nothing to remove, the shape the card-file delete established. No
-    confirmation step anywhere near this: re-uploading undoes it.
+    404 when there was nothing to remove. There is no confirmation step: re-uploading undoes
+    it.
     """
+    # 404 on nothing to remove is the shape the card-file delete established.
     if not await delete_picture(db=db, user_id=current_user["id"], frame=AVATAR_FRAME):
         raise NotFoundException("No avatar set")
 
@@ -438,8 +436,9 @@ async def copy_user_avatar_to_portrait(
     A copy under keys of its own, carrying the original's name and type, so removing or
     replacing either picture later leaves the other whole. Replaces any portrait there is.
     404 while the avatar holds no original, which is what an avatar seeded from Google or
-    stored before originals were kept looks like - upload the portrait instead. A 413 when
-    the copy would take the account past its storage limit.
+    uploaded without a crop looks like - upload the portrait instead. A crop outside the
+    image or off 7:9 is a 422, and a copy that would take the account past its storage limit
+    a 413.
     """
     with _picture_errors(body.crop):
         digest = await copy_avatar_to_portrait(db=db, user_id=current_user["id"], crop=body.crop)
@@ -457,8 +456,9 @@ async def adjust_user_portrait(
 ) -> PictureRead:
     """Re-crop the caller's portrait from its original, which is untouched.
 
-    404 without a portrait, 409 if it is replaced or removed while this renders, 413 as for
-    the avatar's re-crop.
+    404 without a portrait, 409 if it is replaced or removed while this renders, 422 for a
+    crop outside the image or off 7:9, and 413 if the new rendition is larger than the old
+    and the account has no room for the difference. Answers the new rendition's digest.
     """
     with _picture_errors(body.crop):
         digest = await recrop_picture(db=db, user_id=current_user["id"], frame=PORTRAIT_FRAME, crop=body.crop)
@@ -474,8 +474,11 @@ async def read_user_portrait(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[str | None, Query(description=_VERSION_DESCRIPTION)] = None,
 ) -> Response:
-    """Serve the caller's own portrait - its 7:9 rendition, one WebP. Pass
-    `UserRead.portrait_sha256` as `v`, as for the avatar."""
+    """The caller's own portrait: its 7:9 rendition, one WebP.
+
+    Privately cacheable for five minutes, with an `ETag`; `If-None-Match` answers 304. Pass
+    `UserRead.portrait_sha256` as `v`, as for the avatar. 404 when none is set.
+    """
     return await _serve_picture(
         request,
         await get_rendition(db=db, user_id=current_user["id"], frame=PORTRAIT_FRAME),
@@ -490,8 +493,12 @@ async def read_user_portrait_original(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[str | None, Query(description=_VERSION_DESCRIPTION)] = None,
 ) -> Response:
-    """Serve the original the caller's portrait is rendered from, for adjusting its crop.
-    Pass `UserRead.portrait_original_sha256` as `v`."""
+    """The original the caller's portrait is rendered from, for adjusting its crop.
+
+    The file as uploaded, less its metadata, under its own name and type; 404 when none is
+    held. Privately cacheable for five minutes, with an `ETag`; `If-None-Match` answers 304.
+    Pass `UserRead.portrait_original_sha256` as `v`.
+    """
     return await _serve_picture(
         request,
         await get_original(db=db, user_id=current_user["id"], frame=PORTRAIT_FRAME),
@@ -521,16 +528,14 @@ async def request_email_change(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> EmailChangeRequestResponse:
-    """Step 1 of changing an account's email: generates a confirmation link and
-    emails it to the *new* address - the change only takes effect once that link is
-    opened (`POST /user/email-change/verify`), proving the caller actually controls
-    it.
+    """Start changing the caller's email: a confirmation link goes to the *new* address, and
+    the change takes effect only when that link is confirmed at
+    `POST /user/email-change/verify`, which proves the caller controls the address.
 
-    Always operates on the caller's own account (from the access token), not a path
-    parameter - there is no other account to target.
-
-    Always returns the same generic message, whether or not `new_email` already
-    belongs to another account.
+    From a signed-in session, never an API key. Starting again supersedes any earlier link
+    still live, so one is live at a time. 400 when `new_email` is already the caller's
+    address; otherwise the response is the same generic message whether or not the address
+    belongs to another account. Rate limited per account and per IP.
     """
     new_email = body.new_email.lower()
     if new_email == current_user["email"].lower():
@@ -585,17 +590,17 @@ async def request_email_change(
 async def check_email_change_link(
     request: Request, response: Response, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> LinkCheckResponse:
-    """Side-effect-free precheck used by the confirmation page before it shows the
-    "Confirm email change" button - lets it show an error immediately for a link
-    that's already been used, invalidated, or expired (e.g. revisited via the
-    browser's back button after already confirming) rather than a misleadingly
-    clickable button, and lets it display the target email up front. Never marks
-    anything used or changes any state.
+    """Check an email-change link without using it.
 
-    Opts out of the default `public` caching for the same reason as
-    `auth.check_email_link`: anonymous side-effect-free GET, but the token is in the
-    query string and the body is an email address.
+    Anonymous. `valid` is false for a link that is unknown, already used, superseded by a
+    newer request or expired, and true otherwise, with `email` carrying the address the
+    change would apply. Nothing is marked used and no state changes, so a confirmation page
+    can show an error for a dead link before offering its button, and the target address up
+    front. Never cached (`Cache-Control: private, no-store`). Rate limited per IP.
     """
+    # Opts out of the default public caching for the reason `auth.check_email_link` does: an
+    # anonymous side-effect-free GET, but the token is in the query string and the body is an
+    # email address.
     response.headers["Cache-Control"] = "private, no-store"
 
     await enforce_rate_limit(
@@ -623,28 +628,25 @@ async def verify_email_change(
     body: EmailChangeVerifyRequest,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> EmailChangeVerifyResponse:
-    """Step 2: validates the confirmation link and, if it checks out, applies the
-    email change. Deliberately doesn't require the caller to be signed in - the link
-    may well be opened on a different device/browser than the one the change was
-    requested from - the token itself, tied to a specific `user_id`, is what
-    authorizes this.
+    """Confirm an email change: apply the new address the link was sent to.
 
-    Re-opening/re-verifying the *same* link again (e.g. a mail client's
-    link-preview/security-scanning feature "detonating" it before a human clicks, or
-    the user clicking twice) is deliberately not an error, as long as the change it
-    represents was actually applied - it's a no-op that just reports that back,
-    rather than re-touching the DB or re-notifying anyone. Only an *expired* link,
-    one superseded by a newer request (see `AuthenticationRequest.invalidated_at`),
-    or a used token whose target *doesn't* match the account's current email (a
-    genuine, rejected reuse) is an error. `check_email_change_link` is what actually
-    keeps a human from re-triggering this in the first place after the first use -
-    this leniency is just a safety net for races (e.g. a double click).
-
-    Two submissions genuinely racing meet that same rule from the other side: the
-    `used_at` read above can't decide it on its own, so only whoever wins the conditional
-    claim (`claim_authentication_request`) applies the change, and the loser re-reads the
-    account's email and takes the identical tolerated-replay-or-reject decision.
+    Anonymous - the link may be opened on another device than the one that asked - and the
+    token in the body is the credential. Answers the account's new `email`, and the old
+    address is told of the change. Confirming the same link again is not an error while the
+    address it carries is still the account's: it answers the same success and changes
+    nothing. 401 for a link that is unknown, expired, superseded by a newer request, or
+    already used for an address the account has since moved away from; 422 when the address
+    is registered to another account; 404 when the account has been deleted. Rate limited
+    per IP.
     """
+    # The replay tolerance is a safety net for races - a double click, or a mail client's
+    # link scanner detonating the link before the human does - and a no-op that reports the
+    # change back rather than re-touching the row or re-notifying anyone.
+    # `check_email_change_link` is what keeps a human from re-triggering this after the first
+    # use. Two submissions genuinely racing meet the same rule from the other side: the
+    # `used_at` read below cannot decide it alone, so only the winner of the conditional claim
+    # (`claim_authentication_request`) applies the change, and the loser re-reads the
+    # account's email and takes the identical tolerated-replay-or-reject decision.
     await enforce_rate_limit(
         f"email-change-verify:ip:{client_ip_bucket(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
@@ -735,10 +737,9 @@ async def read_dive_stats(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> UserDiveStatsRead:
-    """Return the caller's aggregate dive statistics.
+    """The caller's aggregate dive statistics.
 
-    A user with no dives logged yet gets zeroed-out stats rather than a 404: every user
-    conceptually has stats, the row just hasn't been created.
+    An account with no dives logged yet gets zeroed figures, never a 404.
     """
     derived = await sites_and_dive_days(db, user_id=current_user["id"])
     stats = await crud_user_dive_stats.get(
@@ -770,13 +771,12 @@ async def read_storage_usage(
     """What the caller's uploads occupy, by kind, against this instance's storage limit.
 
     `used_bytes` is what an upload is checked against: one that would take it past
-    `limit_bytes` is a 413. Dive-computer files count as stored: compressed, and so less
-    than the sizes their recordings list, for every file uploaded since compression began;
-    at their full size for any stored before it.
-
-    Not cached, like `GET /user`: every upload and delete would otherwise owe it an
-    invalidation, and the sums are a handful of indexed rows.
+    `limit_bytes` is a 413. Dive-computer files count at their stored size, which for a
+    compressed file is less than the sizes its recordings list; a file stored uncompressed
+    counts at its full size. Never cached: every upload and delete shows at once.
     """
+    # Not cached, like `GET /user`: every upload and delete would otherwise owe it an
+    # invalidation, and the sums are a handful of indexed rows.
     usage = await get_storage_usage(db, user_id=current_user["id"])
     return StorageUsageRead(
         used_bytes=usage.used_bytes,
@@ -817,13 +817,11 @@ async def read_gas_use_history(
 ) -> list[DiveGasUsePoint]:
     """Every dive of the caller's that records enough to derive its gas use, oldest first.
 
-    The whole series rather than a page of it: this exists to be plotted as a trend, and
-    a trend needs the whole career. Dives that can't produce a figure are simply absent -
-    it's a chart series, not a checklist, and `GET /dive/{uuid}` is where a diver finds
-    out why one of theirs is missing.
-
-    Always the caller's own account, like `/user/dive-stats` - no uuid parameter.
+    The whole series, unpaginated. A dive that cannot produce a figure is absent, and
+    `GET /dive/{uuid}` is where a diver finds out why one of theirs is missing.
     """
+    # The whole career because this exists to be plotted as a trend; a chart series, not a
+    # checklist, which is why a dive without a figure is absent rather than carried with nulls.
     return await _cached_gas_use_history(request, user_id=current_user["id"], db=db)
 
 
@@ -848,17 +846,14 @@ async def read_dive_activity(
 ) -> list[DiveActivityPoint]:
     """How many dives the caller logged on each calendar day, oldest first.
 
-    Days without diving are absent, not zeroed - the client draws a fixed grid of days,
-    months or years and fills the gaps itself. Counts are bucketed by each dive's *own*
-    local day, so a dive keeps the day it was logged on wherever it's being read from.
-
-    Days rather than months because the client windows this one series three ways, and
-    sums the finer buckets into the coarser ones itself (see `DiveActivityPoint`).
-
-    The whole series rather than a page of it, like `/user/gas-use-history`: it exists to
-    be plotted, one small object per day with diving in it. Always the caller's own
-    account - no uuid parameter.
+    The whole series, unpaginated: one small object per day with diving in it. Days without
+    diving are absent, not zeroed, so a client drawing a grid of days, months or years fills
+    the gaps itself. Counts are bucketed by each dive's *own* local day, so a dive keeps the
+    day it was logged on wherever it is read from.
     """
+    # Days rather than months because the client windows this one series three ways and sums
+    # the finer buckets into the coarser ones itself (see `DiveActivityPoint`). Whole-career
+    # for the reason the gas-use series is: it exists to be plotted.
     return await _cached_dive_activity(request, user_id=current_user["id"], db=db)
 
 
@@ -882,10 +877,9 @@ async def read_trip_places(
 ) -> list[LocationRead]:
     """Every place the caller's trips went, each once, for a map to frame.
 
-    A part with no place, or a place the geocoder gave no position, is left out, and a
-    place on several trips appears once. A caller with no placed trips gets an empty list.
-    The whole set rather than a page of it: a map frames all of it or none. Always the
-    caller's own account - no uuid parameter.
+    The whole set, unpaginated, since a map frames all of it or none. A part with no place,
+    or a place the geocoder gave no position, is left out, and a place on several trips
+    appears once. A caller with no placed trips gets an empty list.
     """
     return await _cached_trip_places(request, user_id=current_user["id"], db=db)
 
@@ -972,8 +966,7 @@ async def read_species_life_list(
     the site's summary counts them, with each one's figures over those dives alone. A uuid that
     is not one of the caller's sites returns an empty page rather than an error.
 
-    Always the caller's own account, like the rest of `/user/...`. Out-of-range pagination is
-    clamped, not rejected.
+    Out-of-range pagination is clamped, not rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
     # Normalized here rather than in the service, so the shape the cache key is built from is
@@ -1033,9 +1026,8 @@ async def read_species_suggestions(
     matches leave room on the page, and only then does the request count against the
     per-account species budget, so it is the only case that can 429. `has_more` is true when
     the page was cut, or when a typed `q` never reached the catalog search.
-
-    Uncached, like the search it wraps.
     """
+    # Uncached, like the search it wraps.
     user_id = current_user["id"]
     dive_site_ids: list[int] = []
     if dive_site_uuid:
@@ -1088,9 +1080,10 @@ async def read_species_life_list_detail(
     figures.
 
     404 when no live dive of the caller's records the species, whether or not the catalog
-    holds it: exactly the species the life list leaves out. The uuid is the catalog's, which
-    belongs to nobody, so the scoping is the query's and there is no ownership check to make.
+    holds it: exactly the species the life list leaves out.
     """
+    # The uuid is the catalog's, which belongs to nobody, so the scoping is the query's and
+    # there is no ownership check to make.
     return await _cached_species_life_list_detail(request, user_id=current_user["id"], db=db, species_uuid=uuid)
 
 
@@ -1104,31 +1097,31 @@ async def erase_user(
     access_token: Annotated[str, Depends(bearer_scheme)],
     refresh_token: Annotated[str | None, Cookie(alias="refresh_token")] = None,
 ) -> AccountDeletionResponse:
-    """Delete the authenticated user's own account, reversibly for `ACCOUNT_DELETION_GRACE_DAYS`.
+    """Delete the caller's own account, reversibly for the instance's grace period.
 
-    The account goes **dark immediately** and stays deleted until the grace period runs
-    out, at which point `purge_deleted_accounts` issues a real `DELETE FROM "user"` and
-    every row and stored file the account owns goes with it. There is no state in between
-    where the app keeps working: `get_current_user` filters `is_deleted=False`, so every
-    read 401s from this instant, and `/auth/refresh` re-resolves the row so the other
-    devices' cookies stop rotating too. Someone deleting their account because they want
-    to be *gone from it* gets that, not a fortnight's countdown banner.
-
-    Both presented tokens are blacklisted, the caller's **own** session row is stamped
-    `revoked_at`, and the refresh cookie is cleared - so the caller's own session dies now
-    rather than at its natural expiry.
-
-    **No other session row is touched, and that is load-bearing rather than an oversight.**
-    The other devices are already inert: `get_current_user` filters `is_deleted=False` and
-    `/auth/refresh` re-resolves the account, so every one of them 401s from this instant.
-    Leaving them *unrevoked* is what lets `POST /auth/restore` bring the account back with
-    those sessions intact - "a restore that silently signed every other device out would be
-    a worse answer", which is exactly the property the refresh check was written to
-    preserve. Somebody who wants them gone has `DELETE /user/sessions` for it.
-
-    The response carries `purge_after` and is composed **before** the confirmation email is
-    attempted, so a dead relay costs the copy rather than the date.
+    From a signed-in session, never an API key. The account goes **dark immediately**: every
+    request on every device is a 401 from this instant, the presented tokens are revoked and
+    the refresh cookie is cleared. It stays recoverable through `POST /auth/restore` until
+    `purge_after`, which the response carries and a confirmation email repeats; after that,
+    every row and stored file the account owns is gone for good. The caller's other sessions
+    are not revoked, so a restore brings them back signed in; `DELETE /user/sessions` ends
+    them. A duplicate request racing the first answers the date it set. Rate limited per
+    account.
     """
+    # Nothing between dark and deleted: `get_current_user` filters `is_deleted=False`, so every
+    # read 401s at once, and `/auth/refresh` re-resolves the row so the other devices' cookies
+    # stop rotating too. Someone deleting their account because they want to be *gone from it*
+    # gets that, not a fortnight's countdown banner. `purge_deleted_accounts` issues the real
+    # `DELETE FROM "user"` when the grace period runs out.
+    #
+    # No other session row is touched, and that is load-bearing rather than an oversight. The
+    # other devices are already inert, and leaving them *unrevoked* is what lets
+    # `POST /auth/restore` bring the account back with those sessions intact - "a restore that
+    # silently signed every other device out would be a worse answer", which is exactly the
+    # property the refresh check was written to preserve.
+    #
+    # The response is composed before the confirmation email is attempted, so a dead relay
+    # costs the copy rather than the date.
     await enforce_rate_limit(
         f"account-deletion:user:{current_user['id']}",
         settings.ACCOUNT_DELETION_RATE_LIMIT_PER_USER,

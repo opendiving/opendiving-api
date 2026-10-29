@@ -98,12 +98,11 @@ async def write_gear_set(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearSetRead:
-    """Create a gear set - a named bundle of the caller's gear items, with an optional
-    default weight the dive form can pre-fill.
+    """Create a gear set: a named bundle of the caller's gear items, with an optional default
+    weight a dive form can pre-fill.
 
-    Every uuid in `gear_item_uuids` must resolve to a gear item the caller owns; one that
-    doesn't - or doesn't exist - is a 422, since from the caller's side the two are the
-    same thing. Set names are unique per user, so reusing one is a 422.
+    Every uuid in `gear_item_uuids` must name a gear item the caller owns; one that doesn't,
+    or doesn't exist, is a 422. Set names are unique per caller, so reusing one is a 422.
     """
     if await gear_set_name_exists(db=db, user_id=current_user["id"], name=gear_set.name):
         raise DuplicateValueException(_NAME_TAKEN)
@@ -178,7 +177,6 @@ async def read_gear_sets(
 ) -> dict:
     """List the caller's gear sets alphabetically, each with its gear items attached.
 
-    The items are fetched in one batched lookup across the page rather than per set.
     Out-of-range pagination is clamped, not rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
@@ -219,7 +217,7 @@ async def read_gear_set(
 ) -> GearSetRead:
     """Return a single gear set, with its gear items attached.
 
-    404 when no such set exists - and the same 404 when it belongs to another user, so
+    404 when no such set exists, and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable.
     """
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
@@ -238,9 +236,14 @@ async def patch_gear_set(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Partial update. Passing `gear_item_uuids` replaces the set's members wholesale -
-    this is what the dive form's "Save as set" does when saving onto an existing set.
+    """Partially update a gear set; omitted fields are left untouched.
+
+    404 unless the caller owns it. Renaming onto a name the caller already holds is a 422.
+    `gear_item_uuids` replaces the set's members wholesale, every one a gear item the caller
+    owns, else a 422.
     """
+    # A whole-list `gear_item_uuids` is what the dive form's "Save as set" sends when saving
+    # onto an existing set.
     db_gear_set = await _get_owned_gear_set(db, uuid, current_user)
 
     if values.name is not None and await gear_set_name_exists(
@@ -282,12 +285,12 @@ async def erase_gear_set(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Delete a gear set. Sets are purely a convenience shortcut, so deleting one takes its
-    `gear_set_item` membership rows with it (`ON DELETE CASCADE`) and touches neither the
-    gear items themselves nor any dive those items were logged on.
+    """Delete a gear set. A set is a convenience shortcut, so deleting one touches neither the
+    gear items in it nor any dive those items were logged on.
 
     404 unless the caller owns it, and a second `DELETE` on the same uuid is a 404 too.
     """
+    # The membership rows go by `gear_set_item`'s `ON DELETE CASCADE`.
     owner_id = (await _get_owned_gear_set(db, uuid, current_user)).user_id
 
     await crud_gear_sets.delete(db=db, uuid=uuid)

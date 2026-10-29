@@ -136,7 +136,7 @@ async def read_people(
     how many live dives name it.
 
     `search` matches a case-insensitive substring of the name or the linked username.
-    Out-of-range pagination is clamped rather than rejected.
+    Out-of-range pagination is clamped, not rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 

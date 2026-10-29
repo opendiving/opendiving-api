@@ -499,11 +499,11 @@ async def parse_dive(
 ) -> ParsedDiveResponse:
     """Upload a dive-computer file and receive the dive it records, as the dive form's values.
 
-    Any format logbook import reads is read here, by the same reader: a file recording one
-    dive by one computer prefills the form. Its head decides the format and its name decides
-    nothing. A file of several dives, or of one dive recorded by two computers, is a 422
-    pointing at logbook import; a file recording no dive is a 422; a zip is a 415 saying the
-    form takes one file; bytes nothing reads are a 415 naming the formats this build reads.
+    Any format logbook import reads is read here: a file recording one dive by one computer
+    prefills the form. Its head decides the format and its name decides nothing. A file of
+    several dives, or of one dive recorded by two computers, is a 422 pointing at logbook
+    import; a file recording no dive is a 422; a zip is a 415 saying the form takes one file;
+    bytes nothing reads are a 415 naming the formats this instance reads.
 
     Nothing is stored here - the bytes are read and dropped. What comes back alongside the
     dive is a `file_token` attesting that this read happened, naming the format it was read
@@ -515,9 +515,9 @@ async def parse_dive(
     `matches` is the second thing that comes back: dives of the caller's whose recordings
     started near this file's, so a form can offer *attach there* instead of logging a
     second dive for a computer the diver was already wearing. It is the **loose** test -
-    the start window alone, nearest first - because a form is asking a question rather than
-    making a decision; the ones flagged `same_recording` passed the much narrower test that
-    says this file is a second export of a record that dive already has.
+    the start window alone, nearest first - since a form is asking a question, not making a
+    decision; the ones flagged `same_recording` passed the much narrower test that says
+    this file is a second export of a record that dive already has.
     """
     if not file.filename:
         raise BadRequestException("Missing filename")
@@ -657,20 +657,20 @@ async def write_dive(
     in one request.
 
     Every referenced trip, training course, contact, dive site, gear item and person must
-    belong to the caller: one that doesn't - or doesn't exist - is a 422 naming which, not a
-    403, since from the caller's side the two are the same thing. Species are the exception,
-    and only because the catalog is global: a species uuid needs to exist, but it belongs to
-    nobody, so there is no ownership to fail. Dive sites keep the order given; index 0 is the
-    primary site, and sightings keep the order they were spotted in, each with an optional
-    count or abundance band and a note - a species named twice is a 422 naming it, and so is
-    a sighting carrying both a count and a band. `people` keeps the diver's
-    order, each with the role the person had; one named twice keeps the first. `tags` are
-    names in the diver's order: each is trimmed and is the diver's tag it matches once both
-    are case-folded, or a new one, and two that fold to one keep the first spelling.
-    Values the DB's domain constraints reject (a non-positive submerged time, a mixture over 100%)
-    also come back as 422 with the offending field named, and store nothing: the dive and
-    everything on it commit together or not at all.
+    belong to the caller: one that doesn't - or doesn't exist - is a 422 naming which. A
+    species uuid needs only to exist, the catalog being shared by every account. Dive sites
+    keep the order given; index 0 is the primary site, and sightings keep the order they were
+    spotted in, each with an optional count or abundance band and a note - a species named
+    twice is a 422 naming it, and so is a sighting carrying both a count and a band. `people`
+    keeps the diver's order, each with the role the person had; one named twice keeps the
+    first. `tags` are names in the diver's order: each is trimmed and is the diver's tag it
+    matches once both are case-folded, or a new one, and two that fold to one keep the first
+    spelling. A value outside a dive's bounds (a non-positive submerged time, a mixture over
+    100%) is also a 422 with the offending field named, and stores nothing: the dive and
+    everything on it are saved together or not at all.
     """
+    # A reference the caller does not own is a 422 and not a 403: from the caller's side a
+    # foreign row and a missing one are the same thing, and a 403 would tell them apart.
     created_dive = await _stage_dive(db, dive, current_user)
     await db.commit()
     return await _read_logged_dive(db, created_dive, dive, current_user)
@@ -951,10 +951,11 @@ async def read_dives(
     *includes* the site, since a dive can span several, and `species_uuid` any dive that
     recorded that species, `person_uuid` any dive whose `people` name that person and
     `tag_uuid` any dive carrying that tag. `type` is an exact match on the stored value, and
-    one outside the vocabulary is a 422 rather than an empty page: a uuid names a resource
-    whose existence must stay unprobeable, while `type` names a member of a closed set the
-    client already has. Out-of-range pagination is clamped, not rejected.
+    one outside the vocabulary is a 422. Out-of-range pagination is clamped, not rejected.
     """
+    # A bad `type` is a 422 where a bad uuid is an empty page: a uuid names a resource whose
+    # existence must stay unprobeable, while `type` names a member of a closed set the client
+    # already has.
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     trip_id: int | None = None
@@ -1040,9 +1041,10 @@ async def read_next_dive_number(
     """The dive number to prefill for a dive starting at `start_time`.
 
     A suggestion, not a reservation - nothing is held, and the client is free to ignore
-    it. Not `@cache`d: it varies by `start_time`, so the keys would fan out per form
-    keystroke to save two narrow indexed queries.
+    it.
     """
+    # Not `@cache`d: it varies by `start_time`, so the keys would fan out per form keystroke
+    # to save two narrow indexed queries.
     return await suggest_dive_number(db=db, user_id=current_user["id"], start_time=start_time)
 
 
@@ -1134,8 +1136,8 @@ async def read_recent_volumes(
     """The distinct cylinder volumes the caller's dives at or before `until` used, the most
     recently used first, at most ten.
 
-    `until` is the edited dive's start, read as the pickers' lookups read it, so a back-filled
-    dive is offered the cylinders of its own time rather than today's.
+    `until` is the edited dive's start, so a back-filled dive is offered the cylinders of its
+    own time rather than today's.
     """
     return await _cached_recent_volumes(request, user_id=current_user["id"], db=db, until=lookup_bound(until))
 
@@ -1304,10 +1306,11 @@ async def read_dive_neighbors(
     `GET /dives` have no counterpart here, so walking prev/next from a dive opened out of a
     filtered list leaves that filter behind at the first step.
 
-    Chronology is `start_time`, never `dive_number` (see `services/dive_numbering.py`), and
-    only the caller's own dives are ever neighbours. A dive that does not exist and one
-    that belongs to another account are the same 404, exactly as `GET /dive/{uuid}`.
+    Chronology is `start_time`, never `dive_number`, and only the caller's own dives are ever
+    neighbours. A dive that does not exist and one that belongs to another account are the
+    same 404, exactly as `GET /dive/{uuid}`.
     """
+    # Chronology by `start_time` and not `dive_number`: `services/dive_numbering.py` has why.
     dive = await _get_owned_dive(db, uuid, current_user)
 
     return await _cached_read_dive_neighbors(
@@ -1327,13 +1330,13 @@ async def patch_dive(
 
     404 unless the caller owns it, exactly as for a dive that doesn't exist. The
     list-valued fields - `mixtures`, `dive_site_uuids`, `gear_item_uuids`, `sightings`,
-    `people`, `tags` - are replaced wholesale when present rather than merged, so sending a
-    shorter list removes the difference and omitting the key entirely leaves it alone. Passing `null` for
-    `trip_uuid` detaches the dive from its trip, which is distinct from omitting the key.
+    `people`, `tags` - are replaced wholesale when present, not merged, so sending a shorter
+    list removes the difference and omitting the key entirely leaves it alone. Passing `null`
+    for `trip_uuid` detaches the dive from its trip, which is distinct from omitting the key.
     Passing `null` for `course_uuid` detaches it from its training course the same way, and
-    `null` for `contact_uuid` from its contact.
-    Referencing anything the caller doesn't own is a 422, as are the DB's domain
-    constraints, and either leaves the stored dive exactly as it was.
+    `null` for `contact_uuid` from its contact. Referencing anything the caller doesn't own
+    is a 422, as is a value outside a dive's bounds, and either leaves the stored dive
+    exactly as it was.
 
     `start_time` normally has to carry a UTC offset. The exception is a dive whose offset
     is already unknown - an imported dive whose source recorded none - where an offsetless
@@ -1486,12 +1489,10 @@ async def erase_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Soft-delete a dive, and hard-delete every recording and export stored against it.
+    """Delete a dive, and every recording and export stored against it.
 
-    404 unless the caller owns it, exactly as for a dive that doesn't exist. The dive row
-    is only flagged, but its recordings and their files are genuinely removed: leaving them
-    would strand the bytes behind a dive nobody can open and hold each file's slot in the
-    per-diver digest index, blocking a re-import of that same export into a fresh dive.
+    404 unless the caller owns it, exactly as for a dive that doesn't exist. The exports go
+    for good, so the same file can be imported again into a fresh dive.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
     owner_id = db_dive.user_id
@@ -1519,15 +1520,14 @@ async def merge_two_dives(
     """Fold two of your dives into one. **Not reversible.**
 
     For a computer that shut down mid-dive and logged the dive twice. The two records come
-    into the app as two dives - no automatic match will ever fold them, one device's two
-    records of one dive being exactly the pair the import gates refuse - so merging them is
-    the diver's call.
+    into the app as two dives - import never folds one computer's two records of one dive -
+    so merging them is the diver's call.
 
-    **The earlier dive survives**, by the same clock rule the match gates use: by instant
-    where both dives record a UTC offset, by wall clock where either does not. The other
-    dive's recordings, files, sites, gear, species, people, tags and notes move onto it, and
-    its cylinders fill the blanks of the ones the two dives share and join the list where this
-    one lacks them; the dive itself is soft-deleted, its uuid stops resolving and nothing here
+    **The earlier dive survives**, by the clock rule import matching uses: by instant where
+    both dives record a UTC offset, by wall clock where either does not. The other dive's
+    recordings, files, sites, gear, species, people, tags and notes move onto it, and its
+    cylinders fill the blanks of the ones the two dives share and join the list where this
+    one lacks them; the dive itself is deleted, its uuid stops resolving and nothing here
     can be undone.
 
     **What happens to the recordings depends on whether one computer or two recorded the
@@ -1613,12 +1613,12 @@ async def write_dive_recording(
 ) -> RecordingRead:
     """Attach a dive-computer export to this dive, in the recording it belongs to.
 
-    The token is what admits the file: it proves this server parsed these exact bytes for
-    this user, so the endpoint neither has to re-parse nor has to trust that an arbitrary
-    upload is a dive log at all.
+    `file_token` is what admits the file: the one `POST /dive/parse` returned to this
+    account for these exact bytes, else a 422. 404 unless the caller owns the dive, exactly
+    as for a dive that doesn't exist.
 
-    Returns the **recording** the file landed in, not just the file - because which of them
-    it landed in is the server's decision and the caller has to be told. A file whose device
+    Returns the **recording** the file landed in, not just the file, since which of them it
+    landed in is the server's decision. A file whose device
     and start match one of this dive's existing recordings is a second export of that same
     record (the same computer's JSON and FIT, say) and fills its blanks without overwriting
     anything; anything else is a second computer and gets a recording of its own, appended
@@ -1629,9 +1629,12 @@ async def write_dive_recording(
 
     The same bytes twice is a no-op returning the recording they are already in. Bytes
     already stored against *another* dive of this account are a 409 naming it: the realistic
-    cause is logging one export as two dives, and saying so is more use than either silent
-    fix.
+    cause is logging one export as two dives. A 409 that asks for a retry means another
+    upload to this dive changed its recordings while this one was in flight. A value in the
+    file this instance cannot store is a 422 naming the field.
     """
+    # The token proves this server parsed these exact bytes for this account, so the route
+    # neither re-parses nor has to trust that an arbitrary upload is a dive log at all.
     db_dive = await _get_owned_dive(db, uuid, current_user)
 
     try:
@@ -1684,20 +1687,20 @@ async def read_dive_file(
         Query(description="Opaque cache-busting version token; ignored by the server"),
     ] = None,
 ) -> Response:
-    """Serve one of a dive's stored exports back to its owner.
+    """Serve one of a dive's stored exports back to its owner, as an attachment.
 
-    Deliberately *not* `@cache`d, for the same reason as the certification card download:
-    Redis here holds serialized API responses, and parking multi-megabyte binaries in it
-    would evict everything else the cache exists for. The `ETag`/`If-None-Match` pair does
-    the equivalent job in the browser.
+    `fid` is the file's own uuid, from the dive's `recordings[].files[]`. 404 unless the
+    caller owns the dive, and 404 again for a uuid that is not one of *this* dive's files,
+    whether it exists elsewhere or not.
 
-    `fid` is the file's own uuid, from the dive's `recordings[].files[]`. A uuid that is not
-    one of *this* dive's files is a 404 whether it exists elsewhere or not.
-
-    `v` is read by nothing here; it is declared so the contract is visible. The response is
-    cacheable for five minutes, so the client varies `v` to give each version its own cache
-    entry.
+    The response carries an `ETag`, and a request whose `If-None-Match` names it is a 304.
+    It is cacheable by the caller alone for five minutes; `v` is ignored by the server, so
+    a client varies it to give each version its own cache entry.
     """
+    # Not `@cache`d, for the same reason as the certification card download: Redis here holds
+    # serialized API responses, and parking multi-megabyte binaries in it would evict
+    # everything else the cache exists for. The `ETag`/`If-None-Match` pair does the
+    # equivalent job in the browser.
     db_dive = await _get_owned_dive(db, uuid, current_user)
 
     try:
@@ -1747,6 +1750,9 @@ async def read_dive_profile(
 ) -> Response | RecordingProfileRead:
     """Serve one recording's per-sample curves and the events alongside them.
 
+    404 unless the caller owns the dive, and 404 again when the dive has no such recording
+    or the recording has no profile.
+
     Its channels: what its sensors read - depth, deco ceiling, temperature, per-cylinder tank
     pressure and the diver's heart rate - and what its computer worked out from them - the
     no-decompression clock, the time to surface, the computed ppO2, the CNS clock and the two
@@ -1767,17 +1773,17 @@ async def read_dive_profile(
     `dive_end_time` says where the dive ends on the axis, short of `duration` by the minutes
     a computer goes on recording at the surface. The samples run to `duration` all the same.
 
-    Deliberately *not* `@cache`d, and for a sharper reason than the file route above. A
-    profile's samples change only when its row is rewritten, and its `ETag` carries the row's
-    own identity, which every rewrite renews - the ideal `ETag` case and the worst Redis case:
-    every dive cache key lives under `user_{id}_dive*` and `invalidate_dive_caches` sweeps
-    the lot on every dive edit and every dive-site or gear rename - none of which can change
-    a profile. Caching it would mean evicting and refetching tens of KB per dive for nothing.
-
-    `v` is read by nothing here; it is declared so the contract is visible. The client varies
-    it with the profile's `uuid` and `updated_at` so a re-extraction or a relabel gets its own
-    cache entry rather than being masked by the previous one for five minutes.
+    The response carries an `ETag` that changes whenever the samples do, and a request whose
+    `If-None-Match` names it is a 304. It is cacheable by the caller alone for five minutes;
+    `v` is ignored by the server, so a client varies it with the profile's `uuid` and
+    `updated_at` to give a re-extraction or a relabel its own cache entry.
     """
+    # Not `@cache`d, and for a sharper reason than the file route above. A profile's samples
+    # change only when its row is rewritten, and its `ETag` carries the row's own identity,
+    # which every rewrite renews - the ideal `ETag` case and the worst Redis case: every dive
+    # cache key lives under `user_{id}_dive*` and `invalidate_dive_caches` sweeps the lot on
+    # every dive edit and every dive-site or gear rename - none of which can change a profile.
+    # Caching it would mean evicting and refetching tens of KB per dive for nothing.
     db_dive = await _get_owned_dive(db, uuid, current_user)
 
     try:
@@ -1859,8 +1865,8 @@ async def erase_dive_recording(
     Removing the primary recording promotes the next one. The dive's entry and exit fixes are
     derived again from the files it still holds, cleared where none has one if this recording
     held files, and kept if it held none - removing no file, the deletion has no position to
-    take away (`derive_dive_fixes`). 404 unless the caller owns the dive, and 404 again when it
-    has no such recording.
+    take away. 404 unless the caller owns the dive, and 404 again when it has no such
+    recording.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 
@@ -1896,9 +1902,9 @@ async def patch_dive_recording(
     and which one a one-profile-per-dive export writes. Not the dive's entry and exit fixes,
     which follow the files' attach order whatever recording holds them.
 
-    `{"primary": false}` is refused with a 422 rather than silently ignored: there is no
-    "make this one *not* primary" operation, because something has to be, and the diver means
-    to promote a different one.
+    `{"primary": false}` is a 422: some recording has to be primary, so there is no "make
+    this one *not* primary" operation, and the diver means to promote a different one. 404
+    unless the caller owns the dive, and 404 again when it has no such recording.
     """
     db_dive = await _get_owned_dive(db, uuid, current_user)
 

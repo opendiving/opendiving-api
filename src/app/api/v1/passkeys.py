@@ -59,17 +59,19 @@ async def passkey_registration_options(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> PasskeyRegistrationOptions:
-    """Step 1 of adding a passkey: mint a challenge and the creation options the browser
-    passes to `navigator.credentials.create()`.
+    """Step 1 of adding a passkey: a challenge and the creation options the browser passes to
+    `navigator.credentials.create()`, bound to the caller's account.
 
-    Registration only ever happens inside an authenticated session, which is what makes
-    auto-linking a non-question: the credential is born attached to the account that made
-    it, and nothing else can claim it later.
+    Needs a signed-in session's bearer token; an API key is refused (403). Rate limited per
+    account. 409 when the account already holds as many passkeys as the instance allows.
 
-    One pending registration per account, so two tabs racing both fail - the second tab's
-    options overwrite the challenge the first tab's verify then presents. It self-heals on
-    a retry.
+    One registration is pending per account at a time: asking for options again replaces
+    the earlier challenge, so a verify still in flight for the earlier one fails and is
+    retried from this step. 503 when passkeys are temporarily unavailable on this instance.
     """
+    # Registration only ever happens inside an authenticated session, which is what makes
+    # auto-linking a non-question: the credential is born attached to the account that made it,
+    # and nothing else can claim it later.
     await enforce_rate_limit(
         f"passkey-register:user:{current_user['id']}",
         settings.PASSKEY_REGISTER_RATE_LIMIT_PER_USER,
@@ -92,16 +94,21 @@ async def passkey_registration_verify(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> WebauthnCredentialRead:
-    """Step 2: verify the attestation, store the credential, and tell the account's inbox.
+    """Step 2 of adding a passkey: verifies the attestation, stores the passkey under `name`,
+    and emails the account that one was added.
 
-    409 when the account is already at `PASSKEY_MAX_CREDENTIALS_PER_USER`, or when this
-    exact credential is already registered here - which a browser honouring
-    `excludeCredentials` will not produce, and one that ignores it should not be able to
-    duplicate.
+    Needs a signed-in session's bearer token; an API key is refused (403). `credential` is
+    the attestation as the browser returned it. 201 with the new passkey.
 
-    `request` is here only so the audit trail can record where the passkey was added from;
-    this module took no `Request` at all before that.
+    400 when the registration expired or was superseded by a newer options request, or when
+    the attestation does not verify; start again from `POST /user/passkey/options`. 409 when
+    the account already holds as many passkeys as the instance allows, or when this exact
+    credential is already registered on it. 503 when passkeys are temporarily unavailable
+    on this instance.
     """
+    # The duplicate 409 is one a browser honouring `excludeCredentials` never produces, and one
+    # that ignores it must not be able to duplicate. `request` is here only so the audit trail
+    # can record where the passkey was added from.
     created = await finish_registration(
         db=db,
         user=current_user,
@@ -129,12 +136,15 @@ async def read_passkeys(
 ) -> list[WebauthnCredentialRead]:
     """Every passkey on the caller's account, oldest first.
 
-    Unpaginated and not Redis-cached, unlike every other owned resource. Registration holds
-    it to `PASSKEY_MAX_CREDENTIALS_PER_USER` rows, and this reads up to `_LIST_LIMIT` so a
-    lowered cap cannot strand one - either way it is a handful of rows that nothing anywhere
-    embeds, so there is no invalidation obligation to get wrong. The sixth of the documented
-    opt-outs on `OwnedResourceCache`.
+    Needs a signed-in session's bearer token; an API key is refused (403). The whole list in
+    one response, read fresh on every call; a passkey registered or removed a moment ago is
+    already reflected.
     """
+    # Unpaginated and not Redis-cached, unlike every other owned resource. Registration holds
+    # the account to `PASSKEY_MAX_CREDENTIALS_PER_USER` rows, and this reads up to `_LIST_LIMIT`
+    # so a lowered cap cannot strand one - either way it is a handful of rows that nothing
+    # anywhere embeds, so there is no invalidation obligation to get wrong. One of the
+    # documented opt-outs on `OwnedResourceCache`.
     rows = await crud_webauthn_credentials.get_multi(
         db=db,
         user_id=current_user["id"],
@@ -154,10 +164,14 @@ async def patch_passkey(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Rename a passkey. The label is the only thing about a credential a user owns -
-    everything else on the row is the authenticator's to report or fixed at registration.
+    """Renames a passkey.
 
-    404 unless the caller owns it, exactly as for a passkey that doesn't exist.
+    Needs a signed-in session's bearer token; an API key is refused (403). `name` is the one
+    thing about a passkey that can change: everything else is fixed at registration or
+    reported by the authenticator. An empty body changes nothing and succeeds; an explicit
+    `null` name is a 422.
+
+    404 for a passkey that is not the caller's, exactly as for one that does not exist.
     """
     await fetch_owned_or_raise(
         db=db,
@@ -181,17 +195,22 @@ async def erase_passkey(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Revoke a passkey.
+    """Revokes a passkey: it cannot sign in again, and the account is emailed that it was
+    removed.
 
-    A real `DELETE FROM`, not a flag: the row is what an assertion looks up, so a
-    soft-deleted one is a live sign-in path one forgotten filter away from working. An
-    account can remove its last passkey - the magic link is always there, and refusing
-    would be inventing a lockout to prevent one.
+    Needs a signed-in session's bearer token; an API key is refused (403). An account may
+    remove its last passkey, since signing in by email is always available.
 
-    Revoking a credential at its owner's request is an auth event; renaming one
-    (`PATCH /user/passkey/{uuid}`) deliberately is not, even though it commits to the same
-    table - a label change leaves the credential's power exactly where it was.
+    404 for a passkey that is not the caller's, exactly as for one that does not exist - so
+    a second delete of the same passkey is a 404.
     """
+    # A real `DELETE FROM`, not a flag: the row is what an assertion looks up, so a soft-deleted
+    # one is a live sign-in path one forgotten filter away from working. Refusing to remove the
+    # last passkey would be inventing a lockout to prevent one.
+    #
+    # Revoking a credential at its owner's request is an auth event; renaming one
+    # (`PATCH /user/passkey/{uuid}`) deliberately is not, even though it commits to the same
+    # table - a label change leaves the credential's power exactly where it was.
     stored = await fetch_owned_or_raise(
         db=db,
         crud=crud_webauthn_credentials,

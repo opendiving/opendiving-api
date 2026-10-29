@@ -108,8 +108,9 @@ async def patch_dive_draft(
     """Replace a draft's state with the form's.
 
     `values`, when present, replaces the stored values wholesale - a member it leaves out is
-    no longer in the draft, so a field cleared on one device is cleared on the other - and
+    dropped from the draft, so a field cleared on one device is cleared on the other - and
     `gear_set_uuid`, when present, sets or clears the loaded set. `values: null` is a 422.
+    404 when the draft is not the caller's.
     """
     draft = await _get_owned_dive_draft(db, uuid, current_user)
     await update_dive_draft(db, draft.id, values, user_id=current_user["id"])

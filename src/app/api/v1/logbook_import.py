@@ -309,11 +309,13 @@ async def preview_logbook_import(
     re-reads, re-converts and re-plans, because your logbook may have moved between the two
     calls.
 
-    A 413 when the files together are past what one import may carry or plan - its `detail`
-    says which - and one naming the storage used and the limit when the files the import
-    would store do not fit in what your account has left, measured as they would be stored and
-    with your own portrait kept. When no file can be read at all, the answer is what the first
-    of them would get on its own.
+    Rate limited per account, on a budget of its own; a request over it is a 429 and its
+    body is not read. A 413 when the files together are past what one import may carry or
+    plan - its `detail` says which - and one naming the storage used and the limit when the
+    files the import would store do not fit in what your account has left, measured as they
+    would be stored and with your own portrait kept. When no file can be read at all, the
+    answer is what the first of them would get on its own: 415 when nothing here reads bytes
+    of that kind, 422 when a reader does and the file is malformed.
     """
     await _enforce_import_limit(current_user["id"])
     await release_read_transaction(db)
@@ -341,17 +343,15 @@ async def apply_logbook_import(
 
     Answers with the same report the preview did, describing what was actually written. The
     counts can differ from the preview's where your logbook moved in between - a dive
-    deleted since is restored rather than linked - which is why the plan is made afresh here
-    rather than replayed. A converted file is converted again here and reaches the same
-    document: nothing in the conversion depends on when it runs. The rows of `dives` carry
-    the identifiers of the dives written.
+    deleted since is restored rather than linked - because the plan is made afresh from the
+    files here. A converted file is converted again and reaches the same document: nothing
+    in the conversion depends on when it runs. The rows of `dives` carry the identifiers of
+    the dives written.
 
     **All or nothing in rows.** A failure at any point writes no records at all, so a retry
-    after a timeout can never half-duplicate a logbook. Two things sit outside that on
-    purpose: the files an import stores are written before the transaction that names them
-    commits, so a failure can strand an unreferenced file (harmless, and swept), and species
-    this instance's catalog did not hold are looked up in the World Register of Marine
-    Species before the transaction opens and stay whether the import completes or not.
+    after a timeout can never half-duplicate a logbook. Species this instance's catalog did
+    not hold are looked up in the World Register of Marine Species first, and stay in the
+    catalog whether the import completes or not.
 
     The document's diver identity and settings are never applied: this account keeps its own
     name, sign-in email, units and notification settings. Its check-in details are written as
@@ -367,10 +367,17 @@ async def apply_logbook_import(
     and one past it is dropped with a note rather than failing the import. A link counts
     whether or not the import completes.
 
-    Files that would take your account past its storage limit refuse the import whole, with
-    the preview's 413 - which here also counts the archive's portrait if `portrait` takes it.
-    A set of files that differs from the preview's, by bytes or by name, is a 422.
+    Rate limited per account, on the preview's budget; a request over it is a 429 and its
+    body is not read. Files that would take your account past its storage limit refuse the
+    import whole, with the preview's 413 - which here also counts the archive's portrait if
+    `portrait` takes it. A set of files that differs from the preview's, by bytes or by name,
+    is a 422, and so is a `token` that has expired or was not issued to you: preview the
+    files again.
     """
+    # Two writes sit outside the transaction on purpose. The files an import stores are written
+    # before the rows that name them commit, so a failure can strand an unreferenced file -
+    # harmless, and swept. The species lookup runs before the transaction opens; the comment at
+    # the call says why.
     await _enforce_import_limit(current_user["id"])
     await release_read_transaction(db)
     with await _read(request, _APPLY_FIELDS) as body:

@@ -142,9 +142,17 @@ something to look up, not to restate it.
 - `PascalCase` for classes
 - Type hints on all functions (e.g., `def create_user(name: str) -> User:`)
 - Docstrings explain *why*, not the signature — the type hints already document shape, so
-  `Args:`/`Returns:` blocks that restate them are noise. Required on every route handler (FastAPI
-  publishes the docstring as the endpoint description in `/api/v1/openapi.json`) and on non-obvious
-  logic; skip them on self-evident helpers.
+  `Args:`/`Returns:` blocks that restate them are noise. Required on non-obvious logic; skip them on
+  self-evident helpers.
+- **A route handler's docstring is the operation description `/api/v1/openapi.json` publishes**,
+  rendered at `/developers` on every instance, so it is the one docstring written for a caller and
+  the one that says *what*: what the operation does, what it needs, what it answers and how it fails
+  — status codes, ownership (someone else's row is a 404), ordering, caching and `ETag` behaviour
+  stated as promises, in the present tense. Nothing in it names the code: no helper, class, module
+  or setting, no `DECISIONS.md`, no "rather than" defending a choice against the alternative, no
+  history. The reasoning goes in a `#` comment under the docstring, or in the module docstring when
+  it is long. Required on every route handler; `tests/test_openapi_descriptions.py` fails on the
+  leaks it can see.
 - Models in `src/app/models/` with SQLAlchemy relationships and indexes
 - Dependency injection for database sessions and auth
 

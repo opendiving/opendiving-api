@@ -58,11 +58,15 @@ async def read_map_tile(
     """Square `z/x/y` of the Web Mercator grid in `theme`, 512 CSS px at pixel ratio 2, as a
     1024x1024 WebP with nothing of any record in it.
 
-    For any signed-in account, with no owner to check: a tile is drawn from the basemap alone
-    and stored once for the whole instance, so every account whose map covers it is served the
-    same bytes. Drawn the first time anyone asks for it, so that request waits for the draw and
-    every later one is the stored tile. The zoom stops where the web stops fitting a map.
+    For any signed-in account: a tile is drawn from the basemap alone and stored once for the
+    whole instance, so every account whose map covers it is served the same bytes. Drawn the
+    first time anyone asks for it, so that request waits for the draw and every later one is
+    the stored tile. The response carries an `ETag`; a request whose `If-None-Match` names it
+    is a 304, and the tile is cacheable by the caller alone for the time its `Cache-Control`
+    header states.
     """
+    # No owner to check, since nothing of any record is in a tile. The zoom stops where the web
+    # stops fitting a map.
     tile = tile_at(theme, z, x, y)
     if tile is None:
         raise NotFoundException("No such map tile")

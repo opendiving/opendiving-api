@@ -69,15 +69,13 @@ async def write_dive_form_preset(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveFormPresetRead:
-    """Save the current set of hidden dive-form fields under a name.
+    """Save a set of hidden dive-form fields under a name.
 
-    Preset names are unique per account, case-insensitively, so reusing one is a 422 -
-    the same rule trips, dive sites and gear sets keep. "All" is a 422 too, being the
-    clients' built-in preset for the empty set.
-
-    `hidden_fields` may arrive in any order and with repeats; what is stored is the
-    canonical form - `DiveFormField` declaration order, duplicates collapsed - so two equal
-    sets are two equal lists. A name the vocabulary does not contain is a 422.
+    Preset names are unique per account, compared case-insensitively, so reusing one is a
+    422; "All" is a 422 too, being the built-in preset for the empty set. `hidden_fields` may
+    arrive in any order and with repeats; what is stored is the canonical form, the
+    vocabulary's declared order with duplicates collapsed, so two equal sets read as two
+    equal lists. A field name outside the vocabulary is a 422.
     """
     if is_built_in_preset_name(preset.name):
         raise UnprocessableEntityException(_BUILT_IN_NAME)
@@ -111,12 +109,11 @@ async def read_dive_form_presets(
     """List the caller's dive form presets alphabetically.
 
     Out-of-range pagination is clamped, not rejected.
-
-    Deliberately not Redis-cached, unlike the other per-user owned resources: nothing
-    embeds a preset, so there is nothing to go stale anywhere else, and the panel that reads
-    this list reads it once when it opens (see `OwnedResourceCache`'s docstring, which names
-    every resource that opts out and why).
     """
+    # Deliberately not Redis-cached, unlike the other per-user owned resources: nothing embeds
+    # a preset, so there is nothing to go stale anywhere else, and the panel that reads this
+    # list reads it once when it opens (see `OwnedResourceCache`'s docstring, which names every
+    # resource that opts out and why).
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     data = await crud_dive_form_presets.get_multi(
@@ -142,7 +139,7 @@ async def read_dive_form_preset(
 ) -> DiveFormPresetRead:
     """Return a single dive form preset.
 
-    404 when no such preset exists - and the same 404 when it belongs to another account, so
+    404 when no such preset exists, and the same 404 when it belongs to another account, so
     someone else's uuid stays unprobeable.
     """
     preset = await _get_owned_dive_form_preset(db, uuid, current_user)
@@ -157,17 +154,17 @@ async def patch_dive_form_preset(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Rename a preset, replace its hidden set, or both.
+    """Rename a preset, replace its hidden set, or both; omitted fields are left untouched.
 
-    `hidden_fields` replaces the preset's set wholesale - this is what "Update with current
-    fields" sends - and is stored canonically, exactly as on create. Renaming onto a name
-    the account already holds is a 422, compared case-insensitively, and so is renaming to
-    "All".
+    404 unless the caller owns it. `hidden_fields` replaces the preset's set wholesale and is
+    stored canonically, exactly as on create. Renaming onto a name the account already holds,
+    compared case-insensitively, is a 422, and so is renaming to "All".
 
-    A preset is a snapshot: nothing here touches `user.dive_form_hidden_fields`, so editing
-    the preset a diver is currently arranged like does not rearrange their form. Applying it
-    is a separate `PATCH /user`.
+    A preset is a snapshot: editing the one the caller's form is currently arranged like does
+    not rearrange the form. Applying a preset is a separate `PATCH /user` setting
+    `dive_form_hidden_fields`.
     """
+    # A whole-list `hidden_fields` is what the web app's "Update with current fields" sends.
     preset = await _get_owned_dive_form_preset(db, uuid, current_user)
 
     if values.name is not None and is_built_in_preset_name(values.name):
@@ -196,14 +193,14 @@ async def erase_dive_form_preset(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Delete a preset. The row really goes, and with it the account's pick if this was the
-    one picked (`user.dive_form_preset_uuid` is `ON DELETE SET NULL`). The form stays as it
-    is: a preset is a shortcut for filling in one column, and that column is not touched.
+    """Delete a preset. When it was the account's picked preset, the account's
+    `dive_form_preset_uuid` becomes null; the form itself stays as it is, a preset being a
+    shortcut for filling in one setting.
 
-    404 unless the caller owns it, and a second `DELETE` on the same uuid is a 404 too. One
-    of the three seeded defaults deleted this way comes back from
-    `POST /dive-form-presets/defaults`.
+    404 unless the caller owns it, and a second `DELETE` on the same uuid is a 404 too. A
+    default deleted this way comes back from `POST /dive-form-presets/defaults`.
     """
+    # The pick clears itself: `user.dive_form_preset_uuid` is `ON DELETE SET NULL`.
     await _get_owned_dive_form_preset(db, uuid, current_user)
 
     await crud_dive_form_presets.delete(db=db, uuid=uuid)
@@ -218,15 +215,14 @@ async def restore_default_dive_form_presets(
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> list[DiveFormPresetRead]:
     """Add back whichever of the three default presets - Basic, Recreational, Technical -
-    this account no longer has, matched by name case-insensitively.
+    the account is missing, matched by name case-insensitively.
 
-    **Adds what is missing; never overwrites.** A default the diver edited keeps their edit,
-    and one they renamed stays under its new name with the original created beside it. So
-    this is idempotent and a client may offer it whenever the diver asks: with all three
-    present it creates nothing and answers with an empty list.
-
-    Returns only what it created, in the order the defaults are declared, which is what lets
-    a client say how many were added.
+    **Adds what is missing; never overwrites.** A default the diver edited keeps the edit,
+    and one they renamed stays under its new name with the original created beside it. The
+    operation is idempotent, so a client may offer it whenever the diver asks: with all three
+    present it creates nothing and answers an empty list. The response carries only what was
+    created, in the order the defaults are declared, which lets a client say how many were
+    added.
     """
     created = await seed_default_presets(db, user_id=current_user["id"])
     return [_to_public(preset, user_uuid=current_user["uuid"]) for preset in created]

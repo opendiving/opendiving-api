@@ -143,7 +143,7 @@ async def read_contacts(
     """List the caller's contacts by name.
 
     `search` matches a case-insensitive substring of the name or the city. Out-of-range
-    pagination is clamped rather than rejected.
+    pagination is clamped, not rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
@@ -317,9 +317,9 @@ async def erase_contact(
 
     404 unless the caller owns it, and a second `DELETE` on the same uuid is a 404 too.
     The dives, courses, certifications, service records and trip parts that referenced it
-    keep every other field: all five references are `ON DELETE SET NULL`, so the database
-    unlinks them, and there is no way back after.
+    keep every other field and read the contact as `null`; there is no way back after.
     """
+    # All five references are `ON DELETE SET NULL`, so the database does the unlinking.
     db_contact = await _get_owned_contact(db, uuid, current_user)
     owner_id = db_contact.user_id
 

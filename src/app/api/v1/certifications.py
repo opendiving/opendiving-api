@@ -153,13 +153,12 @@ async def write_certification(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> CertificationRead:
-    """Create a certification. Card images are attached afterwards with
-    `PUT /certification/{uuid}/file/{side}` - see that route for why.
+    """Create a certification. Card images are attached afterwards, one side at a time, with
+    `PUT /certification/{uuid}/file/{side}`.
 
     `course_uuid` optionally links the card to the training course that issued it,
     `contact_uuid` to who ran it and `instructor_uuid` to the person who signed it; one that
-    isn't the caller's own - or doesn't exist - is a 422, the same answer `POST /dive` gives
-    for a trip it cannot resolve.
+    isn't the caller's own, or doesn't exist, is a 422.
     """
     course_id: int | None = None
     if certification.course_uuid is not None:
@@ -278,19 +277,20 @@ async def read_certifications(
     items_per_page: int = 10,
     course_uuid: uuid_pkg.UUID | None = None,
 ) -> dict:
-    """List the caller's certifications, newest first.
+    """List the caller's certifications, most recent `certified_on` first; cards with no date
+    sort last.
 
-    `course_uuid` narrows the list to the cards one training course issued - which is what
-    a course's own page reads. One naming a course that doesn't exist or isn't the
-    caller's returns an empty page rather than an error, exactly as `GET /dives`' filters
-    do, so it reveals nothing about whether that course exists.
+    `course_uuid` narrows the list to the cards one training course issued. One naming a
+    course that doesn't exist or isn't the caller's answers an empty page, not an error, so
+    it reveals nothing about whether that course exists.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     course_id: int | None = None
     if course_uuid is not None:
         # -1 is a sentinel that can never match a real course, so filtering safely yields
-        # an empty result set for a nonexistent/foreign course uuid.
+        # an empty result set for a nonexistent/foreign course uuid - as the filters on
+        # `GET /dives` do.
         course_id = await resolve_course_id_for_user(db=db, course_uuid=course_uuid, user_id=current_user["id"]) or -1
 
     return await _cached_read_certifications(
@@ -350,7 +350,7 @@ async def read_certification(
 ) -> CertificationRead:
     """Return a single certification, with metadata for any stored card images.
 
-    404 when no such certification exists - and the same 404 when it belongs to another
+    404 when no such certification exists, and the same 404 when it belongs to another
     user, so someone else's uuid stays unprobeable. The image bytes themselves are served
     by `GET /certification/{uuid}/file/{side}`.
     """
@@ -372,8 +372,8 @@ async def patch_certification(
 
     404 unless the caller owns it, exactly as for a certification that doesn't exist.
     `agency` and `agency_other` are validated as a pair against the resulting values, so
-    clearing one while the other still requires it is a 422 rather than a half-updated
-    row. Passing `null` for `course_uuid` detaches the card from its training course,
+    clearing one while the other still requires it is a 422. Passing `null` for
+    `course_uuid` detaches the card from its training course,
     which is distinct from omitting the key; a course that isn't the caller's own is a
     422. `contact_uuid` and `instructor_uuid` work the same way.
     """
@@ -433,14 +433,16 @@ async def erase_certification(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Soft-deletes a certification and hard-deletes its card files.
+    """Delete a certification and its card files.
 
-    The files go for good because they are the bulk of what this feature stores and
-    nothing can read them once the certification is gone; the row itself is only
-    soft-deleted, as a dive's is. `is_deleted` is application-level,
-    so this delete never reaches the `ON DELETE CASCADE` on
-    `certification_file.certification_id` and the files have to be removed explicitly.
+    404 unless the caller owns it, exactly as for a certification that doesn't exist, and a
+    second `DELETE` on the same uuid is a 404 too. The card files are deleted for good.
     """
+    # The files go for good because they are the bulk of what this feature stores and nothing
+    # can read them once the certification is gone; the row itself is only soft-deleted, as a
+    # dive's is. `is_deleted` is application-level, so this delete never reaches the
+    # `ON DELETE CASCADE` on `certification_file.certification_id` and the files have to be
+    # removed explicitly.
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
     await delete_files_for_certification(db=db, certification_id=db_certification.id, commit=False)
@@ -468,11 +470,14 @@ async def write_certification_file(
     file: Annotated[UploadFile, File(description="Photo or PDF of the card (JPEG, PNG, WEBP or PDF, max 10 MB)")],
 ) -> CertificationFileInfo:
     """Attach or replace one side's card image. Uploading a side that already has a file
-    replaces it.
+    replaces it, so the operation is idempotent.
 
-    A 413 for a file over 10 MB, or one that would take the account past its storage limit -
-    the detail then names the storage used and the limit. A replacement no larger than the
-    file it replaces is never refused for storage.
+    404 unless the caller owns the certification. The file must be a JPEG, PNG, WEBP or PDF,
+    recognised by its content and not by its name; anything else, an empty file or a damaged
+    image is a 415 whose `detail` says what was wrong. An image is stored with its metadata
+    stripped. A 413 for a file over 10 MB, or one that would take the account past its
+    storage limit, when the `detail` names the storage used and the limit; a replacement no
+    larger than the file it replaces is never refused for storage.
     """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
@@ -500,19 +505,21 @@ async def read_certification_file(
         Query(description="Opaque cache-busting version token; ignored by the server"),
     ] = None,
 ) -> Response:
-    """Serve one side's stored bytes to its owner.
+    """Serve one side's stored card image or PDF to its owner.
 
-    Deliberately *not* `@cache`d: Redis here holds serialized API responses, and parking
-    multi-megabyte binaries in it would evict everything else the cache exists for. The
-    `ETag`/`If-None-Match` pair below does the equivalent job in the browser, where the
-    bytes are wanted anyway.
-
-    `v` is read by nothing here. It is declared so the contract is visible rather than
-    looking like a stray param: the response is cacheable for five minutes, and a card
-    image can be *replaced* at this same URL, so the client varies `v` to give each
-    version its own cache entry. Without it a diver who re-photographs a card keeps
-    seeing the old one until the cache expires.
+    404 unless the caller owns the certification, and 404 when that side has no file. The
+    response carries an `ETag`, and a request whose `If-None-Match` matches it is answered
+    304 with no body; it is privately cacheable for five minutes and delivered as an
+    attachment. `v` is ignored by the server: a card can be replaced at this same URL, so a
+    client varies `v` to give each version its own cache entry, and a diver who
+    re-photographs a card sees the new one at once instead of the old one until the cache
+    expires.
     """
+    # Deliberately *not* `@cache`d: Redis here holds serialized API responses, and parking
+    # multi-megabyte binaries in it would evict everything else the cache exists for. The
+    # `ETag`/`If-None-Match` pair below does the equivalent job in the browser, where the bytes
+    # are wanted anyway. `v` is read by nothing here; it is declared so the contract is visible
+    # rather than looking like a stray param.
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
     # Check the hash before loading the bytes, so a conditional request costs one narrow
@@ -553,8 +560,8 @@ async def erase_certification_file(
     """Delete one side's card image from a certification, leaving the certification itself.
 
     404 unless the caller owns it, exactly as for a certification that doesn't exist, and
-    404 again when that side has no image stored - so this is not idempotent: a repeat
-    delete reports the absence rather than succeeding quietly.
+    404 again when that side has no image stored, so this is not idempotent: a repeat
+    delete reports the absence instead of succeeding quietly.
     """
     db_certification = await _get_owned_certification(db, uuid, current_user)
 
@@ -585,16 +592,16 @@ async def read_certifications_expiring(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict:
-    """Every certification the user owns that has an expiry date, soonest first.
+    """Every certification the caller owns that has an expiry date, soonest first, the
+    already expired included.
 
-    The certification twin of `GET /gear-service-due`, and it exists for the same
-    reason: without it a dashboard card has to page through a diver's entire
-    certification list client-side to find the few that are expiring, since an expiry is
-    just as likely to sit on the oldest card as the newest and the list endpoint sorts by
-    neither.
-
-    Takes no date horizon on purpose: filtering by "expiring within N days" server-side
-    would bake today's date into the cached response, which then quietly goes wrong at
-    midnight. The client buckets into expiring-soon/expired itself.
+    Takes no date horizon: the caller buckets into expiring-soon and expired itself. At most
+    200 cards are returned, and `truncated` says whether more exist.
     """
+    # The certification twin of `GET /gear-service-due`, and it exists for the same reason:
+    # without it a dashboard card has to page through a diver's entire certification list
+    # client-side to find the few that are expiring, since an expiry is just as likely to sit on
+    # the oldest card as the newest and the list endpoint sorts by neither. No date horizon on
+    # purpose: filtering by "expiring within N days" server-side would bake today's date into
+    # the cached response, which then quietly goes wrong at midnight.
     return await _cached_read_expiring(request, user_id=current_user["id"], db=db)

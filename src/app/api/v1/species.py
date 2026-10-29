@@ -86,17 +86,21 @@ async def read_species_search(
     catalog and can be attached to a dive immediately; one without is a live hit that has to
     be resolved (`POST /species/resolve`) first.
 
-    Returns an empty list rather than an error for both "nothing matched" and "the registers
-    are unavailable" - a diver can log the dive and add the sighting later, and a 502 here
-    would make a form look broken over an optional convenience. `has_more` means the answer
-    was cut: keep typing rather than expecting the rest.
+    An empty list, never an error, both when nothing matched and when the registers are
+    unavailable: a diver can log the dive and add the sighting later. `has_more` means the
+    answer was cut: keep typing rather than expecting the rest.
 
     A superseded name resolves to the accepted taxon - searching *Manta birostris* returns
     *Mobula birostris*. `matched_name` then reports what actually matched, and only where the
     row's own names do not already explain it: a synonym the diver typed, or a common name in
     any language. Results are ordered by how well each row answers the query, with species
     ahead of the genera and families above them.
+
+    Rate limited per account, on a budget shared with `POST /species/resolve` and
+    `GET /user/species/suggest`; a request over it is a 429.
     """
+    # Degrades to an empty list because a 502 would make a form look broken over an optional
+    # convenience.
     await enforce_species_limit(current_user["id"])
     # Normalized here as well as in the service, so the shape the cache key is built from is
     # the shape this route accepted - the reasoning `read_dive_sites` spells out for its own
@@ -112,21 +116,23 @@ async def write_species_resolve(
 ) -> SpeciesRead:
     """Turn a search hit into a catalog row, and return it.
 
-    Idempotent, and a 200 rather than a 201 for that reason: the caller is naming a taxon
-    that already exists in the world, and whether this instance had seen it before is not
-    something they should have to care about. Calling it twice returns the same `uuid`.
+    Idempotent, and a 200 whether or not the catalog already held the species: calling it
+    twice returns the same `uuid`. Given an unaccepted AphiaID this stores - and returns -
+    the *accepted* taxon it defers to, so the catalog only ever holds current names.
 
-    Given an unaccepted AphiaID this stores - and returns - the *accepted* taxon it defers
-    to, so the catalog only ever holds current names.
+    503 when the register cannot be reached and the species is not already in the catalog;
+    the catalog never holds a row without the register's record behind it, so try again
+    later. Call it when the diver picks a hit, not when the dive is saved, and saving a dive
+    never waits on a third party.
 
-    503 when the register cannot be reached and the species is not already local. This is
-    the one endpoint in the species API that fails rather than degrading: a catalog row is
-    shared with every account and never rewritten, so inventing one without the authoritative
-    record behind it would be worse than asking the diver to try again.
-
-    Called at pick time rather than at dive-save time, which is what keeps saving a dive from
-    ever blocking on a third party.
+    Rate limited per account, on the budget `GET /species/search` spends; a request over it
+    is a 429.
     """
+    # 200 rather than 201 because the caller names a taxon that already exists in the world;
+    # whether this instance had seen it before is nothing they should have to care about. The
+    # 503 is the one failure in this module that does not degrade: a catalog row is shared with
+    # every account and never rewritten, so inventing one without the authoritative record
+    # behind it would be worse than asking the diver to try again.
     await enforce_species_limit(current_user["id"])
     species = await resolve_species(db=db, aphia_id=values.aphia_id)
     return SpeciesRead.model_validate(species, from_attributes=True)
@@ -140,11 +146,11 @@ async def read_species(
 ) -> SpeciesRead:
     """Return one species from the catalog.
 
-    Authenticated but **not** ownership-checked, unlike every other `/{uuid}` route here: the
-    catalog is global, so there is no owner to compare against and a species uuid is not an
-    existence oracle for anything private. A 404 here means the species genuinely is not in
-    this instance's catalog, rather than the "not yours" that the same status means elsewhere.
+    Any signed-in account reads any species: the catalog is global and belongs to nobody, so
+    a 404 means only that the species is not in this instance's catalog.
     """
+    # No ownership check, unlike every other `/{uuid}` route: there is no owner to compare
+    # against, and a species uuid is not an existence oracle for anything private.
     species = (await db.execute(select(Species).where(Species.uuid == uuid))).scalar_one_or_none()
     if species is None:
         raise NotFoundException("Species not found")
@@ -158,32 +164,33 @@ async def read_species_photo(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[str | None, Query(description="Opaque cache-busting version token; ignored by the server")] = None,
 ) -> Response:
-    """Serve a species' photograph - one WebP, always, and **without authentication**.
+    """Serve a species' photograph - one WebP, always, for inline rendering.
 
-    The first route in this app that serves stored bytes to anyone who can reach the port, and
-    it is deliberate. Access tokens here are Bearer-only - the sole cookie is `refresh_token`,
-    read on the refresh, logout and account-deletion paths alone - so an `<img src>` cannot
-    authenticate, and the alternative is fetching every thumbnail through the API client and
-    rendering it from a blob URL. That path re-fetches on every mount, which is tolerable for
-    one certification card and is not a life list of fifty.
+    Anonymous: no token is needed, so an `<img src>` can point straight at it. The images are
+    public-domain or CC-licensed Wikimedia Commons files; served from here, no diver's browser
+    tells Wikimedia which species they are looking at.
 
-    It discloses nothing. The catalog is global and ownerless, a species uuid is not an
-    existence oracle for anything private, and the bytes are public-domain or CC-licensed
-    Wikimedia Commons files that anybody can fetch from Commons directly. What this route buys
-    by serving them from here is that no diver's browser tells Wikimedia which species they are
-    looking at.
+    404 for a uuid that is not in the catalog **and** for a species that has no photo, which
+    is most of them; the two are one answer.
 
-    404 for a uuid that is not in the catalog **and** for a species that simply has no photo,
-    which is most of them - the two are one answer here, because distinguishing them is exactly
-    the oracle an unauthenticated route should not be.
-
-    `v` is read by nothing; the client passes the `photo_sha256` it already has so each version
-    gets its own browser cache entry. Two departures from the authenticated binary reads next
-    door, both consequences of these bytes being public and immutable: `Cache-Control` is
-    `public` rather than `private`, and the content is served for **inline** rendering rather
-    than as an `attachment` - the `attachment` on those exists because the web app fetches them
-    through its API client, which is precisely what this route exists not to do.
+    Publicly cacheable for the time `Cache-Control` states, with an `ETag`; an `If-None-Match`
+    naming it is a 304. `v` is read by nothing: pass the species' `photo_sha256` so each
+    version gets its own browser cache entry.
     """
+    # The one route serving stored bytes to anyone who can reach the port, and deliberately.
+    # Access tokens are Bearer-only - the sole cookie is `refresh_token`, read on the refresh,
+    # logout and account-deletion paths alone - so an `<img src>` cannot authenticate, and the
+    # alternative is fetching every thumbnail through the API client and rendering it from a
+    # blob URL, which re-fetches on every mount: tolerable for one certification card, not for a
+    # life list of fifty. It discloses nothing: the catalog is global and ownerless, a species
+    # uuid is not an existence oracle for anything private, and the bytes are files anybody can
+    # fetch from Commons directly. "No photo" and "no such species" are one 404 because telling
+    # them apart is exactly the oracle an unauthenticated route should not be. Two departures
+    # from the authenticated binary reads, both because these bytes are public and immutable:
+    # `Cache-Control` is `public` (`_PHOTO_CACHE_CONTROL` says why), and the content is served
+    # inline rather than as an `attachment` - the `attachment` on those exists because the web
+    # app fetches them through its API client, which is precisely what this route exists not to
+    # do.
     stored = await get_stored_photo(db=db, species_uuid=uuid)
     if stored is None:
         raise NotFoundException("No photo for this species")

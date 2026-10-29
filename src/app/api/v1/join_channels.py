@@ -22,12 +22,17 @@ router = APIRouter(tags=["config"])
 
 @router.get("/join-channel/{slug}", response_model=JoinChannelRead)
 async def read_join_channel(slug: str) -> JoinChannelRead:
-    """The label a live join link is shown by, or 404.
+    """The label a live join link is shown by.
 
-    A bare `str` path parameter rather than one constrained to the slug format: a segment
-    no operator could have configured is simply not a key, and answers the same 404 as a
-    well-formed one that is not configured, so the route has one answer for "no such link".
+    Anonymous. `slug` is the `via` value of a `/join?via=<slug>` link; 404 when no link by
+    that slug is active on this instance, whatever shape the segment has. The response is
+    publicly cacheable for the time its `Cache-Control` header states, so a link the
+    operator has just removed may still answer here until then - following it is what is
+    refused.
     """
+    # A bare `str` path parameter rather than one constrained to the slug format: a segment
+    # no operator could have configured is simply not a key, and answers the same 404 as a
+    # well-formed one that is not configured, so the route has one answer for "no such link".
     label = settings.join_channels.get(slug)
     if label is None:
         raise NotFoundException("This join link is not active.")

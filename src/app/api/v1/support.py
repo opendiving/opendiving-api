@@ -22,22 +22,21 @@ _SUPPORT_RESPONSE = SupportResponse()
 
 @router.post("/support", response_model=SupportResponse)
 async def send_support_request(request: Request, body: SupportRequest) -> SupportResponse:
-    """Forwards a support-form submission to the instance operator.
+    """Forward a support-form submission to the instance operator.
 
-    Unauthenticated by design - someone locked out of their account is exactly the
-    person who needs this - which also makes it the one endpoint that will send mail
-    on an anonymous caller's say-so, hence the rate limits below.
-
-    The submitted email address is never verified (no confirmation round-trip), so
-    treat the `From:` line in the resulting mail as a claim, not an identity.
-
-    503 when this instance has no `CONTACT_FORM_EMAIL`, which is the default: there is no
-    address worth guessing for somebody else's install, and the alternative to refusing is
-    delivering a stranger's support request to whichever inbox the setting used to point
-    at - which is what this endpoint did until the default came out.
+    Anonymous, so someone locked out of their account can still reach the operator. Nothing
+    is stored: the message goes to the operator's mailbox with the submitted `email` as its
+    reply-to, and that address is never verified, so the operator reads it as a claim, not
+    an identity. Rate limited per IP and per address. 503 when this instance has no support
+    address configured, in which case nothing is counted against the limits.
     """
-    # Before the rate limits, so an instance that has the form switched off cannot have
-    # its buckets spent by traffic that was never going to be delivered.
+    # Anonymous is what makes this the one endpoint that sends mail on an anonymous caller's
+    # say-so, hence the rate limits. No default address: there is none worth guessing for
+    # somebody else's install, and the alternative to refusing is delivering a stranger's
+    # support request to whichever inbox a stale setting points at.
+    #
+    # The 503 comes before the rate limits, so an instance that has the form switched off
+    # cannot have its buckets spent by traffic that was never going to be delivered.
     if not settings.CONTACT_FORM_EMAIL:
         # A raw `HTTPException`: `core/exceptions/http_exceptions.py` has no class for 503,
         # the same reason `species.resolve` raises its own.

@@ -286,25 +286,29 @@ async def _start_onboarding_or_sign_in(
 async def request_email_link(
     request: Request, body: EmailAuthRequest, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> EmailAuthRequestResponse:
-    """Step 1 of the email flow: generates a magic-link token and a six-digit code, and
-    emails both.
+    """Step 1 of signing in by email: sends `email` a magic link and a six-digit code.
 
-    Always returns the same generic message, whether or not `email` belongs to an
-    existing account - this must never be used to check if someone has signed up.
+    Anonymous, and rate limited per IP and per address. Both credentials are good for a
+    window the instance sets, and a new request supersedes any earlier one still live for
+    the same address.
 
-    The `request_id` in the response is the row's public uuid, and it is handed back for
-    one reason: it is the only way to reach `POST /auth/email/verify-code`, which has no
-    email-keyed lookup at all. That keeps the code's attempt budget spendable *only* by
-    the browser that asked for it - a stranger who knows an address cannot burn a diver's
-    code, let alone their link. It is not an oracle either way: a row is minted for every
-    address, so the id is a fresh random value whether or not an account exists.
+    The response is identical whether or not an account exists for the address, so it never
+    says whether someone has signed up. `request_id` identifies this request and is what
+    `POST /auth/email/verify-code` takes alongside the code; it is a fresh random value
+    either way. The link is redeemed at `POST /auth/email/verify` and needs no id.
 
-    `via`, the join-channel slug or invite-link token of the page the form was on, is stored
-    on the row for the link and the code to hand the gate. One that names neither a live
-    channel nor a member's current link is refused (403) on an invite-only instance before
-    anything is written, and dropped on an open one - which says whether a link is live, and
-    nothing about the address or about any account.
+    `via` is the join-channel slug or invite-link token of the page the form was on, and is
+    carried through to account creation. On an invite-only instance a `via` naming neither a
+    live channel nor a member's current link is refused (403) before anything is sent, which
+    says whether a link is live and nothing about the address or any account; an open
+    instance drops it.
     """
+    # `request_id` is handed back for one reason: it is the only way to reach
+    # `POST /auth/email/verify-code`, which has no email-keyed lookup at all. That keeps the
+    # code's attempt budget spendable *only* by the browser that asked for it - a stranger who
+    # knows an address cannot burn a diver's code, let alone their link. Not an oracle either
+    # way: a row is minted for every address, so the id is random whether or not an account
+    # exists.
     email = body.email.lower()
     # First, so a dead link costs nothing: no row, no audit event, no rate-limit charge.
     via = await refuse_a_stale_join_link(db, body.via)
@@ -365,28 +369,30 @@ async def request_email_link(
 async def check_email_link(
     request: Request, response: Response, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> LinkCheckResponse:
-    """Side-effect-free precheck used by the sign-in landing page before it shows the
-    "Sign in" button - lets it show an error immediately for a link that's already
-    been used, invalidated, or expired (e.g. revisited via the browser's back
-    button after already signing in) rather than a misleadingly clickable button,
-    and lets it display which email it's about to sign in as. Never marks anything
-    used or changes any state.
+    """Whether a magic link can still be redeemed, and for which address, without redeeming it.
 
-    It also answers `deletion_pending` for a link into an account inside its deletion grace
-    period, so the button can say *Restore my account* instead of *Sign in*. That is a
-    nicety this one path can afford and the other three cannot - a typed code, a Google
-    dialog and a biometric gesture have no side-effect-free look-before-you-click step, and
-    show the same outcome on a screen after the POST instead. What all four share, and what
-    actually carries the design, is that redeeming the credential still changes nothing
-    about the account.
+    Anonymous, and rate limited per IP. Changes nothing: the link stays exactly as
+    redeemable as it was, so a page can ask before it shows a *Sign in* button rather than
+    offer one that fails.
 
-    The only GET in this module that must not be publicly cached. It is anonymous and
-    side-effect-free, which is exactly the shape `ClientCacheMiddleware` marks
-    `public, max-age=60` - but the magic-link token sits in the query string and the
-    response body is the account's email address, so a shared cache keyed on that URL
-    would hand both to whoever asked next. Setting the header here stops the middleware
-    from filling one in.
+    `valid` is `false` for a link that was already used, superseded by a newer request,
+    expired, or never issued, and the response says no more than that. When it is `true`,
+    `email` is the address the link signs in as; `deletion_pending` is `true`, with
+    `purge_after`, when that address's account is inside its deletion grace period, so the
+    page can offer to restore the account instead of signing in - redeeming the link still
+    changes nothing about the account.
+
+    Never cacheable: the response carries `Cache-Control: private, no-store`.
     """
+    # The one GET here that must not be publicly cached. Anonymous and side-effect-free is
+    # exactly the shape `ClientCacheMiddleware` marks `public, max-age=60` - but the magic-link
+    # token sits in the query string and the body is the account's email address, so a shared
+    # cache keyed on that URL would hand both to whoever asked next. Setting the header here
+    # stops the middleware from filling one in.
+    #
+    # `deletion_pending` is a nicety this path can afford and the other three cannot: a typed
+    # code, a Google dialog and a biometric gesture have no side-effect-free
+    # look-before-you-click step, and show the same outcome on a screen after the POST instead.
     response.headers["Cache-Control"] = "private, no-store"
 
     await enforce_rate_limit(
@@ -432,17 +438,25 @@ async def verify_email_link(
     response: Response,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> AuthOutcome:
-    """Step 2 of the email flow: validates the magic-link token and either signs the
-    caller in (existing account) or hands back an onboarding session (new one).
+    """Step 2 of signing in by email: redeems the magic link's `token`.
 
-    The token is strictly single-use, as the email that carries it promises: an
-    already-`used_at` link is rejected, alongside one that expired or was superseded
-    by a newer request (see `request_email_link` and
-    `AuthenticationRequest.invalidated_at`). That `resolve_identity` is a pure lookup
-    does not make replay safe: `_start_onboarding_or_sign_in` mints a fresh refresh
-    cookie good for `REFRESH_TOKEN_EXPIRE_DAYS`, so anyone who read the mail after the
-    recipient clicked it would get a brand-new week-long session.
+    Anonymous, and rate limited per IP. The outcome is one of three: `authenticated`, with
+    an access token in the body and a `refresh_token` cookie on the response, when an
+    account exists for the address; `onboarding_required`, with an `onboarding_token` to
+    carry to `POST /auth/complete`, when none does; or `deletion_pending`, with a
+    `restore_token` for `POST /auth/restore`, when the account is inside its deletion grace
+    period - in which case nothing is signed in and nothing about the account changes.
+
+    The token is single-use. 401 for a link that was already used, superseded by a newer
+    request, expired, or never issued, and `detail` says which. The link is spent even when
+    the outcome is `deletion_pending` or a refusal.
+
+    403 on an invite-only instance when the address has no account, no live invitation and
+    arrived through no live join or invite link; nothing is created.
     """
+    # Single-use even though resolving the identity is a pure lookup: the sign-in branch mints
+    # a fresh refresh cookie good for the whole idle window, so anyone who read the mail after
+    # the recipient clicked it would otherwise get a brand-new session.
     await enforce_rate_limit(
         f"auth:email-verify:ip:{client_ip_bucket(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
@@ -484,35 +498,44 @@ async def verify_email_code(
     response: Response,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> AuthOutcome:
-    """The other half of step 2: the six-digit code from the sign-in email, typed back
-    into the tab that asked for it. Signs the caller in, or hands back an onboarding
-    session, exactly as the link does.
+    """The other half of step 2: redeems the six-digit `code` from the sign-in email, in the
+    client that asked for it.
 
-    This exists because a link signs in *the device that opens it*, and mail is very often
-    read somewhere else - the one magic-link failure the explicit-click precheck never
-    addressed. Both credentials ride the same row and end at the same
-    `claim_authentication_request`, so a link and a code racing on one request resolve the
-    way two links do: one wins, the other is told it has already been used.
+    Anonymous, and rate limited per IP. `request_id` is the one `POST /auth/email/request`
+    returned; the code is accepted against that request alone. The outcomes are the link's:
+    `authenticated`, `onboarding_required` or `deletion_pending`, with the same tokens and
+    the same 403 on an invite-only instance.
 
-    **`request_id` is not decoration.** There is deliberately no lookup by email here. The
-    id was handed only to the browser that made the request, so the only party who can
-    spend this code's attempts is the one who asked for it - and an earlier design without
-    it let anyone who knew an address fire five wrong guesses at whatever request the
-    victim had live, which, if a burnt code took its link with it, is sign-in denial aimed
-    at exactly the accounts (email-only, self-hosted) whose recovery path is that inbox. It
-    also removes a genuine nondeterminism: two tabs can each leave a live row for the same
-    address, and an `(email, live)` lookup would resolve them by an unordered `.first()`.
+    `idle_timeout` chooses how long the resulting session may sit unused before it ends:
+    `standard` or `extended`, each a window the instance sets. Only this operation takes it.
 
-    Every rejection is the same sentence (`_CODE_REJECTED`), including the case where the
-    `request_id` names nothing at all.
+    Every rejection is a 401 with the same `detail`, "This code is invalid or has expired.":
+    wrong digits, a `request_id` naming no request, a request that expired or was superseded
+    by a newer one, a code already redeemed, and one whose guesses ran out. Guesses are
+    capped per request at a number the instance sets; running out spends the code and leaves
+    the link in the same email usable. A code that is not six digits, however spaced, is a
+    422 and counts as no guess.
 
-    A code spent on reaching a `deletion_pending` screen is spent: the request is claimed
-    before the identity is resolved, and the screen has to say so, because closing that tab
-    costs a fresh code. The link reaches the same screen without that cost - not because
-    `verify_email_link` orders those two steps any differently (it does not), but because
-    the link path has `GET /auth/email/verify/check` in front of it, which answers
-    `deletion_pending` while marking nothing used. The code has no such precheck to reach.
+    The code and the link redeem the same request, so when both are used one wins and the
+    other is refused. A code spent on reaching `deletion_pending` is spent: trying again
+    takes a fresh one.
     """
+    # The code exists because a link signs in *the device that opens it*, and mail is very
+    # often read somewhere else.
+    #
+    # `request_id` is not decoration: there is deliberately no lookup by email here. The id was
+    # handed only to the browser that made the request, so the only party who can spend this
+    # code's attempts is the one who asked for it. A lookup by address would let anyone who
+    # knew it fire wrong guesses at whatever request the victim had live - sign-in denial
+    # aimed at exactly the accounts (email-only, self-hosted) whose recovery path is that
+    # inbox - and would be nondeterministic besides: two tabs can each leave a live row for the
+    # same address, and an `(email, live)` lookup would resolve them by an unordered
+    # `.first()`.
+    #
+    # The link reaches the `deletion_pending` screen without spending itself only because
+    # `GET /auth/email/verify/check` sits in front of it and answers while marking nothing
+    # used; this path claims the request before the identity is resolved, exactly as
+    # `verify_email_link` does, and has no precheck to reach.
     await enforce_rate_limit(
         f"auth:email-verify-code:ip:{client_ip_bucket(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
@@ -572,29 +595,33 @@ async def auth_with_google(
     response: Response,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> AuthOutcome:
-    """Redeems a Google authorization code and either signs the caller in (existing
-    account, linking the Google provider first if it hasn't been already) or hands back an
-    onboarding session (new account).
+    """Redeems a Google authorization code and signs the caller in as the Google account's
+    address, or hands back an onboarding token when no account exists for it.
 
-    The visitor's browser never loads or runs anything of Google's. It navigates to
-    Google's authorization endpoint, comes back to `{FRONTEND_URL}/auth/google/callback`
-    with a single-use code, and posts that code here; this server redeems it at Google's
-    token endpoint with `GOOGLE_CLIENT_SECRET` and the PKCE verifier, and verifies the ID
-    token that comes back. Nothing Google issues that identifies anyone ever passes through
-    the browser.
+    Anonymous, and rate limited per IP. The browser navigates to Google's authorization
+    endpoint with a PKCE challenge, returns to the instance's web app at
+    `/auth/google/callback` with a single-use `code`, and posts that code here with the
+    `code_verifier` and the `redirect_uri` it used; this server redeems the code with Google
+    and verifies the identity Google returns, so nothing that identifies the visitor passes
+    through the browser.
 
-    Three distinct failures, which is the point of the shape:
+    The outcomes are the email flow's: `authenticated`, linking Google to the account that
+    holds the address where it was not linked yet; `onboarding_required`, with an
+    `onboarding_token` for `POST /auth/complete`; or `deletion_pending`, with a
+    `restore_token` for `POST /auth/restore` and nothing changed. `via` is the join-channel
+    slug or invite-link token the attempt started from, and 403 on an invite-only instance
+    is as for the email flow.
 
-    - **400** - the `redirect_uri` is not the one this instance's `FRONTEND_URL` derives.
-      A diagnostic rather than a control (Google binds the code to the URI it saw, and will
-      not accept an unregistered one), and it exists so a `FRONTEND_URL` disagreeing with
-      the origin the visitor reached fails here, naming the setting, rather than as a
-      `redirect_uri_mismatch` that names neither.
-    - **401** - Google refused the code, or the ID token it returned does not check out.
-    - **503** - Google could not be reached, failed, or throttled this server. Raised from
-      `exchange_google_code`, and deliberately not the 401: this server failing is not the
-      visitor's credential failing.
+    400 when `redirect_uri` is not the callback this instance expects; `detail` names the
+    one it does. 401 when Google refuses the code or the identity it returns does not check
+    out. 503 when Google could not be reached, failed, or throttled this server.
     """
+    # The 400 is a diagnostic rather than a control (Google binds the code to the URI it saw,
+    # and will not accept an unregistered one): it exists so a `FRONTEND_URL` disagreeing with
+    # the origin the visitor reached fails here, naming the setting, rather than as a
+    # `redirect_uri_mismatch` that names neither. The 503 is raised from
+    # `exchange_google_code` and is deliberately not the 401: this server failing is not the
+    # visitor's credential failing.
     await enforce_rate_limit(
         f"auth:google:ip:{client_ip_bucket(request)}",
         settings.MAGIC_LINK_VERIFY_RATE_LIMIT_PER_IP,
@@ -634,24 +661,29 @@ async def auth_with_google(
 
 @router.post("/passkey/options", response_model=PasskeySignInOptions)
 async def passkey_sign_in_options(request: Request) -> PasskeySignInOptions:
-    """Step 1 of signing in with a passkey: mints a challenge and the assertion options
-    the browser hands to `navigator.credentials.get()`.
+    """Step 1 of signing in with a passkey: a challenge and the assertion options the browser
+    hands to `navigator.credentials.get()`.
 
-    Anonymous and deliberately incurious - `allowCredentials` is empty, so this request
-    names no account and can reveal nothing about any. Discoverable credentials are what
-    buy that: the assertion itself carries the credential id, and the credential row names
-    the user, so no email-first step exists for a "does this address have a passkey"
-    oracle to hide in.
+    Anonymous, and rate limited per IP. The request names no account and takes no
+    identifier: `allowCredentials` is empty, and the assertion the browser produces carries
+    the credential that names one. `flow_id` identifies the challenge and goes back with the
+    assertion to `POST /auth/passkey/verify`; a challenge is good for one attempt.
 
-    The ceiling is `AUTH_REFRESH_RATE_LIMIT_PER_IP`'s, and for the same reason: conditional
-    UI arms on every signed-out page view that supports it, landing hero included, and an
-    office behind one NAT gateway is a single IP to this counter.
-
-    503 when Redis is unreachable. The challenge store is the anti-replay guarantee, so it
-    fails closed where rate limiting fails open - and the magic link, being pure Postgres,
-    keeps working through exactly that outage. Three methods with independent failure
-    domains is the design, not an accident.
+    503 when passkey sign-in is temporarily unavailable on this instance; `detail` says to
+    use email instead, which keeps working.
     """
+    # Discoverable credentials are what make the anonymity possible: the credential row names
+    # the user, so no email-first step exists for a "does this address have a passkey" oracle
+    # to hide in.
+    #
+    # The ceiling is `AUTH_REFRESH_RATE_LIMIT_PER_IP`'s, and for the same reason: conditional UI
+    # arms on every signed-out page view that supports it, landing hero included, and an office
+    # behind one NAT gateway is a single IP to this counter.
+    #
+    # The 503 is Redis being unreachable. The challenge store is the anti-replay guarantee, so
+    # it fails closed where rate limiting fails open - and the magic link, being pure Postgres,
+    # keeps working through exactly that outage. Three methods with independent failure domains
+    # is the design, not an accident.
     await enforce_rate_limit(
         f"auth:passkey-options:ip:{client_ip_bucket(request)}",
         settings.PASSKEY_OPTIONS_RATE_LIMIT_PER_IP,
@@ -669,23 +701,26 @@ async def passkey_sign_in_verify(
     response: Response,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> AuthOutcome:
-    """Step 2: verifies the assertion and signs in whoever owns the credential.
+    """Step 2 of signing in with a passkey: verifies the assertion and signs in the account
+    that registered the credential.
 
-    The challenge is spent on the *attempt*, not on success, so a captured assertion can
-    never be retried against a still-live one. An unknown credential, an expired or
-    already-spent challenge, a wrong origin, a wrong RP ID and a bad signature are one
-    indistinguishable 401 - see `passkey_service.finish_sign_in`.
+    Anonymous, and rate limited per IP. `flow_id` is the one the options came with and
+    `credential` is the assertion as the browser returned it. The outcome is `authenticated`,
+    with an access token in the body and a `refresh_token` cookie, or `deletion_pending`,
+    with a `restore_token` for `POST /auth/restore`, when the account is inside its deletion
+    grace period; never `onboarding_required`, since a passkey exists only on an account.
 
-    An owner whose account is pending deletion is the one case that is *not* that 401: a
-    verified assertion answers `deletion_pending` and offers the account back, which used
-    to be a dead end with nothing explaining it. The branch sits after verification, so it
-    tells nobody anything they had not already proved.
-
-    Never resolves to onboarding, since a credential can only exist because a signed-in
-    user registered it. It goes through the shared funnel anyway: that is what makes token
-    shape, cookie mechanics and every future outcome variant free here instead of a second
-    copy to keep in step.
+    The challenge is spent on the attempt, success or not, so a failed attempt starts again
+    from `POST /auth/passkey/options`. Every failure - an unknown credential, an expired or
+    already-spent challenge, a wrong origin, a bad signature - is a 401 with the same
+    `detail`. 503 when passkey sign-in is temporarily unavailable on this instance.
     """
+    # Spending the challenge on the attempt is what stops a captured assertion being retried
+    # against a still-live one. The uniform 401 is `passkey_service.finish_sign_in`'s; the
+    # `deletion_pending` branch sits after verification there, so it tells nobody anything they
+    # had not already proved. The outcome still goes through the shared funnel: that is what
+    # keeps token shape, cookie mechanics and every future outcome variant in one place rather
+    # than a second copy to keep in step.
     await enforce_rate_limit(
         f"auth:passkey-verify:ip:{client_ip_bucket(request)}",
         settings.PASSKEY_VERIFY_RATE_LIMIT_PER_IP,
@@ -704,40 +739,42 @@ async def complete_profile(
     response: Response,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> AuthOutcome:
-    """Creates the `User` row (and its `AuthenticationProvider` link) for a verified
-    identity that had no account yet, then signs the new user in. This is the only place
-    *self-service* registration ever creates a `User` row - the admin panel's `User` view
-    also writes one and is not registration, and bypasses the gate below by construction.
+    """Creates the account for a verified identity that had none, and signs it in.
 
-    **On an `invite`-mode instance this refuses (403) an address with no live
-    invitation**, unless the onboarding token carries a live join-channel slug or the token
-    of a member's live invite link, and creates nothing. The check is
-    `services.registration_gate.admit_or_refuse` and it runs *below*
-    `release_read_transaction`, inside the transaction that inserts the row, for the reason
-    spelled out at that call - the helper rolls back, so a check above it decides nothing.
-    The first account on an empty instance is admitted in either mode and is created with
-    `is_superuser = true`. The same transaction adds one to the day's count under the door
-    the gate named and drops any pending invite request for the address - and, where a
-    member's invite link admitted it, gives that member the accepted invitation row their
-    Invitations card lists it by.
+    Takes the `onboarding_token` from an `onboarding_required` outcome, with the `name` and
+    `username` the account starts with; the address is the one the token was issued for.
+    Rate limited per IP. The outcome is `authenticated`, with an access token in the body
+    and a `refresh_token` cookie on the response.
 
-    Rate limited per-IP because the username check below is an availability oracle:
-    someone holding a single onboarding token could otherwise walk a wordlist through
-    it and learn which usernames are taken.
+    401 for an onboarding token that is invalid, expired, or already used: the token is
+    single-use, so a second call with it creates nothing. 422 when `username` is taken or
+    an account already exists for the address.
 
-    A Google sign-up arrives with a picture, and this is where it becomes the account's
-    avatar: the URL rode the verified ID token into the onboarding session, and the bytes
-    are fetched and normalized here rather than stored as a link to somebody else's CDN.
-    Inline rather than a background job - one bounded fetch, once per account ever, and
-    the avatar is there on the first dashboard paint instead of a flash of initials. It is
-    non-fatal in every failure mode (see `import_google_avatar`) and it is a one-off:
-    signing in later never re-imports, because by then the picture is the diver's to
-    manage and overwriting it because Google's changed would be Gravatar in new clothes.
+    On an invite-only instance, 403 for an address with no live invitation unless the token
+    carries a live join-channel slug or a member's live invite link, and nothing is created;
+    where a member's link admitted the address, that member's invitations list the new
+    account. The first account on an empty instance is admitted in either mode and is a
+    superuser. Any pending invite request for the address is dropped.
 
-    The new account is seeded with the three default dive-form presets and the default
-    tags in the same transaction: a registration either creates the account with them or
-    creates nothing.
+    The account starts with the default dive-form presets and tags, and with the picture of
+    a Google identity as its avatar, fetched once at creation and never refreshed from
+    Google afterwards.
     """
+    # The only place *self-service* registration creates a `User` row - the admin panel's
+    # `User` view also writes one and is not registration, and bypasses the gate by
+    # construction.
+    #
+    # Rate limited per IP because the username check is an availability oracle: someone
+    # holding a single onboarding token could otherwise walk a wordlist through it and learn
+    # which usernames are taken.
+    #
+    # The Google picture's URL rode the verified ID token into the onboarding session, and the
+    # bytes are fetched and normalized here rather than stored as a link to somebody else's
+    # CDN. Inline rather than a background job - one bounded fetch, once per account ever, and
+    # the avatar is there on the first dashboard paint instead of a flash of initials. Non-fatal
+    # in every failure mode (see `import_google_avatar`), and a one-off: signing in later never
+    # re-imports, because by then the picture is the diver's to manage and overwriting it
+    # because Google's changed would be Gravatar in new clothes.
     await enforce_rate_limit(
         f"auth:complete:ip:{client_ip_bucket(request)}",
         settings.AUTH_COMPLETE_RATE_LIMIT_PER_IP,
@@ -865,29 +902,32 @@ async def restore_account(
     response: Response,
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> AuthOutcome:
-    """Undo a deletion inside its grace period and sign the account back in.
+    """Undoes a deletion inside its grace period and signs the account back in.
 
-    The second half of a `deletion_pending` outcome, and the click that makes a restore a
-    decision rather than a side effect of signing in. Everything before it was
-    read-only: the four entry points verify an identity, resolve it to a flagged row and
-    hand back a `restore_token`, and the account stays deleted until this endpoint runs.
+    Takes the `restore_token` from a `deletion_pending` outcome; the token names the account,
+    so nothing else does. Rate limited per IP. The account stays deleted until this is
+    called - signing in by any method only ever offers the restore - and the outcome is
+    `authenticated`, with an access token in the body and a `refresh_token` cookie.
 
-    **In `auth.py` rather than as `/user/restore`, and that is not filing.** Every `/user/*`
-    route sits behind `get_current_user`, which filters `is_deleted=False` - it would 401
-    on precisely the accounts this exists to serve. The restore token is the authority
-    here, and it names the account itself, so nothing about the request has to.
-
-    Both columns are cleared, not just the flag: `is_deleted = true, deleted_at IS NULL` is
-    a row `purge_deleted_accounts` can never take and never reports as due, so leaving the
-    clock set would "restore" the account into a state that only looks alive.
-
-    The row is taken `FOR UPDATE` first, which is what settles the race with the purge. If
-    the purge is mid-account, this waits for its transaction and then finds no row - the
-    account is gone, and the 401 says so. If this wins, the purge's guarded `DELETE` (which
-    repeats `is_deleted AND deleted_at < :cutoff`) matches nothing and logs that the account
-    came back. There is no ordering in which a restored account is destroyed or a destroyed
-    account appears restored.
+    401 with one `detail` for a token that is invalid, expired, or already used; the token is
+    single-use. A different 401 `detail` when the grace period ran out and the account is
+    permanently gone. A valid token for an account that was already restored simply signs
+    it in.
     """
+    # Here rather than under `/user`, and that is not filing: every `/user/*` route sits behind
+    # `get_current_user`, which filters `is_deleted=False` - it would 401 on precisely the
+    # accounts this exists to serve.
+    #
+    # Both columns are cleared, not just the flag: `is_deleted = true, deleted_at IS NULL` is a
+    # row `purge_deleted_accounts` can never take and never reports as due, so leaving the
+    # clock set would "restore" the account into a state that only looks alive.
+    #
+    # The row is taken `FOR UPDATE` first, which is what settles the race with the purge. If
+    # the purge is mid-account, this waits for its transaction and then finds no row - the
+    # account is gone, and the 401 says so. If this wins, the purge's guarded `DELETE` (which
+    # repeats `is_deleted AND deleted_at < :cutoff`) matches nothing and logs that the account
+    # came back. There is no ordering in which a restored account is destroyed or a destroyed
+    # account appears restored.
     await enforce_rate_limit(
         f"auth:restore:ip:{client_ip_bucket(request)}",
         settings.AUTH_COMPLETE_RATE_LIMIT_PER_IP,
@@ -1108,45 +1148,47 @@ async def _held_pair_for_a_retry(refresh_token: str, subject: str | None, db: As
 async def refresh_access_token(
     request: Request, response: Response, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> dict[str, str]:
-    """Exchanges the httpOnly `refresh_token` cookie (set by `issue_tokens`) for a new
-    access token *and a new refresh token*. See `DECISIONS.md` for why this is the one
-    cookie-authenticated endpoint in this flow and why that's still CSRF-safe.
+    """Exchanges the `refresh_token` cookie for a new access token and a new refresh cookie.
 
-    The presented refresh token is blacklisted and replaced rather than reused. Without
-    rotation a single leaked cookie stays valid for the session's whole idle window with
-    nothing to revoke it and no way to notice; with rotation, the theft has a much shorter
-    useful life and a later use of the same token fails outright. Two tabs refreshing at
-    the exact same moment still race, and the loser gets a 401 - see `DECISIONS.md`.
+    The one operation authenticated by the cookie alone: no bearer token, and the body
+    carries only the new access token - the new refresh token rides the `Set-Cookie` header.
+    Rate limited per IP. The session continues as itself, sliding by its own idle window.
 
-    **A second presentation inside `REFRESH_TOKEN_REUSE_GRACE_SECONDS` is answered with the
-    pair the first one received** - the same access token and the same refresh cookie -
-    because a reply lost on the way back leaves the client holding a token this server has
-    already spent, and the retry is how it finds out. The pair is held in Redis for the
-    grace (`services.refresh_grace`); see `_held_pair_for_a_retry` for when it is handed out.
+    The presented refresh token is spent by the exchange and does not work again. A second
+    presentation within a short grace window the instance sets is answered with the same
+    pair the first one received, so a retry after a lost reply succeeds; later than that, a
+    re-presented token ends the session it belongs to, access token included, and the
+    device signs in again. Two clients refreshing the same cookie at the same instant: one
+    succeeds, the other is refused.
 
-    A later presentation is also the loudest signal this app gets that a cookie has been
-    stolen, so it is acted on: `_handle_revoked_refresh` separates "a token we revoked,
-    presented again" from "garbage", which the 401 deliberately does not - and past the
-    grace it revokes the session that token names, so the pair rotated out of it stops
-    working too and whoever holds the cookie signs in again. The *response* is identical
-    either way - it must never become an oracle for whether a token was ever real.
-
-    A token that verifies is not the same thing as an account that still exists, so the
-    subject is resolved before a replacement pair is minted, and a deleted account 401s
-    here. Same message as every other failure, for the same oracle reason.
-
-    **Nor is it the same thing as a session that is still live.** The presented token's
-    `sid` has to resolve to an unrevoked, unexpired row belonging to this subject, which is
-    half of what makes "sign out my other devices" mean anything: revoking a row stops it
-    rotating here. The other half is `get_current_user`, which asks the same question of the
-    access token on every authenticated request, so the revoked device is refused there
-    first. A token carrying no `sid` at all - anything minted before this feature - fails
-    both checks and the diver signs in again. That is a one-time global sign-out on upgrade,
-    and deliberately not shimmed.
-
-    All four ways to fail here answer the same uniform 401 the endpoint already answered,
-    which is the property `DECISIONS.md` pins rather than one this change gets to relax.
+    401 when no cookie is present. Every other failure - a token that is invalid, expired or
+    already spent, an account that was deleted, a session that was revoked or ended - is a
+    401 with the same `detail`, so the response never says whether a token was ever real.
     """
+    # See `DECISIONS.md` for why this is the one cookie-authenticated endpoint in this flow and
+    # why that is still CSRF-safe, and for the two-tab race.
+    #
+    # Rotation: without it a single leaked cookie stays valid for the session's whole idle
+    # window with nothing to revoke it and no way to notice; with it, the theft has a much
+    # shorter useful life and a later use of the same token fails outright.
+    #
+    # The grace: a reply lost on the way back leaves the client holding a token this server has
+    # already spent, and the retry is how it finds out. The pair is held in Redis for
+    # `REFRESH_TOKEN_REUSE_GRACE_SECONDS` (`services.refresh_grace`); `_held_pair_for_a_retry`
+    # says when it is handed out.
+    #
+    # A later presentation is the loudest signal this app gets that a cookie has been stolen,
+    # so it is acted on: `_handle_revoked_refresh` separates "a token we revoked, presented
+    # again" from "garbage", which the 401 deliberately does not - and past the grace it revokes
+    # the session that token names, so the pair rotated out of it stops working too.
+    #
+    # A token that verifies is not the same thing as an account that still exists, so the
+    # subject is resolved before a replacement pair is minted. Nor is it the same thing as a
+    # session that is still live: the `sid` has to resolve to an unrevoked, unexpired row
+    # belonging to this subject, which is half of what makes "sign out my other devices" mean
+    # anything. The other half is `get_current_user`, which asks the same question of the
+    # access token on every authenticated request, so the revoked device is refused there
+    # first. A token carrying no `sid` fails both checks.
     await enforce_rate_limit(
         f"auth:refresh:ip:{client_ip_bucket(request)}",
         settings.AUTH_REFRESH_RATE_LIMIT_PER_IP,
@@ -1227,19 +1269,20 @@ async def logout(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     refresh_token: Annotated[str | None, Cookie(alias="refresh_token")] = None,
 ) -> LogoutResponse:
-    """End the caller's session.
+    """Ends the caller's session.
 
-    Blacklists both the access and refresh tokens, stamps `revoked_at` on the session row
-    they belong to, and clears the refresh cookie - so the pair stops working immediately
-    rather than remaining valid until expiry, and the row stops appearing in
-    `GET /user/sessions` on the account's other devices. 401 when no refresh cookie is
-    present or either token fails to decode.
+    Needs the bearer access token and the `refresh_token` cookie. Both stop working at once
+    rather than at their expiry, the session leaves `GET /user/sessions` on the account's
+    other devices, and the response clears the cookie. Signing out a session that was
+    already ended succeeds and changes nothing.
 
-    This route authenticates on `bearer_scheme` alone - no `get_current_user`, so there is
-    no `current_user` dict to take an id from - and resolves its subject from the presented
-    access token the way `_handle_revoked_refresh` already does. One indexed read, on a
-    route nobody calls in a loop.
+    401 when no refresh cookie is present, or when either token is not one this instance
+    issued or has expired.
     """
+    # Authenticates on `bearer_scheme` alone - no `get_current_user`, so there is no
+    # `current_user` dict to take an id from - and resolves its subject from the presented
+    # access token the way `_handle_revoked_refresh` does. One indexed read, on a route nobody
+    # calls in a loop.
     if not refresh_token:
         raise UnauthorizedException("Refresh token not found")
 

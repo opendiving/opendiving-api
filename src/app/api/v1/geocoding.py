@@ -66,22 +66,24 @@ async def read_reverse_geocode(
 ) -> GeocodeResult | Response | None:
     """Name the place at a position, so a dive site pinned on a map can offer a `location`.
 
-    Three outcomes, and the difference between the last two is the point: `200` with a
-    result; `204` when the position was looked up and simply has no name; `200` with `null`
-    when this instance could not ask at all - geocoding switched off, over the provider's
-    instance-wide one-per-second cap, or the provider unreachable.
+    Three outcomes: `200` with a result; `204` when the position was looked up and simply has
+    no name; `200` with `null` when this instance could not ask at all - geocoding switched
+    off, the instance's cap on calls to the provider spent, or the provider unreachable.
 
     Never a 404 and never a 5xx. "We have no suggestion for you" is a normal outcome, and a
     client is expected to treat `null` as "nothing was learned about this position" - only
     `204` says the position really is nameless, which is what makes it safe to clear a
     location a diver may have typed.
 
-    A pin in genuinely open water is answered with the sea's name ("Red Sea"), from polygons
-    carried in this repo rather than from the provider, which has no row for such a point.
+    A pin in open water the provider has no name for is answered with the sea's name ("Red
+    Sea"). The position is rounded to roughly 110 m before being looked up, since the answer
+    is a locality name and that is the resolution at which it stops changing.
 
-    The position is rounded to roughly 110 m before being looked up, since the answer is a
-    locality name and that is the resolution at which it stops changing.
+    Rate limited per account, on a budget shared with `GET /geocode/search`; a request over
+    it is a 429.
     """
+    # The sea names come from polygons carried in this repository, not from the provider, which
+    # has no row for such a point.
     await _enforce_geocode_limit(db, current_user["id"])
     result, asked = await reverse_geocode(lat, lon)
 
@@ -107,9 +109,11 @@ async def read_geocode_search(
     which is what a pick saves, and carries its `region` and `country` as fields of their own
     and its OSM identity in `source` and `source_id`.
 
-    Returns an empty list rather than an error for both "nothing matched" and "the provider
-    is unavailable or switched off"; from the form's point of view those are the same thing,
-    and the diver types the site in by hand either way.
+    An empty list, never an error, both when nothing matched and when the provider is
+    unavailable or switched off: the diver types the site in by hand either way.
+
+    Rate limited per account, on a budget shared with `GET /geocode/reverse`; a request over
+    it is a 429.
     """
     await _enforce_geocode_limit(db, current_user["id"])
     return await search_places(q)

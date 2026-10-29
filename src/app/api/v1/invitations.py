@@ -84,22 +84,20 @@ async def request_an_invite(
 ) -> InviteRequestAccepted:
     """Ask the operator of a closed instance for an invitation.
 
-    **The answer is identical for every address**, first request or fiftieth, whether or
-    not it already has an account, whether or not somebody invited it last week - and the
-    guarantee is structural rather than a matter of shaping the response: this handler
-    never queries the `user` table at all, exactly as `POST /auth/email/request` never
-    does. An anonymous endpoint that answered differently would be an account-existence
-    oracle for anybody who can reach the port, which is precisely what the sign-in flow
-    goes to some length to avoid being.
-
-    Two consequences the design accepts. A row may be stored for an address that already
-    has an account - the operator's queue carries a `has_account` flag so they can see it
-    and remove it. And a repeat submission stores nothing, because the insert is
-    `ON CONFLICT DO NOTHING`; the audit row is still written, because the IP and User-Agent
-    on it are what bound abuse here.
-
-    404 on an `open`-mode instance: there is nothing to request an invitation to.
+    Anonymous. **The answer is identical for every address** - first request or fiftieth,
+    with an account already or without one, invited last week or never - so it never reveals
+    whether an address is known here. Rate limited per IP and per address; over either limit
+    is a 429. 404 on an instance in `open` registration mode: there is nothing to request an
+    invitation to.
     """
+    # The sameness is structural rather than a matter of shaping the response: this handler
+    # never queries the `user` table at all, exactly as `POST /auth/email/request` never does.
+    # An anonymous endpoint that answered differently would be an account-existence oracle for
+    # anybody who can reach the port, which is precisely what the sign-in flow goes to some
+    # length to avoid being. Two consequences accepted: a row may be stored for an address that
+    # already has an account - the operator's queue carries `has_account` so they can see it and
+    # remove it - and a repeat submission stores nothing, the insert being
+    # `ON CONFLICT DO NOTHING`, while its audit row is still written (see below).
     _require_invite_mode()
 
     email = body.email.lower()
@@ -141,21 +139,16 @@ async def read_invitations(
 ) -> dict:
     """The caller's own invitations, newest first.
 
-    Paginated rather than a bare list, unlike the sessions and passkeys lists beside it in
-    the settings grid: those are bounded by a cap the app enforces, while this collection
-    only grows - five a day, indefinitely - so it takes the pagination convention and its
-    clamp.
-
-    A row somebody created by following the caller's invite link carries no address, and
-    names that person's account by its current name instead (`InvitationRead`).
-
-    Not Redis-cached. Nothing embeds these rows, the list changes on the caller's own
-    actions and on an invitee accepting, and an invitation shown as pending after it has
-    been accepted is a wrong answer rather than a stale one.
-
-    404 on an `open`-mode instance, which is what makes the web's card remove itself with
-    no knowledge of the mode.
+    A row somebody created by following the caller's invite link carries no `email`, and
+    names that person's account by its current name in `member_name` instead. Out-of-range
+    pagination is clamped. 404 on an instance in `open` registration mode.
     """
+    # Paginated rather than a bare list, unlike the sessions and passkeys lists beside it in
+    # the settings grid: those are bounded by a cap the app enforces, while this collection
+    # only grows - the quota's worth a day, indefinitely - so it takes the pagination
+    # convention and its clamp. Not Redis-cached: nothing embeds these rows, the list changes
+    # on the caller's own actions and on an invitee accepting, and an invitation shown as
+    # pending after it has been accepted is a wrong answer rather than a stale one.
     _require_invite_mode()
 
     page, items_per_page = clamp_pagination(page, items_per_page)
@@ -189,34 +182,30 @@ async def create_invitation(
 ) -> InvitationRead:
     """Invite an address onto this instance.
 
-    Each refusal is a distinct status so a client can show the message verbatim rather than
-    guess at what happened:
+    Each refusal is a distinct status, and its `detail` can be shown verbatim:
 
-    - **404** - `open` mode; the feature is not here.
-    - **409** - the address already has an account. This does disclose, to a signed-in and
-      throttled caller, that an address is registered. Accepted deliberately: the
-      alternative is a `201` that creates nothing, and the inviter then looks for an
-      invitation that is nowhere in their list. Inviting yourself lands here.
-    - **409** - you already have a live, unaccepted invitation out to this address.
-      Per-inviter, because the table is not unique on the address: somebody else may have
-      invited them too, and each of you sees your own row.
-    - **429** - either the throttle below or your quota. `INVITATIONS_PER_USER` per
-      `INVITATIONS_WINDOW_DAYS`, counted over rows you created in the trailing window with
-      revoked ones included, so the bound is on invitations you have made - by address, or
-      by somebody signing up through your invite link. Superusers are exempt from the
-      quota, not from the throttle.
-    - **422** - a malformed address, from `EmailStr`.
+    - **404** - the instance is in `open` registration mode; the feature is not here.
+    - **409** - the address already has an account. Inviting yourself lands here.
+    - **409** - you already have a live, unaccepted invitation out to this address. Somebody
+      else may have invited them too; each inviter sees their own row.
+    - **429** - the attempt throttle, or your quota: the instance's cap on invitations per
+      window, counted over the ones you made in the trailing window, revoked ones included,
+      whether by address or by somebody signing up through your invite link. Superusers are
+      exempt from the quota, not from the throttle.
+    - **422** - a malformed address.
 
-    Creating an invitation **deletes any pending request row for the address**, in the same
-    transaction as the insert: an address with a live invitation is no longer waiting in
-    the operator's queue, and making that one commit is what keeps the two tables from
-    disagreeing.
-
-    A send that fails after the row commits answers 5xx and leaves the row - the same shape
-    the magic-link path has, and the right one here: the address is admitted from that
-    moment, so the invitation is real whether or not the mail arrived, and the inviter can
-    tell them another way.
+    Creating an invitation withdraws any pending request the address made to the operator.
+    A mail that fails to send after the invitation is stored answers 5xx and keeps it: the
+    address is admitted from that moment, whether or not the mail arrived, and the inviter
+    can tell them another way.
     """
+    # The 409 for a registered address discloses, to a signed-in and throttled caller, that
+    # it is registered. Accepted deliberately: the alternative is a 201 that creates nothing,
+    # and the inviter then looks for an invitation that is nowhere in their list. The second
+    # 409 is per-inviter because the table is not unique on the address. The pending request
+    # row goes in the same transaction as the insert, which is what keeps the two tables from
+    # disagreeing. A send failing after the commit leaving the row is the shape the magic-link
+    # path has, and the right one here.
     _require_invite_mode()
 
     email = body.email.lower()
@@ -294,21 +283,21 @@ async def revoke_invitation(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> InvitationRevokedResponse:
-    """Withdraw an invitation you sent, so the address is no longer admitted.
+    """Withdraw an invitation you sent, so the address stops being admitted.
 
-    Stamps `revoked_at` rather than removing the row, which is what keeps the quota honest:
-    it counts rows created in the window, so an invitation cannot be un-sent by revoking
-    it. The row is deleted later by the retention sweep like any other unaccepted one.
+    The invitation stays in your list with `revoked_at` set, and still counts against your
+    quota: revoking does not un-send it. A second revoke succeeds and changes nothing.
 
-    **409 for an invitation that has already been accepted.** The account exists; revoking
-    would be a stamp asserting something untrue, and it would take away nothing - the
-    address is admitted by having an account, not by the invitation. A second revoke of an
-    already-revoked invitation succeeds and changes nothing, the same as revoking a session
-    twice, because the row is not what is being removed.
-
-    404 unless the caller owns it, exactly as for one that does not exist - the ownership
-    contract every keyed route in this app honours.
+    **409 for an invitation that has already been accepted**: the account exists, and is
+    admitted by existing, so there is nothing to withdraw. 404 unless the caller owns it,
+    exactly as for one that does not exist; 404 too on an instance in `open` registration
+    mode.
     """
+    # Stamps `revoked_at` rather than removing the row, which is what keeps the quota honest:
+    # it counts rows created in the window. The retention sweep deletes the row later like any
+    # other unaccepted one. Revoking an accepted one would be a stamp asserting something
+    # untrue, and would take away nothing. Idempotent like revoking a session twice, because
+    # the row is not what is being removed.
     _require_invite_mode()
 
     row = await fetch_owned_or_raise(
@@ -339,11 +328,14 @@ async def read_own_invite_link(
 ) -> InviteLinkRead:
     """The caller's invite link, or 404 when they have none.
 
-    The token is in the answer every time, unlike a check-in link's: the Invitations card
-    shows the same link and QR code on every visit, which is why it is stored in clear. The
-    404 is the status open mode answers too, on purpose - the card reads "no link yet" from
-    it only once the invitations list has said the feature is here.
+    Needs a signed-in session; an API key is refused with a 403. The `token` is in the
+    answer every time, so a client can show the same link on every visit. The 404 is also
+    what an instance in `open` registration mode answers.
     """
+    # The token is stored in clear so that it can be re-read, unlike a check-in link's: the
+    # Invitations card shows the same link and QR code on every visit. The 404 for open mode
+    # is on purpose - the card reads "no link yet" from it only once the invitations list has
+    # said the feature is here.
     _require_invite_mode()
 
     link = await read_invite_link(db, user_id=current_user["id"])
@@ -363,12 +355,12 @@ async def make_invite_link(
     """Make the caller's invite link, or reset it: a fresh token either way.
 
     Whoever follows `/join?via=<token>` may create an account here, counted as the caller's
-    invitation and charged to their `INVITATIONS_PER_USER` quota. A reset replaces the token
-    in place, so the previous one stops resolving and stops admitting at this commit.
-
-    No rate limiter: minting is authenticated, and a member pressing it repeatedly churns one
-    row of their own.
+    invitation and charged to their quota. A reset replaces the token in place, so the
+    previous one stops resolving and stops admitting at once. Needs a signed-in session; an
+    API key is refused with a 403. 404 on an instance in `open` registration mode.
     """
+    # No rate limiter: minting is authenticated, and a member pressing it repeatedly churns
+    # one row of their own.
     _require_invite_mode()
 
     token, created_at = await replace_invite_link(db, user_id=current_user["id"])
@@ -389,10 +381,11 @@ async def erase_invite_link(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> InviteLinkRemovedResponse:
-    """Remove the caller's invite link: it stops resolving and admitting at once. Succeeds
-    with nothing to remove too, as revoking a session twice does.
+    """Remove the caller's invite link: it stops resolving and admitting at once.
 
-    The rows it already produced stay - each is an account the caller let in.
+    Succeeds with nothing to remove too. The invitations it already produced stay - each is
+    an account the caller let in. Needs a signed-in session; an API key is refused with a
+    403. 404 on an instance in `open` registration mode.
     """
     _require_invite_mode()
 
@@ -420,14 +413,14 @@ def _no_such_invite_link() -> JSONResponse:
 async def resolve_invite_link(
     token: str, response: Response, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> InviteLinkInviter | JSONResponse:
-    """Whose invite link this is, **without authentication** - the join page asks before it
-    paints the sign-in form, titled by the inviter's name.
+    """Whose invite link this is: the inviter's name, which the join page shows before its
+    sign-in form.
 
-    The token is the credential. Every refusal - an unknown token, a reset or removed one,
-    an owner who has asked for their account to be deleted, an open-mode instance - is one
-    identical 404, and both answers set `private, no-store`, so a reset stops the old link
-    resolving at the next request rather than whenever a shared cache lets go. Answers for
-    one token and lists nothing.
+    Anonymous; the token is the credential. Every refusal - an unknown token, a reset or
+    removed one, an owner who has asked for their account to be deleted, an instance in
+    `open` registration mode - is one identical 404. Both answers carry
+    `Cache-Control: private, no-store`, so a reset stops the old link resolving at the very
+    next request. Answers for one token and lists nothing.
     """
     if not registration_is_invite_only():
         return _no_such_invite_link()

@@ -75,9 +75,11 @@ async def write_checkin_link(
 ) -> CheckinLinkMinted:
     """Share the caller's check-in page as a link that lives for 24 hours.
 
-    Revokes every other link of the caller's first, so one is live at a time. The body is the
-    diving figures as the page shows them, which the link shows for its whole life whatever is
-    logged afterwards. The token is in this response and nowhere else: only its hash is kept.
+    From a signed-in session, never an API key. Revokes every other link of the caller's
+    first, so one is live at a time. The body is the diving figures as the page shows them,
+    which the link shows for its whole life whatever is logged afterwards. The `token` is in
+    this response and nowhere else, since only its hash is kept; `expires_at` is when the
+    link stops answering.
     """
     token, expires_at = await mint_checkin_link(db, user_id=current_user["id"], figures=body)
     return CheckinLinkMinted(token=token, expires_at=expires_at)
@@ -88,8 +90,11 @@ async def read_checkin_link(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> CheckinLinkRead:
-    """When the caller's live link expires, or 404 without one. Never the token, which was
-    shown once and is not kept."""
+    """When the caller's live link expires, or 404 without one.
+
+    From a signed-in session, never an API key. Never the token, which was shown once and is
+    not kept.
+    """
     expires_at = await live_checkin_link_expiry(db, user_id=current_user["id"])
     if expires_at is None:
         raise NotFoundException("No live check-in link")
@@ -101,8 +106,10 @@ async def erase_checkin_link(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> CheckinLinkRevokedResponse:
-    """Revoke the caller's link: it stops answering at its next request. Succeeds with nothing
-    to revoke too, as a session revoke does."""
+    """Revoke the caller's link: it stops answering at its next request.
+
+    From a signed-in session, never an API key. Succeeds with nothing to revoke too.
+    """
     await revoke_checkin_links(db, user_id=current_user["id"])
     await db.commit()
     return CheckinLinkRevokedResponse()
@@ -115,7 +122,9 @@ async def read_checkin_summary(
     """A shared check-in page, **without authentication**: the token is the credential.
 
     Everything the signed-in check-in page prints, with the diving figures the link was minted
-    with, and when the link stops working.
+    with, and when the link stops working. An unknown, expired or revoked token, and a diver
+    who has asked for deletion, are one identical 404. Never cached
+    (`Cache-Control: private, no-store`), the 404 included.
     """
     link = await resolve_checkin_link(db, token=token)
     summary = await checkin_summary(db, link) if link is not None else None
@@ -130,7 +139,12 @@ async def read_checkin_portrait(
     request: Request, token: str, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> Response:
     """The shared page's portrait: the 7:9 rendition `GET /user/portrait` serves, and never the
-    avatar or the original. 404 for a diver with no portrait."""
+    avatar or the original.
+
+    The token is the credential. A diver with no portrait is the same 404 as a dead token.
+    Never cached (`Cache-Control: private, no-store`), with an `ETag`; `If-None-Match`
+    answers 304.
+    """
     link = await resolve_checkin_link(db, token=token)
     stored = await get_rendition(db, user_id=link.user_id, frame=PORTRAIT_FRAME) if link is not None else None
     if stored is None:
@@ -150,8 +164,13 @@ async def read_checkin_card_front(
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> Response:
     """The front of one of the shared page's cards, when it is an image; the bytes
-    `GET /certification/{uuid}/file/front` serves. A PDF front, a card with no front and a
-    card that is not the diver's are the same 404, and no route serves a back."""
+    `GET /certification/{uuid}/file/front` serves.
+
+    The token is the credential. A PDF front, a card with no front, a card that is not the
+    diver's and a malformed uuid are the same 404 as a dead token, and no route serves a
+    back. Never cached (`Cache-Control: private, no-store`), with an `ETag`; `If-None-Match`
+    answers 304.
+    """
     try:
         certification_uuid = uuid_pkg.UUID(uuid)
     except ValueError:

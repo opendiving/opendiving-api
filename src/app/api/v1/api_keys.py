@@ -64,12 +64,13 @@ async def write_api_key(
     """Create an API key, and return its secret - in this response and nowhere else, since
     only its hash is kept.
 
-    The server computes `expires_at` from `lifetime`. 409 when the account already holds
-    `API_KEY_MAX_PER_USER` keys, expired ones included; 429 past
-    `API_KEY_CREATE_RATE_LIMIT_PER_USER` creations in the auth window. The account's inbox
-    hears about it, naming the key and its prefix.
+    From a signed-in session, never an API key. The server computes `expires_at` from
+    `lifetime`. 409 when the account already holds the instance's cap on keys, expired ones
+    included; the `detail` names the figure. Rate limited per account. The account's email
+    address is told of the new key, by its name and prefix.
 
-    Takes no `Idempotency-Key`: a replay could not return the secret again.
+    Not idempotent, and takes no `Idempotency-Key`: a replay could not return the secret
+    again.
     """
     await enforce_rate_limit(
         f"api-key-create:user:{current_user['id']}",
@@ -130,9 +131,11 @@ async def read_api_keys(
 ) -> list[ApiKeyRead]:
     """Every API key on the caller's account, oldest first, expired ones included.
 
-    Unpaginated and not Redis-cached, for `GET /user/passkeys`' reason: a handful of rows
-    that nothing embeds.
+    From a signed-in session, never an API key. Unpaginated, and never the secret: the
+    `prefix` is what identifies a key.
     """
+    # Not Redis-cached, for `GET /user/passkeys`' reason: a handful of rows that nothing
+    # embeds.
     rows = await crud_api_keys.get_multi(
         db=db,
         user_id=current_user["id"],
@@ -152,12 +155,14 @@ async def erase_api_key(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> ApiKeyRevokedResponse:
-    """Revoke an API key: it is refused from its very next request, since every request looks
-    the row up.
+    """Revoke an API key: it is refused from its very next request.
 
-    A real `DELETE FROM`, as a passkey's removal is, with its audit row in the same
-    transaction. 404 unless the caller owns it, exactly as for a key that does not exist.
+    From a signed-in session, never an API key. 404 unless the caller owns it, exactly as
+    for a key that does not exist. The account's email address is told of the revocation,
+    by the key's name.
     """
+    # Refused from the next request because every request looks the row up. A real
+    # `DELETE FROM`, as a passkey's removal is, with its audit row in the same transaction.
     stored = await fetch_owned_or_raise(
         db=db,
         crud=crud_api_keys,
