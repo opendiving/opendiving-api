@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import uuid as uuid_pkg
+from collections import defaultdict
 from dataclasses import astuple
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatch
@@ -344,7 +345,7 @@ def _attach_result() -> MagicMock:
     """
     result = MagicMock()
     result.one_or_none.return_value = None
-    result.one.return_value = (0, 0, 0)
+    result.one.return_value = SimpleNamespace(_mapping=defaultdict(int))
     result.scalar_one.return_value = 1
     result.scalar_one_or_none.return_value = 0
     result.scalars.return_value = []

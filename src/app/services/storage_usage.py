@@ -36,11 +36,16 @@ _GB = 1024 * _MB
 
 @dataclass(frozen=True, slots=True)
 class StorageUsage:
-    """One account's stored bytes, by kind."""
+    """One account's stored bytes, by kind, and how many files make up the two kinds that
+    attach to a record."""
 
     dive_files_bytes: int
     certification_files_bytes: int
     pictures_bytes: int
+    dive_files_count: int
+    dives_with_files_count: int
+    certification_files_count: int
+    certifications_with_files_count: int
 
     @property
     def used_bytes(self) -> int:
@@ -59,26 +64,35 @@ async def get_storage_usage(db: AsyncSession, *, user_id: int) -> StorageUsage:
     A rendition stored before `rendition_byte_size` existed reads as 0 until the lifespan
     measures it (`core/setup.py`, `measure_unsized_renditions`).
     """
-    dive_files = select(func.coalesce(func.sum(DiveFile.stored_byte_size), 0)).where(DiveFile.user_id == user_id)
+    dive_files = select().select_from(DiveFile).where(DiveFile.user_id == user_id)
     certification_files = (
-        select(func.coalesce(func.sum(CertificationFile.byte_size), 0))
+        select()
+        .select_from(CertificationFile)
         .join(Certification, Certification.id == CertificationFile.certification_id)
         .where(Certification.user_id == user_id)
     )
-    pictures = select(
-        func.coalesce(
-            func.sum(
-                func.coalesce(UserPicture.original_byte_size, 0) + func.coalesce(UserPicture.rendition_byte_size, 0)
-            ),
-            0,
-        )
-    ).where(UserPicture.user_id == user_id)
+    picture_bytes = func.coalesce(UserPicture.original_byte_size, 0) + func.coalesce(UserPicture.rendition_byte_size, 0)
+    pictures = select().select_from(UserPicture).where(UserPicture.user_id == user_id)
+    figures = {
+        "dive_files_bytes": (dive_files, func.coalesce(func.sum(DiveFile.stored_byte_size), 0)),
+        "certification_files_bytes": (certification_files, func.coalesce(func.sum(CertificationFile.byte_size), 0)),
+        "pictures_bytes": (pictures, func.coalesce(func.sum(picture_bytes), 0)),
+        "dive_files_count": (dive_files, func.count()),
+        "dives_with_files_count": (dive_files, func.count(DiveFile.dive_id.distinct())),
+        "certification_files_count": (certification_files, func.count()),
+        "certifications_with_files_count": (
+            certification_files,
+            func.count(CertificationFile.certification_id.distinct()),
+        ),
+    }
     row = (
         await db.execute(
-            select(dive_files.scalar_subquery(), certification_files.scalar_subquery(), pictures.scalar_subquery())
+            select(
+                *(query.add_columns(column).scalar_subquery().label(name) for name, (query, column) in figures.items())
+            )
         )
     ).one()
-    return StorageUsage(dive_files_bytes=int(row[0]), certification_files_bytes=int(row[1]), pictures_bytes=int(row[2]))
+    return StorageUsage(**{name: int(row._mapping[name]) for name in figures})
 
 
 def format_size(num_bytes: int) -> str:
