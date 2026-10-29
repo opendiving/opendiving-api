@@ -19,6 +19,13 @@ router = APIRouter(tags=["support"])
 
 _SUPPORT_RESPONSE = SupportResponse()
 
+# One bucket for the whole instance. The per-address limit counts an address nobody verified,
+# so one IP rotating addresses gets its full per-IP allowance through, and the relay's daily
+# quota is shared with sign-in links. Constants rather than settings: a setting owes the
+# front door's configuration docs a row.
+SUPPORT_REQUESTS_PER_DAY = 20
+_SUPPORT_DAY_SECONDS = 86_400
+
 
 @router.post("/support", response_model=SupportResponse)
 async def send_support_request(request: Request, body: SupportRequest) -> SupportResponse:
@@ -27,7 +34,8 @@ async def send_support_request(request: Request, body: SupportRequest) -> Suppor
     Anonymous, so someone locked out of their account can still reach the operator. Nothing
     is stored: the message goes to the operator's mailbox with the submitted `email` as its
     reply-to, and that address is never verified, so the operator reads it as a claim, not
-    an identity. Rate limited per IP and per address. 503 when this instance has no support
+    an identity. Rate limited per IP and per address, and across the whole instance to 20
+    submissions a day; any of the three answers 429. 503 when this instance has no support
     address configured, in which case nothing is counted against the limits.
     """
     # Anonymous is what makes this the one endpoint that sends mail on an anonymous caller's
@@ -55,6 +63,8 @@ async def send_support_request(request: Request, body: SupportRequest) -> Suppor
         settings.CONTACT_FORM_RATE_LIMIT_PER_EMAIL,
         settings.CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS,
     )
+    # Last, so a request the narrower limits refuse does not spend the instance's day.
+    await enforce_rate_limit("support:instance", SUPPORT_REQUESTS_PER_DAY, _SUPPORT_DAY_SECONDS)
 
     await send_support_request_email(
         name=body.name,

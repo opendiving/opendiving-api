@@ -19,6 +19,7 @@ import pytest
 import starlette.config
 
 from src.app.core.config import (
+    CI_SECRET_KEY,
     PLACEHOLDER_SECRET_KEYS,
     S3_REQUIRED_SETTINGS,
     EnvironmentOption,
@@ -30,11 +31,15 @@ from src.app.core.config import (
     split_csv,
 )
 
+# A key nothing publishes, so that a case on `staging` or `production` reaches whatever it is
+# about rather than the refusal of CI's key.
+GENERATED_KEY = "0f9c2b7a4e1d8c3f6a5b0e2d9c4f7a1b"
+
 
 def _settings(**overrides):
     """Build a `Settings` without reading the developer's own `src/.env`."""
     base = {
-        "SECRET_KEY": "test-secret-key-for-testing-only",
+        "SECRET_KEY": GENERATED_KEY,
         "ENVIRONMENT": EnvironmentOption.LOCAL,
         "CRUD_ADMIN_ENABLED": False,
         "SMTP_HOST": None,
@@ -146,16 +151,43 @@ class TestPlaceholderSecretKeysAreRefused:
                 EMAIL_FROM_ADDRESS="noreply@opendiving.example",
             )
 
-    def test_a_generated_key_is_accepted(self):
-        settings = _settings(SECRET_KEY="0f9c2b7a4e1d8c3f6a5b0e2d9c4f7a1b")
+    @pytest.mark.parametrize(
+        "environment", [EnvironmentOption.LOCAL, EnvironmentOption.STAGING, EnvironmentOption.PRODUCTION]
+    )
+    def test_a_generated_key_is_accepted(self, environment):
+        settings = _settings(
+            SECRET_KEY=GENERATED_KEY,
+            ENVIRONMENT=environment,
+            SMTP_HOST="smtp.example.com",
+            EMAIL_FROM_ADDRESS="noreply@opendiving.example",
+        )
 
-        assert settings.SECRET_KEY.get_secret_value() == "0f9c2b7a4e1d8c3f6a5b0e2d9c4f7a1b"
+        assert settings.SECRET_KEY.get_secret_value() == GENERATED_KEY
 
-    def test_the_throwaway_key_ci_uses_is_accepted(self):
-        """The guard is a list of published placeholders, not an entropy check - a rule
-        strong enough to reject this would also reject keys people genuinely generated.
+    def test_the_throwaway_key_ci_uses_is_accepted_locally(self):
+        """CI boots as `local`. The guard is a list of published values, not an entropy
+        check - a rule strong enough to reject this would also reject keys people genuinely
+        generated.
         """
-        assert _settings().SECRET_KEY.get_secret_value() == "test-secret-key-for-testing-only"
+        settings = _settings(SECRET_KEY=CI_SECRET_KEY, ENVIRONMENT=EnvironmentOption.LOCAL)
+
+        assert settings.SECRET_KEY.get_secret_value() == CI_SECRET_KEY
+
+    @pytest.mark.parametrize("environment", [EnvironmentOption.STAGING, EnvironmentOption.PRODUCTION])
+    @pytest.mark.parametrize("value", [CI_SECRET_KEY, f"  {CI_SECRET_KEY.upper()}  "])
+    def test_the_throwaway_key_ci_uses_is_refused_anywhere_else(self, environment, value: str):
+        """It is published in this repository's workflow and CONTRIBUTING.md, so a deployment
+        running on it signs tokens anybody can mint. Refused with the placeholder's message,
+        prefix and all, so the front door's troubleshooting entry finds this case too."""
+        with pytest.raises(ValueError) as raised:
+            _settings(
+                SECRET_KEY=value,
+                ENVIRONMENT=environment,
+                SMTP_HOST="smtp.example.com",
+                EMAIL_FROM_ADDRESS="noreply@opendiving.example",
+            )
+
+        assert "SECRET_KEY is unset or still a placeholder" in str(raised.value)
 
 
 class TestEveryDeployedEnvironmentRequiresARelay:

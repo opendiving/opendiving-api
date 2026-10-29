@@ -13,9 +13,10 @@ from src.app.core.config import EnvironmentOption, Settings
 
 
 def _settings(**overrides):
-    """Build a `Settings` without reading the developer's own `src/.env`."""
+    """Build a `Settings` without reading the developer's own `src/.env`. The key is not
+    CI's, which is refused outside `local`."""
     base = {
-        "SECRET_KEY": "test-secret-key-for-testing-only",
+        "SECRET_KEY": "0f9c2b7a4e1d8c3f6a5b0e2d9c4f7a1b",
         "ENVIRONMENT": EnvironmentOption.LOCAL,
         "CRUD_ADMIN_ENABLED": False,
         "SMTP_HOST": "smtp.example.com",

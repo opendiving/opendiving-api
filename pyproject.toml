@@ -143,7 +143,10 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+# Pinned because `uv.lock` does not cover it: the image build installs the project with
+# whatever version PyPI serves that minute, and every push to `main` deploys that image.
+# Renovate's pep621 manager bumps it like any other pin.
+requires = ["hatchling==1.32.3"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.sdist]

@@ -90,7 +90,8 @@ class AppSettings(BaseSettings):
 # An explicit list rather than an entropy heuristic on purpose: the failure this guards is
 # "the template's own value reached a deployment", not "the operator chose badly", and a
 # heuristic that rejects a key someone genuinely generated is a worse bug than the one it
-# prevents. CI's `test-secret-key-for-testing-only` is deliberately not in here.
+# prevents. CI's key is deliberately not in here: CI boots as `local`, so `CI_SECRET_KEY`
+# below is refused only outside it, by the same validator and with the same message.
 PLACEHOLDER_SECRET_KEYS = frozenset(
     {
         "change-me-openssl-rand-hex-32",
@@ -102,6 +103,9 @@ PLACEHOLDER_SECRET_KEYS = frozenset(
         "your_secret_key",
     }
 )
+
+# CI's `SECRET_KEY`, published in `.github/workflows/tests.yml` and `CONTRIBUTING.md`.
+CI_SECRET_KEY = "test-secret-key-for-testing-only"
 
 
 MIN_REFRESH_TOKEN_REUSE_GRACE_SECONDS = 5
@@ -211,6 +215,21 @@ class PostgresSettings(DatabaseSettings):
 # published in this repo's history, so it is treated as "no password at all" rather
 # than as a credential - see `Settings._reject_insecure_admin_config`.
 LEGACY_DEFAULT_ADMIN_PASSWORD = "!Ch4ng3Th1sP4ssW0rd!"
+
+# `ADMIN_PASSWORD` values that are published strings rather than credentials: the one above,
+# the one both config templates ship commented out under an `ADMIN_USERNAME` that defaults
+# to `admin`, and the stock stand-ins. Lowercase, matched case-insensitively after stripping.
+PLACEHOLDER_ADMIN_PASSWORDS = frozenset(
+    {
+        LEGACY_DEFAULT_ADMIN_PASSWORD.lower(),
+        "a-real-password-not-this-one",
+        "change-me",
+        "changeme",
+        "changethis",
+        "admin",
+        "password",
+    }
+)
 
 
 class FirstUserSettings(BaseSettings):
@@ -1145,7 +1164,7 @@ class CRUDAdminSettings(BaseSettings):
     # Who may reach the panel at all, comma-separated and parsed by `split_csv`, e.g.
     # CRUD_ADMIN_ALLOWED_IPS="203.0.113.7,203.0.113.8" or
     # CRUD_ADMIN_ALLOWED_NETWORKS="10.0.0.0/8". Unset means "from anywhere the API is
-    # reachable", which is what `_reject_insecure_admin_config` warns about in production.
+    # reachable", which is what `_reject_insecure_admin_config` warns about outside `local`.
     #
     # These were `list[str] | None` bare annotations with no `config()` call, for the
     # pydantic-settings reason `split_csv` documents - which made them settable only as
@@ -1257,7 +1276,8 @@ class Settings(
 
         Every environment, with no `ENVIRONMENT` gate: a staging instance signing tokens
         with a published key is compromised in exactly the way a production one is, and
-        the local instance is the one whose `.env` came straight from the template.
+        the local instance is the one whose `.env` came straight from the template. The one
+        exception is `CI_SECRET_KEY`, refused everywhere but `local`, which is how CI boots.
 
         The message names `.env` and not `src/.env.example`. This refusal has a *second*
         audience the template path does not describe: the front door's `example.env` ships
@@ -1278,9 +1298,12 @@ class Settings(
         about. `test_the_refusal_keeps_the_prefix_the_front_door_indexes_on` pins it. Change
         it only together with that repository, and only as a deliberate pair.
         """
-        secret = self.SECRET_KEY.get_secret_value().strip()
+        secret = self.SECRET_KEY.get_secret_value().strip().lower()
+        published = secret in PLACEHOLDER_SECRET_KEYS or (
+            secret == CI_SECRET_KEY and self.ENVIRONMENT != EnvironmentOption.LOCAL
+        )
 
-        if not secret or secret.lower() in PLACEHOLDER_SECRET_KEYS:
+        if not secret or published:
             raise ValueError(
                 "SECRET_KEY is unset or still a placeholder - the one your .env arrived with. It "
                 "signs every token this app issues, so a published value lets anyone mint one for "
@@ -1456,7 +1479,7 @@ class Settings(
 
     @model_validator(mode="after")
     def _reject_insecure_admin_config(self) -> Self:
-        """Refuses to boot a production instance whose admin panel is reachable with a
+        """Refuses to boot a deployed instance whose admin panel is reachable with a
         credential that isn't one.
 
         `SECRET_KEY` already fails startup when unset; the admin password deserves the
@@ -1464,25 +1487,31 @@ class Settings(
         `User`, `Dive`, `GearItem` and everything else (`admin.views`). Getting this
         wrong is silent - the app starts, serves traffic, and simply happens to have an
         open door - so the check has to happen here rather than being left to a reader
-        of `.env.example`.
+        of `.env.example`. Both templates ship a password commented out, so uncommenting
+        one as written must fail here rather than become a working public login.
+
+        Every environment except `local`, for `_require_smtp_outside_local`'s reason: a
+        staging instance is a deployment someone other than the developer can reach.
         """
-        if not self.CRUD_ADMIN_ENABLED or self.ENVIRONMENT != EnvironmentOption.PRODUCTION:
+        if not self.CRUD_ADMIN_ENABLED or self.ENVIRONMENT == EnvironmentOption.LOCAL:
             return self
 
-        password = self.ADMIN_PASSWORD.get_secret_value() if self.ADMIN_PASSWORD else ""
-        if not password or password == LEGACY_DEFAULT_ADMIN_PASSWORD:
+        password = self.ADMIN_PASSWORD.get_secret_value().strip() if self.ADMIN_PASSWORD else ""
+        if not password or password.lower() in PLACEHOLDER_ADMIN_PASSWORDS:
             raise ValueError(
-                "CRUD_ADMIN_ENABLED is true in production but ADMIN_PASSWORD is unset or still "
-                "the boilerplate default. Set a real ADMIN_PASSWORD, or set CRUD_ADMIN_ENABLED=false "
-                "to not expose the admin panel at all."
+                f"CRUD_ADMIN_ENABLED is true and ENVIRONMENT is {self.ENVIRONMENT.value}, but "
+                "ADMIN_PASSWORD is unset or still a placeholder. Outside ENVIRONMENT=local, set a "
+                "real ADMIN_PASSWORD, or set CRUD_ADMIN_ENABLED=false to not expose the admin "
+                "panel at all."
             )
 
         if not split_csv(self.CRUD_ADMIN_ALLOWED_IPS) and not split_csv(self.CRUD_ADMIN_ALLOWED_NETWORKS):
             # Advisory rather than fatal: plenty of deployments put the panel behind a
             # VPN or bastion instead, and hard-failing would break those.
             warnings.warn(
-                "The admin panel is enabled in production with no CRUD_ADMIN_ALLOWED_IPS or "
-                "CRUD_ADMIN_ALLOWED_NETWORKS. It is reachable from anywhere that can reach the API.",
+                f"The admin panel is enabled with ENVIRONMENT={self.ENVIRONMENT.value} and no "
+                "CRUD_ADMIN_ALLOWED_IPS or CRUD_ADMIN_ALLOWED_NETWORKS. It is reachable from "
+                "anywhere that can reach the API.",
                 stacklevel=2,
             )
 

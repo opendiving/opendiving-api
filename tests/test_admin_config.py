@@ -12,7 +12,12 @@ from unittest.mock import patch
 import pytest
 
 from src.app.admin.initialize import create_admin_interface
-from src.app.core.config import LEGACY_DEFAULT_ADMIN_PASSWORD, EnvironmentOption, Settings
+from src.app.core.config import (
+    LEGACY_DEFAULT_ADMIN_PASSWORD,
+    PLACEHOLDER_ADMIN_PASSWORDS,
+    EnvironmentOption,
+    Settings,
+)
 from tests.helpers.model_metadata import divers_own_hard_deleted, soft_deleting_models
 
 
@@ -21,11 +26,12 @@ def _settings(**overrides):
 
     The SMTP pair is here because these cases are production ones and
     `_require_smtp_outside_local` refuses to boot a production instance that cannot mail a
-    sign-in link. It is unrelated to the admin panel - it just has to be satisfied to reach
-    the guard under test.
+    sign-in link, and the key is not CI's because that is refused outside `local`. Both are
+    unrelated to the admin panel - they just have to be satisfied to reach the guard under
+    test.
     """
     base = {
-        "SECRET_KEY": "test-secret-key-for-testing-only",
+        "SECRET_KEY": "0f9c2b7a4e1d8c3f6a5b0e2d9c4f7a1b",
         "ENVIRONMENT": EnvironmentOption.PRODUCTION,
         "SMTP_HOST": "smtp.example.com",
         "EMAIL_FROM_ADDRESS": "noreply@opendiving.example",
@@ -35,15 +41,45 @@ def _settings(**overrides):
     return Settings(**{**base, **overrides})
 
 
-class TestAdminPasswordIsRequiredInProduction:
-    def test_missing_password_fails_startup(self):
+class TestAdminPasswordIsRequiredOutsideLocal:
+    @pytest.mark.parametrize("environment", [EnvironmentOption.PRODUCTION, EnvironmentOption.STAGING])
+    def test_missing_password_fails_startup(self, environment):
+        """Staging as well as production: either is a deployment someone other than the
+        developer can reach."""
         with pytest.raises(ValueError, match="ADMIN_PASSWORD"):
-            _settings(ADMIN_PASSWORD=None)
+            _settings(ENVIRONMENT=environment, ADMIN_PASSWORD=None)
 
     def test_the_old_boilerplate_password_fails_startup(self):
         """It is in this repository's history, so it is a published string, not a secret."""
         with pytest.raises(ValueError, match="ADMIN_PASSWORD"):
             _settings(ADMIN_PASSWORD=LEGACY_DEFAULT_ADMIN_PASSWORD)
+
+    @pytest.mark.parametrize("placeholder", sorted(PLACEHOLDER_ADMIN_PASSWORDS))
+    @pytest.mark.parametrize("environment", [EnvironmentOption.PRODUCTION, EnvironmentOption.STAGING])
+    def test_each_placeholder_fails_startup(self, environment, placeholder: str):
+        with pytest.raises(ValueError, match="ADMIN_PASSWORD"):
+            _settings(ENVIRONMENT=environment, ADMIN_PASSWORD=placeholder)
+
+    @pytest.mark.parametrize("value", ["  ADMIN  ", "Password", "A-Real-Password-Not-This-One", "   "])
+    def test_casing_and_padding_do_not_get_past_it(self, value: str):
+        with pytest.raises(ValueError, match="ADMIN_PASSWORD"):
+            _settings(ADMIN_PASSWORD=value)
+
+    def test_the_value_the_template_ships_is_one_of_them(self):
+        """Uncommenting the template's admin block as written must not produce a working
+        login. Read out of the template rather than restated, so editing one without the
+        other fails here.
+        """
+        from pathlib import Path
+
+        template = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text()
+        shipped = next(line for line in template.splitlines() if line.startswith("# ADMIN_PASSWORD="))
+
+        assert shipped.split("=", 1)[1].strip('"').lower() in PLACEHOLDER_ADMIN_PASSWORDS
+
+    def test_the_refusal_names_the_environment_that_was_configured(self):
+        with pytest.raises(ValueError, match="staging"):
+            _settings(ENVIRONMENT=EnvironmentOption.STAGING, ADMIN_PASSWORD=None)
 
     def test_a_real_password_is_accepted(self):
         # The no-allowlist warning is expected here and asserted on its own below.
@@ -60,16 +96,17 @@ class TestAdminPasswordIsRequiredInProduction:
 
         assert settings.CRUD_ADMIN_ENABLED is False
 
-    @pytest.mark.parametrize("environment", [EnvironmentOption.LOCAL, EnvironmentOption.STAGING])
-    def test_non_production_is_left_alone(self, environment):
+    @pytest.mark.parametrize("password", [None, "admin"])
+    def test_local_is_left_alone(self, password):
         """Local development runs the panel without ceremony."""
-        settings = _settings(ENVIRONMENT=environment, ADMIN_PASSWORD=None)
+        settings = _settings(ENVIRONMENT=EnvironmentOption.LOCAL, ADMIN_PASSWORD=password)
 
-        assert settings.ENVIRONMENT == environment
+        assert settings.ENVIRONMENT == EnvironmentOption.LOCAL
 
-    def test_an_enabled_panel_without_an_ip_allowlist_warns(self):
+    @pytest.mark.parametrize("environment", [EnvironmentOption.PRODUCTION, EnvironmentOption.STAGING])
+    def test_an_enabled_panel_without_an_ip_allowlist_warns(self, environment):
         with pytest.warns(UserWarning, match="CRUD_ADMIN_ALLOWED_IPS"):
-            _settings()
+            _settings(ENVIRONMENT=environment)
 
     def test_no_warning_once_an_allowlist_is_set(self):
         import warnings
