@@ -46,6 +46,12 @@
   // UTC; no `timezone` is set because nothing here cares which morning it is.
   "schedule": ["before 9am on monday"],
 
+  // Rebase only on a conflict, not every time `main` moves. A Monday batch gets merged one PR
+  // at a time, each rebased by hand just before its merge, so rebasing the rest after every
+  // merge reruns CI across the whole batch for nothing. The rebase checkbox in a PR's body
+  // still asks for one on demand.
+  "rebaseWhen": "conflicted",
+
   // Load-bearing, and the default only by luck. This repository pins in several styles on
   // purpose, and Renovate's job is to renew whichever it finds rather than to normalise:
   //
