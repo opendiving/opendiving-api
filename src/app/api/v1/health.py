@@ -47,19 +47,19 @@ _NO_STORE = {"Cache-Control": "no-store"}
 
 @router.get("/health")
 async def health_check(response: Response) -> dict[str, str]:
-    """Liveness: the process is up and routing requests. Checks nothing else, on purpose.
+    """Liveness: the process is up and routing requests, and nothing else is checked.
 
-    This is what the image's `HEALTHCHECK` used to run and what an orchestrator should
-    point a restart-on-failure probe at, so it must not fail for a reason restarting the
-    container cannot fix. Use `/health/ready` to find out whether it can serve.
+    Anonymous. The operation an orchestrator points a restart-on-failure probe at, so it
+    never fails for a reason restarting the container cannot fix; `GET /health/ready` is
+    the one that says whether the instance can serve.
 
-    `commit` is what identifies the build, and `version` on its own no longer does:
-    images are published on every merge to `main` as well as on a release tag, and every
-    one on that channel reports the same manifest version until somebody cuts a tag.
-    `commit` reads `"unknown"` anywhere but an image built by `publish-image.yml`, which
-    is the only thing that bakes it in - unlike `version`, which any installed checkout
-    has from its own distribution metadata.
+    `version` is the release the build came from and `commit` the exact build. Images are
+    published on every merge as well as on every release, and every image between two
+    releases reports the same `version`, so `commit` is what tells builds apart; it reads
+    `"unknown"` for a build that did not record one. The response is never cacheable.
     """
+    # `commit` is baked in only by an image built by `publish-image.yml`, unlike `version`,
+    # which any installed checkout has from its own distribution metadata.
     response.headers.update(_NO_STORE)
     return {
         "status": "healthy",
@@ -71,16 +71,19 @@ async def health_check(response: Response) -> dict[str, str]:
 
 @router.get("/health/ready")
 async def readiness_check(response: Response, db: Annotated[AsyncSession, Depends(async_get_db)]) -> dict[str, str]:
-    """Readiness: Postgres and Redis both answered. 503 with the failing dependency named.
+    """Readiness: whether the instance can serve, which takes both its database and its
+    key-value store answering.
 
-    For uptime monitors and for `depends_on: condition: service_healthy` - a dependent
-    that waits on `api` wants "can serve", not "has a process". Every read in this API is
-    Redis-backed and every write is Postgres-backed, so an instance missing either one is
-    not serving, whatever its process table says.
-
-    Both checks are cheap by design (`SELECT 1`, `PING`) because a monitor runs this every
-    few seconds forever: it must cost less than the traffic it is watching for.
+    Anonymous. 200 with a field per dependency reading `ok`; 503 when either does not
+    answer, with `detail` naming which. Both probes run at once and each is bounded, so the
+    answer arrives within a few seconds even when a dependency hangs rather than refuses.
+    Cheap enough to poll every few seconds, and never cacheable.
     """
+    # For uptime monitors and for `depends_on: condition: service_healthy` - a dependent that
+    # waits on `api` wants "can serve", not "has a process". Every read in this API is
+    # Redis-backed and every write is Postgres-backed, so an instance missing either one is not
+    # serving, whatever its process table says. `SELECT 1` and `PING` because a monitor runs
+    # this every few seconds forever: it must cost less than the traffic it is watching for.
     response.headers.update(_NO_STORE)
 
     # `gather` rather than two awaits: both checks always run either way, but concurrently

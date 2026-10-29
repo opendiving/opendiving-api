@@ -64,17 +64,19 @@ async def read_sessions(
 ) -> list[UserSessionRead]:
     """Every device currently signed in to the caller's account, most recently used first.
 
-    Unpaginated, like `GET /user/passkeys`, and **not Redis-cached - for a reason of its
-    own rather than that one's.** Passkeys skip the cache because there is nothing worth
-    caching; this response cannot be cached correctly at all. It carries `current` per row,
-    resolved from the requesting token's `sid`, so it varies by credential rather than by
-    user - and every cache key in this app is user-scoped, which is what pattern
-    invalidation depends on. A cached entry would hand one device's "This device" marker to
-    another, which is a wrong answer rather than a stale one.
+    Needs a signed-in session's bearer token; an API key is refused (403). The whole list in
+    one response, read fresh on every call. `current` marks the session making the request.
 
-    Revoked and expired rows are absent: the list is what can still authenticate something,
-    which is the same predicate `/auth/refresh` checks.
+    Only live sessions: one that was signed out, revoked or expired is absent, so the list is
+    exactly what can still authenticate something.
     """
+    # Unpaginated, like `GET /user/passkeys`, and not Redis-cached - for a reason of its own
+    # rather than that one's. Passkeys skip the cache because there is nothing worth caching;
+    # this response cannot be cached correctly at all. `current` is resolved from the requesting
+    # token's `sid`, so the body varies by credential rather than by user - and every cache key
+    # in this app is user-scoped, which is what pattern invalidation depends on. A cached entry
+    # would hand one device's "This device" marker to another, which is a wrong answer rather
+    # than a stale one.
     rows = await live_sessions_for_user(db, user_id=current_user["id"], limit=_LIST_LIMIT)
     return [to_public_session(row, current_session_uuid=session_uuid) for row in rows]
 
@@ -87,29 +89,29 @@ async def erase_session(
     session_uuid: Annotated[uuid_pkg.UUID | None, Depends(current_session_uuid)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> SessionRevokedResponse:
-    """Sign one other device out.
+    """Signs one other device out.
 
-    404 unless the caller owns it, exactly as for a session that does not exist - the
-    ownership contract every keyed route here honours.
+    Needs a signed-in session's bearer token; an API key is refused (403). The revoked
+    session's access token and refresh cookie both stop working on that device's very next
+    request, and it leaves `GET /user/sessions`.
 
-    **409 for the caller's own session, kept deliberately now that it is optional.** Since
-    `get_current_user` began checking the `sid`, a self-revoke would in fact sign the browser
-    out - so the status no longer stands between the caller and a no-op. It stands between
-    them and a half-logout: ending your own session is what `POST /auth/logout` is, and
-    logout also clears the refresh cookie and blacklists the presented pair. A revoke that
-    skipped both would leave a browser holding a dead access token, a live cookie that
-    cannot rotate, and nothing on the blacklist. So the current row is marked in the list
-    and carries no revoke control, and this status is the backstop rather than the UX.
-
-    A second revoke of an already-revoked session succeeds and changes nothing, unlike the
-    hard-deleting resources whose second `DELETE` is a 404: the row is not what is being
-    removed, and the caller already owns it.
-
-    `session_uuid` is typed optional because `current_session_uuid` is, and it cannot
-    actually be `None` here - `get_current_user` refuses a token carrying no `sid` before
-    this handler runs. The comparison is written to tolerate one regardless, so this route
-    never becomes the place where that assumption is load-bearing.
+    404 for a session that is not the caller's, exactly as for one that does not exist. 409
+    for the session making the request: ending your own is `POST /auth/logout`. Revoking a
+    session that is already revoked succeeds and changes nothing.
     """
+    # The 409 stands between the caller and a half-logout: a self-revoke would sign the browser
+    # out, but logout also clears the refresh cookie and blacklists the presented pair, and a
+    # revoke that skipped both would leave a browser holding a dead access token, a live cookie
+    # that cannot rotate, and nothing on the blacklist. The current row is marked in the list
+    # and carries no revoke control, so this status is the backstop rather than the UX.
+    #
+    # A second revoke succeeds, unlike the hard-deleting resources whose second `DELETE` is a
+    # 404: the row is not what is being removed, and the caller already owns it.
+    #
+    # `session_uuid` is typed optional because `current_session_uuid` is, and it cannot actually
+    # be `None` here - `get_current_user` refuses a token carrying no `sid` before this handler
+    # runs. The comparison tolerates one regardless, so this route never becomes the place
+    # where that assumption is load-bearing.
     await fetch_owned_or_raise(
         db=db,
         crud=crud_user_sessions,
@@ -142,21 +144,22 @@ async def erase_other_sessions(
     session_uuid: Annotated[uuid_pkg.UUID | None, Depends(current_session_uuid)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> SessionsRevokedResponse:
-    """Sign every *other* device out, and report how many that was.
+    """Signs every other device out, and reports how many sessions that ended.
 
-    The count is the payload rather than decoration: the client confirms before it sends
-    this, so the number of sessions actually ended cannot come from the dialog and has to
-    come from here.
-
-    The caller's own session is spared, which is what makes this "sign out other sessions"
-    rather than a global logout. There is no token left that names no session to spare:
-    `get_current_user` refuses one before this handler runs, so `except_uuid` is always a
-    real uuid here and the store's spare-nothing branch is never reached from a route.
-
-    One event for the whole action, not one per row. The rows revoked here are the
-    *subject* of the event, and a per-row row would turn one deliberate act into ninety-nine
-    entries.
+    Needs a signed-in session's bearer token; an API key is refused (403). The session making
+    the request stays signed in; every other live session on the account is revoked, and
+    `revoked` is the count. Calling it with nothing else signed in succeeds with `0`.
     """
+    # The count is the payload rather than decoration: the client confirms before it sends
+    # this, so the number of sessions actually ended cannot come from the dialog and has to
+    # come from here.
+    #
+    # There is no token left that names no session to spare: `get_current_user` refuses one
+    # before this handler runs, so `except_uuid` is always a real uuid here and the store's
+    # spare-nothing branch is never reached from a route.
+    #
+    # One event for the whole action, not one per row. The rows revoked here are the *subject*
+    # of the event, and a per-row row would turn one deliberate act into ninety-nine entries.
     revoked = await revoke_other_sessions(db, user_id=current_user["id"], except_uuid=session_uuid)
     await record_auth_event(
         db,
