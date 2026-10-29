@@ -140,7 +140,8 @@ async def write_dive_site(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> DiveSiteRead:
-    """Create a dive site for the authenticated user.
+    """Create a dive site for the authenticated user, answering 201 with the site as
+    `GET /dive-site/{uuid}` reads it.
 
     Uniqueness is on the site's name *and* its locality's name together, so the same site
     name in a different place is allowed; a genuine repeat is a 422. `latitude` and
@@ -148,18 +149,16 @@ async def write_dive_site(
 
     `location` is the whole place - the name it is known by, the locality's own centre and
     its extent - and every member but the name is optional, so a locality the diver typed
-    is a name and nothing else. Its position is the
-    *place's*, never the site's: filling it from the site's own pin would claim the town
-    sits exactly where the marker was dropped.
+    is a name and nothing else. Its position is the *place's*, never the site's: filling it
+    from the site's own pin would claim the town sits exactly where the marker was dropped.
 
-    `other_names`, `external_ids` and `entry_types` are stored conforming rather than
-    refused: another name the name or an earlier one already says is dropped, compared
-    trimmed and case-folded, and a repeated registry entry or entry type is kept once. An
-    `external_ids` entry under a registry the format names - `wikidata`, `openstreetmap`,
-    `worms` - must have that registry's identifier form; any other registry is stored as
-    sent. `depth_from` above `depth_to` is
-    a 422. `tags` are by name, each matched to the diver's tag of that name or created, as a
-    dive's are.
+    `other_names`, `external_ids` and `entry_types` are stored conforming, not refused:
+    another name the name or an earlier one already says is dropped, compared trimmed and
+    case-folded, and a repeated registry entry or entry type is kept once. An `external_ids`
+    entry under a registry the format names - `wikidata`, `openstreetmap`, `worms` - must
+    have that registry's identifier form; any other registry is stored as sent. `depth_from`
+    above `depth_to` is a 422. `tags` are by name, each matched to the diver's tag of that
+    name or created, as a dive's are.
     """
     location = dive_site.location
     if await dive_site_name_exists(
@@ -270,9 +269,9 @@ async def read_dive_sites(
     there.
 
     `search` matches a case-insensitive substring against the site's name, its other names
-    and its locality's name. `tag_uuid`
-    keeps the sites carrying that tag, and one that is not the caller's returns an empty
-    page rather than an error. Out-of-range pagination is clamped, not rejected.
+    and its locality's name. `tag_uuid` keeps the sites carrying that tag, and one that is
+    not the caller's returns an empty page rather than an error. Out-of-range pagination is
+    clamped, not rejected.
 
     The summary counts the live dives naming the site at any position, so the second site of
     a drift dive counts that dive too.
@@ -374,8 +373,7 @@ async def lookup_dive_sites(
     named most recently first, then sites no such dive names, newest created first.
 
     `search` matches what `GET /dive-sites` matches. `uuid` narrows the rows to the sites a
-    form already holds, and is not cached: no two forms hold the same set for long. Out-of-range
-    pagination is clamped.
+    form already holds. Out-of-range pagination is clamped.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
     return await _lookup(
@@ -445,21 +443,21 @@ async def patch_dive_site(
     is re-checked against the *resulting* name and locality name, so moving a site to a
     place where that name is already taken is a 422. `latitude` and `longitude` are
     one value: a body naming one without the other is a 422, so moving a site means
-    sending both and clearing it means sending both as null. Because dive reads embed
-    this site's name, locality and position, a change to any of them also invalidates
-    every cached dive logged here.
+    sending both and clearing it means sending both as null. The dives logged here read
+    back the new name, place and position at once.
 
-    Naming `location` **replaces** the stored place whole - it is a value object with no
-    identity, so there is nothing to merge a partial one into, and a body carrying only a
-    name would otherwise leave the previous locality's centre and box behind. An explicit
-    `null` clears it, which is how a site entered with the wrong place is corrected back to
-    "not recorded".
+    Naming `location` **replaces** the stored place whole, so a body carrying only its name
+    clears the previous centre and extent: send the whole place. An explicit `null` clears
+    it, which is how a site entered with the wrong place is corrected back to "not recorded".
 
     A list - `other_names`, `external_ids`, `entry_types`, `tags` - replaces the stored one
     whole, and an explicit `null` clears a scalar. The depth range is checked against the
     stored end a body leaves out, so a `depth_from` below the stored `depth_to` is a 422. A
     rename onto one of the site's other names is a rename: that other name is dropped.
     """
+    # `location` is a value object with no identity, so there is nothing to merge a partial one
+    # into; replacing it whole is what keeps a name-only body from carrying the previous
+    # locality's centre and box forward.
     db_dive_site = await _get_owned_dive_site(db, uuid, current_user)
     owner_id = db_dive_site.user_id
     sent = values.model_fields_set
@@ -547,28 +545,29 @@ async def erase_dive_site(
 ) -> dict[str, str]:
     """Delete a dive site, optionally moving the dives logged at it to another site.
 
-    404 unless the caller owns it, exactly as for a site that doesn't exist - and a second
-    `DELETE` on the same uuid is now a 404 too, because the row really is gone. This route
-    used to be idempotent to insure against a half-failed multi-statement delete; one
-    `DELETE FROM dive_site` in one transaction cannot half-fail.
+    404 unless the caller owns it, exactly as for a site that doesn't exist, and a second
+    `DELETE` on the same uuid is a 404 too: the row is gone.
 
-    The `dive_dive_site` rows linking it to the dives logged there go with it
-    (`ON DELETE CASCADE`) - the rule was already declared on the FK and finally fires - so
-    those dives read back one site shorter and their cached reads are invalidated too.
-    Nothing survives the delete; `move_dives_to` before it if the association matters.
+    The dives logged here read back one site shorter, and nothing of the link survives the
+    delete; pass `move_dives_to` if the association matters.
 
     Pass `move_dives_to` and every one of the caller's live dives logged here has this site
     swapped for that one first, in the same transaction as the delete: either the whole log
     moved and this site is gone, or nothing happened. The replacement takes this site's slot
     in each dive's ordered site list - so it inherits being the primary site if this one was
     - and a dive already logged at both ends up holding it once. A replacement that isn't
-    the caller's own site, or that is this site, is a 422: the same answer `PATCH /dive`
-    gives for a `dive_site_uuids` entry it can't resolve, which is the per-dive call this
-    parameter exists to replace.
+    the caller's own site, or that is this site, is a 422, the same answer `PATCH /dive`
+    gives for a `dive_site_uuids` entry it can't resolve.
 
-    The response is the bare `{"message": ...}` every other delete on the API returns; the
-    count of what moved is not reported. See DECISIONS.md.
+    The response is the bare `{"message": ...}` every other delete answers; the count of
+    what moved is not reported.
     """
+    # Not idempotent: one `DELETE FROM dive_site` in one transaction cannot half-fail, so a retry
+    # has nothing to insure against - `DECISIONS.md`, *`DELETE` is not idempotent, and a second
+    # call 404s*. `move_dives_to` is the per-dive `PATCH /dive` call made once, which is why a
+    # bad replacement gets that route's 422 (*Move dives on delete: A bad replacement is a 422,
+    # not a 404*); the unreported count is *Move dives on delete: The response carries no
+    # moved-dives count*.
     db_dive_site = await _get_owned_dive_site(db, uuid, current_user)
     owner_id = db_dive_site.user_id
 
@@ -636,12 +635,12 @@ async def read_dive_site_suggestions(
 ) -> DiveSiteSuggestResponse:
     """Find named dive sites to prefill a new site from - "thistlegorm", "blue hole".
 
-    Answers from a catalog of real dive sites extracted from OpenStreetMap and Wikidata and
-    shipped inside this image, which is the gap the place search cannot fill: a geocoder
-    knows where Dahab is, not where the Blue Hole's north entry is. Picking a suggestion
-    means creating an ordinary dive site of your own from its values, which you can then
-    rename, move and annotate like any other: send its `external_id` in the new site's
-    `external_ids` and the site keeps the record's registry entry.
+    Answers from a catalog of real dive sites extracted from OpenStreetMap and Wikidata that
+    this instance carries, filling the gap a place search leaves: a geocoder knows where
+    Dahab is, not where the Blue Hole's north entry is. Picking a suggestion means creating
+    an ordinary dive site of your own from its values, which you can then rename, move and
+    annotate like any other: send its `external_id` in the new site's `external_ids` and the
+    site keeps the record's registry entry.
 
     `held_site` names your site that already carries that entry - the first by name where
     several do - so a form can offer it instead of making a second.
@@ -659,10 +658,11 @@ async def read_dive_site_suggestions(
     enough offshore belongs to no administrative area at all. Every result carries the
     `attribution` its source's licence requires, and a client showing these must render it.
 
-    Returns an empty list rather than an error when nothing matches, and also when the
-    catalog file itself cannot be read - a diver can always type the site in by hand, and a
-    500 here would make the form look broken over a convenience.
+    An empty list, never an error, both when nothing matches and when the catalog cannot be
+    read: a diver can always type the site in by hand.
     """
+    # Empty rather than a 500 when the catalog file is unreadable: a form looking broken over a
+    # convenience is the worse outcome.
     if (latitude is None) != (longitude is None):
         # The same rule `WholeCoordinatePair` enforces on the write schemas, and for the same
         # reason: half a pair is not a partial position but a meaningless one. Enforced here
