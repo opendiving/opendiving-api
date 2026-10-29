@@ -39,6 +39,7 @@ from .config import (
 )
 from .db.database import async_engine as engine
 from .db.migrations import upgrade_to_head
+from .openapi_access import annotate_credentials
 from .utils import cache
 
 # -------------- logging --------------
@@ -419,14 +420,20 @@ def create_application(
     # Under the API prefix, and on every environment, `production` included: `/api/v1*` is the
     # one path every proxy shape in front of this app already carries, and the document is how a
     # caller reads what the API offers. Anonymous by design - `ANONYMOUS_BY_DESIGN` says why.
+    annotated: list[dict[str, Any] | None] = [None]
+
     @application.get(OPENAPI_URL, include_in_schema=False)
     async def openapi() -> dict[str, Any]:
         # `application.openapi()` rather than a `get_openapi` call of our own: this is the only
         # OpenAPI route there is (the built-in one is off - `openapi_url=None` above), and a
         # hand-rolled call publishes exactly the fields somebody remembered to list. This one
         # passes on everything configured, and re-derives the schema when the route set changes
-        # rather than on every request.
+        # rather than on every request. The credentials are set on that cached document in place,
+        # so they are derived once per rebuild too.
         out: dict[str, Any] = application.openapi()
+        if out is not annotated[0]:
+            annotate_credentials(application, out)
+            annotated[0] = out
         return out
 
     if isinstance(settings, EnvironmentSettings):
