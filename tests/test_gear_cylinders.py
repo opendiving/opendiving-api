@@ -232,6 +232,7 @@ class TestARecordingAttach:
         file_uuid = uuid7()
         recording = MagicMock(files=[MagicMock(uuid=file_uuid)])
         recount = AsyncMock()
+        monkeypatch.setattr(dives_module, "enforce_rate_limit", AsyncMock())
         monkeypatch.setattr(dives_module, "_get_owned_dive", AsyncMock(return_value=MagicMock(id=3)))
         monkeypatch.setattr(
             dives_module, "store_recording_file", AsyncMock(return_value=MagicMock(file_uuid=file_uuid))

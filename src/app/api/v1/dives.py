@@ -10,7 +10,6 @@ from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import ColumnElement, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.concurrency import run_in_threadpool
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...api.integrity import write_or_422
@@ -30,6 +29,7 @@ from ...core.utils.datetime_offset import (
     split_updated_start_time,
 )
 from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
+from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.uploads import content_disposition_attachment, read_upload_within_limit
 from ...crud.crud_contacts import get_contact_uuids_by_ids
 from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
@@ -143,7 +143,12 @@ from ...services.dive_profiles import (
     load_profile,
     to_recording_read_schema,
 )
-from ...services.dive_reader import DiveFileReadError, UnsupportedDiveFileError, read_prefill
+from ...services.dive_reader import (
+    DiveFileReadError,
+    UnsupportedDiveFileError,
+    read_prefill,
+    run_in_conversion_thread,
+)
 from ...services.dive_recordings import (
     DeviceIdentity,
     RecordingFacts,
@@ -488,6 +493,18 @@ def _to_public_dive_with_mixtures(
     )
 
 
+# What one account may have the dive-file reader convert in an hour, across `POST /dive/parse` and
+# `POST /dive/{uuid}/recordings`: a diver logging a trip attaches a few dozen files, and each
+# conversion holds many times its input in memory. Constants rather than settings, since a setting
+# is a row in the self-hosting docs.
+DIVE_FILE_READS_PER_USER = 60
+DIVE_FILE_READS_WINDOW_SECONDS = 3600
+
+
+async def _enforce_dive_file_read_limit(user_id: int) -> None:
+    await enforce_rate_limit(f"dive-file-read:user:{user_id}", DIVE_FILE_READS_PER_USER, DIVE_FILE_READS_WINDOW_SECONDS)
+
+
 @router.post("/dive/parse", response_model=ParsedDiveResponse)
 async def parse_dive(
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -518,7 +535,11 @@ async def parse_dive(
     the start window alone, nearest first - since a form is asking a question, not making a
     decision; the ones flagged `same_recording` passed the much narrower test that says
     this file is a second export of a record that dive already has.
+
+    Rate limited per account, on an hourly budget shared with `POST /dive/{uuid}/recordings`;
+    a request over it is a 429.
     """
+    await _enforce_dive_file_read_limit(current_user["id"])
     if not file.filename:
         raise BadRequestException("Missing filename")
 
@@ -534,7 +555,7 @@ async def parse_dive(
         # the C-accelerated `json`/`expat` the text formats ride on. What bounds the worst
         # case is the reader's own cap on the messages one FIT may hold, which a file under
         # the upload cap can reach and no single dive does.
-        format_id, parsed, profile = await run_in_threadpool(read_prefill, content)
+        format_id, parsed, profile = await run_in_conversion_thread(read_prefill, content)
     except UnsupportedDiveFileError as exc:
         # 415 and 409 stay raw `HTTPException`s - unlike 400/403/404/422, `http_exceptions`
         # has no class for either code.
@@ -1636,7 +1657,11 @@ async def write_dive_recording(
     cause is logging one export as two dives. A 409 that asks for a retry means another
     upload to this dive changed its recordings while this one was in flight. A value in the
     file this instance cannot store is a 422 naming the field.
+
+    Rate limited per account, on an hourly budget shared with `POST /dive/parse`; a request
+    over it is a 429.
     """
+    await _enforce_dive_file_read_limit(current_user["id"])
     # The token proves this server parsed these exact bytes for this account, so the route
     # neither re-parses nor has to trust that an arbitrary upload is a dive log at all.
     db_dive = await _get_owned_dive(db, uuid, current_user)

@@ -51,6 +51,13 @@ def no_storage_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "STORAGE_LIMIT_MB", None)
 
 
+@pytest.fixture(autouse=True)
+def no_dive_file_read_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The read budget's own tests are in `tests/test_dive_file_read_bounds.py`; in CI, Redis
+    is real and bound to whichever event loop opened it first."""
+    monkeypatch.setattr("src.app.api.v1.dives.enforce_rate_limit", AsyncMock())
+
+
 def _make_dive_upload_client() -> TestClient:
     """Build a minimal app exposing only the dives router, with auth stubbed out.
 

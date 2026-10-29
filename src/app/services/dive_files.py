@@ -44,7 +44,6 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.concurrency import run_in_threadpool
 from uuid6 import uuid7
 
 from ..core.db.database import release_read_transaction
@@ -84,6 +83,7 @@ from .dive_reader import (
     prefill,
     read_dive_file,
     reads,
+    run_in_conversion_thread,
     shape,
     start_of,
 )
@@ -270,14 +270,13 @@ def extract_file(content: bytes, format: str) -> FileExtraction:
     reader regression to report, not a file that said nothing.
     """
     try:
-        read = read_dive_file(content, format=format)
+        return extraction_of(read_dive_file(content, format=format))
     except UnsupportedDiveFileError, DiveFileReadError:
         logger.warning("A stored %s file could not be read", format, exc_info=True)
         return _UNREAD
     except Exception:
         logger.exception("Unexpected error reading a %s file", format)
         return _UNREAD
-    return extraction_of(read)
 
 
 def extraction_of(read: ReadDive) -> FileExtraction:
@@ -372,8 +371,8 @@ def extract_recording(
 
     Pure and DB-free, on this module's `reconcile` idiom: the fill rule is the decision worth
     testing, and it is testable with a list of bytes and no database at all. **Pure CPU, and
-    the whole of it** - every caller on a request path hands it to `run_in_threadpool`, for
-    the reason *"Uploaded files are parsed in a thread, not on the event loop"* in
+    the whole of it** - every caller on a request path hands it to `run_in_conversion_thread`,
+    for the reason *"Uploaded files are parsed in a thread, not on the event loop"* in
     `DECISIONS.md` gives.
 
     **`start_time` and `utc_offset_minutes` are the recording's stored start**, the
@@ -1094,7 +1093,7 @@ async def store_recording_file(
     # is pure Python, and this is an `async def`. The read transaction is released first so
     # the connection isn't held idle for the duration - see `release_read_transaction`.
     await release_read_transaction(db)
-    extraction = await run_in_threadpool(extract_file, data, format_id)
+    extraction = await run_in_conversion_thread(extract_file, data, format_id)
 
     recordings = await dive_recordings.load_recordings_for_dive(db, dive_id=dive_id)
     incoming = _incoming_facts(extraction)
@@ -1129,7 +1128,7 @@ async def store_recording_file(
     # The recording's stored start is the axis origin: the matched one's, or - for the
     # recording this upload creates - the incoming file's own, which is what it will store.
     origin = matched.facts if matched is not None else incoming
-    recording_extraction = await run_in_threadpool(
+    recording_extraction = await run_in_conversion_thread(
         extract_recording,
         files,
         {digest: extraction},
@@ -1257,7 +1256,7 @@ async def is_same_stored_recording(
     starts = [
         start
         for file in files
-        if (start := (await run_in_threadpool(extract_file, file.data, file.parser_key)).start) is not None
+        if (start := (await run_in_conversion_thread(extract_file, file.data, file.parser_key)).start) is not None
     ]
     return not dive_recordings.holds_another_start(candidate.facts, starts)
 
@@ -1345,7 +1344,7 @@ async def read_recording(
     start_time, utc_offset_minutes = await dive_recordings.recording_start(db, recording_id=recording_id)
     if release:
         await release_read_transaction(db)
-    return files, await run_in_threadpool(
+    return files, await run_in_conversion_thread(
         extract_recording, files, known, start_time=start_time, utc_offset_minutes=utc_offset_minutes
     )
 
@@ -1856,7 +1855,7 @@ async def delete_dive_file(db: AsyncSession, *, file_id: int, commit: bool = Tru
             ordinal=ordinal or 0,
             change=RecordingChange.REMOVED,
             files=remaining,
-            extraction=await run_in_threadpool(
+            extraction=await run_in_conversion_thread(
                 extract_recording, remaining, start_time=start_time, utc_offset_minutes=utc_offset_minutes
             ),
         )
@@ -2240,7 +2239,7 @@ async def read_unread_file_fixes(db: AsyncSession, *, limit: int = FIX_READ_BATC
             except blob_store.BlobMissingError:
                 logger.error("Reading no fixes off file %s: it is missing from the store", row.id)
             else:
-                fixes = fixes_of(await run_in_threadpool(extract_file, data, row.parser_key))
+                fixes = fixes_of(await run_in_conversion_thread(extract_file, data, row.parser_key))
         await db.execute(update(DiveFile).where(DiveFile.id == row.id).values(**fixes, fixes_read=True))
     for dive_id in sorted({row.dive_id for row in rows}):
         await derive_dive_fixes(db, dive_id=dive_id, clear=False)
