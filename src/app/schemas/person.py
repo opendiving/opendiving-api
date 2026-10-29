@@ -5,7 +5,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
 
-from ..core.schemas import NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from ..core.schemas import MAX_LIST_ITEMS, NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 
 # DiveJSON §6.20's bounds, and the widths of the columns behind them.
 PERSON_NAME_MAX = 255
@@ -79,13 +79,18 @@ PeopleWrite = Annotated[
     list[PersonReference],
     Field(
         default_factory=list,
+        max_length=MAX_LIST_ITEMS,
         description="The people on it, in the diver's order, each with the role they had; a person named "
         "twice keeps the first",
     ),
 ]
 PeopleUpdate = Annotated[
     list[PersonReference] | None,
-    Field(default=None, description="Replaces the people on it wholesale. Omit to leave them."),
+    Field(
+        default=None,
+        max_length=MAX_LIST_ITEMS,
+        description="Replaces the people on it wholesale. Omit to leave them.",
+    ),
 ]
 PeopleRead = Annotated[
     list[PersonReferenceRead],

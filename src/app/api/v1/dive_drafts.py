@@ -51,11 +51,18 @@ async def write_dive_draft(
     """Save a dive not yet logged: the dive form's values, with nothing required.
 
     `values` takes `POST /dive`'s members, every one optional, with their types and
-    vocabularies and none of a dive's bounds or rules between members - a pressure of 400 bar
-    or an average deeper than the maximum is saved as typed, and logging the draft is where
-    the dive is validated. A wrong type or a word outside a vocabulary is a 422. References
-    are stored as given and read back only while they name a record of the caller's (or, for
-    a species, one that exists); a `gear_set_uuid` that is not the caller's is stored as none.
+    vocabularies and none of a dive's value bounds or rules between members - a pressure of
+    400 bar, an empty boat name or an average deeper than the maximum is saved as typed, and
+    logging the draft is where the dive is validated. The length bounds every write has do
+    apply: the notes, a sighting's notes, the boat name, each tag and each list are held to
+    the lengths `POST /dive` allows. A wrong type, a word outside a vocabulary or a value past
+    a length bound is a 422. References are stored as given and read back only while they
+    name a record of the caller's (or, for a species, one that exists); a `gear_set_uuid` that
+    is not the caller's is stored as none.
+
+    An account holds at most 200 drafts. Past that this is a 409 and saves nothing until a
+    draft is logged or deleted; a repeat under an `Idempotency-Key` still answers the draft
+    the first request made.
     """
     draft_id = await create_dive_draft(db, draft, user_id=current_user["id"])
     await db.commit()

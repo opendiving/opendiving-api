@@ -9,6 +9,10 @@ from pydantic import BaseModel, BeforeValidator, EmailStr, Field, StringConstrai
 # limit exists purely to keep payloads sane - not because of any storage constraint.
 NOTES_MAX_LENGTH = 100_000
 
+# The most entries a list in a request body takes: far past any real dive, and far under the
+# 32 767 bind parameters asyncpg allows one statement - a bound on the payload, not a product rule.
+MAX_LIST_ITEMS = 500
+
 # The largest value a Postgres `integer` column holds, for a write schema whose only ceiling on
 # a number is the width of the column it lands in.
 POSTGRES_INTEGER_MAX = 2**31 - 1
