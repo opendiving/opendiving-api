@@ -99,10 +99,10 @@ async def write_gear_item(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> GearItemRead:
-    """Create a gear item for the authenticated user.
+    """Create a gear item for the caller.
 
-    Uniqueness is on brand *and* name together, so the same model from two brands is
-    fine; a genuine repeat is a 422.
+    Uniqueness is on `brand` *and* `name` together, so the same model from two brands is
+    fine; a repeat of both is a 422.
     """
     if await gear_item_name_exists(db=db, user_id=current_user["id"], name=gear_item.name, brand=gear_item.brand):
         raise DuplicateValueException(_NAME_TAKEN)
@@ -211,7 +211,9 @@ async def read_gear_items(
         Query(max_length=255, description="Case-insensitive substring match on name or brand"),
     ] = None,
 ) -> dict:
-    """List the caller's gear. Archived items are excluded unless `include_archived=true`."""
+    """List the caller's gear alphabetically by name. Archived items are excluded unless
+    `include_archived=true`; `search` matches a case-insensitive substring of the name or
+    brand."""
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _cached_read_gear_items(
@@ -338,7 +340,7 @@ async def read_gear_item(
 ) -> GearItemRead:
     """Return a single gear item, with its service schedules attached.
 
-    404 when no such item exists - and the same 404 when it belongs to another user, so
+    404 when no such item exists, and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable.
     """
     # Authorize before the cached read: `@cache` replays a hit without re-checking.
@@ -357,12 +359,14 @@ async def patch_gear_item(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Partial update, including archiving/unarchiving via `is_archived` - `archived_at`
-    is derived here rather than accepted from the caller.
+    """Partially update a gear item; omitted fields are left untouched. Archiving and
+    unarchiving is `is_archived`; `archived_at` follows from it and is never accepted from
+    the caller.
 
-    A changed `volume` is written to every dive cylinder linked to the item in the same
-    transaction, so a tank linked to its vessel never disagrees with it after a correction.
-    Clearing the volume leaves the tanks' figures standing: there is nothing to write.
+    404 unless the caller owns it. A `brand` and `name` the caller already has on another
+    item is a 422. A changed `volume` is written to every dive cylinder linked to the item
+    in the same request, so a tank never disagrees with its vessel after a correction;
+    clearing the volume leaves the tanks' figures standing.
     """
     db_gear_item = await _get_owned_gear_item(db, uuid, current_user)
 
@@ -408,20 +412,20 @@ async def erase_gear_item(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
-    """Delete a gear item, and everything hanging off it.
+    """Delete a gear item and everything hanging off it: the item drops off the dives it was
+    used on and out of the sets it was in, and its servicing rules and service records go
+    with it, so its service history is destroyed. **Archiving** (`is_archived` on
+    `PATCH /gear-item/{uuid}`) is the non-destructive way to retire gear whose log and
+    service history should survive.
 
     404 unless the caller owns it, and a second `DELETE` on the same uuid is a 404 too.
-    Four `ON DELETE CASCADE`s do the work, all of them already declared on their FKs:
-    `dive_gear_item` and `gear_set_item` rows go, so the item drops off the dives it was
-    used on and out of the sets it was in; `gear_service_schedule` rows go, so the digest
-    stops emailing about kit the diver no longer has; and `gear_service_record` rows go
-    with them, so the item's service history is destroyed rather than kept invisibly.
-
-    That last one is the only behaviour a diver could notice as a loss, and the delete
-    dialog already promises it: **archiving** is the non-destructive way to retire gear
-    you still want in your log *and its service history*. See "A deleted gear item's
-    service history has no view, and archiving is the surface that does" in DECISIONS.md.
     """
+    # Four `ON DELETE CASCADE`s do the work, all of them declared on their FKs: `dive_gear_item`
+    # and `gear_set_item` rows; `gear_service_schedule` rows, so the digest stops emailing about
+    # kit the diver no longer has; and `gear_service_record` rows with them, destroyed rather
+    # than kept invisibly. That last one is the only behaviour a diver could notice as a loss,
+    # and the delete dialog already promises it. See "A deleted gear item's service history has
+    # no view, and archiving is the surface that does" in DECISIONS.md.
     db_gear_item = await _get_owned_gear_item(db, uuid, current_user)
     owner_id = db_gear_item.user_id
 

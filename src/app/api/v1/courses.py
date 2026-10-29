@@ -155,18 +155,15 @@ async def write_course(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> CourseRead:
-    """Create a training course for the authenticated user.
+    """Create a training course for the caller.
 
-    Unlike trips, course names are **not** unique per user - a course failed once and
-    retaken later is legitimately the same name twice - so there is no duplicate-name
-    refusal here.
+    Course names need not be unique: a course failed once and retaken later is legitimately
+    the same name twice, so a repeated name is accepted. Dives and certifications are linked
+    to a course from their own endpoints, by `course_uuid` on `POST`/`PATCH /dive` and
+    `/certification`, not from here.
 
-    Dives and certifications are linked to a course from their own endpoints
-    (`course_uuid` on `POST`/`PATCH /dive` and `/certification`), not from here.
-
-    `contact_uuid` names who ran the course; one that isn't the caller's own - or doesn't
-    exist - is a 422. `people` names who was on it, its instructors by role, and is refused
-    the same way.
+    `contact_uuid` names who ran the course and `people` who was on it, its instructors by
+    role; one of either that isn't the caller's own, or doesn't exist, is a 422.
     """
     contact_id: int | None = None
     if course.contact_uuid is not None:
@@ -305,10 +302,9 @@ async def read_courses(
 ) -> dict:
     """List the caller's training courses, most recent start date first.
 
-    Courses with no dates yet sort **last**, not first, so a `planned` course and a
-    back-filled one without dates stay out of the way of the log's chronology. `search`
-    matches a case-insensitive substring of the name. Out-of-range pagination is clamped
-    rather than rejected.
+    Courses with no dates sort **last**, so a `planned` course and a back-filled one without
+    dates stay out of the way of the log's chronology. `search` matches a case-insensitive
+    substring of the name. Out-of-range pagination is clamped, never rejected.
 
     All four filters combine with each other and with `search`. `date_from`/`date_to`
     describe a window a course's own `[start_date, end_date]` has to **overlap**, so
@@ -316,15 +312,15 @@ async def read_courses(
     December and finished in February - and a course with neither date drops out of the list
     entirely once either bound is set, having no interval to overlap. Either bound stands on
     its own: `date_from` alone is "still running on or after that day", `date_to` alone is
-    "had started by it". A window with its bounds the wrong way round is a swap rather than a
-    refusal - it matches nothing, so the client shows the same empty list it shows for a
-    window with no courses in it.
+    "had started by it". A window with its bounds the wrong way round is not refused: it
+    matches nothing and answers an empty page.
 
-    `agency` and `status` are exact matches on the stored value. Unlike the uuid filters on
-    `GET /dives`, a value outside the vocabulary is a 422 rather than an empty page: those
-    name a resource whose existence must stay unprobeable, while these name a member of a
-    closed set the client already has.
+    `agency` and `status` are exact matches on the stored value; a value outside the
+    vocabulary is a 422.
     """
+    # A 422 for an unknown `agency` or `status`, where the uuid filters on `GET /dives` answer
+    # an empty page: those name a resource whose existence must stay unprobeable, while these
+    # name a member of a closed set the client already has.
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     return await _cached_read_courses(
@@ -412,10 +408,11 @@ async def lookup_courses(
     a dive form fills from them. The course a dive at or before `until` was last logged on
     first, then courses no such dive is on, newest created first.
 
-    `search` matches what `GET /courses` matches; its date, agency and status filters are the
-    list's alone. `uuid` narrows the rows to the courses a form already holds, and is not
-    cached: no two forms hold the same set for long. Out-of-range pagination is clamped.
+    `search` matches what `GET /courses` matches; the list's date, agency and status filters
+    are not offered here. `uuid` narrows the rows to the courses a form already holds.
+    Out-of-range pagination is clamped.
     """
+    # A read narrowed by `uuid` bypasses the cache: no two forms hold the same set for long.
     page, items_per_page = clamp_pagination(page, items_per_page)
     return await _lookup(
         request,
@@ -462,7 +459,7 @@ async def read_course(
 ) -> CourseRead:
     """Return a single training course by its public uuid.
 
-    404 when no such course exists - and the same 404 when it belongs to another user, so
+    404 when no such course exists, and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable. The dives and certifications linked to it come
     from `GET /dives?course_uuid=` and `GET /certifications?course_uuid=`.
     """
@@ -486,12 +483,11 @@ async def patch_course(
 
     404 unless the caller owns it, exactly as for a course that doesn't exist. `agency` and
     `agency_other` are validated as a pair against the resulting values, so clearing one
-    while the other still requires it is a 422 rather than a half-updated row - and
-    `start_date`/`end_date` likewise, so moving either one past the stored other is a 422
-    rather than a course that ends before it began. Passing `null` for `contact_uuid`
-    unlinks the course's contact, which is distinct from omitting the key; a contact that
-    isn't the caller's own is a 422. `people` replaces the course's people wholesale, every
-    one the caller's own.
+    while the other still requires it is a 422; `start_date`/`end_date` likewise, so moving
+    either one past the stored other is a 422. Passing `null` for `contact_uuid` unlinks the
+    course's contact, which is distinct from omitting the key; a contact that isn't the
+    caller's own is a 422. `people` replaces the course's people wholesale, every one the
+    caller's own.
     """
     db_course = await _get_owned_course(db, uuid, current_user)
 
@@ -544,17 +540,15 @@ async def erase_course(
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, str]:
     """Delete a training course. The dives and certifications on it survive, unlinked, and
-    the people it named stay the caller's.
+    the people it named stay the caller's; there is no way back after.
 
-    404 unless the caller owns it, exactly as for a course that doesn't exist - and a
-    second `DELETE` on the same uuid is a 404 too, because the row really is gone.
-
-    There is no reassign-before-delete parameter, unlike `DELETE /trip/{uuid}`: a trip
-    groups a whole holiday's dives and moving them somewhere else is a real operation,
-    while a deleted course simply unlinks. `dive.course_id` and `certification.course_id`
-    are both `ON DELETE SET NULL`, so the database does that itself, and there is no way
-    back after.
+    404 unless the caller owns it, exactly as for a course that doesn't exist, and a second
+    `DELETE` on the same uuid is a 404 too, because the row really is gone.
     """
+    # No reassign-before-delete parameter, unlike `DELETE /trip/{uuid}`: a trip groups a whole
+    # holiday's dives and moving them somewhere else is a real operation, while a deleted course
+    # simply unlinks - `dive.course_id` and `certification.course_id` are both `ON DELETE SET
+    # NULL`, so the database does that itself.
     db_course = await _get_owned_course(db, uuid, current_user)
     owner_id = db_course.user_id
 
