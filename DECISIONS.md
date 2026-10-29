@@ -1361,7 +1361,9 @@ events not being a curve.
 SMTP credentials live here, not in the frontend.
 
 - Unauthenticated, so rate-limited by submitted email and by client IP (`CONTACT_FORM_RATE_LIMIT_*`,
-  one-hour window); the address is unverified, so `From:` is a claim.
+  one-hour window); the address is unverified, so `From:` is a claim. Inventing addresses defeats
+  the per-email bucket, so one instance-wide bucket, `SUPPORT_REQUESTS_PER_DAY`, is counted last:
+  the relay's daily quota is shared with sign-in links.
 - Nothing is stored; there is no inbox here.
 - `reply_to`, never a spoofed `from`: `EMAIL_FROM_ADDRESS` is the only address SPF/DKIM covers.
 - `send_support_request_email` runs `html.escape` over name, subject and body, being the only sender
@@ -1432,7 +1434,7 @@ The cache key `user_{id}_dives:neighbors:{uuid}` is under the list prefix like `
 `dive_activity`, going stale when any dive moves; `invalidate_dive_caches()` sweeps
 `user_{id}_dives:*`. `_get_owned_dive` runs before the `@cache` body.
 
-## The admin panel is off by default, and refuses to boot insecurely in production
+## The admin panel is off by default, and refuses to boot insecurely outside `local`
 
 The panel bypasses every ownership check in `api/v1` by talking to the models directly, so it is
 something an operator turns on, not something a fresh deploy inherits — unlike `/docs`, which
@@ -1441,12 +1443,13 @@ something an operator turns on, not something a fresh deploy inherits — unlike
 
 1. `ADMIN_PASSWORD` has no default (`SecretStr | None = None`). Unset means "no admin account",
    which `admin/initialize.py` handles.
-2. `CRUD_ADMIN_ENABLED` defaults to `False`. `src/.env.example` enables it for local development.
-3. `Settings._reject_insecure_admin_config` raises at startup when the panel is enabled in
-   production with a missing or boilerplate password (`"!Ch4ng3Th1sP4ssW0rd!"`). Chosen over
-   silently disabling it: an operator who meant to have it wants to know, and boot is the loudest,
-   cheapest place. A missing IP allowlist warns rather than raises, because deployments fronting the
-   panel with a VPN would otherwise refuse to start for no gain.
+2. `CRUD_ADMIN_ENABLED` defaults to `False`, and `src/.env.example` ships it commented out.
+3. `Settings._reject_insecure_admin_config` raises at startup when the panel is enabled outside
+   `local` with a missing password or one of `PLACEHOLDER_ADMIN_PASSWORDS` - the legacy default, the
+   value both templates ship commented out, stock stand-ins - case-insensitive. Chosen over silently
+   disabling it: an operator who meant to have it wants to know, and boot is the loudest, cheapest
+   place. A missing IP allowlist warns rather than raises, because deployments fronting the panel
+   with a VPN would otherwise refuse to start for no gain.
 
 ## `/auth/refresh` rotates the refresh token instead of reusing it
 
@@ -1482,8 +1485,10 @@ Anything revocable minted here needs the claim; dive-file tokens deliberately do
 revokes them by value and two identical parse receipts are one receipt.
 
 Nothing reads `jti` back (`verify_token` ignores it), so tokens minted without it verify until
-expiry. The blacklist is not keyed on a `jti` column: tidier, but worthless once issuances are
-unique.
+expiry. The blacklist is keyed on the token string, not a `jti` column, which holds only because
+`core.security._decode` accepts each token under one spelling: python-jose's base64url decoding also
+takes padding, dropped characters and a signature's spare low bits, each a string the blacklist has
+never seen.
 
 ## A reused refresh token is a `WARNING`, and `revoked_at` is what makes it legible
 
@@ -1524,7 +1529,8 @@ purge.
 otherwise `GET /dives?items_per_page=999999999` is a request for the whole log and a negative value
 reaches the database as a negative LIMIT. It clamps rather than rejects, so a client asking for too
 much gets the ceiling instead of a 422. One `DEFAULT_MAX_ITEMS_PER_PAGE` replaces per-module
-`MAX_*_PER_PAGE` constants, with a per-call override.
+`MAX_*_PER_PAGE` constants, with a per-call override. `page` is clamped to `MAX_PAGE`, since an
+unbounded one overflows Postgres's bigint `OFFSET` into a 500.
 
 The guard is `TestPageSizeCaps` in `tests/test_picker_search.py`. `PAGINATED_LIST_ROUTES` maps a
 filename to a tuple of handler names, and the check is an `ast` parse asking whether that handler's
@@ -3363,8 +3369,9 @@ relays only; `SMTP_USERNAME`/`SMTP_PASSWORD` are independently optional.
 
 `EMAIL_FROM_ADDRESS` has no default: `Settings._require_from_address_with_smtp` refuses to boot when
 `SMTP_HOST` is set without it, and `.env.example` ships it commented out, since an active template
-value would pass the check. `_build_message` flattens CR/LF in the subject (`EmailMessage` raises;
-the support form's `subject` is unrestricted input) but not in addresses.
+value would pass the check. `_build_message` flattens every break `str.splitlines` splits on in the
+subject (`EmailMessage` raises on any of them; the support form's `subject` and a renewal's
+certification name are typed input) but not in addresses.
 
 Mailpit is the opt-in `mail` compose profile (`docker compose --profile mail up`, inbox
 `127.0.0.1:8025`) so the logged magic link stays the default sign-in. `docker compose restart` does
@@ -3412,8 +3419,9 @@ Any further non-HTTP service from this image needs its own override; `admin_init
 - `SECRET_KEY` is startup-fatal on a placeholder in every environment
   (`Settings._reject_placeholder_secret_key`). The rejected set is `PLACEHOLDER_SECRET_KEYS`,
   case-insensitive after stripping, not an entropy heuristic that would refuse genuine keys. CI's
-  `test-secret-key-for-testing-only` is outside it; `tests/test_config_safety.py` reads the shipped
-  value from `.env.example`.
+  `test-secret-key-for-testing-only` is outside it, and refused outside `local` with the same
+  message (`CI_SECRET_KEY`), since CI boots as `local`; `tests/test_config_safety.py` reads the
+  shipped value from `.env.example`.
 - The admin block (`CRUD_ADMIN_ENABLED`, `ADMIN_PASSWORD`) ships commented out, so enabling the
   panel is an edit.
 - An `ENVIRONMENT` other than `local` without `SMTP_HOST` fails at startup
@@ -7245,8 +7253,9 @@ Redis its memory - a day of answers at the budget's ceiling is about 25 MB.
 A `failed` row sets no mark, so deleting it loses nothing: the dive is pending again and the next
 run asks. That is how a 400 the request caused rather than the dive - a provider renaming a variable
 \- is recovered once the client is fixed. A refused request backs off from an hour, doubling, and
-stops at `ATTEMPTS_CAP`; three instance-wide failures in a row on one dive defer it the same way,
-capped at a day and never counted toward the cap.
+stops at `ATTEMPTS_CAP`; three instance-wide failures in a row on one dive, or three runs that raise
+handling it, defer it the same way, capped at a day and never counted toward the cap. A dive before
+the provider's archive (`ARCHIVE_STARTS`, 1940) is skipped as `before_archive`, never asked.
 
 ## A dive's conditions ride its detail read with no key version
 
@@ -7301,13 +7310,14 @@ person's details.
 ## A dive draft's values are JSON in the dive form's shape, and stored data
 
 `dive_draft.values` holds the form's state as JSON in `DiveCreateRequest`'s member names, every one
-optional, validated member by member by `DiveDraftValues`: the same types and vocabularies, none of
-a dive's bounds or rules between members, because a draft is unfinished and the log route validates
-the dive it becomes. Rejected: a column per member, a migration each time the form moves. The JSON
-is stored data, so renaming or removing a `DiveCreateRequest` member, or narrowing a vocabulary,
-owes a migration of `dive_draft.values` - the rule the hidden-field keys carry.
-`tests/test_dive_drafts.py` holds the draft's member names to `DiveCreateRequest`'s, recursively, so
-a member added to one alone fails CI rather than turning every draft write that sends it into a 422.
+optional, validated member by member by `DiveDraftValues`: the same types, vocabularies and length
+bounds, none of a dive's value bounds or rules between members, because a draft is unfinished and
+the log route validates the dive it becomes. Rejected: a column per member, a migration each time
+the form moves. The JSON is stored data, so renaming or removing a `DiveCreateRequest` member, or
+narrowing a vocabulary, owes a migration of `dive_draft.values` - the rule the hidden-field keys
+carry. `tests/test_dive_drafts.py` holds the draft's member names to `DiveCreateRequest`'s,
+recursively, so a member added to one alone fails CI rather than turning every draft write that
+sends it into a 422.
 
 ## A dive draft's references are checked on the way out
 
