@@ -80,18 +80,19 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_cu
 async def read_invite_requests(
     db: Annotated[AsyncSession, Depends(async_get_db)], page: int = 1, items_per_page: int = 10
 ) -> dict:
-    """The queue: every pending invite request, newest first.
+    """The queue: every pending invite request, newest first. Superuser only.
 
-    Every row is pending - a request that was invited, declined or swept is gone rather
-    than flagged - so there is no filter and no status column to read.
-
-    `has_account` is a `LEFT JOIN` on `lower(User.email)`, and both halves of that matter.
-    *This* route may consult the `user` table where `POST /invite-requests` structurally
-    may not, because its caller is the operator rather than an anonymous stranger; and the
-    comparison is on the lowered column because `POST /auth/complete` stores the onboarding
-    token's address verbatim, so an account created through Google may hold capitals while
-    every row in this table is lowercase.
+    Every row is pending - a request that was invited, declined or swept is gone, not
+    flagged - so there is no filter and no status column. `has_account` says whether the
+    address already has an account here, compared case-insensitively. Out-of-range
+    pagination is clamped.
     """
+    # `has_account` is a `LEFT JOIN` on `lower(User.email)`, and both halves of that matter.
+    # *This* route may consult the `user` table where `POST /invite-requests` structurally
+    # may not, because its caller is the operator rather than an anonymous stranger; and the
+    # comparison is on the lowered column because `POST /auth/complete` stores the onboarding
+    # token's address verbatim, so an account created through Google may hold capitals while
+    # every row in this table is lowercase.
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     account_exists = (
@@ -124,26 +125,25 @@ async def invite_batch(
     current_user: Annotated[dict, Depends(get_current_superuser)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> AdminInvitationBatchResponse:
-    """Invite a batch of addresses, and report what happened to each of them.
+    """Invite a batch of addresses, and report what happened to each of them. Superuser only.
 
-    Addresses that never requested are accepted too: the route takes addresses, and a
-    pending request row is optional context rather than a precondition - the operator
-    inviting a colleague is the same act as inviting somebody off the queue.
+    Addresses that never requested an invitation are accepted too; a pending request is
+    optional context, not a precondition. Each address gets its own `outcome` - `invited`,
+    `already_registered`, `already_invited` or `mail_failed` - so a partial mail failure
+    shows *which* addresses got through. A `mail_failed` row is a real invitation whose
+    invitee has not been told: the address is admitted, and the operator can tell them
+    another way.
 
-    **A per-address outcome rather than a 5xx on the first problem.** `invited`,
-    `already_registered`, `already_invited`, `mail_failed`. A partial SMTP failure is then
-    visible as *which* addresses got through, instead of an error that hides them; and the
-    `mail_failed` rows are real invitations whose invitees simply have not been told, which
-    is a thing the operator can act on.
-
-    Sends are sequential and inline. The worker runs crons only (`DECISIONS.md` §"The Arq
-    worker runs crons only, and nothing in the API enqueues"), and a one-off operator
-    action of at most `MAX_ADDRESSES_PER_BATCH` addresses does not justify this app's first
-    queued job.
-
-    No quota check: superusers are exempt from `INVITATIONS_PER_USER`, and this route
-    cannot be reached by anybody else.
+    The mails are sent one after another before the response, so a full batch takes a
+    while. No quota applies. Up to 100 addresses per request; more is a 422.
     """
+    # A per-address outcome rather than a 5xx on the first problem: a partial SMTP failure
+    # then shows which addresses got through instead of an error that hides them. Sends are
+    # sequential and inline: the worker runs crons only (DECISIONS.md, *The Arq worker runs
+    # crons only, and nothing in the API enqueues*), and a one-off operator action of at most
+    # `MAX_ADDRESSES_PER_BATCH` addresses does not justify this app's first queued job. No
+    # quota check because superusers are exempt from `INVITATIONS_PER_USER`, and nobody else
+    # reaches this route.
     context = RequestContext.from_request(request)
     results: list[AdminInvitationOutcome] = []
 
@@ -201,20 +201,18 @@ async def invite_batch(
 async def remove_invite_requests(
     body: AdminInviteRequestDeleteRequest, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> AdminInviteRequestDeleteResponse:
-    """Drop addresses from the queue - spam, or a request the operator declines.
+    """Drop addresses from the queue - spam, or a request the operator declines. Superuser
+    only.
 
-    Body-keyed rather than a `{uuid}` route because an `invite_request` row has no public
-    identifier: the address is the only thing anybody knows about a request, which is also
-    why the model carries no `uuid` at all.
-
-    Nothing is written anywhere else. A declined request is not a refusal the address can
-    be told about, and there is no state to keep - the person may ask again, and the rate
-    limits on `POST /invite-requests` are what bound that.
-
-    The count is what actually went, which may be fewer than were asked for: the sweep or
-    an invitation may have taken a row between the operator reading the queue and acting on
-    it.
+    A request is keyed by its address, which is all anybody knows about it. Nothing is
+    written anywhere else: the address is not told, and nothing stops it asking again beyond
+    the rate limits on `POST /invite-requests`. `removed` counts what actually went, which
+    may be fewer than were asked for: an invitation, or the sweep, may have taken a row
+    between the operator reading the queue and acting on it.
     """
+    # Body-keyed rather than a `{uuid}` route because an `invite_request` row has no public
+    # identifier - the address is the only thing anybody knows about a request, which is also
+    # why the model carries no `uuid` at all.
     removed = await delete_invite_requests(db, emails=[email.lower() for email in body.emails])
     return AdminInviteRequestDeleteResponse(removed=removed)
 
@@ -231,18 +229,18 @@ async def read_daily_stats(
     last: Annotated[date, Query(alias="to")],
 ) -> DailyStatsRead:
     """The daily totals for every UTC day from `from` to `to` inclusive, zero-filled, with
-    the configured join channels and two figures as of now.
+    the instance's join channels and two figures as of now. Superuser only.
 
     Every number is a count that names no account: accounts created per day and per door,
     distinct accounts that signed in, distinct accounts with a session used that day.
-    `totals.accounts` counts every `user` row, an account inside its deletion grace period
-    included, and `totals.active_now` the accounts holding a session that can still
-    authenticate. A window count of distinct accounts - "active in the last 30 days" - is
-    not here because nothing records one: the sessions that would say so are deleted once
-    dead, and a per-account last-seen date is a record this app does not keep.
+    `totals.accounts` counts every account, one inside its deletion grace period included,
+    and `totals.active_now` the accounts holding a session that can still authenticate.
 
-    `422` for a range running backwards or longer than `MAX_STATS_DAYS`.
+    422 for a range running backwards or longer than 92 days.
     """
+    # No "active in the last 30 days" figure, because nothing records one: the sessions that
+    # would say so are deleted once dead, and a per-account last-seen date is a record this
+    # app does not keep.
     if last < first:
         raise UnprocessableEntityException("`to` is before `from`.")
     span = (last - first).days + 1
@@ -305,14 +303,13 @@ async def read_admin_species(
     chip: Annotated[AdminSpeciesFilter | None, Query(alias="filter")] = None,
 ) -> dict:
     """Every species in the catalog, newest first, with what the operator needs to curate its
-    photo.
+    photo. Superuser only.
 
-    `search` matches the names the catalog search matches on. `filter` is one of the page's
-    chips: `with_photo`, `without_photo`, `hidden`, `pinned`, or `narrow` - a stored photo
-    under the 500 px floor, which only a pin can hold once `--recheck-size` has run.
-
-    Unindexed and uncached: the catalog is thousands of rows and this is one operator's page.
+    `search` matches the names the catalog search matches on. `filter` narrows to one kind:
+    `with_photo`, `without_photo`, `hidden`, `pinned`, or `narrow` - a stored photo under the
+    500 px floor, which only a pinned one may keep. Out-of-range pagination is clamped.
     """
+    # Unindexed and uncached: the catalog is thousands of rows and this is one operator's page.
     page, items_per_page = clamp_pagination(page, items_per_page)
 
     clauses = []
@@ -380,15 +377,17 @@ async def _admin_species(db: AsyncSession, species_id: int) -> AdminSpeciesRead:
 async def read_species_photo_candidates(
     uuid: uuid_pkg.UUID, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> AdminSpeciesPhotoCandidates:
-    """The Commons files the operator may pin for this species, each with a preview.
+    """The Wikimedia Commons files the operator may pin for this species, each with a preview.
+    Superuser only.
 
-    The item's own P18 values first, then the file stored now, then its Commons category's
-    files - the item's P373, or one of the stored file's categories when the item names none -
-    capped at two dozen. `preview` is a `data:` URI of the 250 px rendition, so the page shows
-    it without contacting Wikimedia; it is null where the bytes did not arrive in time.
+    The species' Wikidata item's own images (P18) first, then the file stored now, then its
+    Commons category's files - the item's category (P373), or one of the stored file's
+    categories when the item names none - capped at two dozen. `preview` is a `data:` URI of
+    the 250 px rendition, so a page shows it without contacting Wikimedia; it is `null` where
+    the bytes did not arrive in time.
 
     A species with no Wikidata item and no stored file answers an empty list; pinning a pasted
-    title still works.
+    title still works. 404 for an unknown species.
     """
     row = await _photo_inputs(db, uuid)
     found = await species_service.photo_candidates(
@@ -416,16 +415,20 @@ async def read_species_photo_candidates(
 async def pin_species_photo(
     uuid: uuid_pkg.UUID, body: AdminSpeciesPhotoPin, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> AdminSpeciesRead:
-    """Pin a Commons file as this species' photo, replacing whatever was there.
+    """Pin a Wikimedia Commons file as this species' photo, replacing whatever was there.
+    Superuser only.
 
     `file` is a file title, with or without `File:`, or its `commons.wikimedia.org/wiki/File:`
     page URL. The size floor does not apply: the operator saw the file and chose it. A pinned
-    row is left alone by the backfill, `--force` included, until a re-fetch hands it back to
-    the rule.
+    photo stays, untouched by the automatic selection, until a re-fetch or a hide replaces
+    it. Answers the row, `photo_curation` reading `pinned`.
 
-    `422` for input that names no raster file, a file Commons does not have, or bytes that
-    will not decode; `503` when Commons could not be asked, with the row unchanged.
+    404 for an unknown species. 422 for input that names no raster file, a file Commons does
+    not have, or bytes that will not decode; 503 when Commons could not be asked, with the
+    row unchanged.
     """
+    # The backfill skips a pinned row, `--force` included; only a re-fetch hands it back to
+    # the rule.
     title = species_photos.normalize_file_title(body.file)
     if title is None:
         raise UnprocessableEntityException("That is not the title or page URL of a photograph on Wikimedia Commons.")
@@ -448,13 +451,14 @@ async def pin_species_photo(
 async def hide_species_photo(
     uuid: uuid_pkg.UUID, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> AdminSpeciesRead:
-    """Hide this species' photo: clear it, delete its bytes, and keep the rule from putting one
-    back.
+    """Hide this species' photo: clear it, delete its bytes, and keep the automatic selection
+    from putting one back. Superuser only.
 
-    The stored bytes go rather than being kept behind a flag, because nothing would serve them
-    and a kept blob is one the sweeper cannot reclaim. Undoing a hide is a re-fetch or a pin.
-    Returns the row, `photo_curation` reading `hidden`.
+    Undoing a hide is a re-fetch or a pin. Answers the row, `photo_curation` reading
+    `hidden`. 404 for an unknown species.
     """
+    # The stored bytes go rather than being kept behind a flag, because nothing would serve
+    # them and a kept blob is one the sweeper cannot reclaim.
     row = await _photo_inputs(db, uuid)
     await species_photos.write_curated_photo(db, species_id=row.id, photo=None, curation=PhotoCuration.HIDDEN)
     return await _admin_species(db, row.id)
@@ -464,16 +468,18 @@ async def hide_species_photo(
 async def refetch_species_photo(
     uuid: uuid_pkg.UUID, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> AdminSpeciesRead:
-    """Ask the selection rule again, now, and make the row say what it answers.
+    """Run the automatic photo selection for this species again, now, and make the row say
+    what it answers. Superuser only.
 
-    What lands an upstream fix to Wikidata on this instance at once, and what hands a hidden or
-    pinned row back to the rule: either way `photo_curation` ends up null. A photo the rule
-    chooses replaces what was there; a rule that declines - no candidate, an ambiguous choice,
-    a file under the floor - clears the stored photo.
+    What lands an upstream fix to Wikidata on this instance at once, and what hands a hidden
+    or pinned row back to the automatic selection: either way `photo_curation` ends up
+    `null`. A photo the selection chooses replaces what was there; a selection that declines -
+    no candidate, an ambiguous choice, a file under the floor - clears the stored photo.
 
-    `503`, with the row and its bytes untouched, when the rule could not be asked: a register
-    or Commons that did not answer, a spent provider counter, bytes that would not decode, or
-    the budget running out. Slow by nature - the same budgets as a resolve.
+    404 for an unknown species. 503, with the row and its bytes untouched, when the
+    selection could not be run: a species register or Commons that did not answer, a spent
+    provider counter, bytes that would not decode, or the time budget running out. Slow by
+    nature: it waits on Wikidata and Commons.
     """
     row = await _photo_inputs(db, uuid)
     attempt = await species_service.fetch_photo_for_species(scientific_name=row.scientific_name, aphia_id=row.aphia_id)

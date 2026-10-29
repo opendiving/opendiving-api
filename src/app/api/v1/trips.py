@@ -203,18 +203,17 @@ async def write_trip(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> TripRead:
-    """Create a trip for the authenticated user, together with the parts it ran.
+    """Create a trip for the caller, together with the parts it ran and the people on it.
 
     Trip names are unique per user, so reusing one that already exists is a 422. A trip
     carries no dates of its own: each part has its own optional range and its own optional
     place, and the trip's span is the earliest start and latest end across them. `parts`
     keep the order given; index 0 is the one shown wherever only a single part fits. A part's
-    `accommodation_uuid` names the contact the diver stayed at; one that isn't the caller's
-    own - or doesn't exist - is a 422. `people` names who came on the trip, each with a role
+    `accommodation_uuid` names the contact the diver stayed at; one that is not the caller's
+    own - or does not exist - is a 422. `people` names who came on the trip, each with a role
     or none, and is refused the same way.
 
-    The trip, its parts and its people commit together or not at all, as a dive and its
-    children do.
+    The trip, its parts and its people are stored together or not at all.
     """
     if await trip_name_exists(db=db, user_id=current_user["id"], name=trip.name):
         raise DuplicateValueException(_NAME_TAKEN)
@@ -339,8 +338,8 @@ async def read_trips(
 
     `search` matches a case-insensitive substring against the trip's name and the names
     of the places its parts went to, so a trip is findable by either. Out-of-range
-    pagination is clamped rather than rejected, so `items_per_page` above the ceiling
-    returns the ceiling instead of a 422.
+    pagination is clamped, not rejected: `items_per_page` above the instance's ceiling
+    returns the ceiling, not a 422.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
 
@@ -415,10 +414,10 @@ async def lookup_trips(
     fills from them. The trip a dive at or before `until` was last on first, then trips no
     such dive is on, newest created first.
 
-    `search` matches what `GET /trips` matches. `uuid` narrows the rows to the trips a form
-    already holds, and is not cached: no two forms hold the same set for long. Out-of-range
-    pagination is clamped.
+    `search` matches what `GET /trips` matches. `uuid` narrows the rows to the trips named,
+    for the ones a form already holds. Out-of-range pagination is clamped.
     """
+    # A `uuid`-narrowed page is not cached: no two forms hold the same set for long.
     page, items_per_page = clamp_pagination(page, items_per_page)
     return await _lookup(
         request,
@@ -458,8 +457,8 @@ async def read_trip(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
-    """Return a single trip by its public uuid, with the parts it ran, the people on it and
-    the figures over its dives that `GET /trips` carries.
+    """One trip by its public uuid, with the parts it ran, the people on it and the figures
+    over its dives that `GET /trips` carries.
 
     404 when no such trip exists - and the same 404 when it belongs to another user, so
     someone else's uuid stays unprobeable.
@@ -606,13 +605,13 @@ async def patch_trip(
 ) -> dict[str, str]:
     """Partially update a trip; omitted fields are left untouched.
 
-    404 unless the caller owns it, exactly as for a trip that doesn't exist. Renaming to
-    a name the caller already has on another trip is a 422. `parts` is replaced wholesale
-    when present rather than merged, so sending a shorter list removes the difference and
-    an empty list clears them; omitting the key leaves them alone. Each part's own
-    `end_date` must be on or after its `start_date`, which is a 422 naming the part, and a
-    part's `accommodation_uuid` must name one of the caller's contacts. `people` is replaced
-    the same way as `parts`, and every person in it must be the caller's.
+    404 unless the caller owns it, exactly as for a trip that does not exist. Renaming to
+    a name the caller already has on another trip is a 422. `parts`, when present, replaces
+    the stored list whole: a shorter list removes the difference, an empty list clears them,
+    and omitting the key leaves them alone. Each part's own `end_date` must be on or after
+    its `start_date`, which is a 422 naming the part, and a part's `accommodation_uuid` must
+    name one of the caller's contacts. `people` is replaced the same way as `parts`, and
+    every person in it must be the caller's.
     """
     db_trip = await _get_owned_trip(db, uuid, current_user)
 
@@ -677,26 +676,28 @@ async def erase_trip(
 ) -> dict[str, str]:
     """Delete a trip, optionally moving its dives onto another trip first.
 
-    404 unless the caller owns it, exactly as for a trip that doesn't exist - and a second
-    `DELETE` on the same uuid is now a 404 too, because the row really is gone. This route
-    used to be idempotent to insure against a half-failed multi-statement delete; one
-    `DELETE FROM trip` in one transaction cannot half-fail.
+    404 unless the caller owns it, exactly as for a trip that does not exist - and a second
+    `DELETE` on the same uuid is a 404 too, the row being gone.
 
-    `trip_part` and `trip_person` rows go with it (`ON DELETE CASCADE`) and the dives logged on it survive
-    with `trip_id` nulled (`ON DELETE SET NULL`) - both rules were already declared on the
-    FKs and finally fire. Re-point the dives with `move_dives_to` before deleting if the
-    association matters; there is no way back after.
+    The trip's parts and people go with it. The dives logged on it survive with their
+    `trip_uuid` nulled; re-point them with `move_dives_to` before deleting if the association
+    matters, as there is no way back after.
 
-    Pass `move_dives_to` and every one of the caller's live dives on this trip is
-    re-pointed at that one first, in the same transaction as the delete: either the diver's
-    log ends up entirely on the replacement trip with this one gone, or nothing happened.
-    A replacement that isn't the caller's own trip, or that is this trip, is a 422 - the
-    same answer `PATCH /dive` gives for a `trip_uuid` it can't resolve, which is the
-    per-dive call this parameter exists to replace.
+    Pass `move_dives_to` and every one of the caller's live dives on this trip is re-pointed
+    at that one first, in the same transaction as the delete: either the diver's log ends up
+    entirely on the replacement trip with this one gone, or nothing happened. A replacement
+    that is not the caller's own trip, or that is this trip, is a 422.
 
-    The response is the bare `{"message": ...}` every other delete on the API returns; the
-    count of what moved is not reported. See DECISIONS.md.
+    The response is the bare `{"message": ...}` every delete on this API returns; it does
+    not count what moved.
     """
+    # Not idempotent: one `DELETE FROM trip` in one transaction cannot half-fail, so a second
+    # call has nothing to insure against and answers the honest 404. The child rows go by
+    # `ON DELETE CASCADE` on `trip_part` and `trip_person`, the dives stay by `ON DELETE SET
+    # NULL` on `dive.trip_id`. A bad `move_dives_to` is the 422 `PATCH /dive` gives for a
+    # `trip_uuid` it cannot resolve, this parameter replacing that per-dive call. On the
+    # missing count see DECISIONS.md, *Move dives on delete: The response carries no
+    # moved-dives count*.
     db_trip = await _get_owned_trip(db, uuid, current_user)
     owner_id = db_trip.user_id
 
