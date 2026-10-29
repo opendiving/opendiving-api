@@ -1,6 +1,7 @@
 import functools
 import hashlib
 import json
+import logging
 import pathlib
 import re
 from collections.abc import Awaitable, Callable
@@ -9,12 +10,20 @@ from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 from fastapi import Request
 from fastapi.encoders import jsonable_encoder
 from redis.asyncio import ConnectionPool, Redis
+from redis.exceptions import RedisError
 
 from ..config import settings
 from ..exceptions.cache_exceptions import CacheIdentificationInferenceError, InvalidRequestError, MissingClientError
 
+logger = logging.getLogger(__name__)
+
 pool: ConnectionPool | None = None
 client: Redis | None = None
+
+# The largest response body `cache` stores. The same Redis holds the rate-limit counters, the
+# passkey challenges and the refresh grace, and one account's list page of long notes can
+# otherwise put tens of megabytes in it. A larger response is served uncached.
+MAX_CACHED_RESPONSE_BYTES = 1024 * 1024
 
 # Every key this module writes is namespaced by the build that wrote it, because what it
 # stores is a *response body* and a response body outlives the build whose shape it matches.
@@ -362,17 +371,26 @@ def cache(
                 if to_invalidate_extra is not None or pattern_to_invalidate_extra is not None:
                     raise InvalidRequestError
 
-                cached_data = await client.get(stored_key)
+                # A read that fails is a miss: a cache outage costs the cache, not the route.
+                try:
+                    cached_data = await client.get(stored_key)
+                except RedisError as exc:
+                    logger.warning("Response cache read failed (%s); serving uncached.", type(exc).__name__)
+                    cached_data = None
                 if cached_data:
                     return cast(R, json.loads(cached_data.decode()))
 
             result = await func(request, *args, **kwargs)
 
             if request.method == "GET":
-                serializable_data = jsonable_encoder(result)
-                serialized_data = json.dumps(serializable_data)
+                # Unescaped, since `\uXXXX` is six bytes for a character UTF-8 writes in two or three.
+                serialized_data = json.dumps(jsonable_encoder(result), ensure_ascii=False).encode()
 
-                await client.set(stored_key, serialized_data, ex=expiration)
+                if len(serialized_data) <= MAX_CACHED_RESPONSE_BYTES:
+                    try:
+                        await client.set(stored_key, serialized_data, ex=expiration)
+                    except RedisError as exc:
+                        logger.warning("Response cache write failed (%s).", type(exc).__name__)
 
                 return cast(R, json.loads(serialized_data))
 
