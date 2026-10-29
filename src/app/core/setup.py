@@ -344,7 +344,7 @@ def create_application(
         # `/api/v1/health` already uses for an `APP_VERSION` that is `None` (a source tree nobody
         # installed), and `info.version` is a required string, so it cannot simply be omitted.
         to_update: dict[str, Any] = {
-            "title": settings.APP_NAME,
+            "title": f"{settings.APP_NAME} API",
             "description": settings.APP_DESCRIPTION,
             "version": settings.APP_VERSION or "unknown",
         }
