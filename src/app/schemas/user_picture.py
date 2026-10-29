@@ -20,10 +20,16 @@ class PictureCrop(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    x: Annotated[int, Field(ge=0, examples=[0])]
-    y: Annotated[int, Field(ge=0, examples=[72])]
-    width: Annotated[int, Field(ge=1, examples=[3024])]
-    height: Annotated[int, Field(ge=1, examples=[3888])]
+    x: Annotated[
+        int,
+        Field(ge=0, examples=[0], description="Left edge of the crop, in pixels from the left of the upright original"),
+    ]
+    y: Annotated[
+        int,
+        Field(ge=0, examples=[72], description="Top edge of the crop, in pixels from the top of the upright original"),
+    ]
+    width: Annotated[int, Field(ge=1, examples=[3024], description="Width of the crop in pixels")]
+    height: Annotated[int, Field(ge=1, examples=[3888], description="Height of the crop in pixels")]
 
 
 class PictureCropRequest(BaseModel):
@@ -31,7 +37,7 @@ class PictureCropRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    crop: PictureCrop
+    crop: Annotated[PictureCrop, Field(description="Region of the original to keep as the picture")]
 
 
 class PictureRead(BaseModel):

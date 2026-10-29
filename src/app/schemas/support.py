@@ -40,13 +40,23 @@ class SupportRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: Annotated[str, Field(min_length=1, max_length=100, examples=["Jacques Cousteau"])]
-    email: Annotated[EmailStr, Field(examples=["diver@example.com"])]
-    category: SupportCategory = "support"
-    subject: Annotated[str, Field(min_length=3, max_length=150, examples=["Suunto export won't import"])]
+    name: Annotated[
+        str, Field(min_length=1, max_length=100, examples=["Jacques Cousteau"], description="Sender's name")
+    ]
+    email: Annotated[EmailStr, Field(examples=["diver@example.com"], description="Address replies are sent to")]
+    category: Annotated[SupportCategory, Field(description="What the message is about")] = "support"
+    subject: Annotated[
+        str,
+        Field(
+            min_length=3,
+            max_length=150,
+            examples=["Suunto export won't import"],
+            description="Short summary of the message",
+        ),
+    ]
     # The upper bound is a spam/abuse guard, not an editorial one - it's several pages
     # of prose, far more than a support request needs.
-    message: Annotated[str, Field(min_length=10, max_length=5000)]
+    message: Annotated[str, Field(min_length=10, max_length=5000, description="The message body")]
 
 
 class SupportResponse(BaseModel):

@@ -170,7 +170,10 @@ class CertificationBase(BaseModel):
     name: Annotated[
         str, Trimmed, Field(max_length=255, examples=["Advanced Open Water Diver"], description="Level as printed")
     ]
-    certification_number: Annotated[str | None, Field(default=None, max_length=64, examples=["1234567"])]
+    certification_number: Annotated[
+        str | None,
+        Field(default=None, max_length=64, examples=["1234567"], description="Certification number as printed"),
+    ]
     certified_on: Annotated[date | None, Field(default=None, description="Date the certification was issued")]
     expires_on: Annotated[
         date | None,
@@ -179,7 +182,10 @@ class CertificationBase(BaseModel):
     instructor_number: Annotated[
         str | None, Field(default=None, max_length=64, description="The instructor's number, as printed on the card")
     ]
-    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
+    notes: Annotated[
+        str,
+        Field(default="", max_length=NOTES_MAX_LENGTH, description="The diver's free-text notes on the certification"),
+    ]
 
 
 class _CertificationWrite(CertificationBase):
@@ -290,14 +296,49 @@ class CertificationUpdate(RejectsExplicitNulls):
     # against the merged result.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("agency", "name", "notes")
 
-    agency: Annotated[CertificationAgency | None, Field(default=None)]
-    agency_other: Annotated[str | None, Field(default=None, max_length=64)]
-    name: Annotated[Annotated[str, Trimmed] | None, Field(default=None, max_length=255)]
-    certification_number: Annotated[str | None, Field(default=None, max_length=64)]
-    certified_on: Annotated[date | None, Field(default=None)]
-    expires_on: Annotated[date | None, Field(default=None)]
-    instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    agency: Annotated[
+        CertificationAgency | None,
+        Field(default=None, description="Training agency that issued this certification; cannot be null"),
+    ]
+    agency_other: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=64,
+            description="Agency name, required when `agency` is `other` and not allowed otherwise; null clears it",
+        ),
+    ]
+    name: Annotated[
+        Annotated[str, Trimmed] | None,
+        Field(default=None, max_length=255, description="Level as printed; cannot be null"),
+    ]
+    certification_number: Annotated[
+        str | None,
+        Field(default=None, max_length=64, description="Certification number as printed; null clears it"),
+    ]
+    certified_on: Annotated[
+        date | None, Field(default=None, description="Date the certification was issued; null clears it")
+    ]
+    expires_on: Annotated[
+        date | None,
+        Field(default=None, description="Expiry date, for the certifications that have one; null clears it"),
+    ]
+    instructor_number: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=64,
+            description="The instructor's number, as printed on the card; null clears it",
+        ),
+    ]
+    notes: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=NOTES_MAX_LENGTH,
+            description="The diver's free-text notes on the certification; cannot be null",
+        ),
+    ]
 
 
 class CertificationUpdateRequest(CertificationUpdate):

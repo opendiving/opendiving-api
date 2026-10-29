@@ -304,6 +304,8 @@ class AdminSpeciesPhotoPin(BaseModel):
             min_length=1,
             max_length=1024,
             examples=["Seriphus politus 28977555.jpg", "https://commons.wikimedia.org/wiki/File:Seriphus_politus.jpg"],
+            description="Wikimedia Commons file to pin as the photo: its title, with or without File:, "
+            "or its file-page URL",
         ),
     ]
 

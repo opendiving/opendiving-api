@@ -102,7 +102,11 @@ class TagUpdate(RejectsExplicitNulls):
         str | None,
         StringConstraints(min_length=1, max_length=TAG_NAME_MAX),
         BeforeValidator(trim_tag),
-        Field(default=None, examples=["night dive"]),
+        Field(
+            default=None,
+            examples=["night dive"],
+            description="New name for the tag; trimmed, and must not match another of the diver's tags ignoring case",
+        ),
     ]
 
 

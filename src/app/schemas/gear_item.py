@@ -86,16 +86,26 @@ _MATERIAL_DESCRIPTION = "What the vessel is made of. Meaningful on a cylinder."
 
 GearBrand = Annotated[str, Trimmed, Field(max_length=255)]
 
+_NAME_DESCRIPTION = "What the diver calls this item"
+_BRAND_DESCRIPTION = "Manufacturer or brand; blank is stored as null"
+_GEAR_NOTES_DESCRIPTION = "What the diver wrote about this item"
+_TYPE_DESCRIPTION = "Broad category this item falls into"
+_RENTED_DESCRIPTION = "Whether this item is rented rather than owned"
+
 
 class GearItemBase(BaseModel):
-    name: Annotated[str, Trimmed, Field(max_length=255, examples=["MK25 EVO / S620Ti"])]
-    brand: Annotated[GearBrand | None, BlankIsNone, Field(default=None, examples=["Scubapro"])]
+    name: Annotated[str, Trimmed, Field(max_length=255, examples=["MK25 EVO / S620Ti"], description=_NAME_DESCRIPTION)]
+    brand: Annotated[
+        GearBrand | None,
+        BlankIsNone,
+        Field(default=None, examples=["Scubapro"], description=_BRAND_DESCRIPTION),
+    ]
     type: Annotated[
         GearType | None,
-        Field(default=None, examples=[GearType.REGULATOR], description="Broad category this item falls into"),
+        Field(default=None, examples=[GearType.REGULATOR], description=_TYPE_DESCRIPTION),
     ]
-    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
-    rented: Annotated[bool, Field(default=False, description="Whether this item is rented rather than owned")]
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH, description=_GEAR_NOTES_DESCRIPTION)]
+    rented: Annotated[bool, Field(default=False, description=_RENTED_DESCRIPTION)]
     volume: Annotated[float | None, Field(default=None, examples=[12.0], description=_VOLUME_DESCRIPTION)]
     working_pressure: Annotated[
         float | None, Field(default=None, examples=[232.0], description=_WORKING_PRESSURE_DESCRIPTION)
@@ -220,11 +230,11 @@ class GearItemUpdate(RejectsExplicitNulls):
     # re-checks (brand, name) uniqueness.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes", "rented", "is_archived")
 
-    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None)]
-    brand: Annotated[GearBrand | None, BlankIsNone, Field(default=None)]
-    type: Annotated[GearType | None, Field(default=None)]
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
-    rented: Annotated[bool | None, Field(default=None)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
+    brand: Annotated[GearBrand | None, BlankIsNone, Field(default=None, description=_BRAND_DESCRIPTION)]
+    type: Annotated[GearType | None, Field(default=None, description=_TYPE_DESCRIPTION)]
+    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH, description=_GEAR_NOTES_DESCRIPTION)]
+    rented: Annotated[bool | None, Field(default=None, description=_RENTED_DESCRIPTION)]
     is_archived: Annotated[bool | None, Field(default=None, description="Set to archive/unarchive this item")]
     # Clearable, so absent from `NON_NULLABLE_FIELDS`. A changed `volume` is written through
     # to every dive cylinder linked to the item (`patch_gear_item`).

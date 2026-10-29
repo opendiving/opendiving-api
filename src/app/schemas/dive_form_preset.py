@@ -124,8 +124,11 @@ def canonical_hidden_fields(values: Iterable[DiveFormField]) -> list[DiveFormFie
     return [field for field in DiveFormField if field in present]
 
 
+_NAME_DESCRIPTION = "Name of this preset"
+
+
 class DiveFormPresetBase(BaseModel):
-    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Warm water"])]
+    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Warm water"], description=_NAME_DESCRIPTION)]
     hidden_fields: Annotated[
         list[DiveFormField],
         Field(
@@ -214,7 +217,7 @@ class DiveFormPresetUpdate(RejectsExplicitNulls):
     # null.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "hidden_fields")
 
-    name: Annotated[Annotated[str, Trimmed] | None, Field(default=None, max_length=255)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(default=None, max_length=255, description=_NAME_DESCRIPTION)]
     hidden_fields: Annotated[
         list[DiveFormField] | None,
         Field(default=None, max_length=len(DiveFormField), description="Replaces the preset's hidden set wholesale"),

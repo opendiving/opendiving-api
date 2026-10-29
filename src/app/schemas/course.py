@@ -44,7 +44,15 @@ class CourseStatus(StrEnum):
 
 
 class CourseBase(BaseModel):
-    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Advanced Nitrox + Decompression Procedures"])]
+    name: Annotated[
+        str,
+        Trimmed,
+        Field(
+            max_length=255,
+            examples=["Advanced Nitrox + Decompression Procedures"],
+            description="Title of the course",
+        ),
+    ]
     agency: Annotated[
         CertificationAgency | None,
         Field(
@@ -63,13 +71,20 @@ class CourseBase(BaseModel):
     ]
     # `completed` because back-filling history is the common case: a diver entering the
     # course that issued a card they already hold is entering one that finished.
-    status: Annotated[CourseStatus, Field(default=CourseStatus.COMPLETED)]
-    start_date: Annotated[date | None, Field(default=None, examples=["2026-03-02"])]
-    end_date: Annotated[date | None, Field(default=None, examples=["2026-03-06"])]
+    status: Annotated[CourseStatus, Field(default=CourseStatus.COMPLETED, description="How far the course got")]
+    start_date: Annotated[
+        date | None, Field(default=None, examples=["2026-03-02"], description="Date the course started")
+    ]
+    end_date: Annotated[
+        date | None,
+        Field(default=None, examples=["2026-03-06"], description="Date the course ended, not before `start_date`"),
+    ]
     instructor_number: Annotated[
         str | None, Field(default=None, max_length=64, description="The instructor's number, as printed on the card")
     ]
-    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
+    notes: Annotated[
+        str, Field(default="", max_length=NOTES_MAX_LENGTH, description="The diver's free-text notes on the course")
+    ]
 
     @model_validator(mode="after")
     def _check_date_range(self) -> Self:
@@ -162,14 +177,47 @@ class CourseUpdate(RejectsExplicitNulls):
     # edits. `agency_other` in particular is half of moving a course off `agency="other"`.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "status", "notes")
 
-    name: Annotated[Annotated[str, Trimmed] | None, Field(default=None, max_length=255)]
-    agency: Annotated[CertificationAgency | None, Field(default=None)]
-    agency_other: Annotated[str | None, Field(default=None, max_length=64)]
-    status: Annotated[CourseStatus | None, Field(default=None)]
-    start_date: Annotated[date | None, Field(default=None)]
-    end_date: Annotated[date | None, Field(default=None)]
-    instructor_number: Annotated[str | None, Field(default=None, max_length=64)]
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    name: Annotated[
+        Annotated[str, Trimmed] | None,
+        Field(default=None, max_length=255, description="Title of the course; cannot be null"),
+    ]
+    agency: Annotated[
+        CertificationAgency | None,
+        Field(
+            default=None,
+            description="Training agency whose syllabus this course ran; null records that it ran under none",
+        ),
+    ]
+    agency_other: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=64,
+            description="Agency name, required when `agency` is `other` and not allowed otherwise; null clears it",
+        ),
+    ]
+    status: Annotated[CourseStatus | None, Field(default=None, description="How far the course got; cannot be null")]
+    start_date: Annotated[date | None, Field(default=None, description="Date the course started; null clears it")]
+    end_date: Annotated[
+        date | None,
+        Field(default=None, description="Date the course ended, not before `start_date`; null clears it"),
+    ]
+    instructor_number: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=64,
+            description="The instructor's number, as printed on the card; null clears it",
+        ),
+    ]
+    notes: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=NOTES_MAX_LENGTH,
+            description="The diver's free-text notes on the course; cannot be null",
+        ),
+    ]
 
 
 class CourseUpdateRequest(CourseUpdate):

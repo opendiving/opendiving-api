@@ -7,9 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredName, Trimmed
 from .gear_item import GearItemInfo
 
+_NAME_DESCRIPTION = "Name of this gear set"
+
 
 class GearSetBase(BaseModel):
-    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Sidemount"])]
+    name: Annotated[str, Trimmed, Field(max_length=255, examples=["Sidemount"], description=_NAME_DESCRIPTION)]
     weight: Annotated[
         float | None,
         Field(
@@ -67,7 +69,7 @@ class GearSetUpdate(RejectsExplicitNulls):
     # state, so clearing it stays allowed.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name",)
 
-    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None)]
+    name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
     weight: Annotated[
         float | None, Field(default=None, ge=0, description="Ballast normally carried with this set, in kilograms")
     ]

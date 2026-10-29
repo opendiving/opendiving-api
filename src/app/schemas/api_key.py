@@ -46,9 +46,23 @@ class ApiKeyCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: Annotated[str, Field(min_length=1, max_length=NAME_MAX_LENGTH, examples=["laptop"])]
-    scope: ApiKeyScope
-    lifetime: ApiKeyLifetime
+    name: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=NAME_MAX_LENGTH,
+            examples=["laptop"],
+            description="Label that identifies the key in the key list",
+        ),
+    ]
+    scope: Annotated[
+        ApiKeyScope,
+        Field(
+            description="read allows safe methods only; write allows what a signed-in browser can do, "
+            "minus credential routes"
+        ),
+    ]
+    lifetime: Annotated[ApiKeyLifetime, Field(description="How long the key stays valid: 30d, 90d, 1y or never")]
 
 
 class ApiKeyCreateInternal(BaseModel):

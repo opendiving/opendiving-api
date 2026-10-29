@@ -31,8 +31,14 @@ from ..core.schemas import Trimmed
 # §6.9's own bound, and the width of the column behind it.
 LOCATION_NAME_MAX = 255
 
-Latitude = Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[27.8506])]
-Longitude = Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[34.3136])]
+Latitude = Annotated[
+    float | None,
+    Field(default=None, ge=-90, le=90, examples=[27.8506], description="Latitude in decimal degrees, south negative"),
+]
+Longitude = Annotated[
+    float | None,
+    Field(default=None, ge=-180, le=180, examples=[34.3136], description="Longitude in decimal degrees, west negative"),
+]
 
 COORDINATE_PAIR_MESSAGE = "latitude and longitude must be set together"
 BBOX_MESSAGE = "bbox_south, bbox_north, bbox_west and bbox_east must be set together"
@@ -75,8 +81,14 @@ class WholeCoordinatePair(BaseModel):
     read back as half a position rather than turn every read of it into a 500.
     """
 
-    latitude: Latitude
-    longitude: Longitude
+    latitude: Annotated[
+        Latitude,
+        Field(description="Latitude in decimal degrees, south negative; sent together with `longitude`, or not at all"),
+    ]
+    longitude: Annotated[
+        Longitude,
+        Field(description="Longitude in decimal degrees, west negative; sent together with `latitude`, or not at all"),
+    ]
 
     @model_validator(mode="after")
     def _coordinates_are_a_pair(self) -> WholeCoordinatePair:
@@ -99,11 +111,57 @@ class LocationInput(WholeCoordinatePair):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: Annotated[str, Trimmed, Field(max_length=LOCATION_NAME_MAX, examples=["Dahab, South Sinai, Egypt"])]
-    bbox_south: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.89])]
-    bbox_north: Annotated[float | None, Field(default=None, ge=-90, le=90, examples=[9.98])]
-    bbox_west: Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[123.35])]
-    bbox_east: Annotated[float | None, Field(default=None, ge=-180, le=180, examples=[123.44])]
+    name: Annotated[
+        str,
+        Trimmed,
+        Field(
+            max_length=LOCATION_NAME_MAX,
+            examples=["Dahab, South Sinai, Egypt"],
+            description="The place as written - its name alone, or extended outward through its region to its country",
+        ),
+    ]
+    bbox_south: Annotated[
+        float | None,
+        Field(
+            default=None,
+            ge=-90,
+            le=90,
+            examples=[9.89],
+            description="Southern edge of the place's bounding box in degrees latitude; "
+            "the four edges are sent together and need `latitude` and `longitude`",
+        ),
+    ]
+    bbox_north: Annotated[
+        float | None,
+        Field(
+            default=None,
+            ge=-90,
+            le=90,
+            examples=[9.98],
+            description="Northern edge of the bounding box in degrees latitude; not below `bbox_south`",
+        ),
+    ]
+    bbox_west: Annotated[
+        float | None,
+        Field(
+            default=None,
+            ge=-180,
+            le=180,
+            examples=[123.35],
+            description="Western edge of the bounding box in degrees longitude; "
+            "may exceed `bbox_east` for a box that crosses the antimeridian",
+        ),
+    ]
+    bbox_east: Annotated[
+        float | None,
+        Field(
+            default=None,
+            ge=-180,
+            le=180,
+            examples=[123.44],
+            description="Eastern edge of the bounding box in degrees longitude",
+        ),
+    ]
 
     @model_validator(mode="after")
     def _bounding_box_is_whole(self) -> LocationInput:

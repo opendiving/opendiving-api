@@ -80,13 +80,32 @@ def check_website(value: str | None) -> str | None:
 
 ContactWebsite = Annotated[
     str | None,
-    Field(default=None, max_length=CONTACT_WEBSITE_MAX, examples=["https://blueocean.example"]),
+    Field(
+        default=None,
+        max_length=CONTACT_WEBSITE_MAX,
+        examples=["https://blueocean.example"],
+        description="Absolute http or https URL of the contact's website",
+    ),
     AfterValidator(check_website),
 ]
 ContactEmail = Annotated[
-    EmailStr | None, Field(default=None, max_length=CONTACT_EMAIL_MAX, examples=["info@blueocean.example"])
+    EmailStr | None,
+    Field(
+        default=None,
+        max_length=CONTACT_EMAIL_MAX,
+        examples=["info@blueocean.example"],
+        description="Email address of the contact",
+    ),
 ]
-ContactPhone = Annotated[str | None, Field(default=None, max_length=CONTACT_PHONE_MAX, examples=["+20 69 364 0000"])]
+ContactPhone = Annotated[
+    str | None,
+    Field(
+        default=None,
+        max_length=CONTACT_PHONE_MAX,
+        examples=["+20 69 364 0000"],
+        description="Phone number of the contact, free text",
+    ),
+]
 
 
 CONTACT_UUID_DESCRIPTION = "Public id of the contact - the dive center, school or club - that ran it"
@@ -110,11 +129,28 @@ class ContactAddressInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    street: Annotated[str | None, Field(default=None, max_length=ADDRESS_LINE_MAX)]
-    city: Annotated[str | None, Field(default=None, max_length=ADDRESS_LINE_MAX, examples=["Dahab"])]
-    postcode: Annotated[str | None, Field(default=None, max_length=ADDRESS_POSTCODE_MAX)]
-    region: Annotated[str | None, Field(default=None, max_length=ADDRESS_LINE_MAX, examples=["South Sinai"])]
-    country: Annotated[str, Field(min_length=1, max_length=ADDRESS_LINE_MAX, examples=["Egypt"])]
+    street: Annotated[
+        str | None, Field(default=None, max_length=ADDRESS_LINE_MAX, description="Street and house number")
+    ]
+    city: Annotated[
+        str | None,
+        Field(default=None, max_length=ADDRESS_LINE_MAX, examples=["Dahab"], description="City, town or village"),
+    ]
+    postcode: Annotated[
+        str | None, Field(default=None, max_length=ADDRESS_POSTCODE_MAX, description="Postal or ZIP code")
+    ]
+    region: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=ADDRESS_LINE_MAX,
+            examples=["South Sinai"],
+            description="State, province or other administrative region",
+        ),
+    ]
+    country: Annotated[
+        str, Field(min_length=1, max_length=ADDRESS_LINE_MAX, examples=["Egypt"], description="Country name")
+    ]
 
 
 class ContactAddressRead(BaseModel):
@@ -169,11 +205,21 @@ class ContactBase(BaseModel):
     The position is flat on the wire as in the table, as a dive site's pin is. Only the write
     shapes add `WholeCoordinatePair`, for the reason it gives for staying off a read."""
 
-    name: Annotated[str, Trimmed, Field(max_length=CONTACT_NAME_MAX, examples=["Blue Ocean Dive Center"])]
+    name: Annotated[
+        str,
+        Trimmed,
+        Field(
+            max_length=CONTACT_NAME_MAX,
+            examples=["Blue Ocean Dive Center"],
+            description="Name of the contact, unique among the diver's contacts ignoring case",
+        ),
+    ]
     phone: ContactPhone
-    latitude: Latitude
-    longitude: Longitude
-    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
+    latitude: Annotated[Latitude, Field(description="Latitude of the contact's position in decimal degrees")]
+    longitude: Annotated[Longitude, Field(description="Longitude of the contact's position in decimal degrees")]
+    notes: Annotated[
+        str, Field(default="", max_length=NOTES_MAX_LENGTH, description="The diver's free-text notes on the contact")
+    ]
 
 
 class _ContactWriteFields(BaseModel):
@@ -252,7 +298,14 @@ class _ContactUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
 
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "roles", "notes")
 
-    name: Annotated[Annotated[str, Trimmed] | None, Field(default=None, max_length=CONTACT_NAME_MAX)]
+    name: Annotated[
+        Annotated[str, Trimmed] | None,
+        Field(
+            default=None,
+            max_length=CONTACT_NAME_MAX,
+            description="Name of the contact, unique among the diver's contacts ignoring case; cannot be null",
+        ),
+    ]
     roles: Annotated[
         list[ContactRole] | None,
         Field(default=None, max_length=len(ContactRole), description="Replaces the contact's roles wholesale"),
@@ -260,7 +313,14 @@ class _ContactUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     phone: ContactPhone
     email: ContactEmail
     website: ContactWebsite
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH)]
+    notes: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=NOTES_MAX_LENGTH,
+            description="The diver's free-text notes on the contact; cannot be null",
+        ),
+    ]
 
     @field_validator("roles")
     @classmethod
@@ -286,7 +346,13 @@ class ContactUpdateRequest(_ContactUpdateFields):
 
     model_config = ConfigDict(extra="forbid")
 
-    address: ContactAddressInput | None = None
+    address: Annotated[
+        ContactAddressInput | None,
+        Field(
+            default=None,
+            description="Replaces the postal address whole; `country` required. Null clears it, omitting leaves it",
+        ),
+    ]
 
 
 class ContactUpdateInternal(ContactUpdate):

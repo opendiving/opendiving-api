@@ -51,6 +51,14 @@ DiveLocalStartTime = Annotated[datetime | date, BeforeValidator(full_date_is_a_d
 
 DEPTH_PAIR_MESSAGE = "avg_depth cannot be greater than max_depth"
 
+_MAX_DEPTH_DESCRIPTION = "Deepest point reached, in meters"
+_AVG_DEPTH_DESCRIPTION = "Average depth over the dive, in meters; never greater than `max_depth`"
+_BOTTOM_TEMPERATURE_DESCRIPTION = "Water temperature at the bottom, in °C"
+_CURRENT_DESCRIPTION = "How strong the current was"
+_WAVES_DESCRIPTION = "What the water surface was like"
+_WEATHER_DESCRIPTION = "What the sky was doing"
+_NOTES_DESCRIPTION = "The diver's free-text notes on the dive"
+
 
 def validate_depth_pair(avg_depth: float | None, max_depth: float | None) -> None:
     """The one place the depth pair's ordering is decided.
@@ -235,7 +243,7 @@ class DiveBase(BaseModel):
     """Shared by the read shapes and the write ones, which is why `start_time` is the
     permissive spelling here and `DiveCreate` re-declares it as the strict one."""
 
-    dive_number: Annotated[PostgresInteger, Field(examples=[5])]
+    dive_number: Annotated[PostgresInteger, Field(examples=[5], description="The diver's own number for this dive")]
     start_time: Annotated[
         DiveLocalStartTime,
         Field(
@@ -253,9 +261,9 @@ class DiveBase(BaseModel):
         ),
     ]
 
-    max_depth: Annotated[float | None, Field(default=None)]
-    avg_depth: Annotated[float | None, Field(default=None)]
-    bottom_temperature: Annotated[float | None, Field(default=None)]
+    max_depth: Annotated[float | None, Field(default=None, description=_MAX_DEPTH_DESCRIPTION)]
+    avg_depth: Annotated[float | None, Field(default=None, description=_AVG_DEPTH_DESCRIPTION)]
+    bottom_temperature: Annotated[float | None, Field(default=None, description=_BOTTOM_TEMPERATURE_DESCRIPTION)]
     visibility: Annotated[PostgresInteger | None, Field(default=None, description="Underwater visibility in meters")]
     weight: Annotated[
         float | None, Field(default=None, examples=[6.0], description="Total ballast carried, in kilograms")
@@ -285,15 +293,15 @@ class DiveBase(BaseModel):
     air_temperature: Annotated[
         float | None, Field(default=None, examples=[24.0], description="Air temperature at the surface, in °C")
     ]
-    current: Annotated[Current | None, Field(default=None, examples=[Current.LIGHT])]
-    waves: Annotated[Waves | None, Field(default=None, examples=[Waves.CALM])]
-    weather: Annotated[Weather | None, Field(default=None, examples=[Weather.CLEAR])]
+    current: Annotated[Current | None, Field(default=None, examples=[Current.LIGHT], description=_CURRENT_DESCRIPTION)]
+    waves: Annotated[Waves | None, Field(default=None, examples=[Waves.CALM], description=_WAVES_DESCRIPTION)]
+    weather: Annotated[Weather | None, Field(default=None, examples=[Weather.CLEAR], description=_WEATHER_DESCRIPTION)]
     entry_type: Annotated[
         EntryType | None, Field(default=None, examples=[EntryType.BOAT], description="Where the diver got in")
     ]
     boat_name: Annotated[BoatName | None, Field(default=None, examples=["Legend"], description="The boat's name")]
 
-    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH)]
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
 
     @model_validator(mode="after")
     def _check_depth_pair(self) -> Self:
@@ -475,7 +483,7 @@ class SightingWrite(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    species_uuid: uuid_pkg.UUID
+    species_uuid: Annotated[uuid_pkg.UUID, Field(description="Public id of the species seen")]
     count: Annotated[
         int | None,
         Field(
@@ -1312,7 +1320,13 @@ class DiveCreate(DiveBase):
     # through here, may write a dive with no offset at all. `DiveUpdate` is the write
     # shape this narrowing deliberately does *not* reach - it may carry that state
     # forward on a dive that already has it, never begin one.
-    start_time: Annotated[DiveStartTime, Field(examples=[_START_TIME_EXAMPLE])]
+    start_time: Annotated[
+        DiveStartTime,
+        Field(
+            examples=[_START_TIME_EXAMPLE],
+            description="When the dive started, with the UTC offset of the timezone it happened in",
+        ),
+    ]
     trip_uuid: Annotated[
         uuid_pkg.UUID | None, Field(default=None, description="Public id of the trip this dive belongs to")
     ]
@@ -1367,7 +1381,9 @@ class DiveUpdate(RejectsExplicitNulls):
     # describing the *previous* start time.
     NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("dive_number", "start_time", "submerged_time", "notes")
 
-    dive_number: Annotated[PostgresInteger | None, Field(examples=[5], default=None)]
+    dive_number: Annotated[
+        PostgresInteger | None, Field(examples=[5], default=None, description="The diver's own number for this dive")
+    ]
     # The permissive spelling, unlike `DiveCreate`'s. An update may **preserve** an unknown
     # offset or an unknown time of day - an imported dive stays editable, and the offsetless
     # or date-only `started_at` this app exports for such a dive is a value it will take back
@@ -1379,6 +1395,8 @@ class DiveUpdate(RejectsExplicitNulls):
         Field(
             examples=[_START_TIME_EXAMPLE, _LOCAL_START_TIME_EXAMPLE, _DATE_ONLY_START_TIME_EXAMPLE],
             default=None,
+            description="When the dive started, in the timezone it was logged in. A dive logged with no offset or "
+            "no time of day may keep that state; a dive that has an offset or a time of day cannot lose it.",
         ),
     ]
     submerged_time: Annotated[
@@ -1389,9 +1407,9 @@ class DiveUpdate(RejectsExplicitNulls):
             default=None,
         ),
     ]
-    max_depth: Annotated[float | None, Field(default=None)]
-    avg_depth: Annotated[float | None, Field(default=None)]
-    bottom_temperature: Annotated[float | None, Field(default=None)]
+    max_depth: Annotated[float | None, Field(default=None, description=_MAX_DEPTH_DESCRIPTION)]
+    avg_depth: Annotated[float | None, Field(default=None, description=_AVG_DEPTH_DESCRIPTION)]
+    bottom_temperature: Annotated[float | None, Field(default=None, description=_BOTTOM_TEMPERATURE_DESCRIPTION)]
     visibility: Annotated[PostgresInteger | None, Field(default=None, description="Underwater visibility in meters")]
     weight: Annotated[float | None, Field(default=None, description="Total ballast carried, in kilograms")]
     water_type: Annotated[
@@ -1404,9 +1422,9 @@ class DiveUpdate(RejectsExplicitNulls):
     type: Annotated[DiveType | None, Field(default=None, description="What kind of dive it was")]
     rating: Annotated[PostgresInteger | None, Field(default=None, description="The diver's rating, 1 to 5")]
     air_temperature: Annotated[float | None, Field(default=None, description="Air temperature at the surface, in °C")]
-    current: Annotated[Current | None, Field(default=None)]
-    waves: Annotated[Waves | None, Field(default=None)]
-    weather: Annotated[Weather | None, Field(default=None)]
+    current: Annotated[Current | None, Field(default=None, description=_CURRENT_DESCRIPTION)]
+    waves: Annotated[Waves | None, Field(default=None, description=_WAVES_DESCRIPTION)]
+    weather: Annotated[Weather | None, Field(default=None, description=_WEATHER_DESCRIPTION)]
     entry_type: Annotated[EntryType | None, Field(default=None, description="Where the diver got in")]
     boat_name: Annotated[BoatName | None, Field(default=None, description="The boat's name")]
     trip_uuid: Annotated[
@@ -1424,6 +1442,7 @@ class DiveUpdate(RejectsExplicitNulls):
             max_length=NOTES_MAX_LENGTH,
             examples=["This is my updated dive notes."],
             default=None,
+            description=_NOTES_DESCRIPTION,
         ),
     ]
 
