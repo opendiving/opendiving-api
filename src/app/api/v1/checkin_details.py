@@ -26,7 +26,7 @@ async def read_own_checkin_details(
     birth, their emergency contacts in call order and their insurance policies.
 
     An account that has saved nothing answers the empty object - nulls and empty lists -
-    rather than a 404. The sign-in address is never here, and nothing defaults the object's
+    never a 404. The sign-in address is never here, and nothing defaults the object's
     `email` from it.
     """
     return await read_checkin_details(db, user_id=current_user["id"])

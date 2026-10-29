@@ -122,6 +122,10 @@ async def export_divejson(
 
     For a copy that carries those binaries too, use `/export/archive`, whose
     `logbook.divejson` member is this same document.
+
+    The caller's own account, and nothing else. Served as an attachment with a
+    `Content-Length`, never cached (`Cache-Control: no-store`), and rate limited per
+    account.
     """
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
@@ -152,6 +156,10 @@ async def export_uddf(
     weather and boat name, and the kinds of dive and of entry UDDF has no word for).
     For a lossless structured copy, use `/export/divejson`; for one that carries the
     stored files as well, `/export/archive`.
+
+    The caller's own account, and nothing else. Served as an attachment with a
+    `Content-Length`, never cached (`Cache-Control: no-store`), and rate limited per
+    account.
     """
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
@@ -171,10 +179,14 @@ async def export_csv(
     """Download the caller's dives as a single spreadsheet-ready CSV.
 
     One row per dive with the related records flattened into readable cells - the file to
-    open in Excel, Numbers or a notebook. The normalized set (cylinders, trips, courses,
-    sites, gear, service history, certifications, contacts, people, tags) ships inside
-    `/export/archive`.
-    Deliberately lossy: `/export/archive` is the one that holds everything.
+    open in Excel, Numbers or a notebook. UTF-8 with a byte-order mark. Lossy: the
+    normalized set (cylinders, trips, courses, sites, gear, service history, certifications,
+    contacts, people, tags) ships inside `/export/archive`, which is the one that holds
+    everything.
+
+    The caller's own account, and nothing else. Served as an attachment with a
+    `Content-Length`, never cached (`Cache-Control: no-store`), and rate limited per
+    account.
     """
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
@@ -208,9 +220,12 @@ async def export_archive(
     sides of every c-card, and the originals of the profile picture and the check-in portrait.
 
     This is the complete copy - nothing in the account is reachable only through the app
-    after taking it. **It includes the certification
-    card images and the portrait**, which are personal documents, so treat the file
-    accordingly.
+    after taking it. **It includes the certification card images and the portrait**, which
+    are personal documents, so treat the file accordingly.
+
+    The caller's own account, and nothing else. Served as an attachment with a
+    `Content-Length`, never cached (`Cache-Control: no-store`), and rate limited per
+    account.
     """
     await _enforce_export_limit(current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
