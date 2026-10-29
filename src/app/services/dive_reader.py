@@ -18,8 +18,9 @@ of the format is a diver's logbook or one computer's recording all live in the t
 keyed by format id. A pin bump that adds a reader owes all three, and
 `test_every_read_format_has_a_label` fails the build until it has them.
 
-Pure CPU and never on the event loop: every caller hands these to `run_in_conversion_thread`
-(*"Uploaded files are parsed in a thread, not on the event loop"* in `DECISIONS.md`).
+Pure CPU and never on a request's event loop: every caller on a request path hands these to
+`run_in_conversion_thread` (*"Uploaded files are parsed in a thread, not on the event loop"* in
+`DECISIONS.md`).
 """
 
 import logging
