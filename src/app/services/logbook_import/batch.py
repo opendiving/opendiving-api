@@ -75,14 +75,13 @@ from .reader import LoadedBatch, LoadedImport
 from .staging import StagedFiles
 from .writer import WrittenImport, write_import
 
-# Which outcome of one dive says more, where several files reach it: created or restored
-# over a file or a recording added, over a link, over a skip.
+# Which outcome of one dive says more, where several files reach it: created over a file or a
+# recording added, over a link, over a skip.
 _RANK = {
     ImportDiveOutcome.SKIPPED: 0,
     ImportDiveOutcome.LINKED: 1,
     ImportDiveOutcome.UPDATED: 2,
     ImportDiveOutcome.CREATED: 3,
-    ImportDiveOutcome.RESTORED: 3,
 }
 
 
@@ -209,8 +208,6 @@ class _Dives:
             source = (member, record.source_uuid)
             if record.action is Action.CREATE:
                 self._touch(written.dive_ids[record.source_uuid], source, ImportDiveOutcome.CREATED)
-            elif record.action is Action.RESTORE:
-                self._touch(written.dive_ids[record.source_uuid], source, ImportDiveOutcome.RESTORED)
             elif record.action is Action.LINK and record.row_id is not None:
                 self._touch(record.row_id, source, ImportDiveOutcome.LINKED)
             elif record.action is Action.SKIP and record.source_uuid not in matched:
@@ -444,17 +441,15 @@ def batch_species(batch: LoadedBatch) -> list[ImportSpecies]:
 def _collections(plans: Sequence[ImportPlan]) -> list[ImportCollectionReport]:
     """Each collection's counts summed over the batch's files, each counted as the import of
     it alone would count it, after the files before it."""
-    totals = {name: [0, 0, 0, 0] for name in COLLECTIONS}
+    totals = {name: [0, 0, 0] for name in COLLECTIONS}
     for plan in plans:
         for report in plan.collection_reports():
             counts = totals[report.collection]
             counts[0] += report.created
             counts[1] += report.linked
-            counts[2] += report.restored
-            counts[3] += report.skipped
+            counts[2] += report.skipped
     return [
-        ImportCollectionReport(collection=name, created=c, linked=li, restored=r, skipped=s)
-        for name, (c, li, r, s) in totals.items()
+        ImportCollectionReport(collection=name, created=c, linked=li, skipped=s) for name, (c, li, s) in totals.items()
     ]
 
 
@@ -535,7 +530,7 @@ async def import_batch(
             unnumbered.extend(written.dive_ids[source] for source in plan.unnumbered_dives)
             dives.add(index, row.loaded, plan, written)
             plans.append(plan)
-            retired += portrait_change(plan)[1] + written.retired_bytes
+            retired += portrait_change(plan)[1]
 
         # The one thing a batch does as a whole rather than file by file: its dives with no
         # number are numbered in date order across every file, as the dive form would number

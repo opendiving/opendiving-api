@@ -271,10 +271,11 @@ async def preview_logbook_import(
     dive-computer file's dive takes its identifier from its bytes: the same whenever the
     same file comes again, under any name.
 
-    Every record lands in one of four buckets, per collection, summed over the files: **created**,
-    **linked** (an existing record of yours already carries that identifier, or that name),
-    **restored** (a record you deleted here, coming back under its original identifier) or
-    **skipped**, and `files` says how many files and card images the documents name and how
+    Every record lands in one of three buckets, per collection, summed over the files: **created**,
+    **linked** (an existing record of yours already carries that identifier, or that name) or
+    **skipped** - which is where a record you deleted here goes: no import brings one back, and
+    `restored` is always 0. A deleted dive's recordings can still reach a dive you have, as a new
+    dive's would. `files` says how many files and card images the documents name and how
     many of them the import actually carries - only the full-export archive carries any.
 
     `members` has one row per file - each part and each file a zip held - saying what it was
@@ -343,7 +344,7 @@ async def apply_logbook_import(
 
     Answers with the same report the preview did, describing what was actually written. The
     counts can differ from the preview's where your logbook moved in between - a dive
-    deleted since is restored rather than linked - because the plan is made afresh from the
+    deleted since is skipped rather than linked - because the plan is made afresh from the
     files here. A converted file is converted again and reaches the same document: nothing
     in the conversion depends on when it runs. The rows of `dives` carry the identifiers of
     the dives written.

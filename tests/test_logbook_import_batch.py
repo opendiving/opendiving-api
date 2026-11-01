@@ -49,11 +49,19 @@ from src.app.schemas.logbook_import import (
     ImportNoteCode,
 )
 from src.app.services import blob_store
-from src.app.services.dive_files import FILLABLE_MIXTURE_FIELDS, delete_dive_file, store_recording_file
+from src.app.services.dive_files import (
+    FILLABLE_MIXTURE_FIELDS,
+    delete_dive_file,
+    delete_files_for_dive,
+    store_recording_file,
+)
 from src.app.services.dive_numbering import suggest_dive_number
 from src.app.services.dive_profiles import IMPORT_PARSER_KEY, backfill_profiles
 from src.app.services.dive_reader import read_prefill
 from src.app.services.dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS
+from src.app.services.export import load_export_bundle, write_divejson
+from src.app.services.export.archive import DIVEJSON_NAME
+from src.app.services.export.paths import plan_archive_paths
 from src.app.services.logbook_import import BatchReport, import_batch, load_import
 from tests.conftest import db_available
 from tests.helpers.dive_files import suunto_json
@@ -959,27 +967,71 @@ class TestRowsAndRefusals:
             await load_import(parts_of(("run.json", _fixture("not-a-dive.json"))))
 
 
-class TestTheDiveRows:
-    @pytest.mark.asyncio
-    async def test_a_dive_deleted_since_is_brought_back(self, volume: Any, async_db: AsyncSession, db: Session) -> None:
-        from src.app.services.dive_files import delete_files_for_dive
+async def _delete(db: AsyncSession, dive_uuid: uuid_pkg.UUID | None) -> None:
+    """`DELETE /dive/{uuid}`'s effect: the dive's files gone and the row flagged."""
+    assert dive_uuid is not None
+    dive = (await db.execute(select(Dive).where(Dive.uuid == dive_uuid))).scalar_one()
+    await delete_files_for_dive(db, dive_id=dive.id, commit=False)
+    dive.is_deleted = True
+    dive.deleted_at = datetime.now(UTC)
+    await db.commit()
 
+
+class TestADeletedDiveStaysDeleted:
+    @pytest.mark.asyncio
+    async def test_a_dive_deleted_since_is_skipped(self, volume: Any, async_db: AsyncSession, db: Session) -> None:
         diver = create_user(db)
         files = [("dive.json", _unique_export())]
         [created] = (await _import(async_db, diver, files)).dives
-        dive = (await async_db.execute(select(Dive).where(Dive.uuid == created.uuid))).scalar_one()
-        await delete_files_for_dive(async_db, dive_id=dive.id, commit=False)
-        dive.is_deleted = True
-        await async_db.commit()
+        await _delete(async_db, created.uuid)
 
         preview = await _import(async_db, diver, files, apply=False)
-        [restored] = (await _import(async_db, diver, files)).dives
+        [skipped] = (await _import(async_db, diver, files)).dives
 
-        assert [row.outcome for row in preview.dives] == [ImportDiveOutcome.RESTORED]
-        assert (restored.outcome, restored.uuid) == (ImportDiveOutcome.RESTORED, created.uuid)
-        [back] = await _logbook(async_db, diver)
-        assert len(back["recordings"][0]["files"]) == 1
+        assert [row.outcome for row in preview.dives] == [ImportDiveOutcome.SKIPPED]
+        assert skipped.outcome is ImportDiveOutcome.SKIPPED
+        assert skipped.reason is not None and "You deleted this record here" in skipped.reason
+        assert await _dive_ids(async_db, diver) == []
+        assert await _count(async_db, DiveFile, diver) == 0
 
+    @pytest.mark.asyncio
+    async def test_a_download_of_a_deleted_dive_fills_the_dive_logged_from_elsewhere(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The phone downloads a Perdix dive, the diver deletes it and imports the same dive
+        from Shearwater Cloud, and the phone downloads again: its archive carries the deleted
+        dive's uuid, and its recording goes to the Shearwater Cloud dive rather than the
+        deleted one coming back beside it."""
+        diver = create_user(db)
+        [downloaded] = (await _import(async_db, diver, [("Perdix 3 2026-9-21.xml", CLOUD_XML)])).dives
+        bundle = await load_export_bundle(async_db, user_id=diver.id)
+        paths = plan_archive_paths(bundle)
+        document = b"".join(
+            [chunk async for chunk in write_divejson(async_db, bundle, exported_at=datetime.now(UTC), paths=paths)]
+        )
+        [member] = [
+            stored["archive_path"]
+            for dive in json.loads(document)["dives"]
+            for recording in dive["recordings"]
+            for stored in recording["source_files"]
+        ]
+        download = _zip({DIVEJSON_NAME: document, member: CLOUD_XML})
+        await _delete(async_db, downloaded.uuid)
+        await _import(async_db, diver, [("Perdix 3 2026-9-21.db", CLOUD_DATABASE)])
+        eighth = (await _dive_ids(async_db, diver))[1]
+
+        [row] = (await _import(async_db, diver, [("download.zip", download)])).dives
+
+        assert (row.outcome, row.files_added) == (ImportDiveOutcome.UPDATED, 1)
+        assert row.uuid != downloaded.uuid
+        assert len(await _dive_ids(async_db, diver)) == 2
+        [stored] = (await _dive(async_db, eighth))["recordings"]
+        assert len(stored["files"]) == 1
+        gone = (await async_db.execute(select(Dive.is_deleted).where(Dive.uuid == downloaded.uuid))).scalar_one()
+        assert gone is True
+
+
+class TestTheDiveRows:
     @pytest.mark.asyncio
     async def test_the_result_carries_the_preview_s_uuids(
         self, volume: Any, async_db: AsyncSession, db: Session
@@ -2018,27 +2070,6 @@ class TestADiveWithNoNumberIsNumberedAsTheFormWould:
 
         assert [row.outcome for row in report.dives] == [outcome]
         assert await _numbers(async_db, diver) == [42]
-
-    @pytest.mark.asyncio
-    async def test_a_restored_dive_is_numbered_as_the_dive_it_comes_back_as(
-        self, volume: Any, async_db: AsyncSession, db: Session
-    ) -> None:
-        """A restore keeps nothing of the deleted row but its identity, its number included."""
-        diver = create_user(db)
-        _logged(db, diver, 10, datetime(2026, 1, 10, 9, tzinfo=UTC))
-        export = ("dive.json", _unique_export())
-        await _import(async_db, diver, [export])
-        await async_db.execute(
-            update(Dive)
-            .where(Dive.user_id == diver.id, Dive.dive_number == 11)
-            .values(dive_number=99, is_deleted=True, deleted_at=datetime.now(UTC))
-        )
-        await async_db.commit()
-
-        report = await _import(async_db, diver, [export])
-
-        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.RESTORED]
-        assert await _numbers(async_db, diver) == [10, 11]
 
 
 def _profiled(**dive: Any) -> dict[str, Any]:

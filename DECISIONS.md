@@ -5783,11 +5783,11 @@ Rejected: an importer-local restatement of §3, which drifts.
 Spec §9's duplicate-member rule is a parsing rule — `json` keeps the last value — so
 `parse_document` and `DuplicateMemberError` in `services/logbook_import/reader.py` reject it.
 
-## A uuid is preserved, matched, restored or remapped, and which one is a property of the instance
+## A uuid is preserved, matched, skipped or remapped, and which one is a property of the instance
 
 Every caller-owned collection takes one of four branches on a document uuid. Unclaimed here: create
 under that uuid, preserving identity across instances. The caller's, live: nothing is written,
-counted as `linked` — the idempotence invariant. The caller's, soft-deleted: restore (next section).
+counted as `linked` — the idempotence invariant. The caller's, soft-deleted: skip (next section).
 Another account's: mint a fresh uuid, create under it, remap every reference.
 
 A fifth remap — two records of one collection claiming one uuid — is decided in
@@ -5800,19 +5800,24 @@ a schema-wide change for one corner case.
 
 `species` is exempt: it belongs to nobody, and import never creates or claims a catalog row.
 
-## A soft-deleted match restores the row — wholesale, under its original uuid
+## A record the caller deleted is never brought back by an import
 
-A soft-deleted row of the caller's whose uuid the document carries has `is_deleted` and `deleted_at`
-cleared together, every imported column overwritten and its children rebuilt, and is reported under
-its own `restored` count.
+A document record whose uuid is the caller's soft-deleted row is skipped with a note, for dives,
+certifications and service records alike. A deleted dive's recordings still go through the recording
+gates, so a download of a dive the diver deleted and then logged from another source fills that
+dive. Nothing else of it is written.
 
-Create-fresh under a new uuid is rejected: the `uuid` unique index is full, not partial, and no
-purge job reclaims a deleted dive, so every re-import would duplicate the restored dives.
+Rejected: restoring the row, which put a deleted download back beside the dive that replaced it; and
+creating it under a fresh uuid, the same restore under another name. Dives therefore have no
+un-delete path; a trash bin would be its own feature.
+
+`restored` stays on the collection report, always 0, because the web app and the iOS app decode it
+as required.
 
 Two traps: the dedupe lookup branches on `is_deleted` rather than filtering it — an
-`is_deleted=False` query would call the husk's uuid unclaimed and hit that index — and the match is
-re-evaluated inside the apply transaction, a row being deletable between the two calls, so apply
-re-plans the document rather than carrying a plan in its token.
+`is_deleted=False` query would call the husk's uuid unclaimed and hit the full `uuid` index — and
+the match is re-evaluated inside the apply transaction, a row being deletable between the two calls,
+so apply re-plans the document rather than carrying a plan in its token.
 
 Derive the tables with `git grep -n "SoftDeleteMixin" -- src/app/models/` (`Dive`, `Certification`,
 `GearServiceRecord`, `User`), reading the hits since *not*-soft-deleting models match too; `User`

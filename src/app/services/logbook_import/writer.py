@@ -78,18 +78,16 @@ from ...schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDev
 from ..certification_files import KEY_KIND as CERTIFICATION_KEY_KIND
 from ..certification_files import (
     UnsupportedCardFileError,
-    delete_files_for_certification,
     sniff_content_type,
     strip_card_image,
 )
-from ..dive_conditions import drop_conditions, restore_conditions
+from ..dive_conditions import restore_conditions
 from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
 from ..dive_files import (
     TECH_SCALAR_FIELDS,
     LinkedCylinder,
     RecordingChange,
     apply_gas_mapping,
-    delete_files_for_dive,
     derive_dive_fixes,
     extract_recording,
     fill_dive_mixtures,
@@ -162,16 +160,13 @@ class _StoredBlob:
 @dataclass(frozen=True, slots=True)
 class WrittenImport:
     """What one file's write did that its plan could not say: the row each dive it created
-    or restored went into, by the document's uuid, and how many files each recording match
+    went into, by the document's uuid, and how many files each recording match
     stored and the ordinal its recording holds on its dive - both aligned with
     `ImportPlan.recording_matches`, an attach's slot being assigned only as it is written."""
 
     dive_ids: dict[uuid_pkg.UUID, int]
     match_files: list[int]
     match_ordinals: list[int]
-    # What the restores' cleared files held, as `get_storage_usage` counts it - space the
-    # storage limit check gives back.
-    retired_bytes: int
 
 
 class _Writer:
@@ -185,10 +180,9 @@ class _Writer:
         self._staged = staged
         self._match_files: list[int] = []
         self.match_ordinals: list[int] = []
-        self.retired_bytes = 0
         self._now = datetime.now(UTC)
         # Document uuid -> row id, per collection. Seeded with everything the plan already
-        # resolved (links and restores both name a row) and filled in as rows are created.
+        # resolved (a link names a row) and filled in as rows are created.
         self._ids: dict[tuple[str, uuid_pkg.UUID], int] = {
             (collection, record.source_uuid): record.row_id
             for collection, records in plan.records.items()
@@ -217,9 +211,6 @@ class _Writer:
     def match_files(self) -> list[int]:
         return list(self._match_files)
 
-    async def _stored_bytes(self, total: Any) -> int:
-        return int((await self._db.execute(total)).scalar_one())
-
     def _ids_for(self, collection: str, source_uuids: list[uuid_pkg.UUID]) -> list[int]:
         return [row_id for row_id in (self._id(collection, one) for one in source_uuids) if row_id is not None]
 
@@ -233,23 +224,7 @@ class _Writer:
         }
 
     async def _write_row(self, collection: str, model: Any, record: PlannedRecord) -> int:
-        """Insert a new row, or bring a soft-deleted one back and overwrite it.
-
-        The restore branch clears `is_deleted` and `deleted_at` **together** and rewrites
-        every imported column, keeping nothing of the husk but its identity (`id`, `uuid`,
-        `user_id`). Anything less would leave a row that is half the document's and half
-        whatever it was when the diver deleted it, which is the state nobody could reason
-        about afterwards.
-        """
-        if record.action is Action.RESTORE and record.row_id is not None:
-            await self._db.execute(
-                update(model)
-                .where(model.id == record.row_id)
-                .values(**record.values, is_deleted=False, deleted_at=None, updated_at=self._now)
-            )
-            self._ids[(collection, record.source_uuid)] = record.row_id
-            return record.row_id
-
+        """Insert a new row, recording the id its document uuid now names."""
         result = await self._db.execute(
             # `uuid` is spelled out rather than left to `PublicUUIDMixin`'s
             # `default_factory`: that is a dataclass-level default applied when the ORM
@@ -529,16 +504,6 @@ class _Writer:
 
     async def _write_certifications(self) -> None:
         for record in self._plan.writable("certifications"):
-            if record.action is Action.RESTORE and record.row_id is not None:
-                # `erase_certification` takes the cards with the row, but a soft delete from
-                # the admin panel leaves them: a side the document carries would collide on
-                # `ux_certification_file_certification_id_side`, one it lacks would come back.
-                self.retired_bytes += await self._stored_bytes(
-                    select(func.coalesce(func.sum(CertificationFile.byte_size), 0)).where(
-                        CertificationFile.certification_id == record.row_id
-                    )
-                )
-                await delete_files_for_certification(self._db, certification_id=record.row_id, commit=False)
             record.values["course_id"] = self._id("courses", record.children.get("course_uuid"))
             record.values["contact_id"] = self._contact_id(record)
             record.values["instructor_id"] = self._person_id(record.children.get("instructor"))
@@ -581,22 +546,6 @@ class _Writer:
 
     async def _write_dives(self) -> None:
         for record in self._plan.writable("dives"):
-            if record.action is Action.RESTORE and record.row_id is not None:
-                # Before the row itself, not after: `delete_files_for_dive` clears the
-                # dive's tech scalars along with the recordings they were read off, so
-                # running it afterwards would wipe the positions this import just wrote. It
-                # also takes the old recordings and their profiles, which is what stops a
-                # restored dive from keeping curves the document does not describe.
-                self.retired_bytes += await self._stored_bytes(
-                    select(func.coalesce(func.sum(DiveFile.stored_byte_size), 0)).where(
-                        DiveFile.dive_id == record.row_id
-                    )
-                )
-                await delete_files_for_dive(self._db, dive_id=record.row_id, commit=False)
-                # The deleted dive's record goes with nothing emptied: the document's values
-                # are the dive's now, and its own record, if it carries one, is written below.
-                await drop_conditions(self._db, record.row_id)
-
             record.values["trip_id"] = self._id("trips", record.children.get("trip_uuid"))
             record.values["course_id"] = self._id("courses", record.children.get("course_uuid"))
             record.values["contact_id"] = self._contact_id(record)
@@ -1100,5 +1049,4 @@ async def write_import(
         dive_ids={record.source_uuid: writer.dive_id(record.source_uuid) for record in plan.writable("dives")},
         match_files=writer.match_files,
         match_ordinals=writer.match_ordinals,
-        retired_bytes=writer.retired_bytes,
     )
