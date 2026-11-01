@@ -262,6 +262,14 @@ class TestOneTicketIsOneExport:
 
         assert limit.await_count == 3
 
+    def test_a_refused_fetch_earns_no_free_repeat(self, client: TestClient, limit: AsyncMock):
+        """Over the limit, a fresh ticket's second fetch is refused as its first was."""
+        limit.side_effect = RateLimitException("Too many requests.")
+
+        statuses = [client.get(PATHS[3], params={"ticket": "a"}).status_code for _ in range(2)]
+
+        assert statuses == [429, 429]
+
     def test_each_ticket_counts(self, client: TestClient, limit: AsyncMock):
         client.get(PATHS[3], params={"ticket": "a"})
         client.get(PATHS[3], params={"ticket": "b"})
