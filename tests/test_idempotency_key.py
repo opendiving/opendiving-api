@@ -61,6 +61,7 @@ EXCLUDED: dict[str, str] = {
     "/api/v1/user/api-keys": "Mints a token rather than a record, whose secret a replay could not return again.",
     "/api/v1/user/checkin-link": "Mints a token rather than a record, and minting again revokes the last one.",
     "/api/v1/user/invite-link": "Mints a token rather than a record, and minting again replaces the last one.",
+    "/api/v1/user/download-ticket": "Mints a short-lived token rather than a record; a retry is a second ticket.",
     "/api/v1/user/invitations": "Sends mail, bounded by its own limit, and a second send is a 409 already.",
     "/api/v1/user/passkey/verify": "Completes a single-use ceremony, whose challenge a repeat cannot reuse.",
     "/api/v1/dive/{uuid}/recordings": "Idempotent by its bytes: a repeat upload finds the file it stored.",

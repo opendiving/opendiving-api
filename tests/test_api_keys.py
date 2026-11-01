@@ -65,6 +65,7 @@ REFUSING_PREFIXES = (
     "/api/v1/user/checkin-link",
     "/api/v1/user/invite-link",
     "/api/v1/user/email-change",
+    "/api/v1/user/download-ticket",
 )
 ALSO_REFUSING = {("DELETE", "/api/v1/user")}
 

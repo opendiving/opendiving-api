@@ -232,6 +232,16 @@ class LogbookImportTokenData(BaseModel):
     sha256: str
 
 
+class DownloadTokenData(BaseModel):
+    """Decoded payload of a download ticket (see `create_download_token`/
+    `verify_download_token` in `core.security`), minted by `POST /user/download-ticket` and
+    presented as `?ticket=` on the one download path it names."""
+
+    user_uuid: uuid_pkg.UUID
+    session_uuid: uuid_pkg.UUID
+    jti: str
+
+
 class TokenBlacklistBase(BaseModel):
     token: str
     expires_at: datetime

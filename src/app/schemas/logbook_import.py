@@ -729,8 +729,6 @@ class ImportNoteCode(StrEnum):
     # *second* is created under a fresh one and nothing is rewritten, so references to that
     # identifier stay where the document put them: on the first of the two.
     RECORD_REMAPPED_REFERENCES_STAY = "record_remapped_references_stay"
-    # A soft-deleted row of the caller's came back, under its original uuid.
-    RECORD_RESTORED = "record_restored"
     # The document was written before a change to the format, and a value was read as its
     # writer meant it - a profile axis in seconds, a readout on the dive, `en13319` as a
     # dive's water, `po2_limit`, a dive's `species_uuids`. Nothing was lost.
@@ -819,16 +817,15 @@ class ImportCollectionReport(BaseModel):
     training centers and the instructors an export written before either existed names on its
     courses and certifications, which it carries as strings rather than records. Each file's
     records are counted as an import of that file alone would count them, after the files
-    before it. `restored` is its
-    own figure and never hides inside `created` or `skipped`: un-deleting is the one thing
-    this feature does that no other surface in the app can, and a diver restoring a backup
-    is entitled to see it counted.
+    before it. A record the caller deleted here is skipped, never brought back, so `restored` is
+    always zero.
     """
 
     collection: Annotated[str, Field(examples=["dives"])]
     created: int
     linked: Annotated[int, Field(description="Matched an existing row of the caller's; nothing was written")]
-    restored: Annotated[int, Field(description="A soft-deleted row of the caller's, brought back under its own uuid")]
+    # On the wire until the web app and the iOS app stop decoding it as a required count.
+    restored: Annotated[int, Field(description="Always 0: an import never brings back a deleted record")] = 0
     skipped: int
 
 
@@ -982,8 +979,6 @@ class ImportDiveOutcome(StrEnum):
     """What the import does to one dive, as the most that happens to it."""
 
     CREATED = "created"
-    # A dive of yours that was deleted, brought back under its own identifier.
-    RESTORED = "restored"
     # Already in your logbook; nothing is written for it.
     LINKED = "linked"
     # A dive you have, gaining a file or another computer's recording.

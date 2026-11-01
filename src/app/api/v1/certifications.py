@@ -6,7 +6,7 @@ from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user, get_downloading_user
 from ...api.integrity import refuse_vanished_reference
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
@@ -498,7 +498,7 @@ async def read_certification_file(
     request: Request,
     uuid: uuid_pkg.UUID,
     side: CertificationSide,
-    current_user: Annotated[dict, Depends(get_current_user)],
+    current_user: Annotated[dict, Depends(get_downloading_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[
         str | None,
@@ -536,9 +536,9 @@ async def read_certification_file(
     if file is None:
         raise NotFoundException(f"No {side.value} image for this certification")
 
-    # `attachment`, not `inline`: the web app fetches this through its API client and renders
-    # from a blob URL, so it never navigates here directly. Should someone open the URL in a tab
-    # anyway, `attachment` stops a malicious PDF from executing in the same-origin viewer.
+    # `attachment`, not `inline`: a browser navigating here with a download ticket must save
+    # the file under its name, and a malicious PDF opened in a tab must not execute in the
+    # same-origin viewer.
     # `private` because this is one diver's card and no shared cache should keep a copy.
     return stored_bytes_response(
         file.data,

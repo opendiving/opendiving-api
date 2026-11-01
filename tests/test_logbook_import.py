@@ -474,29 +474,20 @@ class TestIdempotence:
         assert after == before
 
     @pytest.mark.asyncio
-    async def test_a_course_exported_without_its_status_links_and_keeps_a_restored_dives_link(
-        self, db: Session, async_db: AsyncSession
-    ) -> None:
+    async def test_a_course_exported_without_its_status_links(self, db: Session, async_db: AsyncSession) -> None:
         """A stored status the format has no word for exports as no status, and the course
-        still matches the caller's row - so a dive restored from the same document keeps its
-        course rather than losing it to an unresolved reference."""
+        still matches the caller's row rather than leaving its dive's reference unresolved."""
         user = _seed_logbook(db)
         course = db.query(Course).filter(Course.user_id == user.id).one()
         course.status = "audited"
         db.commit()
         document = await _export(async_db, user.id)
         assert "status" not in json.loads(document)["courses"][0]
-        dive = db.query(Dive).filter(Dive.user_id == user.id).one()
-        dive.is_deleted = True
-        dive.deleted_at = datetime.now(UTC)
-        db.commit()
 
         plan = await _apply(async_db, user.id, document)
 
         assert _counts(plan)["courses"] == (0, 1, 0, 0)
         assert ImportNoteCode.REFERENCE_UNRESOLVED not in _codes(plan)
-        restored = (await async_db.execute(select(Dive).where(Dive.id == dive.id))).scalars().one()
-        assert restored.course_id == course.id
 
     @pytest.mark.parametrize(
         ("collection", "member"),
@@ -547,21 +538,19 @@ class TestIdempotence:
         assert _counts(second)["dives"] == (1, 0, 0, 0)
 
 
-class TestRestore:
-    """A soft-deleted row of the caller's comes back, under its own uuid.
+class TestADeletedRecordStaysDeleted:
+    """A record the caller deleted here is skipped, never brought back, by any import.
 
-    The application's only un-delete path, and the one branch a `is_deleted=False` lookup
-    would break in the worst way: it would call the husk's uuid unclaimed, create against
-    it, and hit the full unique index.
+    The branch an `is_deleted=False` lookup would break in the worst way: it would call the
+    husk's uuid unclaimed, create against it, and hit the full unique index.
     """
 
     @pytest.mark.asyncio
-    async def test_a_deleted_dive_is_restored_rather_than_recreated(
+    async def test_a_deleted_dive_is_skipped_and_stays_deleted(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
         user, document = seeded
         dive = db.query(Dive).filter(Dive.user_id == user.id).one()
-        original_id, original_uuid = dive.id, dive.uuid
         dive.is_deleted = True
         dive.deleted_at = datetime.now(UTC)
         dive.notes = "edited after deletion"
@@ -569,37 +558,17 @@ class TestRestore:
 
         plan = await _apply(async_db, user.id, document)
 
-        assert _counts(plan)["dives"] == (0, 0, 1, 0)
-        assert ImportNoteCode.RECORD_RESTORED in _codes(plan)
-        restored = (await async_db.execute(select(Dive).where(Dive.uuid == original_uuid))).scalars().one()
-        assert restored.id == original_id
-        assert restored.is_deleted is False
-        assert restored.deleted_at is None
-        # Wholesale: the husk keeps nothing but its identity.
-        assert restored.notes != "edited after deletion"
+        assert _counts(plan)["dives"] == (0, 0, 0, 1)
+        [note] = [note for note in plan.notes if note.uuid == dive.uuid and note.code is ImportNoteCode.RECORD_SKIPPED]
+        assert "You deleted this record here" in note.message
+        rows = (await async_db.execute(select(Dive).where(Dive.user_id == user.id))).scalars().all()
+        assert [(row.id, row.is_deleted, row.notes) for row in rows] == [(dive.id, True, "edited after deletion")]
 
     @pytest.mark.asyncio
-    async def test_a_restored_dive_gets_its_children_back(
+    async def test_a_deleted_certification_and_service_record_stay_deleted_too(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
-        user, document = seeded
-        dive = db.query(Dive).filter(Dive.user_id == user.id).one()
-        db.query(DiveMixture).filter(DiveMixture.dive_id == dive.id).delete()
-        dive.is_deleted = True
-        dive.deleted_at = datetime.now(UTC)
-        db.commit()
-
-        await _apply(async_db, user.id, document)
-
-        mixtures = (await async_db.execute(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).scalars().all()
-        assert len(mixtures) == 1
-        assert mixtures[0].oxygen == 32.0
-
-    @pytest.mark.asyncio
-    async def test_a_deleted_certification_and_service_record_restore_too(
-        self, seeded: Any, db: Session, async_db: AsyncSession
-    ) -> None:
-        """The branch covers every importable soft-deleting table, not dives alone."""
+        """Every importable soft-deleting table, not dives alone."""
         user, document = seeded
         for model in (Certification, GearServiceRecord):
             db.query(model).filter(model.user_id == user.id).update(
@@ -610,38 +579,36 @@ class TestRestore:
         plan = await _apply(async_db, user.id, document)
 
         counts = _counts(plan)
-        assert counts["certifications"] == (0, 0, 1, 0)
-        assert counts["gear_service_records"] == (0, 0, 1, 0)
+        assert counts["certifications"] == (0, 0, 0, 1)
+        assert counts["gear_service_records"] == (0, 0, 0, 1)
+        for model in (Certification, GearServiceRecord):
+            flags = (await async_db.execute(select(model.is_deleted).where(model.user_id == user.id))).scalars().all()
+            assert flags == [True]
 
     @pytest.mark.asyncio
-    async def test_a_restored_certification_keeps_only_the_cards_the_document_carries(
+    async def test_a_deleted_certification_s_cards_are_not_written(
         self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
     ) -> None:
-        """A certification soft-deleted outside `erase_certification` - the admin panel's
-        delete flags the row and leaves its file rows - restores with the document's cards
-        and none of its old ones: the front the archive carries replaces the old front
-        rather than colliding with it, and the back it lacks does not come back."""
+        """The archive's card is counted as skipped, not restored, and the cards a soft delete
+        from the admin panel left in place stay as they were."""
         monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
         user = create_user(db)
         certification = create_certification(db, user)
-        cards = {
-            side: phone_jpeg(size=(32 + index, 24), orientation=None) for index, side in enumerate(("front", "back"))
-        }
-        for side, payload in cards.items():
-            digest = hashlib.sha256(payload).hexdigest()
-            key = blob_store.new_key("certification-files", sha256=digest)
-            await blob_store.put(key, payload)
-            db.add(
-                CertificationFile(
-                    certification_id=certification.id,
-                    side=side,
-                    content_type="image/jpeg",
-                    byte_size=len(payload),
-                    original_filename=f"{side}.jpg",
-                    sha256=digest,
-                    storage_key=key,
-                )
+        card = phone_jpeg(size=(32, 24), orientation=None)
+        digest = hashlib.sha256(card).hexdigest()
+        key = blob_store.new_key("certification-files", sha256=digest)
+        await blob_store.put(key, card)
+        db.add(
+            CertificationFile(
+                certification_id=certification.id,
+                side="front",
+                content_type="image/jpeg",
+                byte_size=len(card),
+                original_filename="front.jpg",
+                sha256=digest,
+                storage_key=key,
             )
+        )
         db.commit()
         document = await _export(async_db, user.id, archive_paths=True)
         front = parse_document(document)["certifications"][0]["front_file"]["archive_path"]
@@ -650,9 +617,10 @@ class TestRestore:
         )
         db.commit()
 
-        plan = await _apply(async_db, user.id, _zip_of(document, {front: cards["front"]}), filename="logbook.zip")
+        plan = await _apply(async_db, user.id, _zip_of(document, {front: card}), filename="logbook.zip")
 
-        assert _counts(plan)["certifications"] == (0, 0, 1, 0)
+        assert _counts(plan)["certifications"] == (0, 0, 0, 1)
+        assert (plan.files_restored, plan.files_skipped) == (0, 1)
         files = (
             await async_db.execute(
                 select(CertificationFile.side, CertificationFile.sha256).where(
@@ -660,30 +628,28 @@ class TestRestore:
                 )
             )
         ).all()
-        stripped = certification_files.strip_card_image(cards["front"], "image/jpeg")
-        assert [tuple(row) for row in files] == [("front", hashlib.sha256(stripped).hexdigest())]
+        assert [tuple(row) for row in files] == [("front", digest)]
 
     @pytest.mark.asyncio
-    async def test_a_deleted_dive_gets_its_own_files_back_from_the_archive(
+    async def test_a_deleted_dive_s_own_archive_writes_none_of_its_files(
         self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
     ) -> None:
-        """A soft delete that left the dive's files in place - the admin panel's - leaves its
-        digests held. They are the restored dive's own, cleared before it is written, so the
-        archive's copy is restored rather than skipped as stored against another recording."""
+        """The account's own archive, re-imported after the dive was deleted, skips the dive
+        and its file, and leaves the file a soft delete from the admin panel left behind."""
         monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
         user = create_user(db)
-        payload = b'{"restored": "with its file"}'
+        payload = b'{"deleted": "with its file"}'
         dive, digest = await _dive_with_a_file(db, async_db, user, payload)
         archive = await _own_archive(async_db, user.id, payload)
         _soft_delete(db, dive)
 
         plan = await _apply(async_db, user.id, archive, filename="logbook.zip")
 
-        assert _counts(plan)["dives"] == (0, 0, 1, 0)
-        assert (plan.files_restored, plan.files_skipped) == (1, 0)
-        stored = (await async_db.execute(select(DiveFile).where(DiveFile.dive_id == dive.id))).scalars().one()
-        assert stored.sha256 == digest
-        assert await blob_store.get(stored.storage_key) == payload
+        assert _counts(plan)["dives"] == (0, 0, 0, 1)
+        assert (plan.files_restored, plan.files_skipped) == (0, 1)
+        stored = (await async_db.execute(select(DiveFile.dive_id, DiveFile.sha256))).all()
+        assert [tuple(row) for row in stored if row.sha256 == digest] == [(dive.id, digest)]
+        assert (await async_db.execute(select(Dive.is_deleted).where(Dive.id == dive.id))).scalar_one() is True
 
 
 async def _archive_with_a_card(db: Session, async_db: AsyncSession, card: bytes) -> bytes:

@@ -16,7 +16,13 @@ from fastapi import FastAPI
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute, iter_route_contexts
 
-from ..api.dependencies import SAFE_METHODS, get_current_superuser, get_current_user, refuse_api_keys
+from ..api.dependencies import (
+    SAFE_METHODS,
+    get_current_superuser,
+    get_current_user,
+    get_downloading_user,
+    refuse_api_keys,
+)
 from .security import bearer_scheme
 
 EXTENSION = "x-opendiving-credentials"
@@ -45,11 +51,13 @@ def credentials_for(method: str, dependant: Dependant) -> list[Credential]:
     calls = _calls(dependant)
     if get_current_superuser in calls:
         return ["superuser"]
-    if not calls & {get_current_user, bearer_scheme}:
+    # `get_downloading_user` resolves a bearer header through `get_current_user`, keys included.
+    resolves_keys = bool(calls & {get_current_user, get_downloading_user})
+    if not resolves_keys and bearer_scheme not in calls:
         return list(CREDENTIALS)
 
     accepted: list[Credential] = ["session", "superuser"]
-    if get_current_user in calls and refuse_api_keys not in calls:
+    if resolves_keys and refuse_api_keys not in calls:
         if method.upper() in SAFE_METHODS:
             accepted.append("api-key-read")
         accepted.append("api-key-write")

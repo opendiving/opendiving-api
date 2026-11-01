@@ -18,7 +18,7 @@ caller then serves only that caller's rows. That is the other guard, in
 
 from typing import Any
 
-from src.app.api.dependencies import get_current_superuser, get_current_user
+from src.app.api.dependencies import get_current_superuser, get_current_user, get_downloading_user
 from src.app.core.security import bearer_scheme
 from src.app.main import app
 from tests.helpers.routes import RouteInfo, dependency_calls, iter_api_routes
@@ -29,7 +29,7 @@ from tests.helpers.routes import RouteInfo, dependency_calls, iter_api_routes
 # runs. `POST /auth/logout` has it and nothing else, and calling that "no auth" would put
 # an authenticated route into an allowlist of anonymous ones - exactly the wrong
 # direction for a guard whose failure mode is fail-open.
-AUTH_MARKERS: set[Any] = {get_current_user, get_current_superuser, bearer_scheme}
+AUTH_MARKERS: set[Any] = {get_current_user, get_current_superuser, get_downloading_user, bearer_scheme}
 
 # The reason is the payload here, not the path. It is what a reviewer reads when someone
 # proposes the next entry, and "it needs to be anonymous" is not one of these reasons.

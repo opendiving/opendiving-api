@@ -28,14 +28,17 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import IO, Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
-from ...api.dependencies import get_current_user
+from ...api.dependencies import get_downloading_user
 from ...core.config import settings
 from ...core.db.database import async_get_db
+from ...core.security import DOWNLOAD_TOKEN_EXPIRE_SECONDS
+from ...core.utils import cache
 from ...core.utils.binary_responses import BINARY_CSP
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...schemas.export import DIVEJSON_EXTENSION, DIVEJSON_MEDIA_TYPE
@@ -53,12 +56,34 @@ from ...services.export.naming import export_filename
 router = APIRouter(tags=["export"])
 
 
-async def _enforce_export_limit(user_id: int) -> None:
+async def _enforce_export_limit(request: Request, user_id: int) -> None:
+    # A browser that hands a ticketed download to its own downloader fetches the URL twice
+    # (`DOWNLOAD_TOKEN_EXPIRE_SECONDS`), and that is one export to the diver. So a ticket whose
+    # fetch has been admitted earns one uncounted repeat, and every other fetch is counted - a
+    # refused fetch earns nothing. The two keys keep the repeat single-use whatever order
+    # concurrent fetches land in. Fails open with the limit itself when Redis does.
+    ticket_id = getattr(request.state, "download_ticket_id", None)
+    admitted, repeated = f"export:ticket:{ticket_id}:admitted", f"export:ticket:{ticket_id}:repeated"
+    if ticket_id is not None and cache.client is not None:
+        try:
+            if await cache.client.get(admitted) and await cache.client.set(
+                repeated, 1, nx=True, ex=DOWNLOAD_TOKEN_EXPIRE_SECONDS
+            ):
+                return
+        except RedisError:
+            pass
+
     await enforce_rate_limit(
         f"export:user:{user_id}",
         settings.EXPORT_RATE_LIMIT_PER_USER,
         settings.EXPORT_RATE_LIMIT_WINDOW_SECONDS,
     )
+
+    if ticket_id is not None and cache.client is not None:
+        try:
+            await cache.client.set(admitted, 1, nx=True, ex=DOWNLOAD_TOKEN_EXPIRE_SECONDS)
+        except RedisError:
+            pass
 
 
 def _download(buffer: IO[bytes], *, filename: str, media_type: str) -> StreamingResponse:
@@ -104,7 +129,8 @@ def _download(buffer: IO[bytes], *, filename: str, media_type: str) -> Streaming
 
 @router.get("/export/divejson")
 async def export_divejson(
-    current_user: Annotated[dict, Depends(get_current_user)],
+    request: Request,
+    current_user: Annotated[dict, Depends(get_downloading_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> StreamingResponse:
     """Download the caller's whole logbook as a single DiveJSON 1.0 document.
@@ -127,7 +153,7 @@ async def export_divejson(
     `Content-Length`, never cached (`Cache-Control: no-store`), and rate limited per
     account.
     """
-    await _enforce_export_limit(current_user["id"])
+    await _enforce_export_limit(request, current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
     exported_at = datetime.now(UTC)
     # Named before the spool exists, so nothing can raise between creating the temp file
@@ -139,7 +165,8 @@ async def export_divejson(
 
 @router.get("/export/uddf")
 async def export_uddf(
-    current_user: Annotated[dict, Depends(get_current_user)],
+    request: Request,
+    current_user: Annotated[dict, Depends(get_downloading_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> StreamingResponse:
     """Download the caller's whole logbook as a single UDDF 3.2.2 document.
@@ -161,7 +188,7 @@ async def export_uddf(
     `Content-Length`, never cached (`Cache-Control: no-store`), and rate limited per
     account.
     """
-    await _enforce_export_limit(current_user["id"])
+    await _enforce_export_limit(request, current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
     exported_at = datetime.now(UTC)
     # Named before the spool exists, so nothing can raise between creating the temp file
@@ -173,7 +200,8 @@ async def export_uddf(
 
 @router.get("/export/csv")
 async def export_csv(
-    current_user: Annotated[dict, Depends(get_current_user)],
+    request: Request,
+    current_user: Annotated[dict, Depends(get_downloading_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> StreamingResponse:
     """Download the caller's dives as a single spreadsheet-ready CSV.
@@ -188,7 +216,7 @@ async def export_csv(
     `Content-Length`, never cached (`Cache-Control: no-store`), and rate limited per
     account.
     """
-    await _enforce_export_limit(current_user["id"])
+    await _enforce_export_limit(request, current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
     exported_at = datetime.now(UTC)
     filename = export_filename(current_user["username"], exported_at.date(), "csv")
@@ -212,7 +240,8 @@ async def export_csv(
 
 @router.get("/export/archive")
 async def export_archive(
-    current_user: Annotated[dict, Depends(get_current_user)],
+    request: Request,
+    current_user: Annotated[dict, Depends(get_downloading_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> StreamingResponse:
     """Download everything: a zip holding the DiveJSON document, the UDDF one, the
@@ -227,7 +256,7 @@ async def export_archive(
     `Content-Length`, never cached (`Cache-Control: no-store`), and rate limited per
     account.
     """
-    await _enforce_export_limit(current_user["id"])
+    await _enforce_export_limit(request, current_user["id"])
     bundle = await load_export_bundle(db, user_id=current_user["id"])
     exported_at = datetime.now(UTC)
     filename = export_filename(current_user["username"], exported_at.date(), "zip")

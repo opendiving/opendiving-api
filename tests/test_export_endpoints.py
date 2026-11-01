@@ -21,15 +21,17 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from src.app.api import router
-from src.app.api.dependencies import get_current_user
+from src.app.api.dependencies import get_current_user, get_downloading_user
 from src.app.api.v1 import export as export_route
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.setup import create_application
 from tests.helpers.export import full_bundle
+from tests.helpers.fake_redis import FakeRedis
 
 PATHS = (
     "/api/v1/export/divejson",
@@ -67,6 +69,7 @@ def signed_in(export_app: Any, monkeypatch: Any) -> Any:
     response the route builds around it.
     """
     export_app.dependency_overrides[get_current_user] = lambda: CURRENT_USER
+    export_app.dependency_overrides[get_downloading_user] = lambda: CURRENT_USER
 
     async def fake_load_bundle(db: Any, *, user_id: int) -> Any:
         return full_bundle()
@@ -96,16 +99,17 @@ class TestAuthentication:
         assert client.get(path).status_code == 401
 
     @pytest.mark.parametrize("path", PATHS)
-    def test_no_route_takes_any_parameter_at_all(self, client: TestClient, path: str):
-        """The bearer token names the only account there is to export.
+    def test_no_route_takes_any_parameter_but_its_credential(self, client: TestClient, path: str):
+        """The credential names the only account there is to export.
 
         There being nothing to pass is the guarantee every route in the API makes; here
-        it is the whole of one, with no id to probe with. Asserted against the published
-        contract rather than the signature, so a path, query or header parameter added
-        later fails here whatever shape it takes.
+        it is the whole of one, with no id to probe with. The one parameter is the download
+        ticket, which is a credential rather than a choice of account. Asserted against the
+        published contract rather than the signature, so a path, query or header parameter
+        added later fails here whatever shape it takes.
         """
         operation = client.get("/api/v1/openapi.json").json()["paths"][path]["get"]
-        assert operation.get("parameters", []) == []
+        assert [(p["name"], p["in"]) for p in operation.get("parameters", [])] == [("ticket", "query")]
 
     @pytest.mark.parametrize(
         "endpoint",
@@ -227,3 +231,53 @@ class TestRateLimit:
         )
         client.get(path)
         assert not loaded
+
+
+class TestOneTicketIsOneExport:
+    """A browser handing a ticketed download to its own downloader fetches the URL twice, and
+    the diver asked for one export."""
+
+    @pytest.fixture
+    def limit(self, export_app: Any, signed_in, monkeypatch) -> AsyncMock:
+        def ticketed(request: Request) -> dict[str, Any]:
+            request.state.download_ticket_id = request.query_params.get("ticket")
+            return CURRENT_USER
+
+        export_app.dependency_overrides[get_downloading_user] = ticketed
+        monkeypatch.setattr(export_route.cache, "client", FakeRedis())
+        limit = AsyncMock()
+        monkeypatch.setattr(export_route, "enforce_rate_limit", limit)
+        return limit
+
+    def test_both_fetches_of_a_ticket_count_once(self, client: TestClient, limit: AsyncMock):
+        client.get(PATHS[3], params={"ticket": "a"})
+        client.get(PATHS[3], params={"ticket": "a"})
+
+        assert limit.await_count == 1
+
+    def test_a_third_fetch_of_a_ticket_counts(self, client: TestClient, limit: AsyncMock):
+        """Only the downloader's repeat is free; a ticket is not a pass around the limit."""
+        for _ in range(4):
+            client.get(PATHS[3], params={"ticket": "a"})
+
+        assert limit.await_count == 3
+
+    def test_a_refused_fetch_earns_no_free_repeat(self, client: TestClient, limit: AsyncMock):
+        """Over the limit, a fresh ticket's second fetch is refused as its first was."""
+        limit.side_effect = RateLimitException("Too many requests.")
+
+        statuses = [client.get(PATHS[3], params={"ticket": "a"}).status_code for _ in range(2)]
+
+        assert statuses == [429, 429]
+
+    def test_each_ticket_counts(self, client: TestClient, limit: AsyncMock):
+        client.get(PATHS[3], params={"ticket": "a"})
+        client.get(PATHS[3], params={"ticket": "b"})
+
+        assert limit.await_count == 2
+
+    def test_a_bearer_request_always_counts(self, client: TestClient, limit: AsyncMock):
+        client.get(PATHS[3])
+        client.get(PATHS[3])
+
+        assert limit.await_count == 2
