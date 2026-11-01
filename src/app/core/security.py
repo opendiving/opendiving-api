@@ -24,6 +24,7 @@ from .db.crud_token_blacklist import crud_token_blacklist
 from .exceptions.http_exceptions import UnauthorizedException
 from .schemas import (
     DiveFileTokenData,
+    DownloadTokenData,
     GoogleUserInfo,
     LogbookImportTokenData,
     OnboardingTokenData,
@@ -84,6 +85,11 @@ class TokenType(StrEnum):
     # `POST /import/logbook`. Its own member rather than a reused `DIVE_FILE` so a parse
     # receipt cannot be spent at the import endpoint or the other way round.
     LOGBOOK_IMPORT = "logbook_import"
+    # A signed-in session's leave to fetch one download URL with no `Authorization` header,
+    # minted by `POST /user/download-ticket` - see `create_download_token`/
+    # `verify_download_token` below. Its own member so an access token cannot stand in for
+    # one in a query string, and one cannot stand in for an access token.
+    DOWNLOAD = "download"
 
 
 # -------------- magic-link tokens --------------
@@ -822,6 +828,64 @@ def verify_logbook_import_token(token: str) -> LogbookImportTokenData | None:
         return None
 
     return LogbookImportTokenData(user_uuid=user_uuid, sha256=sha256)
+
+
+# -------------- download tokens --------------
+# Long enough to outlast building the largest export before the response starts: a browser
+# that hands the download to its own downloader fetches the URL a second time once the first
+# response's headers arrive, and both fetches have to find the token alive.
+DOWNLOAD_TOKEN_EXPIRE_SECONDS = 300
+
+
+def create_download_token(*, user_uuid: uuid_pkg.UUID, session_uuid: uuid_pkg.UUID, path: str) -> str:
+    """Mints the ticket `POST /user/download-ticket` hands back for one download URL.
+
+    Bound to the account, the session that asked and the exact path, so it opens nothing but
+    that one download, and only while the session that minted it is live - signing that
+    device out ends every ticket it holds. Not blacklisted after use: the second fetch
+    described above `DOWNLOAD_TOKEN_EXPIRE_SECONDS` is the same download, not a replay. The
+    `jti` is what lets a route count both fetches as one (`api.v1.export`).
+    """
+    expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=DOWNLOAD_TOKEN_EXPIRE_SECONDS)
+    to_encode: dict[str, Any] = {
+        "sub": str(user_uuid),
+        **_session_claim(session_uuid),
+        "path": path,
+        "exp": expire,
+        "jti": _new_jti(),
+        "token_type": TokenType.DOWNLOAD,
+    }
+    encoded_jwt: str = jwt.encode(to_encode, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def verify_download_token(token: str, *, path: str) -> DownloadTokenData | None:
+    """Validates a download ticket for a request to `path`: well-formed, unexpired, correctly
+    typed, complete and minted for that path. Returns what it attests, or `None`.
+
+    Whether the account and the session are still live is the caller's to ask, as it is
+    for an access token.
+    """
+    try:
+        payload = _decode(token)
+    except JWTError:
+        return None
+
+    if payload.get("token_type") != TokenType.DOWNLOAD or payload.get("path") != path:
+        return None
+
+    subject = payload.get("sub")
+    session_uuid = _session_id(payload)
+    jti = payload.get("jti")
+    if not isinstance(subject, str) or session_uuid is None or not isinstance(jti, str):
+        return None
+
+    try:
+        user_uuid = uuid_pkg.UUID(subject)
+    except ValueError:
+        return None
+
+    return DownloadTokenData(user_uuid=user_uuid, session_uuid=session_uuid, jti=jti)
 
 
 # -------------- blacklisting --------------

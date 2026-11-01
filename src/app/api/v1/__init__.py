@@ -14,6 +14,7 @@ from .dive_drafts import router as dive_drafts_router
 from .dive_form_presets import router as dive_form_presets_router
 from .dive_sites import router as dive_sites_router
 from .dives import router as dives_router
+from .download_tickets import router as download_tickets_router
 from .export import router as export_router
 from .gear_items import router as gear_items_router
 from .gear_service import router as gear_service_router
@@ -57,6 +58,7 @@ router.include_router(gear_service_router)
 router.include_router(certifications_router)
 router.include_router(checkin_details_router)
 router.include_router(checkin_links_router)
+router.include_router(download_tickets_router)
 router.include_router(species_router)
 router.include_router(dives_router)
 router.include_router(dive_drafts_router)

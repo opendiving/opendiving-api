@@ -28,7 +28,13 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from src.app.api import router
-from src.app.api.dependencies import current_session_uuid, fetch_owned_or_raise, get_current_user, refuse_api_keys
+from src.app.api.dependencies import (
+    current_session_uuid,
+    fetch_owned_or_raise,
+    get_current_user,
+    get_downloading_user,
+    refuse_api_keys,
+)
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.setup import create_application
@@ -582,6 +588,7 @@ def signed_in_client(owned_app: Any) -> Generator[TestClient]:
     for a conflict.
     """
     owned_app.dependency_overrides[get_current_user] = lambda: OWNER
+    owned_app.dependency_overrides[get_downloading_user] = lambda: OWNER
     owned_app.dependency_overrides[current_session_uuid] = lambda: CALLERS_SESSION
     owned_app.dependency_overrides[refuse_api_keys] = lambda: None
     try:

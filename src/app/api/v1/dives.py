@@ -11,7 +11,7 @@ from sqlalchemy import ColumnElement, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user, get_downloading_user
 from ...api.integrity import write_or_422
 from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import (
@@ -1709,7 +1709,7 @@ async def read_dive_file(
     request: Request,
     uuid: uuid_pkg.UUID,
     fid: uuid_pkg.UUID,
-    current_user: Annotated[dict, Depends(get_current_user)],
+    current_user: Annotated[dict, Depends(get_downloading_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[
         str | None,
@@ -1751,9 +1751,9 @@ async def read_dive_file(
     if file is None:
         raise NotFoundException("This dive has no such file")
 
-    # `attachment`, not `inline`: the web app fetches this through its API client and hands it
-    # to the browser as a download, so it never navigates here. XML opened in a tab at the
-    # app's own origin is exactly what we don't want. `private` because this is one diver's
+    # `attachment`, not `inline`: a browser navigating here with a download ticket must save
+    # the file under its name, and XML opened in a tab at the app's own origin is exactly
+    # what we don't want. `private` because this is one diver's
     # file and no shared cache should keep a copy; the `ETag` makes re-validation after 5
     # minutes cheap.
     return stored_bytes_response(

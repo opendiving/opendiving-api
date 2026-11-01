@@ -887,8 +887,8 @@ natively, so a bare "unsupported file type" would read as a bug. Supporting it n
 
 The download response carries `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`
 and `Content-Security-Policy: default-src 'none'; sandbox`. `attachment` rather than `inline`
-because the web app renders from a blob URL and never navigates to the URL, so a malicious PDF
-cannot execute in the same-origin viewer. The `filename` is built by
+because a browser navigating to the URL with a download ticket must save the file under its name,
+and a malicious PDF must not execute in the same-origin viewer. The `filename` is built by
 `content_disposition_attachment`, never interpolated (see "Non-ASCII filenames need RFC 6266").
 
 ## The card download endpoint is never Redis-cached
@@ -7336,3 +7336,15 @@ routes, the email change and `DELETE /user`. Rejected: a long-lived JWT, which n
 until it expires and dies with `SECRET_KEY`; an `X-API-Key` header, which `ClientCacheMiddleware`
 would label publicly cacheable; a parallel dependency routes opt into, which the guard cannot see;
 and a `user_session` row, which the session cap evicts and the active-account counts read.
+
+## A download ticket authenticates a navigation, and is spent more than once
+
+`POST /user/download-ticket` mints a JWT bound to the account, the session and one path, and
+`get_downloading_user` accepts it as `?ticket=` on the routes that serve a download. Firefox on iOS
+names a file saved from an object URL after the URL's uuid, whatever the page asks, because WebKit
+puts no `Content-Disposition` on a blob response; only a real response's header names its file. It
+also fetches that URL twice - once to read the headers, once with its own downloader - so the ticket
+lives five minutes and is not spent on use, and the export limit lets one repeat of an admitted
+fetch go uncounted. Rejected: a `File` in place of the `Blob`, which WebKit names no differently;
+cookie auth on download routes, which makes them cross-site navigable; `navigator.share`, which
+needs a user activation the fetch has already spent.
