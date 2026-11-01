@@ -69,6 +69,10 @@ class ClientCacheMiddleware(BaseHTTPMiddleware):
     #: open. Being wrong this way only costs a cache hit.
     CREDENTIAL_HEADERS = frozenset({"Authorization", "Cookie"})
 
+    #: The query parameter a download ticket rides in (`get_downloading_user`): the one
+    #: credential a request can carry outside its headers on every route that takes it.
+    CREDENTIAL_QUERY_PARAM = "ticket"
+
     #: What the public branch declares it varied on. Derived from the set above rather
     #: than typed out again: a third credential header added there but forgotten here
     #: would still get `private, no-store` on its own request, while leaving shared
@@ -109,7 +113,9 @@ class ClientCacheMiddleware(BaseHTTPMiddleware):
         # one alone is insufficient - see the class docstring for the two times a partial
         # check labelled a private response publicly cacheable.
         is_safe = request.method in self.SAFE_METHODS
-        is_anonymous = not any(header in request.headers for header in self.CREDENTIAL_HEADERS)
+        is_anonymous = not any(header in request.headers for header in self.CREDENTIAL_HEADERS) and (
+            self.CREDENTIAL_QUERY_PARAM not in request.query_params
+        )
 
         if is_safe and is_anonymous:
             response.headers["Cache-Control"] = f"public, max-age={self.max_age}"

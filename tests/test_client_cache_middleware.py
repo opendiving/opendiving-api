@@ -139,6 +139,14 @@ class TestCookieAuthenticatedRequests:
         assert response.headers["Cache-Control"] == "private, no-store"
 
 
+class TestTicketAuthenticatedRequests:
+    def test_a_download_ticket_makes_a_get_private(self, client: TestClient):
+        """A download ticket is a credential in the query string, so no header gives it away."""
+        response = client.get("/public-thing", params={"ticket": "abc"})
+
+        assert response.headers["Cache-Control"] == "private, no-store"
+
+
 class TestPublicResponsesDeclareWhatTheyVaryOn:
     """The decision is made from request headers, so a shared cache has to be told which
     ones - otherwise it answers a credentialed request from the anonymous entry it stored

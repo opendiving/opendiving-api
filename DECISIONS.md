@@ -887,8 +887,8 @@ natively, so a bare "unsupported file type" would read as a bug. Supporting it n
 
 The download response carries `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`
 and `Content-Security-Policy: default-src 'none'; sandbox`. `attachment` rather than `inline`
-because the web app renders from a blob URL and never navigates to the URL, so a malicious PDF
-cannot execute in the same-origin viewer. The `filename` is built by
+because a browser navigating to the URL with a download ticket must save the file under its name,
+and a malicious PDF must not execute in the same-origin viewer. The `filename` is built by
 `content_disposition_attachment`, never interpolated (see "Non-ASCII filenames need RFC 6266").
 
 ## The card download endpoint is never Redis-cached
@@ -5783,11 +5783,11 @@ Rejected: an importer-local restatement of §3, which drifts.
 Spec §9's duplicate-member rule is a parsing rule — `json` keeps the last value — so
 `parse_document` and `DuplicateMemberError` in `services/logbook_import/reader.py` reject it.
 
-## A uuid is preserved, matched, restored or remapped, and which one is a property of the instance
+## A uuid is preserved, matched, skipped or remapped, and which one is a property of the instance
 
 Every caller-owned collection takes one of four branches on a document uuid. Unclaimed here: create
 under that uuid, preserving identity across instances. The caller's, live: nothing is written,
-counted as `linked` — the idempotence invariant. The caller's, soft-deleted: restore (next section).
+counted as `linked` — the idempotence invariant. The caller's, soft-deleted: skip (next section).
 Another account's: mint a fresh uuid, create under it, remap every reference.
 
 A fifth remap — two records of one collection claiming one uuid — is decided in
@@ -5800,23 +5800,18 @@ a schema-wide change for one corner case.
 
 `species` is exempt: it belongs to nobody, and import never creates or claims a catalog row.
 
-## A soft-deleted match restores the row — wholesale, under its original uuid
+## A record the caller deleted is never brought back by an import
 
-A soft-deleted row of the caller's whose uuid the document carries has `is_deleted` and `deleted_at`
-cleared together, every imported column overwritten and its children rebuilt, and is reported under
-its own `restored` count.
+A document record whose uuid is the caller's soft-deleted row (`Dive`, `Certification`,
+`GearServiceRecord`) is skipped with a note. A deleted dive's recordings still go through the
+recording gates, so a re-download of a dive the diver deleted and logged again from another source
+fills that dive. Rejected: restoring the row, and creating it under a fresh uuid, which is the same
+restore. Dives have no un-delete path; a trash bin would be its own feature. `restored` stays on the
+collection report, always 0, until the web and iOS apps stop decoding it as required.
 
-Create-fresh under a new uuid is rejected: the `uuid` unique index is full, not partial, and no
-purge job reclaims a deleted dive, so every re-import would duplicate the restored dives.
-
-Two traps: the dedupe lookup branches on `is_deleted` rather than filtering it — an
-`is_deleted=False` query would call the husk's uuid unclaimed and hit that index — and the match is
-re-evaluated inside the apply transaction, a row being deletable between the two calls, so apply
-re-plans the document rather than carrying a plan in its token.
-
-Derive the tables with `git grep -n "SoftDeleteMixin" -- src/app/models/` (`Dive`, `Certification`,
-`GearServiceRecord`, `User`), reading the hits since *not*-soft-deleting models match too; `User`
-never imports.
+The dedupe lookup branches on `is_deleted` rather than filtering it: an `is_deleted=False` query
+would call the husk's uuid unclaimed and hit the full `uuid` index. Apply re-plans the document
+rather than carrying the preview's plan, a row being deletable between the two calls.
 
 ## No uniqueness rule anywhere fails an import
 
@@ -7179,10 +7174,9 @@ was computed from; a row whose inputs are `IS DISTINCT FROM` the dive's is answe
 covers every writer of those inputs without naming one - the form, a site's pin or water type moved
 under its dives, a site swapped or deleted, a merge, a recording's fix, the backfills, the admin
 panel. Rejected: a hook per writer, which has to find every `update(Dive)`, site-link helper and
-scalar fill across the routes and services and fails silently on the next one added. Only the
-import's restore of a deleted dive touches a row. The position is rounded by one SQL expression
-everywhere it is stored or compared: Python's `round` and Postgres's `round(numeric)` disagree on a
-half-way tie.
+scalar fill across the routes and services and fails silently on the next one added. The position is
+rounded by one SQL expression everywhere it is stored or compared: Python's `round` and Postgres's
+`round(numeric)` disagree on a half-way tie.
 
 ## The conditions run holds a Redis lock of its own
 
@@ -7342,3 +7336,15 @@ routes, the email change and `DELETE /user`. Rejected: a long-lived JWT, which n
 until it expires and dies with `SECRET_KEY`; an `X-API-Key` header, which `ClientCacheMiddleware`
 would label publicly cacheable; a parallel dependency routes opt into, which the guard cannot see;
 and a `user_session` row, which the session cap evicts and the active-account counts read.
+
+## A download ticket authenticates a navigation, and is spent more than once
+
+`POST /user/download-ticket` mints a JWT bound to the account, the session and one path, and
+`get_downloading_user` accepts it as `?ticket=` on the routes that serve a download. Firefox on iOS
+names a file saved from an object URL after the URL's uuid, whatever the page asks, because WebKit
+puts no `Content-Disposition` on a blob response; only a real response's header names its file. It
+also fetches that URL twice - once to read the headers, once with its own downloader - so the ticket
+lives five minutes and is not spent on use, and the export limit lets one repeat of an admitted
+fetch go uncounted. Rejected: a `File` in place of the `Blob`, which WebKit names no differently;
+cookie auth on download routes, which makes them cross-site navigable; `navigator.share`, which
+needs a user activation the fetch has already spent.

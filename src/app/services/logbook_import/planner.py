@@ -1,17 +1,16 @@
 """Deciding what importing a document would do, without doing any of it.
 
 The planner is the whole of the import's judgement and none of its writing. It resolves
-every uuid against this instance, picks create / link / restore / skip for each record,
+every uuid against this instance, picks create / link / skip for each record,
 converts the document's members into column values, drops what the database would refuse,
 and builds the report a diver reads. `writer.py` then walks the result and issues
 statements; it makes no decisions of its own.
 
 **Preview and apply run the same planner, and apply runs it again rather than replaying a
 plan.** Preview stores nothing, so its answer is a prediction; between the two calls a row
-can be deleted, restored by hand, or created under a name the document also uses.
-Replanning inside the apply transaction is what makes the restore branch's re-evaluation
-automatic rather than a rule somebody has to remember, and it costs a handful of indexed
-lookups.
+can be deleted, or created under a name the document also uses. Replanning inside the
+apply transaction is what makes the deleted-here branch's re-evaluation automatic rather
+than a rule somebody has to remember, and it costs a handful of indexed lookups.
 
 Four rules run through everything below, and each is the format's rather than this app's:
 
@@ -19,9 +18,9 @@ Four rules run through everything below, and each is the format's rather than th
   object when the *caller* already owns it, and is remapped to a fresh one when it belongs
   to somebody else - so a cross-instance migration keeps identity and a cross-account copy
   gets its own.
-- **A soft-deleted row of the caller's is restored**, wholesale and under its original
-  uuid, and counted separately from everything else. This is the application's only
-  un-delete path.
+- **A record the caller deleted here stays deleted.** Its uuid is never written again, by
+  any import: the record is skipped and noted. A dive's recordings still go through the
+  recording match first, so one that belongs to a dive the caller still has reaches it.
 - **Nothing is invented** (spec §5.4). A member the document omits imports as absent; where
   the column cannot hold absent and no default honestly means "not recorded", the *record*
   is skipped and reported rather than filled in.
@@ -213,13 +212,14 @@ _MAX_SUBMERGED_TIME_SECONDS = 366 * 24 * 60 * 60
 # million again - below its column's width, as the count's is, and the sum still fits.
 _MAX_DIVE_TIME_SECONDS = _MAX_DIVE_COUNT * 3600
 
+_DELETED_HERE = "You deleted this record here, so the import did not bring it back."
+
 
 class Action(StrEnum):
     """What the import will do with one record of the document."""
 
     CREATE = "create"
     LINK = "link"
-    RESTORE = "restore"
     SKIP = "skip"
 
 
@@ -434,7 +434,7 @@ class ImportPlan:
     # it is one recording's file and is not. See `LoadedImport.kept`.
     kept: bool = False
     not_kept: ImportMemberNotKept | None = None
-    # The dives this file writes - creates or restores - whose document states no number, by
+    # The dives this file creates whose document states no number, by
     # source uuid. Written holding `0`, and numbered by `import_batch` after its last file.
     unnumbered_dives: list[uuid_pkg.UUID] = field(default_factory=list)
 
@@ -457,7 +457,6 @@ class ImportPlan:
                     collection=name,
                     created=sum(1 for record in records if record.action is Action.CREATE),
                     linked=sum(1 for record in records if record.action is Action.LINK),
-                    restored=sum(1 for record in records if record.action is Action.RESTORE),
                     skipped=sum(1 for record in records if record.action is Action.SKIP),
                 )
             )
@@ -473,11 +472,7 @@ class ImportPlan:
 
     def writable(self, collection: str) -> list[PlannedRecord]:
         """The records of one collection the writer has work for, in document order."""
-        return [
-            record
-            for record in self.records.get(collection, {}).values()
-            if record.action in (Action.CREATE, Action.RESTORE)
-        ]
+        return [record for record in self.records.get(collection, {}).values() if record.action is Action.CREATE]
 
 
 @dataclass(frozen=True, slots=True)
@@ -798,10 +793,6 @@ class _Planner:
         # `recording_id`, so it cannot serve two either. The file is skipped and reported; the
         # dive is not.
         self._claimed_digests: dict[str, int | None] = {}
-        # Of those, the ones a soft-deleted dive's own files hold, by dive. A restore clears
-        # that dive's files before writing it (`delete_files_for_dive`), so they are its own
-        # to restore rather than "stored against another recording".
-        self._digests_on_deleted_dives: dict[int, list[str]] = {}
         # Incoming recordings that belong to dives this account already has - see
         # `PlannedRecordingMatch`. Filled by `_plan_dives`, walked by the writer.
         self._recording_matches: list[PlannedRecordingMatch] = []
@@ -909,8 +900,8 @@ class _Planner:
         **Branching on `is_deleted` rather than filtering it is the whole point.** The
         repo's habitual `is_deleted=False` lookup would report a soft-deleted husk's uuid
         as unclaimed, the import would create against it, and the *full* unique index on
-        `uuid` would refuse the insert - a failure on the one path the restore branch exists
-        to serve. No `user_id` filter either: a uuid owned by another account is what the
+        `uuid` would refuse the insert - where the record the diver deleted is to be
+        skipped. No `user_id` filter either: a uuid owned by another account is what the
         remap branch is for, and a query that could not see it would collide instead.
         """
         if not uuids:
@@ -966,14 +957,12 @@ class _Planner:
                 uuid=source_uuid,
             )
             return PlannedRecord(action=Action.CREATE, source_uuid=source_uuid, uuid=uuid7())
-        if row.is_deleted:
-            self._note(
-                ImportNoteCode.RECORD_RESTORED,
-                "This record was deleted here and is being restored from the document, under its original identifier.",
-                collection=collection,
-                uuid=source_uuid,
-            )
-        return PlannedRecord(action=Action.RESTORE, source_uuid=source_uuid, uuid=source_uuid, row_id=row.id)
+        # The caller's own row, and deleted, since `_linked` answers for a live one.
+        return self._skip(collection, source_uuid, _DELETED_HERE)
+
+    def _deleted_here(self, source_uuid: uuid_pkg.UUID, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> bool:
+        row = existing.get(source_uuid)
+        return row is not None and row.user_id == self._user_id and row.is_deleted
 
     def _linked(
         self, collection: str, source_uuid: uuid_pkg.UUID, existing: dict[uuid_pkg.UUID, _ExistingRow]
@@ -1267,10 +1256,10 @@ class _Planner:
     def _created_at(value: datetime | None) -> datetime:
         """`created_at` is logbook history and imports as recorded (spec §5.7).
 
-        Restore means restore: a dive logged in 2019 that comes back out of a backup is
-        still a 2019 record, and stamping it with today's date would have the log claim the
-        diver entered it this morning. `updated_at` is left to the write, which is the
-        honest reading of "when this instance last touched the row".
+        A dive logged in 2019 that comes in from a backup is still a 2019 record, and stamping
+        it with today's date would have the log claim the diver entered it this morning.
+        `updated_at` is left to the write, which is the honest reading of "when this instance
+        last touched the row".
         """
         return value if value is not None else datetime.now(UTC)
 
@@ -1466,7 +1455,7 @@ class _Planner:
                 "contact",
                 index_key=contact_key,
             )
-        if record.action not in (Action.CREATE, Action.RESTORE):
+        if record.action is not Action.CREATE:
             return record
 
         latitude, longitude = self._position(collection, contact.uuid, contact.position, "contact's")
@@ -1798,7 +1787,7 @@ class _Planner:
         if record.action is Action.CREATE:
             trip_key = _key(name)
             record = self._claim_unique("trips", record, index, aliases, trip_key, "trip", index_key=trip_key)
-        if record.action not in (Action.CREATE, Action.RESTORE):
+        if record.action is not Action.CREATE:
             return record
 
         record.values = {
@@ -1973,7 +1962,7 @@ class _Planner:
         if record.action is Action.CREATE:
             site_key = _key(name, place[f"{DIVE_SITE_LOCATION_PREFIX}name"])
             record = self._claim_unique("sites", record, index, aliases, site_key, "dive site", index_key=site_key)
-        if record.action not in (Action.CREATE, Action.RESTORE):
+        if record.action is not Action.CREATE:
             return record
         self._release(place_notes)
 
@@ -2089,7 +2078,7 @@ class _Planner:
         if record.action is Action.CREATE:
             item_key = _key(brand, name)
             record = self._claim_unique("gear", record, index, aliases, item_key, "gear item", index_key=item_key)
-        if record.action not in (Action.CREATE, Action.RESTORE):
+        if record.action is not Action.CREATE:
             return record
 
         gear_type = item.type
@@ -2149,7 +2138,7 @@ class _Planner:
         if record.action is Action.CREATE:
             set_key = _key(name)
             record = self._claim_unique("gear_sets", record, index, aliases, set_key, "gear set", index_key=set_key)
-        if record.action not in (Action.CREATE, Action.RESTORE):
+        if record.action is not Action.CREATE:
             return record
 
         weight = gear_set.weight
@@ -2239,7 +2228,7 @@ class _Planner:
                 "service schedule",
                 index_key=None if gear_record.row_id is None else (str(gear_record.row_id), *rule),
             )
-        if record.action not in (Action.CREATE, Action.RESTORE):
+        if record.action is not Action.CREATE:
             return record
         self._release(interval_notes)
 
@@ -2311,6 +2300,8 @@ class _Planner:
             )
 
         record = self._resolve(collection, service.uuid, existing)
+        if record.action is Action.SKIP:
+            return record
         record.values = {
             "user_id": self._user_id,
             "kind": service.type.value,
@@ -2370,6 +2361,9 @@ class _Planner:
                 "A certification needs an agency this app recognizes, and this one does not name one.",
             )
         record = self._resolve(collection, certification.uuid, existing)
+        if record.action is Action.SKIP:
+            self._count_unwritten((certification.front_file, certification.back_file))
+            return record
 
         record.values = {
             "user_id": self._user_id,
@@ -2429,17 +2423,13 @@ class _Planner:
         unique = sorted(set(wanted))
         for start in range(0, len(unique), _DIGESTS_PER_QUERY):
             rows = await self._db.execute(
-                select(DiveFile.sha256, DiveFile.recording_id, DiveFile.dive_id, Dive.is_deleted)
-                .join(Dive, Dive.id == DiveFile.dive_id)
-                .where(
+                select(DiveFile.sha256, DiveFile.recording_id).where(
                     DiveFile.user_id == self._user_id,
                     DiveFile.sha256.in_(unique[start : start + _DIGESTS_PER_QUERY]),
                 )
             )
             for row in rows:
                 held[row.sha256] = row.recording_id
-                if row.is_deleted:
-                    self._digests_on_deleted_dives.setdefault(row.dive_id, []).append(row.sha256)
         return held
 
     async def _load_candidates(self, around: datetime) -> list[RecordingCandidate]:
@@ -2644,7 +2634,15 @@ class _Planner:
             self._not_writing_the_file()
             return self._skip(collection, dive.uuid, "A dive needs a start time, and this one has none.")
 
-        record = self._resolve(collection, dive.uuid, existing)
+        # A dive the caller deleted here is planned as far as the recording gates, and no
+        # further: its recordings may belong to a dive they still have, and the dive itself
+        # is never written (`_plan_deleted_dive`).
+        deleted = self._deleted_here(dive.uuid, existing)
+        record = (
+            PlannedRecord(action=Action.SKIP, source_uuid=dive.uuid, uuid=dive.uuid)
+            if deleted
+            else self._resolve(collection, dive.uuid, existing)
+        )
 
         bounded = self._bounded(collection, dive.uuid, dive, DIVE_BOUNDS)
         recordings, sources = self._plan_recordings(dive)
@@ -2688,14 +2686,13 @@ class _Planner:
                 "Nothing was invented for it.",
             )
         # Only now that the dive is written: a file planned for a skipped one would be
-        # counted restored and claim a digest a later dive's copy needs.
-        if record.action is Action.RESTORE and record.row_id is not None:
-            for digest in self._digests_on_deleted_dives.pop(record.row_id, []):
-                self._claimed_digests.pop(digest, None)
-        recordings = [
-            replace(recording, files=self._plan_recording_files(dive, source))
-            for recording, source in zip(recordings, sources, strict=True)
-        ]
+        # counted restored and claim a digest a later dive's copy needs. A deleted dive's
+        # recordings get theirs only once the gates have placed them.
+        if not deleted:
+            recordings = [
+                replace(recording, files=self._plan_recording_files(dive, source))
+                for recording, source in zip(recordings, sources, strict=True)
+            ]
 
         max_depth, avg_depth = bounded.get("max_depth"), bounded.get("avg_depth")
         if avg_depth is None and dive.avg_depth is None and in_water is not None:
@@ -2780,13 +2777,18 @@ class _Planner:
         mixtures = self._plan_cylinders(dive)
 
         # **The gates run before a dive is created, and only for a uuid the caller does not
-        # hold.** A `RESTORE` is the caller's own deleted dive coming back under its own
-        # identity, and a `LINK` is a dive they already have - matching either against the
-        # logbook would be asking whether a dive is itself. `CREATE` covers the genuinely new
-        # dive, the remapped one and one whose identity the file's own bytes gave it, and the
-        # remapped case is where this matters most: another account's export carries uuids
-        # that mean nothing here, so uuid matching has nothing to work with and the device and
-        # the clock are all there is.
+        # hold live.** A `LINK` is a dive they already have - matching it against the logbook
+        # would be asking whether a dive is itself. `CREATE` covers the genuinely new dive, the
+        # remapped one and one whose identity the file's own bytes gave it, and the remapped
+        # case is where this matters most: another account's export carries uuids that mean
+        # nothing here, so uuid matching has nothing to work with and the device and the clock
+        # are all there is.
+        if deleted:
+            already = len(self._recording_matches)
+            remaining, matched = await self._match_recordings(dive, recordings, record.values, mixtures)
+            return self._plan_deleted_dive(
+                dive, already, matched, remaining, dict(zip(map(id, recordings), sources, strict=True))
+            )
         if record.action is Action.CREATE:
             already = len(self._recording_matches)
             recordings, matched = await self._match_recordings(dive, recordings, record.values, mixtures)
@@ -2829,6 +2831,33 @@ class _Planner:
         if number is None:
             self._unnumbered_dives.append(dive.uuid)
         return record
+
+    def _plan_deleted_dive(
+        self,
+        dive: ImportDive,
+        already: int,
+        matched: int,
+        remaining: list[PlannedRecording],
+        source_of: dict[int, ImportRecording],
+    ) -> PlannedRecord:
+        """Skip a dive the caller deleted here, after the gates placed what they could.
+
+        A recording that matched a live dive goes to it with its files, as a new dive's
+        would: a dive downloaded again after the diver deleted it and logged the same dive
+        from another source fills that one. One that matched nothing goes with the dive.
+        """
+        # `source_of` is keyed on the planned recordings' identity: the gates hand back the very
+        # objects they were given, matched or not.
+        for index in range(already, len(self._recording_matches)):
+            match = self._recording_matches[index]
+            files = self._plan_recording_files(dive, source_of[id(match.recording)])
+            self._recording_matches[index] = replace(match, recording=replace(match.recording, files=files))
+        self._count_unwritten(stored for recording in remaining for stored in source_of[id(recording)].source_files)
+        if matched and not remaining:
+            self._keep_on_match(already)
+        else:
+            self._not_writing_the_file()
+        return self._skip("dives", dive.uuid, _DELETED_HERE)
 
     def _tag_names(
         self, names: Sequence[str], *, collection: str | None = None, record_uuid: uuid_pkg.UUID | None = None

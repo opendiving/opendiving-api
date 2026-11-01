@@ -3,12 +3,20 @@ import uuid as uuid_pkg
 from datetime import UTC, datetime
 from typing import Annotated, Any, Protocol, cast
 
-from fastapi import Depends, Request
+from fastapi import Depends, Query, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db.database import async_get_db
 from ..core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnauthorizedException
-from ..core.security import TokenType, bearer_scheme, is_api_key, token_session_id, verify_token
+from ..core.security import (
+    TokenType,
+    bearer_scheme,
+    is_api_key,
+    token_session_id,
+    verify_download_token,
+    verify_token,
+)
 from ..crud.crud_api_keys import live_api_key, stamp_api_key_used
 from ..crud.crud_user_sessions import live_session_for
 from ..crud.crud_users import read_account
@@ -117,8 +125,9 @@ async def refuse_api_keys(token: Annotated[str, Depends(bearer_scheme)]) -> None
 
     A sibling of `get_current_user` rather than a change to it, as `current_session_uuid` is,
     declared on every route under the `/user/api-key`, `/user/passkey`, `/user/session`,
-    `/user/checkin-link`, `/user/invite-link` and `/user/email-change` prefixes that takes a
-    session, and on `DELETE /user` - `tests/test_api_keys.py` holds the set to that rule. It
+    `/user/checkin-link`, `/user/invite-link`, `/user/email-change` and `/user/download-ticket`
+    prefixes that takes a session, and on `DELETE /user` - `tests/test_api_keys.py` holds the
+    set to that rule. It
     decides on the prefix alone, without verifying the key: it can only ever refuse more, and
     `get_current_user` still authenticates everything it lets through.
     """
@@ -150,6 +159,59 @@ async def current_session_uuid(token: Annotated[str, Depends(bearer_scheme)]) ->
     should degrade to "I cannot tell" rather than to a claim nothing checked.
     """
     return token_session_id(token)
+
+
+# The path every download ticket's `path` claim is relative to.
+API_V1_PREFIX = "/api/v1"
+
+# The same `bearer` scheme in the published document, without the 401 on a missing header,
+# which `get_downloading_user` raises itself once it knows there is no ticket either.
+optional_bearer_scheme = HTTPBearer(scheme_name="bearer", auto_error=False)
+
+
+async def get_downloading_user(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(optional_bearer_scheme)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    ticket: Annotated[
+        str | None,
+        Query(description="A download ticket for this exact path, in place of an `Authorization` header"),
+    ] = None,
+) -> dict[str, Any]:
+    """`get_current_user` for a route serving a download, which also takes a ticket from
+    `POST /user/download-ticket` in the query string.
+
+    The ticket exists for the browser that saves a file only from a URL it navigated to: it
+    cannot send the in-memory access token, and Firefox on iOS names a file built in the
+    page after the object URL's uuid. A ticket opens only the path it was minted for, as
+    the account and session that minted it, and only while that session is live - the same
+    `live_session_for` question an access token is asked. With no ticket this is
+    `get_current_user` exactly, API keys included.
+
+    The ticket's `jti` is left on `request.state.download_ticket_id` for a route that
+    counts requests, since one download can arrive as two fetches of the same URL.
+    """
+    if ticket is None:
+        if credentials is None:
+            raise bearer_scheme.make_not_authenticated_error()
+        user = await get_current_user(request, credentials.credentials, db)
+        if user is None:
+            raise UnauthorizedException("User not authenticated.")
+        return user
+
+    token_data = verify_download_token(ticket, path=request.url.path.removeprefix(API_V1_PREFIX))
+    if token_data is None:
+        raise UnauthorizedException("User not authenticated.")
+
+    user = await read_account(db, uuid=token_data.user_uuid)
+    if not user:
+        raise UnauthorizedException("User not authenticated.")
+
+    if await live_session_for(db, session_uuid=token_data.session_uuid, user_id=user["id"]) is None:
+        raise UnauthorizedException("User not authenticated.")
+
+    request.state.download_ticket_id = token_data.jti
+    return user
 
 
 async def get_current_superuser(current_user: Annotated[dict, Depends(get_current_user)]) -> dict:
