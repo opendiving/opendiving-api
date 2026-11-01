@@ -256,15 +256,16 @@ themselves, the two health checks — `/health` says the process is up, `/health
 and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how somebody with
 no account asks a closed instance for an invitation, `GET /config`, which tells the web app whether
 registration is open - whether the project itself operates the instance, whether any join link
-exists (`join_links`), and whether a map renderer draws the map tiles (`map_tiles`) - before anyone
-has signed in, `GET /join-channel/{slug}`, which says whether one join link is live,
-`GET /invite-link/{token}`, which says whose invite link one token is, `GET /species/{uuid}/photo`,
-which serves a public Commons image to an `<img>` tag that has no way to send a token, and
-`GET /checkin/{token}` with its `/portrait` and `/certification/{uuid}/front`, the check-in page a
-diver shared as a link, where the token in the path is the credential, and `GET /openapi.json`, the
-document itself. `tests/test_route_authentication.py` is the guard that keeps the *anonymous* half
-of that list honest — it compares the app's real route table against its own allowlist and holds the
-reason for each — but nothing checks this paragraph, so a new route family belongs here by hand.
+exists (`join_links`), and whether a map renderer draws the map tiles (`map_tiles`) and the credit
+they owe (`map_attribution`) - before anyone has signed in, `GET /join-channel/{slug}`, which says
+whether one join link is live, `GET /invite-link/{token}`, which says whose invite link one token
+is, `GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>` tag that has no
+way to send a token, and `GET /checkin/{token}` with its `/portrait` and
+`/certification/{uuid}/front`, the check-in page a diver shared as a link, where the token in the
+path is the credential, and `GET /openapi.json`, the document itself.
+`tests/test_route_authentication.py` is the guard that keeps the *anonymous* half of that list
+honest — it compares the app's real route table against its own allowlist and holds the reason for
+each — but nothing checks this paragraph, so a new route family belongs here by hand.
 
 A record's create — `POST /dive`, `/trip`, `/person` and the like; `/docs` lists the header on each
 — takes an optional `Idempotency-Key` header: a repeat under the same key answers the record the

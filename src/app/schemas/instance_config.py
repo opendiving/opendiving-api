@@ -5,7 +5,7 @@ word for "what this instance is configured to do", and the endpoint was expected
 second field before it grew a second route - which is what `project_operated` is.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..core.config import RegistrationMode
 
@@ -39,6 +39,15 @@ class InstanceConfigRead(BaseModel):
     # Whether this instance names a map renderer, so the web knows whether to ask for tiles at
     # all and what its privacy page owes without probing a service only the API can reach.
     map_tiles: bool
+    # The credit those tiles owe, in `[label](url)` markdown-link syntax, as the renderer
+    # reports it. A client shows it beside every tile it draws, and draws none without it.
+    map_attribution: str | None = Field(
+        description=(
+            "The credit this instance's map tiles owe, as markdown links (`[label](url)`) with "
+            "plain text between them. Null when `map_tiles` is false, and until the map renderer "
+            "has named it; draw no tile without it."
+        )
+    )
     # Whether this instance asks a weather provider about its dives (`DIVE_CONDITIONS_PROVIDER`),
     # so the privacy page discloses the provider only where it is in use.
     dive_conditions: bool

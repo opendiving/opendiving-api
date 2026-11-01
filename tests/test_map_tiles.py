@@ -47,6 +47,7 @@ from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_user
 
 RENDERER_URL = "http://renderer.test"
+CREDIT = "[© OpenStreetMap contributors](https://www.openstreetmap.org/copyright)"
 _CLAIMS = "map-tile:claim:"
 
 
@@ -89,6 +90,7 @@ class StubRenderer:
 
     def __init__(self) -> None:
         self.signature = _signature()
+        self.attribution: str | None = CREDIT
         # The signature a draw says it drew with, when a test redeploys it mid-request.
         self.draws_with: str | None = None
         self.status = 200
@@ -104,7 +106,10 @@ class StubRenderer:
         if self.down:
             raise httpx.ConnectError("Connection refused", request=request)
         if request.method == "GET" and request.url.path == "/signature":
-            return httpx.Response(200, json={"signature": self.signature})
+            answer = {"signature": self.signature}
+            if self.attribution is not None:
+                answer["attribution"] = self.attribution
+            return httpx.Response(200, json=answer)
         if request.method == "POST" and request.url.path == "/render":
             body = json.loads(request.content)
             if _breaks_the_contract(body):
@@ -139,6 +144,7 @@ def renderer(monkeypatch: pytest.MonkeyPatch) -> StubRenderer:
         ),
     )
     monkeypatch.setattr(map_renderer, "_signature", stub.signature)
+    monkeypatch.setattr(map_renderer, "_attribution", stub.attribution)
     monkeypatch.setattr(map_renderer, "_unreachable", False)
     monkeypatch.setattr(map_tiles, "_WAIT_POLL_SECONDS", 0.01)
     return stub
@@ -332,6 +338,49 @@ class TestTheRendererClient:
         assert map_renderer.current_signature() == renderer.signature
 
     @pytest.mark.asyncio
+    async def test_the_credit_is_learned_with_the_signature_and_kept_through_an_outage(
+        self, renderer: StubRenderer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(map_renderer, "_attribution", None)
+        await map_renderer.refresh_signature()
+        assert map_renderer.current_attribution() == CREDIT
+
+        renderer.down = True
+        await map_renderer.refresh_signature()
+        assert map_renderer.current_attribution() == CREDIT
+
+        # An operator who changes the credit restarts the renderer without changing its signature.
+        renderer.down, renderer.attribution = False, "[Someone else](https://example.com/)"
+        await map_renderer.refresh_signature()
+        assert map_renderer.current_attribution() == renderer.attribution
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "attribution",
+        [
+            pytest.param(None, id="absent, as from a renderer older than the credit"),
+            pytest.param("", id="empty"),
+            pytest.param("   ", id="blank"),
+            pytest.param(42, id="not a string"),
+        ],
+    )
+    async def test_a_credit_outside_the_contract_is_none_and_fails_nothing(
+        self, renderer: StubRenderer, monkeypatch: pytest.MonkeyPatch, attribution: object
+    ) -> None:
+        answer: dict[str, object] = {"signature": renderer.signature}
+        if attribution is not None:
+            answer["attribution"] = attribution
+        monkeypatch.setattr(
+            map_renderer,
+            "_client",
+            lambda *, timeout: httpx.AsyncClient(
+                base_url=RENDERER_URL, transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=answer))
+            ),
+        )
+        assert await map_renderer.fetch_signature() == renderer.signature
+        assert map_renderer.current_attribution() is None
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("answer", [{"signature": "A" * 64}, {"signature": "a" * 63}, {}, ["a" * 64]])
     async def test_a_signature_outside_the_contract_is_none(
         self, renderer: StubRenderer, monkeypatch: pytest.MonkeyPatch, answer: object
@@ -490,6 +539,7 @@ class TestBeforeAnythingIsRead:
         assert tile.status_code == 404
         assert tile.json() == {"detail": "This instance draws no map tiles"}
         assert config.json()["map_tiles"] is False
+        assert config.json()["map_attribution"] is None
         assert "map_pictures" not in config.json()
 
     @pytest.mark.asyncio
@@ -497,7 +547,9 @@ class TestBeforeAnythingIsRead:
         self, map_app: Any, anyone: None, renderer: StubRenderer
     ) -> None:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=map_app), base_url="http://api.test") as client:
-            assert (await client.get("/api/v1/config")).json()["map_tiles"] is True
+            config = (await client.get("/api/v1/config")).json()
+        assert config["map_tiles"] is True
+        assert config["map_attribution"] == renderer.attribution
 
     def test_the_route_names_a_square_and_no_record(self, map_app: Any) -> None:
         """So every record and every account whose map covers a tile asks one URL for it."""

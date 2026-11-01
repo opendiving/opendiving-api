@@ -3,14 +3,21 @@ signature it last named.
 
 The renderer is a command of the web image, reachable only inside the stack at
 `MAP_RENDERER_URL`. `GET /signature` names how this instance draws - its drawing code and its
-basemap - and `POST /render` draws one map tile, a 1024x1024 WebP, saying in `X-Map-Signature`
-which signature drew it. Every stored tile is keyed by the signature as well as its address
-(`services/map_tiles.py`), so a renderer that would draw differently names every tile afresh.
+basemap - and the credit that basemap owes, and `POST /render` draws one map tile, a 1024x1024
+WebP, saying in `X-Map-Signature` which signature drew it. Every stored tile is keyed by the
+signature as well as its address (`services/map_tiles.py`), so a renderer that would draw
+differently names every tile afresh.
 
 **A stored tile waits on nothing.** The signature is held in memory per process: fetched when
 the process starts, refreshed on a timer, kept through an outage, and adopted from any draw
 that names another. A tile request reads it and calls out only on a miss, or while the
 process has not learned it yet.
+
+**The credit is the renderer's to say, never this API's.** The renderer resolves its basemap from
+the same settings as the web app, by the web's own code, so the credit it reports is the one the
+web draws beside the same tiles. A copy configured here could name the default basemap's credit
+over an operator's own, which is a false credit; so there is none, and until the renderer has
+said one there is no credit to give - `GET /config` answers `null`.
 """
 
 import asyncio
@@ -37,6 +44,9 @@ _RETRY_SECONDS = 5.0
 _SIGNATURE_TIMEOUT_SECONDS = 5.0
 
 _signature: str | None = None
+# Learned with the signature and replaced by each answer, an answer without one included: it is
+# what the renderer last said, kept through an outage like the signature.
+_attribution: str | None = None
 # Whether the last refresh failed, so an outage warns once on the way in rather than per minute.
 _unreachable = False
 _refresher: asyncio.Task[None] | None = None
@@ -57,6 +67,10 @@ def current_signature() -> str | None:
     return _signature
 
 
+def current_attribution() -> str | None:
+    return _attribution
+
+
 def adopt_signature(signature: str) -> None:
     global _signature
     if signature != _signature:
@@ -72,8 +86,17 @@ def _valid_signature(value: object) -> str | None:
     return value if isinstance(value, str) and _SIGNATURE.fullmatch(value) else None
 
 
+def _valid_attribution(value: object) -> str | None:
+    return (value.strip() or None) if isinstance(value, str) else None
+
+
 async def fetch_signature() -> str:
-    """Ask the renderer for its signature, and adopt the answer."""
+    """Ask the renderer for its signature and its basemap's credit, and adopt the answer.
+
+    A credit missing or malformed fails nothing: the signature alone is what tiles need, and a
+    renderer older than the credit sends none.
+    """
+    global _attribution
     try:
         with anyio.fail_after(_SIGNATURE_TIMEOUT_SECONDS):
             async with _client(timeout=_SIGNATURE_TIMEOUT_SECONDS) as client:
@@ -81,10 +104,13 @@ async def fetch_signature() -> str:
         body = response.json() if response.status_code == 200 else None
     except (httpx.HTTPError, httpx.InvalidURL, TimeoutError, ValueError) as exc:
         raise RendererUnavailable(f"GET /signature failed: {type(exc).__name__}") from exc
-    signature = _valid_signature(body.get("signature")) if isinstance(body, dict) else None
+    if not isinstance(body, dict):
+        body = {}
+    signature = _valid_signature(body.get("signature"))
     if signature is None:
         raise RendererUnavailable(f"GET /signature answered {response.status_code} with no signature")
     adopt_signature(signature)
+    _attribution = _valid_attribution(body.get("attribution"))
     return signature
 
 
