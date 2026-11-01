@@ -1201,7 +1201,8 @@ class ImportReport(BaseModel):
         list[ImportDiveReport],
         Field(
             default_factory=list,
-            description="One row per dive the import creates or touches, in the order the import reaches them",
+            description="One row per dive the import creates or touches, newest first as the logbook lists "
+            "them; a start with no UTC offset sorts by its wall clock read as UTC, and ties keep the import's order",
         ),
     ]
 

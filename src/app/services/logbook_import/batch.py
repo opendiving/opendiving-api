@@ -24,12 +24,13 @@ import uuid as uuid_pkg
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...core.utils.datetime_offset import combine_dive_start_time
+from ...core.utils.datetime_offset import combine_dive_start_time, split_dive_start_time
 from ...models.dive import Dive
 from ...models.dive_recording import DiveRecording
 from ...schemas.dive import RecordingDevice
@@ -373,6 +374,7 @@ class _Dives:
                     **figures,
                 )
             )
+        reports.sort(key=_logbook_order, reverse=True)
         groups, truncated = grouped(self._unlisted(on_rows | self._left_out))
         return reports, groups, truncated
 
@@ -401,6 +403,15 @@ def _placed_recordings(plan: ImportPlan, written: WrittenImport) -> dict[uuid_pk
         if match.recording.source_index is not None:
             placed[match.source_uuid][match.recording.source_index] = (match.dive_id, ordinal)
     return placed
+
+
+def _logbook_order(row: ImportDiveReport) -> tuple[bool, datetime]:
+    """Where a row's dive sits in the logbook's newest-first list: by the value its start is
+    stored as, so a start with no offset sorts as its wall clock read as UTC and a bare date as
+    its midnight. Rows with no start go last, and `reverse` keeps ties in the import's order."""
+    if row.start_time is None:
+        return False, datetime.min.replace(tzinfo=UTC)
+    return True, split_dive_start_time(row.start_time)[0]
 
 
 def _stored_device(row: Any) -> RecordingDevice | None:

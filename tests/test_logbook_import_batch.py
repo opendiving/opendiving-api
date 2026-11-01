@@ -1272,7 +1272,7 @@ class TestTheNotesOfADive:
 
         for report in (await _import(async_db, diver, files, apply=False), await _import(async_db, diver, files)):
             assert [row.outcome for row in report.dives] == [ImportDiveOutcome.CREATED] * 2
-            assert _on_rows(report) == [[ImportNoteCode.SPECIES_UNRESOLVED], []]
+            assert _on_rows(report) == [[], [ImportNoteCode.SPECIES_UNRESOLVED]]
 
     @pytest.mark.asyncio
     async def test_a_note_about_no_dive_is_on_no_row(self, volume: Any, async_db: AsyncSession, db: Session) -> None:
@@ -1315,8 +1315,8 @@ class TestTheNotesOfADive:
 
         report = await _import(async_db, diver, files, apply=False)
 
-        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.SKIPPED, ImportDiveOutcome.CREATED]
-        assert _on_rows(report) == [[ImportNoteCode.RECORD_SKIPPED], [ImportNoteCode.SPECIES_UNRESOLVED]]
+        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.CREATED, ImportDiveOutcome.SKIPPED]
+        assert _on_rows(report) == [[ImportNoteCode.SPECIES_UNRESOLVED], [ImportNoteCode.RECORD_SKIPPED]]
 
 
 # Three dives, the second of which records no date, so the converter drops it - and the third
@@ -1472,7 +1472,7 @@ class TestOneListPerDive:
 
         report = await _import(async_db, diver, [("log.ssrf", THREE_DIVES_SSRF)], apply=False)
 
-        first, third = report.dives
+        third, first = report.dives
         assert _listed(first) == [("start_time_zone_missing", "absent")]
         assert third.outcome is ImportDiveOutcome.SKIPPED
         assert {"start_time_zone_missing", "dive_time_zero"} <= {note.code for note in third.notes}
@@ -1508,7 +1508,7 @@ class TestOneListPerDive:
 
         report = await _import(async_db, diver, [("log.ssrf", THREE_DIVES_SSRF)], apply=False)
 
-        first, third = report.dives
+        third, first = report.dives
         assert [len(row.notes) for row in report.dives] == [1, 1]
         assert first.notes_truncated == 0 and third.notes_truncated >= 1
         # The dropped dive's finding, and what the third dive's row left out - each once.
@@ -2182,3 +2182,45 @@ class TestAFileLandsAsTheFormShowsIt:
 
         assert [row["volume"] for row in await _cylinders(async_db, diver)] == [None, 1e30, 11.1]
         assert ImportNoteCode.VALUE_DROPPED in _codes(report)
+
+
+class TestTheDiveRowsReadAsTheLogbookLists:
+    """A report's dive rows are newest first, as the dive list is, whatever order the files
+    hold them in. A start with no UTC offset sits at its wall clock read as UTC and a bare date
+    at the start of its day - where the dive list places them - so the 08:00 with no offset
+    comes before the 09:00 at +02:00, which was 07:00 UTC."""
+
+    DIVES = (
+        {"started_at": "2026-09-08T15:18:00", "notes": "september, no offset"},
+        {"started_at": "2026-10-26T15:03:00", "notes": "october, no offset"},
+        {"started_at": "2026-09-21T10:47:00+03:00", "notes": "september, at +03:00"},
+        {"started_at": "2026-03-05T09:00:00+02:00", "notes": "at +02:00"},
+        {"started_at": "2026-03-05", "notes": "a date"},
+        {"started_at": "2026-03-05T08:00:00", "notes": "no offset"},
+    )
+
+    NEWEST_FIRST = [
+        "2026-10-26T15:03:00",
+        "2026-09-21T10:47:00+03:00",
+        "2026-09-08T15:18:00",
+        "2026-03-05T08:00:00",
+        "2026-03-05T09:00:00+02:00",
+        "2026-03-05",
+    ]
+
+    @pytest.mark.asyncio
+    async def test_the_preview_and_the_result_list_their_dives_newest_first(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        files = [("logbook.divejson", _logbook_of(*self.DIVES))]
+
+        preview = await _import(async_db, diver, files, apply=False)
+        result = await _import(async_db, diver, files)
+
+        for report in (preview, result):
+            assert [row.start_time.isoformat() for row in report.dives if row.start_time] == self.NEWEST_FIRST
+        listed = await async_db.execute(
+            select(Dive.uuid).where(Dive.user_id == diver.id).order_by(Dive.start_time.desc())
+        )
+        assert [row.uuid for row in result.dives] == list(listed.scalars())
