@@ -7091,15 +7091,13 @@ two dives keeps the gap and synthesises nothing"*.
 The renderer draws Web Mercator square `z/x/y` in a theme the first time anyone asks
 (`api/v1/map_tiles.py`), stored under that address, its label language and the renderer's signature,
 with no account. It holds nothing of a record (the web composes maps from tiles and draws the pins),
-so one row serves every record and account and nothing invalidates it. The zoom stops at `MAX_ZOOM`,
-the web's deepest fit, and the language at `LABEL_LANGUAGES`, bounding the store. A language outside
-the list is the English-alone tile, not a 404, so a client sends its viewer's own unguarded.
-Rejected: a 404, which puts a copy of the list in every client. A stored tile answers faster than a
-drawn one, so an account can learn that someone here was shown a region recently: accepted, as a
-tile names only a region. Rejected: a store per account, drawing each coast once per diver. Every
-tile request, hits included, counts against `MAP_RENDERER_REQUEST_LIMIT_PER_USER`, so a probe runs
-no faster. Rejected: no request limit, where past the draw limit a stored tile's 200 against an
-unstored one's 429 is an exact oracle.
+so one row serves every record and account and nothing invalidates it. `MAX_ZOOM` and
+`LABEL_LANGUAGES` bound the store. A stored tile answers faster than a drawn one, so an account can
+learn that someone here was shown a region recently: accepted, as a tile names only a region.
+Rejected: a store per account, drawing each coast once per diver. Every tile request, hits included,
+counts against `MAP_RENDERER_REQUEST_LIMIT_PER_USER`, so a probe runs no faster. Rejected: no
+request limit, where past the draw limit a stored tile's 200 against an unstored one's 429 is an
+exact oracle.
 
 ## Map tiles are nobody's data
 

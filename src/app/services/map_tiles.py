@@ -53,7 +53,8 @@ CONTENT_TYPE = "image/webp"
 # both, and to the renderer's contract.
 MAX_ZOOM = 9
 
-# The renderer's `LANGUAGES`, outside which it refuses a body: a change here is a change to both.
+# The renderer's `LABEL_LANGUAGES`, outside which it refuses a body: a change here is a change to
+# both.
 # The `name:xx` fields the basemap's vector tiles carry, less English, which every label shows
 # already, and the script variants (`zh-Hant`, `ja-Latn`), which no primary subtag names.
 LABEL_LANGUAGES = frozenset(
