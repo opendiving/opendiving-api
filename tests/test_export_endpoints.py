@@ -255,6 +255,13 @@ class TestOneTicketIsOneExport:
 
         assert limit.await_count == 1
 
+    def test_a_third_fetch_of_a_ticket_counts(self, client: TestClient, limit: AsyncMock):
+        """Only the downloader's repeat is free; a ticket is not a pass around the limit."""
+        for _ in range(4):
+            client.get(PATHS[3], params={"ticket": "a"})
+
+        assert limit.await_count == 3
+
     def test_each_ticket_counts(self, client: TestClient, limit: AsyncMock):
         client.get(PATHS[3], params={"ticket": "a"})
         client.get(PATHS[3], params={"ticket": "b"})

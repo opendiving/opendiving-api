@@ -536,9 +536,9 @@ async def read_certification_file(
     if file is None:
         raise NotFoundException(f"No {side.value} image for this certification")
 
-    # `attachment`, not `inline`: the web app fetches this through its API client and renders
-    # from a blob URL, so it never navigates here directly. Should someone open the URL in a tab
-    # anyway, `attachment` stops a malicious PDF from executing in the same-origin viewer.
+    # `attachment`, not `inline`: a browser navigating here with a download ticket must save
+    # the file under its name, and a malicious PDF opened in a tab must not execute in the
+    # same-origin viewer.
     # `private` because this is one diver's card and no shared cache should keep a copy.
     return stored_bytes_response(
         file.data,

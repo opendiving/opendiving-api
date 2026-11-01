@@ -7350,7 +7350,7 @@ and a `user_session` row, which the session cap evicts and the active-account co
 names a file saved from an object URL after the URL's uuid, whatever the page asks, because WebKit
 puts no `Content-Disposition` on a blob response; only a real response's header names its file. It
 also fetches that URL twice - once to read the headers, once with its own downloader - so the ticket
-lives five minutes and is not spent on use, and the export limit counts a ticket's `jti` once.
-Rejected: a `File` in place of the `Blob`, which WebKit names no differently; cookie auth on
-download routes, which makes them cross-site navigable; `navigator.share`, which needs a user
-activation the fetch has already spent.
+lives five minutes and is not spent on use, and the export limit lets a ticket's second fetch alone
+go uncounted. Rejected: a `File` in place of the `Blob`, which WebKit names no differently; cookie
+auth on download routes, which makes them cross-site navigable; `navigator.share`, which needs a
+user activation the fetch has already spent.

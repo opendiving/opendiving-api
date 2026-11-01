@@ -58,15 +58,19 @@ router = APIRouter(tags=["export"])
 
 async def _enforce_export_limit(request: Request, user_id: int) -> None:
     # A browser that hands a ticketed download to its own downloader fetches the URL twice
-    # (`DOWNLOAD_TOKEN_EXPIRE_SECONDS`), and that is one export to the diver: only a
-    # ticket's first request is counted. Fails open with the limit itself when Redis does.
+    # (`DOWNLOAD_TOKEN_EXPIRE_SECONDS`), and that is one export to the diver: a ticket's second
+    # fetch is the one request not counted, and every other is. Fails open with the limit
+    # itself when Redis does.
     ticket_id = getattr(request.state, "download_ticket_id", None)
     if ticket_id is not None and cache.client is not None:
+        key = f"export:ticket:{ticket_id}"
         try:
-            first = await cache.client.set(f"export:ticket:{ticket_id}", 1, nx=True, ex=DOWNLOAD_TOKEN_EXPIRE_SECONDS)
+            fetches = await cache.client.incr(key)
+            if fetches == 1:
+                await cache.client.expire(key, DOWNLOAD_TOKEN_EXPIRE_SECONDS)
         except RedisError:
-            first = True
-        if not first:
+            fetches = 1
+        if fetches == 2:
             return
 
     await enforce_rate_limit(

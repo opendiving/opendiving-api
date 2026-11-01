@@ -1751,9 +1751,9 @@ async def read_dive_file(
     if file is None:
         raise NotFoundException("This dive has no such file")
 
-    # `attachment`, not `inline`: the web app fetches this through its API client and hands it
-    # to the browser as a download, so it never navigates here. XML opened in a tab at the
-    # app's own origin is exactly what we don't want. `private` because this is one diver's
+    # `attachment`, not `inline`: a browser navigating here with a download ticket must save
+    # the file under its name, and XML opened in a tab at the app's own origin is exactly
+    # what we don't want. `private` because this is one diver's
     # file and no shared cache should keep a copy; the `ETag` makes re-validation after 5
     # minutes cheap.
     return stored_bytes_response(
