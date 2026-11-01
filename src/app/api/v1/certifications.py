@@ -6,7 +6,7 @@ from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user, get_downloading_user
 from ...api.integrity import refuse_vanished_reference
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
@@ -498,7 +498,7 @@ async def read_certification_file(
     request: Request,
     uuid: uuid_pkg.UUID,
     side: CertificationSide,
-    current_user: Annotated[dict, Depends(get_current_user)],
+    current_user: Annotated[dict, Depends(get_downloading_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[
         str | None,

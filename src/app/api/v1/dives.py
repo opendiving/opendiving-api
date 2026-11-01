@@ -11,7 +11,7 @@ from sqlalchemy import ColumnElement, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import fetch_owned_or_raise, get_current_user
+from ...api.dependencies import fetch_owned_or_raise, get_current_user, get_downloading_user
 from ...api.integrity import write_or_422
 from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import (
@@ -1709,7 +1709,7 @@ async def read_dive_file(
     request: Request,
     uuid: uuid_pkg.UUID,
     fid: uuid_pkg.UUID,
-    current_user: Annotated[dict, Depends(get_current_user)],
+    current_user: Annotated[dict, Depends(get_downloading_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
     v: Annotated[
         str | None,

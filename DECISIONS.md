@@ -7342,3 +7342,15 @@ routes, the email change and `DELETE /user`. Rejected: a long-lived JWT, which n
 until it expires and dies with `SECRET_KEY`; an `X-API-Key` header, which `ClientCacheMiddleware`
 would label publicly cacheable; a parallel dependency routes opt into, which the guard cannot see;
 and a `user_session` row, which the session cap evicts and the active-account counts read.
+
+## A download ticket authenticates a navigation, and is spent more than once
+
+`POST /user/download-ticket` mints a JWT bound to the account, the session and one path, and
+`get_downloading_user` accepts it as `?ticket=` on the routes that serve a download. Firefox on iOS
+names a file saved from an object URL after the URL's uuid, whatever the page asks, because WebKit
+puts no `Content-Disposition` on a blob response; only a real response's header names its file. It
+also fetches that URL twice - once to read the headers, once with its own downloader - so the ticket
+lives five minutes and is not spent on use, and the export limit counts a ticket's `jti` once.
+Rejected: a `File` in place of the `Blob`, which WebKit names no differently; cookie auth on
+download routes, which makes them cross-site navigable; `navigator.share`, which needs a user
+activation the fetch has already spent.
