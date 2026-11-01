@@ -8,7 +8,8 @@ from ..core.db.database import Base
 
 class MapTile(Base):
     """One square of the Web Mercator grid, `z/x/y`, drawn by the map renderer in one theme the
-    first time any card or page head asked for it.
+    first time any card or page head asked for it, its labels in English and at most one other
+    language.
 
     Nothing of any record is in it - no pins, no fit - so it carries no account: one row serves
     every record and every account whose map covers that square (`services/map_tiles.py`).
@@ -32,13 +33,26 @@ class MapTile(Base):
     storage_key: Mapped[str] = mapped_column(String(255))
     # The bytes' own digest: the `ETag`.
     sha256: Mapped[str] = mapped_column(String(64))
+    # The second language its labels carry, one of `LABEL_LANGUAGES` in `services/map_tiles.py`;
+    # NULL for English alone.
+    language: Mapped[str | None] = mapped_column(String(8), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
     # Moved forward at most once a day by a request that finds the row, so reads stay reads.
     last_served_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
 
     __table_args__ = (
-        # The single-flight claim's unit.
-        Index("ux_map_tile_signature_theme_z_x_y", "signature", "theme", "z", "x", "y", unique=True),
+        # The single-flight claim's unit. NULLS NOT DISTINCT, so English alone is one tile too.
+        Index(
+            "ux_map_tile_signature_theme_language_z_x_y",
+            "signature",
+            "theme",
+            "language",
+            "z",
+            "x",
+            "y",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+        ),
         # One row per stored file, as on every table holding a key.
         Index("ux_map_tile_storage_key", "storage_key", unique=True),
         Index("ix_map_tile_last_served_at", "last_served_at"),

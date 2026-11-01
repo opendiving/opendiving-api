@@ -41,7 +41,7 @@ from src.app.schemas.dive_site import DiveSiteRead
 from src.app.schemas.map_tile import MapTheme
 from src.app.schemas.trip import TripRead
 from src.app.services import blob_store, map_renderer, map_tiles
-from src.app.services.map_tiles import MAX_ZOOM, UNSERVED_RETENTION, Tile, tile_at
+from src.app.services.map_tiles import LABEL_LANGUAGES, MAX_ZOOM, UNSERVED_RETENTION, Tile, label_language, tile_at
 from tests.conftest import db_available
 from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_user
@@ -57,11 +57,13 @@ def _signature() -> str:
 
 def _breaks_the_contract(body: object) -> bool:
     """Whether a `POST /render` body is outside the renderer's contract: `kind` `tile`, the
-    theme, and `z`, `x`, `y` as integers inside the grid at a zoom of at most 9 - and no other
-    field."""
-    if not isinstance(body, dict) or set(body) != {"kind", "theme", "z", "x", "y"}:
+    theme, and `z`, `x`, `y` as integers inside the grid at a zoom of at most 9, `language` only
+    when it is one of the label languages - and no other field."""
+    if not isinstance(body, dict) or set(body) - {"language"} != {"kind", "theme", "z", "x", "y"}:
         return True
     if body["kind"] != "tile" or body["theme"] not in ("light", "dark"):
+        return True
+    if "language" in body and body["language"] not in LABEL_LANGUAGES:
         return True
     z, x, y = body["z"], body["x"], body["y"]
     if not all(isinstance(value, int) and not isinstance(value, bool) for value in (z, x, y)):
@@ -159,9 +161,10 @@ def volume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _url(theme: str = "light", z: int = 9, x: int = 304, y: int = 214) -> str:
-    """A tile's URL; the default is the zoom-9 square over Dahab."""
-    return f"/api/v1/map-tiles/{theme}/{z}/{x}/{y}"
+def _url(theme: str = "light", z: int = 9, x: int = 304, y: int = 214, language: str | None = None) -> str:
+    """A tile's URL; the default is the zoom-9 square over Dahab, in English alone."""
+    path = f"/api/v1/map-tiles/{theme}/{z}/{x}/{y}"
+    return path if language is None else f"{path}?language={language}"
 
 
 # -------------- which tiles there are --------------
@@ -201,6 +204,37 @@ class TestTheAddress:
         tile = Tile(MapTheme.DARK, 9, 304, 214)
         assert tile.body() == {"kind": "tile", "theme": "dark", "z": 9, "x": 304, "y": 214}
         assert not _breaks_the_contract(tile.body())
+
+    def test_a_language_is_in_the_body_only_when_there_is_one(self) -> None:
+        tile = Tile(MapTheme.LIGHT, 9, 304, 214, "ar")
+        assert tile.body() == {"kind": "tile", "theme": "light", "z": 9, "x": 304, "y": 214, "language": "ar"}
+        assert not _breaks_the_contract(tile.body())
+
+    @pytest.mark.parametrize(
+        ("requested", "expected"),
+        [
+            pytest.param("de", "de", id="a bare code"),
+            pytest.param("de-DE", "de", id="a browser's tag"),
+            pytest.param("pt_BR", "pt", id="a system locale"),
+            pytest.param("zh-Hant-TW", "zh", id="a script and a region"),
+            pytest.param("JA", "ja", id="upper case"),
+            pytest.param(" fr ", "fr", id="padded"),
+            pytest.param("nb-NO", "no", id="Bokmal"),
+            pytest.param("nn", "no", id="Nynorsk"),
+            pytest.param("pnb", "pnb", id="a three-letter code"),
+            pytest.param(None, None, id="nothing asked"),
+            pytest.param("", None, id="empty"),
+            pytest.param("en", None, id="English"),
+            pytest.param("en-GB", None, id="English with a region"),
+            pytest.param("xx", None, id="no such language"),
+            pytest.param("tlh", None, id="a language the basemap names nothing in"),
+            pytest.param("latin", None, id="a basemap field that is no language"),
+            pytest.param("-de", None, id="no primary subtag"),
+        ],
+    )
+    def test_any_tag_names_a_label_language_or_english_alone(self, requested: str | None, expected: str | None) -> None:
+        assert label_language(requested) == expected
+        assert tile_at("light", 0, 0, 0, requested) == Tile(MapTheme.LIGHT, 0, 0, 0, expected)
 
 
 # -------------- the settings --------------
@@ -473,6 +507,7 @@ class TestBeforeAnythingIsRead:
             ("path", "x"),
             ("path", "y"),
             ("path", "z"),
+            ("query", "language"),
         ]
 
     def test_no_map_picture_is_served_or_named(self, map_app: Any) -> None:
@@ -586,6 +621,19 @@ class TestTheRoute:
         assert len(_rows(db, renderer.signature)) == 3
 
     @pytest.mark.asyncio
+    async def test_each_label_language_is_a_tile_of_its_own_and_any_other_is_english_alone(
+        self, api: tuple[httpx.AsyncClient, User], db: Session, renderer: StubRenderer
+    ) -> None:
+        client, _diver = api
+
+        for language in (None, "de-DE", "de", "en-US", "xx", "ja"):
+            assert (await client.get(_url(language=language))).status_code == 200
+
+        assert renderer.refused == []
+        assert [body.get("language") for body in renderer.renders] == [None, "de", "ja"]
+        assert [row.language for row in _rows(db, renderer.signature)] == [None, "de", "ja"]
+
+    @pytest.mark.asyncio
     async def test_the_whole_world_is_one_tile(
         self, api: tuple[httpx.AsyncClient, User], renderer: StubRenderer
     ) -> None:
@@ -682,6 +730,7 @@ class TestTheRoute:
         assert len(_rows(db, renderer.signature)) == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("language", [pytest.param(None, id="English alone"), pytest.param("de", id="in German")])
     async def test_without_redis_every_miss_draws_for_itself_and_one_row_survives(
         self,
         api: tuple[httpx.AsyncClient, User],
@@ -689,13 +738,15 @@ class TestTheRoute:
         renderer: StubRenderer,
         volume: Path,
         monkeypatch: pytest.MonkeyPatch,
+        language: str | None,
     ) -> None:
-        """Failing open costs renders and never a tile: the loser's file goes after its commit."""
+        """Failing open costs renders and never a tile: the loser's file goes after its commit.
+        English alone is a NULL language, which the unique key holds to one row all the same."""
         client, _diver = api
         monkeypatch.setattr(cache, "client", None)
         renderer.gate = asyncio.Event()
 
-        requests = asyncio.gather(client.get(_url()), client.get(_url()))
+        requests = asyncio.gather(client.get(_url(language=language)), client.get(_url(language=language)))
         for _ in range(500):
             if len(renderer.renders) == 2:
                 break

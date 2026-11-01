@@ -12,6 +12,11 @@ limit slows such a probe without removing it.
 like one outside the grid, is refused before anything reaches the renderer, and the store is
 bounded whatever anyone asks.
 
+**Labels are English, with at most one language of `LABEL_LANGUAGES` beside it.** A client
+asks in whatever tag its viewer's browser or system states, and a language the basemap names
+nothing in is English alone rather than a refusal, so no client needs a copy of the list -
+and the store stays bounded by it, as it is by the zoom.
+
 **Concurrent misses share one draw**, across every API process: the first claims it in
 Redis, the rest wait for its row. The claimant draws in a task of its own, so a client that
 disconnects mid-draw still leaves the tile stored.
@@ -20,6 +25,7 @@ disconnects mid-draw still leaves the tile stored.
 import asyncio
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -46,6 +52,20 @@ CONTENT_TYPE = "image/webp"
 # The web's `MAX_FIT_ZOOM`, past which the renderer refuses too: a change here is a change to
 # both, and to the renderer's contract.
 MAX_ZOOM = 9
+
+# The renderer's `LANGUAGES`, outside which it refuses a body: a change here is a change to both.
+# The `name:xx` fields the basemap's vector tiles carry, less English, which every label shows
+# already, and the script variants (`zh-Hant`, `ja-Latn`), which no primary subtag names.
+LABEL_LANGUAGES = frozenset(
+    """
+    af am ar az be bg bn br bs ca co cs cy da de el eo es et eu fa fi fr fy ga gd he hi hr hu hy id
+    is it ja ka kk kn ko ku la lb lt lv mk ml mt nl no oc pa pl pnb pt rm ro ru sk sl sq sr sv ta
+    te th tok tr uk ur vi zh
+    """.split()
+)
+# Norwegian browsers state Bokmål or Nynorsk, which the basemap names only as Norwegian.
+_LANGUAGE_ALIASES = {"nb": "no", "nn": "no"}
+_SUBTAG_SEPARATOR = re.compile(r"[-_]")
 
 # A tile no request has found for this long is deleted by the worker, and drawn again by the
 # next one that asks.
@@ -79,22 +99,39 @@ class Tile:
     z: int
     x: int
     y: int
+    # One of `LABEL_LANGUAGES`, or `None` for labels in English alone.
+    language: str | None = None
 
     def body(self) -> dict[str, Any]:
-        """What the renderer is sent for this tile: the contract's body, and no other field."""
-        return {"kind": "tile", "theme": self.theme.value, "z": self.z, "x": self.x, "y": self.y}
+        """What the renderer is sent for this tile: the contract's body, and no other field.
+        `language` is left out rather than sent empty, as the contract has it."""
+        body: dict[str, Any] = {"kind": "tile", "theme": self.theme.value, "z": self.z, "x": self.x, "y": self.y}
+        if self.language is not None:
+            body["language"] = self.language
+        return body
 
 
-def tile_at(theme: str, z: int, x: int, y: int) -> Tile | None:
-    """The tile those path segments name, or `None` for a theme there is none of, a zoom past
-    `MAX_ZOOM`, or a square outside the grid at that zoom."""
+def label_language(requested: str | None) -> str | None:
+    """The language of `LABEL_LANGUAGES` a tag such as `de-DE` or `pt_BR` names, by its primary
+    subtag, or `None` for English alone: no tag, English, or a language the basemap names
+    nothing in."""
+    if not requested:
+        return None
+    primary = _SUBTAG_SEPARATOR.split(requested.strip(), maxsplit=1)[0].lower()
+    primary = _LANGUAGE_ALIASES.get(primary, primary)
+    return primary if primary in LABEL_LANGUAGES else None
+
+
+def tile_at(theme: str, z: int, x: int, y: int, language: str | None = None) -> Tile | None:
+    """The tile those path segments name, labelled in `label_language(language)`, or `None` for
+    a theme there is none of, a zoom past `MAX_ZOOM`, or a square outside the grid at that zoom."""
     try:
         parsed = MapTheme(theme)
     except ValueError:
         return None
     if not (0 <= z <= MAX_ZOOM and 0 <= x < 2**z and 0 <= y < 2**z):
         return None
-    return Tile(parsed, z, x, y)
+    return Tile(parsed, z, x, y, label_language(language))
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +160,8 @@ async def _find(db: AsyncSession, *, signature: str, tile: Tile) -> _Stored | No
             select(MapTile.id, MapTile.storage_key, MapTile.sha256, MapTile.last_served_at).where(
                 MapTile.signature == signature,
                 MapTile.theme == tile.theme.value,
+                # `IS NULL` for English alone, which the unique index treats as one value.
+                MapTile.language == tile.language,
                 MapTile.z == tile.z,
                 MapTile.x == tile.x,
                 MapTile.y == tile.y,
@@ -163,7 +202,7 @@ async def _serve_stored(db: AsyncSession, stored: _Stored, *, if_none_match: str
 
 
 def _claim_key(signature: str, tile: Tile) -> str:
-    return f"map-tile:claim:{signature}:{tile.theme.value}:{tile.z}:{tile.x}:{tile.y}"
+    return f"map-tile:claim:{signature}:{tile.theme.value}:{tile.language or ''}:{tile.z}:{tile.x}:{tile.y}"
 
 
 async def _claim(key: str, *, seconds: float) -> bool:
@@ -205,6 +244,7 @@ async def _store(*, signature: str, tile: Tile, image: bytes, sha256: str) -> No
                 .values(
                     signature=signature,
                     theme=tile.theme.value,
+                    language=tile.language,
                     z=tile.z,
                     x=tile.x,
                     y=tile.y,
@@ -214,7 +254,14 @@ async def _store(*, signature: str, tile: Tile, image: bytes, sha256: str) -> No
                     last_served_at=now,
                 )
                 .on_conflict_do_nothing(
-                    index_elements=[MapTile.signature, MapTile.theme, MapTile.z, MapTile.x, MapTile.y]
+                    index_elements=[
+                        MapTile.signature,
+                        MapTile.theme,
+                        MapTile.language,
+                        MapTile.z,
+                        MapTile.x,
+                        MapTile.y,
+                    ]
                 )
                 .returning(MapTile.id)
             )

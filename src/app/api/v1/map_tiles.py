@@ -8,7 +8,7 @@ this job in the browser.
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import get_current_user
@@ -54,9 +54,19 @@ async def read_map_tile(
     y: Annotated[int, Path(description="The row, 0 to 2^z - 1, north to south")],
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
+    language: Annotated[
+        str | None,
+        Query(
+            description="The viewer's language as a BCP 47 tag, such as `de-DE`: labels carry a place's name in it "
+            "beside the English one. Omitted, English, or a language the basemap names nothing in, labels are "
+            "English alone"
+        ),
+    ] = None,
 ) -> Response:
     """Square `z/x/y` of the Web Mercator grid in `theme`, 512 CSS px at pixel ratio 2, as a
-    1024x1024 WebP with nothing of any record in it.
+    1024x1024 WebP with nothing of any record in it. Labels are in English, with a second line
+    in `language` where the basemap names a place in it; any tag is accepted, and one in a
+    language the basemap does not carry is the English-alone tile.
 
     For any signed-in account: a tile is drawn from the basemap alone and stored once for the
     whole instance, so every account whose map covers it is served the same bytes. Drawn the
@@ -67,7 +77,7 @@ async def read_map_tile(
     """
     # No owner to check, since nothing of any record is in a tile. The zoom stops where the web
     # stops fitting a map.
-    tile = tile_at(theme, z, x, y)
+    tile = tile_at(theme, z, x, y, language)
     if tile is None:
         raise NotFoundException("No such map tile")
     try:
