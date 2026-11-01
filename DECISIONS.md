@@ -887,8 +887,8 @@ natively, so a bare "unsupported file type" would read as a bug. Supporting it n
 
 The download response carries `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`
 and `Content-Security-Policy: default-src 'none'; sandbox`. `attachment` rather than `inline`
-because the web app renders from a blob URL and never navigates to the URL, so a malicious PDF
-cannot execute in the same-origin viewer. The `filename` is built by
+because a browser navigating to the URL with a download ticket must save the file under its name,
+and a malicious PDF must not execute in the same-origin viewer. The `filename` is built by
 `content_disposition_attachment`, never interpolated (see "Non-ASCII filenames need RFC 6266").
 
 ## The card download endpoint is never Redis-cached
