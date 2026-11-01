@@ -45,6 +45,7 @@ from src.app.schemas.invitation import (
     InvitationReadInternal,
 )
 from src.app.schemas.invite_request import AdminInviteRequestDeleteRequest, InviteRequestSubmission
+from src.app.services import map_renderer
 from tests.conftest import db_available, unique_email
 from tests.helpers.generators import create_user
 from tests.helpers.mocks import awaited_kwargs
@@ -98,6 +99,7 @@ def awaited_args(recorder: Any) -> tuple:
 
 CALLER = {"id": 7, "uuid": uuid_pkg.uuid4(), "name": "Ada Reef", "is_superuser": False}
 OPERATOR = {**CALLER, "id": 9, "is_superuser": True}
+CREDIT = "[OpenFreeMap](https://openfreemap.org/) © [OpenMapTiles](https://openmaptiles.org/)"
 
 
 def _internal(**overrides: Any) -> InvitationReadInternal:
@@ -827,6 +829,24 @@ class TestTheConfigRoute:
             assert (await read_instance_config()).map_tiles is expected
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("renderer", "learned", "expected"),
+        [
+            pytest.param("http://map-renderer:3001", CREDIT, CREDIT, id="the renderer's credit"),
+            pytest.param("http://map-renderer:3001", None, None, id="none learned yet"),
+            pytest.param("", CREDIT, None, id="no tiles, whatever was learned"),
+        ],
+    )
+    async def test_it_reports_the_credit_the_renderer_named(
+        self, renderer: str, learned: str | None, expected: str | None
+    ) -> None:
+        with (
+            patch.object(settings, "MAP_RENDERER_URL", renderer),
+            patch.object(map_renderer, "_attribution", learned),
+        ):
+            assert (await read_instance_config()).map_attribution == expected
+
+    @pytest.mark.asyncio
     async def test_it_carries_nothing_else(self) -> None:
         """Adding a field is a decision rather than a convenience: this endpoint is anonymous,
         so everything on it is public. Dumped in JSON mode because this is the wire shape the
@@ -843,6 +863,7 @@ class TestTheConfigRoute:
                 "project_operated": False,
                 "join_links": False,
                 "map_tiles": False,
+                "map_attribution": None,
                 "dive_conditions": False,
             }
 

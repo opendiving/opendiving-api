@@ -23,6 +23,7 @@ from fastapi import APIRouter
 
 from ...core.config import settings
 from ...schemas.instance_config import InstanceConfigRead
+from ...services import map_renderer
 
 router = APIRouter(tags=["config"])
 
@@ -30,11 +31,15 @@ router = APIRouter(tags=["config"])
 @router.get("/config", response_model=InstanceConfigRead)
 async def read_instance_config() -> InstanceConfigRead:
     """This instance's public configuration: its registration mode, whether the OpenDiving
-    project operates it, whether join links exist, and which optional services it runs.
+    project operates it, whether join links exist, which optional services it runs, and the
+    credit its map tiles owe.
 
     Anonymous. Nothing in it is per-caller and the response is publicly cacheable, for the
-    time its `Cache-Control` header states; the values change only when the operator
-    restarts the API.
+    time its `Cache-Control` header states. The values change only when the operator
+    restarts the API, except `map_attribution`, which follows the map renderer: `null`
+    whenever `map_tiles` is false, and while it is true, `null` until the renderer has
+    named its credit, which it may not have shortly after a start, nor while the renderer has
+    not been reachable since. A client draws map tiles only beside the credit.
     """
     # Anonymous without being a leak: the landing page discloses the mode anyway by which form
     # it shows, the operator by which copy that form carries, and the privacy page whether join
@@ -45,5 +50,6 @@ async def read_instance_config() -> InstanceConfigRead:
         project_operated=settings.PROJECT_OPERATED,
         join_links=bool(settings.join_channels),
         map_tiles=settings.map_tiles,
+        map_attribution=map_renderer.current_attribution() if settings.map_tiles else None,
         dive_conditions=settings.dive_conditions,
     )
