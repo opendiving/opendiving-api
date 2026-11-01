@@ -109,16 +109,15 @@ else; what is here is the source, and the notes for working on it.
   logbook, where UDDF measurably loses trips, gear, weights and UTC offsets.
 - **Logbook import** — put any number of files into an account at once, in any mix of the formats it
   reads, in two phases: a preview that reports exactly what would be created, linked to something
-  you already have, restored from your deleted records or skipped, file by file and dive by dive,
-  and then an apply that writes the lot in one transaction. A DiveJSON document or a full-export
-  archive goes in as it is; a UDDF file, a Subsurface `.ssrf`, a FIT file, a Suunto app export, a
-  Suunto DM5 XML export, a Shearwater Cloud database or XML export, or a `.zip` of any of those is
-  converted on the way in by the [`divejson`](https://pypi.org/project/divejson/) package, and each
-  dive's row lists what its files did not record, what the import worked out, and which of the
-  dive's values it left out. A file that is one dive is kept on the dive it becomes, and one
-  recording exported twice - a Suunto's FIT beside its JSON - is one recording with both files.
-  Restore a backup, migrate between instances, or bring a logbook across from whatever you were
-  keeping it in.
+  you already have or skipped, file by file and dive by dive, and then an apply that writes the lot
+  in one transaction. A DiveJSON document or a full-export archive goes in as it is; a UDDF file, a
+  Subsurface `.ssrf`, a FIT file, a Suunto app export, a Suunto DM5 XML export, a Shearwater Cloud
+  database or XML export, or a `.zip` of any of those is converted on the way in by the
+  [`divejson`](https://pypi.org/project/divejson/) package, and each dive's row lists what its files
+  did not record, what the import worked out, and which of the dive's values it left out. A file
+  that is one dive is kept on the dive it becomes, and one recording exported twice - a Suunto's FIT
+  beside its JSON - is one recording with both files. Restore a backup, migrate between instances,
+  or bring a logbook across from whatever you were keeping it in.
 - **Passwordless auth** — email sign-in (over SMTP, so any relay or provider works), Google Sign-In,
   and passkeys, with automatic account linking, short-lived access tokens, and httpOnly refresh
   cookies. The sign-in email carries a magic link *and* a six-digit code, so reading your mail on a

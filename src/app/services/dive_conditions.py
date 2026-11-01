@@ -8,8 +8,7 @@ date-only flag, the rounded position and the effective water type - and a row wh
 are `IS DISTINCT FROM` the dive's current ones is answered again. That covers every way a
 dive's time, place or water can change - the form, a site's pin moved under every dive logged
 there, a site swapped or deleted, a merge, a recording attached, a backfill, the admin panel -
-without naming any of them; the import's restore of a deleted dive is the one write that
-touches a row directly (`drop_conditions`).
+without naming any of them.
 
 **The fill.** Where the answer has a value for `air_temperature`, `weather` or `waves` and the
 dive's field is empty at the moment of the write, the field takes it and the row records the
@@ -271,12 +270,6 @@ async def _drop_record(db: AsyncSession, dive_id: int) -> None:
             .where(Dive.id == dive_id, getattr(Dive, field) == written.scalar_subquery())
             .values({field: None})
         )
-    await db.execute(delete(DiveConditions).where(DiveConditions.dive_id == dive_id))
-
-
-async def drop_conditions(db: AsyncSession, dive_id: int) -> None:
-    """Delete a dive's row and empty nothing - for a write that replaces the dive's own values
-    wholesale, as the import's restore of a deleted dive does. Not committed."""
     await db.execute(delete(DiveConditions).where(DiveConditions.dive_id == dive_id))
 
 
