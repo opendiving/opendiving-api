@@ -5807,7 +5807,7 @@ A document record whose uuid is the caller's soft-deleted row (`Dive`, `Certific
 recording gates, so a re-download of a dive the diver deleted and logged again from another source
 fills that dive. Rejected: restoring the row, and creating it under a fresh uuid, which is the same
 restore. Dives have no un-delete path; a trash bin would be its own feature. `restored` stays on the
-collection report, always 0, because the web and iOS apps decode it as required.
+collection report, always 0, until the web and iOS apps stop decoding it as required.
 
 The dedupe lookup branches on `is_deleted` rather than filtering it: an `is_deleted=False` query
 would call the husk's uuid unclaimed and hit the full `uuid` index. Apply re-plans the document

@@ -824,7 +824,7 @@ class ImportCollectionReport(BaseModel):
     collection: Annotated[str, Field(examples=["dives"])]
     created: int
     linked: Annotated[int, Field(description="Matched an existing row of the caller's; nothing was written")]
-    # Still on the wire because the web app and the iOS app both decode it as a required count.
+    # On the wire until the web app and the iOS app stop decoding it as a required count.
     restored: Annotated[int, Field(description="Always 0: an import never brings back a deleted record")] = 0
     skipped: int
 
