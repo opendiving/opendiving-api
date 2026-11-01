@@ -2602,12 +2602,15 @@ class _Planner:
         for index, candidate in matches:
             match = self._recording_matches[index]
             noted = candidate.dive_id not in self._batch_dive_ids
+            # `0` is the placeholder a dive imported before imports numbered their dives still
+            # holds, not a number the diver gave it.
+            named = f"dive {candidate.dive_number}" if candidate.dive_number > 0 else "that dive"
             if match.kind == "attach":
                 if noted:
                     self._note(
                         ImportNoteCode.RECORDING_ATTACHED,
                         "A different computer recorded a dive your logbook already has, so this recording was added "
-                        f"to dive {candidate.dive_number} rather than a second dive being created for it.",
+                        f"to {named} rather than a second dive being created for it.",
                         collection="dives",
                         uuid=dive.uuid,
                     )
@@ -2619,10 +2622,10 @@ class _Planner:
             if not noted:
                 continue
             outcome = (
-                f"Its profile replaced the one dive {candidate.dive_number} had, carrying more of the dive, and the "
+                f"Its profile replaced the one {named} had, carrying more of the dive, and the "
                 "dive kept everything else it already recorded."
                 if replaces
-                else f"Dive {candidate.dive_number} kept everything it already recorded."
+                else f"{named[0].upper()}{named[1:]} kept everything it already recorded."
             )
             self._note(
                 ImportNoteCode.RECORDING_FILLED,
@@ -2660,24 +2663,20 @@ class _Planner:
         # reader with no stated figure takes (`divejson.in_water`), and its span - in
         # milliseconds, where a dive's submerged time is whole seconds - stands in only where no
         # sample was in the water.
+        # Noted only once the dive is known to be written: a dive whose every recording a
+        # stored dive takes writes none of these values, so a note on how one was worked out
+        # would describe nothing.
+        derived: list[str] = []
         submerged_time = bounded.get("submerged_time")
         if submerged_time is None and in_water is not None and in_water.submerged_time > 0:
             submerged_time = in_water.submerged_time
-            self._note(
-                ImportNoteCode.VALUE_DERIVED,
+            derived.append(
                 "This dive records no dive time, so its length was taken as the time its own profile spends deeper "
-                f"than {IN_WATER_DEPTH} m.",
-                collection=collection,
-                uuid=dive.uuid,
+                f"than {IN_WATER_DEPTH} m."
             )
         elif submerged_time is None and profile is not None:
             submerged_time = round(profile.duration / MILLISECONDS_PER_SECOND)
-            self._note(
-                ImportNoteCode.VALUE_DERIVED,
-                "This dive records no dive time, so its length was taken from the span of its own profile.",
-                collection=collection,
-                uuid=dive.uuid,
-            )
+            derived.append("This dive records no dive time, so its length was taken from the span of its own profile.")
         if submerged_time is None or submerged_time <= 0:
             self._count_unwritten_files(dive)
             self._not_writing_the_file()
@@ -2700,12 +2699,9 @@ class _Planner:
         max_depth, avg_depth = bounded.get("max_depth"), bounded.get("avg_depth")
         if avg_depth is None and dive.avg_depth is None and in_water is not None:
             avg_depth = float(in_water.avg_depth)
-            self._note(
-                ImportNoteCode.VALUE_DERIVED,
+            derived.append(
                 "This dive records no average depth, so it was taken as the mean depth of its own profile over the "
-                f"time it spends deeper than {IN_WATER_DEPTH} m.",
-                collection=collection,
-                uuid=dive.uuid,
+                f"time it spends deeper than {IN_WATER_DEPTH} m."
             )
         if max_depth is not None and avg_depth is not None and avg_depth > max_depth:
             # A pair rule, so there is no "the bad value": `avg_depth` is the half that goes
@@ -2802,6 +2798,8 @@ class _Planner:
                 # unusable object inside it.
                 self._keep_on_match(already)
                 return PlannedRecord(action=Action.SKIP, source_uuid=dive.uuid, uuid=record.uuid)
+        for message in derived:
+            self._note(ImportNoteCode.VALUE_DERIVED, message, collection=collection, uuid=dive.uuid)
         if stated_temperature is None and temperature is not None:
             # The dive form's default, derived and reported as the submerged time is - here, where the
             # dive is known to be written, since a match writes no dive's temperature.

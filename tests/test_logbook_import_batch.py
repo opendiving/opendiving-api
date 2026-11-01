@@ -809,7 +809,7 @@ class TestTheFilesKept:
         assert report.members[0].not_kept is ImportMemberNotKept.ALREADY_STORED
         assert ImportNoteCode.FILE_SKIPPED not in _codes(report)
         [row] = report.dives
-        assert row.outcome is ImportDiveOutcome.SKIPPED and row.reason is not None
+        assert (row.outcome, row.reason) == (ImportDiveOutcome.LINKED, None)
 
 
 class TestAFileOnAFileLessRecording:
@@ -1045,7 +1045,7 @@ class TestARicherReadingOfADive:
         return _logbook_of({"started_at": "2026-09-21T10:48:00+03:00", "recordings": [recording]})
 
     @pytest.mark.asyncio
-    async def test_the_richer_updates_the_dive_and_the_poorer_skips_it(
+    async def test_the_richer_updates_the_dive_and_the_poorer_links_it(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         diver = create_user(db)
@@ -1055,7 +1055,9 @@ class TestARicherReadingOfADive:
         poorer = await _import(async_db, diver, [("uddf.divejson", self._logbook(3_730_000, tts=False))])
 
         assert [(row.outcome, row.uuid) for row in richer.dives] == [(ImportDiveOutcome.UPDATED, stored.uuid)]
-        assert [(row.outcome, row.uuid) for row in poorer.dives] == [(ImportDiveOutcome.SKIPPED, stored.uuid)]
+        assert [(row.outcome, row.uuid, row.reason) for row in poorer.dives] == [
+            (ImportDiveOutcome.LINKED, stored.uuid, None)
+        ]
 
     @staticmethod
     def _documented(serial: str, *, samples: int, tts: bool) -> bytes:
@@ -1264,7 +1266,10 @@ class TestTheNotesOfADive:
         report = await _import(async_db, diver, files, apply=False)
 
         assert [row.outcome for row in report.dives] == [ImportDiveOutcome.SKIPPED, ImportDiveOutcome.CREATED]
-        assert _on_rows(report) == [[ImportNoteCode.RECORD_SKIPPED], [ImportNoteCode.SPECIES_UNRESOLVED]]
+        # The skip's sentence is the row's reason, and listed nowhere else.
+        assert report.dives[0].reason is not None
+        assert _on_rows(report) == [[], [ImportNoteCode.SPECIES_UNRESOLVED]]
+        assert ImportNoteCode.RECORD_SKIPPED not in {group.code for group in report.notes}
 
 
 # Three dives, the second of which records no date, so the converter drops it - and the third

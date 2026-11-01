@@ -5678,6 +5678,46 @@ class TestTheImportGates:
         assert recording.cns_end == 9.0
 
     @pytest.mark.asyncio
+    async def test_a_dive_every_recording_of_which_fills_notes_no_worked_out_value(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The average depth worked out from the profile is a value the dive row would hold, and
+        a dive no row is written for holds none - so it is noted only where the dive is written."""
+        recording = {
+            "device": {"brand": "Shearwater Research, Inc", "model": "Perdix 3", "serial": "D9772626"},
+            "started_at": "2026-09-08T15:17:38+03:00",
+            "profile": {"duration": 3_051_000, "depth": {"times": [0, 1_500_000, 3_051_000], "values": [0, 1904, 0]}},
+        }
+        user, _ = self._seed(db, **self.PERDIX)
+
+        matched = await _apply(async_db, user.id, self._document(recording))
+        created = await _apply(async_db, create_user(db).id, self._document(recording))
+
+        assert ImportNoteCode.RECORDING_FILLED in _codes(matched)
+        assert ImportNoteCode.VALUE_DERIVED not in _codes(matched)
+        assert ImportNoteCode.VALUE_DERIVED in _codes(created)
+
+    @pytest.mark.asyncio
+    async def test_a_dive_numbered_zero_is_named_by_no_number(self, db: Session, async_db: AsyncSession) -> None:
+        """`0` is what a dive imported before imports numbered their dives still holds."""
+        user, dive = self._seed(db, device_brand="Suunto", device_serial="253810000400")
+        dive.dive_number = 0
+        db.commit()
+        document = self._document(
+            {
+                "device": {"brand": "suunto", "model": "Suunto Ocean"},
+                "started_at": "2026-09-08T15:17:38+03:00",
+                "profile": {"duration": 3_473_000, "depth": {"times": [0, 3_473_000], "values": [0, 1904]}},
+            },
+        )
+
+        plan = await _apply(async_db, user.id, document)
+
+        [filled] = [note for note in plan.notes if note.code is ImportNoteCode.RECORDING_FILLED]
+        assert "That dive kept everything it already recorded." in filled.message
+        assert "dive 0" not in filled.message.lower()
+
+    @pytest.mark.asyncio
     async def test_a_fill_puts_the_documents_mix_into_a_blank_cylinder(
         self, db: Session, async_db: AsyncSession
     ) -> None:

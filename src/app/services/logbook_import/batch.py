@@ -22,7 +22,7 @@ preview, and none by an apply until the whole batch has fitted the account's sto
 
 import uuid as uuid_pkg
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -76,13 +76,12 @@ from .staging import StagedFiles
 from .writer import WrittenImport, write_import
 
 # Which outcome of one dive says more, where several files reach it: created or restored
-# over a file or a recording added, over a link, over a skip.
+# over a file or a recording added, over a link.
 _RANK = {
-    ImportDiveOutcome.SKIPPED: 0,
-    ImportDiveOutcome.LINKED: 1,
-    ImportDiveOutcome.UPDATED: 2,
-    ImportDiveOutcome.CREATED: 3,
-    ImportDiveOutcome.RESTORED: 3,
+    ImportDiveOutcome.LINKED: 0,
+    ImportDiveOutcome.UPDATED: 1,
+    ImportDiveOutcome.CREATED: 2,
+    ImportDiveOutcome.RESTORED: 2,
 }
 
 
@@ -105,11 +104,14 @@ class _DiveRow:
     sources: list[_Source] = field(default_factory=list)
 
 
-def _reason(plan: ImportPlan, source_uuid: Any, codes: Iterable[ImportNoteCode]) -> str | None:
-    """The sentence a plan noted about one document dive, under one of `codes`."""
-    wanted = set(codes)
+def _reason(plan: ImportPlan, source_uuid: Any) -> str | None:
+    """Why a plan skipped one document dive."""
     return next(
-        (note.message for note in plan.notes if note.code in wanted and note.uuid == source_uuid),
+        (
+            note.message
+            for note in plan.notes
+            if note.code is ImportNoteCode.RECORD_SKIPPED and note.uuid == source_uuid
+        ),
         None,
     )
 
@@ -159,15 +161,14 @@ class _Dives:
         *,
         files: int = 0,
         recordings: int = 0,
-        reason: str | None = None,
     ) -> None:
         member = source[0]
         row = self._by_dive.get(dive_id)
         if row is None:
-            row = self._by_dive[dive_id] = _DiveRow(outcome=outcome, dive_id=dive_id, members=[], reason=reason)
+            row = self._by_dive[dive_id] = _DiveRow(outcome=outcome, dive_id=dive_id, members=[])
             self.rows.append(row)
         elif _RANK[outcome] > _RANK[row.outcome]:
-            row.outcome, row.reason = outcome, reason
+            row.outcome = outcome
         if member not in row.members:
             row.members.append(member)
         row.files_added += files
@@ -218,7 +219,7 @@ class _Dives:
                     outcome=ImportDiveOutcome.SKIPPED,
                     dive_id=None,
                     members=[member],
-                    reason=_reason(plan, record.source_uuid, [ImportNoteCode.RECORD_SKIPPED]),
+                    reason=_reason(plan, record.source_uuid),
                     source=documented.get(record.source_uuid),
                 )
                 self.rows.append(row)
@@ -227,14 +228,12 @@ class _Dives:
             recordings = 1 if match.kind == "attach" else 0
             source = (member, match.source_uuid)
             # A fill whose samples replaced the recording's stored ones changed the dive's curves
-            # even where it brought no file.
+            # even where it brought no file. One that changed none of them is the dive the logbook
+            # already has, as its note says, rather than a dive this import declined.
             if files or recordings or match.replaces_profile:
                 self._touch(match.dive_id, source, ImportDiveOutcome.UPDATED, files=files, recordings=recordings)
             else:
-                codes = [ImportNoteCode.RECORDING_FILLED, ImportNoteCode.RECORDING_ATTACHED]
-                self._touch(
-                    match.dive_id, source, ImportDiveOutcome.SKIPPED, reason=_reason(plan, match.source_uuid, codes)
-                )
+                self._touch(match.dive_id, source, ImportDiveOutcome.LINKED)
 
     def _own_notes(self, source: _Source) -> list[ImportNote]:
         """The import's own notes about one document dive, in its plan's order."""
@@ -342,6 +341,11 @@ class _Dives:
         reports = []
         for row in self.rows:
             shown = self._shown(row, None if row.dive_id is None else compared.get(row.dive_id))
+            if row.outcome is ImportDiveOutcome.SKIPPED:
+                # The reason is said once, as the row's outcome, rather than again as its note.
+                reason = [entry for entry in shown if entry[1].code == ImportNoteCode.RECORD_SKIPPED.value]
+                on_rows.update(id(note) for notes, _ in reason for note in notes)
+                shown = [entry for entry in shown if entry not in reason]
             listed = shown[:MAX_DIVE_NOTES]
             on_rows.update(id(note) for notes, _ in listed for note in notes)
             updated = row.outcome is ImportDiveOutcome.UPDATED
