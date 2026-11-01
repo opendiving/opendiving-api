@@ -979,7 +979,7 @@ class ImportDiveOutcome(StrEnum):
     """What the import does to one dive, as the most that happens to it."""
 
     CREATED = "created"
-    # Already in your logbook; nothing is written for it.
+    # Already in your logbook; at most its blanks are filled, and nothing it holds is changed.
     LINKED = "linked"
     # A dive you have, gaining a file or another computer's recording.
     UPDATED = "updated"
