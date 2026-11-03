@@ -231,13 +231,16 @@ class TestTheContentTypesAreOnesWeServe:
         wouldn't already pin down. `application/vnd.ant.fit` (the ANT+ registered type for
         a FIT file) and `application/vnd.sqlite3` (IANA's, for a Shearwater Cloud database)
         clear it more easily than the XML and JSON types: they are opaque binary with no
-        renderer at all. Every value also fits `dive_file.content_type`'s 32 characters.
+        renderer at all, and so does `application/octet-stream`, which a dive-computer original
+        is served as since no type names one computer's buffer. Every value also fits
+        `dive_file.content_type`'s 32 characters.
         """
         assert set(FORMAT_CONTENT_TYPES.values()) <= {
             "application/xml",
             "application/json",
             "application/vnd.ant.fit",
             "application/vnd.sqlite3",
+            "application/octet-stream",
         }
 
 
@@ -392,9 +395,9 @@ class TestProfileExtractionReleasesTheTransaction:
         real_extract_file = dive_files_module.extract_file
         real_extract_recording = dive_files_module.extract_recording
 
-        def first_hop(data, format_id):
+        def first_hop(data, format_id, **tag):
             calls.append("extract")
-            return real_extract_file(data, format_id)
+            return real_extract_file(data, format_id, **tag)
 
         def second_hop(files, known=None, **start):
             calls.append("extract")
@@ -445,7 +448,7 @@ class TestFileExtraction:
 </Dive>
 """.encode()
 
-        assert extract_file(content, "suunto_xml").scalars == {
+        assert extract_file(content, "suunto_xml", descriptor=None, fallback_start=None).scalars == {
             "cns_start": 8.0,
             "cns_end": 9.0,
             "otu_start": 22.0,
@@ -475,7 +478,7 @@ class TestFileExtraction:
         """The upload must survive a file this build can't read: the file is the durable
         artifact, and refusing the attach would discard the very corpus entry needed to fix
         the reader. Empty is what `extract_recording` counts as unreadable."""
-        extraction = extract_file(b"<Dive><Unclosed>", "suunto_xml")
+        extraction = extract_file(b"<Dive><Unclosed>", "suunto_xml", descriptor=None, fallback_start=None)
 
         assert (extraction.parsed, extraction.profile, extraction.scalars) == (None, None, None)
 
@@ -488,7 +491,9 @@ class TestFileExtraction:
             "<StartTime>2026-06-03T12:15:00</StartTime></Dive>"
         ).encode()
 
-        assert extract_file(content, "suunto_xml").scalars == dict.fromkeys(SCALAR_FIELDS)
+        assert extract_file(content, "suunto_xml", descriptor=None, fallback_start=None).scalars == dict.fromkeys(
+            SCALAR_FIELDS
+        )
 
 
 class TestMixtureFieldMerge:
@@ -1108,7 +1113,7 @@ class TestTheDeviceAndSettingsFillMemberByMember:
 
         monkeypatch.setattr("src.app.services.dive_files.load_recording_files", AsyncMock(return_value=self._files()))
         monkeypatch.setattr(
-            "src.app.services.dive_files.extract_file", lambda data, parser_key: self.EXTRACTIONS[_digest(data)]
+            "src.app.services.dive_files.extract_file", lambda data, parser_key, **_tag: self.EXTRACTIONS[_digest(data)]
         )
         monkeypatch.setattr("src.app.services.dive_recordings.fill_readouts", AsyncMock())
         monkeypatch.setattr("src.app.services.dive_recordings.fill_device_fields", fill_device_fields)
@@ -1210,6 +1215,10 @@ class TestReExtractionFailureDoesNotFailTheRequest:
                     original_filename="export.xml",
                     sha256=_digest(TestReExtractionFailureDoesNotFailTheRequest.XML),
                     parser_key="suunto_xml",
+                    descriptor_vendor=None,
+                    descriptor_product=None,
+                    descriptor_model=None,
+                    fallback_start=None,
                 )
             ]
         )
@@ -1356,7 +1365,7 @@ class TestBackfillDoesNotStopOnOneBadDive:
             "src.app.services.dive_files.load_recording_files",
             AsyncMock(
                 return_value=[
-                    SimpleNamespace(
+                    LoadedDiveFile(
                         data=self.XML,
                         sha256=_digest(self.XML),
                         parser_key="suunto_xml",
@@ -1757,7 +1766,7 @@ class TestAFitFilesChannelsFillLast:
         }
         # The recording's stored start, which every real recording has: without one the axis
         # would count from whichever file came first, and the comparison would be of two axes.
-        start = extract_file(files["fit"].data, "fit").start
+        start = extract_file(files["fit"].data, "fit", descriptor=None, fallback_start=None).start
         assert start is not None
         return extract_recording([files[name] for name in names], start_time=start[0], utc_offset_minutes=start[1])
 
@@ -1865,7 +1874,7 @@ class TestAPairSettledByASharedSerial:
         monkeypatch.setattr(
             dive_files_module,
             "extract_file",
-            lambda data, _format: FileExtraction(
+            lambda data, _format, **_tag: FileExtraction(
                 parsed=None, profile=None, scalars=None, start=(starts[int(data)], None)
             ),
         )

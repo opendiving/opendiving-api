@@ -78,10 +78,9 @@ from ...schemas.export import (
 from ...schemas.logbook_import import ImportDocument, ImportMemberNotKept, ImportNoteCode
 from ..dive_files import MAX_DIVE_FILE_SIZE, FileExtraction, extraction_of
 from ..dive_reader import (
-    ReadDive,
     attach_rank,
+    first_dive,
     formats_this_build_reads,
-    inferred_figures,
     is_logbook_format,
     run_in_conversion_thread,
 )
@@ -827,15 +826,7 @@ def _convert_file(
     elif size > MAX_DIVE_FILE_SIZE:
         loaded.not_kept = ImportMemberNotKept.TOO_LARGE
     else:
-        dive = document.dives[0]
-        raw = conversion.document["dives"][0].get("started_at")
-        read = ReadDive(
-            format=claimed,
-            dive=dive,
-            recording=dive.recordings[0] if dive.recordings else None,
-            started_at=raw if isinstance(raw, str) else None,
-            inferred=inferred_figures(conversion.document),
-        )
+        read = first_dive(document, conversion.document, format=claimed)
         try:
             extraction = extraction_of(read)
         except Exception as exc:

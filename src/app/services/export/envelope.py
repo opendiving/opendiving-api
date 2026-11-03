@@ -98,6 +98,7 @@ from ...schemas.person import PersonRole
 from ...schemas.trip import TripPartRead
 from ...schemas.user_picture import PictureKind
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
+from ..libdivecomputer import spell_instant
 from .loader import ExportBundle, ExportFileRow, ExportRecordingRow, ExportReference
 from .paths import ArchivePaths
 
@@ -513,12 +514,25 @@ def _stored_file(bundle: ExportBundle, file: ExportFileRow, paths: ArchivePaths 
         byte_size=file.info.byte_size,
         sha256=digest,
         archive_path=None if paths is None else paths.dive_files.get(file.id),
-        # Which of this app's parsers understood the file. Parser registries are
-        # application-specific, so the format has no core member for one (spec §6.7)
-        # and it rides this producer's key - where the archive-restore path reads it
-        # back.
-        extensions={DIVEJSON_PRODUCER_KEY: {"parser_key": file.info.parser_key}},
+        # Which of this app's readers understood the file, and for a dive-computer original
+        # the tag that reader needs. Reader registries are application-specific, so the format
+        # has no core member for one (spec §6.7) and it rides this producer's key - where the
+        # archive-restore path reads it back, in the shape the iOS app first wrote the tag.
+        extensions={DIVEJSON_PRODUCER_KEY: _stored_file_entry(file)},
     )
+
+
+def _stored_file_entry(file: ExportFileRow) -> dict[str, Any]:
+    entry: dict[str, Any] = {"parser_key": file.info.parser_key}
+    if file.descriptor is not None:
+        entry["descriptor"] = {
+            "vendor": file.descriptor.vendor,
+            "product": file.descriptor.product,
+            "model": file.descriptor.model,
+        }
+    if file.fallback_start is not None:
+        entry["fallback_start"] = spell_instant(file.fallback_start)
+    return entry
 
 
 def _recording(

@@ -37,7 +37,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import UploadFile
 from pydantic import BaseModel
@@ -59,7 +59,6 @@ from ..schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
 from . import blob_store, dive_recordings
 from .dive_profiles import (
-    READER_VERSION,
     ExistingProfileRow,
     NormalizedProfile,
     attribute_and_cap,
@@ -68,6 +67,7 @@ from .dive_profiles import (
     fill_channels,
     get_existing_profile,
     load_stored_profile,
+    reader_version_of,
     recording_source_digest,
     replace_profile_samples,
     replaces_stored_profile,
@@ -82,11 +82,13 @@ from .dive_reader import (
     content_type_of,
     prefill,
     read_dive_file,
+    read_original,
     reads,
     run_in_conversion_thread,
     shape,
     start_of,
 )
+from .libdivecomputer import LIBDIVECOMPUTER, Descriptor, descriptor_of_columns
 from .recording_shape import gate_figures
 from .storage_usage import ensure_room, storage_limit_bytes
 
@@ -137,7 +139,9 @@ class LoadedDiveFile:
 
     `sha256` and `parser_key` ride along because the re-extraction paths need both: a
     recording's profile is a function of its files' digests in order, and a file is re-read
-    as the format id it was admitted under rather than sniffed again.
+    as the format id it was admitted under rather than sniffed again. `descriptor` and
+    `fallback_start` are a dive-computer original's tag, which its reader needs beside the
+    bytes, and `None` on every other file.
     """
 
     data: bytes
@@ -145,6 +149,8 @@ class LoadedDiveFile:
     original_filename: str
     sha256: str
     parser_key: str = ""
+    descriptor: Descriptor | None = None
+    fallback_start: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +233,7 @@ async def ensure_room_to_attach(db: AsyncSession, *, user_id: int, data: bytes, 
 
 @dataclass(frozen=True, slots=True)
 class FileExtraction:
-    """Everything one file yields, read through the one reader.
+    """Everything one file yields, read by its format's reader.
 
     `parsed` is the dive form's projection of the file (`dive_reader.prefill`) - its device,
     settings, cylinders, fixes and start - and is `None` when the file could not be read at
@@ -261,15 +267,22 @@ def fixes_of(extraction: FileExtraction) -> dict[str, float | None]:
     return {name: (extraction.scalars or {}).get(name) for name in TECH_SCALAR_FIELDS}
 
 
-def extract_file(content: bytes, format: str) -> FileExtraction:
+def extract_file(
+    content: bytes, format: str, *, descriptor: Descriptor | None, fallback_start: datetime | None
+) -> FileExtraction:
     """One file read as the format it was admitted under, never raising.
 
     **Never raises**, because the file is the durable artifact: a file this build can no
     longer read must not fail the upload that would have preserved it, nor a backfill run
     over a corpus. It comes back empty, which `extract_recording` counts as unreadable - a
     reader regression to report, not a file that said nothing.
+
+    `descriptor` and `fallback_start` are the file's own row's, required so that no caller
+    can re-read a dive-computer original without its tag; `None` for every other format.
     """
     try:
+        if format == LIBDIVECOMPUTER:
+            return extraction_of(read_original(content, descriptor=descriptor, fallback_start=fallback_start))
         return extraction_of(read_dive_file(content, format=format))
     except UnsupportedDiveFileError, DiveFileReadError:
         logger.warning("A stored %s file could not be read", format, exc_info=True)
@@ -414,7 +427,9 @@ def extract_recording(
                 logger.warning("A stored file is recorded under a format this build does not read: %r", file.parser_key)
                 result = replace(result, unreadable=True)
                 continue
-            extraction = extract_file(file.data, file.parser_key)
+            extraction = extract_file(
+                file.data, file.parser_key, descriptor=file.descriptor, fallback_start=file.fallback_start
+            )
         if extraction.parsed is None and extraction.profile is None and extraction.scalars is None:
             result = replace(result, unreadable=True)
             continue
@@ -1093,7 +1108,8 @@ async def store_recording_file(
     # is pure Python, and this is an `async def`. The read transaction is released first so
     # the connection isn't held idle for the duration - see `release_read_transaction`.
     await release_read_transaction(db)
-    extraction = await run_in_conversion_thread(extract_file, data, format_id)
+    # The parse token names a format the head was sniffed as, which is never a tagged original.
+    extraction = await run_in_conversion_thread(extract_file, data, format_id, descriptor=None, fallback_start=None)
 
     recordings = await dive_recordings.load_recordings_for_dive(db, dive_id=dive_id)
     incoming = _incoming_facts(extraction)
@@ -1256,7 +1272,18 @@ async def is_same_stored_recording(
     starts = [
         start
         for file in files
-        if (start := (await run_in_conversion_thread(extract_file, file.data, file.parser_key)).start) is not None
+        if (
+            start := (
+                await run_in_conversion_thread(
+                    extract_file,
+                    file.data,
+                    file.parser_key,
+                    descriptor=file.descriptor,
+                    fallback_start=file.fallback_start,
+                )
+            ).start
+        )
+        is not None
     ]
     return not dive_recordings.holds_another_start(candidate.facts, starts)
 
@@ -1459,7 +1486,7 @@ async def rederive_recording(
             profile=profile,
             source_sha256=recording_source_digest([file.sha256 for file in files]),
             parser_key=files[0].parser_key,
-            reader_version=READER_VERSION,
+            reader_version=reader_version_of(file.parser_key for file in files),
             commit=False,
         )
     duration, max_depth = gate_figures(profile)
@@ -1658,7 +1685,7 @@ async def _repeat_upload(
         await db.execute(select(DiveRecording.ordinal).where(DiveRecording.id == existing.recording_id))
     ).scalar_one_or_none()
     try:
-        digests = [file.sha256 for file in await load_recording_files(db, recording_id=existing.recording_id)]
+        held_files = await load_recording_files(db, recording_id=existing.recording_id)
     except blob_store.BlobMissingError:
         # A *sibling* file of this recording is missing, which these bytes cannot repair. The
         # upload is still a no-op and still the right answer; what is skipped is the
@@ -1667,9 +1694,10 @@ async def _repeat_upload(
         logger.error("Skipping re-extraction for recording %s: a sibling file is missing", existing.recording_id)
         return StoredRecordingFile(recording_id=existing.recording_id, file_uuid=existing.uuid)
 
-    if digests and should_extract(
+    if held_files and should_extract(
         await get_existing_profile(db, recording_id=existing.recording_id),
-        sha256=recording_source_digest(digests),
+        sha256=recording_source_digest([file.sha256 for file in held_files]),
+        reader_version=reader_version_of(file.parser_key for file in held_files),
     ) == ("extract"):
         # `release=True`: nothing above this is left in the transaction - the blob repair's
         # size is already committed - so the connection is freed for the read rather than
@@ -1709,23 +1737,36 @@ async def load_dive_file(db: AsyncSession, *, file_id: int) -> LoadedDiveFile | 
     download route 500s, the export archive skips the member, the backfills count it failed.
     Collapsing the two into `None` would report data loss as a 404.
     """
-    stmt = select(
-        DiveFile.storage_key,
-        DiveFile.content_type,
-        DiveFile.original_filename,
-        DiveFile.sha256,
-        DiveFile.parser_key,
-    ).where(DiveFile.id == file_id)
+    stmt = select(*_LOADED_COLUMNS).where(DiveFile.id == file_id)
     row = (await db.execute(stmt)).one_or_none()
     if row is None:
         return None
+    return _loaded(row, await blob_store.get(row.storage_key))
 
+
+# What a reader of a stored file needs off its row, beside the bytes `storage_key` names.
+_LOADED_COLUMNS = (
+    DiveFile.storage_key,
+    DiveFile.content_type,
+    DiveFile.original_filename,
+    DiveFile.sha256,
+    DiveFile.parser_key,
+    DiveFile.descriptor_vendor,
+    DiveFile.descriptor_product,
+    DiveFile.descriptor_model,
+    DiveFile.fallback_start,
+)
+
+
+def _loaded(row: Any, data: bytes) -> LoadedDiveFile:
     return LoadedDiveFile(
-        data=await blob_store.get(row.storage_key),
+        data=data,
         content_type=row.content_type,
         original_filename=row.original_filename,
         sha256=row.sha256,
         parser_key=row.parser_key,
+        descriptor=descriptor_of_columns(row.descriptor_vendor, row.descriptor_product, row.descriptor_model),
+        fallback_start=row.fallback_start,
     )
 
 
@@ -1749,24 +1790,11 @@ async def load_recording_files(
     result as though it were the whole.
     """
     held = held or {}
-    stmt = (
-        select(
-            DiveFile.storage_key,
-            DiveFile.content_type,
-            DiveFile.original_filename,
-            DiveFile.sha256,
-            DiveFile.parser_key,
-        )
-        .where(DiveFile.recording_id == recording_id)
-        .order_by(DiveFile.id)
-    )
+    stmt = select(*_LOADED_COLUMNS).where(DiveFile.recording_id == recording_id).order_by(DiveFile.id)
     return [
-        LoadedDiveFile(
-            data=read() if (read := held.get(row.storage_key)) is not None else await blob_store.get(row.storage_key),
-            content_type=row.content_type,
-            original_filename=row.original_filename,
-            sha256=row.sha256,
-            parser_key=row.parser_key,
+        _loaded(
+            row,
+            read() if (read := held.get(row.storage_key)) is not None else await blob_store.get(row.storage_key),
         )
         for row in (await db.execute(stmt)).all()
     ]
@@ -2220,12 +2248,15 @@ async def read_unread_file_fixes(db: AsyncSession, *, limit: int = FIX_READ_BATC
     **Every row it selects is marked read**, a file whose bytes are gone or whose format this
     build does not read included, with no fix: otherwise it is selected again on every pass and
     the caller's loop never ends. `backfill_tech_fields` re-reads every file whatever this says.
+    A file whose reader never returns is one of those: `divejson-raw` is stopped at
+    `libdivecomputer.TIMEOUT_SECONDS`, which a full batch of them still fits inside the worker's
+    job timeout, so the batch commits rather than being rolled back and selected again.
     """
     from .cache_invalidation import invalidate_dive_caches
 
     rows = (
         await db.execute(
-            select(DiveFile.id, DiveFile.dive_id, DiveFile.user_id, DiveFile.storage_key, DiveFile.parser_key)
+            select(DiveFile.id, DiveFile.dive_id, DiveFile.user_id, *_LOADED_COLUMNS)
             .where(DiveFile.fixes_read.is_(False))
             .order_by(DiveFile.id)
             .limit(limit)
@@ -2239,7 +2270,16 @@ async def read_unread_file_fixes(db: AsyncSession, *, limit: int = FIX_READ_BATC
             except blob_store.BlobMissingError:
                 logger.error("Reading no fixes off file %s: it is missing from the store", row.id)
             else:
-                fixes = fixes_of(await run_in_conversion_thread(extract_file, data, row.parser_key))
+                file = _loaded(row, data)
+                fixes = fixes_of(
+                    await run_in_conversion_thread(
+                        extract_file,
+                        file.data,
+                        file.parser_key,
+                        descriptor=file.descriptor,
+                        fallback_start=file.fallback_start,
+                    )
+                )
         await db.execute(update(DiveFile).where(DiveFile.id == row.id).values(**fixes, fixes_read=True))
     for dive_id in sorted({row.dive_id for row in rows}):
         await derive_dive_fixes(db, dive_id=dive_id, clear=False)

@@ -103,7 +103,10 @@ In that case `docker compose pull` is the whole fix even with a version pinned.
 - The API and worker: authentication and magic-link handling, ownership and authorization checks,
   cache key scoping, upload handling and how an uploaded dive-computer file is read, rate limiting,
   anything that serves one account's data to another. A defect in a format's reader itself belongs
-  to the [`divejson`](https://github.com/divejson/divejson-py) package, which reads every file.
+  to the [`divejson`](https://github.com/divejson/divejson-py) package, which reads every uploaded
+  file, or for a dive-computer original the iOS app downloaded, to
+  [`divejson-c`](https://github.com/divejson/divejson-c) and the libdivecomputer it vendors. How the
+  api isolates that reader - its environment, timeout and memory ceiling - is in scope here.
 - The admin panel as shipped, including its defaults.
 
 **The install bundle and the self-hosting docs are not here.** `docker-compose.yml`, `Caddyfile`,

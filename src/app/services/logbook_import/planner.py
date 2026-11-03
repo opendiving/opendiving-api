@@ -136,6 +136,7 @@ from ..dive_recordings import (
     is_same_dive_strict,
     load_candidates,
 )
+from ..libdivecomputer import LIBDIVECOMPUTER, Descriptor, descriptor_from, fallback_start_from
 from ..person_links import Account, accounts_by_uuid, claim_link_slot, link_budget_remaining
 from ..recording_shape import INT32_MAX, Bound, Drop, bounded, finite, gate_figures, in_water_of, shape_recording
 from ..user_pictures import (
@@ -237,6 +238,9 @@ class PlannedFile:
     original_filename: str
     content_type: str
     parser_key: str | None = None
+    # A dive-computer original's tag, kept on the row for its reader (`models/dive_file.py`).
+    descriptor: Descriptor | None = None
+    fallback_start: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3251,14 +3255,28 @@ class _Planner:
         # app's own table rather than from a document that could name anything, since that
         # value ends up in a response header on download. The import's own key otherwise,
         # which is the truth about where the row came from.
+        #
+        # A dive-computer original reads only with the descriptor its tag carries, so one
+        # without a usable descriptor is restored as the import's own key too, as an untagged
+        # one is: nothing could ever read it.
         parser_key = _producer_entry(stored, "parser_key")
-        readable = isinstance(parser_key, str) and reads(parser_key)
+        descriptor = fallback_start = None
+        if parser_key == LIBDIVECOMPUTER:
+            descriptor = descriptor_from(_producer_entry(stored, "descriptor"))
+            fallback_start = fallback_start_from(_producer_entry(stored, "fallback_start"))
+        readable = (
+            isinstance(parser_key, str)
+            and reads(parser_key)
+            and (parser_key != LIBDIVECOMPUTER or descriptor is not None)
+        )
         return PlannedFile(
             archive_path=stored.archive_path,
             sha256=stored.sha256,
             original_filename=stored.original_filename or "dive-file",
             content_type=content_type_of(parser_key) if readable else FALLBACK_CONTENT_TYPE,
             parser_key=parser_key if readable else IMPORT_PARSER_KEY,
+            descriptor=descriptor if readable else None,
+            fallback_start=fallback_start if readable else None,
         )
 
     def _plan_card_file(

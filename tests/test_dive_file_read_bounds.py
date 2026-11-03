@@ -92,7 +92,7 @@ class TestExtractingAStoredFileNeverRaises:
 
         monkeypatch.setattr(dive_files, "extraction_of", overflow)
 
-        extraction = dive_files.extract_file(SUUNTO_XML, "suunto_xml")
+        extraction = dive_files.extract_file(SUUNTO_XML, "suunto_xml", descriptor=None, fallback_start=None)
 
         assert extraction is dive_files._UNREAD
 

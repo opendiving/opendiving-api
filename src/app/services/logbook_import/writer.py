@@ -768,6 +768,10 @@ class _Writer:
                 storage_key=stored.storage_key,
                 uuid=uuid7(),
                 created_at=self._now,
+                descriptor_vendor=None if planned.descriptor is None else planned.descriptor.vendor,
+                descriptor_product=None if planned.descriptor is None else planned.descriptor.product,
+                descriptor_model=None if planned.descriptor is None else planned.descriptor.model,
+                fallback_start=planned.fallback_start,
             )
         )
 

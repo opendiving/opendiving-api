@@ -242,11 +242,31 @@ at the site instead. The auth design, with sequence diagrams for every flow, is 
 
 ## Adding a format
 
-Every dive-computer file this app reads - on the dive form and in logbook import alike - is read by
+Every dive-computer file a diver uploads - on the dive form and in logbook import alike - is read by
 the [`divejson`](https://github.com/divejson/divejson-py) package, so **a reader is a contribution
 to that package, not to this repository**. Its `CONTRIBUTING.md` says how an adapter is written and
 what a sample file needs; a real export from a computer nobody on either project owns is the scarce
 ingredient.
+
+The one other reader is `divejson-raw`, from [`divejson-c`](https://github.com/divejson/divejson-c),
+and it reads the one kind of file nobody uploads: a dive's bytes as the iOS app downloaded them
+through libdivecomputer, stored under `libdivecomputer` with the descriptor the app tagged them
+with. The api runs it as a subprocess, found on `PATH`; the `Dockerfile` copies it from a pinned
+`ghcr.io/divejson/divejson-c` image, and a computer it does not read yet is a contribution to
+libdivecomputer or to that repository.
+
+**Its tests need the binary.** Without `divejson-raw` on `PATH` they skip, and the ones that hold
+its isolation also need Linux, whose address-space ceiling it runs under. CI installs the binary the
+`Dockerfile` pins and fails on the skip. Locally, take it from the same image (Linux only, as the
+binary is):
+
+```bash
+image=$(sed -nE 's/^FROM (.+) AS divejson-raw$/\1/p' Dockerfile)
+docker create --name divejson-raw "$image" \
+  && docker cp divejson-raw:/usr/local/bin/divejson-raw ~/.local/bin/ && docker rm divejson-raw
+```
+
+or run the containerised suite, whose `test` stage carries it.
 
 What a new format owes this repository, once a `divejson` release carries it and the pin moves, is
 three table rows in `src/app/services/dive_reader.py`: the label a diver reads it by
@@ -256,9 +276,10 @@ decides where an import of several files reads it. `test_every_read_format_has_a
 siblings fail the build until all three are there. The format id is written to
 `dive_file.parser_key` on every stored file and is part of the data model.
 
-A release that moves the pin moves the reader version every stored profile records, so the profiles
-are behind until the backfill re-reads them from their stored files - valid meanwhile, and served as
-the previous reader left them:
+A release that moves either pin - `divejson` in `uv.lock`, or the `divejson-raw` image in the
+`Dockerfile` - moves the reader version every stored profile it fed records, so those profiles are
+behind until the backfill re-reads them from their stored files - valid meanwhile, and served as the
+previous reader left them:
 
 ```bash
 docker compose exec api python -m src.scripts.backfill_dive_profiles

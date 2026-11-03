@@ -11,6 +11,8 @@ Same skip-if-unreachable guard and same write-real-rows-and-leave-them conventio
 
 import hashlib
 import io
+import sys
+import time
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,7 +38,7 @@ from src.app.models.user import User
 from src.app.schemas.dive import DecoAlgorithm, DiveListSort, DiveMode, DiveRead, RecordingUpdateRequest
 from src.app.schemas.dive_profile import ProfileProvenance
 from src.app.schemas.parsed_dive import ParsedDecoModel
-from src.app.services import blob_store
+from src.app.services import blob_store, libdivecomputer
 from src.app.services.dive_files import (
     delete_dive_file,
     fill_tech_scalars,
@@ -53,6 +55,7 @@ from src.app.services.dive_recordings import (
     next_ordinal,
     renumber_ordinals,
 )
+from src.app.services.libdivecomputer import LIBDIVECOMPUTER
 from tests.conftest import db_available
 from tests.helpers.dive_files import suunto_json
 from tests.helpers.generators import create_dive, create_dive_recording, create_user
@@ -1318,6 +1321,45 @@ class TestReadingUnreadFixes:
         ).scalar_one()
         assert fixes_read is True
         assert await _dive_fixes(async_db, dive) == (DOCUMENT, OCEAN_EXIT)
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.platform != "linux", reason="the reader's address-space ceiling is set the Linux way")
+    async def test_an_original_whose_reader_never_returns_costs_one_timeout_and_is_marked_read(
+        self,
+        volume: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        async_db: AsyncSession,
+        diver: User,
+        dive: Dive,
+        tmp_path: Path,
+    ) -> None:
+        """A vendored parser can loop for ever on a crafted buffer. The read is stopped at the
+        timeout and the file marked read, so the batch commits and is not selected again."""
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+        stand_in = tmp_path / "divejson-raw"
+        stand_in.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(600)\n")
+        stand_in.chmod(0o755)
+        monkeypatch.setattr(libdivecomputer, "_installed", lambda: (str(stand_in), "0.0.0+stand-in"))
+        monkeypatch.setattr(libdivecomputer, "TIMEOUT_SECONDS", 0.5)
+        await _attach_as(async_db, diver, dive, OCEAN_JSON, "suunto_json")
+        await self._unread(
+            async_db,
+            dive,
+            parser_key=LIBDIVECOMPUTER,
+            descriptor_vendor="Suunto",
+            descriptor_product="Ocean",
+            descriptor_model=1,
+        )
+        started = time.monotonic()
+
+        assert await read_unread_file_fixes(async_db, limit=50) == 1
+
+        assert time.monotonic() - started < 10
+        fixes_read = (
+            await async_db.execute(select(DiveFile.fixes_read).where(DiveFile.dive_id == dive.id))
+        ).scalar_one()
+        assert fixes_read is True
+        assert await read_unread_file_fixes(async_db, limit=50) == 0
 
 
 class TestOrdinals:

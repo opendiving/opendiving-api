@@ -347,7 +347,7 @@ class TestTheParseMatchesOnTheRecordingsOwnFigures:
 
     def _matches(self, monkeypatch: pytest.MonkeyPatch, *, span_shift_ms: int = 0) -> dict:
         json_file = (FIXTURES / "dive_files" / "suunto-ocean-2026.json").read_bytes()
-        stored = _incoming_facts(extract_file(json_file, "suunto_json"))
+        stored = _incoming_facts(extract_file(json_file, "suunto_json", descriptor=None, fallback_start=None))
         assert stored is not None and stored.sampled_span is not None
         stored = replace(stored, sampled_span=stored.sampled_span + span_shift_ms)
         candidate = RecordingCandidate(

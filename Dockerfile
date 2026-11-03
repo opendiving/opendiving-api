@@ -1,3 +1,11 @@
+# --------- divejson-raw ---------
+# The reader of the dive-computer originals the iOS app downloads: a static binary from the
+# release image of DiveJSON's C implementation, at a pinned version. A bump moves the reader
+# version every profile it fed records, so it is followed by the profile backfill, as a pin
+# bump of `divejson` is. `.github/workflows/tests.yml` installs the binary on the runner from
+# this line, so the suite tests the pin this image ships.
+FROM ghcr.io/divejson/divejson-c:0.1.0 AS divejson-raw
+
 # --------- Builder Stage ---------
 FROM ghcr.io/astral-sh/uv:python3.15-trixie-slim AS builder
 
@@ -34,6 +42,8 @@ ENV PYTHONPATH=/code
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-editable --extra dev
 
+COPY --from=divejson-raw /usr/local/bin/divejson-raw /usr/local/bin/divejson-raw
+
 WORKDIR /code
 
 CMD ["pytest", "tests/", "-v"]
@@ -54,6 +64,11 @@ COPY --from=builder --chown=app:app /app/.venv /app/.venv
 
 # Ensure the virtual environment is in the PATH
 ENV PATH="/app/.venv/bin:$PATH"
+
+# Found on `PATH` by `services/libdivecomputer.py`. It links libdivecomputer, LGPL-2.1, so its
+# licence and the notice naming the commit built in travel with it.
+COPY --from=divejson-raw /usr/local/bin/divejson-raw /usr/local/bin/divejson-raw
+COPY --from=divejson-raw /usr/share/licenses/divejson-c /usr/share/licenses/divejson-c
 
 # Where uploaded dive-computer exports and c-card images live (FILE_STORAGE_DIR). Created
 # here, owned by `app`, and *before* `USER app` - which is load-bearing rather than tidy:

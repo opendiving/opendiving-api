@@ -186,7 +186,12 @@ async def _repair_readouts(
     """The folded recording's CNS and OTU, start-side from the files of the record it starts
     on and end-side from the files of the last record after it. A side no file yields stays."""
     files = await load_recording_files(db, recording_id=recording_id)
-    extractions = {file.sha256: extract_file(file.data, file.parser_key) for file in files}
+    extractions = {
+        file.sha256: extract_file(
+            file.data, file.parser_key, descriptor=file.descriptor, fallback_start=file.fallback_start
+        )
+        for file in files
+    }
     placed = [(file, start) for file in files if (start := extractions[file.sha256].start) is not None]
 
     def apart(at: tuple[datetime, int | None], other: tuple[datetime, int | None]) -> float:

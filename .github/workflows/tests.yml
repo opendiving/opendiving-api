@@ -97,6 +97,21 @@ jobs:
       - name: Install package with dev dependencies
         run: uv sync --extra dev
 
+      # The reader of tagged dive-computer originals, which the suite runs as the api does: as
+      # a subprocess found on `PATH`. Taken from the image the `Dockerfile`'s `divejson-raw`
+      # stage names, so there is one pin and the suite tests it. Without the binary its tests
+      # skip, which the skip assertion below turns into a failure here.
+      - name: Install divejson-raw from the image the Dockerfile pins
+        run: |
+          image=$(sed -nE 's/^FROM (ghcr\.io\/divejson\/divejson-c:[^ ]+) AS divejson-raw$/\1/p' Dockerfile)
+          test -n "$image"
+          container=$(docker create "$image")
+          mkdir -p "$RUNNER_TEMP/bin"
+          docker cp "$container:/usr/local/bin/divejson-raw" "$RUNNER_TEMP/bin/divejson-raw"
+          docker rm "$container"
+          "$RUNNER_TEMP/bin/divejson-raw" --version
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       # `check` is the half that cannot be got anywhere else: it autogenerates against a
       # database the migrations just built and fails if it finds any difference, so a model
       # changed without a matching revision fails the PR rather than the first deploy.
@@ -194,6 +209,11 @@ jobs:
             -e SECRET_KEY=test-secret-key-for-testing-only \
             opendiving-api:runtime-check \
             python -c "import app.api.v1.logbook_import, app.api.v1.dives, app.main"
+
+      - name: The runtime image carries divejson-raw and its licences
+        run: |
+          docker run --rm opendiving-api:runtime-check sh -c \
+            'divejson-raw --version && ls /usr/share/licenses/divejson-c/LGPL-2.1.txt /usr/share/licenses/divejson-c/NOTICE'
 
       - name: The worker and the scripts import out of the runtime image
         run: |

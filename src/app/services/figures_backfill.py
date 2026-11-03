@@ -212,7 +212,12 @@ async def backfill_dive_figures(
                 source = "samples"
 
         if source == "files":
-            parsed = [extract_file(file.data, file.parser_key).parsed for file in files]
+            parsed = [
+                extract_file(
+                    file.data, file.parser_key, descriptor=file.descriptor, fallback_start=file.fallback_start
+                ).parsed
+                for file in files
+            ]
             if any(each is None for each in parsed):
                 logger.warning("Skipping dive %s: a stored file could not be re-read", row.uuid)
                 failed += 1

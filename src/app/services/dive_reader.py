@@ -1,26 +1,31 @@
-"""The one place the api reads a dive-computer file, and the dive form's projection of it.
+"""Where the api reads a dive-computer file, and the dive form's projection of it.
 
-`divejson` is the reader, on every path. The head decides the format - `divejson.sniff` over
+Two readers, one path. **`divejson`** reads every file a diver uploads, on the dive form, the
+attach path and logbook import: the head decides the format - `divejson.sniff` over
 `divejson.SNIFF_BYTES`, and the filename decides nothing - and the whole file converts as that
-format into a DiveJSON document, the same conversion logbook import runs. What the form and
-the attach path want is one dive, so a document of none, of several, or of one dive recorded
-by two computers is refused here with a sentence saying where such a file goes instead.
+format into a DiveJSON document, the same conversion logbook import runs. **`divejson-raw`**
+reads the one kind of file no upload is: a dive-computer original the iOS app downloaded,
+re-read from storage by the descriptor its tag carried (`services/libdivecomputer.py`). A bare
+buffer names no computer, so the dive form neither offers nor accepts one. Both readers'
+documents then go through `read_document`, and what the form and the attach path want is one
+dive, so a document of none, of several, or of one dive recorded by two computers is refused
+there with a sentence saying where such a file goes instead.
 
-The document is then read two ways, and neither is a second reader. **`prefill`** is the dive
+The document is then read two ways, and neither is a third reader. **`prefill`** is the dive
 form's projection: `ParsedDiveSchema`, with the app's own rounding and a bottom temperature
 derived where the file states none, because those are what the form shows. **The recording**
 is shaped by `services/recording_shape.py`, the functions logbook import shapes a document's
 recording with, which is what makes an attached file and an imported one the same recording.
 
-**How a format is named, served back and ordered is the application's**, not the package's:
+**How a format is named, served back and ordered is the application's**, not a reader's:
 the label a diver reads, the content type a stored file is downloaded as, and whether a file
 of the format is a diver's logbook or one computer's recording all live in the tables below,
 keyed by format id. A pin bump that adds a reader owes all three, and
 `test_every_read_format_has_a_label` fails the build until it has them.
 
-Pure CPU and never on a request's event loop: every caller on a request path hands these to
+Never on a request's event loop: every caller on a request path hands these to
 `run_in_conversion_thread` (*"Uploaded files are parsed in a thread, not on the event loop"* in
-`DECISIONS.md`).
+`DECISIONS.md`), and `divejson-raw`'s subprocess runs inside that thread.
 """
 
 import logging
@@ -44,8 +49,10 @@ from ..schemas.dive import DiveMode, Salinity
 from ..schemas.dive_profile import TEMPERATURE_SCALE
 from ..schemas.logbook_import import ImportCylinder, ImportDive, ImportDocument, ImportRecording
 from ..schemas.parsed_dive import DiveMixtureSchema, InferredField, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
+from . import libdivecomputer
 from .dive_profiles import NormalizedProfile
 from .dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS
+from .libdivecomputer import LIBDIVECOMPUTER, Descriptor, OriginalReadError
 from .recording_shape import Drop, ShapedRecording, recording_start, shape_recording
 
 logger = logging.getLogger(__name__)
@@ -75,6 +82,7 @@ FORMAT_LABELS = {
     "suunto_xml": "Suunto DM5 XML (.xml)",
     "shearwater_db": "Shearwater Cloud database (.db)",
     "shearwater_xml": "Shearwater Cloud XML (.xml)",
+    LIBDIVECOMPUTER: "Dive computer original (.bin)",
 }
 
 # What a stored file of each format is served back as. From here rather than from the
@@ -89,6 +97,7 @@ FORMAT_CONTENT_TYPES = {
     "suunto_xml": "application/xml",
     "shearwater_db": "application/vnd.sqlite3",
     "shearwater_xml": "application/xml",
+    LIBDIVECOMPUTER: "application/octet-stream",
 }
 
 # What a stored file is served as when nothing here names its format: a restored archive
@@ -111,6 +120,7 @@ FORMAT_KINDS = {
     "suunto_xml": COMPUTER,
     "shearwater_db": LOGBOOK,
     "shearwater_xml": COMPUTER,
+    LIBDIVECOMPUTER: COMPUTER,
 }
 
 
@@ -170,7 +180,10 @@ def formats_this_build_reads() -> str:
 
 
 def reads(fmt: str | None) -> bool:
-    """Whether `fmt` is a format this build's reader converts."""
+    """Whether `fmt` is a format this build reads a stored file of: one `divejson` converts, or
+    a tagged original where this process has `divejson-raw` to read it with."""
+    if fmt == LIBDIVECOMPUTER:
+        return libdivecomputer.available()
     return fmt is not None and fmt in divejson.read_formats()
 
 
@@ -278,8 +291,32 @@ def read_dive_file(content: bytes, *, format: str | None = None) -> ReadDive:
         logger.exception("Unexpected error reading a %s file", format)
         raise DiveFileReadError(f"This file could not be read: {str(exc) or type(exc).__name__}.") from exc
 
+    return read_document(conversion.document, format=format)
+
+
+def read_original(content: bytes, *, descriptor: Descriptor | None, fallback_start: datetime | None) -> ReadDive:
+    """A dive-computer original as one dive, read by `divejson-raw` with the stored file's tag.
+
+    `fallback_start` is the file's own - the start the phone's walk fell back on where the
+    computer states none - and never its recording's: a merge's second half would otherwise
+    read as starting where the first did, and lay its samples on that dive's axis.
+    """
+    if descriptor is None:
+        raise DiveFileReadError("This file could not be read: it does not say which dive computer wrote it.")
     try:
-        document = ImportDocument.model_validate(conversion.document)
+        document = libdivecomputer.convert(
+            content, descriptor=descriptor, fallback_start=fallback_start, exported_at=_conversion_moment()
+        )
+    except OriginalReadError as exc:
+        raise DiveFileReadError(f"This file could not be read: {exc}.") from exc
+    return read_document(document, format=LIBDIVECOMPUTER)
+
+
+def read_document(raw: Mapping[str, Any], *, format: str) -> ReadDive:
+    """A reader's document as one dive, or a refusal saying why not - the step every reader's
+    output takes, whichever reader wrote it."""
+    try:
+        document = ImportDocument.model_validate(raw)
     except ValidationError as exc:
         logger.exception("A converted %s document did not survive this app's own envelope", format)
         raise DiveFileReadError(CONVERTER_BUG) from exc
@@ -291,20 +328,30 @@ def read_dive_file(content: bytes, *, format: str | None = None) -> ReadDive:
             f"This file holds {len(document.dives)} dives, and the dive form takes one. Import it as a logbook to "
             "bring them all in."
         )
-    dive = document.dives[0]
-    if len(dive.recordings) > 1:
+    if len(document.dives[0].recordings) > 1:
         raise DiveFileReadError(
-            f"This file holds {len(dive.recordings)} computers' records of this dive, and the dive form takes one "
-            "computer's record of one dive. Import it as a logbook to keep them all."
+            f"This file holds {len(document.dives[0].recordings)} computers' records of this dive, and the dive form "
+            "takes one computer's record of one dive. Import it as a logbook to keep them all."
         )
+    return first_dive(document, raw, format=format)
 
-    raw = conversion.document["dives"][0].get("started_at")
+
+def first_dive(document: ImportDocument, raw: Mapping[str, Any], *, format: str) -> ReadDive:
+    """A validated document's first dive as a `ReadDive`, its start as `raw` spells it.
+
+    Shared with logbook import, which validates a converted file its own way and keeps it on
+    a dive only where it holds one dive with one recording.
+    """
+    dive = document.dives[0]
+    dives = raw.get("dives")
+    first = dives[0] if isinstance(dives, list) and dives and isinstance(dives[0], Mapping) else {}
+    started_at = first.get("started_at")
     return ReadDive(
         format=format,
         dive=dive,
         recording=dive.recordings[0] if dive.recordings else None,
-        started_at=raw if isinstance(raw, str) else None,
-        inferred=inferred_figures(conversion.document),
+        started_at=started_at if isinstance(started_at, str) else None,
+        inferred=inferred_figures(raw),
     )
 
 

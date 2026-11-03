@@ -23,6 +23,8 @@ import base64
 import hashlib
 import io
 import json
+import shutil
+import sys
 import uuid as uuid_pkg
 import zipfile
 from datetime import UTC, date, datetime
@@ -84,7 +86,7 @@ from src.app.schemas.logbook_import import (
     ImportPortraitChoice,
 )
 from src.app.schemas.user_picture import PictureCrop, PictureKind
-from src.app.services import blob_store, certification_files, dive_reader
+from src.app.services import blob_store, certification_files, dive_reader, libdivecomputer
 from src.app.services.dive_files import store_recording_file
 from src.app.services.dive_profiles import (
     IMPORT_PARSER_KEY,
@@ -97,6 +99,7 @@ from src.app.services.dive_profiles import (
 from src.app.services.export import load_export_bundle, write_divejson, write_uddf
 from src.app.services.export.archive import DIVEJSON_NAME, write_archive
 from src.app.services.export.paths import plan_archive_paths
+from src.app.services.libdivecomputer import LIBDIVECOMPUTER
 from src.app.services.logbook_import import (
     ImportTooLargeError,
     UnsupportedImportError,
@@ -1185,6 +1188,144 @@ def _zip_of(document: bytes, members: dict[str, bytes]) -> bytes:
 def _document_of(archive: bytes) -> bytes:
     with zipfile.ZipFile(io.BytesIO(archive)) as opened:
         return opened.read(DIVEJSON_NAME)
+
+
+PERDIX_ORIGINAL = Path(__file__).parent / "fixtures" / "dive_files" / "shearwater-perdix-3_D9772626_2026-10-26T1503.bin"
+PERDIX_TAG: dict[str, object] = {"vendor": "Shearwater", "product": "Perdix 3", "model": 14}
+
+
+class TestADiveComputerOriginalKeepsItsTag:
+    """The iOS app tags each downloaded dive's bytes with libdivecomputer's descriptor of the
+    computer, and the restore keeps it on the row: without it nothing can ever read the file."""
+
+    @staticmethod
+    async def _seed(db: Session, *, fallback_start: datetime | None = None) -> tuple[Any, bytes]:
+        user = create_user(db)
+        dive = create_dive(db, user)
+        payload = PERDIX_ORIGINAL.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        key = blob_store.new_key("dive-files", sha256=digest)
+        db.add(
+            DiveFile(
+                user_id=user.id,
+                recording_id=create_dive_recording(db, user, dive).id,
+                dive_id=dive.id,
+                sha256=digest,
+                content_type="application/octet-stream",
+                byte_size=len(payload),
+                stored_byte_size=await blob_store.put(key, payload),
+                original_filename=PERDIX_ORIGINAL.name,
+                parser_key=LIBDIVECOMPUTER,
+                storage_key=key,
+                descriptor_vendor="Shearwater",
+                descriptor_product="Perdix 3",
+                descriptor_model=14,
+                fallback_start=fallback_start,
+            )
+        )
+        db.commit()
+        return user, payload
+
+    @staticmethod
+    async def _restore(
+        db: Session, async_db: AsyncSession, document: dict[str, Any], payload: bytes
+    ) -> tuple[Any, DiveFile]:
+        member = document["dives"][0]["recordings"][0]["source_files"][0]["archive_path"]
+        destination = create_user(db)
+        plan = await _apply(
+            async_db, destination.id, _zip_of(json.dumps(document).encode(), {member: payload}), filename="logbook.zip"
+        )
+        assert plan.files_restored == 1
+        stored = (await async_db.execute(select(DiveFile).where(DiveFile.user_id == destination.id))).scalars().one()
+        return destination, stored
+
+    @pytest.mark.asyncio
+    async def test_the_export_writes_the_tag_and_the_restore_keeps_it(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """An account moved between instances keeps its originals read, and the tag goes out in
+        the shape the phone writes it, a fallback start as an offset-aware instant."""
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        monkeypatch.setattr(libdivecomputer, "_installed", lambda: ("/bin/false", "0.1.0+1b201bb"))
+        fallback = datetime(2026, 10, 2, 8, 36, tzinfo=UTC)
+        source, payload = await self._seed(db, fallback_start=fallback)
+
+        document = parse_document(await _export(async_db, source.id, archive_paths=True))
+        stored_file = document["dives"][0]["recordings"][0]["source_files"][0]
+        assert stored_file["extensions"]["opendiving"] == {
+            "parser_key": LIBDIVECOMPUTER,
+            "descriptor": PERDIX_TAG,
+            "fallback_start": "2026-10-02T08:36:00+00:00",
+        }
+        stored_file["extensions"]["opendiving"]["fallback_start"] = "2026-10-02T11:36:00+03:00"
+
+        _, restored = await self._restore(db, async_db, document, payload)
+
+        assert (restored.parser_key, restored.content_type) == (LIBDIVECOMPUTER, "application/octet-stream")
+        assert (restored.descriptor_vendor, restored.descriptor_product, restored.descriptor_model) == (
+            "Shearwater",
+            "Perdix 3",
+            14,
+        )
+        assert restored.fallback_start == fallback
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            {"parser_key": LIBDIVECOMPUTER},
+            {"parser_key": LIBDIVECOMPUTER, "descriptor": {"vendor": "Shearwater", "product": "Perdix 3"}},
+            {"parser_key": LIBDIVECOMPUTER, "descriptor": "Shearwater Perdix 3", "fallback_start": "2026-10-02"},
+        ],
+    )
+    async def test_a_tag_with_no_usable_descriptor_restores_as_an_unread_original(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any, tag: dict[str, Any]
+    ) -> None:
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        monkeypatch.setattr(libdivecomputer, "_installed", lambda: ("/bin/false", "0.1.0+1b201bb"))
+        source, payload = await self._seed(db)
+        document = parse_document(await _export(async_db, source.id, archive_paths=True))
+        document["dives"][0]["recordings"][0]["source_files"][0]["extensions"]["opendiving"] = tag
+
+        _, restored = await self._restore(db, async_db, document, payload)
+
+        assert (restored.parser_key, restored.content_type) == (IMPORT_PARSER_KEY, "application/octet-stream")
+        assert (restored.descriptor_vendor, restored.descriptor_model, restored.fallback_start) == (None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_an_api_with_no_reader_restores_it_unread(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        source, payload = await self._seed(db)
+        document = parse_document(await _export(async_db, source.id, archive_paths=True))
+        monkeypatch.setattr(libdivecomputer, "_installed", lambda: None)
+
+        _, restored = await self._restore(db, async_db, document, payload)
+
+        assert (restored.parser_key, restored.descriptor_vendor) == (IMPORT_PARSER_KEY, None)
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(shutil.which(libdivecomputer.CLI) is None, reason="no divejson-raw on PATH")
+    @pytest.mark.skipif(sys.platform != "linux", reason="the reader's address-space ceiling is set the Linux way")
+    async def test_the_backfill_reads_a_restored_original_and_names_its_reader(
+        self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_dive_caches", AsyncMock())
+        monkeypatch.setattr("src.app.services.cache_invalidation.invalidate_gear_caches", AsyncMock())
+        source, payload = await self._seed(db)
+        document = parse_document(await _export(async_db, source.id, archive_paths=True))
+        destination, _ = await self._restore(db, async_db, document, payload)
+
+        report = await backfill_profiles(async_db, parser_key=LIBDIVECOMPUTER)
+
+        assert (report.extracted, report.failed) == (1, 0)
+        profile = select(DiveProfile.parser_key, DiveProfile.reader_version, DiveProfile.max_depth_cm).where(
+            DiveProfile.dive_id.in_(select(Dive.id).where(Dive.user_id == destination.id))
+        )
+        assert (await async_db.execute(profile)).one() == (LIBDIVECOMPUTER, libdivecomputer.cli_version(), 4770)
+        assert (await backfill_profiles(async_db, parser_key=LIBDIVECOMPUTER)).extracted == 0
 
 
 class TestProfiles:
@@ -5423,6 +5564,7 @@ class TestTheIntegerColumnCensus:
         ("dive_recording", "duration"): "the samples' own span, capped by `_plan_profile`",
         ("dive_file", "byte_size"): "the restored bytes' own length, capped by `MAX_DIVE_FILE_SIZE`",
         ("dive_file", "stored_byte_size"): "what `blob_store.put` wrote for them, within zstd's bound over that cap",
+        ("dive_file", "descriptor_model"): "bounded by `libdivecomputer.descriptor_from`",
         ("certification_file", "id"): "the sequence's",
         ("certification_file", "certification_id"): "resolved from a row this import wrote",
         ("certification_file", "byte_size"): "the restored bytes' own length, capped by `MAX_CARD_FILE_SIZE`",
@@ -5549,7 +5691,9 @@ class TestTheFormatLabelTable:
 
     def test_no_label_outlives_its_format(self) -> None:
         """The mirror, and it is not symmetry for its own sake: a label for a format the
-        library has dropped is a format this build advertises and refuses."""
+        library has dropped is a format this build advertises and refuses. A tagged original
+        is the one row no `divejson` format answers for: `divejson-raw` reads it."""
+        readers = (*divejson.read_formats(), LIBDIVECOMPUTER)
         stale = [
             fmt
             for table in (
@@ -5559,10 +5703,10 @@ class TestTheFormatLabelTable:
                 dive_reader.ATTACHES_FIRST,
             )
             for fmt in table
-            if fmt not in divejson.read_formats()
+            if fmt not in readers
         ]
 
-        assert not stale, f"`services/dive_reader.py` names a format `divejson` no longer reads: {stale}"
+        assert not stale, f"`services/dive_reader.py` names a format no reader of this build reads: {stale}"
 
 
 class TestTheImportGates:

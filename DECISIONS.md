@@ -7043,17 +7043,18 @@ concurrent crons no order, so it races the sweep); snapshots over a sweep deleti
 the hour (the busiest hour, not the day); a per-account last-seen date or per-day id set (a
 per-person usage record).
 
-## One reader reads every dive-computer file, and a profile names the reader that read it
+## Two readers, and a profile names every reader that fed it
 
-`divejson` converts every file the dive form, the attach path and logbook import take; the app reads
-no format itself. What the app adds - the form's rounding, the dive's cylinder labels, the point cap
-and the gas attribution - is its projection of the document, the same on every path. A stored
-profile is a function of the bytes, the reader version (`divejson.__version__`) and
-`PROFILE_EXTRACTOR_VERSION`, and the row carries all three. A pin bump makes every file-backed
-profile stale, and nothing re-derives it on deploy: the backfill does when the operator runs it, and
-until then the row is served as the previous reader made it, which is still a valid profile.
-Rejected: re-deriving in a migration, which has neither the blob store nor the reader. A `fitdecode`
-bump moves no reader version, so it needs `--force --parser-key fit`.
+`divejson` converts every file a diver uploads; `divejson-raw` reads the iOS app's dive-computer
+originals by their stored descriptor. The app reads no format itself, and both readers' documents
+take one path (`dive_reader.read_document`). A stored profile is a function of the bytes,
+`PROFILE_EXTRACTOR_VERSION` and the version of each reader whose files fed it (`reader_version_of`):
+a recording holding the phone's original beside a FIT goes stale when either pin moves. A profile
+only `divejson` fed keeps the package version alone. Nothing re-derives on deploy; the backfill
+does. Rejected: the first file's reader, under which a mixed recording never goes stale for the
+other. `divejson-raw` is a subprocess with no environment, a timeout and an address-space ceiling,
+because libdivecomputer's parsers trust their input and an archive may name any of them. A
+`fitdecode` bump moves no version: `--force --parser-key fit`.
 
 ## An import is its files imported one at a time
 

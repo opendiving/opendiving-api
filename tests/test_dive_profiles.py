@@ -50,6 +50,7 @@ from src.app.services.dive_profiles import (
     join_profiles,
     profile_from_data,
     provenance_of,
+    reader_version_of,
     replaces_stored_profile,
     shift_profile,
     should_extract,
@@ -254,7 +255,11 @@ class TestDiveEndTime:
 
     def test_a_suunto_ocean_fit_ends_its_dive_before_its_surface_delay(self):
         """The Ocean records on at the surface for five minutes by default after the dive."""
-        profile = attribute_and_cap(extract_file((FIXTURES / "suunto-ocean.fit").read_bytes(), "fit").profile)
+        profile = attribute_and_cap(
+            extract_file(
+                (FIXTURES / "suunto-ocean.fit").read_bytes(), "fit", descriptor=None, fallback_start=None
+            ).profile
+        )
 
         assert profile is not None
         assert (dive_end_time(profile.depth), profile.duration) == (4_010_000, 4_301_000)
@@ -471,7 +476,7 @@ class TestDeriveGasAttribution:
 <Duration>401</Duration><MaxDepth>30</MaxDepth><DiveMixtures>{mixtures}</DiveMixtures>
 <DiveSamples>{samples}</DiveSamples></Dive>""".encode()
 
-        profile = attribute_and_cap(extract_file(content, "suunto_xml").profile)
+        profile = attribute_and_cap(extract_file(content, "suunto_xml", descriptor=None, fallback_start=None).profile)
 
         assert profile is not None
         assert [(entry.gas_number, entry.seconds, entry.mean_depth_cm) for entry in profile.gas_attribution] == [
@@ -682,10 +687,14 @@ class TestShouldExtract:
     def test_table(self, existing, sha256, version, reader, expected):
         assert should_extract(existing, sha256=sha256, version=version, reader_version=reader) == expected
 
-    def test_the_default_reader_is_the_installed_package(self):
-        """The version a profile is stored under is the one it is later checked against."""
+    def test_a_profile_only_divejson_fed_is_spelled_as_the_installed_package(self):
+        """The version a profile is stored under is the one it is later checked against, and a
+        profile only `divejson` read keeps the spelling every stored one already has."""
         assert READER_VERSION == divejson.__version__
-        assert should_extract(_row("abc", 1, reader_version=READER_VERSION), sha256="abc", version=1) == "skip"
+        assert reader_version_of(["fit", "suunto_json"]) == READER_VERSION
+        stored = _row("abc", 1, reader_version=reader_version_of(["fit"]))
+
+        assert should_extract(stored, sha256="abc", version=1, reader_version=reader_version_of(["fit"])) == "skip"
 
 
 class TestToData:

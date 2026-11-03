@@ -1,4 +1,6 @@
-from sqlalchemy import Boolean, CheckConstraint, Float, ForeignKey, Index, Integer, String
+from datetime import datetime
+
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -78,10 +80,10 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # counts this.
     stored_byte_size: Mapped[int] = mapped_column(Integer)
     original_filename: Mapped[str] = mapped_column(String(255))
-    # The format id the reader read the file as - `fit`, `suunto_json`, `uddf`, whatever
-    # `divejson.read_formats()` names - or `divejson_import` for a restored file this build
-    # does not read. The key a stored file is re-read by, and what a backfill's
-    # `--parser-key` selects on.
+    # The format id the file was read as - `fit`, `suunto_json`, `uddf`, whatever
+    # `divejson.read_formats()` names, or `libdivecomputer` for a dive-computer original the
+    # iOS app tagged - or `divejson_import` for a restored file this build does not read. The
+    # key a stored file is re-read by, and what a backfill's `--parser-key` selects on.
     parser_key: Mapped[str] = mapped_column(String(32))
     # Where the bytes are, in whichever store `blob_store` is configured for:
     # `dive-files/{sha256[:2]}/{nonce}_{sha256}.zst`, minted by `blob_store.new_key`; a key
@@ -106,6 +108,16 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     # which is not the same as a file that recorded no position, and the worker reads it
     # (`read_unread_file_fixes`).
     fixes_read: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # A `libdivecomputer` original's tag, which its reader cannot do without: the bytes are one
+    # dive's buffer as the download handed it over, and only libdivecomputer's descriptor of the
+    # computer - vendor, product and model number, never a family number, which is numbered per
+    # build - says which parser reads them. NULL on every other file, all three together.
+    descriptor_vendor: Mapped[str | None] = mapped_column(String(64), default=None)
+    descriptor_product: Mapped[str | None] = mapped_column(String(64), default=None)
+    descriptor_model: Mapped[int | None] = mapped_column(Integer, default=None)
+    # The start the phone's walk fell back on where the computer states none - the file's own,
+    # never its recording's - which a re-read passes back so the dive reads to the same instant.
+    fallback_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
     @declared_attr.directive
     @classmethod
@@ -137,5 +149,14 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
             ),
             CheckConstraint(
                 "(exit_latitude IS NULL) = (exit_longitude IS NULL)", name="ck_dive_file_exit_position_pair"
+            ),
+            CheckConstraint(
+                "(descriptor_vendor IS NULL) = (descriptor_product IS NULL) "
+                "AND (descriptor_vendor IS NULL) = (descriptor_model IS NULL)",
+                name="ck_dive_file_descriptor_whole",
+            ),
+            CheckConstraint("descriptor_model >= 0", name="ck_dive_file_descriptor_model"),
+            CheckConstraint(
+                "fallback_start IS NULL OR descriptor_vendor IS NOT NULL", name="ck_dive_file_fallback_start_tagged"
             ),
         )

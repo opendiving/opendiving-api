@@ -87,6 +87,7 @@ from ..dive_conditions import get_conditions_for_dives
 from ..dive_drafts import read_all_dive_drafts
 from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
 from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS, attach_orders
+from ..libdivecomputer import Descriptor, descriptor_of_columns
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +97,10 @@ class ExportFileRow:
 
     id: int
     info: DiveFileInfo
+    # A dive-computer original's tag, which the archive carries for the restore to read back
+    # and the published `DiveFileInfo` does not.
+    descriptor: Descriptor | None = None
+    fallback_start: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -669,6 +674,10 @@ async def _files_by_recording(db: AsyncSession, recording_ids: list[int]) -> dic
             DiveFile.updated_at,
             DiveFile.entry_latitude,
             DiveFile.entry_longitude,
+            DiveFile.descriptor_vendor,
+            DiveFile.descriptor_product,
+            DiveFile.descriptor_model,
+            DiveFile.fallback_start,
         )
         .join(ranks, ranks.c.id == DiveFile.id)
         .where(DiveFile.recording_id.in_(recording_ids))
@@ -690,6 +699,8 @@ async def _files_by_recording(db: AsyncSession, recording_ids: list[int]) -> dic
                     entry_longitude=row.entry_longitude,
                     attach_order=row.attach_order,
                 ),
+                descriptor=descriptor_of_columns(row.descriptor_vendor, row.descriptor_product, row.descriptor_model),
+                fallback_start=row.fallback_start,
             )
         )
     return files

@@ -328,7 +328,8 @@ curl -X POST http://localhost:8000/api/v1/import/logbook \
   `docker-compose.test.yml` is an overlay and does nothing on its own. Note that the Postgres-backed
   tests skip themselves unless the test process can reach the database; see
   [CONTRIBUTING.md](CONTRIBUTING.md).
-- Re-read stored profiles after a release that moves the `divejson` pin or the extractor version:
+- Re-read stored profiles after a release that moves the `divejson` pin, the `divejson-raw` image
+  the `Dockerfile` pins, or the extractor version:
   `docker compose exec api python -m src.scripts.backfill_dive_profiles`. Until it runs, every
   profile is served as the previous reader left it.
 - Once, after that: `docker compose exec api python -m src.scripts.backfill_dive_figures --dry-run`,

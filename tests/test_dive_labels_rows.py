@@ -221,7 +221,7 @@ class TestTheHeartRateIsTheFilesWholeSeries:
         self, volume: Any, async_db: AsyncSession, db: Session, name: str, parser_key: str
     ) -> None:
         content = _fixture(name)
-        uncapped = extract_file(content, parser_key).profile
+        uncapped = extract_file(content, parser_key, descriptor=None, fallback_start=None).profile
         assert uncapped is not None and uncapped.heart_rate is not None
         readings = uncapped.heart_rate.v
         attaching, importing = create_user(db), create_user(db)

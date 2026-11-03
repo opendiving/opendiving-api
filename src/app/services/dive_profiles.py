@@ -40,7 +40,7 @@ on the box, is worth more than the bytes. This is the codebase's first JSONB col
 import hashlib
 import logging
 from bisect import bisect_right
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from itertools import pairwise
@@ -77,6 +77,7 @@ from ..schemas.dive_profile import (
     ProfileProvenance,
     RecordingProfileRead,
 )
+from . import libdivecomputer
 from .blob_store import BlobMissingError
 from .gear_stats import recalculate_gear_dive_counts
 
@@ -85,7 +86,8 @@ logger = logging.getLogger(__name__)
 # Bumped whenever a change to this app's own pipeline - the shaping, the labelling, the
 # attribution, the cap - would produce different samples from the same bytes. Stored on the
 # row, so `should_extract` can tell "already done" from "done by an older extractor", and so
-# the backfill script has something to select on. What the *reader* does is `READER_VERSION`'s.
+# the backfill script has something to select on. What a *reader* does is its version's
+# (`reader_version_of`).
 #
 # 2: the deco `ceiling` channel and `events`, which every parser had been dropping.
 # 3: `gas_attribution`, derived from those events - which gas was breathed for how long
@@ -125,18 +127,46 @@ PROFILE_EXTRACTOR_VERSION = 10
 # body lacks the member, and reads an absent one as no channel, which is what that body meant.
 PROFILE_READ_VERSION = 3
 
-# The reader's version, stored beside the extractor's: a profile read from stored bytes is a
-# function of those bytes, of this and of `PROFILE_EXTRACTOR_VERSION`, and the row records all
-# three. It names the package and moves with every pin bump whether or not a reader changed,
-# so after a bump every profile is behind until the backfill runs, and valid meanwhile. It
-# does not name the package's FIT decoder: `fitdecode` is pinned beside it, and a bump of it
-# alone is followed by a forced backfill over the FIT files (`--force --parser-key fit`).
+# The `divejson` reader's version, stored beside the extractor's: a profile read from stored
+# bytes is a function of those bytes, of its readers' versions and of `PROFILE_EXTRACTOR_VERSION`,
+# and the row records them all (`reader_version_of`). It names the package and moves with every
+# pin bump whether or not a reader changed, so after a bump every profile it fed is behind until
+# the backfill runs, and valid meanwhile. It does not name the package's FIT decoder: `fitdecode`
+# is pinned beside it, and a bump of it alone is followed by a forced backfill over the FIT files
+# (`--force --parser-key fit`).
 READER_VERSION: str = divejson.__version__
+
+
+def reader_version_of(parser_keys: Iterable[str]) -> str | None:
+    """The `reader_version` of a profile read from files of these formats: the version of every
+    reader of this build that read one, `divejson`'s first and `divejson-raw`'s after, spaced.
+
+    Every reader, not the first file's: a recording holding the phone's original beside the
+    Suunto app's FIT goes stale when either pin moves. A profile only `divejson` fed is spelled
+    as it always was, the package version alone. `None` where no reader of this build reads
+    any of them.
+    """
+    keys = set(parser_keys)
+    versions = []
+    if not keys.isdisjoint(divejson.read_formats()):
+        versions.append(READER_VERSION)
+    if libdivecomputer.LIBDIVECOMPUTER in keys and (cli := libdivecomputer.cli_version()) is not None:
+        versions.append(cli)
+    return " ".join(versions) or None
+
+
+def current_reader_versions() -> frozenset[str]:
+    """Every `reader_version` this build can write - what the backfill's candidate query
+    compares against before `should_extract` settles a recording on its own files' formats."""
+    cli = libdivecomputer.cli_version()
+    return frozenset({READER_VERSION} if cli is None else {READER_VERSION, cli, f"{READER_VERSION} {cli}"})
+
 
 # The two `parser_key` values that are **not** a format id, and the set both backfills refuse
 # to overwrite. `dive_profile.parser_key` answers "which of three things is this profile":
-# a format id the reader names (`divejson.read_formats()`) means the samples were read out of
-# the recording's files and can be read again; these two mean nothing on this instance can
+# a format id a reader of this app names - `divejson.read_formats()`, or `libdivecomputer` for
+# `divejson-raw`'s - means the samples were read out of the recording's files and can be read
+# again; these two mean nothing on this instance can
 # re-yield them.
 #
 # `divejson_import` is a profile a document supplied - see *"Importing a logbook is the one
@@ -1133,12 +1163,14 @@ def should_extract(
     *,
     sha256: str,
     version: int = PROFILE_EXTRACTOR_VERSION,
-    reader_version: str = READER_VERSION,
+    reader_version: str | None,
 ) -> Literal["extract", "skip"]:
     """Decide whether a recording's profile is still current.
 
     `(source digest, extractor version, reader version)` is the whole test for a profile read
-    from stored bytes - it is a pure function of those three things. Any of them differing is
+    from stored bytes - it is a pure function of those three things. `reader_version` is what
+    this build would store for the recording's files (`reader_version_of`), and required, so a
+    caller cannot compare against one reader where the files have two. Any of them differing is
     `extract`, a newer reader's row included: this build cannot vouch for what another
     reader made of the bytes. Split out from its callers so the table of cases is testable
     without a database.
@@ -1214,8 +1246,8 @@ async def store_profile(
 ) -> None:
     """Replace this recording's profile with `profile`.
 
-    `reader_version` is `READER_VERSION` for samples read from the recording's stored files
-    and `None` for samples that were not - a document's or a merge's. Required, so a new
+    `reader_version` is `reader_version_of` the files for samples read from the recording's
+    stored files and `None` for samples that were not - a document's or a merge's. Required, so a new
     caller has to say which it has.
 
     `commit=False` by default because the caller that matters (`store_recording_file`) has
@@ -1785,7 +1817,7 @@ async def backfill_profiles(
             (DiveProfile.id.is_(None))
             | (DiveProfile.extractor_version != PROFILE_EXTRACTOR_VERSION)
             | (DiveProfile.reader_version.is_(None))
-            | (DiveProfile.reader_version != READER_VERSION)
+            | (DiveProfile.reader_version.not_in(current_reader_versions()))
             | (file_count != 1)
             | (DiveProfile.source_sha256 != one_file)
         )
@@ -1821,7 +1853,8 @@ async def backfill_profiles(
         digest = recording_source_digest([file.sha256 for file in files])
         if not force:
             existing = await get_existing_profile(db, recording_id=row.recording_id)
-            if should_extract(existing, sha256=digest) == "skip":
+            reader_version = reader_version_of(file.parser_key for file in files)
+            if should_extract(existing, sha256=digest, reader_version=reader_version) == "skip":
                 skipped += 1
                 continue
 

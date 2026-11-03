@@ -113,11 +113,11 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # profile the first produced.
     source_sha256: Mapped[str] = mapped_column(String(64))
     # **Which of three things this profile is**, which is more than "which format was read":
-    # a format id the reader names means the samples were read from the recording's files in
-    # order and can be read again; `divejson_import` means a document supplied them and no
-    # file here can re-yield them; `merge` means two recordings' samples were folded on one
-    # axis. The two sentinels are what both backfills refuse to overwrite, and the
-    # distinction is on the *profile* rather than on a file precisely because a merged
+    # a format id one of this app's readers names means the samples were read from the
+    # recording's files in order and can be read again; `divejson_import` means a document
+    # supplied them and no file here can re-yield them; `merge` means two recordings' samples
+    # were folded on one axis. The two sentinels are what both backfills refuse to overwrite,
+    # and the distinction is on the *profile* rather than on a file precisely because a merged
     # recording may still hold the files either part had.
     parser_key: Mapped[str] = mapped_column(String(32))
     extractor_version: Mapped[int] = mapped_column(Integer)
@@ -212,11 +212,12 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     # time and nothing re-points it when recordings are reordered, deleted or merged.
     # NULL where there is no depth curve to draw.
     depth_outline: Mapped[dict | None] = mapped_column(JSONB, default=None)
-    # The `divejson` version whose reader produced these samples from the stored files -
-    # `READER_VERSION` in `services/dive_profiles.py`. NULL where no reader of this instance
-    # did: a document supplied them, a merge produced them, or the row predates the column,
-    # which is what makes every such row with a file behind it a backfill candidate.
-    reader_version: Mapped[str | None] = mapped_column(String(32), default=None)
+    # The version of every reader whose files fed these samples - `divejson`'s, `divejson-raw`'s
+    # `--version`, or both, as `reader_version_of` in `services/dive_profiles.py` spells them.
+    # NULL where no reader of this instance did: a document supplied them, a merge produced
+    # them, or the row predates the column, which is what makes every such row with a file
+    # behind it a backfill candidate.
+    reader_version: Mapped[str | None] = mapped_column(String(64), default=None)
 
     __table_args__ = (
         # One profile per recording. `ux_dive_profile_dive_id` - one per *dive* - is gone:
