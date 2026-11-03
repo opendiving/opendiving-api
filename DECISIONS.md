@@ -7359,4 +7359,4 @@ updated by a maintainer at all. Loose checks alone are rejected because every me
 hosted instance within minutes, untested as merged. `semantic-title` has no title to read on a merge
 group and skips; a skipped job reports success. The release coordinator in opendiving/opendiving
 merges bump pull requests with `gh pr merge`, which a required queue enqueues instead of merging, so
-the queue goes on only once that flow lands a bump through or past it.
+the queue goes on only once that flow can merge past it.
