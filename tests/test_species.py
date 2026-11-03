@@ -53,7 +53,8 @@ from src.app.crud.crud_dive_species import StoredSighting, get_species_for_dive,
 from src.app.models.dive_species import DiveSpecies
 from src.app.models.species import Species
 from src.app.models.species_name import SpeciesName
-from src.app.schemas.dive import DiveCreateRequest, SightingRead
+from src.app.models.user import User
+from src.app.schemas.dive import DiveCreateRequest, DiveListSort, SightingRead
 from src.app.schemas.species import SpeciesSearchResponse, SpeciesSearchResult
 from src.app.services import species_service
 from src.app.services.dive_stats import recalculate_dive_stats
@@ -2844,6 +2845,57 @@ class TestSpeciesSeenIsDerived:
         db.commit()
 
         assert (await recalculate_dive_stats(async_db, user_id=user.id)).species_seen == 1
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestTheDiveListCountsSpecies:
+    """`species_count` on each `GET /dives` row, against real sightings."""
+
+    @staticmethod
+    async def _counts(async_db: AsyncSession, user: User) -> dict[uuid_pkg.UUID, int]:
+        page = await dives_module._cached_read_dives.__wrapped__(  # type: ignore[attr-defined]
+            request=None,
+            user_id=user.id,
+            user_uuid=user.uuid,
+            db=async_db,
+            page=1,
+            items_per_page=10,
+            trip_id=None,
+            course_id=None,
+            dive_site_id=None,
+            gear_item_id=None,
+            species_id=None,
+            person_id=None,
+            tag_id=None,
+            dive_type=None,
+            sort=DiveListSort.DATE,
+        )
+        return {row["uuid"]: row["species_count"] for row in page["data"]}
+
+    @pytest.mark.asyncio
+    async def test_a_dive_with_no_sightings_counts_zero(self, db: Session, async_db: AsyncSession):
+        user = create_user(db)
+        dive = create_dive(db, user)
+
+        assert await self._counts(async_db, user) == {dive.uuid: 0}
+
+    @pytest.mark.asyncio
+    async def test_each_row_counts_its_own_species(self, db: Session, async_db: AsyncSession):
+        """A species seen on two dives of the page counts once on each, never twice on either."""
+        user = create_user(db)
+        busy, quiet, empty = create_dive(db, user), create_dive(db, user), create_dive(db, user)
+        shared, second, third = create_species(db), create_species(db), create_species(db)
+        db.add_all(
+            [
+                DiveSpecies(dive_id=busy.id, species_id=shared.id, position=0),
+                DiveSpecies(dive_id=busy.id, species_id=second.id, position=1),
+                DiveSpecies(dive_id=busy.id, species_id=third.id, position=2),
+                DiveSpecies(dive_id=quiet.id, species_id=shared.id, position=0),
+            ]
+        )
+        db.commit()
+
+        assert await self._counts(async_db, user) == {busy.uuid: 3, quiet.uuid: 1, empty.uuid: 0}
 
 
 class TestWriteDiveEmbedsSightings:

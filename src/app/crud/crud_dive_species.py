@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.dive_species import DiveSpecies
@@ -92,6 +92,18 @@ async def get_species_for_dives(db: AsyncSession, dive_ids: list[int]) -> dict[i
     for row in result:
         species_by_dive[row.dive_id].append(sighting_from_row(row))
     return species_by_dive
+
+
+async def species_counts_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, int]:
+    """How many species each dive's sightings name, for the dive list; a dive with none is absent."""
+    if not dive_ids:
+        return {}
+    rows = await db.execute(
+        select(DiveSpecies.dive_id, func.count(func.distinct(DiveSpecies.species_id)).label("species_count"))
+        .where(DiveSpecies.dive_id.in_(set(dive_ids)))
+        .group_by(DiveSpecies.dive_id)
+    )
+    return {row.dive_id: row.species_count for row in rows}
 
 
 async def replace_species_for_dive(

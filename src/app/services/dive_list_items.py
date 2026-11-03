@@ -15,6 +15,7 @@ from ..crud.crud_contacts import get_contact_uuids_by_ids
 from ..crud.crud_courses import get_course_uuids_by_ids
 from ..crud.crud_dive_dive_sites import get_dive_sites_for_dives
 from ..crud.crud_dive_gear_items import get_gear_items_for_dives
+from ..crud.crud_dive_species import species_counts_for_dives
 from ..crud.crud_tags import get_tags_for_dives
 from ..crud.crud_trips import get_trip_uuids_by_ids
 from ..schemas.dive import DiveListItem, DiveReadInternal, DiveSiteInfo
@@ -62,6 +63,7 @@ def to_public_dive(
     depth_outline: DepthOutline | None,
     deco: bool,
     recording_count: int,
+    species_count: int,
     tags: list[str],
 ) -> DiveListItem:
     """Convert an internal dive representation (integer FKs) into its public list-row shape
@@ -78,6 +80,7 @@ def to_public_dive(
         depth_outline=depth_outline,
         deco=deco,
         recording_count=recording_count,
+        species_count=species_count,
         tags=tags,
     )
 
@@ -86,8 +89,8 @@ async def to_dive_list_items(
     db: AsyncSession, rows: list[dict[str, Any]], *, user_id: int, user_uuid: uuid_pkg.UUID
 ) -> list[dict[str, Any]]:
     """Each row - every `dive` column, as `get_dives_page` returns it - with its dive site(s),
-    gear, trip/course/contact uuids, depth outline and deco flag, recording count and tags, through one
-    batched lookup apiece for the whole page."""
+    gear, trip/course/contact uuids, depth outline and deco flag, recording and species counts and tags,
+    through one batched lookup apiece for the whole page."""
     dive_ids = [d["id"] for d in rows]
     sites_by_dive = await get_dive_sites_for_dives(db=db, dive_ids=dive_ids)
     gear_by_dive = await get_gear_items_for_dives(db=db, dive_ids=dive_ids)
@@ -100,6 +103,7 @@ async def to_dive_list_items(
     )
     card_profile_by_dive = await get_card_profiles_for_dives(db, dive_ids=dive_ids)
     recording_count_by_dive = await recording_counts_for_dives(db, dive_ids=dive_ids)
+    species_count_by_dive = await species_counts_for_dives(db, dive_ids=dive_ids)
     tags_by_dive = await get_tags_for_dives(db, dive_ids)
 
     return [
@@ -114,6 +118,7 @@ async def to_dive_list_items(
             depth_outline=card_profile_by_dive.get(dive["id"], NO_CARD_PROFILE).depth_outline,
             deco=card_profile_by_dive.get(dive["id"], NO_CARD_PROFILE).deco,
             recording_count=recording_count_by_dive.get(dive["id"], 0),
+            species_count=species_count_by_dive.get(dive["id"], 0),
             tags=tags_by_dive[dive["id"]],
         ).model_dump()
         for dive in rows

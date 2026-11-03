@@ -641,6 +641,10 @@ class DiveListItem(DiveRead):
         int,
         Field(ge=0, description="How many recordings the dive holds, as the dive page lists them; 0 when it has none"),
     ]
+    species_count: Annotated[
+        int,
+        Field(ge=0, description="How many distinct species the dive's sightings name; 0 when it has none"),
+    ]
     tags: Annotated[list[str], Field(default_factory=list, description="The dive's tags, in the diver's order")]
 
 
