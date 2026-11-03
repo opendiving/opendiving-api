@@ -320,6 +320,9 @@ are non-commercial or no-derivatives: the merged file is ODbL as a whole and can
   whatever your branch carried. Sign if you already sign — nobody will ask you to set GPG up for a
   pull request.
 - Branch off `main`, keep the PR focused on one thing.
+- **Your branch never needs to be current with `main`.** Once a PR is green and reviewed, a
+  maintainer adds it to the merge queue, which squashes it onto `main` as it then stands, runs the
+  required checks on that result and lands it. Rebase only to resolve a conflict.
 - Title the PR as a conventional commit — `<type>[(scope)][!]: <description>`, e.g.
   `feat: store the dive-computer export a dive was imported from`. Types: `feat`, `fix`, `refactor`,
   `docs`, `test`, `chore`, `perf`, `ci`, `build`, `revert`. A CI check enforces this, and re-runs
