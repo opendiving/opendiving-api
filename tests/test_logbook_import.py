@@ -1324,14 +1324,19 @@ class TestADiveComputerOriginalKeepsItsTag:
         document = parse_document(await _export(async_db, source.id, archive_paths=True))
         destination, _ = await self._restore(db, async_db, document, payload)
 
-        report = await backfill_profiles(async_db, parser_key=LIBDIVECOMPUTER)
+        # The database is shared, so the run's counts are other tests' too: the destination's
+        # profile is the assertion.
+        await backfill_profiles(async_db, parser_key=LIBDIVECOMPUTER)
 
-        assert (report.extracted, report.failed) == (1, 0)
-        profile = select(DiveProfile.parser_key, DiveProfile.reader_version, DiveProfile.max_depth_cm).where(
-            DiveProfile.dive_id.in_(select(Dive.id).where(Dive.user_id == destination.id))
-        )
-        assert (await async_db.execute(profile)).one() == (LIBDIVECOMPUTER, libdivecomputer.cli_version(), 4770)
-        assert (await backfill_profiles(async_db, parser_key=LIBDIVECOMPUTER)).extracted == 0
+        profile = select(
+            DiveProfile.uuid, DiveProfile.parser_key, DiveProfile.reader_version, DiveProfile.max_depth_cm
+        ).where(DiveProfile.dive_id.in_(select(Dive.id).where(Dive.user_id == destination.id)))
+        read = (await async_db.execute(profile)).one()
+        assert tuple(read)[1:] == (LIBDIVECOMPUTER, libdivecomputer.cli_version(), 4770)
+
+        await backfill_profiles(async_db, parser_key=LIBDIVECOMPUTER)
+
+        assert (await async_db.execute(profile)).one() == read
 
 
 class TestProfiles:

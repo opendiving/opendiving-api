@@ -2,7 +2,7 @@
 
 Two paths turn a document's recording into a `dive_recording` row and a profile: logbook
 import, which reads a document it was handed, and a dive-computer file attached to a dive,
-which the one reader (`services/dive_reader.py`) converts into a document first. Both call
+which `services/dive_reader.py` reads into a document first. Both call
 these functions, so **the door does not matter**: the recording an attach creates from a file
 is the recording an import creates from the same file - device, settings, readouts, channels,
 labels and gate figures.
