@@ -30,6 +30,8 @@ from src.app.services.dive_recordings import (
     is_same_dive_strict,
     is_same_recording,
     same_device,
+    signed_delta_seconds,
+    starts_on_dive_axis,
     wall_clock,
 )
 
@@ -409,6 +411,100 @@ class TestSameDiveLoose:
         )
 
         assert not is_same_dive_loose(next_day, _suunto_json())
+
+
+def _on_axis(
+    start: datetime | None, offset: int | None = None, *, duration: int | None = 3000, sampled: bool = True
+) -> RecordingFacts:
+    """One recording as the axis placement reads it: a start, its offset, its duration, and
+    whether it has samples at all. The device plays no part in placement."""
+    return RecordingFacts(
+        device=DeviceIdentity(),
+        start_time=start,
+        utc_offset_minutes=offset,
+        duration=duration,
+        sampled_span=1_000 if sampled else None,
+    )
+
+
+# 2026-11-03's example dive: a Perdix 3 primary with no offset, and a Suunto Ocean on the
+# other wrist stamping +03:00 that started logging 93.52 s earlier on the wall clock.
+AXIS_PERDIX = _on_axis(datetime(2026, 10, 30, 15, 3, 23, tzinfo=UTC), duration=4800)
+AXIS_SUUNTO = _on_axis(datetime(2026, 10, 30, 12, 1, 49, 480000, tzinfo=UTC), 180, duration=4966)
+
+
+class TestTheDiveAxis:
+    """Where each of a dive's recordings starts on the axis they share - placed against the
+    first recording with samples and a start, and measured from the earliest placed one."""
+
+    def test_an_earlier_second_computer_is_0_and_moves_the_primary_right(self) -> None:
+        """The anchor carries no offset and the peer one, so the delta is between wall clocks."""
+        assert starts_on_dive_axis([AXIS_PERDIX, AXIS_SUUNTO]) == [93_520, 0]
+
+    def test_a_later_second_computer_leaves_the_primary_at_0(self) -> None:
+        later = _on_axis(datetime(2026, 10, 30, 15, 4, 0, tzinfo=UTC))
+
+        assert starts_on_dive_axis([AXIS_PERDIX, later]) == [0, 37_000]
+
+    def test_two_zones_compare_instants_rather_than_wall_clocks(self) -> None:
+        """15:00+03:00 and 13:00:30+01:00 are 30 s apart, not two hours."""
+        dahab = _on_axis(datetime(2026, 10, 30, 12, 0, 0, tzinfo=UTC), 180)
+        lisbon = _on_axis(datetime(2026, 10, 30, 12, 0, 30, tzinfo=UTC), 60)
+
+        assert starts_on_dive_axis([dahab, lisbon]) == [0, 30_000]
+
+    def test_a_recording_without_samples_or_without_a_start_is_null_and_never_the_anchor(self) -> None:
+        no_samples = _on_axis(datetime(2026, 10, 30, 14, 0, 0, tzinfo=UTC), sampled=False)
+        no_start = _on_axis(None)
+
+        assert starts_on_dive_axis([no_samples, no_start, AXIS_PERDIX, AXIS_SUUNTO]) == [None, None, 93_520, 0]
+
+    def test_a_primary_without_samples_hands_the_anchor_to_the_next(self) -> None:
+        """The primary's start is two hours off the others: anchoring on it would put both
+        outside the window. Passing it over leaves the two placed against each other."""
+        primary = _on_axis(datetime(2026, 10, 30, 13, 0, 0, tzinfo=UTC), sampled=False)
+
+        assert starts_on_dive_axis([primary, AXIS_PERDIX, AXIS_SUUNTO]) == [None, 93_520, 0]
+
+    def test_a_peer_outside_the_window_is_null_beside_one_inside_it(self) -> None:
+        nine_days_on = _on_axis(datetime(2026, 11, 8, 15, 3, 23, tzinfo=UTC))
+
+        assert starts_on_dive_axis([AXIS_PERDIX, nine_days_on, AXIS_SUUNTO]) == [93_520, None, 0]
+
+    def test_the_window_is_the_same_dive_gates(self) -> None:
+        """A minute at least, widening to half the longer recording, an unknown duration as none."""
+        anchor = _on_axis(datetime(2026, 10, 30, 15, 0, 0, tzinfo=UTC), duration=None)
+        at_the_floor = _on_axis(datetime(2026, 10, 30, 15, 1, 0, tzinfo=UTC), duration=None)
+        past_the_floor = _on_axis(datetime(2026, 10, 30, 15, 1, 1, tzinfo=UTC), duration=None)
+        long = _on_axis(datetime(2026, 10, 30, 15, 40, 0, tzinfo=UTC), duration=4800)
+
+        assert starts_on_dive_axis([anchor, at_the_floor, past_the_floor, long]) == [0, 60_000, None, 2_400_000]
+
+    def test_a_single_recording_is_0(self) -> None:
+        assert starts_on_dive_axis([AXIS_PERDIX]) == [0]
+
+    def test_a_dive_with_nothing_to_place_is_all_null(self) -> None:
+        assert starts_on_dive_axis([_on_axis(None), _on_axis(None, sampled=False)]) == [None, None]
+        assert starts_on_dive_axis([]) == []
+
+    def test_three_recordings_keep_their_deltas_and_the_earliest_is_0(self) -> None:
+        third = _on_axis(datetime(2026, 10, 30, 15, 2, 30, tzinfo=UTC))
+        recordings = [AXIS_PERDIX, AXIS_SUUNTO, third]
+
+        placed = starts_on_dive_axis(recordings)
+
+        assert placed == [93_520, 0, 40_520]
+        for left, right in ((0, 1), (1, 2), (0, 2)):
+            a, b = recordings[left], recordings[right]
+            assert a.start_time is not None and b.start_time is not None
+            delta = signed_delta_seconds(b.start_time, b.utc_offset_minutes, a.start_time, a.utc_offset_minutes)
+            assert placed[right] - placed[left] == round(delta * 1000)  # type: ignore[operator]
+
+    def test_with_the_anchor_fixed_the_order_of_the_rest_does_not_matter(self) -> None:
+        third = _on_axis(datetime(2026, 10, 30, 15, 2, 30, tzinfo=UTC))
+
+        assert starts_on_dive_axis([AXIS_PERDIX, AXIS_SUUNTO, third]) == [93_520, 0, 40_520]
+        assert starts_on_dive_axis([AXIS_PERDIX, third, AXIS_SUUNTO]) == [93_520, 40_520, 0]
 
 
 class TestRelabellingASecondComputersCylinders:

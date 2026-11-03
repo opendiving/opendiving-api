@@ -41,6 +41,7 @@ from ..schemas.dive import (
     RecordingReadouts,
     Salinity,
 )
+from ..schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ..schemas.parsed_dive import ParsedDecoModel, ParsedDevice
 from . import blob_store
 from .dive_profiles import MERGE_PARSER_KEY, get_profile_infos_for_recordings
@@ -446,9 +447,8 @@ def is_same_dive_strict(incoming: RecordingFacts, stored: RecordingFacts) -> boo
     if not _within_depth(incoming.max_depth, stored.max_depth):
         return False
 
-    longer = max(incoming.duration or 0, stored.duration or 0)
     delta = start_delta(incoming, stored)
-    return delta is not None and delta <= max(STRICT_START_FLOOR, longer / 2)
+    return delta is not None and delta <= same_dive_window(incoming.duration, stored.duration)
 
 
 def is_same_dive_loose(incoming: RecordingFacts, stored: RecordingFacts) -> bool:
@@ -459,9 +459,52 @@ def is_same_dive_loose(incoming: RecordingFacts, stored: RecordingFacts) -> bool
     withhold the dive a diver is looking straight at because their second computer surfaced
     early.
     """
-    longer = max(incoming.duration or 0, stored.duration or 0)
     delta = start_delta(incoming, stored)
-    return delta is not None and delta <= max(STRICT_START_FLOOR, longer / 2)
+    return delta is not None and delta <= same_dive_window(incoming.duration, stored.duration)
+
+
+def same_dive_window(left_duration: int | None, right_duration: int | None) -> float:
+    """How far apart, in seconds, two recordings' starts may lie and still be one dive's.
+
+    A minute, widening to half the longer recording; an unknown duration counts as none.
+    """
+    return max(STRICT_START_FLOOR, max(left_duration or 0, right_duration or 0) / 2)
+
+
+def starts_on_dive_axis(recordings: Sequence[RecordingFacts]) -> list[int | None]:
+    """Where each of one dive's recordings, in ordinal order, starts on the axis they share.
+
+    In milliseconds from the start of whichever placed recording started first, so the
+    earliest reads 0 and none reads below it; `None` for a recording that cannot be placed.
+    Only a recording with samples (`sampled_span`) and a start can be. The first such by
+    ordinal is the anchor, and every other is placed by its delta to the anchor alone,
+    provided that delta is inside the same-dive window.
+
+    Against one anchor rather than pairwise: two non-anchor recordings whose offsets differ
+    can disagree between their instant and wall-clock deltas, and three compared pairwise can
+    fail to order at all. Measured from the anchor, every placed recording has exactly one
+    position.
+    """
+    timed = [
+        (index, recording.start_time, recording)
+        for index, recording in enumerate(recordings)
+        if recording.sampled_span is not None and recording.start_time is not None
+    ]
+    if not timed:
+        return [None] * len(recordings)
+
+    _, anchor_start, anchor = timed[0]
+    deltas: dict[int, float] = {}
+    for index, start, recording in timed:
+        delta = signed_delta_seconds(start, recording.utc_offset_minutes, anchor_start, anchor.utc_offset_minutes)
+        if abs(delta) <= same_dive_window(recording.duration, anchor.duration):
+            deltas[index] = delta
+
+    origin = min(deltas.values())
+    return [
+        None if index not in deltas else round((deltas[index] - origin) * MILLISECONDS_PER_SECOND)
+        for index in range(len(recordings))
+    ]
 
 
 def start_delta(incoming: RecordingFacts, stored: RecordingFacts) -> float | None:
@@ -1020,6 +1063,25 @@ async def get_recordings_for_dives(db: AsyncSession, *, dive_ids: Sequence[int])
     profiles = await get_profile_infos_for_recordings(db, recording_ids=recording_ids)
     files = await get_file_infos_for_recordings(db, recording_ids=recording_ids)
 
+    rows_by_dive: dict[int, list[DiveRecording]] = {}
+    for row in rows:
+        rows_by_dive.setdefault(row.dive_id, []).append(row)
+    axis_starts: dict[int, int | None] = {}
+    for dive_rows in rows_by_dive.values():
+        starts = starts_on_dive_axis(
+            [
+                RecordingFacts(
+                    device=DeviceIdentity(),
+                    start_time=row.start_time,
+                    utc_offset_minutes=row.utc_offset_minutes,
+                    duration=row.duration,
+                    sampled_span=profiles[row.id].duration if row.id in profiles else None,
+                )
+                for row in dive_rows
+            ]
+        )
+        axis_starts.update(zip((row.id for row in dive_rows), starts, strict=True))
+
     by_dive: dict[int, list[RecordingRead]] = {dive_id: [] for dive_id in dive_ids}
     for row in rows:
         by_dive.setdefault(row.dive_id, []).append(
@@ -1034,6 +1096,7 @@ async def get_recordings_for_dives(db: AsyncSession, *, dive_ids: Sequence[int])
                 started_at=(
                     None if row.start_time is None else combine_start_time(row.start_time, row.utc_offset_minutes)
                 ),
+                start_on_dive_axis=axis_starts[row.id],
                 files=files.get(row.id, []),
                 profile=profiles.get(row.id),
                 updated_at=row.updated_at,
