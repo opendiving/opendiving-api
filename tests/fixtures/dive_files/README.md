@@ -1,6 +1,6 @@
 # Dive-computer file fixtures
 
-Real inputs to the one reader, copied from the `divejson` package's own conformance corpus
+Real inputs to the readers, copied from the `divejson` package's own conformance corpus
 (`divejson/divejson-py`, `fixtures/`, at the commit released as `divejson` 0.16.0, and
 `suunto-ocean-2026.json` and the two `ocean-poor-first-fix` files at the one released as 0.21.0, and
 the two `perdix3` files at the one released as 0.33.0, and the two `ocean-heart-rate` files at the
@@ -34,5 +34,5 @@ fix's error, and the FIT none. The two `ocean-heart-rate` files are a fourth, th
 a heart rate: the FIT's runs past the profile cap, which is what the average is tested against.
 
 The bytes matter - a stored file is identified by its digest - so `.gitattributes` keeps git from
-normalizing the text ones. Replace a file only from the package's corpus, and say which release it
-came from here.
+normalizing the text ones. Replace a file only from the corpus it was copied from, and say which
+release it came from here.
