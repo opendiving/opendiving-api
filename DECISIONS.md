@@ -7359,4 +7359,4 @@ on contributors, and a fork owned by an organisation cannot be updated by a main
 checks alone are rejected because every merge deploys to the hosted instance within minutes,
 untested as merged. `semantic-title` has no title to read on a merge group and skips; a skipped job
 reports success. The release coordinator in opendiving/opendiving merges bump pull requests by API,
-so the queue waits for that flow to pass it; its `DECISIONS.md` says how.
+so the queue waits for that flow to pass it.
