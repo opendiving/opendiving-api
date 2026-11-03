@@ -3258,17 +3258,17 @@ class _Planner:
         #
         # A dive-computer original reads only with the descriptor its tag carries, so one
         # without a usable descriptor is restored as the import's own key too, as an untagged
-        # one is: nothing could ever read it.
+        # one is: nothing could ever read it. One with a descriptor keeps its key and tag even
+        # where this process has no `divejson-raw`, as a stored one does: the bytes cannot give
+        # the tag back, and a reader installed later reads it.
         parser_key = _producer_entry(stored, "parser_key")
         descriptor = fallback_start = None
         if parser_key == LIBDIVECOMPUTER:
             descriptor = descriptor_from(_producer_entry(stored, "descriptor"))
             fallback_start = fallback_start_from(_producer_entry(stored, "fallback_start"))
-        readable = (
-            isinstance(parser_key, str)
-            and reads(parser_key)
-            and (parser_key != LIBDIVECOMPUTER or descriptor is not None)
-        )
+            readable = descriptor is not None
+        else:
+            readable = isinstance(parser_key, str) and reads(parser_key)
         return PlannedFile(
             archive_path=stored.archive_path,
             sha256=stored.sha256,

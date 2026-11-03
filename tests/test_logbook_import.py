@@ -1299,9 +1299,11 @@ class TestADiveComputerOriginalKeepsItsTag:
         assert (restored.descriptor_vendor, restored.descriptor_model, restored.fallback_start) == (None, None, None)
 
     @pytest.mark.asyncio
-    async def test_an_api_with_no_reader_restores_it_unread(
+    async def test_an_api_with_no_reader_still_keeps_the_tag(
         self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
     ) -> None:
+        """The bytes cannot give the tag back, so dropping it here would leave an original no
+        reader installed later could ever read."""
         monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
         source, payload = await self._seed(db)
         document = parse_document(await _export(async_db, source.id, archive_paths=True))
@@ -1309,7 +1311,7 @@ class TestADiveComputerOriginalKeepsItsTag:
 
         _, restored = await self._restore(db, async_db, document, payload)
 
-        assert (restored.parser_key, restored.descriptor_vendor) == (IMPORT_PARSER_KEY, None)
+        assert (restored.parser_key, restored.descriptor_vendor) == (LIBDIVECOMPUTER, "Shearwater")
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(shutil.which(libdivecomputer.CLI) is None, reason="no divejson-raw on PATH")
