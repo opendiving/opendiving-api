@@ -1191,6 +1191,7 @@ def _document_of(archive: bytes) -> bytes:
 
 
 PERDIX_ORIGINAL = Path(__file__).parent / "fixtures" / "dive_files" / "shearwater-perdix-3_D9772626_2026-10-26T1503.bin"
+PERDIX_START = datetime(2026, 10, 26, 15, 3, 23, tzinfo=UTC)
 PERDIX_TAG: dict[str, object] = {"vendor": "Shearwater", "product": "Perdix 3", "model": 14}
 
 
@@ -1202,13 +1203,18 @@ class TestADiveComputerOriginalKeepsItsTag:
     async def _seed(db: Session, *, fallback_start: datetime | None = None) -> tuple[Any, bytes]:
         user = create_user(db)
         dive = create_dive(db, user)
+        # Where the original says it starts: a re-read lays the samples on the recording's
+        # axis by the offset between the two.
+        recording = create_dive_recording(db, user, dive)
+        recording.start_time, recording.utc_offset_minutes = PERDIX_START, None
+        db.commit()
         payload = PERDIX_ORIGINAL.read_bytes()
         digest = hashlib.sha256(payload).hexdigest()
         key = blob_store.new_key("dive-files", sha256=digest)
         db.add(
             DiveFile(
                 user_id=user.id,
-                recording_id=create_dive_recording(db, user, dive).id,
+                recording_id=recording.id,
                 dive_id=dive.id,
                 sha256=digest,
                 content_type="application/octet-stream",
