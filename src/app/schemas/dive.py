@@ -630,6 +630,13 @@ class DiveListItem(DiveRead):
             "when there is none to draw",
         ),
     ]
+    deco: Annotated[
+        bool,
+        Field(
+            description="Whether the recording the dive page charts held the diver to a decompression ceiling; false "
+            "when the dive has no profile"
+        ),
+    ]
     recording_count: Annotated[
         int,
         Field(ge=0, description="How many recordings the dive holds, as the dive page lists them; 0 when it has none"),

@@ -1695,37 +1695,47 @@ async def get_gas_attribution_for_dives(db: AsyncSession, *, dive_ids: list[int]
     return attribution
 
 
-async def get_depth_outlines_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, DepthOutline]:
-    """Several dives' `depth_outline` in one query, for `GET /dives`.
+@dataclass(frozen=True, slots=True)
+class CardProfile:
+    """What a `GET /dives` row draws from the profile the dive page charts."""
+
+    depth_outline: DepthOutline | None
+    deco: bool
+
+
+async def get_card_profiles_for_dives(db: AsyncSession, *, dive_ids: Sequence[int]) -> dict[int, CardProfile]:
+    """Several dives' charted profile, as a dive card draws it, in one query for `GET /dives`.
 
     **The first recording by ordinal that has a profile**, which is the one the dive page
-    charts - not the primary's alone, which may be a recording with no samples. A dive whose
-    charted profile has no depth curve is absent, as is one with no profile at all.
+    charts - not the primary's alone, which may be a recording with no samples. A dive with no
+    profile at all is absent. `deco` is that profile's ceiling channel having readings, the
+    test the dive page's `max_ceiling` makes.
 
-    Reads the one column and never `data`: this runs on every page of the hottest list in the
-    app. An entry that no longer validates is dropped with a warning, for the reason
+    Reads two narrow columns and never `data`: this runs on every page of the hottest list in
+    the app. An outline that no longer validates is dropped with a warning, for the reason
     `get_gas_attribution_for_dives` drops one.
     """
     if not dive_ids:
         return {}
 
     stmt = (
-        select(DiveProfile.dive_id, DiveProfile.depth_outline)
+        select(DiveProfile.dive_id, DiveProfile.depth_outline, DiveProfile.max_ceiling_cm)
         .join(DiveRecording, DiveRecording.id == DiveProfile.recording_id)
         .where(DiveProfile.dive_id.in_(set(dive_ids)))
         .order_by(DiveProfile.dive_id, DiveRecording.ordinal)
         .distinct(DiveProfile.dive_id)
     )
 
-    outlines: dict[int, DepthOutline] = {}
+    profiles: dict[int, CardProfile] = {}
     for row in await db.execute(stmt):
-        if row.depth_outline is None:
-            continue
-        try:
-            outlines[row.dive_id] = DepthOutline.model_validate(row.depth_outline)
-        except ValidationError:
-            logger.warning("Ignoring an unreadable depth outline stored for dive %s", row.dive_id, exc_info=True)
-    return outlines
+        outline = None
+        if row.depth_outline is not None:
+            try:
+                outline = DepthOutline.model_validate(row.depth_outline)
+            except ValidationError:
+                logger.warning("Ignoring an unreadable depth outline stored for dive %s", row.dive_id, exc_info=True)
+        profiles[row.dive_id] = CardProfile(depth_outline=outline, deco=row.max_ceiling_cm is not None)
+    return profiles
 
 
 # How many files are processed between commits. Small enough that an interrupted run

@@ -11,8 +11,8 @@ is a list of objects rather than an integer, so the round trip is worth a test o
 `backfill_profiles`' candidate selection is here for the neighbouring reason: the criterion
 lives in a `WHERE` clause, so a mocked session could only assert the SQL that was written
 rather than the rows it comes back with - which is exactly the difference that let the
-digest term go missing. So is the choice of which recording's `depth_outline` a list row
-carries, which is a `DISTINCT ON` ordered by ordinal, and the outline backfill, whose paging
+digest term go missing. So is the choice of which recording's `depth_outline` and `deco` a
+list row carries, which is a `DISTINCT ON` ordered by ordinal, and the outline backfill, whose paging
 and scoping are `WHERE` clauses too.
 
 Same skip-if-unreachable guard and same write-real-rows-and-leave-them convention as
@@ -22,11 +22,12 @@ Same skip-if-unreachable guard and same write-real-rows-and-leave-them conventio
 import hashlib
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Response
-from sqlalchemy import null, select, update
+from sqlalchemy import event, null, select, update
 from sqlalchemy.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import Session, undefer
 from starlette.requests import Request
@@ -51,7 +52,7 @@ from src.app.services.dive_profiles import (
     backfill_profiles,
     derive_depth_outline,
     downsample,
-    get_depth_outlines_for_dives,
+    get_card_profiles_for_dives,
     get_existing_profile,
     get_gas_attribution_for_dives,
     load_stored_profile,
@@ -411,10 +412,12 @@ class TestTheDepthOutline:
     ) -> None:
         await _store(async_db, recording, NormalizedProfile(depth=ProfileSeries(t=[0, 3200], v=[0, 3200])))
 
-        outlines = await get_depth_outlines_for_dives(async_db, dive_ids=[dive.id])
+        profiles = await get_card_profiles_for_dives(async_db, dive_ids=[dive.id])
 
         # A straight descent, one reading at each end: every slice between them is the line.
-        assert outlines[dive.id] == DepthOutline(span=3200, values=[round(i * 3200 / 63) for i in range(64)])
+        assert profiles[dive.id].depth_outline == DepthOutline(
+            span=3200, values=[round(i * 3200 / 63) for i in range(64)]
+        )
 
     @pytest.mark.asyncio
     async def test_it_is_the_first_recording_by_ordinal_that_has_a_profile(
@@ -425,12 +428,12 @@ class TestTheDepthOutline:
         await _store(async_db, third, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 900])))
         await _store(async_db, second, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 1800])))
 
-        before = await get_depth_outlines_for_dives(async_db, dive_ids=[dive.id])
+        before = (await get_card_profiles_for_dives(async_db, dive_ids=[dive.id]))[dive.id].depth_outline
         await _store(async_db, recording, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 2700])))
-        after = await get_depth_outlines_for_dives(async_db, dive_ids=[dive.id])
+        after = (await get_card_profiles_for_dives(async_db, dive_ids=[dive.id]))[dive.id].depth_outline
 
-        assert max(before[dive.id].values) == 1800
-        assert max(after[dive.id].values) == 2700
+        assert before is not None and max(before.values) == 1800
+        assert after is not None and max(after.values) == 2700
 
     @pytest.mark.asyncio
     async def test_a_charted_profile_with_no_depth_curve_has_none(
@@ -448,7 +451,7 @@ class TestTheDepthOutline:
         ).scalar_one()
 
         assert stored is None
-        assert await get_depth_outlines_for_dives(async_db, dive_ids=[dive.id]) == {}
+        assert (await get_card_profiles_for_dives(async_db, dive_ids=[dive.id]))[dive.id].depth_outline is None
 
     @pytest.mark.asyncio
     async def test_a_rewrite_of_the_samples_rewrites_it(
@@ -460,9 +463,9 @@ class TestTheDepthOutline:
             async_db, recording_id=recording.id, profile=NormalizedProfile(depth=ProfileSeries(t=[0, 200], v=[0, 1500]))
         )
         await async_db.commit()
-        outlines = await get_depth_outlines_for_dives(async_db, dive_ids=[dive.id])
+        outline = (await get_card_profiles_for_dives(async_db, dive_ids=[dive.id]))[dive.id].depth_outline
 
-        assert (outlines[dive.id].span, max(outlines[dive.id].values)) == (200, 1500)
+        assert outline is not None and (outline.span, max(outline.values)) == (200, 1500)
 
     @pytest.mark.asyncio
     async def test_the_dive_list_serves_it_on_each_row(
@@ -475,27 +478,114 @@ class TestTheDepthOutline:
         db.commit()
         await _store(async_db, recording, NormalizedProfile(depth=ProfileSeries(t=[0, 100], v=[0, 900])))
 
-        page = await dives_module._cached_read_dives.__wrapped__(  # type: ignore[attr-defined]
-            request=None,
-            user_id=owner.id,
-            user_uuid=owner.uuid,
-            db=async_db,
-            page=1,
-            items_per_page=10,
-            trip_id=None,
-            course_id=None,
-            dive_site_id=None,
-            gear_item_id=None,
-            species_id=None,
-            person_id=None,
-            tag_id=None,
-            dive_type=None,
-            sort=DiveListSort.DATE,
-        )
+        page = await _read_dives(async_db, owner)
         rows = {row["uuid"]: row["depth_outline"] for row in page["data"]}
 
         assert rows[hand_logged.uuid] is None
         assert rows[dive.uuid] is not None and max(rows[dive.uuid]["values"]) == 900
+
+
+async def _read_dives(async_db: AsyncSession, owner: User) -> Any:
+    return await dives_module._cached_read_dives.__wrapped__(  # type: ignore[attr-defined]
+        request=None,
+        user_id=owner.id,
+        user_uuid=owner.uuid,
+        db=async_db,
+        page=1,
+        items_per_page=10,
+        trip_id=None,
+        course_id=None,
+        dive_site_id=None,
+        gear_item_id=None,
+        species_id=None,
+        person_id=None,
+        tag_id=None,
+        dive_type=None,
+        sort=DiveListSort.DATE,
+    )
+
+
+DESCENT = ProfileSeries(t=[0, 100], v=[0, 4200])
+HELD_TO_SIX_METERS = NormalizedProfile(depth=DESCENT, ceiling=ProfileSeries(t=[0, 100], v=[300, 600]))
+
+
+class TestTheDecoFlag:
+    @pytest.mark.asyncio
+    async def test_a_ceiling_on_the_charted_profile_is_deco(
+        self, db: Session, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        no_deco = Dive(user_id=dive.user_id, dive_number=2, start_time=datetime.now(UTC), submerged_time=1800, notes="")
+        db.add(no_deco)
+        db.commit()
+        no_deco_recording = DiveRecording(
+            dive_id=no_deco.id, user_id=no_deco.user_id, ordinal=0, start_time=no_deco.start_time
+        )
+        db.add(no_deco_recording)
+        db.commit()
+        await _store(async_db, recording, HELD_TO_SIX_METERS)
+        await _store(async_db, no_deco_recording, NormalizedProfile(depth=DESCENT))
+
+        profiles = await get_card_profiles_for_dives(async_db, dive_ids=[dive.id, no_deco.id])
+
+        assert (profiles[dive.id].deco, profiles[no_deco.id].deco) == (True, False)
+
+    @pytest.mark.asyncio
+    async def test_it_is_the_charted_recordings_and_no_other(
+        self, db: Session, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        """A second computer that showed a ceiling does not flag a dive whose charted one did
+        not - the chip says what the dive page's chart says."""
+        second, third = _second_recording(db, dive, 1), _second_recording(db, dive, 2)
+        await _store(async_db, second, NormalizedProfile(depth=DESCENT))
+        await _store(async_db, third, HELD_TO_SIX_METERS)
+
+        before = await get_card_profiles_for_dives(async_db, dive_ids=[dive.id])
+        await _store(async_db, recording, HELD_TO_SIX_METERS)
+        after = await get_card_profiles_for_dives(async_db, dive_ids=[dive.id])
+
+        assert (before[dive.id].deco, after[dive.id].deco) == (False, True)
+
+    @pytest.mark.asyncio
+    async def test_the_dive_list_serves_it_on_each_row_in_one_query(
+        self, db: Session, async_db: AsyncSession, dive: Dive, recording: DiveRecording
+    ) -> None:
+        owner = db.get(User, dive.user_id)
+        assert owner is not None
+
+        def add_dive(number: int) -> Dive:
+            row = Dive(
+                user_id=owner.id, dive_number=number, start_time=datetime.now(UTC), submerged_time=1800, notes=""
+            )
+            db.add(row)
+            db.commit()
+            return row
+
+        hand_logged = add_dive(2)
+        await _store(async_db, recording, HELD_TO_SIX_METERS)
+        await _read_dives(async_db, owner)  # once before counting, so connection setup is not counted
+
+        statements: list[str] = []
+
+        def record(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+            statements.append(statement)
+
+        engine = async_db.bind.sync_engine  # type: ignore[union-attr]
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            await _read_dives(async_db, owner)
+            for_two = len(statements)
+            extras = [add_dive(number) for number in (3, 4, 5)]
+            for extra in extras:
+                await _store(async_db, _second_recording(db, extra, 0), HELD_TO_SIX_METERS)
+            statements.clear()
+            page = await _read_dives(async_db, owner)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        rows = {row["uuid"]: row["deco"] for row in page["data"]}
+        assert rows == {dive.uuid: True, hand_logged.uuid: False} | {extra.uuid: True for extra in extras}
+        assert len(statements) == for_two
+        assert sum("max_ceiling_cm" in statement for statement in statements) == 1
 
 
 # A dive and the minutes the computer recorded at the surface after it: the dive ends at 40 s.
