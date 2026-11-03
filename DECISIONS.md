@@ -7348,3 +7348,15 @@ lives five minutes and is not spent on use, and the export limit lets one repeat
 fetch go uncounted. Rejected: a `File` in place of the `Blob`, which WebKit names no differently;
 cookie auth on download routes, which makes them cross-site navigable; `navigator.share`, which
 needs a user activation the fetch has already spent.
+
+## Pull requests land through a merge queue, and a branch need not be current with `main`
+
+The `main` ruleset requires a merge queue — squash, groups of up to five — and its required-checks
+rule is not strict. The queue squashes each entry onto `main` as it stands, runs the required checks
+on that result under the `merge_group` event, and lands it only if they pass: what a strict rule
+guarantees, without the author rebasing after every merge to `main`. Strict is rejected because that
+work falls on contributors, and a fork owned by an organisation cannot be updated by a maintainer at
+all. Loose checks alone are rejected because every merge deploys to the hosted instance within
+minutes and the deploy waits for none of `main`'s own checks. Every workflow that produces a
+required check triggers on `merge_group`; `semantic-title` has no title to read there and skips, and
+a skipped job reports success.

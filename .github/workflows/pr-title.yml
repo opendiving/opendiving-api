@@ -12,6 +12,10 @@ on:
     # from the event payload rather than from the tree, so the extra runs
     # reach the same verdict.
     types: [opened, edited, reopened, synchronize]
+  # The merge queue tests each entry squashed onto `main` under this event,
+  # and a required check that never reports there holds the entry until the
+  # queue times it out.
+  merge_group:
 
 # The one list of types, read by both jobs below: the check that enforces them
 # and the labels that carry them into the release notes. CONTRIBUTING.md spells
@@ -21,6 +25,10 @@ env:
 
 jobs:
   semantic-title:
+    # Only a pull request carries a title to check. An entry in the merge queue
+    # had to pass this on its pull request to be queued, and a job skipped by
+    # `if` reports success, which is what lets the queue go on without one.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     # Nothing is checked out and no API call is made - the title arrives in the

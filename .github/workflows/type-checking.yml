@@ -5,6 +5,9 @@ on:
     branches:
       - main
   pull_request:
+  # The merge queue tests each entry squashed onto `main` under this event, and a required
+  # check that never reports there holds the entry until the queue times it out.
+  merge_group:
 
 # The job only reads: it checks out, installs, and runs mypy three times. `contents: read` is what
 # checkout needs and the whole of what it needs, and saying so keeps the token off whatever the
