@@ -59,7 +59,7 @@ _refresher: asyncio.Task[None] | None = None
 
 
 class RendererUnavailable(Exception):
-    """The renderer handed back no tile or no signature: unreachable, refusing, past its
+    """The renderer handed back no tile, signature or style: unreachable, refusing, past its
     deadline, or answering outside its contract."""
 
 
