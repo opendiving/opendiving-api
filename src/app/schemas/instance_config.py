@@ -40,12 +40,12 @@ class InstanceConfigRead(BaseModel):
     # all and what its privacy page owes without probing a service only the API can reach.
     map_tiles: bool
     # The credit those tiles owe, in `[label](url)` markdown-link syntax, as the renderer
-    # reports it. A client shows it beside every tile it draws, and draws none without it.
+    # reports it. A client shows it beside every map it draws, and draws none without it.
     map_attribution: str | None = Field(
         description=(
             "The credit this instance's map tiles owe, as markdown links (`[label](url)`) with "
             "plain text between them. Null when `map_tiles` is false, and until the map renderer "
-            "has named it; draw no tile without it."
+            "has named it; draw no tile, and no map on the instance's style, without it."
         )
     )
     # Whether this instance asks a weather provider about its dives (`DIVE_CONDITIONS_PROVIDER`),

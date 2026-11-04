@@ -630,7 +630,7 @@ class MapRendererSettings(BaseSettings):
     # The map renderer that draws the map tiles every dive, trip and dive site card and page head
     # is composed from (`services.map_renderer`), a service of its own reachable only inside the
     # stack. Empty, the default, draws none: `GET /config` says `map_tiles: false` and the tile
-    # route answers 404.
+    # and style routes answer 404.
     MAP_RENDERER_URL: str = config("MAP_RENDERER_URL", default="")
 
     # Seconds one draw may take, queueing at the renderer included: a margin over the renderer's
@@ -644,7 +644,7 @@ class MapRendererSettings(BaseSettings):
     # admits that twice over; a stored tile, and a request waiting on another's draw of the same
     # one, are never counted. Tile requests, stored ones and waits included: tiles are shared, and
     # a stored one answers faster than a drawn one, so this is the rate at which an account can
-    # probe what this instance has drawn.
+    # probe what this instance has drawn. Style requests count here too.
     MAP_RENDERER_DRAW_LIMIT_PER_USER: int = config("MAP_RENDERER_DRAW_LIMIT_PER_USER", default=150)
     MAP_RENDERER_REQUEST_LIMIT_PER_USER: int = config("MAP_RENDERER_REQUEST_LIMIT_PER_USER", default=1200)
     MAP_RENDERER_LIMIT_WINDOW_SECONDS: int = config("MAP_RENDERER_LIMIT_WINDOW_SECONDS", default=60)

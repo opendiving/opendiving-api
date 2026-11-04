@@ -1,12 +1,13 @@
-"""The API's side of the map renderer: a client of the three routes it answers, and the
-signature it last named.
+"""The API's side of the map renderer: a client of the routes it answers, and the signature
+it last named.
 
 The renderer is a command of the web image, reachable only inside the stack at
 `MAP_RENDERER_URL`. `GET /signature` names how this instance draws - its drawing code and its
 basemap - and the credit that basemap owes, and `POST /render` draws one map tile, a 1024x1024
 WebP, saying in `X-Map-Signature` which signature drew it. Every stored tile is keyed by the
 signature as well as its address (`services/map_tiles.py`), so a renderer that would draw
-differently names every tile afresh.
+differently names every tile afresh. `GET /style/{theme}` hands over the style those tiles are
+drawn on, for a client that draws the map itself.
 
 **A stored tile waits on nothing.** The signature is held in memory per process: fetched when
 the process starts, refreshed on a timer, kept through an outage, and adopted from any draw
@@ -22,6 +23,7 @@ said one there is no credit to give - `GET /config` answers `null`.
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -31,6 +33,7 @@ import anyio
 import httpx
 
 from ..core.config import settings
+from ..schemas.map_tile import MapTheme
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,9 @@ _SIGNATURE = re.compile(r"[0-9a-f]{64}")
 _REFRESH_SECONDS = 60.0
 _RETRY_SECONDS = 5.0
 _SIGNATURE_TIMEOUT_SECONDS = 5.0
+# Covers the renderer's own 15 s read of a remote style. `MAP_RENDERER_TIMEOUT` is a draw's
+# deadline, sized to a full queue that a style never joins.
+_STYLE_TIMEOUT_SECONDS = 20.0
 
 _signature: str | None = None
 # Learned with the signature and replaced by each answer, an answer without one included: it is
@@ -185,3 +191,35 @@ async def render(body: dict[str, Any], *, timeout: float) -> Drawn:
     if signature is None or content_type != "image/webp" or not _is_webp(response.content):
         raise RendererUnavailable("POST /render answered 200 with something other than a signed WebP")
     return Drawn(image=response.content, signature=signature)
+
+
+def _is_json_object(data: bytes) -> bool:
+    try:
+        return isinstance(json.loads(data), dict)
+    except ValueError:
+        return False
+
+
+async def style(theme: MapTheme, language: str | None) -> bytes:
+    """The renderer's style for `theme`, as the bytes it sent. `language` is one of the label
+    languages, or `None` for English alone, which goes as no query at all: the renderer refuses
+    an empty one.
+
+    Anything but a 200 carrying a JSON object is a failure.
+    """
+    params = None if language is None else {"language": language}
+    try:
+        with anyio.fail_after(_STYLE_TIMEOUT_SECONDS):
+            async with _client(timeout=_STYLE_TIMEOUT_SECONDS) as client:
+                response = await client.get(f"/style/{theme.value}", params=params)
+    except (httpx.HTTPError, httpx.InvalidURL, TimeoutError) as exc:
+        raise RendererUnavailable(f"GET /style failed: {type(exc).__name__}") from exc
+    if response.status_code == 400:
+        # The theme and language are this API's own, so a refusal is a contract mismatch.
+        logger.error("The map renderer refused a style request this API built: %s", response.text[:200])
+    if response.status_code != 200:
+        raise RendererUnavailable(f"GET /style answered {response.status_code}")
+    content_type = response.headers.get("content-type", "").partition(";")[0].strip()
+    if content_type != "application/json" or not _is_json_object(response.content):
+        raise RendererUnavailable("GET /style answered 200 with something other than a JSON object")
+    return response.content

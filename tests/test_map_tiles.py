@@ -1,5 +1,5 @@
-"""Map tiles: which squares there are, the renderer's contract from the API's side, and the route
-that finds or draws one for every account.
+"""Map tiles: which squares there are, the renderer's contract from the API's side, the route
+that finds or draws one for every account, and the route that reads the style they are drawn on.
 
 Every draw here goes to `StubRenderer`, which speaks the renderer's contract and refuses a
 body outside it with the `400` the real one answers - so a body that grew a field, or lost
@@ -10,6 +10,7 @@ under a signature of its own (`renderer`) and reads back only the rows carrying 
 """
 
 import asyncio
+import hashlib
 import io
 import json
 from collections.abc import AsyncGenerator, Generator
@@ -49,6 +50,8 @@ from tests.helpers.generators import create_user
 RENDERER_URL = "http://renderer.test"
 CREDIT = "[© OpenStreetMap contributors](https://www.openstreetmap.org/copyright)"
 _CLAIMS = "map-tile:claim:"
+# Spaced and ordered as no serializer here would write it, so a re-encoded answer shows.
+STYLE = b'{ "version": 8,  "sources": {}, "layers": [] }'
 
 
 def _signature() -> str:
@@ -80,9 +83,10 @@ def _webp(shade: int) -> bytes:
 
 
 class StubRenderer:
-    """The renderer's contract, in a `MockTransport`: `GET /signature`, and `POST /render`
+    """The renderer's contract, in a `MockTransport`: `GET /signature`, `POST /render`
     answering a 1024x1024 WebP signed with `X-Map-Signature` - or a `400` for a body outside
-    the contract, or whatever `status` says.
+    the contract, or whatever `status` says - and `GET /style/{theme}`, answering `style` or a
+    `400` for a theme or language outside the lists, an empty language among them.
 
     `gate`, when set, holds every draw until it opens, which is how a test arranges for
     requests to overlap one.
@@ -100,6 +104,8 @@ class StubRenderer:
         self.renders: list[dict[str, Any]] = []
         self.refused: list[object] = []
         self.calls = 0
+        self.style = STYLE
+        self.style_requests: list[httpx.URL] = []
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         self.calls += 1
@@ -128,6 +134,18 @@ class StubRenderer:
                 content=bytes(bytearray(_webp(drawn))),
                 headers={"Content-Type": "image/webp", "X-Map-Signature": self.draws_with or self.signature},
             )
+        if request.method == "GET" and request.url.path.startswith("/style/"):
+            self.style_requests.append(request.url)
+            self.started.set()
+            if self.gate is not None:
+                await self.gate.wait()
+            theme = request.url.path.removeprefix("/style/")
+            language = request.url.params.get("language")
+            if theme not in ("light", "dark") or ("language" in request.url.params and language not in LABEL_LANGUAGES):
+                return httpx.Response(400, json={"detail": "outside the lists"})
+            if self.status != 200:
+                return httpx.Response(self.status, json={"detail": "no style"})
+            return httpx.Response(200, content=self.style, headers={"Content-Type": "application/json"})
         return httpx.Response(404)
 
 
@@ -566,6 +584,197 @@ class TestBeforeAnythingIsRead:
         assert not [path for path in map_app.openapi()["paths"] if "map-picture" in path]
         for schema in (DiveListItem, TripRead, DiveSiteRead):
             assert "map_picture" not in schema.model_fields, schema.__name__
+
+
+# -------------- the style --------------
+
+
+def _style_url(theme: str = "light", language: str | None = None) -> str:
+    path = f"/api/v1/map-style/{theme}"
+    return path if language is None else f"{path}?language={language}"
+
+
+def _etag_of(style: bytes) -> str:
+    return f'"{hashlib.sha256(style).hexdigest()}"'
+
+
+@pytest_asyncio.fixture
+async def styled(map_app: Any, anyone: None, redis: FakeRedis) -> AsyncGenerator[httpx.AsyncClient]:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=map_app), base_url="http://api.test") as client:
+        yield client
+
+
+class TestTheStyleRoute:
+    """Nothing here touches the database: the route reads no row and stores nothing."""
+
+    @pytest.mark.asyncio
+    async def test_the_style_is_the_renderers_bytes_under_their_digest(
+        self, styled: httpx.AsyncClient, renderer: StubRenderer
+    ) -> None:
+        response = await styled.get(_style_url(theme="dark"))
+
+        assert response.status_code == 200
+        assert response.content == STYLE
+        assert response.headers["content-type"] == "application/json"
+        assert response.headers["cache-control"] == "private, max-age=300"
+        assert response.headers["etag"] == _etag_of(STYLE)
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["content-disposition"].startswith("attachment")
+        assert [url.path for url in renderer.style_requests] == ["/style/dark"]
+
+    @pytest.mark.asyncio
+    async def test_a_held_style_is_a_304_and_the_renderer_is_still_asked(
+        self, styled: httpx.AsyncClient, renderer: StubRenderer
+    ) -> None:
+        response = await styled.get(_style_url(), headers={"If-None-Match": _etag_of(STYLE)})
+
+        assert response.status_code == 304
+        assert response.content == b""
+        assert response.headers["etag"] == _etag_of(STYLE)
+        assert response.headers["cache-control"] == "private, max-age=300"
+        assert len(renderer.style_requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_style_changed_under_the_same_signature_is_sent_again(
+        self, styled: httpx.AsyncClient, renderer: StubRenderer
+    ) -> None:
+        """A move of domain changes the sprite's address and not the signature."""
+        held = _etag_of(STYLE)
+        renderer.style = b'{"version":8,"sprite":"https://moved.example/sprite"}'
+
+        response = await styled.get(_style_url(), headers={"If-None-Match": held})
+
+        assert response.status_code == 200
+        assert response.content == renderer.style
+        assert response.headers["etag"] == _etag_of(renderer.style)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tag", "sent"),
+        [
+            pytest.param("de-DE", "de", id="a region"),
+            pytest.param("pt_BR", "pt", id="an underscore"),
+            pytest.param("nb", "no", id="an alias"),
+            pytest.param("en", None, id="English"),
+            pytest.param("en-GB", None, id="English with a region"),
+            pytest.param("xx", None, id="a language the basemap does not carry"),
+            pytest.param("", None, id="empty"),
+            pytest.param(None, None, id="absent"),
+        ],
+    )
+    async def test_any_tag_is_reduced_and_english_alone_sends_no_query(
+        self, styled: httpx.AsyncClient, renderer: StubRenderer, tag: str | None, sent: str | None
+    ) -> None:
+        response = await styled.get(_style_url(language=tag))
+
+        assert response.status_code == 200
+        (url,) = renderer.style_requests
+        assert url.query == (b"" if sent is None else f"language={sent}".encode())
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_theme_is_a_404_that_counts_nothing_and_reaches_no_renderer(
+        self, styled: httpx.AsyncClient, renderer: StubRenderer, redis: FakeRedis
+    ) -> None:
+        response = await styled.get(_style_url(theme="sepia"))
+
+        assert response.status_code == 404
+        assert response.json() == {"detail": "No such map style"}
+        assert renderer.calls == 0
+        assert redis.store == {}
+
+    @pytest.mark.asyncio
+    async def test_without_a_renderer_the_style_is_a_404(
+        self, styled: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "MAP_RENDERER_URL", "")
+
+        response = await styled.get(_style_url())
+
+        assert response.status_code == 404
+        assert response.json() == {"detail": "This instance has no map style"}
+
+    @pytest.mark.asyncio
+    async def test_a_style_counts_against_the_tile_request_limit(
+        self, styled: httpx.AsyncClient, renderer: StubRenderer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "MAP_RENDERER_REQUEST_LIMIT_PER_USER", 1)
+
+        assert (await styled.get(_style_url())).status_code == 200
+        assert (await styled.get(_style_url())).status_code == 429
+        assert (await styled.get(_url())).status_code == 429, "tiles and styles are one limit"
+        assert len(renderer.style_requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_transaction_is_released_before_the_renderer_is_asked(
+        self, renderer: StubRenderer, redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order: list[str] = []
+
+        async def release(_db: object) -> None:
+            order.append("released")
+
+        async def asked(_theme: MapTheme, _language: str | None) -> bytes:
+            order.append("asked")
+            return STYLE
+
+        monkeypatch.setattr(map_tiles, "release_read_transaction", release)
+        monkeypatch.setattr(map_renderer, "style", asked)
+
+        await map_tiles.read_style(AsyncMock(), user_id=1, theme=MapTheme.LIGHT, language=None)
+
+        assert order == ["released", "asked"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            pytest.param(httpx.Response(503, json={"detail": "no style"}), id="the renderer's 503"),
+            pytest.param(httpx.Response(400, json={"detail": "refused"}), id="a refusal"),
+            pytest.param(httpx.Response(404), id="a renderer older than the route"),
+            pytest.param(
+                httpx.Response(200, content=b"not json", headers={"Content-Type": "application/json"}), id="not JSON"
+            ),
+            pytest.param(
+                httpx.Response(200, content=b"[1]", headers={"Content-Type": "application/json"}), id="an array"
+            ),
+            pytest.param(
+                httpx.Response(200, content=b"\xff", headers={"Content-Type": "application/json"}), id="not text"
+            ),
+            pytest.param(httpx.Response(200, content=STYLE, headers={"Content-Type": "text/html"}), id="another type"),
+        ],
+    )
+    async def test_anything_but_a_json_object_is_a_503(
+        self,
+        styled: httpx.AsyncClient,
+        renderer: StubRenderer,
+        monkeypatch: pytest.MonkeyPatch,
+        answer: httpx.Response,
+    ) -> None:
+        monkeypatch.setattr(
+            map_renderer,
+            "_client",
+            lambda *, timeout: httpx.AsyncClient(
+                base_url=RENDERER_URL, transport=httpx.MockTransport(lambda _request: answer)
+            ),
+        )
+
+        response = await styled.get(_style_url())
+
+        assert response.status_code == 503
+        assert response.json() == {"detail": "The map style could not be read. Try again later."}
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_renderer_is_a_503(self, styled: httpx.AsyncClient, renderer: StubRenderer) -> None:
+        renderer.down = True
+        assert (await styled.get(_style_url())).status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_a_style_past_its_deadline_is_a_503(
+        self, styled: httpx.AsyncClient, renderer: StubRenderer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(map_renderer, "_STYLE_TIMEOUT_SECONDS", 0.05)
+        renderer.gate = asyncio.Event()
+        assert (await styled.get(_style_url())).status_code == 503
 
 
 # -------------- against Postgres: the route, the store, the cron --------------

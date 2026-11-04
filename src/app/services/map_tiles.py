@@ -1,4 +1,5 @@
-"""Map tiles: which squares of the map there are, and finding or drawing one.
+"""Map tiles: which squares of the map there are, and finding or drawing one; and the style
+they are drawn on, for a client that draws the map itself.
 
 **A tile is a square of the Web Mercator grid, drawn once for the whole instance.** `z/x/y`
 in one theme, with nothing of any record in it: the web composes a card's or a page head's
@@ -20,6 +21,9 @@ and the store stays bounded by it, as it is by the zoom.
 **Concurrent misses share one draw**, across every API process: the first claims it in
 Redis, the rest wait for its row. The claimant draws in a task of its own, so a client that
 disconnects mid-draw still leaves the tile stored.
+
+**A style is read through, never stored.** Nothing here holds one, and the renderer is asked on
+every request, so what a client holds is always compared with what the renderer says now.
 """
 
 import asyncio
@@ -94,6 +98,10 @@ class MapTileUnavailable(Exception):
     """No tile could be had in time: the renderer failed, refused or ran out of time."""
 
 
+class MapStyleUnavailable(Exception):
+    """The renderer gave no style: it failed, refused or ran out of time."""
+
+
 @dataclass(frozen=True, slots=True)
 class Tile:
     theme: MapTheme
@@ -123,12 +131,18 @@ def label_language(requested: str | None) -> str | None:
     return primary if primary in LABEL_LANGUAGES else None
 
 
+def map_theme(theme: str) -> MapTheme | None:
+    try:
+        return MapTheme(theme)
+    except ValueError:
+        return None
+
+
 def tile_at(theme: str, z: int, x: int, y: int, language: str | None = None) -> Tile | None:
     """The tile those path segments name, labelled in `label_language(language)`, or `None` for
     a theme there is none of, a zoom past `MAX_ZOOM`, or a square outside the grid at that zoom."""
-    try:
-        parsed = MapTheme(theme)
-    except ValueError:
+    parsed = map_theme(theme)
+    if parsed is None:
         return None
     if not (0 <= z <= MAX_ZOOM and 0 <= x < 2**z and 0 <= y < 2**z):
         return None
@@ -153,6 +167,22 @@ class _Stored:
 
 def etag(sha256: str) -> str:
     return f'"{sha256}"'
+
+
+def style_etag(style: bytes) -> str:
+    """A digest of the bytes, never the renderer's signature: that leaves out `SITE_URL` for the
+    vendored styles and a remote style edited behind its URL. A tile drawn under an old signature
+    is still a good backdrop, but a client holding an old style after a move of domain would
+    keep a sprite address that no longer answers."""
+    return etag(hashlib.sha256(style).hexdigest())
+
+
+async def _count_request(user_id: int) -> None:
+    await enforce_rate_limit(
+        f"map-tile:requests:user:{user_id}",
+        settings.MAP_RENDERER_REQUEST_LIMIT_PER_USER,
+        settings.MAP_RENDERER_LIMIT_WINDOW_SECONDS,
+    )
 
 
 async def _find(db: AsyncSession, *, signature: str, tile: Tile) -> _Stored | None:
@@ -345,11 +375,7 @@ async def find_or_draw(db: AsyncSession, *, user_id: int, tile: Tile, if_none_ma
     """
     if not settings.map_tiles:
         raise MapTilesOff
-    await enforce_rate_limit(
-        f"map-tile:requests:user:{user_id}",
-        settings.MAP_RENDERER_REQUEST_LIMIT_PER_USER,
-        settings.MAP_RENDERER_LIMIT_WINDOW_SECONDS,
-    )
+    await _count_request(user_id)
     signature = map_renderer.current_signature()
     if signature is None:
         await release_read_transaction(db)
@@ -379,6 +405,21 @@ async def find_or_draw(db: AsyncSession, *, user_id: int, tile: Tile, if_none_ma
                 return drawn
             continue
         await anyio.sleep(min(_WAIT_POLL_SECONDS, remaining))
+
+
+async def read_style(db: AsyncSession, *, user_id: int, theme: MapTheme, language: str | None) -> bytes:
+    """The renderer's style for `theme`, labelled in `label_language(language)`, on behalf of the
+    account `user_id`, against the same request limit as a tile. The transaction is released
+    before the renderer is asked."""
+    if not settings.map_tiles:
+        raise MapTilesOff
+    await _count_request(user_id)
+    await release_read_transaction(db)
+    try:
+        return await map_renderer.style(theme, label_language(language))
+    except map_renderer.RendererUnavailable as exc:
+        logger.warning("A map style was not read: %s", exc)
+        raise MapStyleUnavailable(str(exc)) from exc
 
 
 async def purge_unserved(db: AsyncSession, *, cutoff: datetime, limit: int) -> int:

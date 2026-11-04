@@ -39,7 +39,8 @@ async def read_instance_config() -> InstanceConfigRead:
     restarts the API, except `map_attribution`, which follows the map renderer: `null`
     whenever `map_tiles` is false, and while it is true, `null` until the renderer has
     named its credit, which it may not have shortly after a start, nor while the renderer has
-    not been reachable since. A client draws map tiles only beside the credit.
+    not been reachable since. A client draws map tiles, or a map on the instance's style, only
+    beside the credit.
     """
     # Anonymous without being a leak: the landing page discloses the mode anyway by which form
     # it shows, the operator by which copy that form carries, and the privacy page whether join

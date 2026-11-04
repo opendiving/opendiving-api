@@ -1,9 +1,11 @@
 """The map tiles every dive, trip and dive site card and page head is composed from, drawn by
 the map renderer the first time any account asks for one and served from storage after that
-(`services/map_tiles.py`).
+(`services/map_tiles.py`), and the style they are drawn on, for a client that draws the map
+itself.
 
 Never `@cache`d, as no binary read is: Redis holds serialized responses, and the `ETag` does
-this job in the browser.
+this job in the browser. The style is passed through as bytes for the same reason, and because
+its `ETag` is a digest of exactly those bytes.
 """
 
 from typing import Annotated, Any
@@ -19,10 +21,14 @@ from ...core.utils.uploads import content_disposition_attachment
 from ...services.map_tiles import (
     CONTENT_TYPE,
     MAX_ZOOM,
+    MapStyleUnavailable,
     MapTilesOff,
     MapTileUnavailable,
     etag,
     find_or_draw,
+    map_theme,
+    read_style,
+    style_etag,
     tile_at,
 )
 
@@ -42,6 +48,14 @@ _RESPONSES: dict[int | str, dict[str, Any]] = {
     },
     429: {"description": "This account has made too many tile requests, or started too many draws, in the window"},
     503: {"description": "The renderer failed, refused, or ran out of time; nothing was stored"},
+}
+
+_STYLE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {"content": {"application/json": {}}, "description": "The style, a MapLibre style document"},
+    304: {"description": "The `If-None-Match` style is still the current one"},
+    404: {"description": "A theme other than `light` or `dark`, or no renderer on this instance"},
+    429: {"description": "This account has made too many map requests in the window"},
+    503: {"description": "The renderer failed, refused, or ran out of time"},
 }
 
 
@@ -99,4 +113,57 @@ async def read_map_tile(
         etag=tag,
         cache_control=_KEPT,
         disposition=content_disposition_attachment("map-tile.webp", default="map-tile"),
+    )
+
+
+@router.get("/map-style/{theme}", response_class=Response, responses=_STYLE_RESPONSES)
+async def read_map_style(
+    request: Request,
+    theme: Annotated[str, Path(description="The basemap's colour scheme, `light` or `dark`")],
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    language: Annotated[
+        str | None,
+        Query(
+            description="The viewer's language as a BCP 47 tag, such as `de-DE`: labels carry a place's name in it "
+            "beside the English one. Omitted, English, or a language the basemap names nothing in, labels are "
+            "English alone"
+        ),
+    ] = None,
+) -> Response:
+    """The MapLibre style this instance's map tiles are drawn on, in `theme`, for a client that
+    draws the map itself. Labels follow the same rule as a tile's: English, with a second line
+    in `language` where the basemap names a place in it; any tag is accepted, and one in a
+    language the basemap does not carry is the English-alone style.
+
+    For any signed-in account, and counted against the same limit as map tile requests. Nothing
+    of any record is in a style. A client shows the instance's `map_attribution` beside a map
+    drawn on it, and draws none without it.
+
+    The current style is read on every request. The response carries an `ETag`, a digest of its
+    bytes; a request whose `If-None-Match` names it is a 304, and the style is cacheable by the
+    caller alone for the time its `Cache-Control` header states.
+    """
+    # No owner to check, since nothing of any record is in a style. Behind sign-in because every
+    # form that draws a map is, and an anonymous route would be a new way to reach a private
+    # service.
+    parsed = map_theme(theme)
+    if parsed is None:
+        raise NotFoundException("No such map style")
+    try:
+        style = await read_style(db, user_id=current_user["id"], theme=parsed, language=language)
+    except MapTilesOff as exc:
+        raise NotFoundException("This instance has no map style") from exc
+    except MapStyleUnavailable as exc:
+        raise HTTPException(status_code=503, detail="The map style could not be read. Try again later.") from exc
+
+    tag = style_etag(style)
+    if request.headers.get("if-none-match") == tag:
+        return not_modified(tag, cache_control=_KEPT)
+    return stored_bytes_response(
+        style,
+        media_type="application/json",
+        etag=tag,
+        cache_control=_KEPT,
+        disposition=content_disposition_attachment("map-style.json", default="map-style"),
     )
