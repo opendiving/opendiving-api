@@ -768,7 +768,9 @@ class TestSendRenewalReminders:
     async def test_one_email_per_diver_soonest_first(self) -> None:
         certifications = [
             _certification_row(certification_id=20, name="Rescue Diver", expires_on=TODAY + timedelta(days=60)),
-            _certification_row(certification_id=21, name="EFR", agency="efr", expires_on=TODAY - timedelta(days=3)),
+            _certification_row(
+                certification_id=21, name="Oxygen Provider", agency="dan", expires_on=TODAY - timedelta(days=3)
+            ),
             _certification_row(user_id=2, email="other@example.com", certification_id=22),
         ]
         policies = [
@@ -784,7 +786,7 @@ class TestSendRenewalReminders:
         email, lines = send.await_args_list[0].args
         assert email == "diver@example.com"
         assert lines == [
-            ("EFR EFR", "expired 23 Sep 2026", "/certifications"),
+            ("DAN Oxygen Provider", "expired 23 Sep 2026", "/certifications"),
             ("DAN Europe dive insurance", "expires 6 Oct 2026", "/settings/checkin"),
             ("PADI Rescue Diver", "expires 25 Nov 2026", "/certifications"),
             ("DiveAssure dive insurance", "expires 15 Dec 2026", "/settings/checkin"),

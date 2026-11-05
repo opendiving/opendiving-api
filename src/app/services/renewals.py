@@ -81,7 +81,6 @@ _AGENCY_LABELS = {
     CertificationAgency.IANTD: "IANTD",
     CertificationAgency.PSAI: "PSAI",
     CertificationAgency.DAN: "DAN",
-    CertificationAgency.EFR: "EFR",
     CertificationAgency.ANDI: "ANDI",
     CertificationAgency.SNSI: "SNSI",
     CertificationAgency.ACUC: "ACUC",
@@ -89,7 +88,6 @@ _AGENCY_LABELS = {
     CertificationAgency.IDA: "IDA",
     CertificationAgency.NDL: "NDL",
     CertificationAgency.UTD: "UTD",
-    CertificationAgency.SAA: "SAA",
     CertificationAgency.SCOTSAC: "ScotSAC",
     CertificationAgency.IAC: "IAC",
     CertificationAgency.PROTEC: "ProTec",
@@ -107,6 +105,9 @@ _AGENCY_LABELS = {
     CertificationAgency.NACD: "NACD",
     CertificationAgency.IDEA: "IDEA",
     CertificationAgency.DIWA: "DIWA",
+    CertificationAgency.CDAA: "CDAA",
+    CertificationAgency.ISC: "ISC",
+    CertificationAgency.ISE: "ISE",
     CertificationAgency.OTHER: "Other",
 }
 

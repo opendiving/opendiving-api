@@ -5667,8 +5667,8 @@ class TestTheIntegerColumnCensus:
 class TestTheAgencyVocabulary:
     def test_the_app_enum_is_the_formats_own(self) -> None:
         """A REQUIRED member of a vocabulary the format freezes at 1.0 (spec §§6.16, 7), so
-        laundering five real agencies through `other` would have made a round trip lossy on
-        the one member the format guarantees cannot grow."""
+        laundering real agencies through `other` would make a round trip lossy on a member
+        the format guarantees."""
         schema = divejson.load_schema()
         published = schema["$defs"]["certification"]["properties"]["agency"]["enum"]
 

@@ -6001,20 +6001,20 @@ beside the facts, so a client that knows only the facts keeps the account's.
 
 Rejected: restore-means-restore for preferences; filling only empty details.
 
-## The certification agency vocabulary is the format's, value for value, and cannot grow again
+## The certification agency vocabulary is the format's, value for value
 
-`CertificationAgency` equals DiveJSON's §6.16 enum value for value and in order, the twenty of the
-format's last widening before 1.0 (`ndl` to `diwa`) included. The column is a plain `VARCHAR(32)`
-with no DB `CHECK`, for the reason `gear_item.type` has none, so the vocabulary needs no migration.
+`CertificationAgency` equals DiveJSON's §6.16 enum value for value and in order. The column is a
+plain `VARCHAR(32)` with no DB `CHECK`, for the reason `gear_item.type` has none, so the vocabulary
+needs no migration.
 
 Rejected: laundering real agencies through `other`/`agency_other` on the way in, which makes a round
 trip lossy on a member the format guarantees.
 
-The list cannot grow: a certification's `agency` is a REQUIRED member of a closed set, and §7
+The format owns the list: a certification's `agency` is a REQUIRED member of a closed set, and §7
 freezes those at 1.0 because a reader treats an unrecognized value as absent, which for a REQUIRED
-member leaves the record uninterpretable. That is why the spec seeded the list wide and widened it
-once more before the tag, and why a national CMAS federation is `cmas`. The freeze holds for the
-whole enum although a course's `agency` is OPTIONAL: one list is shared by both, so the
+member leaves the record uninterpretable. That is why the spec seeded the list wide, why a national
+CMAS federation is `cmas`, and why an agency not on it is `other` after the tag. The freeze holds
+for the whole enum although a course's `agency` is OPTIONAL: one list is shared by both, so the
 certification's requiredness is what governs it.
 
 ## Logbook import spools its upload and still parses the document whole

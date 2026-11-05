@@ -41,8 +41,8 @@ class Certification(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # `default` has to follow every column without one.
     name: Mapped[str] = mapped_column(String(255))
     # The agency's name when `agency == "other"`. There is a long tail of national and
-    # regional bodies (VDST, FFESSM, Scuba Schools of the Pacific, ...) that will never
-    # justify their own enum member, but whose cards divers still carry.
+    # regional bodies (Scuba Schools of the Pacific, ...) that will never justify their own
+    # enum member, but whose cards divers still carry.
     agency_other: Mapped[str | None] = mapped_column(String(64), default=None)
     certification_number: Mapped[str | None] = mapped_column(String(64), default=None)
     certified_on: Mapped[date | None] = mapped_column(Date, default=None)
