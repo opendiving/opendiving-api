@@ -335,6 +335,7 @@ _LOOKUP_COLUMNS = (
     DiveSite.user_id,
     DiveSite.commons_source,
     DiveSite.name,
+    DiveSite.other_names,
     DiveSite.latitude,
     DiveSite.longitude,
     *(getattr(DiveSite, f"{DIVE_SITE_LOCATION_PREFIX}{field}") for field in LOCATION_FIELDS),
@@ -349,6 +350,7 @@ def _lookup_item(row: dict[str, Any], *, saved: bool) -> dict[str, Any]:
     return DiveSiteLookupItem(
         uuid=row["uuid"],
         name=row["name"],
+        other_names=row["other_names"],
         latitude=row["latitude"],
         longitude=row["longitude"],
         location=location_from_row(row, DIVE_SITE_LOCATION_PREFIX),
@@ -372,36 +374,41 @@ async def _lookup_dive_sites(
     uuids: list[uuid_pkg.UUID] | None,
     latitude: float | None = None,
     longitude: float | None = None,
+    commons_only: bool = False,
 ) -> dict:
     """A page of `GET /dive-sites/lookup`. Reached only after the route has authorized the
     caller. A search reads two groups one after the other, so a page may straddle them: the
-    second answers for what the first left of the page."""
+    second answers for what the first left of the page. `commons_only` skips the first, whose
+    locality matches can otherwise fill the page."""
     offset, limit = compute_offset(page, items_per_page), items_per_page
-    on_the_list = SavedSite.id.is_not(None)
-    # Without a search the feed holds what is on the list, and a client caches every page of it:
-    # only a form holding a Commons record by uuid reaches an unsaved one here.
-    conditions: tuple[Any, ...] = (on_the_list if search or not uuids else on_the_list | in_the_commons(),)
-    if search:
-        conditions += (search_condition(search),)
-    if uuids:
-        conditions += (DiveSite.uuid.in_(uuids),)
-    data = await get_lookup_page(
-        db,
-        model=DiveSite,
-        columns=(*_LOOKUP_COLUMNS, on_the_list.label("saved")),
-        conditions=conditions,
-        used_by=DiveDiveSite.dive_site_id,
-        user_id=user_id,
-        bound=until,
-        offset=offset,
-        limit=limit,
-        from_clause=DiveSite.__table__.outerjoin(
-            SavedSite.__table__, (SavedSite.dive_site_id == DiveSite.id) & (SavedSite.user_id == user_id)
-        ),
-        created_at=func.coalesce(SavedSite.created_at, DiveSite.created_at),
-    )
-    items = [_lookup_item(row, saved=row["saved"]) for row in data["data"]]
-    total_count = data["total_count"]
+    items: list[dict[str, Any]] = []
+    total_count = 0
+    if not commons_only:
+        on_the_list = SavedSite.id.is_not(None)
+        # Without a search the feed holds what is on the list, and a client caches every page of
+        # it: only a form holding a Commons record by uuid reaches an unsaved one here.
+        conditions: tuple[Any, ...] = (on_the_list if search or not uuids else on_the_list | in_the_commons(),)
+        if search:
+            conditions += (search_condition(search),)
+        if uuids:
+            conditions += (DiveSite.uuid.in_(uuids),)
+        data = await get_lookup_page(
+            db,
+            model=DiveSite,
+            columns=(*_LOOKUP_COLUMNS, on_the_list.label("saved")),
+            conditions=conditions,
+            used_by=DiveDiveSite.dive_site_id,
+            user_id=user_id,
+            bound=until,
+            offset=offset,
+            limit=limit,
+            from_clause=DiveSite.__table__.outerjoin(
+                SavedSite.__table__, (SavedSite.dive_site_id == DiveSite.id) & (SavedSite.user_id == user_id)
+            ),
+            created_at=func.coalesce(SavedSite.created_at, DiveSite.created_at),
+        )
+        items = [_lookup_item(row, saved=row["saved"]) for row in data["data"]]
+        total_count = data["total_count"]
     if search:
         commons = await get_unsaved_commons_page(
             db,
@@ -421,9 +428,10 @@ async def _lookup_dive_sites(
     return response
 
 
-# The order depends on the position, so the position is part of the key. A Commons change reaches
-# a cached page at its 60-second expiry, since nothing sweeps every account's lookups for one.
-_lookup = _dive_site_cache.lookup(_lookup_dive_sites, also_keyed_on=("latitude", "longitude"))
+# The order depends on the position and the rows on `commons_only`, so both are part of the key. A
+# Commons change reaches a cached page at its 60-second expiry, since nothing sweeps every account's
+# lookups for one.
+_lookup = _dive_site_cache.lookup(_lookup_dive_sites, also_keyed_on=("latitude", "longitude", "commons_only"))
 
 
 @router.get("/dive-sites/lookup", response_model=PaginatedListResponse[DiveSiteLookupItem])
@@ -448,10 +456,13 @@ async def lookup_dive_sites(
         Query(ge=-90, le=90, description="With `search`, the Commons records nearest this position come first"),
     ] = None,
     longitude: Annotated[float | None, Query(ge=-180, le=180, description="Longitude of that position")] = None,
+    commons_only: Annotated[
+        bool, Query(description="With `search`, answer only the Commons records the caller has not saved")
+    ] = False,
 ) -> dict:
-    """The sites a picker lists: uuid, name, pin, locality and registry entries, with the water
-    type, altitude and entry types a dive form fills from them, who owns each and whether it is
-    on the caller's list, and for a Commons record the credit to show beside it.
+    """The sites a picker lists: uuid, name, other names, pin, locality and registry entries,
+    with the water type, altitude and entry types a dive form fills from them, who owns each and
+    whether it is on the caller's list, and for a Commons record the credit to show beside it.
 
     Without `search`, the caller's list: the site a dive at or before `until` named most
     recently first, then sites no such dive names, newest saved first.
@@ -461,15 +472,20 @@ async def lookup_dive_sites(
     name within each, or nearest first where `latitude` and `longitude` are sent. One response,
     to render in the order it comes. The position is sent whole: one coordinate alone is a 422.
 
+    `commons_only=true` with `search` answers those Commons records alone, in the same order.
+    Without `search` it is a 422.
+
     `uuid` narrows the rows to the sites a form already holds: their own, saved, or any Commons
     record, saved or not. Out-of-range pagination is clamped. A Commons record's change may take
     up to a minute to show here.
     """
     if (latitude is None) != (longitude is None):
         raise UnprocessableEntityException("latitude and longitude must be sent together")
-    page, items_per_page = clamp_pagination(page, items_per_page)
     # Only a search orders by the position, so any other request keeps one key whatever it sent.
     near = bool((search or "").strip())
+    if commons_only and not near:
+        raise UnprocessableEntityException("commons_only needs a search")
+    page, items_per_page = clamp_pagination(page, items_per_page)
     return await _lookup(
         request,
         user_id=current_user["id"],
@@ -481,6 +497,7 @@ async def lookup_dive_sites(
         uuids=uuid,
         latitude=latitude if near else None,
         longitude=longitude if near else None,
+        commons_only=commons_only,
     )
 
 

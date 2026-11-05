@@ -438,6 +438,7 @@ RESOURCES = [
                 "latitude",
                 "longitude",
                 "location",
+                "other_names",
                 "external_ids",
                 "water_type",
                 "altitude",

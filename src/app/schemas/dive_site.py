@@ -529,10 +529,12 @@ class DiveSiteLookupItem(_DiveSiteRelation, PublicUUIDSchema):
     and the members a dive form fills from the site picked, as `DiveSiteRead` carries them.
 
     Not the dive's `DiveSiteInfo`, which requires coordinates. `external_ids` is what lets a
-    place search drop a geocoder row for an OpenStreetMap object a listed site already names.
+    place search drop a geocoder row for an OpenStreetMap object a listed site already names;
+    `other_names` is what shows why a search found a row whose name does not match it.
     """
 
     name: str
+    other_names: Annotated[list[str], Field(default_factory=list)]
     latitude: float | None = None
     longitude: float | None = None
     location: LocationRead | None = None
