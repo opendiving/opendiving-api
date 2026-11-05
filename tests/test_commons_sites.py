@@ -939,6 +939,23 @@ class TestTheLookup:
         assert (row["owner"], row["attribution"]) == ("opendivingcommons", OSM_CREDIT)
 
     @pytest.mark.asyncio
+    async def test_a_row_carries_the_other_name_a_search_found_it_by(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        term = _marked()
+        unsaved = create_commons_site(db, name="砂辺", other_names=[term])
+        own = create_dive_site(db, diver)
+        own.other_names = [f"{term} Own"]
+        db.commit()
+
+        rows = (await _lookup(http, search=term))["data"]
+
+        assert [(row["uuid"], row["other_names"]) for row in rows] == [
+            (str(own.uuid), [f"{term} Own"]),
+            (str(unsaved.uuid), [term]),
+        ]
+
+    @pytest.mark.asyncio
     async def test_a_page_can_straddle_the_two_groups(self, http: httpx.AsyncClient, db: Session) -> None:
         term = _marked()
         saved = [create_commons_site(db, name=f"{term} A{index}") for index in range(2)]
@@ -976,6 +993,69 @@ class TestTheLookup:
 
         assert first["data"][0]["uuid"] == str(near.uuid)
         assert second["data"][0]["uuid"] == str(far.uuid)
+
+    @pytest.mark.asyncio
+    async def test_commons_only_answers_the_unsaved_records_alone_in_their_order(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        term = _marked()
+        far = create_commons_site(db, name=term, latitude=4.2, longitude=73.5)
+        near = create_commons_site(db, name=term, latitude=5.9, longitude=102.7)
+        prefix = create_commons_site(db, name=f"{term} Point", latitude=5.9, longitude=102.7)
+        saved = create_commons_site(db, name=term)
+        await _save(http, saved.uuid)
+        own = create_dive_site(db, diver)
+        own.name = term
+        db.commit()
+
+        page = await _lookup(http, search=term, commons_only="true", latitude=5.9, longitude=102.7)
+
+        assert [(row["uuid"], row["saved"]) for row in page["data"]] == [
+            (str(near.uuid), False),
+            (str(far.uuid), False),
+            (str(prefix.uuid), False),
+        ]
+        assert page["total_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_commons_only_pages_over_the_records_alone(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        term = _marked()
+        records = [create_commons_site(db, name=f"{term} {index}") for index in range(3)]
+        own = create_dive_site(db, diver)
+        own.name = term
+        db.commit()
+
+        pages = [await _lookup(http, search=term, commons_only="true", page=page, items_per_page=2) for page in (1, 2)]
+
+        assert [row["uuid"] for page in pages for row in page["data"]] == [str(site.uuid) for site in records]
+        assert [page["has_more"] for page in pages] == [True, False]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("params", [{}, {"search": "   "}])
+    async def test_commons_only_without_a_search_is_a_422(
+        self, http: httpx.AsyncClient, params: dict[str, str]
+    ) -> None:
+        response = await http.get("/dive-sites/lookup", params={"commons_only": "true", **params})
+
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_commons_only_is_part_of_the_cached_key(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        term = _marked()
+        record = create_commons_site(db, name=f"{term} Commons")
+        own = create_dive_site(db, diver)
+        own.name = term
+        db.commit()
+
+        everything = await _lookup(http, search=term)
+        alone = await _lookup(http, search=term, commons_only="true")
+
+        assert [row["uuid"] for row in everything["data"]] == [str(own.uuid), str(record.uuid)]
+        assert [row["uuid"] for row in alone["data"]] == [str(record.uuid)]
 
 
 class TestNamingARecordOnADive:
