@@ -140,10 +140,16 @@ async def get_waiting_proposals_page(db: AsyncSession, *, offset: int, limit: in
 
     Of the site this selects the shared members and its uuid, and of the proposer the name: the
     queue reads a diver's private site, so a member not on that list cannot reach a reviewer.
-    Nothing here joins the tables holding a diver's notes or tags.
+    Nothing here joins the tables holding a diver's notes or tags. An account being deleted has
+    gone dark, so its proposals leave the queue, and come back if it is restored.
     """
-    waiting = DiveSiteProposal.status == _WAITING
-    total_count = await db.scalar(select(func.count()).select_from(DiveSiteProposal).where(waiting))
+    waiting = (DiveSiteProposal.status == _WAITING, User.is_deleted.is_(False))
+    total_count = await db.scalar(
+        select(func.count())
+        .select_from(DiveSiteProposal)
+        .join(User, User.id == DiveSiteProposal.user_id)
+        .where(*waiting)
+    )
     rows = await db.execute(
         select(
             DiveSiteProposal.uuid,
@@ -160,7 +166,7 @@ async def get_waiting_proposals_page(db: AsyncSession, *, offset: int, limit: in
         )
         .join(User, User.id == DiveSiteProposal.user_id)
         .join(DiveSite, DiveSite.id == DiveSiteProposal.dive_site_id)
-        .where(waiting)
+        .where(*waiting)
         .order_by(DiveSiteProposal.created_at, DiveSiteProposal.id)
         .offset(offset)
         .limit(limit)

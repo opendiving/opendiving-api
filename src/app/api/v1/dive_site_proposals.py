@@ -127,7 +127,8 @@ async def read_dive_site_proposal_queue(
     accepted and declined proposals, the site's shared members as they stand in `current`, as
     proposed in `proposed`, the members the proposer named in `changed`, and in `matches` the
     Commons records the proposed site may be. Of a private site a row carries only what a Commons
-    record would. Out-of-range pagination is clamped. 404 on an instance that does not edit the
+    record would. A proposal whose account is being deleted is left out, and comes back if the
+    account is restored. Out-of-range pagination is clamped. 404 on an instance that does not edit the
     Commons.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
@@ -156,8 +157,8 @@ async def accept_dive_site_proposal(
     A body breaking a record rule is a 422 naming it: a pin at 0, 0 or none at all, a registry
     entry another Commons record carries, an `opendivingcommons` entry naming a record that
     exists, a seed losing the entry it was seeded from, or a record that is not valid DiveJSON.
-    409 on one already decided or withdrawn; 404 on no such proposal, and on an instance that does
-    not edit the Commons.
+    409 on one already decided or withdrawn; 404 on no such proposal, on one whose account is being
+    deleted, and on an instance that does not edit the Commons.
     """
     return await commons_proposals.accept(db, uuid=uuid, values=values)
 
@@ -172,6 +173,7 @@ async def decline_dive_site_proposal(
     list until they propose again. Superuser only.
 
     The site and the record are unchanged. 409 on one already decided or withdrawn; 404 on no such
-    proposal, and on an instance that does not edit the Commons.
+    proposal, on one whose account is being deleted, and on an instance that does not edit the
+    Commons.
     """
     return await commons_proposals.decline(db, uuid=uuid, reason=values.reason)

@@ -32,6 +32,7 @@ from ..crud.crud_dive_sites import commons_records_carrying, in_the_commons, rep
 from ..models.dive_site import DiveSite
 from ..models.dive_site_proposal import DiveSiteProposal
 from ..models.saved_site import SavedSite
+from ..models.user import User
 from ..schemas.dive_site import (
     DEPTH_RANGE_MESSAGE,
     CommonsMatchRule,
@@ -205,8 +206,18 @@ async def locked_proposal(
     db: AsyncSession, *, uuid: uuid_pkg.UUID, user_id: int | None = None
 ) -> DiveSiteProposal | None:
     """A proposal to decide, locked so two decisions cannot both find it waiting: one of this
-    diver's, or for a reviewer any account's."""
-    statement = select(DiveSiteProposal).where(DiveSiteProposal.uuid == uuid).with_for_update()
+    diver's, or for a reviewer any account's.
+
+    Not one whose account is being deleted: that diver has gone dark and cannot withdraw, and
+    accepting would put their site beyond the reach of the purge. Restoring the account brings
+    it back.
+    """
+    statement = (
+        select(DiveSiteProposal)
+        .join(User, User.id == DiveSiteProposal.user_id)
+        .where(DiveSiteProposal.uuid == uuid, User.is_deleted.is_(False))
+        .with_for_update(of=DiveSiteProposal)
+    )
     if user_id is not None:
         statement = statement.where(DiveSiteProposal.user_id == user_id)
     proposal: DiveSiteProposal | None = await db.scalar(statement)

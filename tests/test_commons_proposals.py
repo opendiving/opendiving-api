@@ -21,7 +21,7 @@ import pytest
 import pytest_asyncio
 from divejson import SPEC_VERSION
 from divejson.validate import validate_document
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session
@@ -783,6 +783,36 @@ class TestWhatDeletingTakes:
         assert db.scalar(select(DiveSiteProposal.id).where(DiveSiteProposal.uuid == waiting["uuid"])) is None
         row = _row(db, uuid)
         assert row is not None and row.user_id is None and row.commons_reviewed_at is not None
+
+
+class TestAnAccountBeingDeleted:
+    """The account has gone dark and cannot withdraw, and a fortnight passes before the purge."""
+
+    def _flagged(self, db: Session, diver: User, *, deleted: bool) -> None:
+        db.execute(update(User).where(User.id == diver.id).values(is_deleted=deleted))
+        db.commit()
+
+    @pytest.mark.asyncio
+    async def test_its_proposals_leave_the_queue_and_cannot_be_decided_and_a_restore_brings_them_back(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        site = _own_site(db, diver)
+        proposal = await _propose_site(http, site)
+        signed.as_(reviewer)
+        self._flagged(db, diver, deleted=True)
+
+        body = (await http.get("/admin/dive-site-proposals")).json()
+        accepted = await _accept(http, proposal, members=_members())
+        declined = await http.post(f"/admin/dive-site-proposal/{proposal['uuid']}/decline", json={"reason": "No"})
+
+        assert (body["data"], body["total_count"]) == ([], 0)
+        assert (accepted.status_code, declined.status_code) == (404, 404)
+        row = _row(db, site.uuid)
+        assert row is not None and row.user_id == diver.id
+
+        self._flagged(db, diver, deleted=False)
+
+        assert [row["uuid"] for row in await _queue(http)] == [proposal["uuid"]]
 
 
 class TestTheQueue:
