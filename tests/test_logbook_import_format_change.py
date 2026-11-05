@@ -21,6 +21,7 @@ from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_site import DiveSite
+from src.app.models.saved_site import SavedSite
 from src.app.models.user import User
 from src.app.schemas.logbook_import import ImportNoteCode
 from src.app.services.logbook_import import plan_import, write_import
@@ -634,7 +635,8 @@ class TestASubsurfaceSite:
 
         site = (await async_db.execute(select(DiveSite).where(DiveSite.user_id == user.id))).scalar_one()
         assert (site.latitude, site.longitude) == (28.478807, 34.522936)
-        assert site.notes == (
+        saved = (await async_db.execute(select(SavedSite).where(SavedSite.dive_site_id == site.id))).scalar_one()
+        assert saved.notes == (
             "Sandy slope north of the lighthouse\n\nEntry from the beach steps.\nStrong current on the outgoing tide."
         )
         assert site.location_name == "Dahab, South Sinai, Egypt"

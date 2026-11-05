@@ -87,14 +87,18 @@ def create_map_tile(
 def create_dive_site(db: Session, user: models.User) -> models.DiveSite:
     """A dive site of this user's, named uniquely for the same reason `create_user` is:
     these rows persist in the suite's own database and nothing removes them."""
-    return _persist(
+    site = _persist(
         db,
-        models.DiveSite(
-            user_id=user.id,
-            name=f"Pescador {uuid7().hex[-8:]}",
-            location_name="Moalboal, Philippines",
-            notes="",
-        ),
+        models.DiveSite(user_id=user.id, name=f"Pescador {uuid7().hex[-8:]}", location_name="Moalboal, Philippines"),
+    )
+    save_dive_site(db, site)
+    return site
+
+
+def save_dive_site(db: Session, site: models.DiveSite, *, notes: str = "") -> models.SavedSite:
+    """A hand-built site's row on its owner's list, which the routes write with the site."""
+    return _persist(
+        db, models.SavedSite(user_id=site.user_id, dive_site_id=site.id, notes=notes, created_at=site.created_at)
     )
 
 

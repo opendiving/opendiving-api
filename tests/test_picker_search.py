@@ -182,7 +182,7 @@ class TestTheSearchedListSelectsTheMappersColumns:
         assert {column.key for column in statement.selected_columns} == {"id", "name"}
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("model", [DiveSite, GearItem, Contact])
+    @pytest.mark.parametrize("model", [GearItem, Contact])
     async def test_a_table_the_mapper_covers_is_selected_whole(self, model: Any) -> None:
         """The models `search_multi` serves map every column, so for them the mapper's set is
         the table's and nothing they return moves."""

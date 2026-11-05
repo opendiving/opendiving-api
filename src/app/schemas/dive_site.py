@@ -179,8 +179,8 @@ SiteAltitude = Annotated[
 ]
 
 
-class DiveSiteBase(BaseModel):
-    """What every shape of a dive site carries apart from its locality.
+class DiveSiteColumnsBase(BaseModel):
+    """What every shape of a dive site carries apart from its locality and the diver's notes.
 
     The locality is split out because the wire nests it and the table does not: a
     `DiveSiteRead` carries one `location` object, while `DiveSiteReadInternal` mirrors the
@@ -190,6 +190,13 @@ class DiveSiteBase(BaseModel):
     name: Annotated[str, Trimmed, Field(max_length=255, examples=["Blue Hole"], description=_NAME_DESCRIPTION)]
     latitude: Annotated[Latitude, Field(description=_LATITUDE_DESCRIPTION)]
     longitude: Annotated[Longitude, Field(description=_LONGITUDE_DESCRIPTION)]
+
+
+class DiveSiteBase(DiveSiteColumnsBase):
+    """The wire's site, whose notes are the reading diver's and live on `saved_site`: the shapes
+    that mirror `dive_site` take `DiveSiteColumnsBase` instead, where FastCRUD would otherwise
+    find no such column and leave them at their default."""
+
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
 
 
@@ -277,11 +284,11 @@ class DiveSiteRead(DiveSiteBase, _DiveSiteMembersRead, DiveSiteSummary, PublicUU
     created_at: datetime
 
 
-class DiveSiteReadInternal(DiveSiteBase, _DiveSiteMembersRead, DiveSiteLocationColumns, PublicUUIDSchema):
+class DiveSiteReadInternal(DiveSiteColumnsBase, _DiveSiteMembersRead, DiveSiteLocationColumns, PublicUUIDSchema):
     """Mirrors the actual `dive_site` table columns (integer PK/FK), for server-side
     lookups only - never returned directly over the API (use `DiveSiteRead` for the
     public shape, which additionally resolves `user_id` to the owning user's `uuid`, nests
-    the locality and carries the tags and the summary).
+    the locality and carries the diver's notes, the tags and the summary).
     """
 
     name: StoredName
@@ -358,9 +365,11 @@ class DiveSiteCreate(DiveSiteBase, _DiveSiteMembersWrite, WholeCoordinatePair):
     tags: TagsWrite
 
 
-class DiveSiteCreateInternal(DiveSiteBase, _DiveSiteMembersWrite, DiveSiteLocationColumnsInput, WholeCoordinatePair):
+class DiveSiteCreateInternal(
+    DiveSiteColumnsBase, _DiveSiteMembersWrite, DiveSiteLocationColumnsInput, WholeCoordinatePair
+):
     """What reaches FastCRUD, so the locality is flat here where `DiveSiteCreate` nests it,
-    and the tags - rows of another table - are absent."""
+    and the tags and the notes - rows of other tables - are absent."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -368,7 +377,8 @@ class DiveSiteCreateInternal(DiveSiteBase, _DiveSiteMembersWrite, DiveSiteLocati
 
 
 class _DiveSiteUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
-    """What both update shapes carry, which is everything but the locality and the tags.
+    """What both update shapes carry, which is everything but the locality, the tags and the
+    notes.
 
     The two differ only in how they spell a place: `DiveSiteUpdate` is column-shaped for
     CRUDAdmin and the `NOT NULL` sweep, `DiveSiteUpdateRequest` nests it for the API.
@@ -388,12 +398,11 @@ class _DiveSiteUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     # both columns are nullable, and clearing the position means sending *both* as null.
     # Listing them here would refuse that - a site whose position was mistyped could
     # never be corrected back to "not recorded".
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes", "other_names", "external_ids", "entry_types")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "other_names", "external_ids", "entry_types")
 
     latitude: Annotated[Latitude, Field(description=_LATITUDE_DESCRIPTION)]
     longitude: Annotated[Longitude, Field(description=_LONGITUDE_DESCRIPTION)]
     name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
-    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
     other_names: Annotated[
         list[OtherName] | None,
         Field(default=None, max_length=MAX_LIST_ITEMS, description="Replaces the other names whole"),
@@ -451,7 +460,10 @@ class DiveSiteUpdateRequest(_DiveSiteUpdateFields):
 
     model_config = ConfigDict(extra="forbid")
 
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (*_DiveSiteUpdateFields.NON_NULLABLE_FIELDS, "notes")
+
     location: Annotated[LocationInput | None, Field(default=None, description=_LOCATION_DESCRIPTION)]
+    notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
     tags: TagsUpdate
 
 

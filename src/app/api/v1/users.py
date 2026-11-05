@@ -38,7 +38,7 @@ from ...crud.crud_authentication_requests import (
     invalidate_live_requests,
 )
 from ...crud.crud_dive_form_presets import crud_dive_form_presets
-from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
+from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user, saved_by
 from ...crud.crud_invitations import account_exists_for
 from ...crud.crud_trip_parts import get_places_for_user
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
@@ -1037,11 +1037,7 @@ async def read_species_suggestions(
         # Not `resolve_dive_site_ids_for_user`, which answers nothing at all when any one uuid is
         # foreign: a form holding a deleted site beside a live one keeps the live one's tier.
         dive_site_ids = list(
-            (
-                await db.scalars(
-                    select(DiveSite.id).where(DiveSite.uuid.in_(dive_site_uuid), DiveSite.user_id == user_id)
-                )
-            ).all()
+            (await db.scalars(select(DiveSite.id).where(DiveSite.uuid.in_(dive_site_uuid), saved_by(user_id)))).all()
         )
 
     return await suggest_species(

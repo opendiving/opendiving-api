@@ -1996,11 +1996,13 @@ class _Planner:
             "water_type": None if site.water_type is None else site.water_type.value,
             "altitude": bounded.get("altitude"),
             "entry_types": [entry.value for entry in canonical_entry_types(site.entry_types or [])],
-            "notes": self._notes_text("sites", site.uuid, site.notes),
             "created_at": self._created_at(site.created_at),
             **place,
         }
-        record.children = {"tags": self._tag_names(site.tags, collection="sites", record_uuid=site.uuid)}
+        record.children = {
+            "notes": self._notes_text("sites", site.uuid, site.notes),
+            "tags": self._tag_names(site.tags, collection="sites", record_uuid=site.uuid),
+        }
         return record
 
     async def _plan_species(self) -> None:

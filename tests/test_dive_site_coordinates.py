@@ -222,9 +222,9 @@ class TestWhatReachesTheColumns:
         against the stored row had to special-case exactly this."""
         captured["db_dive_site"].latitude = BLUE_HOLE[0]
 
-        await _patch({"notes": "Deep, dark, and busier than it looks"}, mock_redis)
+        await _patch({"altitude": 372}, mock_redis)
 
-        assert captured["update_data"] == {"notes": "Deep, dark, and busier than it looks"}
+        assert captured["update_data"] == {"altitude": 372}
 
 
 class TestDiveCacheInvalidation:

@@ -44,7 +44,13 @@ from src.app.models.trip_part import TripPart
 from src.app.models.user import User
 from src.app.services.export.loader import ExportBundle, load_export_bundle
 from tests.conftest import db_available
-from tests.helpers.generators import create_dive_recording, create_person, create_tag, create_user
+from tests.helpers.generators import (
+    create_dive_recording,
+    create_person,
+    create_tag,
+    create_user,
+    save_dive_site,
+)
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -122,10 +128,13 @@ class TestScoping:
     async def test_every_other_table_is_scoped_to_the_caller_too(self, db: Session, owner: User, stranger: User):
         """Each of these applies the `user_id` scope itself, so each is its own chance to
         leave it off."""
+        sites = [DiveSite(user_id=owner.id, name="Mine"), DiveSite(user_id=stranger.id, name="Theirs")]
+        db.add_all(sites)
+        db.commit()
+        for site in sites:
+            save_dive_site(db, site)
         db.add_all(
             [
-                DiveSite(user_id=owner.id, name="Mine", notes=""),
-                DiveSite(user_id=stranger.id, name="Theirs", notes=""),
                 Trip(user_id=owner.id, name="Mine", notes=""),
                 Trip(user_id=stranger.id, name="Theirs", notes=""),
                 Course(user_id=owner.id, name="Mine", agency="tdi", status="completed", notes=""),
@@ -256,9 +265,10 @@ class TestTheCascadeLeavesNothingDangling:
 
     @pytest.mark.asyncio
     async def test_deleting_a_site_takes_its_dive_links_with_it(self, db: Session, owner: User):
-        site = DiveSite(user_id=owner.id, name="Gone", notes="")
+        site = DiveSite(user_id=owner.id, name="Gone")
         db.add(site)
         db.commit()
+        save_dive_site(db, site)
         dive = _dive(db, owner, number=1)
         db.add(DiveDiveSite(dive_id=dive.id, dive_site_id=site.id, position=0))
         db.commit()
@@ -386,9 +396,10 @@ class TestTheCascadeLeavesNothingDangling:
         way in. This one cannot be created through the API - every write validates
         ownership first - so it stands for hand-edited data, and the answer has to be
         "skip", not "export" and not "500 the one endpoint a diver uses to leave"."""
-        theirs = DiveSite(user_id=stranger.id, name="Theirs", notes="")
+        theirs = DiveSite(user_id=stranger.id, name="Theirs")
         db.add(theirs)
         db.commit()
+        save_dive_site(db, theirs)
         dive = _dive(db, owner, number=1)
         db.add(DiveDiveSite(dive_id=dive.id, dive_site_id=theirs.id, position=0))
         db.commit()
@@ -413,10 +424,12 @@ class TestOrdering:
     async def test_a_dives_sites_keep_their_visit_order(self, db: Session, owner: User):
         """Index 0 is the primary site, and it is the one fact UDDF's single-site
         convention would otherwise lose."""
-        first = DiveSite(user_id=owner.id, name="Zulu", notes="")
-        second = DiveSite(user_id=owner.id, name="Alpha", notes="")
+        first = DiveSite(user_id=owner.id, name="Zulu")
+        second = DiveSite(user_id=owner.id, name="Alpha")
         db.add_all([first, second])
         db.commit()
+        save_dive_site(db, first)
+        save_dive_site(db, second)
         dive = _dive(db, owner, number=1)
         # Deliberately added in the order that is *not* alphabetical and *not* id order,
         # so only `position` can produce the expected answer.

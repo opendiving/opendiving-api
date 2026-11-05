@@ -300,7 +300,7 @@ class TestUniquenessAgainstPostgres:
 
     @staticmethod
     def _site(db: Session, diver: User, name: str, location_name: str | None) -> DiveSite:
-        site = DiveSite(user_id=diver.id, name=name, notes="", location_name=location_name)
+        site = DiveSite(user_id=diver.id, name=name, location_name=location_name)
         db.add(site)
         db.commit()
         return site
@@ -328,7 +328,6 @@ class TestUniquenessAgainstPostgres:
             DiveSite(
                 user_id=diver.id,
                 name=name,
-                notes="",
                 location_name="Dahab, Egypt",
                 location_latitude=28.4949,
                 location_longitude=34.5136,

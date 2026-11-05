@@ -37,7 +37,7 @@ from src.app.services.export import load_export_bundle, write_divejson
 from src.app.services.logbook_import import plan_import, write_import
 from tests.conftest import db_available
 from tests.helpers.fake_redis import FakeRedis
-from tests.helpers.generators import create_user
+from tests.helpers.generators import create_user, save_dive_site
 from tests.helpers.import_parts import load_one
 from tests.helpers.open_meteo import FakeOpenMeteo, dahab_answers, dahab_body, fixture
 
@@ -93,11 +93,11 @@ def _site(db: Session, user: User, position: tuple[float, float] | None = BLUE_H
         name=f"Blue Hole {datetime.now(UTC).timestamp()}",
         latitude=None if position is None else position[0],
         longitude=None if position is None else position[1],
-        notes="",
         **fields,
     )
     db.add(site)
     db.commit()
+    save_dive_site(db, site)
     return site
 
 

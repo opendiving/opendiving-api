@@ -28,6 +28,7 @@ from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.person import Person
+from src.app.models.saved_site import SavedSite
 from src.app.models.species import Species
 from src.app.models.tag import Tag
 from src.app.models.trip import Trip
@@ -223,6 +224,7 @@ def build_bundle(
     parts_by_trip: dict[int, list[TripPartRead]] | None = None,
     courses: list[Course] | None = None,
     dive_sites: list[DiveSite] | None = None,
+    notes_by_site: dict[int, str] | None = None,
     gear_items: list[GearItem] | None = None,
     species: list[Species] | None = None,
     gear_sets: list[GearSet] | None = None,
@@ -287,6 +289,15 @@ def build_bundle(
         parts_by_trip={**{trip.id: [] for trip in (trips or [])}, **(parts_by_trip or {})},
         courses=courses or [],
         dive_sites=dive_sites or [],
+        saved_by_site={
+            site.id: SavedSite(
+                user_id=site.user_id,
+                dive_site_id=site.id,
+                notes=(notes_by_site or {}).get(site.id, ""),
+                created_at=site.created_at,
+            )
+            for site in (dive_sites or [])
+        },
         gear_items=gear_items or [],
         species=species or [],
         gear_sets=gear_sets or [],
@@ -345,7 +356,6 @@ def full_bundle() -> ExportBundle:
         location_bbox_north=27.83,
         location_bbox_west=34.18,
         location_bbox_east=34.30,
-        notes="Current picks up after slack.",
         # Every member a site gained beside its pin and its locality, so each writer's
         # mapping of them is exercised rather than their absence.
         other_names=["Shark & Yolanda", "砂辺"],
@@ -726,6 +736,7 @@ def full_bundle() -> ExportBundle:
         parts_by_trip={1: trip_parts},
         courses=[course],
         dive_sites=[reef, wall],
+        notes_by_site={reef.id: "Current picks up after slack."},
         gear_items=[regulator, second_regulator, suit, untyped],
         # Ordered by scientific name, matching `load_export_bundle`'s pre-sorted contract.
         species=[clownfish, morays],

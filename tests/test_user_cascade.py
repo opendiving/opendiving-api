@@ -53,6 +53,7 @@ from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
 from src.app.models.invite_link import InviteLink
 from src.app.models.person import Person
+from src.app.models.saved_site import SavedSite
 from src.app.models.tag import Tag
 from src.app.models.trip import Trip
 from src.app.models.trip_part import TripPart
@@ -256,6 +257,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             GearSet,
             InviteLink,
             Person,
+            SavedSite,
             Tag,
             Trip,
             UserDiveStats,

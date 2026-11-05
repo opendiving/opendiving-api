@@ -21,11 +21,15 @@ from ...crud.crud_dive_dive_sites import replace_dive_site_on_dives
 from ...crud.crud_dive_sites import (
     DIVE_SITE_NAME_KEY,
     DIVE_SITE_SEARCH_COLUMNS,
+    add_saved_site,
     crud_dive_sites,
     dive_site_name_exists,
     get_dive_sites_page,
+    get_saved_dive_site,
     get_summaries_for_dive_sites,
+    replace_saved_site_notes,
     resolve_dive_site_ids_for_user,
+    saved_by,
     search_condition,
     sites_by_external_id,
 )
@@ -91,16 +95,15 @@ async def _get_owned_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_us
 
 
 def _to_public_dive_site(
-    db_dive_site: DiveSiteReadInternal | dict[str, Any],
+    data: dict[str, Any],
     *,
     user_uuid: uuid_pkg.UUID,
     tags: list[str],
     summary: DiveSiteSummary,
 ) -> DiveSiteRead:
-    """Convert an internal dive site representation (integer FKs, flat locality columns)
-    into its public shape (owning user referenced by `uuid`, locality nested, tags and the
-    summary of its dives attached)."""
-    data = db_dive_site if isinstance(db_dive_site, dict) else db_dive_site.model_dump()
+    """Convert an internal dive site representation (integer FKs, flat locality columns, the
+    diver's notes beside them) into its public shape (owning user referenced by `uuid`, locality
+    nested, tags and the summary of its dives attached)."""
     dropped = {"id", "user_id"} | {f"{DIVE_SITE_LOCATION_PREFIX}{field}" for field in LOCATION_FIELDS}
     return DiveSiteRead(
         **{k: v for k, v in data.items() if k not in dropped},
@@ -171,7 +174,7 @@ async def write_dive_site(
 
     tag_ids = await _resolved_tag_ids(db, user_id=current_user["id"], names=dive_site.tags)
     dive_site_internal = DiveSiteCreateInternal(
-        **dive_site.model_dump(exclude={"location", "tags"}),
+        **dive_site.model_dump(exclude={"location", "notes", "tags"}),
         **location_columns(location, DIVE_SITE_LOCATION_PREFIX),
         user_id=current_user["id"],
     )
@@ -182,6 +185,13 @@ async def write_dive_site(
         ),
         DIVE_SITE_NAME_KEY,
         _NAME_TAKEN,
+    )
+    add_saved_site(
+        db,
+        user_id=current_user["id"],
+        dive_site_id=created_dive_site.id,
+        notes=dive_site.notes,
+        created_at=created_dive_site.created_at,
     )
     if tag_ids:
         await write_or_422(
@@ -194,7 +204,7 @@ async def write_dive_site(
     tags = (await get_tags_for_dive_sites(db, [created_dive_site.id]))[created_dive_site.id] if tag_ids else []
     # No dive can name a site that did not exist, so a new one has nothing to summarise.
     return _to_public_dive_site(
-        created_dive_site,
+        {**created_dive_site.model_dump(), "notes": dive_site.notes},
         user_uuid=current_user["uuid"],
         tags=tags,
         summary=DiveSiteSummary(),
@@ -320,7 +330,7 @@ async def _lookup_dive_sites(
 ) -> dict:
     """A page of `GET /dive-sites/lookup`. Reached only after the route has authorized the
     caller."""
-    conditions: tuple[Any, ...] = (DiveSite.user_id == user_id,)
+    conditions: tuple[Any, ...] = (saved_by(user_id),)
     if search:
         conditions += (search_condition(search),)
     if uuids:
@@ -394,17 +404,13 @@ async def _cached_read_dive_site(
 ) -> dict[str, Any]:
     """Fetches (and caches) one site with its tags and summary. Like the list, reached only
     once the route has established that the caller owns it."""
-    db_dive_site = await crud_dive_sites.get(
-        db=db, uuid=uuid, schema_to_select=DiveSiteReadInternal, return_as_model=True
-    )
+    db_dive_site = await get_saved_dive_site(db, uuid=uuid, user_id=user_id)
     if db_dive_site is None:
         raise NotFoundException("Dive site not found")
-    db_dive_site = cast(DiveSiteReadInternal, db_dive_site)
 
-    tags = (await get_tags_for_dive_sites(db, [db_dive_site.id]))[db_dive_site.id]
-    summary = (await get_summaries_for_dive_sites(db, dive_site_ids=[db_dive_site.id], user_id=user_id))[
-        db_dive_site.id
-    ]
+    site_id = db_dive_site["id"]
+    tags = (await get_tags_for_dive_sites(db, [site_id]))[site_id]
+    summary = (await get_summaries_for_dive_sites(db, dive_site_ids=[site_id], user_id=user_id))[site_id]
     return _to_public_dive_site(db_dive_site, user_uuid=owner_uuid, tags=tags, summary=summary).model_dump()
 
 
@@ -492,7 +498,7 @@ async def patch_dive_site(
         if depth_from is not None and depth_to is not None and depth_from > depth_to:
             raise UnprocessableEntityException(DEPTH_RANGE_MESSAGE)
 
-    update_data = values.model_dump(exclude_unset=True, exclude={"location", "tags"})
+    update_data = values.model_dump(exclude_unset=True, exclude={"location", "notes", "tags"})
     if replaces_location:
         update_data |= location_columns(values.location, DIVE_SITE_LOCATION_PREFIX)
     # Against the name the site ends up with, so a rename onto another name drops that one
@@ -514,8 +520,12 @@ async def patch_dive_site(
         )
     if tag_ids is not None:
         await write_or_422(db, replace_tags_for_dive_site(db, db_dive_site.id, tag_ids, commit=False), TAG_NOT_FOUND)
+    if values.notes is not None and not await replace_saved_site_notes(
+        db, user_id=owner_id, dive_site_id=db_dive_site.id, notes=values.notes
+    ):
+        raise NotFoundException("Dive site not found")
 
-    if update_data or tag_ids is not None:
+    if update_data or tag_ids is not None or values.notes is not None:
         await db.commit()
         await invalidate_dive_site_caches(owner_id)
         # Dive reads embed this site's name, locality and position, so a rename, a new

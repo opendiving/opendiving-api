@@ -71,6 +71,7 @@ from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
 from src.app.models.person import Person
+from src.app.models.saved_site import SavedSite
 from src.app.models.species import Species
 from src.app.models.tag import Tag
 from src.app.models.trip import Trip
@@ -401,6 +402,25 @@ class TestTheRoundTrip:
         dives = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalars().all()
         assert len(dives) == 1
         assert dives[0].trip_id is not None
+
+    @pytest.mark.asyncio
+    async def test_a_site_arrives_on_the_list_with_its_notes_and_its_date(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        source, destination = create_user(db), create_user(db)
+        saved = db.execute(
+            select(SavedSite).where(SavedSite.dive_site_id == create_dive_site(db, source).id)
+        ).scalar_one()
+        saved.notes, saved.created_at = "Gate code 1234", datetime(2024, 3, 1, 9, 30, tzinfo=UTC)
+        db.commit()
+
+        await _apply(async_db, destination.id, await _export(async_db, source.id))
+
+        arrived = (await async_db.execute(select(SavedSite).where(SavedSite.user_id == destination.id))).scalar_one()
+        assert (arrived.notes, arrived.created_at) == (saved.notes, saved.created_at)
+        assert await async_db.scalar(select(DiveSite.user_id).where(DiveSite.id == arrived.dive_site_id)) == (
+            destination.id
+        )
 
     @pytest.mark.asyncio
     async def test_a_second_export_of_the_destination_says_the_same_thing(
@@ -757,7 +777,6 @@ class TestUniquenessNeverFailsAnImport:
                 user_id=destination.id,
                 name=clash["name"],
                 location_name=(clash.get("location") or {}).get("name"),
-                notes="",
             )
         )
         db.commit()
@@ -783,7 +802,6 @@ class TestUniquenessNeverFailsAnImport:
             user_id=destination.id,
             name=clash["name"],
             location_name=(clash.get("location") or {}).get("name"),
-            notes="",
         )
         db.add(existing)
         db.commit()
@@ -819,7 +837,7 @@ class TestUniquenessNeverFailsAnImport:
         """ "Blue Hole " is the "Blue Hole" already there, as a save through the API would
         have it - not a second site beside it that the next save of it refuses."""
         destination = create_user(db)
-        db.add(DiveSite(user_id=destination.id, name="Blue Hole", location_name="Dahab", notes=""))
+        db.add(DiveSite(user_id=destination.id, name="Blue Hole", location_name="Dahab"))
         db.commit()
         item_uuid = str(uuid7())
         document = json.dumps(
@@ -873,7 +891,7 @@ class TestUniquenessNeverFailsAnImport:
         """Its locality is read for the key, but a linked site writes nothing, so a position
         that would have been dropped from it was dropped from nothing."""
         destination = create_user(db)
-        db.add(DiveSite(user_id=destination.id, name="Blue Hole", location_name="Dahab", notes=""))
+        db.add(DiveSite(user_id=destination.id, name="Blue Hole", location_name="Dahab"))
         db.commit()
         location = {"name": "Dahab", "position": {"latitude": 200, "longitude": 0}}
         linked = _site_document({"name": "Blue Hole", "location": location})

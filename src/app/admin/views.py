@@ -137,11 +137,13 @@ def register_admin_views(admin: CRUDAdmin) -> None:
     # cache invalidation**: that lives on the API routes (`services/cache_invalidation.py`)
     # and nowhere else, so Redis would go on serving the deleted rows for the rest of the
     # TTL. Delete through the API. `view`/`create`/`update` are unaffected.
+    # No `"create"` either: a site is written with its owner's `saved_site` row, which this form
+    # has no way to add, and one without it is on nobody's list.
     admin.add_view(
         model=DiveSite,
         create_schema=DiveSiteCreateInternal,
         update_schema=DiveSiteUpdate,
-        allowed_actions={"view", "create", "update"},
+        allowed_actions={"view", "update"},
     )
 
     admin.add_view(

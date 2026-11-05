@@ -67,6 +67,7 @@ from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.gear_set import GearSet
 from ...models.gear_set_item import GearSetItem
 from ...models.person import Person
+from ...models.saved_site import SavedSite
 from ...models.species import Species
 from ...models.tag import Tag
 from ...models.trip import Trip
@@ -174,6 +175,9 @@ class ExportBundle:
     parts_by_trip: dict[int, list[TripPartRead]]
     courses: list[Course]
     dive_sites: list[DiveSite]
+    # Keyed for every site in `dive_sites`: the diver's notes and the `created_at` a site read
+    # answers are on this row, and the site says neither.
+    saved_by_site: dict[int, SavedSite]
     gear_items: list[GearItem]
     # The species this user's live dives reference, and only those. Unlike every other list
     # here it is not "the user's rows" - there is no such thing for a global table - so an
@@ -520,7 +524,15 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
     # collection here: the bundle's contract is a stable order run after run, not the list
     # endpoint's ordering (which runs newest-first with the dateless rows last).
     courses = await _owned(db, Course, user_id=user_id, order_by=(Course.start_date, Course.id))
-    dive_sites = await _owned(db, DiveSite, user_id=user_id, order_by=(DiveSite.name, DiveSite.id))
+    saved_sites = (
+        await db.execute(
+            select(DiveSite, SavedSite)
+            .join(SavedSite, SavedSite.dive_site_id == DiveSite.id)
+            .where(SavedSite.user_id == user_id)
+            .order_by(DiveSite.name, DiveSite.id)
+        )
+    ).all()
+    dive_sites = [site for site, _ in saved_sites]
     gear_items = await _owned(db, GearItem, user_id=user_id, order_by=(GearItem.name, GearItem.id))
     certifications = await _owned(
         db, Certification, user_id=user_id, order_by=(Certification.certified_on, Certification.id)
@@ -541,6 +553,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         parts_by_trip=await get_parts_for_trips(db=db, trip_ids=[trip.id for trip in trips]),
         courses=courses,
         dive_sites=dive_sites,
+        saved_by_site={site.id: saved for site, saved in saved_sites},
         gear_items=gear_items,
         # After `_ordered_ids_by_dive` above, which is what says which species to read.
         species=await _referenced_species(db, sightings_by_dive),

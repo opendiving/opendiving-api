@@ -258,6 +258,7 @@ def _export_dive_site(bundle: ExportBundle, site: DiveSite) -> ExportDiveSite:
     do - and each list the site holds nothing in is written as absence.
     """
     entry_types = [entry for value in site.entry_types if (entry := _sayable(value, EntryType)) is not None]
+    saved = bundle.saved_by_site[site.id]
     return ExportDiveSite(
         uuid=site.uuid,
         name=site.name,
@@ -273,8 +274,8 @@ def _export_dive_site(bundle: ExportBundle, site: DiveSite) -> ExportDiveSite:
         altitude=site.altitude,
         entry_types=entry_types or None,
         tags=[tag.name for tag in bundle.tags_for(site)] or None,
-        notes=_text(site.notes),
-        created_at=site.created_at,
+        notes=_text(saved.notes),
+        created_at=saved.created_at,
     )
 
 

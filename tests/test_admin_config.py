@@ -203,7 +203,8 @@ class TestHardDeletedModelsCannotBeDeletedFromThePanel:
         actions = self._actions_for(model)
 
         assert '"delete"' not in actions, model
-        assert '"view", "create", "update"' in actions, model
+        # A site is written with its owner's saved row, which the panel's form cannot add.
+        assert ('"view", "update"' if model == "DiveSite" else '"view", "create", "update"') in actions, model
 
     @pytest.mark.parametrize("model", PANEL_SOFT_DELETING)
     def test_the_soft_deleting_models_keep_theirs(self, model: str):

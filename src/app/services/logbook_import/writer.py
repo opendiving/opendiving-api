@@ -67,6 +67,7 @@ from ...models.gear_service_record import GearServiceRecord
 from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.gear_set import GearSet
 from ...models.person import Person
+from ...models.saved_site import SavedSite
 from ...models.trip import Trip
 from ...models.trip_part import TripPart
 from ...schemas.certification import CertificationSide
@@ -452,6 +453,14 @@ class _Writer:
     async def _write_sites(self) -> None:
         for record in self._plan.writable("sites"):
             site_id = await self._write_row("sites", DiveSite, record)
+            await self._db.execute(
+                insert(SavedSite).values(
+                    user_id=record.values["user_id"],
+                    dive_site_id=site_id,
+                    notes=record.children["notes"],
+                    created_at=record.values["created_at"],
+                )
+            )
             tag_ids = [self._tag_ids[name] for name in record.children.get("tags") or []]
             if tag_ids:
                 await replace_tags_for_dive_site(self._db, site_id, tag_ids, commit=False)

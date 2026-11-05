@@ -757,8 +757,8 @@ def _divesite_element(bundle: ExportBundle, guides: dict[tuple[int, int], str]) 
             # `sitedataType` is an `xs:sequence`, and it lists the deep end first.
             _optional(sitedata, "maximumdepth", site.depth_to)
             _optional(sitedata, "minimumdepth", site.depth_from)
-        if site.notes:
-            _sub(_sub(element, "notes"), "para", site.notes)
+        if notes := bundle.saved_by_site[site.id].notes:
+            _sub(_sub(element, "notes"), "para", notes)
     return divesite
 
 

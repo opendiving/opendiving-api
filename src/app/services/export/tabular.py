@@ -465,7 +465,7 @@ def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
                 "; ".join(site.entry_types),
                 "; ".join(tag.name for tag in bundle.tags_for(site)),
                 counts.get(site.id, 0),
-                site.notes,
+                bundle.saved_by_site[site.id].notes,
                 str(site.uuid),
             )
 

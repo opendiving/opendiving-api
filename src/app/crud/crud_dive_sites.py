@@ -1,10 +1,10 @@
 import uuid as uuid_pkg
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, NamedTuple
 
 from fastcrud import FastCRUD
-from sqlalchemy import ColumnElement, func, inspect, literal, or_, select
+from sqlalchemy import ColumnElement, Select, func, inspect, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.utils.datetime_offset import combine_dive_start_time
@@ -14,6 +14,7 @@ from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_site import DiveSite
 from ..models.dive_site_tag import DiveSiteTag
 from ..models.dive_species import DiveSpecies
+from ..models.saved_site import SavedSite
 from ..schemas.dive_site import (
     DiveSiteCreateInternal,
     DiveSiteListSort,
@@ -36,6 +37,42 @@ crud_dive_sites = CRUDDiveSite(DiveSite)
 # `search_condition`, being list elements rather than a column. Named rather than inlined,
 # on `COURSE_SEARCH_COLUMNS`' precedent: `test_picker_search.py` asserts these exist.
 DIVE_SITE_SEARCH_COLUMNS = ("name", "location_name")
+
+
+def saved_by(user_id: int) -> ColumnElement[bool]:
+    """The sites on this diver's list - what "the caller's site" means wherever a site is named."""
+    return DiveSite.id.in_(select(SavedSite.dive_site_id).where(SavedSite.user_id == user_id))
+
+
+def _select_saved_sites(user_id: int) -> Select[Any]:
+    """Every mapped column of the diver's sites, with their saved row's notes and `created_at`."""
+    site_columns = [column for column in inspect(DiveSite).columns if column.key != "created_at"]
+    return select(*site_columns, SavedSite.notes, SavedSite.created_at).join_from(
+        DiveSite, SavedSite, (SavedSite.dive_site_id == DiveSite.id) & (SavedSite.user_id == user_id)
+    )
+
+
+async def get_saved_dive_site(db: AsyncSession, *, uuid: uuid_pkg.UUID, user_id: int) -> dict[str, Any] | None:
+    """One site of the diver's, in `_select_saved_sites`' shape, or `None` if it is not on their list."""
+    row = (await db.execute(_select_saved_sites(user_id).where(DiveSite.uuid == uuid))).mappings().one_or_none()
+    return None if row is None else dict(row)
+
+
+def add_saved_site(db: AsyncSession, *, user_id: int, dive_site_id: int, notes: str, created_at: datetime) -> None:
+    """Put a new site on its owner's list, in the transaction that creates it. Stamped with the
+    site's own `created_at`, so a read answers the instant the create did."""
+    db.add(SavedSite(user_id=user_id, dive_site_id=dive_site_id, notes=notes, created_at=created_at))
+
+
+async def replace_saved_site_notes(db: AsyncSession, *, user_id: int, dive_site_id: int, notes: str) -> bool:
+    """Whether the diver had this site on their list to write the notes to. Does not commit."""
+    written = await db.scalar(
+        update(SavedSite)
+        .where(SavedSite.user_id == user_id, SavedSite.dive_site_id == dive_site_id)
+        .values(notes=notes, updated_at=datetime.now(UTC))
+        .returning(SavedSite.id)
+    )
+    return written is not None
 
 
 def search_condition(term: str) -> ColumnElement[bool]:
@@ -153,17 +190,17 @@ async def get_dive_sites_page(
     Hand-written for the two orders on the summary, which are aggregates over the dives
     rather than columns of the site: the most dived first, and the most recently dived first
     with a site no live dive names after every one that has. Ties go by name either way.
-    Rows are plain dicts of every mapped column, as `search_multi` returns them.
+    Rows are plain dicts, `_select_saved_sites`' shape.
     """
-    conditions: list[ColumnElement[bool]] = [DiveSite.user_id == user_id]
+    conditions: list[ColumnElement[bool]] = []
     if search:
         conditions.append(search_condition(search))
     if tag_id is not None:
         conditions.append(carrying_tag(tag_id))
 
-    total_count = await db.scalar(select(func.count()).select_from(DiveSite).where(*conditions))
+    total_count = await db.scalar(select(func.count()).select_from(DiveSite).where(saved_by(user_id), *conditions))
 
-    statement = select(*inspect(DiveSite).columns).where(*conditions)
+    statement = _select_saved_sites(user_id).where(*conditions)
     by_name = (DiveSite.name.asc(), DiveSite.id.asc())
     if sort is DiveSiteListSort.NAME:
         statement = statement.order_by(*by_name)
@@ -206,7 +243,7 @@ async def sites_by_external_id(db: AsyncSession, *, user_id: int) -> dict[tuple[
     """
     rows = await db.execute(
         select(DiveSite.id, DiveSite.uuid, DiveSite.name, DiveSite.external_ids)
-        .where(DiveSite.user_id == user_id, func.json_array_length(DiveSite.external_ids) > 0)
+        .where(saved_by(user_id), func.json_array_length(DiveSite.external_ids) > 0)
         .order_by(DiveSite.name, DiveSite.id)
     )
     held: dict[tuple[str, str], list[HeldSite]] = {}
@@ -220,11 +257,11 @@ async def sites_by_external_id(db: AsyncSession, *, user_id: int) -> dict[tuple[
 async def resolve_dive_site_ids_for_user(
     db: AsyncSession, dive_site_uuids: list[uuid_pkg.UUID], user_id: int
 ) -> dict[uuid_pkg.UUID, int] | None:
-    """Resolve dive site public `uuid`s to their internal `id`s, scoped to dive sites
-    belonging to the given user.
+    """Resolve dive site public `uuid`s to their internal `id`s, scoped to the dive sites on
+    the given user's list.
 
-    Returns `None` if any given uuid doesn't resolve to a dive site owned by the user
-    (used to prevent a user from linking another user's dive site(s) to their own dive).
+    Returns `None` if any given uuid doesn't resolve to a dive site on that list (used to
+    prevent a user from linking another user's dive site(s) to their own dive).
     """
     unique_uuids = set(dive_site_uuids)
     if not unique_uuids:
@@ -232,7 +269,7 @@ async def resolve_dive_site_ids_for_user(
 
     stmt = select(DiveSite.uuid, DiveSite.id).where(
         DiveSite.uuid.in_(unique_uuids),
-        DiveSite.user_id == user_id,
+        saved_by(user_id),
     )
     result = await db.execute(stmt)
     mapping = {row.uuid: row.id for row in result}

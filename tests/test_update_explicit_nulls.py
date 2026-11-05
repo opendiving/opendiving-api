@@ -59,7 +59,7 @@ from src.app.schemas.course import CourseUpdate
 from src.app.schemas.dive import DiveUpdate
 from src.app.schemas.dive_draft import DiveDraftUpdate
 from src.app.schemas.dive_form_preset import DiveFormPresetUpdate
-from src.app.schemas.dive_site import DiveSiteUpdate
+from src.app.schemas.dive_site import DiveSiteUpdate, DiveSiteUpdateRequest
 from src.app.schemas.gear_item import GearItemUpdate
 from src.app.schemas.gear_service import GearServiceRecordUpdate, GearServiceScheduleUpdate
 from src.app.schemas.gear_set import GearSetUpdate
@@ -250,7 +250,7 @@ def test_a_position_can_still_be_cleared_as_a_pair(schema: type[BaseModel]) -> N
 
 def test_names_every_offending_field_at_once() -> None:
     with pytest.raises(ValidationError) as exc_info:
-        DiveSiteUpdate.model_validate({"name": None, "notes": None})
+        DiveSiteUpdateRequest.model_validate({"name": None, "notes": None})
 
     message = str(exc_info.value)
     assert "name" in message

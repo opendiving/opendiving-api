@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, CheckConstraint, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import JSON, CheckConstraint, Column, Float, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -7,11 +7,11 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 
 class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
     __tablename__ = "dive_site"
+    __mapper_args__ = {"exclude_properties": ["notes"]}
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
-    notes: Mapped[str] = mapped_column(Text, default="")
     # Two plain floats rather than PostGIS: a dive site is a point, and the only questions
     # asked of it are "show it" and "list them" - see DECISIONS.md.
     latitude: Mapped[float | None] = mapped_column(Float, default=None)
@@ -50,6 +50,10 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
+            # A diver's notes are on `saved_site`. This column stays until the build that still
+            # reads and writes it has gone (DECISIONS.md, *A column the serving build maps is
+            # dropped a deploy after it is unmapped*); a row inserted here takes the default.
+            Column("notes", Text, nullable=False, server_default=""),
             # Case-insensitive uniqueness per user on (name, locality name). COALESCE maps
             # a NULL locality to '' so two sites with the same name and no locality are
             # also considered duplicates. The key is the locality's *name* and none of its

@@ -36,6 +36,7 @@ from .invite_link import InviteLink
 from .invite_request import InviteRequest
 from .map_tile import MapTile
 from .person import Person
+from .saved_site import SavedSite
 from .species import Species
 from .species_name import SpeciesName
 from .tag import Tag
