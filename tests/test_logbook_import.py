@@ -139,6 +139,7 @@ from tests.helpers.generators import (
     create_tag,
     create_trip,
     create_user,
+    save_dive_site,
 )
 from tests.helpers.images import gif, phone_jpeg
 from tests.helpers.import_parts import load_one
@@ -772,14 +773,7 @@ class TestUniquenessNeverFailsAnImport:
         destination = create_user(db)
         original = parse_document(document)
         clash = original["sites"][0]
-        db.add(
-            DiveSite(
-                user_id=destination.id,
-                name=clash["name"],
-                location_name=(clash.get("location") or {}).get("name"),
-            )
-        )
-        db.commit()
+        _site_of(db, destination, clash["name"], (clash.get("location") or {}).get("name"))
 
         plan = await _apply(async_db, destination.id, document)
 
@@ -798,14 +792,7 @@ class TestUniquenessNeverFailsAnImport:
         destination = create_user(db)
         original = parse_document(document)
         clash = original["sites"][0]
-        existing = DiveSite(
-            user_id=destination.id,
-            name=clash["name"],
-            location_name=(clash.get("location") or {}).get("name"),
-        )
-        db.add(existing)
-        db.commit()
-        db.refresh(existing)
+        existing = _site_of(db, destination, clash["name"], (clash.get("location") or {}).get("name"))
 
         await _apply(async_db, destination.id, document)
 
@@ -837,8 +824,7 @@ class TestUniquenessNeverFailsAnImport:
         """ "Blue Hole " is the "Blue Hole" already there, as a save through the API would
         have it - not a second site beside it that the next save of it refuses."""
         destination = create_user(db)
-        db.add(DiveSite(user_id=destination.id, name="Blue Hole", location_name="Dahab"))
-        db.commit()
+        _site_of(db, destination, "Blue Hole", "Dahab")
         item_uuid = str(uuid7())
         document = json.dumps(
             {
@@ -891,8 +877,7 @@ class TestUniquenessNeverFailsAnImport:
         """Its locality is read for the key, but a linked site writes nothing, so a position
         that would have been dropped from it was dropped from nothing."""
         destination = create_user(db)
-        db.add(DiveSite(user_id=destination.id, name="Blue Hole", location_name="Dahab"))
-        db.commit()
+        _site_of(db, destination, "Blue Hole", "Dahab")
         location = {"name": "Dahab", "position": {"latitude": 200, "longitude": 0}}
         linked = _site_document({"name": "Blue Hole", "location": location})
         created = _site_document({"name": "Canyon", "location": location})
@@ -3659,6 +3644,15 @@ class TestTheClassificationConditionsAndTags:
         assert await _tags_of(async_db, destination.id) == ["drift"]
 
 
+def _site_of(db: Session, user: Any, name: str, location_name: str | None) -> DiveSite:
+    site = DiveSite(user_id=user.id, name=name, location_name=location_name)
+    db.add(site)
+    db.commit()
+    db.refresh(site)
+    save_dive_site(db, site)
+    return site
+
+
 def _site_document(*sites: dict[str, Any]) -> bytes:
     """Hand-written sites, each with a fresh uuid unless it names one."""
     return json.dumps(
@@ -5121,6 +5115,8 @@ class TestTheBoundsCensus:
             "ck_dive_avg_depth_within_max",
             # `_plan_site` drops both ends of an inverted depth range.
             "ck_dive_site_depth_range",
+            # An import never writes a Commons row, and a private row carries no provenance.
+            "ck_dive_site_owner_provenance",
             "ck_dive_entry_position_pair",
             "ck_dive_exit_position_pair",
             "ck_dive_mixture_oxygen_helium_sum",

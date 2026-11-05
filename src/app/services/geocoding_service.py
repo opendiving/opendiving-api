@@ -100,8 +100,8 @@ _FALLBACK_SEARCH_LANGUAGE = "en"
 # not a part of where a place is.
 _PHOTON_ADDRESS_KEYS = ("locality", "district", "city", "county", "state", "country")
 
-# Photon's `osm_type`, spelled the way the dive-site catalog spells an OSM identity
-# (`scripts/build_dive_site_catalog.py`), so a client compares the two by string.
+# Photon's `osm_type`, spelled the way the `openstreetmap` registry spells an identifier, so a
+# client compares a row with a site's `external_ids` by string.
 _OSM_TYPES = {"N": "node", "W": "way", "R": "relation"}
 
 # How long a request will wait for a provider's cap to free up before giving up and answering
@@ -642,7 +642,7 @@ def _normalize_photon(feature: dict[str, Any]) -> GeocodeResult | None:
         location=location[:_LOCATION_MAX_LENGTH],
         name=name[:_NAME_MAX_LENGTH] if name else None,
         # Photon sends no licence, and what it serves is OpenStreetMap's. Byte-identical to
-        # the dive-site catalog's OSM credit on purpose: the site form shows both sources
+        # a Commons seed's OSM credit on purpose: the site form shows both sources
         # under one credit line that collapses repeats by string.
         attribution=_DEFAULT_ATTRIBUTION,
         country=country[:_COUNTRY_MAX_LENGTH] if country else None,

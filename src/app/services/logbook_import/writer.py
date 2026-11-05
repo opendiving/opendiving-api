@@ -34,7 +34,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +45,7 @@ from ...crud.crud_checkin_details import write_checkin_details
 from ...crud.crud_dive_dive_sites import replace_dive_sites_for_dive
 from ...crud.crud_dive_gear_items import replace_gear_items_for_dive
 from ...crud.crud_dive_mixtures import get_mixtures_for_dive, replace_mixtures_for_dive, vessel_ids_for_dive
+from ...crud.crud_dive_sites import save_commons_site
 from ...crud.crud_dive_species import replace_species_for_dive
 from ...crud.crud_gear_set_items import replace_gear_items_for_set
 from ...crud.crud_people import (
@@ -463,7 +464,20 @@ class _Writer:
             )
             tag_ids = [self._tag_ids[name] for name in record.children.get("tags") or []]
             if tag_ids:
-                await replace_tags_for_dive_site(self._db, site_id, tag_ids, commit=False)
+                await replace_tags_for_dive_site(self._db, site_id, tag_ids, user_id=self._user_id, commit=False)
+        await self._save_commons_sites()
+
+    async def _save_commons_sites(self) -> None:
+        """The Commons records the document names and the caller has not saved: a saved row and
+        their tags, with nothing written to the record."""
+        for record in self._plan.commons_to_save():
+            site_id = cast(int, record.row_id)
+            saved = await save_commons_site(
+                self._db, user_id=self._user_id, dive_site_id=site_id, notes=record.children["notes"]
+            )
+            tag_ids = [self._tag_ids[name] for name in record.children.get("tags") or []]
+            if saved and tag_ids:
+                await replace_tags_for_dive_site(self._db, site_id, tag_ids, user_id=self._user_id, commit=False)
 
     async def _write_gear(self) -> None:
         for record in self._plan.writable("gear"):
@@ -548,9 +562,8 @@ class _Writer:
         """Every tag the sites, the dives and the tag list name, the ones the caller has
         matched by the unique index's own fold and the rest created."""
         names = [*self._plan.tags]
-        for collection in ("sites", "dives"):
-            for record in self._plan.writable(collection):
-                names.extend(record.children.get("tags") or [])
+        for record in (*self._plan.writable("sites"), *self._plan.commons_to_save(), *self._plan.writable("dives")):
+            names.extend(record.children.get("tags") or [])
         self._tag_ids = await tag_ids_by_name(self._db, user_id=self._user_id, names=list(dict.fromkeys(names)))
 
     async def _write_dives(self) -> None:

@@ -6,6 +6,7 @@ from .auth import router as auth_router
 from .certifications import router as certifications_router
 from .checkin_details import router as checkin_details_router
 from .checkin_links import router as checkin_links_router
+from .commons_export import router as commons_router
 from .config import router as config_router
 from .contacts import router as contacts_router
 from .courses import router as courses_router
@@ -36,6 +37,7 @@ from .users import router as users_router
 
 router = APIRouter(prefix="/v1")
 router.include_router(health_router)
+router.include_router(commons_router)
 router.include_router(config_router)
 router.include_router(join_channels_router)
 router.include_router(auth_router)

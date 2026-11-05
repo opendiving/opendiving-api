@@ -15,7 +15,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import Engine, inspect, select, text
+from sqlalchemy import Engine, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -23,7 +23,7 @@ from src.app.api.v1 import dive_sites as dive_sites_module
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.crud.crud_dive_sites import (
     get_dive_sites_page,
-    get_saved_dive_site,
+    get_readable_dive_site,
     resolve_dive_site_ids_for_user,
     sites_by_external_id,
 )
@@ -125,19 +125,13 @@ class TestTheRevision:
         assert (notes, table) == (["Gate code 1234", "Rewritten", "Their own words"], None)
 
 
-class TestTheMapper:
-    def test_the_notes_are_on_the_table_and_off_the_mapper(self) -> None:
-        assert "notes" in DiveSite.__table__.columns
-        assert "notes" not in inspect(DiveSite).columns
-
-
 def _as(user: User) -> dict[str, Any]:
     return {"id": user.id, "uuid": user.uuid, "username": user.username, "is_superuser": False}
 
 
 async def _read(async_db: AsyncSession, user: User, uuid: Any) -> DiveSiteRead:
     read = await dive_sites_module._cached_read_dive_site.__wrapped__(  # type: ignore[attr-defined]
-        None, user_id=user.id, uuid=uuid, owner_uuid=user.uuid, db=async_db
+        None, user_id=user.id, uuid=uuid, db=async_db
     )
     return DiveSiteRead.model_validate(read)
 
@@ -172,9 +166,7 @@ def no_caches(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.usefixtures("no_caches")
 class TestTheRoutes:
     @pytest.mark.asyncio
-    async def test_a_create_writes_the_saved_row_and_leaves_the_site_s_column_empty(
-        self, db: Session, async_db: AsyncSession, diver: User
-    ) -> None:
+    async def test_a_create_writes_the_saved_row(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         created = await dive_sites_module.write_dive_site(
             request=MagicMock(),
             dive_site=DiveSiteCreate.model_validate(
@@ -185,9 +177,7 @@ class TestTheRoutes:
         )
 
         saved = db.execute(select(SavedSite).join(DiveSite).where(DiveSite.uuid == created.uuid)).scalars().one()
-        column = db.scalar(text("SELECT notes FROM dive_site WHERE id = :id"), {"id": saved.dive_site_id})
         assert (saved.user_id, saved.notes, saved.created_at) == (diver.id, "Gate code 1234", created.created_at)
-        assert column == ""
         assert created.notes == "Gate code 1234"
 
     @pytest.mark.asyncio
@@ -220,7 +210,6 @@ class TestTheRoutes:
         db.expire_all()
         saved = db.execute(select(SavedSite).where(SavedSite.dive_site_id == site.id)).scalars().one()
         assert (saved.notes, saved.updated_at is not None) == ("Mine", True)
-        assert db.scalar(text("SELECT notes FROM dive_site WHERE id = :id"), {"id": site.id}) == ""
         assert db.get(DiveSite, site.id).name == name  # type: ignore[union-attr]
 
     @pytest.mark.asyncio
@@ -259,7 +248,7 @@ class TestASiteNoSavedRowNames:
         )
 
         assert (page["data"], page["total_count"]) == ([], 0)
-        assert await get_saved_dive_site(async_db, uuid=site.uuid, user_id=diver.id) is None
+        assert await get_readable_dive_site(async_db, uuid=site.uuid, user_id=diver.id) is None
         assert await resolve_dive_site_ids_for_user(async_db, [site.uuid], diver.id) is None
         assert await sites_by_external_id(async_db, user_id=diver.id) == {}
         assert (await load_export_bundle(async_db, user_id=diver.id)).dive_sites == []
@@ -283,7 +272,7 @@ class TestAnotherDiver:
         other = create_user(db)
         site = create_dive_site(db, diver)
 
-        assert await get_saved_dive_site(async_db, uuid=site.uuid, user_id=other.id) is None
+        assert await get_readable_dive_site(async_db, uuid=site.uuid, user_id=other.id) is None
         assert await resolve_dive_site_ids_for_user(async_db, [site.uuid], other.id) is None
 
 

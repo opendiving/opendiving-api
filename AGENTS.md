@@ -165,9 +165,10 @@ something to look up, not to restate it.
   single resources singular and keyed by public uuid (`/dive/{uuid}`).
 - Methods: GET (read), POST (create), PATCH (partial update), DELETE (remove). PUT only for
   idempotent whole-slot replace — currently `PUT /certification/{uuid}/file/{side}`,
-  `PUT /user/avatar`, `PUT /user/portrait` and `PUT /admin/species/{uuid}/photo`. Attaching a
-  dive-computer export is **not** one of them: a dive holds an ordered list of recordings and each
-  holds a list of files, so there is no slot to replace and `POST /dive/{uuid}/recordings` appends.
+  `PUT /user/avatar`, `PUT /user/portrait`, `PUT /admin/species/{uuid}/photo` and
+  `PUT /dive-site/{uuid}/saved`. Attaching a dive-computer export is **not** one of them: a dive
+  holds an ordered list of recordings and each holds a list of files, so there is no slot to replace
+  and `POST /dive/{uuid}/recordings` appends.
 - Response: the resource schema directly (`response_model=DiveRead`) — no envelope. Success is
   signalled by the status code.
 - Errors: FastAPI's `{ "detail": "message" }`; 422 returns `detail` as an array of per-field
@@ -175,12 +176,13 @@ something to look up, not to restate it.
   by hand. The frontend normalizes both shapes via `getApiErrorMessage`.
 - Status codes: 200 (success), 201 (created), 304 (ETag match on file/profile reads), 400 (bad
   request), 401 (unauthenticated), 403 (authenticated but not permitted at all — the superuser gate,
-  the registration gate and the two API-key refusals (a read-only key past a safe method, any key on
-  a credential route), which are all of them; **not** "someone else's resource", which is a 404),
-  404 (not found, *or* found but not the caller's — see *"Ownership checks go through one
-  `fetch_owned_or_raise`"* in `DECISIONS.md`), 409 (conflict, e.g. a dive file already linked to
-  another dive), 413 (upload over the size limit, or over the account's storage limit), 415
-  (unrecognized dive-computer export), 422 (validation failure), 500 (server error)
+  the registration gate, the two API-key refusals (a read-only key past a safe method, any key on a
+  credential route) and a `PATCH` naming a shared member of a Commons record, which are all of them;
+  **not** "someone else's resource", which is a 404), 404 (not found, *or* found but not the
+  caller's — see *"Ownership checks go through one `fetch_owned_or_raise`"* in `DECISIONS.md`), 409
+  (conflict, e.g. a dive file already linked to another dive), 413 (upload over the size limit, or
+  over the account's storage limit), 415 (unrecognized dive-computer export), 422 (validation
+  failure), 500 (server error)
 - Paginated endpoints: FastCRUD's `PaginatedListResponse` —
   `{ data: [...], total_count: number, has_more: boolean, page: number, items_per_page: number }`.
   Page/size, not limit/offset; clamp the query params with `clamp_pagination` (see

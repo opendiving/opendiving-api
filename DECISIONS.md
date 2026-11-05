@@ -5366,126 +5366,97 @@ re-derivable. Rejected: `uap-python`, `user-agents` (dormant), `ua-parser-js` 2.
 `TRUSTED_PROXY_IPS` handling is unchanged; a misconfigured instance records the proxy's address in
 `ip`, as `docs/authentication.md` says.
 
-## The dive-site catalog is a vendored ODbL database, and the licence is the hard part
+## A dive site is one record with one owner, and a diver's own words sit beside it
 
-`GET /api/v1/dive-sites/suggest` answers from `src/app/data/dive_site_catalog.json` — 3,702 records
-extracted from OpenStreetMap and Wikidata by `scripts/build_dive_site_catalog.py` and checked in —
-because the geocoder cannot: it knows where Dahab is, not where the Blue Hole's north entry is. It
-is `services/marine_areas.py` one size up and copies that reasoning: a vendored, licence-stamped
-extract beats a live dependency, since a self-hoster should not acquire an outbound host, an account
-and a second failure mode for a form suggestion.
+A `dive_site` row holds what is true of the place and has one owner: an account, or, where `user_id`
+is null, OpenDiving Commons, whose record every account reads and no ordinary request writes.
+`saved_site` and a diver's `dive_site_tag` rows are the diver's relation to it. A dive names a
+Commons record in place, and naming one saves it. `dive_dive_site`, `dive_site_tag` and `saved_site`
+therefore hold several divers' rows for one site, so every reader of them filters on the reader.
+Becoming a Commons record is a change of owner on the same row.
 
-A pick makes an ordinary per-user `dive_site` row through `POST /dive-site`, keeping only the
-record's OpenStreetMap or Wikidata entry in `external_ids` — the registry's identity, not this
-file's row. The opposite of the species catalog, because the entity differs: a species is a
-universal immutable fact, so a shared row is right; a dive site is personal and editable, and the
-whole chain — join table, per-user rows, uniqueness, caches, export — is built on ownership.
+Rejected: copying a record into each account and syncing both ways, which keeps two records per site
+and the question of which a dive means; notes on the row for private sites alone, which leaves the
+shared row a column able to hold "gate code 1234".
 
-## Dive-site catalog: The PostGIS revisit condition is *not* met by these query parameters
+## The Commons bundle seeds the rows, and the sync has two branches
+
+`src/app/data/commons_dive_sites.geojson` is the repository's records at a named commit, 3,712 at
+`f96a9ed`, in one file, and `sync_commons` brings the rows in line after the migrations, keyed on
+the record's uuid. A vendored file beats a live dependency: a self-hoster acquires no outbound host,
+and upgrading refreshes the copy. A copy inserts and updates; the primary only inserts, the table
+being the truth there. Neither deletes, since dives name the rows. A bundled uuid naming a private
+row is skipped and logged: an import keeps a document's uuid when nothing claims it. It runs whether
+or not this process migrated, one worker at a time, and never fails a start.
+
+## `COMMONS_PRIMARY` is a setting of its own, and off is what a missing variable gives
+
+`COMMONS_PRIMARY` marks the one instance where the Commons is edited, and is published as
+`commons_primary`. It reaches rows and routes, which `PROJECT_OPERATED` must not: that one selects
+copy, and its entry says so. It is documented in `src/.env.example` alone, as no self-hoster needs
+it. Rejected: gating on `PROJECT_OPERATED` and rewriting what it promises; `COMMONS_EDITABLE`, which
+reads as a feature to switch on; `COMMONS_HOME`, which reads as a path.
+
+## A refused `PATCH` on a Commons record has codes of its own
+
+A body naming a shared member of a saved record is a 403, and any body on a record the caller has
+not saved is a 409, asked first. Neither is a 422, so a client can tell "this form sent the wrong
+members" and "save it first" from a validation error without parsing `detail`. A write that saved
+the record itself is rejected: a note would put a site on a list as a side effect.
+
+## The Commons bundle is refreshed by hand, before every release
+
+`scripts/build_commons_bundle.py` runs from a clean checkout of the repository's `main`, in the PR
+that ships the file, and is how a self-hosted copy is refreshed on upgrade. No CI job, Makefile
+target or schedule. Rejected: a scheduled Actions job opening a refresh PR (`contents: write` on a
+schedule, a cron GitHub disables after 60 quiet days).
+
+The tripwire is the count: `tests/test_commons_bundle.py` pins the exact number, so a moved one
+fails loudly, and a shrinking pool is usually a broken reader. It is pinned in that test and the
+3,712 above; move both together.
+
+## The Commons: Three ODbL obligations, and how each is met
+
+The Commons is a Derivative Database of OpenStreetMap under ODbL §4.4(b). §4.4 share-alike: the
+bundle is ODbL though `LICENSE` is the AGPL, a software copyleft, so the carve-out is named in the
+file's notice block and in `README.md`. §4.2 notices travel in the data: that block, and
+`GET /commons/dive-sites` repeats it. §4.6 access: a copy redistributes the bundle unaltered with
+its script beside it; the primary, which alters the database and uses it publicly, offers it through
+that route and the repository.
+
+`load_bundle` builds per-source credit from the file's `sources` block and leaves out any record
+naming an uncredited source: losing the record beats a missing notice. A diver's notes, tags and
+dives sit outside the database, a Collective Database under §4.5. Never mix an NC or ND source in.
+
+## The Commons lookup orders by nearness without PostGIS
 
 *"Dive site coordinates are two `Float` columns"* rejects PostGIS with "Revisit if 'sites near me'
-ever ships", and `search_sites` takes a latitude and longitude and ranks by distance. The condition
-is not met. There is no table: the catalog is a tuple of frozen value objects parsed from a file in
-the image, and the one query a request makes reads the caller's own sites for the registry entries
-the results carry. There is no spatial query: a linear scan over a few thousand in-memory objects
-computes a haversine per match after the name has narrowed the answer, and no index would help. The
-rejected cost was an install step — a new Postgres image and an extension for every self-hoster —
-and nothing here adds one. The condition is about the diver's own `dive_site` rows becoming
-searchable by distance in Postgres, and nothing here moves towards it.
+ever ships", and `GET /dive-sites/lookup` takes a position. The condition is not met here: the name
+narrows the rows and the position only orders what is left, so no spatial predicate reaches the
+table and no index would help. Exact names come before prefixes before substrings, and nearness
+decides within each. The locality is not searched in this group: across the world's sites a town's
+name matches everything near it.
 
-## Dive-site catalog: Refresh policy, and why `marine_areas`' excuse is not available
+## Commons localities are resolved from Natural Earth, and containment alone is not enough
 
-`marine_areas.geojson` is exempt from refresh as "293 public-domain polygons that do not change";
-that does not transfer: OSM dive sites are added, renamed and moved. Sites change slowly, though, so
-a stale file only fails to suggest a recent addition. So: regenerated by hand in the PR that changes
-the file's meaning, like every generated artifact; no CI job, Makefile target or schedule.
-`CONTRIBUTING.md` documents both generators, `build_dive_site_catalog.py` and
-`build_marine_areas.py`.
-
-*Rejected:* a scheduled Actions job opening a refresh PR (`contents: write` on a schedule, a cron
-GitHub disables after 60 quiet days), and release-cadence refreshes, a release being a heuristic,
-not a calendar.
-
-The tripwire is the count: `tests/test_dive_site_catalog.py` asserts the exact count, so a moved
-number fails loudly — a shrinking catalog is usually a filter deleting real sites. It is pinned in
-that test, `services/dive_site_catalog.py`'s module docstring and the 3,702 above; move all three
-together.
-
-## Dive-site catalog: Three ODbL obligations, and all three are discharged in the file
-
-The catalog is a Derivative Database under ODbL §4.4(b). §4.4 share-alike: the file is ODbL though
-`LICENSE` is the AGPL, a software copyleft, so the carve-out is named in the file's provenance block
-and in `README.md`. §4.2 notices travel in the data itself; that is the in-file block. §4.6 access
-is met by checking in the JSON, its generator and the exact Overpass and SPARQL queries.
-
-Natural Earth is public domain and never shipped; the block names it anyway, recording where every
-field came from. Wikidata is CC0, but the merged file is ODbL as a whole — never mix an NC or ND
-source in.
-
-`_attributions` builds per-source credit from the file's `sources` block and drops at load any
-record naming an uncredited source: losing the record beats a missing notice. Natural Earth carries
-no `source` key there, so it cannot become a record source by accident.
-
-## Dive-site catalog: What the wire carries, and the two things it deliberately does not
-
-Results follow `SpeciesSearchResponse`'s shape, capped at 10, no `clamp_pagination`; each carries
-`name`, `name_en`, `latitude`, `longitude`, `country`, `region`, `source`, `source_id`,
-`attribution`, `external_id` — the record's entry in DiveJSON's spelling, which a pick sends back —
-and `held_site`, the caller's site already carrying it, first by name. The web keys rows on
-`source`/`source_id`. No `country_code`: a client fills a place's free-text `name`. No distance: the
-web formats one. Name fills from `name`; `name_en` is searched too, so Latin typing reaches 砂辺.
-
-No `@cache`: the held site moves with every site write. No rate budget: the 600/hour ones bound a
-shared resource; this scans a resident file and queries the caller's sites once, `GET /dives`'
-profile.
-
-With a position, distance is the ranking, not a tie-break. Without one: exact name, prefix,
-substring, then name; full ties keep file order, since `CatalogSite` is not orderable. Half a
-position is a 422, mirroring `WholeCoordinatePair`.
-
-## Dive-site catalog: The selection rules are floors, and only `divespot=yes` rescues an indoor feature
-
-The generator takes every feature carrying `sport=scuba_diving` or `scuba_diving:divespot=yes`, then
-drops businesses and indoor facilities; both exclusion sets are floors, re-derived from the tag
-distributions before a refresh.
-
-`leisure=pitch` and `leisure=water_park` are not noise: `pitch` is the Dutch convention in Zeeland
-(35 of 43 named features carry scuba attributes), so neither is in the indoor set.
-`scuba_diving:divespot=yes` rescues a feature the indoor rule would drop, and only `=yes` does; no
-other scuba attribute is consulted, and nothing rescues a business. `amenity=scuba_diving` is not in
-the business set. OSM's `;` multi-values are split, so `amenity=restaurant;dive_centre` is a dive
-centre.
-
-Overpass is queried with `out center;`, never bare `out;`: a way or relation has no position of its
-own.
-
-Wikidata is a regional patch, not a second global source: OSM has three named `sport=scuba_diving`
-features in South Africa, and 302 of Wikidata's 345 are there. Dedupe: the OSM `wikidata` tag, a
-position within 200 m, or within 1 km with matching normalised names.
-
-## Dive-site catalog: Country and region are resolved from Natural Earth, and containment alone is not enough
-
-Neither upstream carries them; the generator downloads Natural Earth admin-0 and admin-1 and
-resolves each record itself, as `build_marine_areas.py` does.
+Neither upstream carries a locality; the bundle script downloads Natural Earth admin-0 and admin-1
+and resolves each record that names none to `region, country`.
 
 Rule 1 is point-in-polygon; rule 2, nearest boundary within 50 km, is not optional: only 44.5% of
-records fall inside any admin-0 polygon, because dive sites are in water. A generator written to
-rule 1 alone empties the country for over half the catalog while every unit test passes. Rule 3 is
-null, and the record ships anyway. Distances are vertex-to-point, which is why
-`tests/test_build_dive_site_catalog.py` subdivides its synthetic edges.
+records fall inside any admin-0 polygon, because dive sites are in water. Rule 3 is no locality, and
+the record ships anyway. Distances are vertex-to-point, which is why
+`tests/test_build_commons_bundle.py` subdivides its synthetic edges.
 
 `ISO_A2` is `-99` for 22 admin-0 features and `ISO_A2_EH`'s 13 are a strict subset: read `ISO_A2_EH`
 alone, `-99` as null. Admin-1: take `name_en`, never `name`. Resolve admin-0 first, then restrict
-admin-1 to that country by `iso_a2`, or the layers disagree and ship `Tabuk, Egypt`; an empty
-restricted set within 50 km gives a null region, not a neighbour's.
+admin-1 to that country, or the layers disagree and ship `Tabuk, Egypt`.
 
-## Dive-site catalog: The OpenStreetMap credit is byte-identical to the geocoder's, on purpose
+## A seed's OpenStreetMap credit is byte-identical to the geocoder's, on purpose
 
-The catalog's OSM attribution is exactly `geocoding_service._DEFAULT_ATTRIBUTION`: the site form
-renders catalog hits and geocoder hits in one list under one credit line that collapses repeats by
-exact string, so a second wording for the same licence would show the credit twice. A test asserts
-the two are equal. The Wikidata credit is necessarily different — CC0 is not ODbL — which is why
-attribution travels per record rather than per response.
+Its attribution is exactly `geocoding_service._DEFAULT_ATTRIBUTION`: the site form renders Commons
+rows and geocoder rows in one list under one credit line that collapses repeats by exact string, so
+a second wording would show the credit twice. A test asserts the two are equal. Attribution travels
+per record because the sources' terms differ.
 
 ## Self-hosting is a capability we offer, not what the product *is*
 

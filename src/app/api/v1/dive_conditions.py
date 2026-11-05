@@ -18,7 +18,7 @@ from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
 from ...core.utils.rate_limit import enforce_rate_limit
-from ...crud.crud_dive_sites import get_saved_dive_site
+from ...crud.crud_dive_sites import get_readable_dive_site
 from ...schemas.dive import DiveLocalStartTime, WaterType
 from ...schemas.dive_conditions import DiveConditionsLookupRead
 from ...services.dive_conditions import preview_conditions
@@ -71,7 +71,8 @@ async def read_dive_conditions_lookup(
     be answered - no position, a date alone, a day after today or before 1940, a request the
     provider refused for them - so the form empties what it filled. `503` when the provider could not be asked,
     which says nothing about the inputs: over the instance's budget, cooling down, slow or down.
-    404 when this instance fetches no conditions, or when `dive_site_uuid` is not the caller's.
+    404 when this instance fetches no conditions, or when `dive_site_uuid` is neither the caller's
+    nor a Commons record.
     """
     if (latitude is None) != (longitude is None):
         raise UnprocessableEntityException("latitude and longitude are given together or not at all")
@@ -82,7 +83,7 @@ async def read_dive_conditions_lookup(
     )
     site_water: str | None = None
     if dive_site_uuid is not None:
-        site = await get_saved_dive_site(db, uuid=dive_site_uuid, user_id=current_user["id"])
+        site = await get_readable_dive_site(db, uuid=dive_site_uuid, user_id=current_user["id"])
         if site is None:
             raise NotFoundException("Dive site not found")
         site_water = site["water_type"]

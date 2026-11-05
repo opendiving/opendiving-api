@@ -48,7 +48,7 @@ from ...crud.crud_dive_mixtures import (
     get_recent_volumes,
     replace_mixtures_for_dive,
 )
-from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user
+from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user, save_named_commons_sites
 from ...crud.crud_dive_species import (
     StoredSighting,
     get_species_for_dive,
@@ -722,6 +722,7 @@ async def _stage_dive(db: AsyncSession, dive: DiveCreateRequest, current_user: d
     if site_id_by_uuid is None:
         raise UnprocessableEntityException("Dive site not found.")
     dive_site_ids = [site_id_by_uuid[u] for u in dive.dive_site_uuids]
+    await save_named_commons_sites(db, user_id=current_user["id"], dive_site_ids=dive_site_ids)
 
     gear_id_by_uuid = await resolve_gear_item_ids_for_user(
         db=db, gear_item_uuids=dive.gear_item_uuids, user_id=current_user["id"]
@@ -1433,6 +1434,7 @@ async def patch_dive(
         if site_id_by_uuid is None:
             raise UnprocessableEntityException("Dive site not found.")
         dive_site_ids = [site_id_by_uuid[u] for u in values.dive_site_uuids]
+        await save_named_commons_sites(db, user_id=owner_id, dive_site_ids=dive_site_ids)
 
     gear_item_ids: list[int] | None = None
     if values.gear_item_uuids is not None:

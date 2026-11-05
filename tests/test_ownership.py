@@ -339,6 +339,9 @@ FETCH_OWNED_ROUTES = [
         )
         for method, extra in _CRUD_METHODS
     ),
+    OwnedRoute(
+        "PUT", "/api/v1/dive-site/{uuid}/saved", "src.app.api.v1.dive_sites:crud_dive_sites", "Dive site not found"
+    ),
     *(
         OwnedRoute(method, "/api/v1/trip/{uuid}", "src.app.api.v1.trips:crud_trips", "Trip not found", extra)
         for method, extra in _CRUD_METHODS

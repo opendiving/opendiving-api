@@ -56,6 +56,7 @@ async def get_lookup_page(
     offset: int,
     limit: int,
     from_clause: FromClause | None = None,
+    created_at: Any = None,
 ) -> dict[str, Any]:
     """One page of `columns` over `model`'s rows matching `conditions`, in `get_multi`'s
     `{data, total_count}` shape.
@@ -63,7 +64,8 @@ async def get_lookup_page(
     Ordered by last use at or before `bound`, then never-used newest first, then name, then id:
     an item created a minute ago is what a diver logging their first dive with it reaches for.
     `from_clause` replaces `model` as what the rows are read from, for a search reaching a
-    joined table. `also_used_by` is a second column naming the item on a dive, for the one
+    joined table, and `created_at` the model's own for the never-used order, for a row whose
+    date for this caller is held on that table. `also_used_by` is a second column naming the item on a dive, for the one
     resource a dive names two ways - a gear item listed in the gear and linked as a cylinder's
     vessel - so both count as a use.
     """
@@ -77,7 +79,12 @@ async def get_lookup_page(
         .select_from(source)
         .outerjoin(used, used.c.item_id == model.id)
         .where(*conditions)
-        .order_by(used.c.last_start.desc().nulls_last(), model.created_at.desc(), model.name.asc(), model.id.asc())
+        .order_by(
+            used.c.last_start.desc().nulls_last(),
+            (model.created_at if created_at is None else created_at).desc(),
+            model.name.asc(),
+            model.id.asc(),
+        )
         .offset(offset)
         .limit(limit)
     )

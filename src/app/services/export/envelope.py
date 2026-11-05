@@ -255,7 +255,8 @@ def _export_dive_site(bundle: ExportBundle, site: DiveSite) -> ExportDiveSite:
     """One dive site, as §6.10 spells it.
 
     The vocabularies go through `_sayable` - `entry_types` item by item, as a contact's roles
-    do - and each list the site holds nothing in is written as absence.
+    do - and each list the site holds nothing in is written as absence. A Commons record reads
+    as the diver's own record: its facts, with their notes, their tags and the date they saved it.
     """
     entry_types = [entry for value in site.entry_types if (entry := _sayable(value, EntryType)) is not None]
     saved = bundle.saved_by_site[site.id]
@@ -267,7 +268,7 @@ def _export_dive_site(bundle: ExportBundle, site: DiveSite) -> ExportDiveSite:
         # below and is a different fact (spec §6.10).
         location=_location(location_from_row(site, DIVE_SITE_LOCATION_PREFIX)),
         position=_position(site.latitude, site.longitude),
-        external_ids=[ExportExternalId(**entry) for entry in site.external_ids] or None,
+        external_ids=[ExportExternalId(**entry) for entry in bundle.external_ids_for(site)] or None,
         depth_from=site.depth_from,
         depth_to=site.depth_to,
         water_type=_sayable(site.water_type, WaterType),

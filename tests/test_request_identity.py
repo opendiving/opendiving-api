@@ -394,7 +394,9 @@ class TestACreateBodyMayNotNameAnOwner:
         assert response.status_code == 201, response.text
         assert create.await_args is not None
         assert create.await_args.kwargs["object"].user_id == CALLER_ID
-        assert response.json()["user_uuid"] == str(CALLER_UUID)
+        # A site read says who owns the site in a word of its own, there being a second kind of owner.
+        body = response.json()
+        assert body["owner"] == "account" if route.path == "/dive-site" else body["user_uuid"] == str(CALLER_UUID)
 
 
 def _paginated(row: dict[str, Any] | None, owner: uuid_pkg.UUID) -> dict[str, Any]:
@@ -471,7 +473,6 @@ LIST_ROUTES = (
             "species_count": 0,
         },
     ),
-    ListRoute("/dive-sites", dive_sites_module, "_cached_read_dive_sites", _PUBLIC_ROW | {"name": "Blue Hole"}),
     ListRoute(
         "/certifications",
         certifications_module,

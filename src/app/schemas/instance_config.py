@@ -32,6 +32,9 @@ class InstanceConfigRead(BaseModel):
 
     registration_mode: RegistrationMode
     project_operated: bool
+    # Whether this instance is where OpenDiving Commons is edited: the web offers proposing
+    # and words its legal pages on it, and a copy has neither to offer.
+    commons_primary: bool
     # Whether any join link exists here - a yes or no, never the list, which is resolved one
     # slug at a time (`GET /join-channel/{slug}`) so a visitor holding one link learns
     # nothing about the others. The privacy page shows its join-link paragraph on it.

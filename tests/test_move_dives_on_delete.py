@@ -142,7 +142,7 @@ def dive_site_route(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     }
 
     monkeypatch.setattr(cache_module, "client", stubs["redis"])
-    monkeypatch.setattr(dive_sites_module, "_get_owned_dive_site", stubs["owned"])
+    monkeypatch.setattr(dive_sites_module, "_get_readable_dive_site", stubs["owned"])
     monkeypatch.setattr(dive_sites_module, "resolve_dive_site_ids_for_user", stubs["resolve"])
     monkeypatch.setattr(dive_sites_module, "replace_dive_site_on_dives", stubs["replace"])
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "delete", stubs["delete"])
@@ -174,7 +174,7 @@ async def _erase_dive_site(stubs: dict[str, Any], move_dives_to: uuid_pkg.UUID |
         request=_request(),
         uuid=stubs["uuid"],
         current_user=_current_user(),
-        db=MagicMock(),
+        db=MagicMock(execute=AsyncMock()),
         move_dives_to=move_dives_to,
     )
 

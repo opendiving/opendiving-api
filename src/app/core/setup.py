@@ -27,6 +27,7 @@ from ..models import *  # noqa: F403
 from ..services import blob_store, map_renderer
 from ..services.blob_keys import BLOB_KEY_COLUMNS
 from ..services.blob_store import ensure_storage_ready
+from ..services.commons_records import sync_commons
 from .config import (
     AppSettings,
     ClientSideCacheSettings,
@@ -249,6 +250,7 @@ def lifespan_factory(
             if apply_migrations_on_start:
                 await apply_migrations()
 
+            await sync_commons()
             await warn_if_files_volume_looks_empty()
             await measure_unsized_renditions()
             map_renderer.start_signature_refresh()

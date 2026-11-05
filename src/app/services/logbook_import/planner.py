@@ -44,7 +44,7 @@ from typing import Any, Literal
 
 from divejson import IN_WATER_DEPTH, InWater
 from pydantic import EmailStr, TypeAdapter, ValidationError
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid6 import uuid7
 
@@ -52,7 +52,7 @@ from ...core.schemas import NOTES_MAX_LENGTH
 from ...core.utils.datetime_offset import split_dive_start_time
 from ...core.utils.uploads import safe_filename
 from ...crud.crud_checkin_details import read_checkin_details
-from ...crud.crud_dive_sites import sites_by_external_id
+from ...crud.crud_dive_sites import in_the_commons, saved_by, sites_by_external_id
 from ...crud.crud_dive_species import StoredSighting
 from ...models.certification import Certification
 from ...models.contact import Contact
@@ -119,6 +119,7 @@ from ...schemas.person import PersonRole
 from ...schemas.tag import TAG_NAME_MAX, tag_key, trim_tag
 from ...schemas.user_picture import PictureCrop
 from ..certification_files import MAX_CARD_FILE_SIZE
+from ..commons_records import COMMONS_REGISTRY
 from ..dive_files import MAX_DIVE_FILE_SIZE, first_same_recording
 from ..dive_profiles import (
     IMPORT_PARSER_KEY,
@@ -478,12 +479,27 @@ class ImportPlan:
         """The records of one collection the writer has work for, in document order."""
         return [record for record in self.records.get(collection, {}).values() if record.action is Action.CREATE]
 
+    def commons_to_save(self) -> list[PlannedRecord]:
+        """The site links that put a Commons record on the caller's list, in document order."""
+        return [
+            record
+            for record in self.records.get("sites", {}).values()
+            if record.action is Action.LINK and "notes" in record.children
+        ]
+
 
 @dataclass(frozen=True, slots=True)
 class _ExistingRow:
     id: int
-    user_id: int
+    # Null on a Commons record, the one row no account owns.
+    user_id: int | None
     is_deleted: bool
+
+
+@dataclass(slots=True)
+class _CommonsRow:
+    id: int
+    saved: bool
 
 
 # Every single-column bound on `dive` a document can reach. The pair rules
@@ -692,6 +708,16 @@ def _site_external_ids(site: ImportDiveSite) -> tuple[list[ExternalId], list[str
                 "and was dropped"
             )
     return canonical_external_ids(kept), refused
+
+
+def _commons_uuid(entry: ExternalId) -> uuid_pkg.UUID | None:
+    """The record a registry entry names in the Commons, if it is one and reads as a uuid."""
+    if entry.registry != COMMONS_REGISTRY:
+        return None
+    try:
+        return uuid_pkg.UUID(entry.identifier)
+    except ValueError:
+        return None
 
 
 def _worms_aphia_id(species: ImportSpecies) -> int | None:
@@ -921,15 +947,22 @@ class _Planner:
         }
 
     async def _existing_by_key(
-        self, model: Any, columns: Sequence[Any], key: Callable[[Any], tuple[str, ...]]
+        self,
+        model: Any,
+        columns: Sequence[Any],
+        key: Callable[[Any], tuple[str, ...]],
+        *,
+        scope: ColumnElement[bool] | None = None,
     ) -> dict[tuple[str, ...], int]:
-        """The caller's rows for one table, indexed by its user-scoped uniqueness key.
+        """The caller's rows for one table, indexed by its user-scoped uniqueness key. `scope`
+        replaces the owner filter for a table whose caller's rows are more than the ones they own.
 
         Whole-table for this user rather than one lookup per record: a diver has hundreds
         of sites at the outside, and the alternative is a query per record of the document.
         The first row wins a duplicate key, which cannot happen while the index holds.
         """
-        rows = await self._db.execute(select(model.id, *columns).where(model.user_id == self._user_id))
+        owned = model.user_id == self._user_id if scope is None else scope
+        rows = await self._db.execute(select(model.id, *columns).where(owned))
         index: dict[tuple[str, ...], int] = {}
         for row in rows:
             index.setdefault(key(row[1:]), row[0])
@@ -1905,12 +1938,19 @@ class _Planner:
         """
         existing = await self._rows_by_uuid(DiveSite, [site.uuid for site in self._document.sites])
         index = await self._existing_by_key(
-            DiveSite, (DiveSite.name, DiveSite.location_name), lambda row: _key(row[0], row[1])
+            DiveSite,
+            (DiveSite.name, DiveSite.location_name),
+            lambda row: _key(row[0], row[1]),
+            scope=saved_by(self._user_id),
         )
         held = await sites_by_external_id(self._db, user_id=self._user_id)
         # By position rather than by uuid: the claim below remaps a repeated uuid, after
         # which the site would no longer find its own entries.
         entries = [_site_external_ids(site)[0] for site in self._document.sites]
+        commons = await self._commons_named(
+            {site.uuid for site in self._document.sites}
+            | {uuid for kept in entries for entry in kept if (uuid := _commons_uuid(entry)) is not None}
+        )
         on_document_sites: dict[tuple[str, str], int] = {}
         for kept in entries:
             for entry in kept:
@@ -1923,7 +1963,67 @@ class _Planner:
                 for entry in kept
                 if on_document_sites[entry.pair] == 1 and len(holders := held.get(entry.pair, [])) == 1
             }
-            self._records["sites"][site.uuid] = self._plan_site(site, existing, index, aliases, single)
+            named = self._commons_record_of(site, kept, existing, commons)
+            self._records["sites"][site.uuid] = (
+                self._plan_site(site, existing, index, aliases, single)
+                if named is None
+                else self._plan_commons_site(site, named)
+            )
+
+    async def _commons_named(self, uuids: set[uuid_pkg.UUID]) -> dict[uuid_pkg.UUID, _CommonsRow]:
+        """The Commons records among these uuids, each saying whether the caller has it saved.
+        A second site of the document naming a record it has seen finds it saved."""
+        rows = await self._db.execute(
+            select(DiveSite.uuid, DiveSite.id, saved_by(self._user_id)).where(
+                DiveSite.uuid.in_(uuids), in_the_commons()
+            )
+        )
+        return {row[0]: _CommonsRow(id=row[1], saved=bool(row[2])) for row in rows}
+
+    def _commons_record_of(
+        self,
+        site: ImportDiveSite,
+        entries: list[ExternalId],
+        existing: dict[uuid_pkg.UUID, _ExistingRow],
+        commons: dict[uuid_pkg.UUID, _CommonsRow],
+    ) -> _CommonsRow | None:
+        """The Commons record a document's site names, by its uuid or by that registry's entry.
+
+        `_linked` and `_resolve` read a null owner as another account's row, so this is asked
+        first. A site that is the caller's own under this uuid stays theirs, whatever it says.
+        """
+        row = existing.get(site.uuid)
+        if row is not None and row.user_id == self._user_id:
+            return None
+        if (named := commons.get(site.uuid)) is not None:
+            return named
+        named_by_entries = (commons.get(uuid) for entry in entries if (uuid := _commons_uuid(entry)) is not None)
+        return next((named for named in named_by_entries if named is not None), None)
+
+    def _plan_commons_site(self, site: ImportDiveSite, named: _CommonsRow) -> PlannedRecord:
+        """A link, as a match is: the document's facts stay behind, and where the record is not
+        on the caller's list yet, the document's notes and tags go to the caller's layer."""
+        record = PlannedRecord(action=Action.LINK, source_uuid=site.uuid, uuid=site.uuid, row_id=named.id)
+        if named.saved:
+            self._note(
+                ImportNoteCode.RECORD_LINKED,
+                "This OpenDiving Commons site is already in your sites, so nothing was written for it.",
+                collection="sites",
+                uuid=site.uuid,
+            )
+            return record
+        named.saved = True
+        self._note(
+            ImportNoteCode.RECORD_LINKED,
+            "This is an OpenDiving Commons site, so it was saved to your sites rather than copied.",
+            collection="sites",
+            uuid=site.uuid,
+        )
+        record.children = {
+            "notes": self._notes_text("sites", site.uuid, site.notes),
+            "tags": self._tag_names(site.tags, collection="sites", record_uuid=site.uuid),
+        }
+        return record
 
     def _plan_site(
         self,

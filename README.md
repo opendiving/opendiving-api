@@ -73,12 +73,12 @@ else; what is here is the source, and the notes for working on it.
   gets no photo rather than a picture of a different animal, nor does one whose only file is
   narrower than 500 px; the author, licence and source travel with it so a credit line can be
   rendered. The operator can hide a photo, pin another file from Commons, or ask the rule again.
-- **Dive-site suggestions** — `GET /dive-sites/suggest` answers from a catalog of real dive sites
-  bundled in the image, so the site form can offer "SS Thistlegorm" rather than only the town it is
-  near. A geocoder knows where Dahab is, not where the Blue Hole's north entry is. No account, no
-  key and no outbound call: the file ships with the app, and picking a suggestion makes a dive site
-  of your own that you can rename, move and annotate, which keeps the record's OpenStreetMap or
-  Wikidata entry. A suggestion you already hold names your site.
+- **OpenDiving Commons** — an open pool of real dive sites, bundled in the image, so a picker can
+  offer "SS Thistlegorm" rather than only the town it is near. A geocoder knows where Dahab is, not
+  where the Blue Hole's north entry is. A Commons site is one shared record: your dive names it,
+  your notes and tags sit on top of it, and nobody else's reach you. No account, no key and no
+  outbound call: the records ship with the app, and every one carries the credit its source asks
+  for.
 - **Surface conditions** — off until the operator names a provider: the worker then asks
   [Open-Meteo](https://open-meteo.com/) for the weather, sea state and tide at each dive's place and
   hour, fills the air temperature, weather and waves the diver left empty, and marks each value it
@@ -234,14 +234,15 @@ restore) and **user** (profile, avatar, check-in portrait, the check-in details,
 email change, dive statistics, gas-use history, the species life list, species suggestions for the
 dive form, account deletion); **API keys**, which a diver creates, lists and revokes for tools of
 their own; **dives**, the bulk of it, with their **recordings** — attach an export, read one
-recording's per-sample profile back, fold two dives into one — alongside **trips**, **dive sites**,
-the shared **species** catalog a dive can reference, a **geocoding** helper for naming a site pinned
-on a map, and the **map tiles** every card and page head is composed from, drawn once for the whole
-instance, with the **map style** they are drawn on; **gear** as items, sets, service schedules and
-service records; **certifications** with their card images and the **courses** that issued them;
-**export** in DiveJSON, UDDF, CSV or full-archive form and **import** back from either of the first
-and the last, or from any format the converter reads; **invitations**, which exist only where the
-operator has closed registration (`REGISTRATION_MODE`, documented with the rest of the settings in
+recording's per-sample profile back, fold two dives into one — alongside **trips**, **dive sites**
+with the public **Commons** export where this instance is its primary, the shared **species**
+catalog a dive can reference, a **geocoding** helper for naming a site pinned on a map, and the
+**map tiles** every card and page head is composed from, drawn once for the whole instance, with the
+**map style** they are drawn on; **gear** as items, sets, service schedules and service records;
+**certifications** with their card images and the **courses** that issued them; **export** in
+DiveJSON, UDDF, CSV or full-archive form and **import** back from either of the first and the last,
+or from any format the converter reads; **invitations**, which exist only where the operator has
+closed registration (`REGISTRATION_MODE`, documented with the rest of the settings in
 `src/.env.example`) — a member sends and revokes their own, makes, resets and removes their invite
 link, and the routes answer 404 on an open instance; and **admin**, the operator's own — the queue
 of people who have asked to be let in, inviting or removing them in a batch, the daily totals of
@@ -364,13 +365,15 @@ a service, you share your changes. Divers' data stays free.
 nothing about a vendored database. Both record their own licence inside themselves, where it cannot
 drift away from the data:
 
-- `src/app/data/dive_site_catalog.json` — the dive-site suggestion catalog, a Derivative Database of
+- `src/app/data/commons_dive_sites.geojson` — the records of
+  [OpenDiving Commons](https://github.com/opendiving/opendiving-commons), a Derivative Database of
   OpenStreetMap under the
-  [Open Database License (ODbL) 1.0](https://opendatacommons.org/licenses/odbl/1-0/). ©
-  OpenStreetMap contributors, <https://osm.org/copyright>. It also carries public-domain (CC0)
-  records from Wikidata, and its country and region names come from Natural Earth (public domain).
-  Redistributing it — which anyone who redistributes this repository or an image built from it does
-  — carries ODbL's share-alike and notice conditions with it.
+  [Open Database License (ODbL) 1.0](https://opendatacommons.org/licenses/odbl/1-0/). © OpenDiving
+  Commons contributors. © OpenStreetMap contributors, <https://osm.org/copyright>. It also carries
+  public-domain (CC0) records from Wikidata and from divers' contributions, and its locality names
+  come from Natural Earth (public domain). Redistributing it — which anyone who redistributes this
+  repository or an image built from it does — carries ODbL's share-alike and notice conditions with
+  it.
 - `src/app/data/marine_areas.geojson` — Natural Earth sea polygons, public domain.
 
 Both are regenerated by the scripts in `scripts/`, which is what makes the method of producing them

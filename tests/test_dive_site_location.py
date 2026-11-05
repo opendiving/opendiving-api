@@ -98,7 +98,8 @@ class TestWhatTheWireCarries:
         client meets them: one under `location`, one on the site."""
         site = DiveSiteRead(
             uuid=uuid7(),
-            user_uuid=USER_UUID,
+            owner="account",
+            saved=True,
             name="Blue Hole",
             latitude=BLUE_HOLE[0],
             longitude=BLUE_HOLE[1],
@@ -186,7 +187,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         seen["update_data"] = object
 
     seen["name_exists"] = AsyncMock(return_value=False)
-    monkeypatch.setattr(dive_sites_module, "_get_owned_dive_site", AsyncMock(return_value=db_dive_site))
+    monkeypatch.setattr(dive_sites_module, "_get_readable_dive_site", AsyncMock(return_value=db_dive_site))
     monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", seen["name_exists"])
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "update", fake_update)
     monkeypatch.setattr(dive_sites_module, "invalidate_dive_site_caches", AsyncMock())

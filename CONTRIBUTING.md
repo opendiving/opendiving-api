@@ -293,46 +293,38 @@ forced over the FIT files: `--force --parser-key fit`.
 Two files under `src/app/data/` are built from public datasets and checked in, so that a self-hoster
 needs no account, no key and no outbound call for the features that read them:
 
-| File                     | Built by                             | Upstream                                          | Licence       |
-| ------------------------ | ------------------------------------ | ------------------------------------------------- | ------------- |
-| `dive_site_catalog.json` | `scripts/build_dive_site_catalog.py` | OpenStreetMap (Overpass), Wikidata, Natural Earth | **ODbL 1.0**  |
-| `marine_areas.geojson`   | `scripts/build_marine_areas.py`      | Natural Earth                                     | public domain |
+| File                         | Built by                          | Upstream                          | Licence       |
+| ---------------------------- | --------------------------------- | --------------------------------- | ------------- |
+| `commons_dive_sites.geojson` | `scripts/build_commons_bundle.py` | OpenDiving Commons, Natural Earth | **ODbL 1.0**  |
+| `marine_areas.geojson`       | `scripts/build_marine_areas.py`   | Natural Earth                     | public domain |
 
 Both are run **by hand, and by nothing else** — no CI job, no Makefile target, no schedule:
 
 ```bash
-uv run python scripts/build_dive_site_catalog.py     # a couple of minutes; ~54 MB of downloads
+uv run python scripts/build_commons_bundle.py /path/to/opendiving-commons   # a clean checkout of its main
 uv run python scripts/build_marine_areas.py
 ```
 
 Each writes its output atomically (staged to `.tmp`, then `os.replace`d), because
 `docker-compose.yml` bind-mounts `./src/app` into the running container and a plain in-place write
-would let a request read a half-written file.
+would let a process read a half-written file.
 
-**Refresh when the file's meaning changes, in the PR that changes it** — not on a clock. A stale
-catalog fails to suggest a site somebody added last month, which is the state the form was in before
-it existed; a refresh that fires unattended is a data change nobody read. Every generated artifact
-in this repo works this way.
+**`marine_areas.geojson` refreshes when the file's meaning changes, in the PR that changes it**, not
+on a clock. **The Commons bundle is re-run from the repository's `main` before every release**: that
+re-run is how a self-hosted copy of the Commons is refreshed on upgrade, the instance's startup sync
+bringing its rows in line with the file.
 
-Two things to do when you do refresh:
+**The record count is pinned and the test will tell you.** `tests/test_commons_bundle.py` asserts
+the exact number of records, so a refresh that moves it fails there rather than landing quietly.
+That is the point — a shrinking pool is usually a broken reader, not the world losing dive sites.
+When the change is genuine, update the constant there and the count in `DECISIONS.md`, and say in
+the PR what moved and why. `marine_areas.geojson` has the same guard at 293 features.
 
-- **The record count is pinned in three places and the test will tell you.**
-  `tests/test_dive_site_catalog.py` asserts the exact number of catalog records, so a refresh that
-  moves it fails there rather than landing quietly. That is the point — a shrinking catalog is
-  usually a filter that started deleting real sites, not the world losing dive sites. When the
-  change is genuine, update the constant there, the count in `services/dive_site_catalog.py`'s
-  docstring and the one in `DECISIONS.md`, and say in the PR what moved and why.
-  `marine_areas.geojson` has the same guard at 293 features.
-- **Re-derive the catalog's exclusion sets rather than trusting them.** `_is_business` and
-  `_is_indoor` in the generator are floors, not enumerations, and OSM's tagging vocabulary moves.
-  Dump the tag distributions and read them before assuming the current sets still fit; the
-  generator's comments say which values are deliberately *absent* and what deleting them would cost.
-
-The dive-site catalog is an **ODbL Derivative Database**. Its provenance block — source URLs, the
-exact queries, retrieval dates, licences and the per-source attribution the API serves with every
-result — lives inside the JSON, not beside it, because ODbL §4.2 requires the notice to travel
-within the data or its metadata. Do not strip it, and do not add records from a source whose terms
-are non-commercial or no-derivatives: the merged file is ODbL as a whole and cannot carry them.
+The bundle is an **ODbL Derivative Database**. Its notice block — the commit it was built from, the
+licences and the per-source attribution the API serves with every record — lives inside the file,
+not beside it, because ODbL §4.2 requires the notice to travel within the data or its metadata. Do
+not strip it, and do not add records from a source whose terms are non-commercial or no-derivatives:
+the file is ODbL as a whole and cannot carry them.
 
 ## Pull requests
 

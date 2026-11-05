@@ -455,7 +455,7 @@ def write_dive_sites_csv(bundle: ExportBundle) -> Iterator[str]:
                 site.location_name,
                 site.latitude,
                 site.longitude,
-                "; ".join(f"{entry['registry']}:{entry['identifier']}" for entry in site.external_ids),
+                "; ".join(f"{entry['registry']}:{entry['identifier']}" for entry in bundle.external_ids_for(site)),
                 site.depth_from,
                 site.depth_to,
                 site.water_type,

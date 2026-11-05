@@ -38,7 +38,7 @@ from ...crud.crud_authentication_requests import (
     invalidate_live_requests,
 )
 from ...crud.crud_dive_form_presets import crud_dive_form_presets
-from ...crud.crud_dive_sites import resolve_dive_site_ids_for_user, saved_by
+from ...crud.crud_dive_sites import readable_by, resolve_dive_site_ids_for_user
 from ...crud.crud_invitations import account_exists_for
 from ...crud.crud_trip_parts import get_places_for_user
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
@@ -1006,7 +1006,7 @@ async def read_species_suggestions(
         Query(
             max_length=DEFAULT_MAX_ITEMS_PER_PAGE,
             description="The sites the dive names, repeated once per site: the species logged on the caller's "
-            "dives there come first. One that is not the caller's names no dives",
+            "dives there come first. One the caller may not read names no dives",
         ),
     ] = None,
     exclude_species_uuid: Annotated[
@@ -1037,7 +1037,7 @@ async def read_species_suggestions(
         # Not `resolve_dive_site_ids_for_user`, which answers nothing at all when any one uuid is
         # foreign: a form holding a deleted site beside a live one keeps the live one's tier.
         dive_site_ids = list(
-            (await db.scalars(select(DiveSite.id).where(DiveSite.uuid.in_(dive_site_uuid), saved_by(user_id)))).all()
+            (await db.scalars(select(DiveSite.id).where(DiveSite.uuid.in_(dive_site_uuid), readable_by(user_id)))).all()
         )
 
     return await suggest_species(

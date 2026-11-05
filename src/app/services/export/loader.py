@@ -84,6 +84,7 @@ from ...schemas.person import PersonRole
 from ...schemas.trip import TripPartRead
 from ...schemas.user_picture import PictureKind
 from ..certification_files import get_file_infos_for_certifications
+from ..commons_records import COMMONS_REGISTRY
 from ..dive_conditions import get_conditions_for_dives
 from ..dive_drafts import read_all_dive_drafts
 from ..dive_profiles import ProfileGasAttribution, get_gas_attribution_for_dives
@@ -322,6 +323,13 @@ class ExportBundle:
         ids = self.tag_ids_by_dive[row.id] if isinstance(row, Dive) else self.tag_ids_by_site[row.id]
         return [tag for tag_id in ids if (tag := self.tag_by_id.get(tag_id))]
 
+    def external_ids_for(self, site: DiveSite) -> list[dict[str, str]]:
+        """A site's registry entries as an export writes them: a Commons record's name it in the
+        Commons too, which is how an import anywhere finds the record again."""
+        if site.user_id is not None:
+            return site.external_ids
+        return [*site.external_ids, {"registry": COMMONS_REGISTRY, "identifier": str(site.uuid)}]
+
     def instructor_for(self, row: Course | Certification) -> Person | None:
         """A card's instructor, or a course's first by position - the one name each of the
         CSV's instructor columns holds."""
@@ -350,15 +358,18 @@ async def _person_ids_by_host(
     return by_host
 
 
-async def _tag_ids_by_host(db: AsyncSession, host_column: Any, model: Any, host_ids: list[int]) -> dict[int, list[int]]:
+async def _tag_ids_by_host(
+    db: AsyncSession, host_column: Any, model: Any, host_ids: list[int], *, user_id: int
+) -> dict[int, list[int]]:
     """One join table's tag ids in position order, keyed for every host - a dive's or a
-    site's."""
+    site's. This diver's alone: a Commons record carries every saver's rows."""
     by_host: dict[int, list[int]] = {host_id: [] for host_id in host_ids}
     if not host_ids:
         return by_host
     rows = await db.execute(
         select(host_column.label("host_id"), model.tag_id)
-        .where(host_column.in_(host_ids))
+        .join(Tag, Tag.id == model.tag_id)
+        .where(host_column.in_(host_ids), Tag.user_id == user_id)
         .order_by(host_column, model.position)
     )
     for row in rows:
@@ -583,9 +594,9 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
             db, CoursePerson.course_id, CoursePerson, [course.id for course in courses]
         ),
         tags=await _owned(db, Tag, user_id=user_id, order_by=(Tag.name, Tag.id)),
-        tag_ids_by_dive=await _tag_ids_by_host(db, DiveTag.dive_id, DiveTag, dive_ids),
+        tag_ids_by_dive=await _tag_ids_by_host(db, DiveTag.dive_id, DiveTag, dive_ids, user_id=user_id),
         tag_ids_by_site=await _tag_ids_by_host(
-            db, DiveSiteTag.dive_site_id, DiveSiteTag, [site.id for site in dive_sites]
+            db, DiveSiteTag.dive_site_id, DiveSiteTag, [site.id for site in dive_sites], user_id=user_id
         ),
         conditions_by_dive=await get_conditions_for_dives(db, dive_ids),
         drafts=await read_all_dive_drafts(db, user_id=user_id),

@@ -247,10 +247,13 @@ class OwnedResourceCache[InternalT, PublicT]:
             limit=limit,
         )
 
-    def lookup(self, fetch: LookupPage) -> Callable[..., Awaitable[dict[str, Any]]]:
+    def lookup(
+        self, fetch: LookupPage, *, also_keyed_on: tuple[str, ...] = ()
+    ) -> Callable[..., Awaitable[dict[str, Any]]]:
         """`GET /<plural>/lookup` over `fetch`: the term trimmed and lowered, `until` reduced to
         the one instant it ranks by. Reached only after the route has authorized the caller and
-        clamped the page.
+        clamped the page. `also_keyed_on` names the further parameters a resource's order
+        depends on, passed through to `fetch` and made part of the key.
 
         Cached under the list's prefix, so every sweep that drops the list drops the lookup with
         it - unless the request names `uuids`, the rows a form already holds, which is not
@@ -265,7 +268,8 @@ class OwnedResourceCache[InternalT, PublicT]:
         async def unnarrowed(request: Request, **query: Any) -> dict[str, Any]:
             return await fetch(**query, uuids=None)
 
-        cached = cache(key_prefix=self.lookup_cache_key_prefix, resource_id_name="user_id", expiration=60)(unnarrowed)
+        key_prefix = self.lookup_cache_key_prefix + "".join(f":{name}_{{{name}}}" for name in also_keyed_on)
+        cached = cache(key_prefix=key_prefix, resource_id_name="user_id", expiration=60)(unnarrowed)
 
         async def read(
             request: Request,
@@ -277,8 +281,11 @@ class OwnedResourceCache[InternalT, PublicT]:
             search: str | None,
             until: datetime | date | None,
             uuids: list[uuid_pkg.UUID] | None,
+            **also: Any,
         ) -> dict[str, Any]:
             query: dict[str, Any] = {
+                **dict.fromkeys(also_keyed_on),
+                **also,
                 "user_id": user_id,
                 "db": db,
                 "page": page,

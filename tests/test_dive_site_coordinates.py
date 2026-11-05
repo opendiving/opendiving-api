@@ -158,7 +158,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     async def fake_update(*, db: Any, object: dict, uuid: uuid_pkg.UUID, commit: bool) -> None:
         seen["update_data"] = object
 
-    monkeypatch.setattr(dive_sites_module, "_get_owned_dive_site", AsyncMock(return_value=db_dive_site))
+    monkeypatch.setattr(dive_sites_module, "_get_readable_dive_site", AsyncMock(return_value=db_dive_site))
     monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "update", fake_update)
     monkeypatch.setattr(dive_sites_module, "invalidate_dive_site_caches", AsyncMock())

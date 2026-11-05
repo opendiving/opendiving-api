@@ -254,7 +254,6 @@ async def _list_sites(async_db: AsyncSession, user: User, term: str) -> set[Any]
         await dive_sites_module._cached_read_dive_sites.__wrapped__(  # type: ignore[attr-defined]
             None,
             user_id=user.id,
-            user_uuid=user.uuid,
             db=async_db,
             page=1,
             items_per_page=50,
@@ -432,7 +431,22 @@ RESOURCES = [
         _lookup_sites,
         _list_sites,
         _site_searchable,
-        frozenset({"uuid", "name", "location", "water_type", "altitude", "entry_types"}),
+        frozenset(
+            {
+                "uuid",
+                "name",
+                "latitude",
+                "longitude",
+                "location",
+                "external_ids",
+                "water_type",
+                "altitude",
+                "entry_types",
+                "owner",
+                "saved",
+                "attribution",
+            }
+        ),
     ),
     _Resource(
         "contacts",

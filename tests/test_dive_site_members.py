@@ -215,7 +215,13 @@ class TestTheReadSchema:
 
     def test_a_site_no_dive_names_reads_an_empty_summary(self) -> None:
         read = DiveSiteRead.model_validate(
-            {"uuid": uuid7(), "user_uuid": uuid7(), "name": "Blue Hole", "created_at": datetime(2026, 6, 1, tzinfo=UTC)}
+            {
+                "uuid": uuid7(),
+                "owner": "account",
+                "saved": True,
+                "name": "Blue Hole",
+                "created_at": datetime(2026, 6, 1, tzinfo=UTC),
+            }
         )
 
         assert (read.dive_count, read.last_dived_on, read.max_dive_depth) == (0, None, None)
@@ -250,7 +256,7 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     seen["resolve_tags"] = AsyncMock(return_value=[3, 4])
     seen["invalidate_sites"] = AsyncMock()
     seen["invalidate_dives"] = AsyncMock()
-    monkeypatch.setattr(dive_sites_module, "_get_owned_dive_site", AsyncMock(return_value=site))
+    monkeypatch.setattr(dive_sites_module, "_get_readable_dive_site", AsyncMock(return_value=site))
     monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "update", fake_update)
     monkeypatch.setattr(dive_sites_module, "replace_tags_for_dive_site", seen["replace_tags"])
@@ -373,7 +379,7 @@ class TestTheReads:
             return {}
 
         monkeypatch.setattr(
-            dive_sites_module, "_get_owned_dive_site", AsyncMock(side_effect=lambda *_: calls.append("owned"))
+            dive_sites_module, "_get_readable_dive_site", AsyncMock(side_effect=lambda *_: calls.append("owned"))
         )
         monkeypatch.setattr(dive_sites_module, "_cached_read_dive_site", AsyncMock(side_effect=read))
 
@@ -489,7 +495,7 @@ def _at(db: Session, dive: Dive, *sites: DiveSite) -> None:
 
 async def _read(async_db: AsyncSession, user: User, uuid: Any) -> DiveSiteRead:
     read = await dive_sites_module._cached_read_dive_site.__wrapped__(  # type: ignore[attr-defined]
-        None, user_id=user.id, uuid=uuid, owner_uuid=user.uuid, db=async_db
+        None, user_id=user.id, uuid=uuid, db=async_db
     )
     return DiveSiteRead.model_validate(read)
 
@@ -498,7 +504,7 @@ async def _page(async_db: AsyncSession, user: User, **arguments: Any) -> list[di
     query: dict[str, Any] = {"search": None, "tag_id": None, "sort": DiveSiteListSort.NAME}
     query.update(arguments)
     result = await dive_sites_module._cached_read_dive_sites.__wrapped__(  # type: ignore[attr-defined]
-        None, user_id=user.id, user_uuid=user.uuid, db=async_db, page=1, items_per_page=50, **query
+        None, user_id=user.id, db=async_db, page=1, items_per_page=50, **query
     )
     rows: list[dict[str, Any]] = result["data"]
     return rows
@@ -582,7 +588,7 @@ class TestTheDatabase:
         site.other_names, site.water_type, site.depth_to = ["Pescador Wall"], "salt", 40.0
         site.external_ids = [{"registry": "wikidata", "identifier": "Q12"}]
         db.commit()
-        await replace_tags_for_dive_site(async_db, site.id, [tag.id])
+        await replace_tags_for_dive_site(async_db, site.id, [tag.id], user_id=diver.id)
 
         await dive_sites_module.patch_dive_site(
             request=MagicMock(),
@@ -694,7 +700,7 @@ class TestTheDatabase:
     async def test_the_list_filters_on_a_tag(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         tagged, plain = create_dive_site(db, diver), create_dive_site(db, diver)
         tag = create_tag(db, diver)
-        await replace_tags_for_dive_site(async_db, tagged.id, [tag.id])
+        await replace_tags_for_dive_site(async_db, tagged.id, [tag.id], user_id=diver.id)
 
         assert [row["uuid"] for row in await _page(async_db, diver, tag_id=tag.id)] == [tagged.uuid]
         assert await _page(async_db, diver, tag_id=-1) == []
@@ -740,7 +746,7 @@ class TestTheDatabase:
         """A tag on sites alone is not unused."""
         tag = create_tag(db, diver, name=f"cave {uuid7().hex[-6:]}")
         site = create_dive_site(db, diver)
-        await replace_tags_for_dive_site(async_db, site.id, [tag.id])
+        await replace_tags_for_dive_site(async_db, site.id, [tag.id], user_id=diver.id)
 
         page = await get_tags_page(async_db, user_id=diver.id, offset=0, limit=10, search=tag.name)
 

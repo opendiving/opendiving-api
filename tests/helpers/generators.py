@@ -1,5 +1,5 @@
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
@@ -95,10 +95,40 @@ def create_dive_site(db: Session, user: models.User) -> models.DiveSite:
     return site
 
 
-def save_dive_site(db: Session, site: models.DiveSite, *, notes: str = "") -> models.SavedSite:
-    """A hand-built site's row on its owner's list, which the routes write with the site."""
+def save_dive_site(
+    db: Session, site: models.DiveSite, *, notes: str = "", user: models.User | None = None
+) -> models.SavedSite:
+    """A hand-built site's row on a list: its owner's, which the routes write with the site, or
+    `user`'s for a Commons record."""
     return _persist(
-        db, models.SavedSite(user_id=site.user_id, dive_site_id=site.id, notes=notes, created_at=site.created_at)
+        db,
+        models.SavedSite(
+            user_id=cast(int, site.user_id) if user is None else user.id,
+            dive_site_id=site.id,
+            notes=notes,
+            created_at=site.created_at,
+        ),
+    )
+
+
+def create_commons_site(db: Session, *, name: str | None = None, **values: Any) -> models.DiveSite:
+    """A Commons record, seeded from OpenStreetMap, named uniquely as `create_dive_site` is."""
+    identifier = f"node/{uuid7().int % 10**12 + 1}"
+    return _persist(
+        db,
+        models.DiveSite(
+            user_id=None,
+            name=name or f"Commons {uuid7().hex[-8:]}",
+            latitude=values.pop("latitude", 27.814092),
+            longitude=values.pop("longitude", 33.920048),
+            external_ids=values.pop("external_ids", [{"registry": "openstreetmap", "identifier": identifier}]),
+            commons_source="openstreetmap",
+            commons_license="ODbL-1.0",
+            commons_seed_registry="openstreetmap",
+            commons_seed_identifier=identifier,
+            commons_retrieved=date(2026, 10, 17),
+            **values,
+        ),
     )
 
 

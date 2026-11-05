@@ -45,16 +45,15 @@ class GeocodeResult(BaseModel):
             examples=["[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"],
         ),
     ]
-    # Where a result sits, as fields of their own for a picker's hint: the same role under the
-    # same names as on `DiveSiteSuggestion`, though not the same vocabulary - these come from
-    # OpenStreetMap, the catalog's from Natural Earth. `region` is the finer of the two. A
-    # pin's answer carries them as a search result does; each is null wherever OSM records
-    # none, and on the offshore answer, which names only the water.
+    # Where a result sits, as fields of their own for a picker's hint, from OpenStreetMap.
+    # `region` is the finer of the two. A pin's answer carries them as a search result does;
+    # each is null wherever OSM records none, and on the offshore answer, which names only the
+    # water.
     country: Annotated[str | None, Field(default=None, max_length=255, examples=["Egypt"])]
     region: Annotated[str | None, Field(default=None, max_length=255, examples=["South Sinai"])]
-    # The OSM object a search result is, spelled as the dive-site catalog spells it, so a
-    # client can drop a geocoder row that repeats a catalog row by comparing both fields.
-    # Null on every reverse answer.
+    # The OSM object a search result is, `source_id` spelled as an `openstreetmap` registry
+    # identifier, so a client can drop a geocoder row that repeats a listed site by comparing
+    # it with the site's `external_ids`. Null on every reverse answer.
     source: Annotated[Literal["osm"] | None, Field(default=None, examples=["osm"])]
     source_id: Annotated[str | None, Field(default=None, max_length=64, examples=["node/27043265"])]
     # The place's extent, when the provider sends one. Four named floats rather than a

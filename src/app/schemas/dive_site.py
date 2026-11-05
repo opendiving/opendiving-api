@@ -1,5 +1,4 @@
 import re
-import uuid as uuid_pkg
 from collections.abc import Iterable
 from datetime import date, datetime
 from enum import StrEnum
@@ -271,29 +270,64 @@ class DiveSiteSummary(BaseModel):
     average_rating: Annotated[float | None, Field(description="The mean rating of the rated ones")] = None
 
 
-class DiveSiteRead(DiveSiteBase, _DiveSiteMembersRead, DiveSiteSummary, PublicUUIDSchema):
+# Who a site belongs to. A later kind of owner is a further value here, which is why this is
+# not a boolean.
+SITE_OWNER_ACCOUNT = "account"
+SITE_OWNER_COMMONS = "opendivingcommons"
+DiveSiteOwner = Literal["account", "opendivingcommons"]
+
+
+class _DiveSiteRelation(BaseModel):
+    """What a read says of a site's place in the reader's world, beside the site itself."""
+
+    owner: Annotated[
+        DiveSiteOwner,
+        Field(description="`account`, the reader's own site, or `opendivingcommons`, a record every account shares"),
+    ]
+    saved: Annotated[bool, Field(description="Whether the site is on the reader's list")]
+    # Per row rather than in an envelope: the credit is a condition of the record's licence, so
+    # it travels with what it describes. A wire format, `[label](href)`, not display copy - the
+    # clients collapse repeats by string, and an OpenStreetMap record's is byte-identical to the
+    # geocoder's so that a menu listing both shows one credit.
+    attribution: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=255,
+            examples=["[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"],
+            description="The credit a Commons record's source asks for, to show wherever it is listed or shown; "
+            "null on the reader's own site",
+        ),
+    ]
+
+
+class DiveSiteRead(DiveSiteBase, _DiveSiteMembersRead, DiveSiteSummary, _DiveSiteRelation, PublicUUIDSchema):
     """Public representation of a dive site, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API), with its tags by name in
     the diver's order and the summary of the diver's dives there.
+
+    `notes`, `tags`, the summary and `created_at` are the reader's, whoever else has the site:
+    on a Commons record they have not saved the first three are empty and `created_at` is when
+    the row became a Commons record.
     """
 
     name: StoredName
     location: LocationRead | None = None
     tags: Annotated[list[str], Field(default_factory=list)]
-    user_uuid: uuid_pkg.UUID
     created_at: datetime
 
 
 class DiveSiteReadInternal(DiveSiteColumnsBase, _DiveSiteMembersRead, DiveSiteLocationColumns, PublicUUIDSchema):
     """Mirrors the actual `dive_site` table columns (integer PK/FK), for server-side
     lookups only - never returned directly over the API (use `DiveSiteRead` for the
-    public shape, which additionally resolves `user_id` to the owning user's `uuid`, nests
-    the locality and carries the diver's notes, the tags and the summary).
+    public shape, which additionally says who owns the site, nests the locality and carries
+    the diver's notes, the tags and the summary).
     """
 
     name: StoredName
     id: int
-    user_id: int
+    # Null on a Commons record, which no account owns.
+    user_id: int | None
     created_at: datetime
 
 
@@ -467,6 +501,15 @@ class DiveSiteUpdateRequest(_DiveSiteUpdateFields):
     tags: TagsUpdate
 
 
+class DiveSiteSave(BaseModel):
+    """Request body for `PUT /dive-site/{uuid}/saved`: what the diver writes as they save it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
+    tags: TagsWrite
+
+
 class DiveSiteUpdateInternal(DiveSiteUpdate):
     updated_at: datetime
 
@@ -481,112 +524,19 @@ class DiveSiteListSort(StrEnum):
     LAST_DIVED_ON = "last_dived_on"
 
 
-# -------------- catalog suggestions --------------
-# Deliberately not a `DiveSiteRead`. A suggestion is not a resource: it has no uuid, no
-# owner and no `created_at`. Picking one makes an ordinary site of the diver's own from its
-# values, and that site keeps the record's registry entry in its `external_ids` - which is
-# how a later suggestion of the same record names it. See `services.dive_site_catalog`.
-
-# The source that supplied a suggestion. Both are databases with their own licences, which
-# is why every result carries an `attribution` naming its own.
-DiveSiteSuggestionSource = Literal["osm", "wikidata"]
-
-# The catalogue's own short spelling of a source, as the registry DiveJSON names it. The
-# mapping lives here and nowhere else: a client sends back the `external_id` it was given.
-SUGGESTION_REGISTRY: dict[str, str] = {"osm": OPENSTREETMAP, "wikidata": WIKIDATA}
-
-
-class DiveSiteReference(PublicUUIDSchema):
-    """One of the caller's own sites, named: enough for a client to say which it is, and to
-    read the rest with `GET /dive-site/{uuid}`."""
-
-    name: str
-
-
-class DiveSiteSuggestion(BaseModel):
-    """One hit from `GET /dive-sites/suggest`.
-
-    `name` is what the site is called where it is, and is what a client fills the Name field
-    from; `name_en` exists so a Latin keyboard reaches 砂辺 by typing "Sunabe", and is null
-    wherever the two would say the same thing. OSM's own semantics make `name` the primary.
-
-    **All three of `name_en`, `country` and `region` are genuinely nullable**, and a client
-    that assumes otherwise will be wrong on real rows: a few dozen records sit far enough
-    offshore that no administrative boundary is within 50 km of them, and they ship anyway,
-    because a site with no country is still a site.
-
-    **There is no country code here, and that is deliberate.** The catalog carries one
-    internally as its stable key, but the field a client writes this into is a place's own
-    `name`, an ordinary text input whose example is `Dahab, South Sinai, Egypt`; putting `EG`
-    on the wire invites it into a Location field or a menu hint, which is wrong on both.
-
-    **There is no distance either**, for a reason that is a decision rather than an omission.
-    The endpoint ranks by distance when it is given a position, but the web client already
-    carries `haversineMeters` and a `formatDistance` wired to the diver's unit preference, so
-    it computes and formats the hint from coordinates it has. A distance on the wire would
-    either duplicate that or - pre-formatted, or metric-only - silently break the imperial
-    preference.
-
-    **`external_id` is what a pick sends back.** It is the record's registry entry in the
-    format's spelling, ready for `POST /dive-site`'s `external_ids`; `source` and `source_id`
-    are the catalogue's own spelling of the same pair, which a client keys its rows on.
-    `held_site` names the caller's site that already carries that entry - the first by name
-    where several do - so a client can offer it rather than make a second one.
-    """
-
-    name: Annotated[str, Field(max_length=255, examples=["SS Thistlegorm"])]
-    name_en: Annotated[str | None, Field(default=None, max_length=255, examples=["Sunabe"])]
-    latitude: Annotated[float, Field(ge=-90, le=90, examples=[27.814092])]
-    longitude: Annotated[float, Field(ge=-180, le=180, examples=[33.920048])]
-    # English display names, resolved from Natural Earth when the file was built - neither
-    # upstream carries them. `region` is the finer of the two and is what pulls two
-    # same-named sites in one country apart.
-    country: Annotated[str | None, Field(default=None, max_length=255, examples=["Egypt"])]
-    region: Annotated[str | None, Field(default=None, max_length=255, examples=["South Sinai"])]
-    source: Annotated[DiveSiteSuggestionSource, Field(examples=["osm"])]
-    source_id: Annotated[
-        str,
-        Field(max_length=64, examples=["node/255316037"], description="The stable identifier upstream"),
-    ]
-    # Carried per-result rather than in an envelope, for the reason `GeocodeResult` does it:
-    # attribution is a licence condition of the data itself, so it travels with the row it
-    # describes. A wire format, `[label](href)`, not display copy - the clients collapse
-    # repeats by string and render one credit line. An OSM row and a Wikidata row carry
-    # different strings, and the OSM one is byte-identical to the geocoder's so that a menu
-    # showing both sources still shows one OpenStreetMap credit.
-    attribution: Annotated[
-        str,
-        Field(
-            max_length=255,
-            examples=["[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)"],
-        ),
-    ]
-    external_id: ExternalIdRead
-    held_site: DiveSiteReference | None = None
-
-
-class DiveSiteSuggestResponse(BaseModel):
-    """A capped list, not a paginated envelope.
-
-    A picker feed like `GET /species/search` and `GET /geocode/search`, not a browsable
-    collection: there is no page to ask for, and a total over a suggestion catalog is not a
-    number anyone acts on. `has_more` is the one thing a client needs - it renders "keep
-    typing to narrow" and stops.
-    """
-
-    results: Annotated[list[DiveSiteSuggestion], Field(default_factory=list)]
-    has_more: Annotated[bool, Field(default=False, description="True when matches were cut by the result cap")]
-
-
-class DiveSiteLookupItem(PublicUUIDSchema):
+class DiveSiteLookupItem(_DiveSiteRelation, PublicUUIDSchema):
     """One row of `GET /dive-sites/lookup`: the name and the locality a picker shows under it,
     and the members a dive form fills from the site picked, as `DiveSiteRead` carries them.
 
-    Not `DiveSiteReference`, which names the suggest route's held site and carries no
-    locality, nor the dive's `DiveSiteInfo`, which requires coordinates."""
+    Not the dive's `DiveSiteInfo`, which requires coordinates. `external_ids` is what lets a
+    place search drop a geocoder row for an OpenStreetMap object a listed site already names.
+    """
 
     name: str
+    latitude: float | None = None
+    longitude: float | None = None
     location: LocationRead | None = None
+    external_ids: Annotated[list[ExternalIdRead], Field(default_factory=list)]
     water_type: StoredVocabulary | None = None
     altitude: int | None = None
     entry_types: Annotated[list[StoredVocabulary], Field(default_factory=list)]

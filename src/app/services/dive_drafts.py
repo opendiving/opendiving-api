@@ -19,7 +19,7 @@ from sqlalchemy import Row, Select, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.exceptions.http_exceptions import CustomException, NotFoundException
-from ..crud.crud_dive_sites import saved_by
+from ..crud.crud_dive_sites import readable_by
 from ..models.contact import Contact
 from ..models.course import Course
 from ..models.dive_draft import DiveDraft
@@ -148,7 +148,7 @@ async def _held(db: AsyncSession, wanted: Held, *, user_id: int) -> Held:
     for model, uuids in wanted.items():
         statement = select(model.uuid).where(model.uuid.in_(uuids))
         if issubclass(model, DiveSite):
-            statement = statement.where(saved_by(user_id))
+            statement = statement.where(readable_by(user_id))
         elif not issubclass(model, Species):
             statement = statement.where(model.user_id == user_id)
         held[model] = set((await db.execute(statement)).scalars())

@@ -49,6 +49,7 @@ async def read_instance_config() -> InstanceConfigRead:
     return InstanceConfigRead(
         registration_mode=settings.REGISTRATION_MODE,
         project_operated=settings.PROJECT_OPERATED,
+        commons_primary=settings.COMMONS_PRIMARY,
         join_links=bool(settings.join_channels),
         map_tiles=settings.map_tiles,
         map_attribution=map_renderer.current_attribution() if settings.map_tiles else None,

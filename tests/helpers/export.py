@@ -14,7 +14,7 @@ is assigned after construction - that is what `_with_id` is for.
 
 import uuid as uuid_pkg
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import Any, cast
 
 from src.app.crud.crud_dive_species import StoredSighting
 from src.app.models.certification import Certification
@@ -291,7 +291,7 @@ def build_bundle(
         dive_sites=dive_sites or [],
         saved_by_site={
             site.id: SavedSite(
-                user_id=site.user_id,
+                user_id=cast(int, site.user_id),
                 dive_site_id=site.id,
                 notes=(notes_by_site or {}).get(site.id, ""),
                 created_at=site.created_at,

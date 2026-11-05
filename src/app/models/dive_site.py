@@ -1,4 +1,6 @@
-from sqlalchemy import JSON, CheckConstraint, Column, Float, ForeignKey, Index, Integer, String, Text, func
+from datetime import date
+
+from sqlalchemy import JSON, CheckConstraint, Date, Float, ForeignKey, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -7,10 +9,12 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 
 class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
     __tablename__ = "dive_site"
-    __mapper_args__ = {"exclude_properties": ["notes"]}
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
-    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
+    # Who owns the row: an account, whose private site only it can read or change, or, where
+    # null, OpenDiving Commons, whose record every account can read and no ordinary request
+    # can change. A change of owner is what makes a diver's site a Commons record.
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     # Two plain floats rather than PostGIS: a dive site is a point, and the only questions
     # asked of it are "show it" and "list them" - see DECISIONS.md.
@@ -45,22 +49,28 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
     water_type: Mapped[str | None] = mapped_column(String(32), default=None)
     altitude: Mapped[int | None] = mapped_column(Integer, default=None)
     entry_types: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
+    # A Commons record's provenance, null on a private site: where it came from and on what
+    # terms, and for a seed the registry entry it was seeded from and the day it was retrieved.
+    # That entry is what places the seed's file in the repository, so it is held apart from
+    # `external_ids`, which a reviewer can edit.
+    commons_source: Mapped[str | None] = mapped_column(String(32), default=None)
+    commons_license: Mapped[str | None] = mapped_column(String(32), default=None)
+    commons_seed_registry: Mapped[str | None] = mapped_column(String(255), default=None)
+    commons_seed_identifier: Mapped[str | None] = mapped_column(String(255), default=None)
+    commons_retrieved: Mapped[date | None] = mapped_column(Date, default=None)
 
     @declared_attr.directive
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
-            # A diver's notes are on `saved_site`. This column stays until the build that still
-            # reads and writes it has gone (DECISIONS.md, *A column the serving build maps is
-            # dropped a deploy after it is unmapped*); a row inserted here takes the default.
-            Column("notes", Text, nullable=False, server_default=""),
             # Case-insensitive uniqueness per user on (name, locality name). COALESCE maps
             # a NULL locality to '' so two sites with the same name and no locality are
             # also considered duplicates. The key is the locality's *name* and none of its
             # other members: a place is identified by what it is called, and two sites in
             # "Dahab, Egypt" collide whether or not a geocoder filled in a centre for one
             # of them. Reusing a deleted site's pair needs no exemption here: the row is
-            # gone, so it constrains nothing.
+            # gone, so it constrains nothing. A Commons record's null owner compares unequal
+            # to every other, so it binds nothing either: a name is not unique across the world.
             Index(
                 "ux_dive_site_user_id_name_location_lower",
                 "user_id",
@@ -87,5 +97,19 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
             # The dive's range, `ck_dive_altitude_range`, for the same water.
             CheckConstraint(
                 "altitude IS NULL OR (altitude >= -450 AND altitude <= 6500)", name="ck_dive_site_altitude_range"
+            ),
+            # Neither owner can be half-written: a private row carries no provenance, a Commons
+            # row its source and licence, and a seed its entry and date where a contribution
+            # has neither.
+            CheckConstraint(
+                "(user_id IS NOT NULL AND commons_source IS NULL AND commons_license IS NULL "
+                "AND commons_seed_registry IS NULL AND commons_seed_identifier IS NULL "
+                "AND commons_retrieved IS NULL) "
+                "OR (user_id IS NULL AND commons_license IS NOT NULL AND ("
+                "(commons_source IN ('openstreetmap', 'wikidata') AND commons_seed_registry IS NOT NULL "
+                "AND commons_seed_identifier IS NOT NULL AND commons_retrieved IS NOT NULL) "
+                "OR (commons_source = 'contribution' AND commons_seed_registry IS NULL "
+                "AND commons_seed_identifier IS NULL AND commons_retrieved IS NULL)))",
+                name="ck_dive_site_owner_provenance",
             ),
         )

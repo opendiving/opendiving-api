@@ -1,10 +1,12 @@
+import math
 import uuid as uuid_pkg
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from typing import Any, NamedTuple
 
 from fastcrud import FastCRUD
-from sqlalchemy import ColumnElement, Select, func, inspect, literal, or_, select, update
+from sqlalchemy import ColumnElement, Select, case, delete, func, inspect, literal, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.utils.datetime_offset import combine_dive_start_time
@@ -15,6 +17,7 @@ from ..models.dive_site import DiveSite
 from ..models.dive_site_tag import DiveSiteTag
 from ..models.dive_species import DiveSpecies
 from ..models.saved_site import SavedSite
+from ..models.tag import Tag
 from ..schemas.dive_site import (
     DiveSiteCreateInternal,
     DiveSiteListSort,
@@ -38,23 +41,48 @@ crud_dive_sites = CRUDDiveSite(DiveSite)
 # on `COURSE_SEARCH_COLUMNS`' precedent: `test_picker_search.py` asserts these exist.
 DIVE_SITE_SEARCH_COLUMNS = ("name", "location_name")
 
+_SAVED_SITE_KEY = "ux_saved_site_user_id_dive_site_id"
+
 
 def saved_by(user_id: int) -> ColumnElement[bool]:
-    """The sites on this diver's list - what "the caller's site" means wherever a site is named."""
+    """The sites on this diver's list: their own, and the Commons records they have saved."""
     return DiveSite.id.in_(select(SavedSite.dive_site_id).where(SavedSite.user_id == user_id))
 
 
-def _select_saved_sites(user_id: int) -> Select[Any]:
-    """Every mapped column of the diver's sites, with their saved row's notes and `created_at`."""
+def in_the_commons() -> ColumnElement[bool]:
+    """The rows the Commons owns, which every account can read."""
+    return DiveSite.user_id.is_(None)
+
+
+def readable_by(user_id: int) -> ColumnElement[bool]:
+    """What this diver may name wherever a site is named: their list, and any Commons record."""
+    return or_(in_the_commons(), saved_by(user_id))
+
+
+def _select_sites(user_id: int, *, on_the_list_only: bool) -> Select[Any]:
+    """Every mapped column of a site, with what this diver's saved row says of it, if they have one.
+
+    `notes` and `created_at` are the saved row's. A Commons record the diver has not saved has
+    no such row, so it reads with no notes and the date it became a Commons record.
+    """
     site_columns = [column for column in inspect(DiveSite).columns if column.key != "created_at"]
-    return select(*site_columns, SavedSite.notes, SavedSite.created_at).join_from(
-        DiveSite, SavedSite, (SavedSite.dive_site_id == DiveSite.id) & (SavedSite.user_id == user_id)
+    return select(
+        *site_columns,
+        func.coalesce(SavedSite.notes, "").label("notes"),
+        func.coalesce(SavedSite.created_at, DiveSite.created_at).label("created_at"),
+        SavedSite.id.is_not(None).label("saved"),
+    ).join_from(
+        DiveSite,
+        SavedSite,
+        (SavedSite.dive_site_id == DiveSite.id) & (SavedSite.user_id == user_id),
+        isouter=not on_the_list_only,
     )
 
 
-async def get_saved_dive_site(db: AsyncSession, *, uuid: uuid_pkg.UUID, user_id: int) -> dict[str, Any] | None:
-    """One site of the diver's, in `_select_saved_sites`' shape, or `None` if it is not on their list."""
-    row = (await db.execute(_select_saved_sites(user_id).where(DiveSite.uuid == uuid))).mappings().one_or_none()
+async def get_readable_dive_site(db: AsyncSession, *, uuid: uuid_pkg.UUID, user_id: int) -> dict[str, Any] | None:
+    """One site in `_select_sites`' shape, or `None` if this diver may not read it."""
+    statement = _select_sites(user_id, on_the_list_only=False).where(DiveSite.uuid == uuid, readable_by(user_id))
+    row = (await db.execute(statement)).mappings().one_or_none()
     return None if row is None else dict(row)
 
 
@@ -62,6 +90,61 @@ def add_saved_site(db: AsyncSession, *, user_id: int, dive_site_id: int, notes: 
     """Put a new site on its owner's list, in the transaction that creates it. Stamped with the
     site's own `created_at`, so a read answers the instant the create did."""
     db.add(SavedSite(user_id=user_id, dive_site_id=dive_site_id, notes=notes, created_at=created_at))
+
+
+async def is_saved(db: AsyncSession, *, user_id: int, dive_site_id: int) -> bool:
+    saved = await db.scalar(
+        select(SavedSite.id).where(SavedSite.user_id == user_id, SavedSite.dive_site_id == dive_site_id)
+    )
+    return saved is not None
+
+
+async def save_commons_site(db: AsyncSession, *, user_id: int, dive_site_id: int, notes: str) -> bool:
+    """Whether this put the record on the diver's list, which it does not where it already is:
+    a retry changes nothing, and two at once leave one row. Does not commit."""
+    written = await db.scalar(
+        insert(SavedSite)
+        .values(user_id=user_id, dive_site_id=dive_site_id, notes=notes, created_at=datetime.now(UTC))
+        .on_conflict_do_nothing(constraint=_SAVED_SITE_KEY)
+        .returning(SavedSite.id)
+    )
+    return written is not None
+
+
+async def save_named_commons_sites(db: AsyncSession, *, user_id: int, dive_site_ids: Sequence[int]) -> None:
+    """Put on the diver's list every Commons record among these sites, as naming one on a dive
+    does. Their own sites and records already saved are left as they are. Does not commit."""
+    if not dive_site_ids:
+        return
+    await db.execute(
+        insert(SavedSite)
+        .from_select(
+            ["user_id", "dive_site_id", "notes", "created_at"],
+            select(literal(user_id), DiveSite.id, literal(""), literal(datetime.now(UTC))).where(
+                DiveSite.id.in_(set(dive_site_ids)), in_the_commons()
+            ),
+        )
+        .on_conflict_do_nothing(constraint=_SAVED_SITE_KEY)
+    )
+
+
+async def remove_saved_commons_site(db: AsyncSession, *, user_id: int, dive_site_id: int) -> None:
+    """Take a Commons record off the diver's list: their saved row, their tags on it and their
+    dives' links to it, which is what deleting their own site takes through its cascades. Every
+    other saver's rows on the record stay. Does not commit."""
+    await db.execute(
+        delete(DiveDiveSite).where(
+            DiveDiveSite.dive_site_id == dive_site_id,
+            DiveDiveSite.dive_id.in_(select(Dive.id).where(Dive.user_id == user_id)),
+        )
+    )
+    await db.execute(
+        delete(DiveSiteTag).where(
+            DiveSiteTag.dive_site_id == dive_site_id,
+            DiveSiteTag.tag_id.in_(select(Tag.id).where(Tag.user_id == user_id)),
+        )
+    )
+    await db.execute(delete(SavedSite).where(SavedSite.user_id == user_id, SavedSite.dive_site_id == dive_site_id))
 
 
 async def replace_saved_site_notes(db: AsyncSession, *, user_id: int, dive_site_id: int, notes: str) -> bool:
@@ -83,15 +166,73 @@ def search_condition(term: str) -> ColumnElement[bool]:
     every name outside ASCII: the JSON is stored with ASCII escapes, so `砂辺` sits in it as
     `\\u7802\\u8fba` and no pattern of the name finds it.
     """
+    return or_(search_clause(DiveSite, DIVE_SITE_SEARCH_COLUMNS, term), _any_other_name_ilike(f"%{escape_like(term)}%"))
+
+
+def _any_other_name_ilike(pattern: str) -> ColumnElement[bool]:
     other_name = func.json_array_elements_text(DiveSite.other_names).table_valued("value")
-    pattern = f"%{escape_like(term)}%"
-    return or_(
-        search_clause(DiveSite, DIVE_SITE_SEARCH_COLUMNS, term),
+    return (
         select(literal(1))
         .select_from(other_name)
         .where(other_name.c.value.ilike(pattern, escape=LIKE_ESCAPE_CHAR))
-        .exists(),
+        .exists()
     )
+
+
+def _name_ilike(pattern: str) -> ColumnElement[bool]:
+    return or_(DiveSite.name.ilike(pattern, escape=LIKE_ESCAPE_CHAR), _any_other_name_ilike(pattern))
+
+
+def _distance_from(latitude: float, longitude: float) -> ColumnElement[float]:
+    """Great-circle distance by the haversine formula, in radians of arc: this orders rows and
+    never leaves the query. Trigonometry rather than a planar difference, because a search from
+    Egypt matches sites in Indonesia and a flat approximation reorders those."""
+    pin_latitude, pin_longitude = func.radians(DiveSite.latitude), func.radians(DiveSite.longitude)
+    from_latitude, from_longitude = math.radians(latitude), math.radians(longitude)
+    half_chord = func.power(func.sin((pin_latitude - from_latitude) / 2), 2) + math.cos(from_latitude) * func.cos(
+        pin_latitude
+    ) * func.power(func.sin((pin_longitude - from_longitude) / 2), 2)
+    return func.asin(func.least(1.0, func.sqrt(half_chord)))
+
+
+async def get_unsaved_commons_page(
+    db: AsyncSession,
+    *,
+    columns: tuple[Any, ...],
+    user_id: int,
+    search: str,
+    uuids: Sequence[uuid_pkg.UUID] | None,
+    position: tuple[float, float] | None,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """The Commons records this diver has not saved whose name or other names match, in
+    `get_multi`'s `{data, total_count}` shape: exact names before prefixes before substrings,
+    nearer first where a position is given, then by name.
+
+    The locality is not searched: it is what tells a diver's own sites apart, and across the
+    world's sites a town's name matches everything near it. Nearness is computed over the rows
+    the name already narrowed, so no spatial index is asked of the table.
+    """
+    escaped = escape_like(search)
+    conditions: list[ColumnElement[bool]] = [in_the_commons(), ~saved_by(user_id), _name_ilike(f"%{escaped}%")]
+    if uuids:
+        conditions.append(DiveSite.uuid.in_(uuids))
+    total_count = await db.scalar(select(func.count()).select_from(DiveSite).where(*conditions))
+    if not limit:
+        return {"data": [], "total_count": total_count or 0}
+
+    match = case((_name_ilike(escaped), 0), (_name_ilike(f"{escaped}%"), 1), else_=2)
+    nearer = () if position is None else (_distance_from(*position).asc().nulls_last(),)
+    statement = (
+        select(*columns)
+        .where(*conditions)
+        .order_by(match, *nearer, DiveSite.name.asc(), DiveSite.id.asc())
+        .offset(offset)
+        .limit(limit)
+    )
+    rows = (await db.execute(statement)).mappings().all()
+    return {"data": [dict(row) for row in rows], "total_count": total_count or 0}
 
 
 def carrying_tag(tag_id: int) -> ColumnElement[bool]:
@@ -190,7 +331,7 @@ async def get_dive_sites_page(
     Hand-written for the two orders on the summary, which are aggregates over the dives
     rather than columns of the site: the most dived first, and the most recently dived first
     with a site no live dive names after every one that has. Ties go by name either way.
-    Rows are plain dicts, `_select_saved_sites`' shape.
+    Rows are plain dicts, `_select_sites`' shape.
     """
     conditions: list[ColumnElement[bool]] = []
     if search:
@@ -200,7 +341,7 @@ async def get_dive_sites_page(
 
     total_count = await db.scalar(select(func.count()).select_from(DiveSite).where(saved_by(user_id), *conditions))
 
-    statement = _select_saved_sites(user_id).where(*conditions)
+    statement = _select_sites(user_id, on_the_list_only=True).where(*conditions)
     by_name = (DiveSite.name.asc(), DiveSite.id.asc())
     if sort is DiveSiteListSort.NAME:
         statement = statement.order_by(*by_name)
@@ -257,11 +398,11 @@ async def sites_by_external_id(db: AsyncSession, *, user_id: int) -> dict[tuple[
 async def resolve_dive_site_ids_for_user(
     db: AsyncSession, dive_site_uuids: list[uuid_pkg.UUID], user_id: int
 ) -> dict[uuid_pkg.UUID, int] | None:
-    """Resolve dive site public `uuid`s to their internal `id`s, scoped to the dive sites on
-    the given user's list.
+    """Resolve dive site public `uuid`s to their internal `id`s, scoped to the sites the given
+    user may name: their list, and any Commons record.
 
-    Returns `None` if any given uuid doesn't resolve to a dive site on that list (used to
-    prevent a user from linking another user's dive site(s) to their own dive).
+    Returns `None` if any given uuid doesn't resolve to one of those (used to prevent a user
+    from linking another user's dive site(s) to their own dive).
     """
     unique_uuids = set(dive_site_uuids)
     if not unique_uuids:
@@ -269,7 +410,7 @@ async def resolve_dive_site_ids_for_user(
 
     stmt = select(DiveSite.uuid, DiveSite.id).where(
         DiveSite.uuid.in_(unique_uuids),
-        saved_by(user_id),
+        readable_by(user_id),
     )
     result = await db.execute(stmt)
     mapping = {row.uuid: row.id for row in result}

@@ -104,7 +104,7 @@ class TestTheResolveRoute:
 
 @pytest.fixture(scope="module")
 def anonymous_client() -> Generator[TestClient]:
-    """Its own app with no migrations on start, like `test_dive_site_catalog.py`: nothing the
+    """Its own app with no migrations on start, like `test_commons_sites.py`: nothing the
     resolve route does touches a database."""
     app = create_application(router=router, settings=settings, apply_migrations_on_start=False)
     with TestClient(app) as test_client:

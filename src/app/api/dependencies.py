@@ -224,7 +224,8 @@ async def get_current_superuser(current_user: Annotated[dict, Depends(get_curren
 class OwnedRow(Protocol):
     """Any internal read schema that carries the owning user's integer id."""
 
-    user_id: int
+    @property
+    def user_id(self) -> int | None: ...
 
 
 async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
@@ -235,9 +236,11 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
     current_user: dict[str, Any],
     schema: type[OwnedRowT],
     not_found_message: str,
+    unowned_is_shared: bool = False,
 ) -> OwnedRowT:
     """Fetch a row by its public `uuid` and assert `current_user` owns it: 404 both when
-    the row isn't there and when it belongs to someone else.
+    the row isn't there and when it belongs to someone else. `unowned_is_shared` answers a
+    row with no owner too, for the one table holding rows every account may read.
 
     Every route that names a single owned resource starts here. Two things make that
     worth centralizing rather than restating per route:
@@ -293,7 +296,7 @@ async def fetch_owned_or_raise[OwnedRowT: OwnedRow](
         raise NotFoundException(not_found_message)
 
     row = cast(OwnedRowT, row)
-    if row.user_id != current_user["id"]:
+    if row.user_id != current_user["id"] and not (unowned_is_shared and row.user_id is None):
         logger.warning(
             "Owned-row lookup: %s with uuid %s belongs to user_id %s, caller is user_id %s",
             schema.__name__,

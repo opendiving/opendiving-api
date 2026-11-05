@@ -175,15 +175,18 @@ async def replace_tags_for_dive(db: AsyncSession, dive_id: int, tag_ids: Sequenc
         await db.commit()
 
 
-async def get_tags_for_dive_sites(db: AsyncSession, dive_site_ids: Sequence[int]) -> dict[int, list[str]]:
-    """Each site's tags by name in the diver's order, keyed for every site asked about."""
+async def get_tags_for_dive_sites(
+    db: AsyncSession, dive_site_ids: Sequence[int], *, user_id: int
+) -> dict[int, list[str]]:
+    """This diver's tags on each site by name in their order, keyed for every site asked about.
+    A Commons record carries every saver's rows, and each diver reads their own."""
     by_site: dict[int, list[str]] = {site_id: [] for site_id in dive_site_ids}
     if not dive_site_ids:
         return by_site
     rows = await db.execute(
         select(DiveSiteTag.dive_site_id, Tag.name)
         .join(Tag, Tag.id == DiveSiteTag.tag_id)
-        .where(DiveSiteTag.dive_site_id.in_(set(dive_site_ids)))
+        .where(DiveSiteTag.dive_site_id.in_(set(dive_site_ids)), Tag.user_id == user_id)
         .order_by(DiveSiteTag.dive_site_id, DiveSiteTag.position)
     )
     for row in rows:
@@ -192,11 +195,16 @@ async def get_tags_for_dive_sites(db: AsyncSession, dive_site_ids: Sequence[int]
 
 
 async def replace_tags_for_dive_site(
-    db: AsyncSession, dive_site_id: int, tag_ids: Sequence[int], commit: bool = True
+    db: AsyncSession, dive_site_id: int, tag_ids: Sequence[int], *, user_id: int, commit: bool = True
 ) -> None:
-    """Replace a site's tags with the given ordered list, as `replace_tags_for_dive` replaces
-    a dive's."""
-    await db.execute(delete(DiveSiteTag).where(DiveSiteTag.dive_site_id == dive_site_id))
+    """Replace this diver's tags on a site with the given ordered list, as
+    `replace_tags_for_dive` replaces a dive's. Another saver's rows on a Commons record stay."""
+    await db.execute(
+        delete(DiveSiteTag).where(
+            DiveSiteTag.dive_site_id == dive_site_id,
+            DiveSiteTag.tag_id.in_(select(Tag.id).where(Tag.user_id == user_id)),
+        )
+    )
     for position, tag_id in enumerate(dict.fromkeys(tag_ids)):
         db.add(DiveSiteTag(dive_site_id=dive_site_id, tag_id=tag_id, position=position))
     if commit:

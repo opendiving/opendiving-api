@@ -861,6 +861,7 @@ class TestTheConfigRoute:
             assert (await read_instance_config()).model_dump(mode="json") == {
                 "registration_mode": "invite",
                 "project_operated": False,
+                "commons_primary": False,
                 "join_links": False,
                 "map_tiles": False,
                 "map_attribution": None,

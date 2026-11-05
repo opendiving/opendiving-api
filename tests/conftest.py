@@ -2,7 +2,7 @@ import os
 import tempfile
 from collections.abc import AsyncGenerator, Generator
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from starlette.config import Config
 
@@ -174,6 +174,15 @@ def unique_email() -> str:
     fails validation in any test that round-trips one through a schema.
     """
     return f"{unique_username()}@example.com"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def no_commons_at_startup() -> Generator[None, Any]:
+    """The app's lifespan brings the Commons rows in line with the bundle, and `TestClient` enters
+    it for real: 3,700 rows in every worker's database would answer every site search here. The
+    sync's own tests call it directly, and a test wanting a Commons record makes one."""
+    with patch("src.app.core.setup.sync_commons", AsyncMock()):
+        yield
 
 
 @pytest.fixture(scope="session")

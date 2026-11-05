@@ -64,6 +64,9 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "Undoes a deletion, so it serves exactly the accounts `get_current_user` filters "
         "out - the restore token is the credential, and it names the account itself."
     ),
+    ("GET", "/api/v1/commons/dive-sites"): (
+        "The offer of the database the ODbL asks of its primary: anyone may have it, account or not."
+    ),
     # 2. The caller may be locked out, and that is the point.
     ("POST", "/api/v1/support"): "A diver who cannot sign in is precisely who needs to reach a human.",
     ("POST", "/api/v1/invite-requests"): (
