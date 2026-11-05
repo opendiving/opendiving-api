@@ -377,6 +377,12 @@ class RegistrationSettings(BaseSettings):
     # switch: that one selects copy, and this one reaches rows and routes.
     COMMONS_PRIMARY: bool = config("COMMONS_PRIMARY", default=False)
 
+    # What one address may ask of `GET /commons/dive-sites`, the whole pool per request. The
+    # publish fetches it daily, so the bound is on a scraper rather than on any caller meant to
+    # be here.
+    COMMONS_EXPORT_RATE_LIMIT_WINDOW_SECONDS: int = config("COMMONS_EXPORT_RATE_LIMIT_WINDOW_SECONDS", default=3600)
+    COMMONS_EXPORT_RATE_LIMIT_PER_IP: int = config("COMMONS_EXPORT_RATE_LIMIT_PER_IP", default=20)
+
     # `slug=Label` pairs, comma-separated: each one a link, `/join?via=<slug>`, that admits
     # whoever follows it without an invitation and counts the account under its slug. Empty
     # is the default and turns the feature off everywhere - the resolve route 404s, `GET
@@ -540,12 +546,6 @@ class ContactSettings(BaseSettings):
     # endpoint is unauthenticated and sends mail, so this is the only thing standing
     # between it and being used as a relay; the window is deliberately much longer
     # than the auth one, since nobody legitimately files ten support requests an hour.
-    # What one address may ask of `GET /commons/dive-sites`, the whole pool per request. The
-    # publish fetches it daily, so the bound is on a scraper rather than on any caller meant to
-    # be here.
-    COMMONS_EXPORT_RATE_LIMIT_WINDOW_SECONDS: int = config("COMMONS_EXPORT_RATE_LIMIT_WINDOW_SECONDS", default=3600)
-    COMMONS_EXPORT_RATE_LIMIT_PER_IP: int = config("COMMONS_EXPORT_RATE_LIMIT_PER_IP", default=20)
-
     CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS: int = config("CONTACT_FORM_RATE_LIMIT_WINDOW_SECONDS", default=3600)
     CONTACT_FORM_RATE_LIMIT_PER_EMAIL: int = config("CONTACT_FORM_RATE_LIMIT_PER_EMAIL", default=3)
     CONTACT_FORM_RATE_LIMIT_PER_IP: int = config("CONTACT_FORM_RATE_LIMIT_PER_IP", default=10)

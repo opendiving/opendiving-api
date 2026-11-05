@@ -272,7 +272,7 @@ async def sync_commons() -> None:
 
 
 async def read_commons_features(db: AsyncSession) -> list[dict[str, Any]]:
-    """Every Commons record as the repository's record, oldest uuid first, so two reads of an
+    """Every Commons record as the repository's record, ordered by uuid, so two reads of an
     unchanged table are the same bytes."""
     selected = [_TABLE.c.uuid, *(_TABLE.c[column] for column in _FACT_COLUMNS)]
     rows = await db.execute(select(*selected).where(_TABLE.c.user_id.is_(None)).order_by(_TABLE.c.uuid))
