@@ -2896,11 +2896,12 @@ to disagree, at all four call sites.
 ## The admin panel has no delete on the five hard-deleted models
 
 `admin/views.py` registers `Trip`, `DiveSite`, `GearItem`, `GearSet` and `GearServiceSchedule`
-without `"delete"`; `view`/`create`/`update` stay. FastCRUD's `delete` branches on the column's
-presence, so a registered delete would turn "flag one row" into "destroy the item, its schedules,
-its service records and every join row" with no cache invalidation — that lives only in the API
-routes (`services/cache_invalidation.py`), leaving Redis stale for the TTL. The panel is off by
-default.
+without `"delete"`; `view`/`create`/`update` stay, apart from `DiveSite`'s `create`: a site is
+written with its owner's `saved_site` row, which the panel's form cannot add. FastCRUD's `delete`
+branches on the column's presence, so a registered delete would turn "flag one row" into "destroy
+the item, its schedules, its service records and every join row" with no cache invalidation — that
+lives only in the API routes (`services/cache_invalidation.py`), leaving Redis stale for the TTL.
+The panel is off by default.
 
 ## No trash bin, and the decision is deferred
 
