@@ -5453,10 +5453,11 @@ different from its source.
 
 ## The Commons match rule lives here, not in the repository
 
-Proposals are reviewed in the app, so the rule a diver and a reviewer read has to run here, and the
-repository stops taking the pull requests its report ran on. Its thresholds and tests moved with it,
-and it gained *identity*, a shared registry entry, which is the one rule that refuses a proposal:
-such a site is a copy. A list reads that rule alone, in one query.
+A diver and a reviewer read the rule where proposals are made and reviewed, which is this instance,
+so `services/commons_matches.py` is its home and holds its tests. *Identity*, a shared registry
+entry, comes ahead of the three distance rules and is the one that refuses a proposal: such a site
+is a copy. A list reads that rule alone, in one query. Rejected: the rule in the repository, which
+reads its own files and no diver's site.
 
 ## The Commons match query answers "sites near me" with a range over two columns
 

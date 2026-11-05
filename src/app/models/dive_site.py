@@ -17,7 +17,8 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     # Two plain floats rather than PostGIS: a dive site is a point, and the only questions
-    # asked of it are "show it" and "list them" - see DECISIONS.md.
+    # asked of it are "show it", "list them" and which Commons records lie near it, which a
+    # range over the two columns answers - see DECISIONS.md.
     latitude: Mapped[float | None] = mapped_column(Float, default=None)
     longitude: Mapped[float | None] = mapped_column(Float, default=None)
     # The locality, flat and prefixed: the same place object a trip part carries

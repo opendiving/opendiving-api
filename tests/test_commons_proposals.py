@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from src.app.api import router
 from src.app.api.dependencies import get_current_user
+from src.app.api.v1 import dive_sites as dive_sites_module
 from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.core.setup import create_application
@@ -40,7 +42,7 @@ from src.app.models.dive_site_tag import DiveSiteTag
 from src.app.models.saved_site import SavedSite
 from src.app.models.tag import Tag
 from src.app.models.user import User
-from src.app.schemas.dive_site import DiveSiteProposalKind
+from src.app.schemas.dive_site import DiveSiteProposalKind, DiveSiteReadInternal
 from src.app.schemas.dive_site_proposal import ATTESTATIONS
 from src.app.services import commons_proposals, commons_records
 from src.app.services.commons_records import CommonsBundle, sync_commons
@@ -997,6 +999,34 @@ class TestAcceptingANewSite:
         await _accepted(http, proposal, members=_members(latitude=27.81409249, longitude=33.92004851))
 
         assert (await _exported(http, site.uuid))["geometry"]["coordinates"] == [33.920049, 27.814092]
+
+
+class TestAPatchRacingAnAcceptance:
+    @pytest.mark.asyncio
+    async def test_a_patch_that_read_the_row_before_the_acceptance_writes_nothing_to_the_record(
+        self,
+        http: httpx.AsyncClient,
+        db: Session,
+        diver: User,
+        reviewer: User,
+        signed: Sign,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        site = _own_site(db, diver)
+        uuid = site.uuid
+        stale = DiveSiteReadInternal.model_validate(site, from_attributes=True)
+        proposal = await _propose_site(http, site)
+        members = _members()
+        signed.as_(reviewer)
+        await _accepted(http, proposal, members=members)
+        signed.as_(diver)
+        monkeypatch.setattr(dive_sites_module, "_get_readable_dive_site", AsyncMock(return_value=stale))
+
+        response = await http.patch(f"/dive-site/{uuid}", json={"name": _marked("Too late")})
+
+        assert response.status_code == 403
+        row = _row(db, uuid)
+        assert row is not None and row.name == members["name"]
 
 
 class TestTheRecordRules:

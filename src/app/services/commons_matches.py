@@ -1,10 +1,10 @@
 """Which Commons records a site may be: the rule a diver and a reviewer both read.
 
-The rule was the Commons repository's, as an advisory report on pull requests. Proposals are
-reviewed here now, so this is its home, and it adds one rule ahead of the repository's three:
-*identity*, the two share a registry entry. Two records it flags are often two real sites - a
-lake's sunken platform and its sunken boat - and two it misses can be one, so it only ever
-offers. The distances are floors calibrated on the catalogue the pool was seeded from:
+Proposals are reviewed on this instance, so the rule runs here. *Identity* comes first: the two
+share a registry entry, which makes a diver's site a copy and is the one rule that refuses a
+proposal. The others only ever offer, since two records they flag are often two real sites - a
+lake's sunken platform and its sunken boat - and two they miss can be one. Their distances are
+floors calibrated on the catalogue the pool was seeded from:
 
 - **Within 20 m, whatever the names.** Further out, most close pairs are differently named
   features of one dive lake or one reef, and flagging them would bury the real hits.

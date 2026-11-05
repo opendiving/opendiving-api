@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import func, select
+from sqlalchemy.exc import NoResultFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
@@ -793,13 +794,17 @@ async def patch_dive_site(
     tag_ids = None if values.tags is None else await _resolved_tag_ids(db, user_id=owner_id, names=values.tags)
 
     if update_data:
-        await write_or_duplicate(
-            db,
-            # The owner too: a review may have given this row to the Commons since it was read.
-            crud_dive_sites.update(db=db, object=update_data, uuid=uuid, user_id=owner_id, commit=False),
-            DIVE_SITE_NAME_KEY,
-            _NAME_TAKEN,
-        )
+        try:
+            await write_or_duplicate(
+                db,
+                # The owner too, which the UPDATE carries: a review may have given this row to the
+                # Commons since it was read, and then the body names a shared member of a record.
+                crud_dive_sites.update(db=db, object=update_data, uuid=uuid, user_id=owner_id, commit=False),
+                DIVE_SITE_NAME_KEY,
+                _NAME_TAKEN,
+            )
+        except NoResultFound as exc:
+            raise ForbiddenException(_SHARED_MEMBER_REFUSED) from exc
     if tag_ids is not None:
         await write_or_422(
             db, replace_tags_for_dive_site(db, db_dive_site.id, tag_ids, user_id=owner_id, commit=False), TAG_NOT_FOUND

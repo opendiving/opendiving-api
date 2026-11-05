@@ -101,6 +101,9 @@ class OwnedResourceCache[InternalT, PublicT]:
       than a stale one.
     - `dive_drafts.py` - uncached: nothing embeds a draft, and a phone writes one each time the
       diver pauses, so a cache would owe an invalidation per write and save a query per read.
+    - `dive_site_proposals.py` - uncached for `invitations.py`'s reason: a reviewer's decision is
+      a write the proposer's own requests never make, and nothing embeds the list, which is
+      read when a diver goes looking for an outcome.
 
     In each of the enriched ones the enrichment is a second query whose results have to be
     zipped back into the page before conversion, which is precisely the step this factory has
