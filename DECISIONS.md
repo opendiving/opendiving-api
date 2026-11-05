@@ -5389,6 +5389,11 @@ being the truth there. Neither deletes, since dives name the rows. A bundled uui
 row is skipped and logged: an import keeps a document's uuid when nothing claims it. It runs whether
 or not this process migrated, one worker at a time, and never fails a start.
 
+Neither changes a row carrying `commons_reviewed_at`, whatever `COMMONS_PRIMARY` says: off is what a
+missing variable gives and off is the branch that overwrites, so a primary restarting without its
+setting loses its routes and no accepted change. The mark is on the row because an account's
+deletion takes the proposals, and the export leaves it out, so a copy has no marked row.
+
 ## `COMMONS_PRIMARY` is a setting of its own, and off is what a missing variable gives
 
 `COMMONS_PRIMARY` marks the one instance where the Commons is edited, and is published as
@@ -5436,6 +5441,30 @@ narrows the rows and the position only orders what is left, so no spatial predic
 table and no index would help. Exact names come before prefixes before substrings, and nearness
 decides within each. The locality is not searched in this group: across the world's sites a town's
 name matches everything near it.
+
+## Acceptance writes the reviewer's body, not the row
+
+A diver may go on editing their site while a proposal waits, so what a reviewer approved and what
+the row holds can differ by the time they press the button. The body is the whole record, every
+member named, so one a form left out is a refusal rather than a cleared value. The pin is rounded
+here, and a body breaking a record rule is refused by name, because the repository only copies what
+the primary holds. Rejected: a publish that normalises records on the way out, which leaves the copy
+different from its source.
+
+## The Commons match rule lives here, not in the repository
+
+Proposals are reviewed in the app, so the rule a diver and a reviewer read has to run here, and the
+repository stops taking the pull requests its report ran on. Its thresholds and tests moved with it,
+and it gained *identity*, a shared registry entry, which is the one rule that refuses a proposal:
+such a site is a copy. A list reads that rule alone, in one query.
+
+## The Commons match query answers "sites near me" with a range over two columns
+
+This is the condition *"Dive site coordinates are two `Float` columns"* names, and it is answered
+without PostGIS. A latitude and longitude range over the columns narrows the Commons, the
+antimeridian splitting it in two and a pole widening it to every longitude, and the rule then runs
+in Python over what is left. One site's matches read a few thousand floats at most, with a person
+waiting on one page; a spatial index would cost every self-hoster an extension for that.
 
 ## Commons localities are resolved from Natural Earth, and containment alone is not enough
 

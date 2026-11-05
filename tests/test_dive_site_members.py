@@ -249,7 +249,7 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     )
     seen["site"] = site
 
-    async def fake_update(*, db: Any, object: dict, uuid: Any, commit: bool) -> None:
+    async def fake_update(*, db: Any, object: dict, uuid: Any, user_id: int, commit: bool) -> None:
         seen["update_data"] = object
 
     seen["replace_tags"] = AsyncMock()
@@ -501,7 +501,7 @@ async def _read(async_db: AsyncSession, user: User, uuid: Any) -> DiveSiteRead:
 
 
 async def _page(async_db: AsyncSession, user: User, **arguments: Any) -> list[dict[str, Any]]:
-    query: dict[str, Any] = {"search": None, "tag_id": None, "sort": DiveSiteListSort.NAME}
+    query: dict[str, Any] = {"search": None, "tag_id": None, "sort": DiveSiteListSort.NAME, "commons_match": False}
     query.update(arguments)
     result = await dive_sites_module._cached_read_dive_sites.__wrapped__(  # type: ignore[attr-defined]
         None, user_id=user.id, db=async_db, page=1, items_per_page=50, **query

@@ -93,6 +93,12 @@ NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
         "owns its lifecycle, along with the blob it writes to whichever store "
         "`FILE_STORAGE_BACKEND` selects."
     ),
+    "DiveSiteProposal": (
+        "`DELETE /dive-site-proposal/{uuid}` **withdraws rather than removes**, as an invitation's revoke "
+        "does: the row stays so the diver still reads how it ended, and a second withdraw is a 409. The "
+        "row goes with its account or its private site, through the cascades. A panel form that wrote "
+        "one could accept a proposal around the record rules, so it is not registered there either."
+    ),
     "DiveFile": (
         "One of a recording's stored exports, reached through the dive: "
         "`DELETE /dive/{uuid}/file/{fid}` owns its lifecycle, along with the blob it writes to "

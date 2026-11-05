@@ -383,6 +383,13 @@ class RegistrationSettings(BaseSettings):
     COMMONS_EXPORT_RATE_LIMIT_WINDOW_SECONDS: int = config("COMMONS_EXPORT_RATE_LIMIT_WINDOW_SECONDS", default=3600)
     COMMONS_EXPORT_RATE_LIMIT_PER_IP: int = config("COMMONS_EXPORT_RATE_LIMIT_PER_IP", default=20)
 
+    # How many proposals one account may send a day, each a person's time in the queue. Far past
+    # a diver working through their logbook; `POST /dive-site/{uuid}/proposals` answers 429 beyond.
+    COMMONS_PROPOSAL_RATE_LIMIT_WINDOW_SECONDS: int = config(
+        "COMMONS_PROPOSAL_RATE_LIMIT_WINDOW_SECONDS", default=86400
+    )
+    COMMONS_PROPOSAL_RATE_LIMIT_PER_USER: int = config("COMMONS_PROPOSAL_RATE_LIMIT_PER_USER", default=30)
+
     # `slug=Label` pairs, comma-separated: each one a link, `/join?via=<slug>`, that admits
     # whoever follows it without an invitation and counts the account under its slug. Empty
     # is the default and turns the feature off everywhere - the resolve route 404s, `GET

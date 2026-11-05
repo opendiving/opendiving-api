@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
@@ -20,12 +20,14 @@ from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...crud.crud_dive_dive_sites import replace_dive_site_on_dives
+from ...crud.crud_dive_site_proposals import get_latest_proposals_for_sites
 from ...crud.crud_dive_sites import (
     DIVE_SITE_NAME_KEY,
     DIVE_SITE_SEARCH_COLUMNS,
     add_saved_site,
     crud_dive_sites,
     dive_site_name_exists,
+    get_commons_matches_for_sites,
     get_dive_sites_page,
     get_readable_dive_site,
     get_summaries_for_dive_sites,
@@ -34,6 +36,7 @@ from ...crud.crud_dive_sites import (
     is_saved,
     remove_saved_commons_site,
     replace_saved_site_notes,
+    replace_site_with_record,
     resolve_dive_site_ids_for_user,
     save_commons_site,
     save_named_commons_sites,
@@ -54,12 +57,16 @@ from ...schemas.dive_site import (
     DEPTH_RANGE_MESSAGE,
     SITE_OWNER_ACCOUNT,
     SITE_OWNER_COMMONS,
+    DiveSiteCommonsMatch,
+    DiveSiteCommonsMatchRead,
     DiveSiteCreate,
     DiveSiteCreateInternal,
     DiveSiteListSort,
     DiveSiteLookupItem,
+    DiveSiteProposalState,
     DiveSiteRead,
     DiveSiteReadInternal,
+    DiveSiteReplace,
     DiveSiteSave,
     DiveSiteSummary,
     DiveSiteUpdateRequest,
@@ -74,6 +81,7 @@ from ...schemas.location import (
 from ...schemas.lookup import LookupUntil, LookupUuids
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches, invalidate_trip_caches
+from ...services.commons_matches import find_commons_matches
 from ...services.commons_records import attribution_for
 from ..idempotency import IdempotentCreate
 
@@ -103,6 +111,18 @@ async def _get_readable_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current
     )
 
 
+async def _get_own_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
+    """`_get_readable_dive_site` for a route that means the caller's own site alone."""
+    return await fetch_owned_or_raise(
+        db=db,
+        crud=crud_dive_sites,
+        uuid=uuid,
+        current_user=current_user,
+        schema=DiveSiteReadInternal,
+        not_found_message="Dive site not found",
+    )
+
+
 def _relation(row: dict[str, Any]) -> dict[str, Any]:
     """Who owns a site and the credit it asks for, from its internal columns."""
     if row["user_id"] is not None:
@@ -118,21 +138,39 @@ _INTERNAL_MEMBERS = {
     "commons_seed_registry",
     "commons_seed_identifier",
     "commons_retrieved",
+    "commons_reviewed_at",
     *(f"{DIVE_SITE_LOCATION_PREFIX}{field}" for field in LOCATION_FIELDS),
 }
 
 
-def _to_public_dive_site(data: dict[str, Any], *, tags: list[str], summary: DiveSiteSummary) -> DiveSiteRead:
+def _to_public_dive_site(
+    data: dict[str, Any],
+    *,
+    tags: list[str],
+    summary: DiveSiteSummary,
+    proposal: DiveSiteProposalState | None = None,
+    commons_match: DiveSiteCommonsMatch | None = None,
+) -> DiveSiteRead:
     """Convert an internal dive site representation (integer FKs, flat locality columns, the
     diver's notes beside them) into its public shape (who owns it, locality nested, tags and
-    the summary of the diver's dives attached)."""
+    the summary of the diver's dives attached, with what the Commons has to say to this reader)."""
     return DiveSiteRead(
         **{k: v for k, v in data.items() if k not in _INTERNAL_MEMBERS},
         **summary.model_dump(),
         **_relation(data),
         location=location_from_row(data, DIVE_SITE_LOCATION_PREFIX),
         tags=tags,
+        proposal=proposal,
+        commons_match=commons_match,
     )
+
+
+async def _commons_matches_of(
+    db: AsyncSession, sites: list[dict[str, Any]], *, user_id: int
+) -> dict[int, DiveSiteCommonsMatch]:
+    """*commons_match* for the sites here that are this diver's own and carry an entry at all."""
+    own = [site["id"] for site in sites if site["user_id"] == user_id and site["external_ids"]]
+    return await get_commons_matches_for_sites(db, dive_site_ids=own)
 
 
 # Kept for its list key's shape and its `lookup`, as `trips.py` keeps its own: a site read carries its tags and
@@ -229,11 +267,14 @@ async def write_dive_site(
         if tag_ids
         else []
     )
+    created = created_dive_site.model_dump()
+    matches = await _commons_matches_of(db, [created], user_id=current_user["id"])
     # No dive can name a site that did not exist, so a new one has nothing to summarise.
     return _to_public_dive_site(
-        {**created_dive_site.model_dump(), "notes": dive_site.notes, "saved": True},
+        {**created, "notes": dive_site.notes, "saved": True},
         tags=tags,
         summary=DiveSiteSummary(),
+        commons_match=matches.get(created_dive_site.id),
     )
 
 
@@ -241,7 +282,7 @@ async def write_dive_site(
 # filter or an order missing from it serves one page for another for sixty seconds. The shape
 # up to the search is `_dive_site_cache`'s, which keeps it under the pattern
 # `invalidate_dive_site_caches` sweeps.
-_LIST_CACHE_KEY_PREFIX = _dive_site_cache.list_cache_key_prefix + ":tag_{tag_id}:sort_{sort}"
+_LIST_CACHE_KEY_PREFIX = _dive_site_cache.list_cache_key_prefix + ":tag_{tag_id}:sort_{sort}:match_{commons_match}"
 
 
 @cache(key_prefix=_LIST_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
@@ -254,6 +295,7 @@ async def _cached_read_dive_sites(
     search: str | None,
     tag_id: int | None,
     sort: DiveSiteListSort,
+    commons_match: bool,
 ) -> dict:
     """Fetches (and caches) a page of the caller's sites, each with its tags and the summary
     of its dives. Only ever called once `read_dive_sites` has authorized the caller - a hit
@@ -266,12 +308,21 @@ async def _cached_read_dive_sites(
         search=search,
         tag_id=tag_id,
         sort=sort,
+        commons_match=commons_match,
     )
     site_ids = [site["id"] for site in sites_data["data"]]
     tags_by_site = await get_tags_for_dive_sites(db, site_ids, user_id=user_id)
     summaries = await get_summaries_for_dive_sites(db, dive_site_ids=site_ids, user_id=user_id)
+    proposals = await get_latest_proposals_for_sites(db, user_id=user_id, dive_site_ids=site_ids)
+    matches = await _commons_matches_of(db, sites_data["data"], user_id=user_id)
     sites_data["data"] = [
-        _to_public_dive_site(site, tags=tags_by_site[site["id"]], summary=summaries[site["id"]]).model_dump()
+        _to_public_dive_site(
+            site,
+            tags=tags_by_site[site["id"]],
+            summary=summaries[site["id"]],
+            proposal=proposals.get(site["id"]),
+            commons_match=matches.get(site["id"]),
+        ).model_dump()
         for site in sites_data["data"]
     ]
     response: dict[str, Any] = paginated_response(crud_data=sites_data, page=page, items_per_page=items_per_page)
@@ -297,14 +348,18 @@ async def read_dive_sites(
             "every site no dive names last. Ties go by name"
         ),
     ] = DiveSiteListSort.NAME,
+    commons_match: Annotated[
+        bool, Query(description="Only the caller's own sites that share a registry entry with a Commons record")
+    ] = False,
 ) -> dict:
     """List the sites on the caller's list, their own and the Commons records they have saved,
     each with its tags and the summary of the caller's dives there.
 
     `search` matches a case-insensitive substring against the site's name, its other names
     and its locality's name. `tag_uuid` keeps the sites carrying that tag, and one that is
-    not the caller's returns an empty page rather than an error. Out-of-range pagination is
-    clamped, not rejected.
+    not the caller's returns an empty page rather than an error. `commons_match` keeps the
+    caller's own sites with a `commons_match`, so `total_count` is how many they have.
+    Out-of-range pagination is clamped, not rejected.
 
     The summary counts the live dives naming the site at any position, so the second site of
     a drift dive counts that dive too.
@@ -327,6 +382,7 @@ async def read_dive_sites(
         search=(search or "").strip().lower() or None,
         tag_id=tag_id,
         sort=sort,
+        commons_match=commons_match,
     )
 
 
@@ -497,7 +553,15 @@ async def _cached_read_dive_site(
     site_id = db_dive_site["id"]
     tags = (await get_tags_for_dive_sites(db, [site_id], user_id=user_id))[site_id]
     summary = (await get_summaries_for_dive_sites(db, dive_site_ids=[site_id], user_id=user_id))[site_id]
-    return _to_public_dive_site(db_dive_site, tags=tags, summary=summary).model_dump()
+    proposals = await get_latest_proposals_for_sites(db, user_id=user_id, dive_site_ids=[site_id])
+    matches = await _commons_matches_of(db, [db_dive_site], user_id=user_id)
+    return _to_public_dive_site(
+        db_dive_site,
+        tags=tags,
+        summary=summary,
+        proposal=proposals.get(site_id),
+        commons_match=matches.get(site_id),
+    ).model_dump()
 
 
 @router.get("/dive-site/{uuid}", response_model=DiveSiteRead)
@@ -514,6 +578,10 @@ async def read_dive_site(
     have not saved, `saved` is false, `notes` and `tags` are empty, the summary is zero and
     `created_at` is when the record became a Commons record on this instance.
 
+    `proposal` is the caller's latest proposal on the site while it waits or after a decline, and
+    `commons_match`, on the caller's own site, the Commons record sharing a registry entry with
+    it. Either may trail a change made elsewhere by the read's cache.
+
     404 when no such site exists - and the same 404 when it is another user's private site, so
     someone else's uuid stays unprobeable.
     """
@@ -521,6 +589,62 @@ async def read_dive_site(
     await _get_readable_dive_site(db, uuid, current_user)
 
     return await _cached_read_dive_site(request, user_id=current_user["id"], uuid=uuid, db=db)
+
+
+@router.get("/dive-site/{uuid}/commons-matches", response_model=list[DiveSiteCommonsMatchRead])
+async def read_dive_site_commons_matches(
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> list[DiveSiteCommonsMatchRead]:
+    """The Commons records the caller's own site may be, strongest first and nearest first within
+    a rule: `identity`, which shares a registry entry with the site; `within_20_m`;
+    `similar_name_within_200_m`; and `same_name_within_5_km`, for a name that is not a generic one.
+
+    `distance_metres` is between the two pins, null when the site has none. A site with no pin
+    can only meet `identity`. `qualifier_siblings` says the names differ only by a word like West
+    or East, which usually means two sites.
+
+    404 when no such site exists, and the same 404 on a Commons record and on another user's
+    private site.
+    """
+    site = await _get_own_dive_site(db, uuid, current_user)
+    return await find_commons_matches(db, site.model_dump())
+
+
+@router.post("/dive-site/{uuid}/replace", response_model=DiveSiteRead)
+async def replace_dive_site(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    values: DiveSiteReplace,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, Any]:
+    """Replace the caller's own site with a Commons record, answering the record as
+    `GET /dive-site/{uuid}` reads it.
+
+    In one transaction: every one of the caller's live dives naming the site names the record at
+    the same position, and a dive already naming both holds it once; the site's notes join any the
+    caller had on the record; its tags are added to theirs there; the record is on their list; and
+    the site is deleted, with any proposal on it. A draft naming the site loses it.
+
+    A `commons_site_uuid` that is not a Commons record is a 422. 404 when no such site exists,
+    and the same 404 on a Commons record and on another user's private site, so a second call on
+    the same uuid is a 404 too.
+    """
+    user_id = current_user["id"]
+    site = await _get_own_dive_site(db, uuid, current_user)
+    record_id = await db.scalar(select(DiveSite.id).where(DiveSite.uuid == values.commons_site_uuid, in_the_commons()))
+    if record_id is None:
+        raise UnprocessableEntityException("That Commons site does not exist")
+
+    await replace_site_with_record(db, user_id=user_id, site_id=site.id, record_id=record_id)
+    await db.commit()
+    await invalidate_dive_site_caches(user_id)
+    await invalidate_dive_caches(user_id)
+    await invalidate_trip_caches(user_id)
+
+    return await _cached_read_dive_site(request, user_id=user_id, uuid=values.commons_site_uuid, db=db)
 
 
 @router.put("/dive-site/{uuid}/saved", response_model=DiveSiteRead)
@@ -671,7 +795,8 @@ async def patch_dive_site(
     if update_data:
         await write_or_duplicate(
             db,
-            crud_dive_sites.update(db=db, object=update_data, uuid=uuid, commit=False),
+            # The owner too: a review may have given this row to the Commons since it was read.
+            crud_dive_sites.update(db=db, object=update_data, uuid=uuid, user_id=owner_id, commit=False),
             DIVE_SITE_NAME_KEY,
             _NAME_TAKEN,
         )

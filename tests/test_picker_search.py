@@ -255,6 +255,7 @@ PAGINATED_LIST_ROUTES: dict[str, tuple[str, ...]] = {
     "courses.py": ("lookup_courses", "read_courses"),
     "dive_drafts.py": ("read_dive_drafts",),
     "dive_form_presets.py": ("read_dive_form_presets",),
+    "dive_site_proposals.py": ("read_dive_site_proposal_queue", "read_dive_site_proposals"),
     "dive_sites.py": ("lookup_dive_sites", "read_dive_sites"),
     "dives.py": ("read_dives",),
     "gear_items.py": ("lookup_gear_items", "read_gear_items"),

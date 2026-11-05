@@ -1,13 +1,29 @@
 import math
 import uuid as uuid_pkg
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime
 from typing import Any, NamedTuple
 
 from fastcrud import FastCRUD
-from sqlalchemy import ColumnElement, Select, case, delete, func, inspect, literal, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Select,
+    String,
+    case,
+    column,
+    delete,
+    func,
+    inspect,
+    literal,
+    or_,
+    select,
+    true,
+    tuple_,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from ..core.utils.datetime_offset import combine_dive_start_time
 from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like, search_clause
@@ -19,6 +35,7 @@ from ..models.dive_species import DiveSpecies
 from ..models.saved_site import SavedSite
 from ..models.tag import Tag
 from ..schemas.dive_site import (
+    DiveSiteCommonsMatch,
     DiveSiteCreateInternal,
     DiveSiteListSort,
     DiveSiteReadInternal,
@@ -26,6 +43,7 @@ from ..schemas.dive_site import (
     DiveSiteUpdate,
     DiveSiteUpdateInternal,
 )
+from .crud_dive_dive_sites import replace_dive_site_on_dives
 from .crud_dives import date_only_of_the, offset_of_the
 from .unique_keys import unique_key_taken
 
@@ -42,6 +60,7 @@ crud_dive_sites = CRUDDiveSite(DiveSite)
 DIVE_SITE_SEARCH_COLUMNS = ("name", "location_name")
 
 _SAVED_SITE_KEY = "ux_saved_site_user_id_dive_site_id"
+_SITE_TAG_KEY = "ux_dive_site_tag_dive_site_id_tag_id"
 
 
 def saved_by(user_id: int) -> ColumnElement[bool]:
@@ -57,6 +76,61 @@ def in_the_commons() -> ColumnElement[bool]:
 def readable_by(user_id: int) -> ColumnElement[bool]:
     """What this diver may name wherever a site is named: their list, and any Commons record."""
     return or_(in_the_commons(), saved_by(user_id))
+
+
+def _registry_entries(site: Any) -> Select[Any]:
+    """One row per registry entry of a site, for matching entries in SQL: the column is JSON,
+    which has no containment operator, and one list of sites is compared with all of the Commons."""
+    entry = (
+        func.json_to_recordset(site.external_ids)
+        .table_valued(column("registry", String), column("identifier", String))
+        .render_derived(with_types=True)
+    )
+    return select(site.id, site.uuid, site.name, entry.c.registry, entry.c.identifier).join_from(site, entry, true())
+
+
+def _commons_entries() -> Any:
+    record = aliased(DiveSite)
+    return _registry_entries(record).where(record.user_id.is_(None)).subquery()
+
+
+def has_commons_match(user_id: int) -> ColumnElement[bool]:
+    """The diver's own sites sharing a registry entry with a Commons record."""
+    own = aliased(DiveSite)
+    entries = _registry_entries(own).where(own.user_id == user_id).subquery()
+    commons = _commons_entries()
+    return DiveSite.id.in_(
+        select(entries.c.id).join(
+            commons, (commons.c.registry == entries.c.registry) & (commons.c.identifier == entries.c.identifier)
+        )
+    )
+
+
+async def get_commons_matches_for_sites(
+    db: AsyncSession, *, dive_site_ids: Sequence[int]
+) -> dict[int, DiveSiteCommonsMatch]:
+    """The Commons record each of these sites shares a registry entry with, in one query so a
+    list can say so. A site sharing entries with several reads the first by name."""
+    if not dive_site_ids:
+        return {}
+    own = aliased(DiveSite)
+    entries = _registry_entries(own).where(own.id.in_(set(dive_site_ids))).subquery()
+    commons = _commons_entries()
+    rows = await db.execute(
+        select(entries.c.id.label("site_id"), commons.c.uuid, commons.c.name)
+        .join(commons, (commons.c.registry == entries.c.registry) & (commons.c.identifier == entries.c.identifier))
+        .order_by(commons.c.name, commons.c.id)
+    )
+    matches: dict[int, DiveSiteCommonsMatch] = {}
+    for row in rows:
+        matches.setdefault(row.site_id, DiveSiteCommonsMatch(uuid=row.uuid, name=row.name))
+    return matches
+
+
+def commons_records_carrying(entries: Iterable[tuple[str, str]]) -> Select[Any]:
+    """The ids of the Commons records carrying any of these registry entries."""
+    commons = _commons_entries()
+    return select(commons.c.id).where(tuple_(commons.c.registry, commons.c.identifier).in_(list(entries)))
 
 
 def _select_sites(user_id: int, *, on_the_list_only: bool) -> Select[Any]:
@@ -99,12 +173,14 @@ async def is_saved(db: AsyncSession, *, user_id: int, dive_site_id: int) -> bool
     return saved is not None
 
 
-async def save_commons_site(db: AsyncSession, *, user_id: int, dive_site_id: int, notes: str) -> bool:
+async def save_commons_site(
+    db: AsyncSession, *, user_id: int, dive_site_id: int, notes: str, created_at: datetime | None = None
+) -> bool:
     """Whether this put the record on the diver's list, which it does not where it already is:
     a retry changes nothing, and two at once leave one row. Does not commit."""
     written = await db.scalar(
         insert(SavedSite)
-        .values(user_id=user_id, dive_site_id=dive_site_id, notes=notes, created_at=datetime.now(UTC))
+        .values(user_id=user_id, dive_site_id=dive_site_id, notes=notes, created_at=created_at or datetime.now(UTC))
         .on_conflict_do_nothing(constraint=_SAVED_SITE_KEY)
         .returning(SavedSite.id)
     )
@@ -156,6 +232,51 @@ async def replace_saved_site_notes(db: AsyncSession, *, user_id: int, dive_site_
         .returning(SavedSite.id)
     )
     return written is not None
+
+
+async def replace_site_with_record(db: AsyncSession, *, user_id: int, site_id: int, record_id: int) -> None:
+    """Put a Commons record where a diver's own site stands, and delete the site. Does not commit.
+
+    The diver's dives name the record at the same positions, their notes join any they had on
+    it, their tags are the union, and the record is on their list with the date the site
+    entered it. Their proposals on the site go with the row, so a caller keeping one moves it
+    first.
+    """
+    site_row = (
+        await db.execute(
+            select(SavedSite.notes, SavedSite.created_at).where(
+                SavedSite.user_id == user_id, SavedSite.dive_site_id == site_id
+            )
+        )
+    ).one()
+    await save_commons_site(db, user_id=user_id, dive_site_id=record_id, notes="", created_at=site_row.created_at)
+    held = await db.scalar(
+        select(SavedSite.notes).where(SavedSite.user_id == user_id, SavedSite.dive_site_id == record_id)
+    )
+    if site_row.notes and site_row.notes != held:
+        joined = "\n\n".join(notes for notes in (held, site_row.notes) if notes)
+        await replace_saved_site_notes(db, user_id=user_id, dive_site_id=record_id, notes=joined)
+
+    await replace_dive_site_on_dives(db=db, user_id=user_id, from_dive_site_id=site_id, to_dive_site_id=record_id)
+
+    # After the tags the diver already had on the record, in the order they had them on the site.
+    last_position = await db.scalar(
+        select(func.max(DiveSiteTag.position))
+        .join(Tag, Tag.id == DiveSiteTag.tag_id)
+        .where(DiveSiteTag.dive_site_id == record_id, Tag.user_id == user_id)
+    )
+    first_free = 0 if last_position is None else last_position + 1
+    await db.execute(
+        insert(DiveSiteTag)
+        .from_select(
+            ["dive_site_id", "tag_id", "position"],
+            select(literal(record_id), DiveSiteTag.tag_id, DiveSiteTag.position + first_free).where(
+                DiveSiteTag.dive_site_id == site_id
+            ),
+        )
+        .on_conflict_do_nothing(constraint=_SITE_TAG_KEY)
+    )
+    await db.execute(delete(DiveSite).where(DiveSite.id == site_id, DiveSite.user_id == user_id))
 
 
 def search_condition(term: str) -> ColumnElement[bool]:
@@ -325,6 +446,7 @@ async def get_dive_sites_page(
     search: str | None,
     tag_id: int | None,
     sort: DiveSiteListSort,
+    commons_match: bool = False,
 ) -> dict[str, Any]:
     """One page of a diver's sites, in `get_multi`'s `{data, total_count}` shape.
 
@@ -338,6 +460,8 @@ async def get_dive_sites_page(
         conditions.append(search_condition(search))
     if tag_id is not None:
         conditions.append(carrying_tag(tag_id))
+    if commons_match:
+        conditions.append(has_commons_match(user_id))
 
     total_count = await db.scalar(select(func.count()).select_from(DiveSite).where(saved_by(user_id), *conditions))
 

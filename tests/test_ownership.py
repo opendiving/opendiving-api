@@ -342,6 +342,26 @@ FETCH_OWNED_ROUTES = [
     OwnedRoute(
         "PUT", "/api/v1/dive-site/{uuid}/saved", "src.app.api.v1.dive_sites:crud_dive_sites", "Dive site not found"
     ),
+    OwnedRoute(
+        "GET",
+        "/api/v1/dive-site/{uuid}/commons-matches",
+        "src.app.api.v1.dive_sites:crud_dive_sites",
+        "Dive site not found",
+    ),
+    OwnedRoute(
+        "POST",
+        "/api/v1/dive-site/{uuid}/replace",
+        "src.app.api.v1.dive_sites:crud_dive_sites",
+        "Dive site not found",
+        {"json": {"commons_site_uuid": str(uuid_pkg.uuid4())}},
+    ),
+    OwnedRoute(
+        "POST",
+        "/api/v1/dive-site/{uuid}/proposals",
+        "src.app.api.v1.dive_site_proposals:crud_dive_sites",
+        "Dive site not found",
+        {"json": {"attestation": "Not looked at."}},
+    ),
     *(
         OwnedRoute(method, "/api/v1/trip/{uuid}", "src.app.api.v1.trips:crud_trips", "Trip not found", extra)
         for method, extra in _CRUD_METHODS
@@ -504,6 +524,12 @@ RESOLVER_OWNED_ROUTES = [
         )
         for method, extra in _CRUD_METHODS
     ),
+    OwnedRoute(
+        "DELETE",
+        "/api/v1/dive-site-proposal/{uuid}",
+        "src.app.services.commons_proposals:locked_proposal",
+        "Proposal not found",
+    ),
 ]
 
 # The two kinds of entry that belong here. A resource with no owner at all: the species
@@ -530,6 +556,14 @@ UNOWNED_ROUTES: dict[tuple[str, str], str] = {
         ),
         "The species catalog is global, and these are the operator's routes over it, gated on "
         "the superuser by the `/admin` router - there is no owner to compare against.",
+    ),
+    **dict.fromkeys(
+        (
+            ("POST", "/api/v1/admin/dive-site-proposal/{uuid}/accept"),
+            ("POST", "/api/v1/admin/dive-site-proposal/{uuid}/decline"),
+        ),
+        "A reviewer decides any account's proposal: gated on the superuser by the `/admin` router, "
+        "with no owner to compare the caller against.",
     ),
     ("GET", "/api/v1/user/species/{uuid}"): (
         "The uuid is the global catalog's; the caller's own dives scope the query, and a species "
@@ -574,7 +608,7 @@ def owned_app() -> Any:
 
 
 @pytest.fixture
-def signed_in_client(owned_app: Any) -> Generator[TestClient]:
+def signed_in_client(owned_app: Any, monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient]:
     """A caller who is signed in, which now means two things rather than one.
 
     `current_session_uuid` is overridden alongside `get_current_user` because
@@ -589,7 +623,11 @@ def signed_in_client(owned_app: Any) -> Generator[TestClient]:
     A uuid nothing else uses, so the route's current-session 409 can never fire here: these
     cases are about somebody *else's* row, and a collision would swap the 404 they assert
     for a conflict.
+
+    The Commons' proposal routes answer only on its primary, and their 404 elsewhere would
+    pass for the one these cases assert.
     """
+    monkeypatch.setattr(settings, "COMMONS_PRIMARY", True)
     owned_app.dependency_overrides[get_current_user] = lambda: OWNER
     owned_app.dependency_overrides[get_downloading_user] = lambda: OWNER
     owned_app.dependency_overrides[current_session_uuid] = lambda: CALLERS_SESSION

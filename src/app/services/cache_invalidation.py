@@ -31,6 +31,9 @@ user-scoped. See `read_dive`/`_cached_read_dives` and `gear_items.py` for the ke
 shapes themselves.
 """
 
+import uuid as uuid_pkg
+from collections.abc import Iterable
+
 from ..core.utils.cache import delete_keys_by_pattern
 from ..core.utils.owned_resource_cache import OwnedResourceCache
 
@@ -137,6 +140,20 @@ async def invalidate_dive_site_caches(user_id: int) -> None:
     """
     await delete_keys_by_pattern(OwnedResourceCache.list_cache_pattern("dive_sites", user_id))
     await delete_keys_by_pattern(f"user_{user_id}_dive_site:*")
+
+
+async def invalidate_commons_record_caches(uuid: uuid_pkg.UUID, *, saver_ids: Iterable[int]) -> None:
+    """Drop what a review's write to a Commons record makes stale: every account's read of the
+    record, by pattern, and for each account with it saved their lists and their dives, whose
+    reads embed its name and pin.
+
+    The second half is a loop over the savers, two sweeps each, which suits today's counts and
+    is the thing to revisit if a record comes to have thousands.
+    """
+    await delete_keys_by_pattern(f"user_*_dive_site:{uuid}")
+    for saver_id in saver_ids:
+        await invalidate_dive_site_caches(saver_id)
+        await invalidate_dive_caches(saver_id)
 
 
 async def invalidate_trip_caches(user_id: int) -> None:

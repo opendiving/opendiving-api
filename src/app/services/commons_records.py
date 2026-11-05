@@ -7,7 +7,8 @@ and at startup `sync_commons` brings the rows in line with it, keyed on the reco
 **One instance is the primary, and there the table is the truth**: the sync inserts what the
 table lacks and changes nothing, since a row may hold what a review wrote. Everywhere else the
 rows are a read-only copy of the bundle, so a row whose bundled facts differ is updated. Neither
-deletes: a dive may name the row, and no record is ever retired.
+deletes, since a dive may name the row and no record is ever retired, and neither changes a row a
+review wrote, whatever the setting says.
 
 The notice block at the head of the file is the licence compliance artifact: ODbL 4.2 requires
 the notice to travel within the data or its metadata. It is what credits each record, too, so a
@@ -50,10 +51,9 @@ _SYNC_LOCK_KEY = 8231907441002139
 # `IN` lists are chunked: asyncpg binds at most 32,767 parameters to a statement.
 _CHUNK = 10_000
 
-# The members a Commons record publishes, as the columns that hold them. Both the public export
-# and the sync read this list and no other, and nothing here reads `saved_site` or a tag: a
-# diver's notes and tags cannot reach a record because neither is selected.
-_FACT_COLUMNS = (
+# What a proposal may change and a review writes: a site's facts, with a locality as its name
+# alone. The queue reads a diver's private site through this list and no other.
+SHARED_MEMBER_COLUMNS = (
     "name",
     "other_names",
     "latitude",
@@ -65,6 +65,13 @@ _FACT_COLUMNS = (
     "water_type",
     "altitude",
     "entry_types",
+)
+
+# The members a Commons record publishes, as the columns that hold them. Both the public export
+# and the sync read this list and no other, and nothing here reads `saved_site` or a tag: a
+# diver's notes and tags cannot reach a record because neither is selected.
+_FACT_COLUMNS = (
+    *SHARED_MEMBER_COLUMNS,
     "commons_source",
     "commons_license",
     "commons_seed_registry",
@@ -210,7 +217,13 @@ def _differing(row: Mapping[str, Any], record: Mapping[str, Any]) -> dict[str, A
 
 
 async def _rows_named(conn: AsyncConnection, uuids: Iterable[uuid_pkg.UUID]) -> dict[uuid_pkg.UUID, dict[str, Any]]:
-    selected = [_TABLE.c.id, _TABLE.c.uuid, _TABLE.c.user_id, *(_TABLE.c[column] for column in _FACT_COLUMNS)]
+    selected = [
+        _TABLE.c.id,
+        _TABLE.c.uuid,
+        _TABLE.c.user_id,
+        _TABLE.c.commons_reviewed_at,
+        *(_TABLE.c[column] for column in _FACT_COLUMNS),
+    ]
     rows: dict[uuid_pkg.UUID, dict[str, Any]] = {}
     for chunk in _chunks(list(uuids)):
         for row in (await conn.execute(select(*selected).where(_TABLE.c.uuid.in_(chunk)))).mappings():
@@ -240,7 +253,7 @@ async def _apply(conn: AsyncConnection, records: Sequence[Mapping[str, Any]], *,
                 "Commons record %s skipped: its uuid already names a private site on this instance.", record["uuid"]
             )
             continue
-        if primary or not (changed := _differing(row, record)):
+        if primary or row["commons_reviewed_at"] is not None or not (changed := _differing(row, record)):
             continue
         await conn.execute(
             update(_TABLE).where(_TABLE.c.id == row["id"], _TABLE.c.user_id.is_(None)).values(**changed, updated_at=now)

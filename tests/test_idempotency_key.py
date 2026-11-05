@@ -64,6 +64,7 @@ EXCLUDED: dict[str, str] = {
     "/api/v1/user/download-ticket": "Mints a short-lived token rather than a record; a retry is a second ticket.",
     "/api/v1/user/invitations": "Sends mail, bounded by its own limit, and a second send is a 409 already.",
     "/api/v1/user/passkey/verify": "Completes a single-use ceremony, whose challenge a repeat cannot reuse.",
+    "/api/v1/dive-site/{uuid}/proposals": "One waits per account and site, so a retry replaces what the first wrote.",
     "/api/v1/dive/{uuid}/recordings": "Idempotent by its bytes: a repeat upload finds the file it stored.",
 }
 

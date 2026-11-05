@@ -1,4 +1,5 @@
 import re
+import uuid as uuid_pkg
 from collections.abc import Iterable
 from datetime import date, datetime
 from enum import StrEnum
@@ -301,6 +302,35 @@ class _DiveSiteRelation(BaseModel):
     ]
 
 
+class DiveSiteProposalKind(StrEnum):
+    """A proposal asks for a diver's own site to join the Commons, or for a record to change."""
+
+    NEW_SITE = "new_site"
+    CHANGE = "change"
+
+
+class DiveSiteProposalStatus(StrEnum):
+    WAITING = "waiting"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    WITHDRAWN = "withdrawn"
+
+
+class DiveSiteProposalState(PublicUUIDSchema):
+    """The reader's own proposal on a site, as the site's read carries it."""
+
+    kind: Annotated[StoredVocabulary, Field(description="`new_site` or `change`")]
+    status: Annotated[StoredVocabulary, Field(description="`waiting` or `declined`")]
+    reason: Annotated[str | None, Field(default=None, description="Why it was declined")]
+    created_at: datetime
+
+
+class DiveSiteCommonsMatch(PublicUUIDSchema):
+    """The Commons record a diver's own site shares a registry entry with."""
+
+    name: StoredName
+
+
 class DiveSiteRead(DiveSiteBase, _DiveSiteMembersRead, DiveSiteSummary, _DiveSiteRelation, PublicUUIDSchema):
     """Public representation of a dive site, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API), with its tags by name in
@@ -308,13 +338,26 @@ class DiveSiteRead(DiveSiteBase, _DiveSiteMembersRead, DiveSiteSummary, _DiveSit
 
     `notes`, `tags`, the summary and `created_at` are the reader's, whoever else has the site:
     on a Commons record they have not saved the first three are empty and `created_at` is when
-    the row became a Commons record.
+    the row became a Commons record. So is `proposal`, which no other reader ever sees.
     """
 
     name: StoredName
+    # Unbounded on the way out: replacing a site joins its notes to those already on the record,
+    # which can pass what one write takes.
+    notes: Annotated[str, Field(default="", description=_NOTES_DESCRIPTION)]
     location: LocationRead | None = None
     tags: Annotated[list[str], Field(default_factory=list)]
     created_at: datetime
+    proposal: Annotated[
+        DiveSiteProposalState | None,
+        Field(default=None, description="The reader's latest proposal on this site, while it waits or once declined"),
+    ]
+    commons_match: Annotated[
+        DiveSiteCommonsMatch | None,
+        Field(
+            default=None, description="On the reader's own site, the Commons record sharing a registry entry with it"
+        ),
+    ]
 
 
 class DiveSiteReadInternal(DiveSiteColumnsBase, _DiveSiteMembersRead, DiveSiteLocationColumns, PublicUUIDSchema):
@@ -514,6 +557,51 @@ class DiveSiteUpdateInternal(DiveSiteUpdate):
     updated_at: datetime
 
 
+_SHARED_LOCATION_DESCRIPTION = "The town or area the site is in, by name alone"
+
+
+class DiveSiteMembers(DiveSiteColumnsBase, _DiveSiteMembersWrite, WholeCoordinatePair):
+    """A Commons record's shared members, whole: what a review writes.
+
+    Every member is named, a null or an empty list included, so a member a reviewer's form
+    left out is a refusal rather than a value cleared from a published record.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    location_name: Annotated[
+        Annotated[str, Trimmed] | None,
+        Field(default=None, max_length=LOCATION_NAME_MAX, description=_SHARED_LOCATION_DESCRIPTION),
+    ]
+
+    @model_validator(mode="after")
+    def _names_every_member(self) -> Self:
+        missing = sorted(set(type(self).model_fields) - self.model_fields_set)
+        if missing:
+            raise ValueError(f"every shared member is sent; this leaves out {', '.join(missing)}")
+        return self
+
+
+class DiveSiteMembersChange(_DiveSiteUpdateFields):
+    """The shared members a diver wants different on a Commons record, and no others."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    location_name: Annotated[
+        Annotated[str, Trimmed] | None,
+        Field(default=None, max_length=LOCATION_NAME_MAX, description=_SHARED_LOCATION_DESCRIPTION),
+    ]
+
+
+class DiveSiteMembersRead(_DiveSiteMembersRead):
+    """A site's shared members as stored, and nothing else of the row it was read from."""
+
+    name: StoredName
+    latitude: float | None = None
+    longitude: float | None = None
+    location_name: str | None = None
+
+
 class DiveSiteListSort(StrEnum):
     """How `GET /dive-sites` orders a page. `name` is the default; the other two sort on the
     summary, most first, and break ties by name."""
@@ -522,6 +610,52 @@ class DiveSiteListSort(StrEnum):
     DIVE_COUNT = "dive_count"
     # Most recently dived first, and a site no live dive names after every one that has.
     LAST_DIVED_ON = "last_dived_on"
+
+
+class DiveSiteReplace(BaseModel):
+    """Request body for `POST /dive-site/{uuid}/replace`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    commons_site_uuid: Annotated[uuid_pkg.UUID, Field(description="The Commons record that takes this site's place")]
+
+
+class CommonsMatchRule(StrEnum):
+    """Why a Commons record may be the same place, strongest first."""
+
+    IDENTITY = "identity"
+    WITHIN_20_M = "within_20_m"
+    SIMILAR_NAME_WITHIN_200_M = "similar_name_within_200_m"
+    SAME_NAME_WITHIN_5_KM = "same_name_within_5_km"
+
+
+class DiveSiteCommonsMatchRead(PublicUUIDSchema):
+    """A Commons record a site may be, with the rule it met and how far away it is."""
+
+    name: StoredName
+    other_names: Annotated[list[str], Field(default_factory=list)]
+    latitude: float | None = None
+    longitude: float | None = None
+    location_name: str | None = None
+    external_ids: Annotated[list[ExternalIdRead], Field(default_factory=list)]
+    attribution: Annotated[str | None, Field(default=None, description="The credit the record's source asks for")]
+    rule: Annotated[
+        CommonsMatchRule,
+        Field(
+            description="`identity`, the two share a registry entry; `within_20_m`, whatever the names; "
+            "`similar_name_within_200_m`; or `same_name_within_5_km`, a name that is not a generic one"
+        ),
+    ]
+    distance_metres: Annotated[
+        float | None, Field(default=None, description="Between the two pins; null when the site has none")
+    ]
+    qualifier_siblings: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="The names differ only by a word like West or East, which usually means two sites",
+        ),
+    ]
 
 
 class DiveSiteLookupItem(_DiveSiteRelation, PublicUUIDSchema):

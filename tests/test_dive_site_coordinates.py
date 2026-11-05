@@ -155,7 +155,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     db_dive_site.depth_to = None
     seen["db_dive_site"] = db_dive_site
 
-    async def fake_update(*, db: Any, object: dict, uuid: uuid_pkg.UUID, commit: bool) -> None:
+    async def fake_update(*, db: Any, object: dict, uuid: uuid_pkg.UUID, user_id: int, commit: bool) -> None:
         seen["update_data"] = object
 
     monkeypatch.setattr(dive_sites_module, "_get_readable_dive_site", AsyncMock(return_value=db_dive_site))

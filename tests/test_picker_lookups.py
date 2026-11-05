@@ -260,6 +260,7 @@ async def _list_sites(async_db: AsyncSession, user: User, term: str) -> set[Any]
             search=term,
             tag_id=None,
             sort=DiveSiteListSort.NAME,
+            commons_match=False,
         )
     )
 

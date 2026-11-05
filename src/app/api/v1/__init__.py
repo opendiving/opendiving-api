@@ -13,6 +13,8 @@ from .courses import router as courses_router
 from .dive_conditions import router as dive_conditions_router
 from .dive_drafts import router as dive_drafts_router
 from .dive_form_presets import router as dive_form_presets_router
+from .dive_site_proposals import admin_router as dive_site_proposals_admin_router
+from .dive_site_proposals import router as dive_site_proposals_router
 from .dive_sites import router as dive_sites_router
 from .dives import router as dives_router
 from .download_tickets import router as download_tickets_router
@@ -53,6 +55,8 @@ router.include_router(contacts_router)
 router.include_router(people_router)
 router.include_router(tags_router)
 router.include_router(dive_sites_router)
+router.include_router(dive_site_proposals_router)
+router.include_router(dive_site_proposals_admin_router)
 router.include_router(geocoding_router)
 router.include_router(gear_items_router)
 router.include_router(gear_sets_router)

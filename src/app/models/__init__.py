@@ -22,6 +22,7 @@ from .dive_person import DivePerson
 from .dive_profile import DiveProfile
 from .dive_recording import DiveRecording
 from .dive_site import DiveSite
+from .dive_site_proposal import DiveSiteProposal
 from .dive_site_tag import DiveSiteTag
 from .dive_species import DiveSpecies
 from .dive_tag import DiveTag
