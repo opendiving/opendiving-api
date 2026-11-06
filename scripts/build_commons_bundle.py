@@ -4,10 +4,30 @@ Run by hand, not by anything automated, from a clean checkout at the commit to s
 repository's `main` before every release, which is how a self-hosted copy is refreshed on
 upgrade:
 
-    uv run python scripts/build_commons_bundle.py /path/to/opendiving-commons
+    ENVIRONMENT=local SECRET_KEY=... uv run python scripts/build_commons_bundle.py /path/to/opendiving-commons
 
+The two settings are there because the app's match rule is imported, and importing it reads them.
 A second or two when every record names its locality; a couple of minutes, most of it two
 Natural Earth downloads (~54 MB together), when some do not. Nothing is cached between runs.
+
+**A batch enters here.** `--batch` names a file of candidate records an importer wrote, in the
+repository's record shape, and may be repeated:
+
+    ... scripts/build_commons_bundle.py /path/to/opendiving-commons --batch wrecks.geojson
+
+No record is ever removed, so a candidate has to clear the pool first. One the checkout already
+holds is dropped silently, which is what lets a build repeated after the publish write the same
+bundle. One the app's match rule pairs with a record, or with a candidate kept before it, is left
+out unless the rule calls the two siblings. One sharing a name by containment within the same
+distance is held, wider than the app's rule because a batch has no reviewer looking at a map.
+Candidates are judged in file order, so which of two survives does not vary between runs.
+
+The checkout is compared at the commit the bundle names. A proposal accepted on the hosted instance
+since the last publish is not in it, so a batch record can duplicate one.
+
+**A build that would lose a uuid the current file holds fails and writes nothing.** A batch lives
+only in this file until the publish copies it to the repository, so a rebuild from a repository
+that does not yet hold it would otherwise drop it.
 
 **The output is an ODbL Derivative Database, and the notice block inside it is a licence
 compliance artifact rather than documentation.** ODbL 4.2 requires the notice to travel "within
@@ -19,8 +39,8 @@ name.
 The script reads a record in either of the two shapes the repository has held. An OpenStreetMap
 seed's English name sits in `extensions.opendivingcommons.name_en`, or in `other_names`; a seed's
 registry entry is read off its path, or from `seeded_from` in its provenance. What it writes is
-always the second shape, one feature per line so that a refresh reads as a diff of the records it
-moved.
+always the second shape, one feature per line and each member in one fixed place, so that a refresh
+reads as a diff of the records it moved.
 
 Natural Earth supplies a record's locality where the record names none: neither OpenStreetMap nor
 Wikidata carries a country or a region. It is public domain, consumed here and never shipped, so
@@ -41,6 +61,14 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
+
+from src.app.services.commons_matches import (
+    SAME_NAME_METRES,
+    judge,
+    metres_between,
+    normalised_names,
+    one_contains_the_other,
+)
 
 _OUTPUT = Path(__file__).resolve().parent.parent / "src" / "app" / "data" / "commons_dive_sites.geojson"
 
@@ -80,6 +108,22 @@ _ATTRIBUTION = {
     "wikidata": "[Data from Wikidata, CC0 1.0.](https://www.wikidata.org/wiki/Wikidata:Licensing)",
     "contribution": f"[Data from OpenDiving Commons contributors, CC0 1.0.]({_REPOSITORY})",
 }
+
+# Where each member sits on a line. Fixed because the repository publishes them in another order,
+# and following it would rewrite every line of a refresh that moved one record.
+_MEMBER_ORDER = (
+    "uuid",
+    "name",
+    "external_ids",
+    "extensions",
+    "other_names",
+    "location",
+    "entry_types",
+    "depth_from",
+    "depth_to",
+    "water_type",
+    "altitude",
+)
 
 _ODBL_URL = "https://opendatacommons.org/licenses/odbl/1-0/"
 _CC0_URL = "https://creativecommons.org/publicdomain/zero/1.0/"
@@ -169,6 +213,27 @@ def _read_records(checkout: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _path_of(record: dict[str, Any]) -> Path:
+    """Where the repository holds a record, so a batch sorts where the publish will put it."""
+    properties = record["properties"]
+    entry = properties["extensions"][_REGISTRY].get("seeded_from")
+    registry, identifier = (entry["registry"], entry["identifier"]) if entry else (_REGISTRY, properties["uuid"])
+    return Path(f"sites/{registry}/{identifier}.geojson")
+
+
+def _read_batch(file: Path) -> list[dict[str, Any]]:
+    features = json.loads(file.read_text(encoding="utf-8"))["features"]
+    return [bundled(_path_of(feature).as_posix(), feature) for feature in features]
+
+
+def _lost_uuids(records: list[dict[str, Any]]) -> set[str]:
+    """The uuids the file being replaced holds and these records do not."""
+    if not _OUTPUT.exists():
+        return set()
+    held = json.loads(_OUTPUT.read_text(encoding="utf-8"))["features"]
+    return {feature["properties"]["uuid"] for feature in held} - {record["properties"]["uuid"] for record in records}
+
+
 def _commit_of(checkout: Path) -> str:
     """The commit the checkout stands at, refusing a tree that says something else: the file
     names its commit, and a record edited by hand would make that a false statement."""
@@ -181,6 +246,82 @@ def _commit_of(checkout: Path) -> str:
     if git("status", "--porcelain", "--", "sites"):
         raise ValueError(f"{checkout} has uncommitted changes under sites/")
     return git("rev-parse", "HEAD")
+
+
+# -------------- the batch --------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Site:
+    """A record as the match rule reads it."""
+
+    name: str
+    names: list[str]
+    latitude: float
+    longitude: float
+
+
+@dataclass(slots=True)
+class Admission:
+    """What became of a batch. `left_out` and `held` are `(candidate, record, reason)` names."""
+
+    kept: list[dict[str, Any]]
+    left_out: list[tuple[str, str, str]]
+    held: list[tuple[str, str]]
+
+
+def _site_of(record: dict[str, Any]) -> _Site:
+    properties = record["properties"]
+    longitude, latitude = record["geometry"]["coordinates"]
+    names = normalised_names([properties["name"], *properties.get("other_names", [])])
+    return _Site(properties["name"], names, latitude, longitude)
+
+
+def admitted(records: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> Admission:
+    """Which candidates the pool has no such site for, judged in the order given."""
+    uuids = {record["properties"]["uuid"] for record in records}
+    pool = [_site_of(record) for record in records]
+    admission = Admission(kept=[], left_out=[], held=[])
+
+    for candidate in candidates:
+        if candidate["properties"]["uuid"] in uuids:
+            continue
+        site = _site_of(candidate)
+        near = [
+            (other, metres)
+            for other in pool
+            if (metres := metres_between(site.latitude, site.longitude, other.latitude, other.longitude))
+            <= SAME_NAME_METRES
+        ]
+
+        matched = next(
+            (
+                (other, met[0])
+                for other, metres in near
+                if (met := judge(site.names, other.names, metres)) is not None and not met[1]
+            ),
+            None,
+        )
+        if matched is not None:
+            admission.left_out.append((site.name, matched[0].name, matched[1].value))
+            continue
+
+        containing = next(
+            (
+                other
+                for other, _ in near
+                if any(one_contains_the_other(mine, theirs) for mine in site.names for theirs in other.names)
+            ),
+            None,
+        )
+        if containing is not None:
+            admission.held.append((site.name, containing.name))
+            continue
+
+        admission.kept.append(candidate)
+        uuids.add(candidate["properties"]["uuid"])
+        pool.append(site)
+    return admission
 
 
 # -------------- Natural Earth --------------
@@ -451,27 +592,60 @@ def notice_block(commit: str, today: str, count: int) -> dict[str, Any]:
     }
 
 
+def _in_member_order(record: dict[str, Any]) -> dict[str, Any]:
+    properties = record["properties"]
+    ordered = {member: properties[member] for member in _MEMBER_ORDER if member in properties}
+    return {**record, "properties": ordered | properties}
+
+
 def serialised(notice: dict[str, Any], records: list[dict[str, Any]]) -> str:
     """The notice first, where a reader meets it, then one feature per line."""
     compact = {"ensure_ascii": False, "separators": (",", ":")}
     head = json.dumps({"type": "FeatureCollection", **notice}, **compact)  # type: ignore[arg-type]
-    features = ",\n".join(json.dumps(record, **compact) for record in records)  # type: ignore[arg-type]
+    features = ",\n".join(json.dumps(_in_member_order(record), **compact) for record in records)  # type: ignore[arg-type]
     return f'{head[:-1]},"features":[\n{features}\n]}}\n'
 
 
-def main() -> int:
+def _report(admission: Admission) -> None:
+    for name, record, rule in admission.left_out:
+        print(f"left out: {name} matches {record} ({rule})")
+    for name, record in admission.held:
+        print(f"held: {name} by {record}")
+    print(f"batch: {len(admission.kept)} kept, {len(admission.left_out)} left out, {len(admission.held)} held")
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the Commons bundle from a checkout of the repository.")
     parser.add_argument("checkout", type=Path, help="A clean checkout of opendiving/opendiving-commons")
-    checkout = parser.parse_args().checkout.resolve()
+    parser.add_argument("--batch", type=Path, action="append", default=[], help="A file of candidate records")
+    arguments = parser.parse_args(argv)
+    checkout = arguments.checkout.resolve()
 
     try:
         commit = _commit_of(checkout)
         records = _read_records(checkout)
+        candidates = [candidate for file in arguments.batch for candidate in _read_batch(file)]
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
         print(f"could not read {checkout}: {exc}", file=sys.stderr)
         return 1
     if not records:
         print("no records found; refusing to write an empty bundle", file=sys.stderr)
+        return 1
+
+    admission = admitted(records, candidates)
+    records = sorted([*records, *admission.kept], key=_path_of)
+
+    try:
+        lost = _lost_uuids(records)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"could not read {_OUTPUT}: {exc}", file=sys.stderr)
+        return 1
+    if lost:
+        print(
+            f"{len(lost)} records of {_OUTPUT.name} would be lost, among them {min(lost)}; "
+            "a batch stays out of the repository until the publish copies it, so name its file or wait",
+            file=sys.stderr,
+        )
         return 1
 
     if any("location" not in record["properties"] for record in records):
@@ -496,6 +670,8 @@ def main() -> int:
     os.replace(staged, _OUTPUT)
 
     placed = sum(1 for record in records if "location" in record["properties"])
+    if candidates:
+        _report(admission)
     print(f"{_OUTPUT}: {len(records)} records from {commit[:12]}, {placed} with a locality")
     return 0
 

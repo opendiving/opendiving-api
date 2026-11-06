@@ -19,6 +19,8 @@ from typing import Any
 
 import pytest
 
+from src.app.services.commons_matches import judge, metres_between, normalised_names
+
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "build_commons_bundle.py"
 
 
@@ -297,3 +299,239 @@ class TestTheNoticeBlock:
         assert document["type"] == "FeatureCollection"
         assert document["features"] == [_seed(), _seed()]
         assert len(text.splitlines()) == 4
+
+
+def _candidate(
+    name: str,
+    identifier: str = "node/1",
+    position: tuple[float, float] = (33.920048, 27.814092),
+    other_names: list[str] | None = None,
+) -> dict[str, Any]:
+    entry = {"registry": "openstreetmap", "identifier": identifier}
+    properties: dict[str, Any] = {
+        "uuid": f"uuid-of-{identifier}",
+        "name": name,
+        "external_ids": [entry],
+        "extensions": {
+            "opendivingcommons": {
+                "source": "openstreetmap",
+                "license": "ODbL-1.0",
+                "retrieved": "2026-11-06",
+                "seeded_from": entry,
+            }
+        },
+    }
+    if other_names:
+        properties["other_names"] = other_names
+    return {"type": "Feature", "geometry": {"type": "Point", "coordinates": list(position)}, "properties": properties}
+
+
+# About 111 m of latitude to the thousandth of a degree.
+_HERE = (33.0, 27.0)
+_150_METRES_OFF = (33.0, 27.00135)
+_1_KM_OFF = (33.0, 27.009)
+_10_KM_OFF = (33.0, 27.09)
+
+
+class TestAdmittingABatch:
+    def test_a_candidate_the_checkout_holds_is_dropped_without_a_word(self) -> None:
+        admission = build.admitted(
+            [_candidate("SS Thistlegorm")], [_candidate("Another name entirely", position=_10_KM_OFF)]
+        )
+
+        assert (admission.kept, admission.left_out, admission.held) == ([], [], [])
+
+    def test_a_site_the_pool_has_no_such_record_for_is_kept(self) -> None:
+        candidate = _candidate("Moltke", "node/2", _10_KM_OFF)
+
+        assert build.admitted([_candidate("SS Thistlegorm", position=_HERE)], [candidate]).kept == [candidate]
+
+    def test_a_match_is_left_out_and_reported(self) -> None:
+        pool = [_candidate("Moltke", position=_HERE)]
+
+        admission = build.admitted(pool, [_candidate("Moltke", "node/2", _1_KM_OFF)])
+
+        assert admission.kept == []
+        assert admission.left_out == [("Moltke", "Moltke", "same_name_within_5_km")]
+
+    def test_siblings_that_differ_by_a_qualifier_alone_both_stay(self) -> None:
+        """Within 200 m, where the rule reads the names, and short of the containment rule."""
+        pool = [_candidate("Eller Island Wreck 1", position=_HERE)]
+        candidate = _candidate("Eller Island Wreck 2", "node/2", _150_METRES_OFF)
+
+        assert build.admitted(pool, [candidate]).kept == [candidate]
+
+    @pytest.mark.parametrize(
+        ("mine", "theirs", "position"),
+        [
+            ("Moltke", "Moltke", _1_KM_OFF),
+            ("Moltke", "Moltke", _10_KM_OFF),
+            ("Eller Island Wreck 1", "Eller Island Wreck 2", _150_METRES_OFF),
+            ("Moltke", "Bismarck", (33.0, 27.0001)),
+            ("Moltke", "Bismarck", _1_KM_OFF),
+        ],
+        ids=["same-name", "same-name-too-far", "siblings", "within-20-m", "nothing"],
+    )
+    def test_a_pair_gets_the_answer_the_app_s_own_rule_gives(
+        self, mine: str, theirs: str, position: tuple[float, float]
+    ) -> None:
+        metres = metres_between(_HERE[1], _HERE[0], position[1], position[0])
+        met = judge(normalised_names([mine]), normalised_names([theirs]), metres)
+
+        admission = build.admitted([_candidate(theirs, position=_HERE)], [_candidate(mine, "node/2", position)])
+
+        assert bool(admission.left_out) == (met is not None and not met[1])
+
+    def test_every_name_of_a_record_is_compared(self) -> None:
+        pool = [_candidate("Saudi Golden Arrow", position=_HERE, other_names=["Moltke"])]
+
+        assert build.admitted(pool, [_candidate("Moltke", "node/2", _1_KM_OFF)]).left_out
+
+    def test_a_name_the_other_contains_is_held_within_the_distance(self) -> None:
+        """Wider than the app's rule, which reads no containment past 200 m: the pool's pin for
+        one wreck sits a kilometre from a registry's, under a longer name."""
+        pool = [_candidate("USNS Vandenberg Wreck", position=_HERE)]
+
+        admission = build.admitted(pool, [_candidate("Vandenberg", "node/2", _1_KM_OFF)])
+
+        assert admission.kept == [] and admission.left_out == []
+        assert admission.held == [("Vandenberg", "USNS Vandenberg Wreck")]
+
+    def test_siblings_are_still_held_by_containment(self) -> None:
+        pool = [_candidate("PBM #3", position=_HERE)]
+
+        assert build.admitted(pool, [_candidate("PBM", "node/2", _150_METRES_OFF)]).held == [("PBM", "PBM #3")]
+
+    def test_containment_reaches_no_further_than_the_distance(self) -> None:
+        candidate = _candidate("Vandenberg", "node/2", _10_KM_OFF)
+
+        assert build.admitted([_candidate("USNS Vandenberg", position=_HERE)], [candidate]).kept == [candidate]
+
+    def test_a_shorter_name_than_the_rule_reads_is_not_contained(self) -> None:
+        candidate = _candidate("U9", "node/2", _1_KM_OFF)
+
+        assert build.admitted([_candidate("U9 Berlin", position=_HERE)], [candidate]).kept == [candidate]
+
+    def test_two_words_in_common_are_not_containment(self) -> None:
+        """The rejected rule: every pair `names_similar` accepts counts two reefs as one."""
+        candidate = _candidate("Shell Island Wreck", "node/2", _1_KM_OFF)
+
+        assert build.admitted([_candidate("Mann Island Wreck", position=_HERE)], [candidate]).kept == [candidate]
+
+    def test_the_first_of_two_candidates_survives_in_the_order_given(self) -> None:
+        first = _candidate("PBM #3", "node/2", _HERE)
+        second = _candidate("PBM", "node/3", _150_METRES_OFF)
+
+        assert build.admitted([], [first, second]).kept == [first]
+        assert build.admitted([], [second, first]).kept == [second]
+
+
+class TestTheLineARecordIsWrittenOn:
+    def test_a_refresh_moves_no_member_of_a_published_record(self) -> None:
+        """The repository publishes `location` before `external_ids`. Followed, that rewrites
+        every line, and the diff stops being the batch."""
+        as_published = _seed({"location": {"name": "South Sinai, Egypt"}})
+        properties = as_published["properties"]
+        as_published["properties"] = {
+            "uuid": properties["uuid"],
+            "name": properties["name"],
+            "location": properties["location"],
+            "external_ids": properties["external_ids"],
+            "extensions": properties["extensions"],
+        }
+
+        line = build.serialised({}, [as_published]).splitlines()[1]
+
+        assert list(json.loads(line)["properties"]) == ["uuid", "name", "external_ids", "extensions", "location"]
+
+    def test_a_member_nothing_places_keeps_a_place_at_the_end(self) -> None:
+        line = build.serialised({}, [_seed({"a_new_member": 1})]).splitlines()[1]
+
+        assert list(json.loads(line)["properties"])[-1] == "a_new_member"
+
+
+class TestBuildingWithABatch:
+    @pytest.fixture
+    def output(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "bundle.geojson"
+        monkeypatch.setattr(build, "_OUTPUT", path)
+        monkeypatch.setattr(build, "_commit_of", lambda checkout: "f" * 40)
+        return path
+
+    def _checkout(self, root: Path, *records: dict[str, Any]) -> Path:
+        for record in records:
+            file = root / build._path_of(record)
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text(json.dumps(record), encoding="utf-8")
+        return root
+
+    def _placed(self, record: dict[str, Any]) -> dict[str, Any]:
+        record["properties"]["location"] = {"name": "Somewhere"}
+        return record
+
+    def _batch(self, path: Path, *records: dict[str, Any]) -> str:
+        path.write_text(json.dumps({"type": "FeatureCollection", "features": records}), encoding="utf-8")
+        return str(path)
+
+    def _features(self, text: str) -> list[str]:
+        """Every line but the header, which names the commit and the day."""
+        return text.splitlines()[1:]
+
+    def test_a_kept_candidate_sorts_where_the_repository_will_hold_it(self, tmp_path: Path, output: Path) -> None:
+        checkout = self._checkout(
+            tmp_path / "checkout",
+            self._placed(_candidate("Aaa", "node/1", _HERE)),
+            self._placed(_candidate("Ccc", "node/3", _10_KM_OFF)),
+        )
+        batch = self._batch(tmp_path / "batch.json", self._placed(_candidate("Bbb", "node/2", (40.0, 10.0))))
+
+        assert build.main([str(checkout), "--batch", batch]) == 0
+
+        document = json.loads(output.read_text(encoding="utf-8"))
+        assert [feature["properties"]["name"] for feature in document["features"]] == ["Aaa", "Bbb", "Ccc"]
+        assert document["count"] == 3
+
+    def test_a_build_repeated_after_the_publish_writes_the_same_records(self, tmp_path: Path, output: Path) -> None:
+        pool = self._placed(_candidate("Aaa", "node/1", _HERE))
+        published = self._placed(_candidate("Bbb", "node/2", (40.0, 10.0)))
+        published["properties"] |= {"depth_from": 12.5, "depth_to": 30.0}
+        batch = self._batch(tmp_path / "batch.json", published)
+
+        assert build.main([str(self._checkout(tmp_path / "before", pool)), "--batch", batch]) == 0
+        before = self._features(output.read_text(encoding="utf-8"))
+
+        checkout = self._checkout(tmp_path / "after", pool, published)
+        assert build.main([str(checkout), "--batch", batch]) == 0
+
+        assert self._features(output.read_text(encoding="utf-8")) == before
+
+    def test_a_build_that_would_lose_a_record_fails_and_writes_nothing(self, tmp_path: Path, output: Path) -> None:
+        pool = self._placed(_candidate("Aaa", "node/1", _HERE))
+        batch = self._batch(tmp_path / "batch.json", self._placed(_candidate("Bbb", "node/2", (40.0, 10.0))))
+        checkout = self._checkout(tmp_path / "checkout", pool)
+        assert build.main([str(checkout), "--batch", batch]) == 0
+        written = output.read_text(encoding="utf-8")
+
+        assert build.main([str(checkout)]) == 1
+
+        assert output.read_text(encoding="utf-8") == written
+
+    def test_a_first_build_has_nothing_to_lose(self, tmp_path: Path, output: Path) -> None:
+        checkout = self._checkout(tmp_path / "checkout", self._placed(_candidate("Aaa", "node/1", _HERE)))
+
+        assert not output.exists()
+        assert build.main([str(checkout)]) == 0
+
+    def test_a_candidate_with_no_locality_gets_one(
+        self, tmp_path: Path, output: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        egypt = _square("EG", "Egypt", 30.0, 35.0, 25.0, 30.0)
+        monkeypatch.setattr(build, "_fetch", lambda url: {"features": []})
+        monkeypatch.setattr(build, "_admin_0_boundaries", lambda document: [egypt])
+        checkout = self._checkout(tmp_path / "checkout", self._placed(_candidate("Aaa", "node/1", (40.0, 10.0))))
+        batch = self._batch(tmp_path / "batch.json", _candidate("Bbb", "node/2", (33.5, 27.5)))
+
+        assert build.main([str(checkout), "--batch", batch]) == 0
+
+        features = json.loads(output.read_text(encoding="utf-8"))["features"]
+        assert features[1]["properties"]["location"] == {"name": "Egypt"}

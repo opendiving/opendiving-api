@@ -90,13 +90,17 @@ def _tokens(normalised: str) -> set[str]:
     return {token for token in normalised.split() if len(token) >= _MIN_TOKEN and token not in STOP_WORDS}
 
 
+def one_contains_the_other(a: str, b: str) -> bool:
+    shorter, longer = sorted((a, b), key=len)
+    return len(shorter) >= _MIN_SUBSTRING and shorter in longer
+
+
 def names_similar(a: str, b: str) -> bool:
     if not a or not b:
         return False
     if a == b:
         return True
-    shorter, longer = sorted((a, b), key=len)
-    if len(shorter) >= _MIN_SUBSTRING and shorter in longer:
+    if one_contains_the_other(a, b):
         return True
     tokens_a, tokens_b = _tokens(a), _tokens(b)
     if tokens_a and tokens_b and 2 * len(tokens_a & tokens_b) >= min(len(tokens_a), len(tokens_b)):

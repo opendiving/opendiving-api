@@ -70,7 +70,10 @@ class TestTheFile:
             assert canonical_other_names(record["name"], record["other_names"]) == record["other_names"]
 
     def test_a_seed_records_the_entry_it_was_seeded_from_among_its_entries(self, bundle: CommonsBundle) -> None:
-        for record in bundle.records:
+        seeds = [record for record in bundle.records if record["commons_seed_registry"] is not None]
+
+        assert seeds
+        for record in seeds:
             entry = {"registry": record["commons_seed_registry"], "identifier": record["commons_seed_identifier"]}
             assert entry in record["external_ids"]
             assert record["commons_retrieved"] is not None
@@ -85,7 +88,7 @@ class TestTheFile:
         thistlegorm = next(
             feature["properties"]
             for feature in document["features"]
-            if feature["properties"]["external_ids"][0]["identifier"] == "node/255316037"
+            if any(entry["identifier"] == "node/255316037" for entry in feature["properties"].get("external_ids", []))
         )
 
         assert thistlegorm["uuid"] == "74c091ba-1ec3-5a6b-b70e-fe31c5438605"
@@ -120,7 +123,7 @@ class TestReadingIt:
 
         assert bundle is not None
         assert 0 < len(bundle.records) < COMMONS_RECORDS
-        assert {record["commons_source"] for record in bundle.records} == {"openstreetmap"}
+        assert "wikidata" not in {record["commons_source"] for record in bundle.records}
 
     @pytest.mark.parametrize("text", ["{not json", "{}", '{"features": [{}], "sources": []}'])
     def test_a_broken_file_is_no_bundle_rather_than_an_error(
