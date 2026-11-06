@@ -2,7 +2,8 @@
 
 A Commons record is a `dive_site` row with no owning account. `data/commons_dive_sites.geojson`
 is the pool as `scripts/build_commons_bundle.py` read it from a named commit of the repository,
-and at startup `sync_commons` brings the rows in line with it, keyed on the record's uuid.
+plus any batch the publish has not yet copied there, and at startup `sync_commons` brings the rows
+in line with it, keyed on the record's uuid.
 
 **One instance is the primary, and there the table is the truth**: the sync inserts what the
 table lacks and changes nothing, since a row may hold what a review wrote. Everywhere else the

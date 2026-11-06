@@ -263,7 +263,7 @@ class _Site:
 
 @dataclass(slots=True)
 class Admission:
-    """What became of a batch. `left_out` and `held` are `(candidate, record, reason)` names."""
+    """What became of a batch: `left_out` as `(candidate, record, rule)`, `held` as `(candidate, record)`."""
 
     kept: list[dict[str, Any]]
     left_out: list[tuple[str, str, str]]
