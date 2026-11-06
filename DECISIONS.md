@@ -5417,10 +5417,9 @@ that ships the file, and is how a self-hosted copy is refreshed on upgrade. No C
 target or schedule. Rejected: a scheduled Actions job opening a refresh PR (`contents: write` on a
 schedule, a cron GitHub disables after 60 quiet days).
 
-A batch from an open dataset enters here too, and the PR's diff is the batch. The file holds it
-until the publish copies it to the repository, so a build that would lose a uuid the file holds
-fails. Each member has one fixed place on a line, the file's own order, or a refresh rewrites every
-line. Rejected: a superuser import route, whose batch no PR shows.
+A batch from an open dataset enters here too, the PR's diff being the batch, so a build that would
+lose a uuid the file holds fails. Each member has a fixed place on a line, or a refresh rewrites
+every one. Rejected: a superuser import route, whose batch no PR shows.
 
 The tripwire is the count: `tests/test_commons_bundle.py` pins the exact number, so a moved one
 fails loudly, and a shrinking pool is usually a broken reader. It is pinned in that test and the
