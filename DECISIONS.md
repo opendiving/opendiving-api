@@ -5382,7 +5382,7 @@ shared row a column able to hold "gate code 1234".
 ## The Commons bundle seeds the rows, and the sync has two branches
 
 `src/app/data/commons_dive_sites.geojson` is the repository's records at a named commit plus any
-batch the publish has not yet copied there, 3,858 records in all, in one file, and `sync_commons`
+batch the publish has not yet copied there, 3,850 records in all, in one file, and `sync_commons`
 brings the rows in line after the migrations, keyed on the record's uuid. A vendored file beats a
 live dependency: a self-hoster acquires no outbound host, and upgrading refreshes the copy. A copy
 inserts and updates; the primary only inserts, the table being the truth there. Neither deletes,
@@ -5423,7 +5423,7 @@ every one. Rejected: a superuser import route, whose batch no PR shows.
 
 The tripwire is the count: `tests/test_commons_bundle.py` pins the exact number, so a moved one
 fails loudly, and a shrinking pool is usually a broken reader. It is pinned in that test and the
-3,858 above; move both together.
+3,850 above; move both together.
 
 ## The Commons: Three ODbL obligations, and how each is met
 

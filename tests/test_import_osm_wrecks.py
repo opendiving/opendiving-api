@@ -125,13 +125,24 @@ class TestTheDepth:
 
     @pytest.mark.parametrize(
         ("value", "passes"),
-        [("0m", False), ("0.1", True), ("60", True), ("60.1", False), ("196 ft", True), ("200 ft", False)],
+        [
+            ("0m", False),
+            ("2.9", False),
+            ("3", True),
+            ("9 ft", False),
+            ("10 ft", True),
+            ("60", True),
+            ("60.1", False),
+            ("196 ft", True),
+            ("200 ft", False),
+        ],
     )
-    def test_the_deepest_is_above_0_and_at_most_60_m(self, value: str, passes: bool) -> None:
+    def test_the_deepest_is_at_least_3_m_and_at_most_60_m(self, value: str, passes: bool) -> None:
         assert bool(_kept(_element(tags={"wreck:depth": value}))) is passes
 
-    def test_a_range_is_judged_by_its_deepest_end(self) -> None:
-        assert not _kept(_element(tags={"wreck:depth": "40-80"}))
+    @pytest.mark.parametrize(("value", "passes"), [("40-80", False), ("1-2", False), ("1-25", True)])
+    def test_a_range_is_judged_by_its_deepest_end(self, value: str, passes: bool) -> None:
+        assert bool(_kept(_element(tags={"wreck:depth": value}))) is passes
 
 
 class TestWhatShowsOrIsClosed:
@@ -175,6 +186,8 @@ class TestHeritage:
             {"war_grave": "yes"},
             {"raä:ref": "Boo 58"},
             {"historic": "archaeological_site"},
+            {"seamark:status": "historic"},
+            {"seamark:status": "permanent;historic"},
             {"seamark:information": "Underwater Cultural Heritage"},
             {"description": "Site archéologique sous-marin"},
             {"note": "A war grave; do not enter"},
@@ -187,6 +200,7 @@ class TestHeritage:
         "tags",
         [
             {"website": "https://example.org/maritime-heritage/wreck"},
+            {"seamark:status": "permanent"},
             {"name:en": "Heritage"},
             {"description": "Lies on a gravel bottom"},
             {"note": "Engraved plate on the bow"},
@@ -194,6 +208,24 @@ class TestHeritage:
     )
     def test_what_only_contains_the_word_does_not(self, tags: dict[str, str]) -> None:
         assert _kept(_element(tags=tags))
+
+
+class TestTheEntriesLeftOutByName:
+    @pytest.mark.parametrize(
+        ("identifier", "name"),
+        [(1347780019, "HMAS Perth"), (6516992724, "Riksäpplet")],
+    )
+    def test_no_tag_is_needed_and_the_entry_is_what_decides(self, identifier: int, name: str) -> None:
+        kept, left_out = wrecks.candidates(_response(_element(identifier, name=name)), set())
+
+        assert kept == []
+        assert left_out == {"left out by name": 1}
+
+    def test_the_same_name_on_another_entry_is_not_left_out(self) -> None:
+        assert _kept(_element(5, name="HMAS Perth"))
+
+    def test_every_entry_says_why(self) -> None:
+        assert all(reason.strip() for reason in wrecks._LEFT_OUT_BY_NAME.values())
 
 
 class TestThePool:
@@ -288,7 +320,7 @@ class TestTheCounts:
             "already in the pool": 1,
             "not a name": 1,
             "closed": 1,
-            "not above 0 and at most 60 m": 1,
+            "not at least 3 m and at most 60 m": 1,
         }
 
 

@@ -22,7 +22,7 @@ from src.app.services.geocoding_service import _DEFAULT_ATTRIBUTION
 # The tripwire. A refresh that moves this fails here, so it becomes a decision somebody takes
 # rather than a diff somebody accepts: a shrinking pool is usually a broken reader, not the world
 # losing dive sites.
-COMMONS_RECORDS = 3858
+COMMONS_RECORDS = 3850
 
 
 @pytest.fixture

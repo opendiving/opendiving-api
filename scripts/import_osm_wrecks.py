@@ -51,6 +51,8 @@ _SEED_UUID_PREFIX = "https://github.com/opendiving/opendiving-commons/sites/"
 
 _REGISTRY = "openstreetmap"
 
+# Shallower than this the tagged wrecks read as chart hazards rather than dives.
+_MIN_DEPTH_METRES = 3.0
 _MAX_DEPTH_METRES = 60.0
 _METRES_PER_FOOT = 0.3048
 
@@ -84,6 +86,12 @@ _CLOSED = frozenset({"no", "private"})
 # Swedish National Heritage Board's own reference, which says heritage without the word.
 _HERITAGE = re.compile(r"heritage|protect|archa?eolog|(?<![a-z])graves?(?![a-z])|^raa:")
 _HERITAGE_VALUE_KEYS = ("historic", "seamark:information", "description", "note")
+
+# Wrecks that should stay out and that no tag says so of, by entry, each with its reason.
+_LEFT_OUT_BY_NAME = {
+    "node/1347780019": "HMAS Perth, a war grave no tag marks",
+    "node/6516992724": "Riksäpplet, a 17th-century Swedish warship and a monument no tag marks",
+}
 
 _ROMAN_NUMERAL = re.compile(r"[ivx]+")
 
@@ -160,7 +168,7 @@ def depth_of(tags: Mapping[str, str]) -> tuple[float, float] | None:
 
 def _within_reach(tags: Mapping[str, str]) -> bool:
     depths = depth_of(tags)
-    return depths is not None and 0 < depths[1] <= _MAX_DEPTH_METRES
+    return depths is not None and _MIN_DEPTH_METRES <= depths[1] <= _MAX_DEPTH_METRES
 
 
 def _shows_a_hull_or_mast(tags: Mapping[str, str]) -> bool:
@@ -186,7 +194,9 @@ def _marked_as_heritage(tags: Mapping[str, str]) -> bool:
     only under the keys that describe it."""
     named = (_folded(key) for key in tags)
     described = (_folded(tags[key]) for key in _HERITAGE_VALUE_KEYS if key in tags)
-    return any(_HERITAGE.search(text) for text in (*named, *described))
+    return "historic" in tags.get("seamark:status", "").split(";") or any(
+        _HERITAGE.search(text) for text in (*named, *described)
+    )
 
 
 def entry_of(element: Mapping[str, Any]) -> str:
@@ -204,12 +214,13 @@ def _floors(pool: set[tuple[str, str]]) -> list[tuple[str, Callable[[Mapping[str
         ("its Wikidata entry is in the pool", lambda element: bool(wikidata_entries(element["tags"]) & pool)),
         ("not a name", lambda element: not is_a_name(element["tags"]["name"])),
         ("no depth", lambda element: depth_of(element["tags"]) is None),
-        ("not above 0 and at most 60 m", lambda element: not _within_reach(element["tags"])),
+        ("not at least 3 m and at most 60 m", lambda element: not _within_reach(element["tags"])),
         ("shows a hull or a mast", lambda element: _shows_a_hull_or_mast(element["tags"])),
         ("a water level that is not submerged", lambda element: _breaks_the_surface(element["tags"])),
         ("visible at a tide", lambda element: _visible_at_a_tide(element["tags"])),
         ("closed", lambda element: _closed(element["tags"])),
         ("marked as heritage", lambda element: _marked_as_heritage(element["tags"])),
+        ("left out by name", lambda element: entry_of(element) in _LEFT_OUT_BY_NAME),
     ]
 
 
@@ -325,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(response['elements'])} named wrecks at {response['osm3s']['timestamp_osm_base']}")
     for label, _ in _floors(pool):
         print(f"  {left_out[label]:>5} {label}")
+    for entry, reason in _LEFT_OUT_BY_NAME.items():
+        print(f"        {entry}: {reason}")
     print(f"{arguments.output}: {len(kept)} candidates")
     return 0
 
