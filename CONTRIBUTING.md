@@ -61,8 +61,9 @@ Note that lint and type-checking cover `tests/` and the build-time `scripts/` as
 mypy runs as three separate invocations, for two different reasons. `src` and `tests` are split
 because the app is importable as both `app.*` (via `mypy_path`) and `src.app.*` (how the tests
 import it), and asking it to check both roots at once fails with "source file found twice under
-different module names". `scripts` is third only because it sits under neither root — it imports
-nothing from the app, and needs no environment either.
+different module names". `scripts` is third only because it sits under neither root; it needs no
+environment, since mypy reads what `build_commons_bundle.py` imports from the app without running
+it.
 
 mypy and pytest need `ENVIRONMENT=local` and a `SECRET_KEY` in the environment. Any value except a
 placeholder: `Settings._reject_placeholder_secret_key` rejects the one `src/.env.example` ships and
@@ -301,6 +302,7 @@ needs no account, no key and no outbound call for the features that read them:
 Both are run **by hand, and by nothing else** — no CI job, no Makefile target, no schedule:
 
 ```bash
+export ENVIRONMENT=local SECRET_KEY=any-value-but-a-placeholder   # the Commons builder imports the app's match rule
 uv run python scripts/build_commons_bundle.py /path/to/opendiving-commons   # a clean checkout of its main
 uv run python scripts/build_marine_areas.py
 ```
@@ -313,6 +315,22 @@ would let a process read a half-written file.
 on a clock. **The Commons bundle is re-run from the repository's `main` before every release**: that
 re-run is how a self-hosted copy of the Commons is refreshed on upgrade, the instance's startup sync
 bringing its rows in line with the file.
+
+**A batch from an open dataset enters through the same file.** An importer beside the builder reads
+the publisher's data, leaves out what it doubts, and writes candidates, which the builder takes
+beside the checkout:
+
+```bash
+uv run python scripts/import_osm_wrecks.py /path/to/opendiving-commons wrecks.geojson
+uv run python scripts/build_commons_bundle.py /path/to/opendiving-commons --batch wrecks.geojson
+```
+
+The candidates file is not checked in: the pull request's diff of the bundle is the batch, one line
+per record, and its body gives the count kept, the count left out by each rule, and the names held.
+Read it as a diff before merging, because nothing removes a Commons record once the hosted instance
+has inserted it. **A release's rebuild waits for the publish.** Until the repository's daily publish
+has copied a merged batch, a rebuild from its `main` would lose those records, and the builder fails
+and writes nothing rather than drop them.
 
 **The record count is pinned and the test will tell you.** `tests/test_commons_bundle.py` asserts
 the exact number of records, so a refresh that moves it fails there rather than landing quietly.

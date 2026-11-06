@@ -5381,13 +5381,14 @@ shared row a column able to hold "gate code 1234".
 
 ## The Commons bundle seeds the rows, and the sync has two branches
 
-`src/app/data/commons_dive_sites.geojson` is the repository's records at a named commit, 3,712 at
-`f96a9ed`, in one file, and `sync_commons` brings the rows in line after the migrations, keyed on
-the record's uuid. A vendored file beats a live dependency: a self-hoster acquires no outbound host,
-and upgrading refreshes the copy. A copy inserts and updates; the primary only inserts, the table
-being the truth there. Neither deletes, since dives name the rows. A bundled uuid naming a private
-row is skipped and logged: an import keeps a document's uuid when nothing claims it. It runs whether
-or not this process migrated, one worker at a time, and never fails a start.
+`src/app/data/commons_dive_sites.geojson` is the repository's records at a named commit plus any
+batch the publish has not yet copied there, 3,858 records in all, in one file, and `sync_commons`
+brings the rows in line after the migrations, keyed on the record's uuid. A vendored file beats a
+live dependency: a self-hoster acquires no outbound host, and upgrading refreshes the copy. A copy
+inserts and updates; the primary only inserts, the table being the truth there. Neither deletes,
+since dives name the rows. A bundled uuid naming a private row is skipped and logged: an import
+keeps a document's uuid when nothing claims it. It runs whether or not this process migrated, one
+worker at a time, and never fails a start.
 
 Neither changes a row carrying `commons_reviewed_at`, whatever `COMMONS_PRIMARY` says: off is what a
 missing variable gives and off is the branch that overwrites, so a primary restarting without its
@@ -5416,9 +5417,14 @@ that ships the file, and is how a self-hosted copy is refreshed on upgrade. No C
 target or schedule. Rejected: a scheduled Actions job opening a refresh PR (`contents: write` on a
 schedule, a cron GitHub disables after 60 quiet days).
 
+A batch from an open dataset enters here too, and the PR's diff is the batch. The file holds it
+until the publish copies it to the repository, so a build that would lose a uuid the file holds
+fails. Each member has one fixed place on a line, the file's own order, or a refresh rewrites every
+line. Rejected: a superuser import route, whose batch no PR shows.
+
 The tripwire is the count: `tests/test_commons_bundle.py` pins the exact number, so a moved one
 fails loudly, and a shrinking pool is usually a broken reader. It is pinned in that test and the
-3,712 above; move both together.
+3,858 above; move both together.
 
 ## The Commons: Three ODbL obligations, and how each is met
 

@@ -22,7 +22,7 @@ from src.app.services.geocoding_service import _DEFAULT_ATTRIBUTION
 # The tripwire. A refresh that moves this fails here, so it becomes a decision somebody takes
 # rather than a diff somebody accepts: a shrinking pool is usually a broken reader, not the world
 # losing dive sites.
-COMMONS_RECORDS = 3712
+COMMONS_RECORDS = 3858
 
 
 @pytest.fixture
@@ -82,7 +82,7 @@ class TestTheFile:
         provenance = [feature["properties"]["extensions"][COMMONS_REGISTRY] for feature in document["features"]]
 
         assert not [member for member in provenance if "name_en" in member]
-        assert sum(1 for feature in document["features"] if feature["properties"].get("other_names")) == 124
+        assert sum(1 for feature in document["features"] if feature["properties"].get("other_names")) == 125
 
     def test_a_named_seed_keeps_its_uuid_and_its_locality(self, document: dict[str, Any]) -> None:
         thistlegorm = next(
