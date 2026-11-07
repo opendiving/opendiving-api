@@ -1150,7 +1150,7 @@ class LogbookImportDive(BaseModel):
         Field(
             default=None,
             description="The dive's identifier, a new dive's as it will be written - or `null` for a dive the upload "
-            "skipped",
+            "skipped, and for one the apply reached and skipped that the review has no row for",
         ),
     ]
     outcome: ImportDiveOutcome
@@ -1159,9 +1159,10 @@ class LogbookImportDive(BaseModel):
         Field(
             default=None,
             description="The dive as the import leaves it, on a `new` or `modified` row, in the shape a dive read "
-            "gives, and on a row the apply skipped, the dive the review showed. A recording or file inside it that "
-            "the review made takes a new identifier at the apply, and an applied import keeps the one the review "
-            "showed, which names nothing.",
+            "gives, and on a row the apply skipped, the dive the review showed. A recording, file or profile inside "
+            "it that the review made takes a new identifier at the apply, a fill's richer samples give a stored "
+            "recording's profile a new one too, and an applied import keeps the one the review showed, which names "
+            "nothing.",
         ),
     ]
     changes: Annotated[

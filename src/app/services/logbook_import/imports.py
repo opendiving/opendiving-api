@@ -90,6 +90,12 @@ def _pending_conflict(uuid: uuid_pkg.UUID) -> HTTPException:
     )
 
 
+def _overtaken_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=409, detail="Another import of yours finished while this one was uploading. Upload it again."
+    )
+
+
 async def _file_keys(db: AsyncSession, import_id: int) -> list[str]:
     rows = await db.execute(
         select(LogbookImportFile.storage_key).where(LogbookImportFile.logbook_import_id == import_id)
@@ -97,11 +103,15 @@ async def _file_keys(db: AsyncSession, import_id: int) -> list[str]:
     return list(rows.scalars())
 
 
-async def _delete_import(db: AsyncSession, import_id: int) -> None:
-    """Delete one import with its file rows, its files after the commit."""
+async def _delete_import(db: AsyncSession, import_id: int, *still: ColumnElement[bool]) -> None:
+    """Delete one import with its file rows, its files after the commit. A row that no longer
+    meets `still` when the `DELETE` reaches it stays, and so do its files."""
     keys = await _file_keys(db, import_id)
-    await db.execute(delete(LogbookImport).where(LogbookImport.id == import_id))
-    blob_store.delete_after_commit(db, keys)
+    went = await db.execute(
+        delete(LogbookImport).where(LogbookImport.id == import_id, *still).returning(LogbookImport.id)
+    )
+    if went.first() is not None:
+        blob_store.delete_after_commit(db, keys)
 
 
 async def refuse_while_pending(db: AsyncSession, *, user_id: int) -> None:
@@ -120,7 +130,14 @@ async def refuse_while_pending(db: AsyncSession, *, user_id: int) -> None:
         return
     if not _past_expiry(pending.expires_at):
         raise _pending_conflict(pending.uuid)
-    await _delete_import(db, pending.id)
+    # An apply that took the row in its last moments may commit before this reaches it, and then
+    # the row is history, and the slot is free anyway.
+    await _delete_import(
+        db,
+        pending.id,
+        LogbookImport.status == LogbookImportStatus.PENDING.value,
+        LogbookImport.expires_at < datetime.now(UTC),
+    )
     await db.commit()
 
 
@@ -298,8 +315,9 @@ async def hold_upload(
                     LogbookImport.user_id == user_id, LogbookImport.status == LogbookImportStatus.PENDING.value
                 )
             )
-        ).scalar_one()
-        raise _pending_conflict(winner) from exc
+        ).scalar_one_or_none()
+        # The winner can finish while the files above are deleted, and then there is none to name.
+        raise (_overtaken_conflict() if winner is None else _pending_conflict(winner)) from exc
     db.add_all(LogbookImportFile(logbook_import_id=held.id, **file) for file in files)
     return held
 
@@ -678,27 +696,26 @@ async def purge_expired(db: AsyncSession, *, now: datetime, limit: int) -> int:
     """Delete up to `limit` imports past their expiry, their files after the commit, and return
     how many went.
 
-    The `DELETE` repeats the selection's predicate, so an import applied between the two keeps its
-    review, and only the keys of the imports that went are handed over.
+    One choice of rows feeds the keys and the `DELETE`, or a row could go with its keys unread. The
+    `DELETE` repeats the choice's predicate, so an import applied in between keeps its review, and
+    only the keys of the imports that went are handed over.
     """
-    batch = select(LogbookImport.id).where(LogbookImport.expires_at < now).limit(limit)
+    expired = LogbookImport.expires_at < now
+    ids = list((await db.execute(select(LogbookImport.id).where(expired).limit(limit))).scalars())
     keys_by_import = list(
         await db.execute(
             select(LogbookImportFile.logbook_import_id, LogbookImportFile.storage_key).where(
-                LogbookImportFile.logbook_import_id.in_(batch)
+                LogbookImportFile.logbook_import_id.in_(ids)
             )
         )
     )
-    ids = list(
+    gone = set(
         (
             await db.execute(
-                delete(LogbookImport)
-                .where(LogbookImport.id.in_(batch), LogbookImport.expires_at < now)
-                .returning(LogbookImport.id)
+                delete(LogbookImport).where(LogbookImport.id.in_(ids), expired).returning(LogbookImport.id)
             )
         ).scalars()
     )
-    gone = set(ids)
     blob_store.delete_after_commit(db, [one.storage_key for one in keys_by_import if one.logbook_import_id in gone])
     await db.commit()
-    return len(ids)
+    return len(gone)
