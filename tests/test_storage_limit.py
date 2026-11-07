@@ -110,7 +110,7 @@ def one_megabyte(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def no_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     """The import routes throttle and drop caches through Redis, which is beside the point."""
-    monkeypatch.setattr(import_routes, "_enforce_import_limit", AsyncMock())
+    monkeypatch.setattr(import_routes, "enforce_rate_limit", AsyncMock())
     monkeypatch.setattr(import_routes, "resolve_catalog_gaps", AsyncMock(return_value=frozenset()))
     for name in dir(import_routes):
         if name.startswith("invalidate_"):
