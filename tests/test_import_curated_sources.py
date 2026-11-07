@@ -269,6 +269,17 @@ class TestThunderBay:
         assert properties["water_type"] == "fresh"
         assert "depth_from" not in properties
 
+    def test_a_name_the_florida_keys_leave_out_stays_here(self) -> None:
+        row = {
+            "attributes": {"Icon_Title": "Grecian", "Name": "Grecian", "Description": "<b>Depth:</b> 106 Feet"},
+            "geometry": {"x": -83.201, "y": 44.9686},
+        }
+
+        (record,) = thunder_bay.candidates([row], _RETRIEVED)[0]
+
+        assert _identifier(record) == "grecian"
+        assert record["properties"]["depth_to"] == 32.3
+
     def test_no_depth_floor_stands_between_a_shallow_mooring_and_the_pool(self) -> None:
         assert thunder_bay.depth_of("<b>Depth:</b> 5 Feet<br>") == pytest.approx(1.524)
 

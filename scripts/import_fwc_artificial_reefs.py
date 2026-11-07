@@ -12,8 +12,8 @@ a flat deck among other material. `Depth` and `Relief` are in feet, as the layer
 The register places itself in the public domain, and its metadata travels with the repository's
 copy of the data, which the credit links.
 
-Candidates are written oldest first, so where two vessels share a site the builder keeps the first
-sunk. `DDate` is `YYYYMMDD` as a number, and the register writes 0 for a date it does not know.
+Candidates are written oldest first, so where two vessels at a site share a name the builder keeps
+the first sunk. `DDate` is `YYYYMMDD` as a number, and the register writes 0 for a date it does not know.
 """
 
 import argparse

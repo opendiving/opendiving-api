@@ -135,7 +135,17 @@ class TestTheBatchFromTheRegistries:
         (record,) = self._named(bundle, "Grecian Rocks")
 
         assert record["commons_source"] == "noaa-florida-keys-moorings"
-        assert not [row for row in self._named(bundle, "Grecian") if row["water_type"] != "fresh"]
+
+    def test_thunder_bay_keeps_its_own_grecian(self, bundle: CommonsBundle) -> None:
+        """A wreck, sharing an identifier with the Florida Keys buoy and no list with it."""
+        (record,) = self._named(bundle, "Grecian")
+
+        assert record["commons_source"] == "noaa-thunder-bay-moorings"
+        assert (record["commons_seed_identifier"], record["depth_to"], record["water_type"]) == (
+            "grecian",
+            32.3,
+            "fresh",
+        )
 
     @pytest.mark.parametrize(
         "name",
