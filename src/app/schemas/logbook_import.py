@@ -1159,9 +1159,9 @@ class LogbookImportDive(BaseModel):
         Field(
             default=None,
             description="The dive as the import leaves it, on a `new` or `modified` row, in the shape a dive read "
-            "gives, and on a row the apply skipped, the dive the review showed. Only the row's own `uuid` is a link: "
-            "a recording or file inside it that the review made takes a new identifier at the apply, and an applied "
-            "import keeps the one the review showed, which names nothing.",
+            "gives, and on a row the apply skipped, the dive the review showed. A recording or file inside it that "
+            "the review made takes a new identifier at the apply, and an applied import keeps the one the review "
+            "showed, which names nothing.",
         ),
     ]
     changes: Annotated[

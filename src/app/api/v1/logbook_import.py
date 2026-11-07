@@ -378,11 +378,12 @@ async def read_logbook_import_notes(
 
     `dives` has an entry for each dive row, in the review's order, with its `outcome`, the `reason`
     a skipped one was skipped, and its `notes`: each decision that is not a plain create, and what
-    its files did not record, worked out, or read one way of several, one sentence at a time. A line about a value goes when another file of the dive
-    supplied it. Everything about no dive is in `notes`, one group per code and sentence with a
-    count and up to three places in your files. On an applied import these are what the apply
-    found, with what it could not hold to the review. Treat a `code` or `kind` you do not recognise
-    as information. 404 as `GET /import/{uuid}`.
+    its files did not record, worked out, or read one way of several, one sentence at a time. A
+    line about a value goes when another file of the dive supplied it. Everything about no dive is
+    in `notes`, one group per code and sentence with a count and up to three places in your files.
+    On an applied import these are what the apply found, with what it could not hold to the
+    review. Treat a `code` or `kind` you do not recognise as information. 404 as
+    `GET /import/{uuid}`.
     """
     return JSONResponse(content=_found(await find_import(db, user_id=current_user["id"], uuid=uuid)).notes)
 
