@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Delete, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 
@@ -50,7 +50,7 @@ from src.app.services import blob_store
 from src.app.services.dive_merge import merge_dives
 from src.app.services.dive_recordings import DEVICE_COLUMNS
 from src.app.services.export.archive import DIVEJSON_NAME
-from src.app.services.logbook_import import import_batch, load_import
+from src.app.services.logbook_import import import_batch, imports, load_import
 from src.app.services.logbook_import.planner import DELETED_HERE
 from src.app.services.logbook_import.reconcile import hold_reviewed_values
 from tests.conftest import db_available
@@ -59,6 +59,7 @@ from tests.helpers.generators import (
     create_dive,
     create_dive_recording,
     create_dive_site,
+    create_logbook_import,
     create_user,
 )
 from tests.helpers.held_imports import apply, body_of, caller, discard, upload, upload_and_apply
@@ -322,6 +323,37 @@ class TestTheUpload:
         assert list(blob_store.iter_keys()) == [held.storage_key], "the loser takes back what it wrote"
 
     @pytest.mark.asyncio
+    async def test_a_winner_finished_during_the_loser_s_cleanup_leaves_a_409_naming_nothing(
+        self,
+        async_db: AsyncSession,
+        async_sessions: async_sessionmaker[AsyncSession],
+        db: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        diver = create_user(db)
+        winner = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        monkeypatch.setattr(import_routes, "refuse_while_pending", AsyncMock())
+        take_back = blob_store.delete
+        finished = False
+
+        async def finishing_first(key: str) -> None:
+            nonlocal finished
+            if not finished:
+                finished = True
+                async with async_sessions() as device:
+                    await discard(device, diver, winner["uuid"], LogbookImportStatus.PENDING)
+            await take_back(key)
+
+        monkeypatch.setattr(blob_store, "delete", finishing_first)
+
+        refused = await _refusal(upload(async_db, diver, [("dive.json", OCEAN_JSON)]))
+
+        assert finished
+        assert refused.status_code == 409 and winner["uuid"] not in str(refused.detail)
+        assert await _rows(async_db, diver) == []
+        assert list(blob_store.iter_keys()) == [], "the loser takes back what it wrote"
+
+    @pytest.mark.asyncio
     async def test_any_session_of_the_account_reads_the_same_review(
         self, async_db: AsyncSession, async_sessions: async_sessionmaker[AsyncSession], db: Session
     ) -> None:
@@ -428,6 +460,83 @@ class TestTheLifetimes:
         assert fresh["uuid"] != old["uuid"]
         assert not await blob_store.has(held)
         assert [row.uuid for row in await _rows(async_db, diver)] == [uuid_pkg.UUID(fresh["uuid"])]
+
+    @pytest.mark.asyncio
+    async def test_an_upload_leaves_an_import_applied_as_it_clears_it(
+        self,
+        async_db: AsyncSession,
+        async_sessions: async_sessionmaker[AsyncSession],
+        db: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The upload read the row pending and expired; the apply that took it in its last moments
+        commits before the upload's `DELETE` reaches it."""
+        diver = create_user(db)
+        old = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        [held] = [file.storage_key for file in await _files(async_db, diver)]
+        await _age(async_db, diver)
+        read_keys = imports._file_keys
+
+        async def applied_after(session: AsyncSession, import_id: int) -> list[str]:
+            keys = await read_keys(session, import_id)
+            async with async_sessions() as device:
+                await device.execute(
+                    update(LogbookImport)
+                    .where(LogbookImport.id == import_id)
+                    .values(status=LogbookImportStatus.APPLIED.value, expires_at=datetime.now(UTC) + timedelta(days=1))
+                )
+                await device.commit()
+            return keys
+
+        monkeypatch.setattr(imports, "_file_keys", applied_after)
+
+        fresh = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
+
+        assert [str(row.uuid) for row in await _rows(async_db, diver)] == [old["uuid"], fresh["uuid"]]
+        assert await blob_store.has(held), "what the apply left is the apply's to delete"
+
+    @pytest.mark.asyncio
+    async def test_the_purge_takes_the_files_of_exactly_the_imports_it_takes(
+        self,
+        async_db: AsyncSession,
+        async_sessions: async_sessionmaker[AsyncSession],
+        db: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An apply lands between the purge's choice of rows and its `DELETE`, which would otherwise
+        make a different choice of its own: the row past the batch, whose keys nobody read."""
+        await purge_expired_logbook_imports({})
+        now = datetime.now(UTC)
+        held = {}
+        for diver in (create_user(db), create_user(db), create_user(db)):
+            key = blob_store.new_key(imports.KEY_KIND, sha256="e" * 64)
+            await blob_store.put(key, b"held")
+            held[create_logbook_import(db, diver, storage_key=key).id] = key
+        await async_db.execute(
+            update(LogbookImport).where(LogbookImport.id.in_(held)).values(expires_at=now - timedelta(days=1))
+        )
+        await async_db.commit()
+        execute = async_db.execute
+
+        async def applied_before_a_delete(statement: Any, *args: Any, **kwargs: Any) -> Any:
+            if isinstance(statement, Delete):
+                async with async_sessions() as device:
+                    first = select(LogbookImport.id).where(LogbookImport.expires_at < now).limit(1).scalar_subquery()
+                    await device.execute(
+                        update(LogbookImport)
+                        .where(LogbookImport.id == first)
+                        .values(status=LogbookImportStatus.APPLIED.value, expires_at=now + timedelta(days=1))
+                    )
+                    await device.commit()
+            return await execute(statement, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(async_db, "execute", applied_before_a_delete)
+            went = await imports.purge_expired(async_db, now=now, limit=2)
+
+        standing = set((await async_db.execute(select(LogbookImport.id).where(LogbookImport.id.in_(held)))).scalars())
+        assert went == 1 and len(standing) == 2
+        assert {id_: await blob_store.has(key) for id_, key in held.items()} == {id_: id_ in standing for id_ in held}
 
     @pytest.mark.asyncio
     async def test_the_cron_deletes_what_has_expired_with_its_files(self, async_db: AsyncSession, db: Session) -> None:

@@ -288,7 +288,9 @@ async def create_logbook_import(
     Species before the review is made, and stay in the catalog whatever becomes of the import.
 
     One import at a time: a 409 names the pending import while your account has one, on any
-    device, and its body is not read. Rate limited per account, on a budget of its own; a
+    device, and its body is not read. An upload overtaken by another of yours while it was read
+    is a 409 too, naming nothing where that other has already been finished. Rate limited per
+    account, on a budget of its own; a
     request over it is a 429 and its body is not read. A 413 when the files together are past
     what one import may carry or plan - its `detail` says which - and one naming the storage
     used and the limit when the files the import would store do not fit in what your account
