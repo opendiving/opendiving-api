@@ -1,7 +1,7 @@
 """An import the server holds, and the files it holds
 
 Revision ID: 08cefce15233
-Revises: b4d27e6f1c03
+Revises: d3f8a61c27e4
 Create Date: 2026-11-07 10:24:51.395112
 
 `logbook_import` holds an import from its upload to the end of its history, one `pending` per
@@ -17,7 +17,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "08cefce15233"
-down_revision: str | None = "b4d27e6f1c03"
+down_revision: str | None = "d3f8a61c27e4"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
