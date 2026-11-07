@@ -49,7 +49,7 @@ from src.app.services.export.archive import DIVEJSON_NAME
 from src.app.services.logbook_import import import_batch, load_import
 from src.app.services.logbook_import.planner import DELETED_HERE
 from tests.conftest import db_available
-from tests.helpers.generators import create_dive, create_user
+from tests.helpers.generators import create_dive, create_dive_recording, create_user
 from tests.helpers.held_imports import apply, body_of, caller, discard, upload, upload_and_apply
 from tests.helpers.images import phone_jpeg
 from tests.helpers.import_parts import parts_of
@@ -688,11 +688,10 @@ class TestAppliedAsReviewed:
         assert reviewed_dive is not None
         reviewed_id = reviewed_dive.id
         survivor = create_dive(db, diver)
-        db.execute(
-            update(Dive)
-            .where(Dive.id == survivor.id)
-            .values(start_time=reviewed_dive.start_time - timedelta(minutes=5), utc_offset_minutes=120)
-        )
+        create_dive_recording(db, diver, survivor)
+        earlier = {"start_time": reviewed_dive.start_time - timedelta(minutes=5), "utc_offset_minutes": 120}
+        db.execute(update(Dive).where(Dive.id == survivor.id).values(**earlier))
+        db.execute(update(DiveRecording).where(DiveRecording.dive_id == survivor.id).values(**earlier))
         db.commit()
         review = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
         assert review["dives"][0]["outcome"] == "modified"
