@@ -52,7 +52,7 @@ from ...core.schemas import NOTES_MAX_LENGTH
 from ...core.utils.datetime_offset import split_dive_start_time
 from ...core.utils.uploads import safe_filename
 from ...crud.crud_checkin_details import read_checkin_details
-from ...crud.crud_dive_sites import in_the_commons, saved_by, sites_by_external_id
+from ...crud.crud_dive_sites import aliased_records, in_the_commons, saved_by, sites_by_external_id
 from ...crud.crud_dive_species import StoredSighting
 from ...models.certification import Certification
 from ...models.contact import Contact
@@ -1947,10 +1947,15 @@ class _Planner:
         # By position rather than by uuid: the claim below remaps a repeated uuid, after
         # which the site would no longer find its own entries.
         entries = [_site_external_ids(site)[0] for site in self._document.sites]
+        replaced = await aliased_records(self._db, {site.uuid for site in self._document.sites}, user_id=self._user_id)
         commons = await self._commons_named(
             {site.uuid for site in self._document.sites}
             | {uuid for kept in entries for entry in kept if (uuid := _commons_uuid(entry)) is not None}
+            | {record.uuid for record in replaced.values()}
         )
+        # A site the diver replaced is its record to them, ahead of a create that would bring the
+        # private site back under the uuid.
+        commons |= {uuid: commons[record.uuid] for uuid, record in replaced.items()}
         on_document_sites: dict[tuple[str, str], int] = {}
         for kept in entries:
             for entry in kept:

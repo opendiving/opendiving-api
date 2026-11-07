@@ -1341,6 +1341,64 @@ class TestPrivacy:
         assert (await _lookup(http, uuid=[uuid]))["data"] == []
         assert (await _lookup(http, search=theirs.name))["data"] == []
 
+    @pytest.mark.asyncio
+    async def test_a_uuid_another_account_retired_names_nothing_on_every_route(
+        self,
+        http: httpx.AsyncClient,
+        db: Session,
+        diver: User,
+        other_diver: User,
+        signed: Sign,
+        commons: DiveSite,
+        async_db: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """P2's sibling: an alias is one account's, so to anyone else the uuid never existed."""
+        site = create_dive_site(db, diver)
+        uuid = str(site.uuid)
+        replaced = await http.post(f"/dive-site/{uuid}/replace", json={"commons_site_uuid": str(commons.uuid)})
+        assert replaced.status_code == 200, replaced.text
+        signed.as_(other_diver)
+        monkeypatch.setattr(settings, "DIVE_CONDITIONS_PROVIDER", "open-meteo", raising=False)
+        dive = {"dive_number": 1, "start_time": "2026-01-02T09:00:00+00:00", "submerged_time": 2400}
+        bare = await http.post("/dive", json=dive)
+        draft = await http.post("/dive-draft", json={"values": {"dive_site_uuids": [uuid]}})
+        own = create_dive_site(db, other_diver)
+        conditions = {"dive_site_uuid": uuid, "start_time": "2024-06-01T10:00:00+00:00"}
+
+        answers = [
+            (await http.get(f"/dive-site/{uuid}")).status_code,
+            (await http.patch(f"/dive-site/{uuid}", json={"notes": "Mine"})).status_code,
+            (await http.delete(f"/dive-site/{uuid}")).status_code,
+            (await http.put(f"/dive-site/{uuid}/saved")).status_code,
+            (await http.get(f"/dive-site/{uuid}/commons-matches")).status_code,
+            (await http.get("/dive-conditions/lookup", params=conditions)).status_code,
+        ]
+        refused = [
+            (await http.post("/dive", json={**dive, "dive_number": 2, "dive_site_uuids": [uuid]})).status_code,
+            (await http.patch(f"/dive/{bare.json()['uuid']}", json={"dive_site_uuids": [uuid]})).status_code,
+            (
+                await http.post(
+                    f"/dive-draft/{draft.json()['uuid']}/dive",
+                    json={**dive, "dive_number": 3, "dive_site_uuids": [uuid]},
+                )
+            ).status_code,
+            (await http.delete(f"/dive-site/{own.uuid}", params={"move_dives_to": uuid})).status_code,
+        ]
+
+        assert answers == [404] * 6
+        assert refused == [422] * 4
+        assert (await _lookup(http, uuid=[uuid]))["data"] == []
+        assert (await http.get(f"/dive-draft/{draft.json()['uuid']}")).json()["values"]["dive_site_uuids"] == []
+        assert (await http.get("/dives", params={"dive_site_uuid": uuid})).json()["total_count"] == 0
+        assert (await http.get("/user/species", params={"dive_site_uuid": uuid})).json()["data"] == []
+        suggested = await http.get("/user/species/suggest", params={"dive_site_uuid": uuid})
+        assert suggested.status_code == 200, suggested.text
+
+        await _import(async_db, other_diver, _document({"uuid": uuid, "name": "From a shared export"}))
+        row = db.scalars(select(DiveSite).where(DiveSite.uuid == uuid_pkg.UUID(uuid))).one()
+        assert (row.user_id, row.name) == (other_diver.id, "From a shared export")
+
 
 class TestThePublicExport:
     @pytest.fixture
@@ -1521,6 +1579,46 @@ def _saved_row(db: Session, user: User, site: DiveSite) -> SavedSite | None:
 
 
 class TestTheImport:
+    @pytest.mark.asyncio
+    async def test_a_site_the_diver_replaced_links_the_record_and_never_comes_back(
+        self, http: httpx.AsyncClient, db: Session, diver: User, async_db: AsyncSession, commons: DiveSite
+    ) -> None:
+        uuid = create_dive_site(db, diver).uuid
+        await http.post(f"/dive-site/{uuid}/replace", json={"commons_site_uuid": str(commons.uuid)})
+        site = {"uuid": str(uuid), "name": "As it was exported"}
+        dive = {
+            "uuid": str(uuid_pkg.uuid4()),
+            "number": 1,
+            "started_at": "2026-01-02T09:00:00+00:00",
+            "submerged_time": 2400,
+            "max_depth": 18.0,
+            "site_uuids": [str(uuid)],
+        }
+
+        await _import(async_db, diver, _document(site, dives=[dive]))
+
+        assert db.scalars(select(DiveSite).where(DiveSite.user_id == diver.id)).all() == []
+        assert db.scalars(select(DiveDiveSite.dive_site_id)).all().count(commons.id) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_alias_outranks_another_account_s_row_under_the_uuid(
+        self,
+        http: httpx.AsyncClient,
+        db: Session,
+        diver: User,
+        other_diver: User,
+        async_db: AsyncSession,
+        commons: DiveSite,
+    ) -> None:
+        uuid = create_dive_site(db, diver).uuid
+        await http.post(f"/dive-site/{uuid}/replace", json={"commons_site_uuid": str(commons.uuid)})
+        await _import(async_db, other_diver, _document({"uuid": str(uuid), "name": "A buddy's copy"}))
+
+        await _import(async_db, diver, _document({"uuid": str(uuid), "name": "As it was exported"}))
+
+        assert db.scalars(select(DiveSite).where(DiveSite.user_id == diver.id)).all() == []
+        assert _saved_row(db, diver, commons) is not None
+
     @pytest.mark.asyncio
     async def test_a_site_naming_a_record_by_uuid_saves_it_with_the_notes_and_tags(
         self, db: Session, diver: User, async_db: AsyncSession, commons: DiveSite

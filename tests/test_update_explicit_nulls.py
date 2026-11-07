@@ -318,6 +318,7 @@ class TestTheNullNeverReachesTheDatabase:
         # a partial clear into.
         update = AsyncMock()
         monkeypatch.setattr(dive_sites_module, "_get_readable_dive_site", AsyncMock())
+        monkeypatch.setattr(dive_sites_module, "proposal_following_an_edit", AsyncMock(return_value=None))
         monkeypatch.setattr(dive_sites_module.crud_dive_sites, "update", update)
         monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", AsyncMock(return_value=False))
         monkeypatch.setattr(dive_sites_module, "invalidate_dive_site_caches", AsyncMock())

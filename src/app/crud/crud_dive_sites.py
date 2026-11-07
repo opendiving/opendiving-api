@@ -1,6 +1,6 @@
 import math
 import uuid as uuid_pkg
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from datetime import UTC, date, datetime
 from typing import Any, NamedTuple
 
@@ -30,6 +30,7 @@ from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like, search_clause
 from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_site import DiveSite
+from ..models.dive_site_alias import DiveSiteAlias
 from ..models.dive_site_tag import DiveSiteTag
 from ..models.dive_species import DiveSpecies
 from ..models.saved_site import SavedSite
@@ -61,6 +62,7 @@ DIVE_SITE_SEARCH_COLUMNS = ("name", "location_name")
 
 _SAVED_SITE_KEY = "ux_saved_site_user_id_dive_site_id"
 _SITE_TAG_KEY = "ux_dive_site_tag_dive_site_id_tag_id"
+_ALIAS_KEY = "ux_dive_site_alias_user_id_alias_uuid"
 
 
 def saved_by(user_id: int) -> ColumnElement[bool]:
@@ -76,6 +78,35 @@ def in_the_commons() -> ColumnElement[bool]:
 def readable_by(user_id: int) -> ColumnElement[bool]:
     """What this diver may name wherever a site is named: their list, and any Commons record."""
     return or_(in_the_commons(), saved_by(user_id))
+
+
+class AliasedRecord(NamedTuple):
+    id: int
+    uuid: uuid_pkg.UUID
+
+
+async def aliased_records(
+    db: AsyncSession, uuids: Collection[uuid_pkg.UUID], *, user_id: int
+) -> dict[uuid_pkg.UUID, AliasedRecord]:
+    """The Commons record each of these uuids means to this diver, for those they replaced.
+
+    A uuid they can still read answers for itself, and one that is on another account's row does
+    not stop being theirs: an import of a shared export makes that row under the very uuid. So the
+    test is what this diver can read, never whether a row exists.
+    """
+    if not uuids:
+        return {}
+    readable = select(DiveSite.uuid).where(DiveSite.uuid.in_(uuids), readable_by(user_id))
+    rows = await db.execute(
+        select(DiveSiteAlias.alias_uuid, DiveSite.id, DiveSite.uuid)
+        .join(DiveSite, DiveSite.id == DiveSiteAlias.dive_site_id)
+        .where(
+            DiveSiteAlias.user_id == user_id,
+            DiveSiteAlias.alias_uuid.in_(uuids),
+            DiveSiteAlias.alias_uuid.not_in(readable),
+        )
+    )
+    return {row.alias_uuid: AliasedRecord(id=row.id, uuid=row.uuid) for row in rows}
 
 
 def _registry_entries(site: Any) -> Select[Any]:
@@ -154,9 +185,12 @@ def _select_sites(user_id: int, *, on_the_list_only: bool) -> Select[Any]:
 
 
 async def get_readable_dive_site(db: AsyncSession, *, uuid: uuid_pkg.UUID, user_id: int) -> dict[str, Any] | None:
-    """One site in `_select_sites`' shape, or `None` if this diver may not read it."""
-    statement = _select_sites(user_id, on_the_list_only=False).where(DiveSite.uuid == uuid, readable_by(user_id))
-    row = (await db.execute(statement)).mappings().one_or_none()
+    """One site in `_select_sites`' shape, or `None` if this diver may not read it. A uuid they
+    replaced reads as its record."""
+    readable = _select_sites(user_id, on_the_list_only=False).where(readable_by(user_id))
+    row = (await db.execute(readable.where(DiveSite.uuid == uuid))).mappings().one_or_none()
+    if row is None and (aliased := (await aliased_records(db, [uuid], user_id=user_id)).get(uuid)) is not None:
+        row = (await db.execute(readable.where(DiveSite.id == aliased.id))).mappings().one_or_none()
     return None if row is None else dict(row)
 
 
@@ -239,8 +273,8 @@ async def replace_site_with_record(db: AsyncSession, *, user_id: int, site_id: i
 
     The diver's dives name the record at the same positions, their notes join any they had on
     it, their tags are the union, and the record is on their list with the date the site
-    entered it. Their proposals on the site go with the row, so a caller keeping one moves it
-    first.
+    entered it. The site's uuid goes on meaning the record to them alone. Their proposals on the
+    site go with the row, so a caller keeping one moves it first.
     """
     site_row = (
         await db.execute(
@@ -275,6 +309,14 @@ async def replace_site_with_record(db: AsyncSession, *, user_id: int, site_id: i
             ),
         )
         .on_conflict_do_nothing(constraint=_SITE_TAG_KEY)
+    )
+    await db.execute(
+        insert(DiveSiteAlias)
+        .from_select(
+            ["user_id", "alias_uuid", "dive_site_id"],
+            select(literal(user_id), DiveSite.uuid, literal(record_id)).where(DiveSite.id == site_id),
+        )
+        .on_conflict_do_nothing(constraint=_ALIAS_KEY)
     )
     await db.execute(delete(DiveSite).where(DiveSite.id == site_id, DiveSite.user_id == user_id))
 
@@ -523,7 +565,8 @@ async def resolve_dive_site_ids_for_user(
     db: AsyncSession, dive_site_uuids: list[uuid_pkg.UUID], user_id: int
 ) -> dict[uuid_pkg.UUID, int] | None:
     """Resolve dive site public `uuid`s to their internal `id`s, scoped to the sites the given
-    user may name: their list, and any Commons record.
+    user may name: their list, any Commons record, and a uuid they replaced, which resolves to
+    its record.
 
     Returns `None` if any given uuid doesn't resolve to one of those (used to prevent a user
     from linking another user's dive site(s) to their own dive).
@@ -538,6 +581,8 @@ async def resolve_dive_site_ids_for_user(
     )
     result = await db.execute(stmt)
     mapping = {row.uuid: row.id for row in result}
+    aliased = await aliased_records(db, unique_uuids - mapping.keys(), user_id=user_id)
+    mapping |= {uuid: record.id for uuid, record in aliased.items()}
     if mapping.keys() != unique_uuids:
         return None
     return mapping

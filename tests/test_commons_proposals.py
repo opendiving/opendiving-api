@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from src.app.api import router
 from src.app.api.dependencies import get_current_user
+from src.app.api.v1 import dive_conditions
 from src.app.api.v1 import dive_sites as dive_sites_module
 from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
@@ -39,6 +40,7 @@ from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_site import DiveSite
 from src.app.models.dive_site_proposal import DiveSiteProposal
 from src.app.models.dive_site_tag import DiveSiteTag
+from src.app.models.dive_species import DiveSpecies
 from src.app.models.saved_site import SavedSite
 from src.app.models.tag import Tag
 from src.app.models.user import User
@@ -53,6 +55,7 @@ from tests.helpers.generators import (
     create_curated_site,
     create_dive,
     create_dive_site,
+    create_species,
     create_tag,
     create_user,
 )
@@ -454,7 +457,7 @@ class TestReplacing:
 
     @pytest.mark.asyncio
     async def test_what_the_diver_read_before_is_not_served_after(
-        self, http: httpx.AsyncClient, db: Session, diver: User
+        self, http: httpx.AsyncClient, db: Session, diver: User, other_diver: User, signed: Sign
     ) -> None:
         site = _own_site(db, diver)
         record = _record(db)
@@ -467,6 +470,8 @@ class TestReplacing:
 
         assert (await http.get(f"/dive/{dive.uuid}")).json()["dive_sites"][0]["uuid"] == str(record.uuid)
         assert (await http.get("/dive-sites", params={"search": site.name})).json()["total_count"] == 0
+        assert (await _read(http, site.uuid))["uuid"] == str(record.uuid)
+        signed.as_(other_diver)
         assert (await http.get(f"/dive-site/{site.uuid}")).status_code == 404
 
     @pytest.mark.asyncio
@@ -499,6 +504,309 @@ class TestReplacing:
 
         assert (refused.status_code, theirs.status_code, a_record.status_code) == (422, 404, 404)
         assert _row(db, site.uuid) is not None
+
+
+async def _replaced(http: httpx.AsyncClient, site: DiveSite, record: DiveSite) -> uuid_pkg.UUID:
+    """Replace the site and answer its uuid, which the row no longer has to give."""
+    uuid = site.uuid
+    response = await http.post(f"/dive-site/{uuid}/replace", json={"commons_site_uuid": str(record.uuid)})
+    assert response.status_code == 200, response.text
+    return uuid
+
+
+def _named_on_dives(db: Session, diver: User, record: DiveSite) -> int:
+    db.expire_all()
+    return len(
+        db.scalars(
+            select(DiveDiveSite.id)
+            .join(Dive, Dive.id == DiveDiveSite.dive_id)
+            .where(DiveDiveSite.dive_site_id == record.id, Dive.user_id == diver.id)
+        ).all()
+    )
+
+
+class TestAReplacedSiteLeavesAnAlias:
+    """Every route the alias reaches, asked with the record's uuid and then with the retired one."""
+
+    @staticmethod
+    async def _what_a_uuid_answers(
+        http: httpx.AsyncClient, db: Session, diver: User, uuid: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> dict[str, Any]:
+        named = str(uuid)
+        dive = {"start_time": "2026-01-02T09:00:00+00:00", "submerged_time": 2400, "max_depth": 18.0}
+        monkeypatch.setattr(settings, "DIVE_CONDITIONS_PROVIDER", "open-meteo", raising=False)
+        preview = AsyncMock(return_value=None)
+        monkeypatch.setattr(dive_conditions, "preview_conditions", preview)
+
+        conditions = await http.get(
+            "/dive-conditions/lookup", params={"dive_site_uuid": named, "start_time": "2024-06-01T10:00:00+00:00"}
+        )
+        assert preview.await_args is not None
+        saved = await http.put(f"/dive-site/{named}/saved")
+        patched = await http.patch(f"/dive-site/{named}", json={"notes": "The same note"})
+        read = await http.get(f"/dive-site/{named}")
+        lookup = await http.get("/dive-sites/lookup", params={"uuid": named})
+
+        created = await http.post("/dive", json={**dive, "dive_number": 1, "dive_site_uuids": [named]})
+        assert created.status_code == 201, created.text
+        bare = await http.post("/dive", json={**dive, "dive_number": 2, "dive_site_uuids": []})
+        updated = await http.patch(f"/dive/{bare.json()['uuid']}", json={"dive_site_uuids": [named]})
+        draft = await http.post("/dive-draft", json={"values": {"dive_site_uuids": [named]}})
+        draft_read = await http.get(f"/dive-draft/{draft.json()['uuid']}")
+        logged = await http.post(
+            f"/dive-draft/{draft.json()['uuid']}/dive",
+            json={**dive, "dive_number": 3, "dive_site_uuids": [named]},
+        )
+        assert logged.status_code == 201, logged.text
+        filtered = await http.get("/dives", params={"dive_site_uuid": named})
+        life_list = await http.get("/user/species", params={"dive_site_uuid": named})
+        suggested = await http.get("/user/species/suggest", params={"dive_site_uuid": named})
+
+        moved_from = _own_site(db, diver)
+        moved_dive = create_dive(db, diver)
+        _on_a_dive(db, moved_dive, moved_from)
+        moved = await http.delete(f"/dive-site/{moved_from.uuid}", params={"move_dives_to": named})
+
+        return {
+            "conditions": (conditions.status_code, preview.await_args.kwargs["latitude"]),
+            "saved": (saved.status_code, saved.json()["uuid"]),
+            "patched": patched.status_code,
+            "read": {key: read.json()[key] for key in ("uuid", "name", "owner", "saved", "notes", "attribution")},
+            "lookup": [row["uuid"] for row in lookup.json()["data"]],
+            "created": [site["uuid"] for site in created.json()["dive_sites"]],
+            "updated": updated.status_code,
+            "draft": draft_read.json()["values"]["dive_site_uuids"],
+            "logged": [site["uuid"] for site in logged.json()["dive_sites"]],
+            "filtered": filtered.json()["total_count"] > 0,
+            "life_list": life_list.status_code,
+            "suggested": suggested.status_code,
+            "moved": moved.status_code,
+            "moved_to": [site["uuid"] for site in (await http.get(f"/dive/{moved_dive.uuid}")).json()["dive_sites"]],
+        }
+
+    @pytest.mark.asyncio
+    async def test_every_route_answers_for_it_as_for_the_record(
+        self, http: httpx.AsyncClient, db: Session, diver: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        record = _record(db)
+        retired = await _replaced(http, _own_site(db, diver), record)
+
+        by_the_record = await self._what_a_uuid_answers(http, db, diver, record.uuid, monkeypatch)
+        by_the_alias = await self._what_a_uuid_answers(http, db, diver, retired, monkeypatch)
+
+        assert by_the_alias == by_the_record
+        assert by_the_alias["read"]["uuid"] == str(record.uuid)
+        assert by_the_alias["created"] == by_the_alias["logged"] == by_the_alias["moved_to"] == [str(record.uuid)]
+
+    @pytest.mark.asyncio
+    async def test_the_filters_read_the_record_s_dives(self, http: httpx.AsyncClient, db: Session, diver: User) -> None:
+        site = _own_site(db, diver)
+        dive = create_dive(db, diver)
+        _on_a_dive(db, dive, site)
+        retired = await _replaced(http, site, _record(db))
+
+        listed = (await http.get("/dives", params={"dive_site_uuid": str(retired)})).json()
+
+        assert [row["uuid"] for row in listed["data"]] == [str(dive.uuid)]
+
+    @pytest.mark.asyncio
+    async def test_the_species_menu_keeps_its_tier_for_it(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        site = _own_site(db, diver)
+        dive = create_dive(db, diver)
+        _on_a_dive(db, dive, site)
+        species = create_species(db)
+        db.add(DiveSpecies(dive_id=dive.id, species_id=species.id))
+        db.commit()
+        retired = await _replaced(http, site, _record(db))
+
+        response = await http.get("/user/species/suggest", params={"dive_site_uuid": str(retired)})
+
+        assert [row["dive_count_at_sites"] for row in response.json()["results"]][:1] == [1]
+
+    @pytest.mark.asyncio
+    async def test_accepting_into_a_record_leaves_one_too(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        site = _own_site(db, diver)
+        uuid = site.uuid
+        record = _record(db)
+        proposal = await _propose_site(http, site)
+        signed.as_(reviewer)
+        await _accepted(http, proposal, into=str(record.uuid))
+        signed.as_(diver)
+
+        assert (await _read(http, uuid))["uuid"] == str(record.uuid)
+
+    @pytest.mark.asyncio
+    async def test_a_dive_naming_it_and_the_record_holds_the_record_once(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        record = _record(db)
+        retired = await _replaced(http, _own_site(db, diver), record)
+
+        created = await http.post(
+            "/dive",
+            json={
+                "dive_number": 1,
+                "start_time": "2026-01-02T09:00:00+00:00",
+                "submerged_time": 2400,
+                "max_depth": 18.0,
+                "dive_site_uuids": [str(retired), str(record.uuid)],
+            },
+        )
+
+        assert created.status_code == 201, created.text
+        assert [site["uuid"] for site in created.json()["dive_sites"]] == [str(record.uuid)]
+
+    @pytest.mark.asyncio
+    async def test_a_draft_naming_both_reads_the_record_once_where_the_first_stood(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        site = _own_site(db, diver)
+        other = _own_site(db, diver)
+        record = _record(db)
+        names = [str(other.uuid), str(site.uuid), str(record.uuid)]
+        draft = await http.post("/dive-draft", json={"values": {"dive_site_uuids": names}})
+        await _replaced(http, site, record)
+
+        read = await http.get(f"/dive-draft/{draft.json()['uuid']}")
+
+        assert read.json()["values"]["dive_site_uuids"] == [str(other.uuid), str(record.uuid)]
+
+    @pytest.mark.asyncio
+    async def test_a_queued_notes_edit_lands_on_the_record_and_the_latest_write_wins(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        record = _record(db)
+        retired = await _replaced(http, _own_site(db, diver, notes="Joined by the replace"), record)
+
+        response = await http.patch(f"/dive-site/{retired}", json={"notes": "Written offline", "tags": ["Queued"]})
+
+        assert response.status_code == 200, response.text
+        read = await _read(http, record.uuid)
+        assert (read["notes"], read["tags"]) == ("Written offline", ["Queued"])
+
+    @pytest.mark.asyncio
+    async def test_a_queued_edit_of_a_shared_member_is_the_record_s_403(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        record = _record(db)
+        name = record.name
+        retired = await _replaced(http, _own_site(db, diver), record)
+
+        response = await http.patch(f"/dive-site/{retired}", json={"name": _marked("Queued")})
+
+        assert response.status_code == 403
+        row = _row(db, record.uuid)
+        assert row is not None and row.name == name
+
+    @pytest.mark.asyncio
+    async def test_a_delete_through_it_is_a_404_and_takes_nothing(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        site = _own_site(db, diver)
+        _on_a_dive(db, create_dive(db, diver), site)
+        record = _record(db)
+        retired = await _replaced(http, site, record)
+
+        response = await http.delete(f"/dive-site/{retired}")
+
+        assert response.status_code == 404
+        listed = (await http.get("/dive-sites", params={"items_per_page": 100})).json()["data"]
+        assert str(record.uuid) in [row["uuid"] for row in listed]
+        assert _named_on_dives(db, diver, record) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_routes_that_mean_the_caller_s_own_site_stay_a_404(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        record = _record(db)
+        retired = await _replaced(http, _own_site(db, diver), record)
+
+        answers = [
+            (await http.get(f"/dive-site/{retired}/commons-matches")).status_code,
+            (
+                await http.post(f"/dive-site/{retired}/replace", json={"commons_site_uuid": str(record.uuid)})
+            ).status_code,
+            (await http.post(f"/dive-site/{retired}/proposals", json={"attestation": CHANGE})).status_code,
+        ]
+
+        assert answers == [404, 404, 404]
+
+    @pytest.mark.asyncio
+    async def test_a_delete_moving_the_dives_onto_the_record_it_means_is_a_move_onto_itself(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        site = _own_site(db, diver)
+        _on_a_dive(db, create_dive(db, diver), site)
+        record = _record(db)
+        retired = await _replaced(http, site, record)
+
+        response = await http.delete(f"/dive-site/{record.uuid}", params={"move_dives_to": str(retired)})
+
+        assert response.status_code == 422
+        assert _named_on_dives(db, diver, record) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_record_taken_off_the_list_is_still_what_it_means(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        record = _record(db)
+        retired = await _replaced(http, _own_site(db, diver, notes="Mine"), record)
+        assert (await _read(http, retired))["saved"] is True
+
+        assert (await http.delete(f"/dive-site/{record.uuid}")).status_code == 200
+
+        read = await _read(http, retired)
+        assert (read["uuid"], read["saved"], read["notes"]) == (str(record.uuid), False, "")
+        assert (await http.patch(f"/dive-site/{retired}", json={"notes": "Queued"})).status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_another_account_s_row_under_the_uuid_hides_nothing(
+        self, http: httpx.AsyncClient, db: Session, diver: User, other_diver: User, signed: Sign
+    ) -> None:
+        record = _record(db)
+        retired = await _replaced(http, _own_site(db, diver), record)
+        theirs = _own_site(db, other_diver, uuid=retired)
+
+        assert (await _read(http, retired))["uuid"] == str(record.uuid)
+        lookup = (await http.get("/dive-sites/lookup", params={"uuid": str(retired)})).json()
+        assert [row["uuid"] for row in lookup["data"]] == [str(record.uuid)]
+        assert (await http.delete(f"/dive-site/{retired}")).status_code == 404
+
+        signed.as_(other_diver)
+        mine = await _read(http, retired)
+        assert (mine["name"], mine["owner"]) == (theirs.name, "account")
+
+    @pytest.mark.asyncio
+    async def test_a_create_replayed_after_the_replace_answers_the_record_with_its_stored_201(
+        self, http: httpx.AsyncClient, db: Session
+    ) -> None:
+        """Accepted: the record is what the site became, so the retry reads as a success."""
+        record = _record(db)
+        body = {"name": _marked("Queued create")}
+        headers = {"Idempotency-Key": uuid_pkg.uuid4().hex}
+        created = await http.post("/dive-site", json=body, headers=headers)
+        assert created.status_code == 201, created.text
+        await http.post(f"/dive-site/{created.json()['uuid']}/replace", json={"commons_site_uuid": str(record.uuid)})
+
+        replayed = await http.post("/dive-site", json=body, headers=headers)
+
+        assert (replayed.status_code, replayed.json()["uuid"]) == (201, str(record.uuid))
+
+    @pytest.mark.asyncio
+    async def test_a_read_through_it_is_dropped_with_the_record_s(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        record = _record(db)
+        retired = await _replaced(http, _own_site(db, diver), record)
+        await _read(http, retired)
+
+        await http.patch(f"/dive-site/{record.uuid}", json={"notes": "Written since"})
+
+        assert (await _read(http, retired))["notes"] == "Written since"
 
 
 class TestOnlyOnThePrimary:
@@ -712,6 +1020,143 @@ class TestProposingAChange:
         response = await http.post(f"/dive-site/{site.uuid}/proposals", json={"attestation": NEW_SITE})
 
         assert response.status_code == 404
+
+
+class TestAWaitingProposalFollowsItsSite:
+    @pytest.mark.asyncio
+    async def test_an_edit_reaches_the_queue_and_the_proposal_keeps_everything_else(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        site = _own_site(db, diver)
+        sent = await _propose_site(http, site, message="Worth having")
+        before = _proposal(db, sent["uuid"])
+        attested_at, attestation = before.attested_at, before.attestation
+        name = _marked("Renamed")
+
+        response = await http.patch(f"/dive-site/{site.uuid}", json={"name": name, "depth_to": 24.0})
+
+        assert response.status_code == 200, response.text
+        after = _proposal(db, sent["uuid"])
+        assert (after.attested_at, after.attestation, after.message) == (attested_at, attestation, "Worth having")
+        assert after.created_at.isoformat() == sent["created_at"].replace("Z", "+00:00")
+        signed.as_(reviewer)
+        (row,) = await _queue(http)
+        assert (row["uuid"], row["proposed"]["name"], row["proposed"]["depth_to"]) == (sent["uuid"], name, 24.0)
+        assert row["proposed"] == row["current"]
+
+    @pytest.mark.asyncio
+    async def test_the_locality_reaches_it_by_its_name(self, http: httpx.AsyncClient, db: Session, diver: User) -> None:
+        site = _own_site(db, diver)
+        sent = await _propose_site(http, site)
+
+        await http.patch(f"/dive-site/{site.uuid}", json={"location": {"name": "Dahab, Egypt"}})
+
+        assert _proposal(db, sent["uuid"]).members["location_name"] == "Dahab, Egypt"
+
+    @pytest.mark.asyncio
+    async def test_a_body_clearing_the_pin_is_refused_and_writes_nothing(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        site = _own_site(db, diver, name="Kept")
+        latitude = site.latitude
+        sent = await _propose_site(http, site)
+
+        response = await http.patch(
+            f"/dive-site/{site.uuid}",
+            json={"name": _marked("Refused"), "latitude": None, "longitude": None, "tags": ["Never made"]},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == "A site needs a pin to be proposed for the Commons"
+        row = _row(db, site.uuid)
+        assert row is not None and (row.name, row.latitude) == ("Kept", latitude)
+        assert _proposal(db, sent["uuid"]).members["latitude"] == latitude
+        assert db.scalars(select(Tag).where(Tag.user_id == diver.id)).all() == []
+
+    @pytest.mark.asyncio
+    async def test_a_body_adding_a_record_s_entry_is_the_409_and_writes_nothing(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        carried = _entry()
+        _record(db, external_ids=[carried])
+        site = _own_site(db, diver)
+        sent = await _propose_site(http, site)
+
+        response = await http.patch(f"/dive-site/{site.uuid}", json={"external_ids": [carried], "depth_to": 24.0})
+
+        assert response.status_code == 409
+        assert "shares a registry entry" in response.json()["detail"]
+        row = _row(db, site.uuid)
+        assert row is not None and (row.external_ids, row.depth_to) == ([], None)
+        assert _proposal(db, sent["uuid"]).members["external_ids"] == []
+
+    @pytest.mark.asyncio
+    async def test_an_entry_a_record_came_to_carry_since_stops_no_edit(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        entry = _entry()
+        site = _own_site(db, diver, external_ids=[entry])
+        sent = await _propose_site(http, site)
+        _record(db, external_ids=[entry])
+
+        deeper = await http.patch(f"/dive-site/{site.uuid}", json={"depth_to": 24.0})
+        kept = await http.patch(f"/dive-site/{site.uuid}", json={"external_ids": [entry, _entry()]})
+
+        assert (deeper.status_code, kept.status_code) == (200, 200), (deeper.text, kept.text)
+        members = _proposal(db, sent["uuid"]).members
+        assert (members["depth_to"], len(members["external_ids"])) == (24.0, 2)
+
+    @pytest.mark.asyncio
+    async def test_notes_and_tags_leave_it_alone(self, http: httpx.AsyncClient, db: Session, diver: User) -> None:
+        site = _own_site(db, diver)
+        sent = await _propose_site(http, site)
+
+        response = await http.patch(f"/dive-site/{site.uuid}", json={"notes": "Private", "tags": ["Mine"]})
+
+        assert response.status_code == 200, response.text
+        assert _proposal(db, sent["uuid"]).updated_at is None
+
+    @pytest.mark.asyncio
+    async def test_the_limit_on_proposing_does_not_count_it(
+        self, http: httpx.AsyncClient, db: Session, diver: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        limit = AsyncMock()
+        monkeypatch.setattr(commons_proposals, "enforce_rate_limit", limit)
+        site = _own_site(db, diver)
+        await _propose_site(http, site)
+        limit.reset_mock()
+
+        await http.patch(f"/dive-site/{site.uuid}", json={"depth_to": 24.0})
+
+        limit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_decided_proposal_follows_nothing_and_refuses_nothing(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        site = _own_site(db, diver)
+        latitude = site.latitude
+        sent = await _propose_site(http, site)
+        await http.delete(f"/dive-site-proposal/{sent['uuid']}")
+
+        response = await http.patch(f"/dive-site/{site.uuid}", json={"latitude": None, "longitude": None})
+
+        assert response.status_code == 200, response.text
+        assert _proposal(db, sent["uuid"]).members["latitude"] == latitude
+
+    @pytest.mark.asyncio
+    async def test_a_change_waiting_on_a_saved_record_is_untouched(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        record = _record(db)
+        saved_row(db, record, user=diver)
+        sent = await _propose_change(http, record, depth_to=11.0)
+
+        await http.patch(f"/dive-site/{record.uuid}", json={"notes": "Mine"})
+        refused = await http.patch(f"/dive-site/{record.uuid}", json={"depth_to": 24.0})
+
+        assert refused.status_code == 403
+        assert _proposal(db, sent["uuid"]).members == {"depth_to": 11.0}
 
 
 class TestTheCallersProposals:

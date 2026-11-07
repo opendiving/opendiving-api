@@ -142,7 +142,7 @@ def dive_site_route(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     }
 
     monkeypatch.setattr(cache_module, "client", stubs["redis"])
-    monkeypatch.setattr(dive_sites_module, "_get_readable_dive_site", stubs["owned"])
+    monkeypatch.setattr(dive_sites_module, "_get_row_under_uuid", stubs["owned"])
     monkeypatch.setattr(dive_sites_module, "resolve_dive_site_ids_for_user", stubs["resolve"])
     monkeypatch.setattr(dive_sites_module, "replace_dive_site_on_dives", stubs["replace"])
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "delete", stubs["delete"])
@@ -392,8 +392,11 @@ class TestEraseDiveSiteWithAReplacement:
 
     @pytest.mark.asyncio
     async def test_a_site_cannot_be_moved_onto_itself(self, dive_site_route: dict[str, Any]) -> None:
+        site = dive_site_route["owned"].return_value
+        dive_site_route["resolve"].return_value = {site.uuid: site.id}
+
         with pytest.raises(UnprocessableEntityException):
-            await _erase_dive_site(dive_site_route, move_dives_to=dive_site_route["uuid"])
+            await _erase_dive_site(dive_site_route, move_dives_to=site.uuid)
 
     @pytest.mark.asyncio
     async def test_a_second_delete_moves_nothing(self, dive_site_route: dict[str, Any]) -> None:

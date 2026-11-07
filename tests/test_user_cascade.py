@@ -45,6 +45,7 @@ from src.app.models.dive_file import DiveFile
 from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.dive_person import DivePerson
 from src.app.models.dive_site import DiveSite
+from src.app.models.dive_site_alias import DiveSiteAlias
 from src.app.models.dive_tag import DiveTag
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
@@ -158,6 +159,7 @@ class TestDeletingAUserTakesEverythingWithIt:
                     user_id=diver.id, total_dives=1, max_depth=18.0, total_submerged_time=1800, species_seen=0
                 ),
                 DiveDiveSite(dive_id=dive.id, dive_site_id=site.id),
+                DiveSiteAlias(user_id=diver.id, alias_uuid=uuid7(), dive_site_id=site.id),
                 GearSetItem(gear_set_id=gear_set.id, gear_item_id=item.id),
                 DivePerson(dive_id=dive.id, person_id=person.id, role="buddy"),
                 TripPerson(trip_id=trip.id, person_id=person.id),
@@ -251,6 +253,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             DiveFile,
             DiveFormPreset,
             DiveSite,
+            DiveSiteAlias,
             GearItem,
             GearServiceRecord,
             GearServiceSchedule,

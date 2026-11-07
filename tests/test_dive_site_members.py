@@ -257,6 +257,7 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     seen["invalidate_sites"] = AsyncMock()
     seen["invalidate_dives"] = AsyncMock()
     monkeypatch.setattr(dive_sites_module, "_get_readable_dive_site", AsyncMock(return_value=site))
+    monkeypatch.setattr(dive_sites_module, "proposal_following_an_edit", AsyncMock(return_value=None))
     monkeypatch.setattr(dive_sites_module, "dive_site_name_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(dive_sites_module.crud_dive_sites, "update", fake_update)
     monkeypatch.setattr(dive_sites_module, "replace_tags_for_dive_site", seen["replace_tags"])
@@ -378,9 +379,11 @@ class TestTheReads:
             calls.append("read")
             return {}
 
-        monkeypatch.setattr(
-            dive_sites_module, "_get_readable_dive_site", AsyncMock(side_effect=lambda *_: calls.append("owned"))
-        )
+        def authorize(*_: Any) -> MagicMock:
+            calls.append("owned")
+            return MagicMock(uuid=uuid7())
+
+        monkeypatch.setattr(dive_sites_module, "_get_readable_dive_site", AsyncMock(side_effect=authorize))
         monkeypatch.setattr(dive_sites_module, "_cached_read_dive_site", AsyncMock(side_effect=read))
 
         await dive_sites_module.read_dive_site(

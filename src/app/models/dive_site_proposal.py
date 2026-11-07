@@ -25,9 +25,9 @@ class DiveSiteProposal(Base, PublicUUIDMixin, TimestampMixin):
     # into, so a proposer whose own row has gone still reads the outcome.
     dive_site_id: Mapped[int] = mapped_column(ForeignKey("dive_site.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(16))
-    # The shared members as the proposer asked for them: every one for a new site, as the site
-    # stood when proposed, and for a change only those they wanted different. Nothing a Commons
-    # record would not carry is ever written here.
+    # The shared members as the proposer asked for them: every one for a new site, following the
+    # site's edits while it waits, and for a change only those they wanted different. Nothing a
+    # Commons record would not carry is ever written here.
     members: Mapped[dict[str, Any]] = mapped_column(JSON)
     # The words the proposer affirmed and when: the proposal's evidence of the CC0 dedication.
     attestation: Mapped[str] = mapped_column(Text)

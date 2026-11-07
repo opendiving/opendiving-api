@@ -38,6 +38,7 @@ from src.app.api.dependencies import (
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.setup import create_application
+from src.app.crud.crud_dive_sites import crud_dive_sites
 from src.app.main import app
 from tests.helpers.routes import iter_api_routes
 
@@ -589,6 +590,14 @@ def no_dive_file_read_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("src.app.api.v1.dives.enforce_rate_limit", AsyncMock())
 
 
+@pytest.fixture(autouse=True)
+def no_dive_site_aliases(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Nothing here reaches a database, and a site route asks for the caller's alias on a miss."""
+    aliases = AsyncMock(return_value={})
+    monkeypatch.setattr("src.app.api.v1.dive_sites.aliased_records", aliases)
+    return aliases
+
+
 @pytest.fixture(scope="module")
 def owned_app() -> Any:
     """Its own app with `apply_migrations_on_start=False`, like `test_export_endpoints.py`.
@@ -670,6 +679,43 @@ class TestSomeoneElsesRowIsIndistinguishableOverHTTP:
         assert absent.status_code == 404
         assert someone_elses.status_code == absent.status_code
         assert someone_elses.json() == absent.json() == {"detail": route.detail}
+
+
+class TestADiveSiteMissIsAskedOfTheCallersAliases:
+    """An alias answers one account, so what matters at this seam is whose id the route asks with."""
+
+    @pytest.mark.parametrize(
+        ("method", "extra"),
+        [("GET", {}), ("PATCH", {"json": {"notes": "Mine"}}), ("PUT", {})],
+        ids=["read", "edit", "save"],
+    )
+    def test_the_lookup_carries_the_caller_s_id_and_nothing_found_is_a_404(
+        self,
+        signed_in_client: TestClient,
+        monkeypatch: Any,
+        no_dive_site_aliases: AsyncMock,
+        method: str,
+        extra: dict[str, Any],
+    ):
+        uuid = uuid_pkg.uuid4()
+        path = f"/api/v1/dive-site/{uuid}" + ("/saved" if method == "PUT" else "")
+        monkeypatch.setattr(crud_dive_sites, "get", AsyncMock(return_value=None))
+
+        response = signed_in_client.request(method, path, **extra)
+
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Dive site not found"}
+        assert no_dive_site_aliases.await_args is not None
+        assert no_dive_site_aliases.await_args.args[1] == [uuid]
+        assert no_dive_site_aliases.await_args.kwargs["user_id"] == OWNER_ID
+
+    def test_a_delete_never_asks(self, signed_in_client: TestClient, monkeypatch: Any, no_dive_site_aliases: AsyncMock):
+        monkeypatch.setattr(crud_dive_sites, "get", AsyncMock(return_value=None))
+
+        response = signed_in_client.request("DELETE", f"/api/v1/dive-site/{uuid_pkg.uuid4()}")
+
+        assert response.status_code == 404
+        no_dive_site_aliases.assert_not_awaited()
 
 
 class TestTheResolverRoutesScopeToTheCaller:

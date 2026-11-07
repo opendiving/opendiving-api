@@ -4,10 +4,11 @@
 in `values` are not foreign keys: the records they name can be deleted while the draft lives,
 and a phone writes a draft from a copy that predates the delete. So a write stores them as
 given, and every read keeps only those the account still holds - species, a global catalog,
-need only exist - with one query per kind over the rows read. The next whole-state write from
-either client then no longer carries what was dropped. Logging the draft validates the dive
-as `POST /dive` does, so a reference a phone still holds offline is that route's 422 on the
-field. See DECISIONS.md, *"A dive draft's references are checked on the way out"*.
+need only exist - with one query per kind over the rows read, and a site the account replaced
+reads as its record. The next whole-state write from either client then no longer carries what
+was dropped. Logging the draft validates the dive as `POST /dive` does, so a reference a phone
+still holds offline is that route's 422 on the field. See DECISIONS.md, *"A dive draft's
+references are checked on the way out"*.
 """
 
 import uuid as uuid_pkg
@@ -19,7 +20,7 @@ from sqlalchemy import Row, Select, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.exceptions.http_exceptions import CustomException, NotFoundException
-from ..crud.crud_dive_sites import readable_by
+from ..crud.crud_dive_sites import aliased_records, readable_by
 from ..models.contact import Contact
 from ..models.course import Course
 from ..models.dive_draft import DiveDraft
@@ -155,19 +156,24 @@ async def _held(db: AsyncSession, wanted: Held, *, user_id: int) -> Held:
     return held
 
 
-def _scrubbed(values: DiveDraftValuesRead, held: Held) -> DiveDraftValuesRead:
+def _scrubbed(
+    values: DiveDraftValuesRead, held: Held, records: dict[uuid_pkg.UUID, uuid_pkg.UUID]
+) -> DiveDraftValuesRead:
     def one(model: Referenced, uuid: uuid_pkg.UUID | None) -> uuid_pkg.UUID | None:
         return uuid if uuid in held.get(model, set()) else None
 
     def some(model: Referenced, uuids: list[uuid_pkg.UUID] | None) -> list[uuid_pkg.UUID] | None:
         return None if uuids is None else [uuid for uuid in uuids if uuid in held.get(model, set())]
 
+    # Once, where the draft names both a replaced site and its record, as the replace keeps a dive.
+    sites = None if values.dive_site_uuids is None else dict.fromkeys(records.get(u, u) for u in values.dive_site_uuids)
+
     return values.model_copy(
         update={
             "trip_uuid": one(Trip, values.trip_uuid),
             "course_uuid": one(Course, values.course_uuid),
             "contact_uuid": one(Contact, values.contact_uuid),
-            "dive_site_uuids": some(DiveSite, values.dive_site_uuids),
+            "dive_site_uuids": None if sites is None else some(DiveSite, list(sites)),
             "gear_item_uuids": some(GearItem, values.gear_item_uuids),
             "mixtures": None
             if values.mixtures is None
@@ -192,13 +198,16 @@ async def _as_read(db: AsyncSession, rows: Sequence[Row[Any]], *, user_id: int) 
         for model, uuid in _references(values):
             wanted.setdefault(model, set()).add(uuid)
     held = await _held(db, wanted, user_id=user_id)
+    aliased = await aliased_records(db, wanted.get(DiveSite, set()) - held.get(DiveSite, set()), user_id=user_id)
+    records = {uuid: record.uuid for uuid, record in aliased.items()}
+    held.setdefault(DiveSite, set()).update(records.values())
     return [
         DiveDraftRead(
             uuid=row.uuid,
             created_at=row.created_at,
             updated_at=row.updated_at,
             gear_set_uuid=row.set,
-            values=_scrubbed(values, held),
+            values=_scrubbed(values, held, records),
         )
         for row, values in parsed
     ]

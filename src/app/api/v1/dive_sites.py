@@ -26,6 +26,7 @@ from ...crud.crud_dive_sites import (
     DIVE_SITE_NAME_KEY,
     DIVE_SITE_SEARCH_COLUMNS,
     add_saved_site,
+    aliased_records,
     crud_dive_sites,
     dive_site_name_exists,
     get_commons_matches_for_sites,
@@ -83,6 +84,7 @@ from ...schemas.lookup import LookupUntil, LookupUuids
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches, invalidate_trip_caches
 from ...services.commons_matches import find_commons_matches
+from ...services.commons_proposals import follow_the_edit, proposal_following_an_edit
 from ...services.commons_records import attribution_for
 from ..idempotency import IdempotentCreate
 
@@ -93,9 +95,9 @@ _SHARED_MEMBER_REFUSED = "A Commons site's shared details cannot be changed here
 _NOT_SAVED_REFUSED = "Save this Commons site to your sites before adding notes or tags"
 
 
-async def _get_readable_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
-    """Fetch a dive site by public uuid and assert the caller may read it: their own, or any
-    Commons record.
+async def _get_row_under_uuid(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
+    """Fetch the row carrying this public uuid and assert the caller may read it: their own, or
+    any Commons record.
 
     Thin wrapper over `fetch_owned_or_raise` - see there for why someone else's row reads
     as a 404 and, in particular, why this must run before any `@cache`-wrapped read
@@ -112,8 +114,20 @@ async def _get_readable_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current
     )
 
 
+async def _get_readable_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
+    """`_get_row_under_uuid`, where a uuid the caller replaced with a Commons record means the
+    record. A caller given the record passes on its uuid, never the one in the path."""
+    try:
+        return await _get_row_under_uuid(db, uuid, current_user)
+    except NotFoundException:
+        aliased = (await aliased_records(db, [uuid], user_id=current_user["id"])).get(uuid)
+        if aliased is None:
+            raise
+        return await _get_row_under_uuid(db, aliased.uuid, current_user)
+
+
 async def _get_own_dive_site(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
-    """`_get_readable_dive_site` for a route that means the caller's own site alone."""
+    """`_get_row_under_uuid` for a route that means the caller's own site alone."""
     return await fetch_owned_or_raise(
         db=db,
         crud=crud_dive_sites,
@@ -437,6 +451,9 @@ async def _lookup_dive_sites(
     caller. A search reads two groups one after the other, so a page may straddle them: the
     second answers for what the first left of the page. `commons_only` skips the first, whose
     locality matches can otherwise fill the page."""
+    if uuids:
+        aliased = await aliased_records(db, uuids, user_id=user_id)
+        uuids = [aliased[uuid].uuid if uuid in aliased else uuid for uuid in uuids]
     offset, limit = compute_offset(page, items_per_page), items_per_page
     items: list[dict[str, Any]] = []
     total_count = 0
@@ -600,13 +617,17 @@ async def read_dive_site(
     `commons_match`, on the caller's own site, the Commons record sharing a registry entry with
     it. Either may trail a change made elsewhere by the read's cache.
 
+    The uuid of a site the caller replaced with a Commons record reads as that record, its `uuid`
+    the record's, here and wherever the caller names a site by uuid.
+
     404 when no such site exists - and the same 404 when it is another user's private site, so
     someone else's uuid stays unprobeable.
     """
-    # Authorize before the cached read: `@cache` replays a hit without re-checking.
-    await _get_readable_dive_site(db, uuid, current_user)
+    # Authorize before the cached read: `@cache` replays a hit without re-checking. Keyed on the
+    # row's uuid, so a replaced site's read is dropped by the sweeps that drop its record's.
+    site = await _get_readable_dive_site(db, uuid, current_user)
 
-    return await _cached_read_dive_site(request, user_id=current_user["id"], uuid=uuid, db=db)
+    return await _cached_read_dive_site(request, user_id=current_user["id"], uuid=site.uuid, db=db)
 
 
 @router.get("/dive-site/{uuid}/commons-matches", response_model=list[DiveSiteCommonsMatchRead])
@@ -644,7 +665,11 @@ async def replace_dive_site(
     In one transaction: every one of the caller's live dives naming the site names the record at
     the same position, and a dive already naming both holds it once; the site's notes join any the
     caller had on the record; its tags are added to theirs there; the record is on their list; and
-    the site is deleted, with any proposal on it. A draft naming the site loses it.
+    the site is deleted, with any proposal on it. A draft naming the site names the record.
+
+    The site's uuid goes on meaning the record to the caller alone: a dive, a read or an edit of
+    the record's notes and tags that names it lands on the record, and to anyone else it names
+    nothing.
 
     A `commons_site_uuid` that is not a Commons record is a 422. 404 when no such site exists,
     and the same 404 on a Commons record and on another user's private site, so a second call on
@@ -701,7 +726,7 @@ async def save_dive_site(
         await db.commit()
         await invalidate_dive_site_caches(user_id)
 
-    return await _cached_read_dive_site(request, user_id=user_id, uuid=uuid, db=db)
+    return await _cached_read_dive_site(request, user_id=user_id, uuid=db_dive_site.uuid, db=db)
 
 
 async def _patch_saved_commons_site(
@@ -741,6 +766,9 @@ async def patch_dive_site(
     the caller has not saved, every body is a 409 and writes nothing: `PUT /dive-site/{uuid}/saved`
     saves it first, and can carry both.
 
+    The uuid of a site the caller replaced with a Commons record is a `PATCH` on that record, so
+    `notes` overwrite theirs on it and `tags` replace them.
+
     Everything below is about the caller's own site. 404 on another user's private site, exactly
     as for a site that doesn't exist. Uniqueness is re-checked against the *resulting* name and
     locality name, so moving a site to a place where that name is already taken is a 422. `latitude` and `longitude` are
@@ -756,6 +784,11 @@ async def patch_dive_site(
     whole, and an explicit `null` clears a scalar. The depth range is checked against the
     stored end a body leaves out, so a `depth_from` below the stored `depth_to` is a 422. A
     rename onto one of the site's other names is a rename: that other name is dropped.
+
+    While the site's proposal for the Commons waits, a body naming anything but `notes` and `tags`
+    reaches the proposal, which keeps its place in the queue, its attestation and its message. Such
+    a body clearing the pin is a 422 and one adding a registry entry a Commons record carries is a
+    409, as proposing the site would answer, and either writes nothing.
     """
     # `location` is a value object with no identity, so there is nothing to merge a partial one
     # into; replacing it whole is what keeps a name-only body from carrying the previous
@@ -808,6 +841,12 @@ async def patch_dive_site(
         if values.other_names is not None or conformed != db_dive_site.other_names:
             update_data["other_names"] = conformed
 
+    proposal = (
+        await proposal_following_an_edit(db, site_id=db_dive_site.id, user_id=owner_id, changes=update_data)
+        if update_data
+        else None
+    )
+
     tag_ids = None if values.tags is None else await _resolved_tag_ids(db, user_id=owner_id, names=values.tags)
 
     if update_data:
@@ -822,6 +861,8 @@ async def patch_dive_site(
             )
         except NoResultFound as exc:
             raise ForbiddenException(_SHARED_MEMBER_REFUSED) from exc
+        if proposal is not None:
+            await follow_the_edit(db, proposal)
     if tag_ids is not None:
         await write_or_422(
             db, replace_tags_for_dive_site(db, db_dive_site.id, tag_ids, user_id=owner_id, commit=False), TAG_NOT_FOUND
@@ -863,9 +904,9 @@ async def erase_dive_site(
     optionally moving the dives logged at it to another site.
 
     A Commons record stays for everyone: what goes is the caller's notes and tags on it and
-    their dives' links to it. 404 on a Commons record the caller has not saved and on another
-    user's private site, exactly as for a site that doesn't exist, and a second `DELETE` on the
-    same uuid is a 404 too.
+    their dives' links to it. 404 on a Commons record the caller has not saved, on another
+    user's private site and on the uuid of a site the caller replaced with a Commons record,
+    exactly as for a site that doesn't exist, and a second `DELETE` on the same uuid is a 404 too.
 
     The caller's dives logged here read back one site shorter, and nothing of the link survives
     the delete; pass `move_dives_to` if the association matters.
@@ -888,18 +929,23 @@ async def erase_dive_site(
     # bad replacement gets that route's 422 (*Move dives on delete: A bad replacement is a 422,
     # not a 404*); the unreported count is *Move dives on delete: The response carries no
     # moved-dives count*.
-    db_dive_site = await _get_readable_dive_site(db, uuid, current_user)
+    #
+    # Not through an alias: the phone's queued delete of a site since replaced would take the
+    # record off the diver's list and every dive off it - `DECISIONS.md`, *A replaced site leaves
+    # an alias*.
+    db_dive_site = await _get_row_under_uuid(db, uuid, current_user)
     in_commons = db_dive_site.user_id is None
     owner_id = current_user["id"]
     if in_commons and not await is_saved(db, user_id=owner_id, dive_site_id=db_dive_site.id):
         raise NotFoundException("Dive site not found")
 
     if move_dives_to is not None:
-        if move_dives_to == uuid:
-            raise UnprocessableEntityException("A dive site cannot be moved onto itself.")
         site_id_by_uuid = await resolve_dive_site_ids_for_user(db=db, dive_site_uuids=[move_dives_to], user_id=owner_id)
         if site_id_by_uuid is None:
             raise UnprocessableEntityException("Dive site not found.")
+        # By the row, since a site the diver replaced with this record resolves to it.
+        if site_id_by_uuid[move_dives_to] == db_dive_site.id:
+            raise UnprocessableEntityException("A dive site cannot be moved onto itself.")
         await save_named_commons_sites(db, user_id=owner_id, dive_site_ids=[site_id_by_uuid[move_dives_to]])
         await replace_dive_site_on_dives(
             db=db,

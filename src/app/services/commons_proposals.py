@@ -5,7 +5,8 @@ dives naming it and the proposer's saved row are untouched. A change to a record
 record alone until a reviewer accepts it.
 
 **Acceptance writes the body it was sent, never the row.** The diver may go on editing their
-site while the proposal waits, and the reviewer approved what was on their screen.
+site while the proposal waits, each edit reaching the proposal, and the reviewer approved what
+was on their screen.
 
 The repository only copies what this instance holds, so an accepted record is held to the
 repository's record rules here, and a body breaking one is refused by naming it. Normalising on
@@ -13,7 +14,7 @@ the way to the repository instead would leave the copy different from its source
 """
 
 import uuid as uuid_pkg
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -36,6 +37,7 @@ from ..models.user import User
 from ..schemas.dive_site import (
     DEPTH_RANGE_MESSAGE,
     CommonsMatchRule,
+    DiveSiteCommonsMatchRead,
     DiveSiteMembers,
     DiveSiteMembersRead,
     DiveSiteProposalKind,
@@ -66,6 +68,7 @@ CONTRIBUTION_LICENSE = "CC0-1.0"
 _NOT_FOUND = "Proposal not found"
 _PIN_DECIMALS = 6
 _PIN_REQUIRED = "a Commons record keeps its pin"
+_NEW_SITE_PIN_REQUIRED = "A site needs a pin to be proposed for the Commons"
 
 # Every locality column but the name: a record's published form carries the name alone, so a
 # site that had a geocoded centre or box gives them up on becoming one.
@@ -122,18 +125,21 @@ def _proposal_read(row: Mapping[str, Any], site: Mapping[str, Any]) -> DiveSiteP
     )
 
 
-async def _members_of_a_new_site(db: AsyncSession, site: Mapping[str, Any]) -> dict[str, Any]:
-    members = _shared_members(site)
-    if members["latitude"] is None or members["longitude"] is None:
-        raise UnprocessableEntityException("A site needs a pin to be proposed for the Commons")
-    # A site sharing an entry with a record is a copy of it. Replacing it, or proposing a change
-    # to the record, is what the diver means.
-    matches = await find_commons_matches(db, members)
+def _refuse_a_copy(matches: Iterable[DiveSiteCommonsMatchRead]) -> None:
+    """A site sharing an entry with a record is a copy of it. Replacing it, or proposing a change
+    to the record, is what the diver means."""
     if any(match.rule is CommonsMatchRule.IDENTITY for match in matches):
         raise HTTPException(
             status_code=409,
             detail="This site shares a registry entry with a Commons site: replace it, or propose a change to that one",
         )
+
+
+async def _members_of_a_new_site(db: AsyncSession, site: Mapping[str, Any]) -> dict[str, Any]:
+    members = _shared_members(site)
+    if members["latitude"] is None or members["longitude"] is None:
+        raise UnprocessableEntityException(_NEW_SITE_PIN_REQUIRED)
+    _refuse_a_copy(await find_commons_matches(db, members))
     return members
 
 
@@ -201,6 +207,54 @@ async def propose(
         },
         site,
     )
+
+
+async def proposal_following_an_edit(
+    db: AsyncSession, *, site_id: int, user_id: int, changes: Mapping[str, Any]
+) -> DiveSiteProposal | None:
+    """The diver's waiting proposal of their own site, which `changes` are about to reach, or
+    `None`. An edit it could not carry to a reviewer is refused here, before anything is written.
+
+    Locked before the site's row is written, the order *Accept* takes the two locks in, and
+    re-read by the lock, so a decision that committed first leaves nothing to follow.
+
+    Only what the edit changes is tested. Testing the merged row would refuse every edit of a
+    site whose entry a Commons record came to carry after it was proposed, as a batch import adds
+    records.
+    """
+    proposal: DiveSiteProposal | None = await db.scalar(
+        select(DiveSiteProposal)
+        .where(
+            DiveSiteProposal.user_id == user_id,
+            DiveSiteProposal.dive_site_id == site_id,
+            DiveSiteProposal.kind == DiveSiteProposalKind.NEW_SITE.value,
+            DiveSiteProposal.status == DiveSiteProposalStatus.WAITING.value,
+        )
+        .with_for_update()
+    )
+    if proposal is None:
+        return None
+    if "latitude" in changes and (changes["latitude"] is None or changes["longitude"] is None):
+        raise UnprocessableEntityException(_NEW_SITE_PIN_REQUIRED)
+
+    members = _shared_members(await _site(db, site_id))
+    held = {(entry["registry"], entry["identifier"]) for entry in members["external_ids"]}
+    added = [entry for entry in changes.get("external_ids", []) if (entry["registry"], entry["identifier"]) not in held]
+    if added:
+        # No pin, so that identity is the one rule a match can meet.
+        _refuse_a_copy(
+            await find_commons_matches(db, {**members, "latitude": None, "longitude": None, "external_ids": added})
+        )
+    return proposal
+
+
+async def follow_the_edit(db: AsyncSession, proposal: DiveSiteProposal) -> None:
+    """Make the saved row's shared members what `proposal` asks for, keeping its place in the
+    queue and what the diver affirmed. Not a proposal of its own, so no limit counts it. Does not
+    commit."""
+    proposal.members = _shared_members(await _site(db, proposal.dive_site_id))
+    proposal.updated_at = datetime.now(UTC)
+    await db.flush()
 
 
 async def locked_proposal(

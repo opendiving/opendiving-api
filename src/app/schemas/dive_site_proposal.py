@@ -93,8 +93,8 @@ class AdminDiveSiteProposalRead(PublicUUIDSchema):
     proposed: Annotated[
         DiveSiteMembersRead,
         Field(
-            description="The shared members as proposed: for a new site as it stood when proposed, "
-            "for a change the record with the change applied"
+            description="The shared members as proposed: for a new site as it stood at its last edit "
+            "while the proposal waits, for a change the record with the change applied"
         ),
     ]
     changed: Annotated[list[str], Field(description="The members the proposer named")]

@@ -5469,6 +5469,29 @@ here, and a body breaking a record rule is refused by name, because the reposito
 the primary holds. Rejected: a publish that normalises records on the way out, which leaves the copy
 different from its source.
 
+## A waiting proposal follows its site
+
+A submitted site stays editable until it is decided, and the reviewer's form starts from the
+proposal, so a snapshot reaches them without the diver's later edits. A `PATCH` naming a shared
+member rewrites the waiting proposal's `members` from the saved row, keeping its uuid, its place in
+the queue, its attestation and its message. An edit the proposal could not carry is refused first: a
+cleared pin, or an entry the body adds that a Commons record carries. Only what the body adds is
+tested, since a record may come to carry an entry after the site was proposed. The proposal is
+locked before the row, the order *Accept* takes. Rejected: clients sending the proposal again, which
+re-sends the attestation without a tick and counts against the daily limit.
+
+## A replaced site leaves an alias
+
+A phone queues writes against a site that a replace elsewhere, or a reviewer's *Accept into*, then
+deletes. `dive_site_alias` keeps, per account, the retired uuid and the record it means, and a route
+naming a site resolves it whenever the caller cannot read a row under that uuid; another account's
+row there, which an import of a shared export makes, hides nothing. Per account, because a global
+one answers people who never held the uuid and outlives the account. `DELETE` stays a 404: resolved,
+a queued delete would unsave the record and unlink every dive. The own-site routes and proposing
+stay a 404, the site being gone. A `PATCH` through an alias is a `PATCH` on the record, so queued
+notes overwrite what the replace joined. Rejected: the phone rewriting its queue or refusing
+Replace.
+
 ## The Commons match rule lives here, not in the repository
 
 A diver and a reviewer read the rule where proposals are made and reviewed, which is this instance,
@@ -7332,12 +7355,12 @@ sends it into a 422.
 ## A dive draft's references are checked on the way out
 
 A write stores the uuids in `values` as given; every read keeps only those naming a record the
-account holds, or a species that exists, one query per kind over the rows read. A phone writes from
-a copy that can predate a delete, so a check at write time turns its queued update into a permanent
-failure the diver cannot see. Rejected: scrubbing drafts in the seven delete routes, which couples
-them to the draft's JSON while an offline phone writes the uuid back. `gear_set_id`, a column, is
-resolved on write, a set not the caller's stored as none. Logging validates as `POST /dive` does, so
-a stale reference is that route's 422.
+account holds, or a species that exists, one query per kind over the rows read, and a site the
+account replaced reads as its record. A phone writes from a copy that can predate a delete, so a
+check at write time turns its queued update into a permanent failure the diver cannot see. Rejected:
+scrubbing drafts in the seven delete routes, which couples them to the draft's JSON while an offline
+phone writes the uuid back. `gear_set_id`, a column, is resolved on write, a set not the caller's
+stored as none. Logging validates as `POST /dive` does, so a stale reference is that route's 422.
 
 ## Logging a draft is one request
 
