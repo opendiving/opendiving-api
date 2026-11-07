@@ -402,8 +402,9 @@ async def apply_logbook_import(
     land: the recording has gone, the dive's cylinder list was reshaped in between, or the row
     cannot hold it beside what it now records. Everything else `changes` lists - a file, a
     recording, a profile, a position read from the files, a cylinder's link to a gear item - comes
-    of the files themselves. What did not arrive is named by a note on the dive. A dive the review showed that has since been
-    deleted or merged away is skipped, and nothing is written for it. A dive the review showed as
+    of the files themselves. What did not arrive is named by a note on the dive. A dive the
+    review showed that has since been deleted or merged away is skipped, and nothing is written
+    for it. A dive the review showed as
     `new` that reached your logbook another way in between takes the outcome and `uuid` of the
     dive that holds it. `GET /import/{uuid}/notes` has what happened.
 
