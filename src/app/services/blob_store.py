@@ -24,10 +24,10 @@ opaque string keys that are also valid S3 object keys, bytes in and bytes out, a
 caller anywhere holding a `Path`. Keys are identical on both backends, so an install can
 move either way and back (`src/scripts/migrate_blobs.py`).
 
-Whole `bytes` rather than streams, because every caller already holds the whole payload:
-`read_upload_within_limit` buffers at most 10 MB, and the routes, the export archive and
-the backfills all read the entire file. A streaming interface is photo-era work, added
-when there is a caller that can use it.
+Whole `bytes` wherever the caller holds the whole payload: `read_upload_within_limit` buffers
+at most 10 MB, and the routes, the export archive and the backfills all read the entire file.
+`put_file` and `get_file` take a file object for the one caller that does not: a logbook
+import's held upload may be the whole request bound, and it sits on a spool.
 
 **A key names its encoding.** A dive-computer export is stored as one zstd frame under a key
 ending `.zst`, and every other kind as the bytes themselves; `put` encodes and `get` decodes
@@ -39,12 +39,12 @@ import asyncio
 import hashlib
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from compression import zstd
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import IO, Any, Protocol
 
 import anyio.to_thread
 import boto3
@@ -92,6 +92,9 @@ _COMPRESSED_KINDS = frozenset({"dive-files"})
 # `Content-Encoding` header, which an object store may act on: R2 decompresses gzip-encoded
 # objects on the way out unless the client asks otherwise.
 ZSTD_SUFFIX = ".zst"
+
+# What one read of a stream moves, so a stored object never sits in memory whole.
+_STREAM_CHUNK_SIZE = 1024 * 1024
 
 # Measured against real Suunto exports: level 3 leaves 18% more bytes for a fifth of the
 # CPU, and level 19 costs about sixty times the CPU for 13% fewer.
@@ -259,6 +262,8 @@ class Backend(Protocol):
 
     def ensure_ready(self) -> None: ...
     def write(self, key: str, data: bytes) -> None: ...
+    def write_file(self, key: str, source: IO[bytes]) -> None: ...
+    def read_into(self, key: str, sink: IO[bytes]) -> None: ...
     def read(self, key: str) -> bytes: ...
     def remove(self, key: str) -> None: ...
     def discard_many(self, keys: list[str]) -> None: ...
@@ -328,20 +333,34 @@ class LocalBackend:
         concurrently is safe: keys embed the content hash, so whichever object lands last
         decodes to the same bytes as the others.
         """
+        self._replace(key, id(data), lambda fd: os.write(fd, data))
+
+    def write_file(self, key: str, source: IO[bytes]) -> None:
+        """`write`, filled from a file object a chunk at a time."""
+
+        def fill(fd: int) -> None:
+            while chunk := source.read(_STREAM_CHUNK_SIZE):
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(fd, view) :]
+
+        self._replace(key, id(source), fill)
+
+    def _replace(self, key: str, token: int, fill: Callable[[int], object]) -> None:
         root = storage_root()
         destination = root / key
         destination.parent.mkdir(parents=True, exist_ok=True)
         tmp_dir = root / TMP_DIRNAME
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
-        # `os.getpid()` and `id(data)` rather than a random name: the file is renamed away
-        # immediately, and a collision only has to be impossible *within* one process's
+        # `os.getpid()` and the payload's `id` rather than a random name: the file is renamed
+        # away immediately, and a collision only has to be impossible *within* one process's
         # concurrent writes.
-        tmp_path = tmp_dir / f".{os.getpid()}-{id(data):x}.part"
+        tmp_path = tmp_dir / f".{os.getpid()}-{token:x}.part"
         try:
             fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
-                os.write(fd, data)
+                fill(fd)
                 os.fsync(fd)
             finally:
                 os.close(fd)
@@ -365,6 +384,14 @@ class LocalBackend:
             # A key that names a shard directory rather than a file. Same operational meaning
             # as a missing file, and the caller has one exception to catch either way.
             raise BlobMissingError(key) from exc
+
+    def read_into(self, key: str, sink: IO[bytes]) -> None:
+        try:
+            with self._path_for(key).open("rb") as stored:
+                while chunk := stored.read(_STREAM_CHUNK_SIZE):
+                    sink.write(chunk)
+        except FileNotFoundError, IsADirectoryError:
+            raise BlobMissingError(key) from None
 
     def remove(self, key: str) -> None:
         self._path_for(key).unlink(missing_ok=True)
@@ -514,16 +541,32 @@ class S3Backend:
     def write(self, key: str, data: bytes) -> None:
         self._client.put_object(Bucket=self._bucket, Key=self._object_key(key), Body=data)
 
-    def read(self, key: str) -> bytes:
+    def write_file(self, key: str, source: IO[bytes]) -> None:
+        """`PutObject` with the file object as its `Body`: botocore reads the length off a
+        seekable source and streams it, so `source` must seek - and a retry rewinds it."""
+        self._client.put_object(Bucket=self._bucket, Key=self._object_key(key), Body=source)
+
+    def _body(self, key: str) -> Any:
         try:
             response = self._client.get_object(Bucket=self._bucket, Key=self._object_key(key))
         except ClientError as exc:
             if _error_code(exc) in _S3_MISSING_CODES:
                 raise BlobMissingError(key) from exc
             raise
-        body = response["Body"]
+        return response["Body"]
+
+    def read(self, key: str) -> bytes:
+        body = self._body(key)
         try:
             return bytes(body.read())
+        finally:
+            body.close()
+
+    def read_into(self, key: str, sink: IO[bytes]) -> None:
+        body = self._body(key)
+        try:
+            while chunk := body.read(_STREAM_CHUNK_SIZE):
+                sink.write(chunk)
         finally:
             body.close()
 
@@ -764,6 +807,27 @@ async def get(key: str) -> bytes:
     `BlobStoreError` when the store itself fails."""
     with _store_errors(key):
         return await anyio.to_thread.run_sync(_read_decoded, _backend(), key)
+
+
+def _refuse_compressed(key: str) -> None:
+    """A compressed object is one frame, encoded and decoded whole, so a stream is not one."""
+    if _is_compressed(key):
+        raise ValueError(f"{key!r} is stored compressed, and only `put` and `get` encode one")
+
+
+async def put_file(key: str, source: IO[bytes]) -> None:
+    """Store a seekable file object's bytes under `key`, from where it stands, a chunk at a
+    time. For a kind stored as it is; the object is written whole or not at all."""
+    _refuse_compressed(key)
+    with _store_errors(key):
+        await anyio.to_thread.run_sync(_backend().write_file, key, source)
+
+
+async def get_file(key: str, sink: IO[bytes]) -> None:
+    """Write the bytes stored under `key` into `sink` a chunk at a time, or raise as `get`."""
+    _refuse_compressed(key)
+    with _store_errors(key):
+        await anyio.to_thread.run_sync(_backend().read_into, key, sink)
 
 
 async def delete(key: str) -> None:

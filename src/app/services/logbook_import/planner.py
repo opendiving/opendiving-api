@@ -214,7 +214,27 @@ _MAX_SUBMERGED_TIME_SECONDS = 366 * 24 * 60 * 60
 # million again - below its column's width, as the count's is, and the sum still fits.
 _MAX_DIVE_TIME_SECONDS = _MAX_DIVE_COUNT * 3600
 
-_DELETED_HERE = "You deleted this record here, so the import did not bring it back."
+DELETED_HERE = "You deleted this record here, so the import did not bring it back."
+
+
+@dataclass(slots=True)
+class MintedUuids:
+    """The uuids one file's plan mints, by collection and the document's uuid, each list in the
+    order the plan minted them - and the ones an earlier pass over the same file minted, which
+    this pass takes again in that order, so a record the review showed is written at the uuid
+    it showed. The key of a record the document only names is `None`'s, the empty string.
+    """
+
+    earlier: Mapping[str, Mapping[str, list[str]]] = field(default_factory=dict)
+    minted: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+
+    def mint(self, collection: str, source_uuid: uuid_pkg.UUID | None) -> uuid_pkg.UUID:
+        key = "" if source_uuid is None else str(source_uuid)
+        minted = self.minted.setdefault(collection, {}).setdefault(key, [])
+        earlier = self.earlier.get(collection, {}).get(key, [])
+        uuid = uuid_pkg.UUID(earlier[len(minted)]) if len(minted) < len(earlier) else uuid7()
+        minted.append(str(uuid))
+        return uuid
 
 
 class Action(StrEnum):
@@ -779,8 +799,15 @@ class _Planner:
         claim_links: bool = False,
         batch_dive_ids: frozenset[int] = frozenset(),
         held: Mapping[str, Callable[[], bytes]] | None = None,
+        gone_dives: frozenset[uuid_pkg.UUID] = frozenset(),
+        minted: MintedUuids | None = None,
     ) -> None:
         self._db = db
+        # The document dives whose reviewed dive is no longer live: skipped before the recording
+        # gates, which read live dives alone and would make one of them a creation, or fill the
+        # survivor of a merge.
+        self._gone_dives = gone_dives
+        self._minted = MintedUuids() if minted is None else minted
         # The bytes of the files earlier files of the same import stored, by storage key - not
         # in the store until the import has finished, and read by the same-recording gate when
         # a pair rests on a shared serial (`first_same_recording`).
@@ -913,7 +940,7 @@ class _Planner:
             collection=collection,
             uuid=record.uuid,
         )
-        record.uuid = uuid7()
+        record.uuid = self._minted.mint(collection, record.uuid)
 
     def _skip(self, collection: str, record_uuid: uuid_pkg.UUID, reason: str) -> PlannedRecord:
         self._note(ImportNoteCode.RECORD_SKIPPED, reason, collection=collection, uuid=record_uuid)
@@ -993,9 +1020,11 @@ class _Planner:
                 collection=collection,
                 uuid=source_uuid,
             )
-            return PlannedRecord(action=Action.CREATE, source_uuid=source_uuid, uuid=uuid7())
+            return PlannedRecord(
+                action=Action.CREATE, source_uuid=source_uuid, uuid=self._minted.mint(collection, source_uuid)
+            )
         # The caller's own row, and deleted, since `_linked` answers for a live one.
-        return self._skip(collection, source_uuid, _DELETED_HERE)
+        return self._skip(collection, source_uuid, DELETED_HERE)
 
     def _deleted_here(self, source_uuid: uuid_pkg.UUID, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> bool:
         row = existing.get(source_uuid)
@@ -1570,7 +1599,7 @@ class _Planner:
         owner = self._contact_aliases.get(legacy_key)
         if owner is not None:
             return {"contact_uuid": owner}
-        source_uuid = uuid7()
+        source_uuid = self._minted.mint("contacts", None)
         self._contact_aliases[legacy_key] = source_uuid
         self._records["contacts"][source_uuid] = PlannedRecord(
             action=Action.CREATE,
@@ -1775,7 +1804,7 @@ class _Planner:
         owner = self._person_aliases.get(legacy_key)
         if owner is not None:
             return PlannedPersonReference(role=role, source_uuid=owner)
-        source_uuid = uuid7()
+        source_uuid = self._minted.mint("people", None)
         self._person_aliases[legacy_key] = source_uuid
         self._records["people"][source_uuid] = PlannedRecord(
             action=Action.CREATE,
@@ -2734,6 +2763,10 @@ class _Planner:
 
     async def _plan_dive(self, dive: ImportDive, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
         collection = "dives"
+        if dive.uuid in self._gone_dives:
+            self._count_unwritten_files(dive)
+            self._not_writing_the_file()
+            return self._skip(collection, dive.uuid, DELETED_HERE)
         if (linked := self._linked(collection, dive.uuid, existing)) is not None:
             self._count_unwritten_files(dive)
             self._not_writing_the_file()
@@ -2961,7 +2994,7 @@ class _Planner:
             self._keep_on_match(already)
         else:
             self._not_writing_the_file()
-        return self._skip("dives", dive.uuid, _DELETED_HERE)
+        return self._skip("dives", dive.uuid, DELETED_HERE)
 
     def _tag_names(
         self, names: Sequence[str], *, collection: str | None = None, record_uuid: uuid_pkg.UUID | None = None
@@ -3505,14 +3538,18 @@ async def plan_import(
     claim_links: bool = False,
     batch_dive_ids: frozenset[int] = frozenset(),
     held: Mapping[str, Callable[[], bytes]] | None = None,
+    gone_dives: frozenset[uuid_pkg.UUID] = frozenset(),
+    minted: MintedUuids | None = None,
 ) -> ImportPlan:
     """Plan an import of `loaded` into `user_id`'s logbook. Writes nothing to the database.
 
-    `check_in` and `portrait` are what the diver confirmed in the preview; the apply passes
-    them and the preview, which has nothing submitted yet, does not. `claim_links` is the
-    apply's too: it spends the link limit for each person it links, where the preview only
+    `check_in` and `portrait` are what the diver confirmed in the review; the apply passes
+    them and the upload, which has nothing submitted yet, does not. `claim_links` is the
+    apply's too: it spends the link limit for each person it links, where the upload only
     reads what is left of it. `batch_dive_ids` are the dives the files before this one in the
-    same import wrote, and `held` the bytes of the files they stored.
+    same import wrote, and `held` the bytes of the files they stored. `gone_dives` and `minted`
+    are the apply's as well: the document dives the review's dives no longer stand for, and the
+    uuids the upload's pass minted for this file.
     """
     planner = _Planner(
         db,
@@ -3525,6 +3562,8 @@ async def plan_import(
         claim_links=claim_links,
         batch_dive_ids=batch_dive_ids,
         held=held,
+        gone_dives=gone_dives,
+        minted=minted,
     )
     return await planner.plan()
 

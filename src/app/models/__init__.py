@@ -35,6 +35,7 @@ from .idempotency_hold import IdempotencyHold
 from .invitation import Invitation
 from .invite_link import InviteLink
 from .invite_request import InviteRequest
+from .logbook_import import LogbookImport, LogbookImportFile
 from .map_tile import MapTile
 from .person import Person
 from .saved_site import SavedSite

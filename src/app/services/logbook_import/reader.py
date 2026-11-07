@@ -980,6 +980,17 @@ class BatchRow:
     _info: zipfile.ZipInfo | None = None
     _zip: BatchRow | None = None
 
+    @property
+    def in_zip(self) -> bool:
+        return self._zip is not None
+
+    def copy_member_to(self, sink: IO[bytes]) -> None:
+        """A zip's member onto `sink`, a chunk at a time, and `sink` rewound."""
+        assert self._source is not None
+        with self._source() as member:
+            shutil.copyfileobj(member, sink, _READ_CHUNK_SIZE)
+        sink.seek(0)
+
 
 @dataclass(slots=True)
 class LoadedBatch:
