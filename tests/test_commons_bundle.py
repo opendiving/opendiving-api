@@ -11,6 +11,7 @@ from src.app.schemas.dive_site import canonical_other_names
 from src.app.services import commons_records
 from src.app.services.commons_records import (
     COMMONS_REGISTRY,
+    CURATED_SOURCES,
     CommonsBundle,
     attribution_for,
     columns_of,
@@ -22,7 +23,7 @@ from src.app.services.geocoding_service import _DEFAULT_ATTRIBUTION
 # The tripwire. A refresh that moves this fails here, so it becomes a decision somebody takes
 # rather than a diff somebody accepts: a shrinking pool is usually a broken reader, not the world
 # losing dive sites.
-COMMONS_RECORDS = 3850
+COMMONS_RECORDS = 4268
 
 
 @pytest.fixture
@@ -55,6 +56,7 @@ class TestTheFile:
         assert bundle.licence == "ODbL 1.0"
         assert "Derivative Database of OpenStreetMap" in bundle.notice
         assert "© OpenStreetMap contributors" in bundle.notice
+        assert "not for navigation" in bundle.notice
 
     def test_every_uuid_is_its_own(self, bundle: CommonsBundle) -> None:
         assert len({record["uuid"] for record in bundle.records}) == COMMONS_RECORDS
@@ -70,13 +72,28 @@ class TestTheFile:
             assert canonical_other_names(record["name"], record["other_names"]) == record["other_names"]
 
     def test_a_seed_records_the_entry_it_was_seeded_from_among_its_entries(self, bundle: CommonsBundle) -> None:
-        seeds = [record for record in bundle.records if record["commons_seed_registry"] is not None]
+        seeds = [record for record in bundle.records if record["commons_source"] in {"openstreetmap", "wikidata"}]
 
         assert seeds
         for record in seeds:
             entry = {"registry": record["commons_seed_registry"], "identifier": record["commons_seed_identifier"]}
             assert entry in record["external_ids"]
-            assert record["commons_retrieved"] is not None
+
+    def test_every_record_but_a_contribution_says_when_it_was_retrieved(self, bundle: CommonsBundle) -> None:
+        for record in bundle.records:
+            assert (record["commons_retrieved"] is None) == (record["commons_source"] == "contribution")
+
+    def test_a_curated_record_keeps_its_identifier_in_its_provenance_alone(self, bundle: CommonsBundle) -> None:
+        curated = [record for record in bundle.records if record["commons_source"] in CURATED_SOURCES]
+
+        assert {record["commons_source"] for record in curated} == CURATED_SOURCES
+        for record in curated:
+            assert record["commons_seed_registry"] == record["commons_source"]
+            assert record["commons_seed_identifier"]
+            assert record["external_ids"] == []
+
+    def test_every_source_is_a_seed_listing_its_entry_or_a_curated_one(self, bundle: CommonsBundle) -> None:
+        assert set(bundle.attributions) == {"openstreetmap", "wikidata", "contribution"} | CURATED_SOURCES
 
     def test_the_english_names_moved_and_nothing_is_left_behind(self, document: dict[str, Any]) -> None:
         provenance = [feature["properties"]["extensions"][COMMONS_REGISTRY] for feature in document["features"]]
@@ -93,6 +110,69 @@ class TestTheFile:
 
         assert thistlegorm["uuid"] == "74c091ba-1ec3-5a6b-b70e-fe31c5438605"
         assert thistlegorm["location"] == {"name": "South Sinai, Egypt"}
+
+
+class TestTheBatchFromTheRegistries:
+    @staticmethod
+    def _named(bundle: CommonsBundle, name: str) -> list[dict[str, Any]]:
+        return [record for record in bundle.records if record["name"] == name]
+
+    def test_a_keys_site_has_the_ends_of_its_moorings_and_its_own_credit(self, bundle: CommonsBundle) -> None:
+        (record,) = self._named(bundle, "French Reef")
+
+        assert (record["depth_from"], record["depth_to"]) == (7.0, 16.8)
+        assert attribution_for(record["commons_source"]) == (
+            "[Data from NOAA Florida Keys National Marine Sanctuary, public domain.]"
+            "(https://floridakeys.noaa.gov/mbuoy/)"
+        )
+
+    def test_a_site_the_pool_already_had_stays_one_row(self, bundle: CommonsBundle) -> None:
+        (record,) = self._named(bundle, "Molasses Reef")
+
+        assert record["commons_source"] == "openstreetmap"
+
+    def test_a_buoy_inside_a_site_gave_way_to_the_site(self, bundle: CommonsBundle) -> None:
+        (record,) = self._named(bundle, "Grecian Rocks")
+
+        assert record["commons_source"] == "noaa-florida-keys-moorings"
+
+    def test_a_site_the_register_types_a_wreck_stays_whatever_it_is_named_for(self, bundle: CommonsBundle) -> None:
+        (record,) = self._named(bundle, "Toppinos Marker 32")
+
+        assert record["commons_source"] == "noaa-florida-keys-moorings"
+
+    def test_thunder_bay_keeps_its_own_grecian(self, bundle: CommonsBundle) -> None:
+        """A wreck, sharing an identifier with the Florida Keys buoy and no list with it."""
+        (record,) = self._named(bundle, "Grecian")
+
+        assert record["commons_source"] == "noaa-thunder-bay-moorings"
+        assert (record["commons_seed_identifier"], record["depth_to"], record["water_type"]) == (
+            "grecian",
+            32.3,
+            "fresh",
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Archer Key",
+            "Cottrell Key",
+            "Marker 48",
+            "Mule Key",
+            "Mule Key 2",
+            "Hoyt Vandenberg",
+            "Cayman Salvage Master",
+            "OSJ Site - Drydocks",
+        ],
+    )
+    def test_what_was_left_out_by_name_is_not_here(self, bundle: CommonsBundle, name: str) -> None:
+        assert not self._named(bundle, name)
+
+    def test_a_thunder_bay_site_is_in_fresh_water(self, bundle: CommonsBundle) -> None:
+        (record,) = self._named(bundle, "E. B. Allen")
+
+        assert (record["depth_to"], record["water_type"]) == (30.5, "fresh")
+        assert record["commons_license"] == "LicenseRef-US-Gov-PD"
 
 
 class TestTheCredit:

@@ -45,10 +45,17 @@ from src.app.models.user import User
 from src.app.schemas.dive_site import DiveSiteProposalKind, DiveSiteReadInternal
 from src.app.schemas.dive_site_proposal import ATTESTATIONS
 from src.app.services import commons_proposals, commons_records
-from src.app.services.commons_records import CommonsBundle, sync_commons
+from src.app.services.commons_records import CURATED_SOURCES, CommonsBundle, sync_commons
 from tests.conftest import db_available
 from tests.helpers.fake_redis import FakeRedis
-from tests.helpers.generators import create_commons_site, create_dive, create_dive_site, create_tag, create_user
+from tests.helpers.generators import (
+    create_commons_site,
+    create_curated_site,
+    create_dive,
+    create_dive_site,
+    create_tag,
+    create_user,
+)
 from tests.helpers.generators import save_dive_site as saved_row
 
 pytestmark = [
@@ -1122,6 +1129,17 @@ class TestTheRecordRules:
         assert row is not None and row.external_ids == [entry]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("registry", sorted(CURATED_SOURCES))
+    async def test_an_entry_naming_a_curated_source_is_refused_by_name(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign, registry: str
+    ) -> None:
+        _, proposal = await self._proposed(http, db, diver, signed, reviewer)
+
+        detail = await self._refusal(http, proposal, external_ids=[{"registry": registry, "identifier": "french-reef"}])
+
+        assert registry in detail and "curated source" in detail
+
+    @pytest.mark.asyncio
     async def test_a_record_divejson_would_refuse_is_refused(
         self,
         http: httpx.AsyncClient,
@@ -1226,6 +1244,39 @@ class TestAnsweringAReportOnASeed:
         assert (row.commons_seed_registry, row.commons_seed_identifier) == seed
         assert row.commons_retrieved == date(2026, 10, 17)
         assert row.commons_reviewed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_a_curated_record_takes_a_change_with_no_entry_and_its_provenance_stands(
+        self, http: httpx.AsyncClient, db: Session, reviewer: User, signed: Sign
+    ) -> None:
+        record = create_curated_site(db)
+        seed = (record.commons_seed_registry, record.commons_seed_identifier)
+        signed.as_(reviewer)
+        proposal = await _propose_change(http, record, depth_to=12.0)
+
+        members = _members(depth_to=12.0)
+
+        await _accepted(http, proposal, members=members)
+
+        row = _row(db, record.uuid)
+        assert row is not None
+        assert (row.name, row.depth_to, row.external_ids) == (members["name"], 12.0, [])
+        assert (row.commons_source, row.commons_license) == ("noaa-florida-keys-moorings", "LicenseRef-US-Gov-PD")
+        assert (row.commons_seed_registry, row.commons_seed_identifier) == seed
+
+    @pytest.mark.asyncio
+    async def test_a_curated_record_is_not_handed_an_entry_of_its_own_source(
+        self, http: httpx.AsyncClient, db: Session, reviewer: User, signed: Sign
+    ) -> None:
+        record = create_curated_site(db)
+        entry = {"registry": record.commons_seed_registry, "identifier": record.commons_seed_identifier}
+        signed.as_(reviewer)
+        proposal = await _propose_change(http, record, depth_to=12.0)
+
+        response = await _accept(http, proposal, members=_members(external_ids=[entry]))
+
+        assert response.status_code == 422
+        assert "curated source" in response.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_an_acceptance_cannot_take_a_seed_s_own_entry(

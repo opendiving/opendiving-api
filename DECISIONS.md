@@ -5382,7 +5382,7 @@ shared row a column able to hold "gate code 1234".
 ## The Commons bundle seeds the rows, and the sync has two branches
 
 `src/app/data/commons_dive_sites.geojson` is the repository's records at a named commit plus any
-batch the publish has not yet copied there, 3,850 records in all, in one file, and `sync_commons`
+batch the publish has not yet copied there, 4,268 records in all, in one file, and `sync_commons`
 brings the rows in line after the migrations, keyed on the record's uuid. A vendored file beats a
 live dependency: a self-hoster acquires no outbound host, and upgrading refreshes the copy. A copy
 inserts and updates; the primary only inserts, the table being the truth there. Neither deletes,
@@ -5423,7 +5423,7 @@ every one. Rejected: a superuser import route, whose batch no PR shows.
 
 The tripwire is the count: `tests/test_commons_bundle.py` pins the exact number, so a moved one
 fails loudly, and a shrinking pool is usually a broken reader. It is pinned in that test and the
-3,850 above; move both together.
+4,268 above; move both together.
 
 ## The Commons: Three ODbL obligations, and how each is met
 
@@ -5434,9 +5434,22 @@ file's notice block and in `README.md`. §4.2 notices travel in the data: that b
 its script beside it; the primary, which alters the database and uses it publicly, offers it through
 that route and the repository.
 
+Public-domain sources enter as they are: NOAA's two sanctuaries, US federal works, and the Florida
+register, whose metadata the repository carries. A CC BY source waits for a waiver: ODbL 4.7(b)
+allows technological measures CC BY forbids.
+
 `load_bundle` builds per-source credit from the file's `sources` block and leaves out any record
 naming an uncredited source: losing the record beats a missing notice. A diver's notes, tags and
 dives sit outside the database, a Collective Database under §4.5. Never mix an NC or ND source in.
+
+## A Commons row's constraint names no source
+
+`ck_dive_site_owner_provenance` says what a seed carries, an entry and a date, and what a
+contribution does not. Which sources exist is the bundle's `sources` block, where `load_bundle`
+drops a record no entry credits. Rejected: listing the tokens, a migration per source for ever, and
+one the sync fails without, rolling back on every start. A curated source's identifier is
+provenance, mostly a slug of the site's name, so `CURATED_SOURCES` keeps it out of `external_ids`,
+where it would show as raw text.
 
 ## The Commons lookup orders by nearness without PostGIS
 
@@ -5474,8 +5487,8 @@ waiting on one page; a spatial index would cost every self-hoster an extension f
 
 ## Commons localities are resolved from Natural Earth, and containment alone is not enough
 
-Neither upstream carries a locality; the bundle script downloads Natural Earth admin-0 and admin-1
-and resolves each record that names none to `region, country`.
+No source of the pool carries a locality; the bundle script downloads Natural Earth admin-0 and
+admin-1 and resolves each record that names none to `region, country`.
 
 Rule 1 is point-in-polygon; rule 2, nearest boundary within 50 km, is not optional: only 44.5% of
 records fall inside any admin-0 polygon, because dive sites are in water. Rule 3 is no locality, and

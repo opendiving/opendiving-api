@@ -1,0 +1,276 @@
+{
+ "features": [
+  {
+   "attributes": {
+    "DeployID": "BA0290",
+    "DDate": 19940801,
+    "Description": "110' X 30' X 4' Steel Barge with 40 Culverts Nearby",
+    "Depth": 100.0,
+    "Relief": 4.0,
+    "Name": "Deep Pipe Barge",
+    "MatDescrip": "Barge 110'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -85.90657000014434,
+    "y": 29.938220000119752
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "BA0245",
+    "DDate": 20110309,
+    "Description": "47' X 14' X 10' Ferro-Cement Sailboat-Funded by MBARA",
+    "Depth": 61.0,
+    "Relief": 8.0,
+    "Name": "MB-125",
+    "MatDescrip": "Sailboat Ferro-Cement 47'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -85.54008000031375,
+    "y": 29.90641999968504
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "BE0013",
+    "DDate": 19951103,
+    "Description": "35' Steel Sailboat",
+    "Depth": 0.0,
+    "Relief": 18.0,
+    "Name": "Steel Sailboat 35'",
+    "MatDescrip": "Sailboat 35'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.21064999953786,
+    "y": 28.498979999745274
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "BE0008",
+    "DDate": 19420503,
+    "Description": "425' The \"Ocean Venus\", AKA \"Lead Wreck\", Sank In WWII",
+    "Depth": 70.0,
+    "Relief": 0.0,
+    "Name": "Lead Wreck",
+    "MatDescrip": "Freighter 425'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.29525276165978,
+    "y": 28.389517531672592
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "BO0096",
+    "DDate": 19990427,
+    "Description": "143' X 28' Wide Ship, the \"Sheridan Express\"",
+    "Depth": 25.0,
+    "Relief": 35.0,
+    "Name": "Ft. Lauderdale, C-1 Reef",
+    "MatDescrip": "Vessel 143'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.08278333329487,
+    "y": 26.13676666742777
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "FR0032",
+    "DDate": 19970211,
+    "Description": "108' X 35' Tugboat, the \"Moonlighter\"",
+    "Depth": 75.0,
+    "Relief": 29.0,
+    "Name": "Bryson Memorial Reef",
+    "MatDescrip": "Tugboat 108'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -84.40943732544885,
+    "y": 29.520955538797146
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "FR0031",
+    "DDate": 19970211,
+    "Description": "85' X 35' Tugboat, the \"Atlas\"",
+    "Depth": 79.0,
+    "Relief": 22.0,
+    "Name": "Bryson Memorial Reef",
+    "MatDescrip": "Tugboat 85'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -84.40871666728007,
+    "y": 29.52211666656613
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "MO0061",
+    "DDate": 20020517,
+    "Description": "510' LSD-32, the \"USS Spiegel Grove\", Pushed on Side on 6/10/02",
+    "Depth": 135.0,
+    "Relief": 84.0,
+    "Name": "Spiegel Grove",
+    "MatDescrip": "Landing Dock Ship 510'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.31083333326112,
+    "y": 25.066666666567315
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "MO0003",
+    "DDate": 19680220,
+    "Description": "377' Fletcher Class Destroyer",
+    "Depth": 420.0,
+    "Relief": 0.0,
+    "Name": "USS Saufley (DD-465)",
+    "MatDescrip": "Destroyer 337'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -81.58290000030631,
+    "y": 24.449033332773716
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "PB0001",
+    "DDate": 0,
+    "Description": "82' Yacht, the \"Tso Paradise\"",
+    "Depth": 55.0,
+    "Relief": 0.0,
+    "Name": "Tso Paradise",
+    "MatDescrip": "Yacht 82'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.02149999973727,
+    "y": 26.763166667115094
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "VO0026",
+    "DDate": 19950729,
+    "Description": "81' Tug, the \"Thomas H\"",
+    "Depth": 80.0,
+    "Relief": 35.0,
+    "Name": "Site #3_1995",
+    "MatDescrip": "Tugboat 81'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.74851958798523,
+    "y": 29.195672231084995
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "PB0150",
+    "DDate": 19680409,
+    "Description": "165' Patrol Craft, \"PC-1174\"",
+    "Depth": 82.0,
+    "Relief": 14.0,
+    "Name": "PC-1174",
+    "MatDescrip": "Patrol Craft 165'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.01620263103634,
+    "y": 26.786504993167156
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "PI0443",
+    "DDate": 20230323,
+    "Description": "40' Steel Sailboat",
+    "Depth": 45.0,
+    "Relief": null,
+    "Name": "Veterans Reef - 40' Steel Hulled Sailboat",
+    "MatDescrip": "Sailboat 40'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -83.00140353700509,
+    "y": 28.051205231213103
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "DU0071",
+    "DDate": 19890913,
+    "Description": "615' X 127' X 57' Wood & Steel Drydocks",
+    "Depth": 125.0,
+    "Relief": 0.0,
+    "Name": "OSJ Site - Drydocks",
+    "MatDescrip": "Drydock 615'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.55949999957777,
+    "y": 30.11766666696082
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "MO0062",
+    "DDate": 20090527,
+    "Description": "522' Former Missile Tracking Ship, the \"Hoyt Vandenberg\"",
+    "Depth": 145.0,
+    "Relief": 100.0,
+    "Name": "Hoyt Vandenberg",
+    "MatDescrip": "Missile Tracking Ship 522'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -81.73647000029888,
+    "y": 24.459950000191075
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "MO0024",
+    "DDate": 19850430,
+    "Description": "187' Former US Army Minelayer, the \"Lt. Col. Ellery W. Niles\", Upright in Sand",
+    "Depth": 92.0,
+    "Relief": 0.0,
+    "Name": "Cayman Salvage Master",
+    "MatDescrip": "Minelayer ARMY 187'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -81.7663333325572,
+    "y": 24.453500000057804
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "SJ0016",
+    "DDate": 19890000,
+    "Description": "615' Long Navy Drydock",
+    "Depth": 125.0,
+    "Relief": 0.0,
+    "Name": "Navy  Drydock",
+    "MatDescrip": "Drydock 615'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.5595000001585,
+    "y": 30.12680000043992
+   }
+  }
+ ]
+}

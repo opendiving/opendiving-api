@@ -1,0 +1,411 @@
+{
+ "features": [
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 36
+   },
+   "geometry": {
+    "x": -80.34854888899996,
+    "y": 25.034149170000024
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 35
+   },
+   "geometry": {
+    "x": -80.34821319599996,
+    "y": 25.034282684000058
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 35
+   },
+   "geometry": {
+    "x": -80.34795379599996,
+    "y": 25.034482956000026
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 36
+   },
+   "geometry": {
+    "x": -80.34788513199999,
+    "y": 25.03521728500004
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 29
+   },
+   "geometry": {
+    "x": -80.34757995599995,
+    "y": 25.03578376800004
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 27
+   },
+   "geometry": {
+    "x": -80.34731292699996,
+    "y": 25.036216736000014
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring-LV",
+    "Depth__ft_": 42
+   },
+   "geometry": {
+    "x": -80.34600067099996,
+    "y": 25.03603363000008
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 42
+   },
+   "geometry": {
+    "x": -80.34706878699997,
+    "y": 25.03406715400006
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 47
+   },
+   "geometry": {
+    "x": -80.34778594999995,
+    "y": 25.033433914000064
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 39
+   },
+   "geometry": {
+    "x": -80.34846496599994,
+    "y": 25.03375053400003
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 23
+   },
+   "geometry": {
+    "x": -80.34860229499998,
+    "y": 25.03486633300003
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 28
+   },
+   "geometry": {
+    "x": -80.349220276,
+    "y": 25.034215927000034
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 27
+   },
+   "geometry": {
+    "x": -80.34967040999999,
+    "y": 25.03389930700007
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 27
+   },
+   "geometry": {
+    "x": -80.35011291499994,
+    "y": 25.033567429000062
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 40
+   },
+   "geometry": {
+    "x": -80.34908294699996,
+    "y": 25.03311729400007
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 33
+   },
+   "geometry": {
+    "x": -80.34484863299997,
+    "y": 25.038717270000056
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 55
+   },
+   "geometry": {
+    "x": -80.34342956499995,
+    "y": 25.03720092800006
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 26
+   },
+   "geometry": {
+    "x": -80.34968566899994,
+    "y": 25.03300094600006
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 37
+   },
+   "geometry": {
+    "x": -80.34940338099995,
+    "y": 25.033449173000058
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 37
+   },
+   "geometry": {
+    "x": -80.34898376499996,
+    "y": 25.03366661100006
+   }
+  },
+  {
+   "attributes": {
+    "Location": "Mule Key ",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 8
+   },
+   "geometry": {
+    "x": -81.85701751699997,
+    "y": 24.562767029000028
+   }
+  },
+  {
+   "attributes": {
+    "Location": "New Found Harbor",
+    "BuoyType": "Mooring",
+    "Depth__ft_": null
+   },
+   "geometry": {
+    "x": -81.39388275099998,
+    "y": 24.614999771000047
+   }
+  },
+  {
+   "attributes": {
+    "Location": "New Found Harbor",
+    "BuoyType": "Mooring",
+    "Depth__ft_": null
+   },
+   "geometry": {
+    "x": -81.39402008099995,
+    "y": 24.615350723000056
+   }
+  },
+  {
+   "attributes": {
+    "Location": "New Found Harbor",
+    "BuoyType": "Mooring",
+    "Depth__ft_": null
+   },
+   "geometry": {
+    "x": -81.39375305199997,
+    "y": 24.615667343000037
+   }
+  },
+  {
+   "attributes": {
+    "Location": "New Found Harbor",
+    "BuoyType": "Mooring",
+    "Depth__ft_": null
+   },
+   "geometry": {
+    "x": -81.39346313499999,
+    "y": 24.615766525000023
+   }
+  },
+  {
+   "attributes": {
+    "Location": "New Found Harbor",
+    "BuoyType": "Mooring",
+    "Depth__ft_": null
+   },
+   "geometry": {
+    "x": -81.39138030999999,
+    "y": 24.616249084000064
+   }
+  },
+  {
+   "attributes": {
+    "Location": "New Found Harbor",
+    "BuoyType": "Mooring",
+    "Depth__ft_": null
+   },
+   "geometry": {
+    "x": -81.39109802199992,
+    "y": 24.616500854000023
+   }
+  },
+  {
+   "attributes": {
+    "Location": "T.J.’s Rise",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 75
+   },
+   "geometry": {
+    "x": -83.03305053699994,
+    "y": 24.68305015600004
+   }
+  },
+  {
+   "attributes": {
+    "Location": "Alex’s Mountains",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 73
+   },
+   "geometry": {
+    "x": -83.05083465599995,
+    "y": 24.686117172000028
+   }
+  },
+  {
+   "attributes": {
+    "Location": "Amys",
+    "BuoyType": "Spar",
+    "Depth__ft_": 11
+   },
+   "geometry": {
+    "x": -80.39389800999999,
+    "y": 25.03636741600007
+   }
+  },
+  {
+   "attributes": {
+    "Location": "French Reef SPA Boundaries",
+    "BuoyType": "SPA Boundary",
+    "Depth__ft_": 16
+   },
+   "geometry": {
+    "x": -80.35448455799997,
+    "y": 25.039283752000077
+   }
+  },
+  {
+   "attributes": {
+    "Location": "Western Dry Rocks Closure",
+    "BuoyType": "Buoy Closure",
+    "Depth__ft_": null
+   },
+   "geometry": {
+    "x": -81.95011901899993,
+    "y": 24.43695068400006
+   }
+  },
+  {
+   "attributes": {
+    "Location": "The Spiegel Grove",
+    "BuoyType": "Mooring Wreck",
+    "Depth__ft_": 61
+   },
+   "geometry": {
+    "x": -80.31288146999998,
+    "y": 25.066150665000066
+   }
+  },
+  {
+   "attributes": {
+    "Location": "Grecian",
+    "BuoyType": "Mooring ",
+    "Depth__ft_": 26
+   },
+   "geometry": {
+    "x": -80.30593109099993,
+    "y": 25.10736656200004
+   }
+  },
+  {
+   "attributes": {
+    "Location": "Grecian Rocks",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 22
+   },
+   "geometry": {
+    "x": -80.30699920699999,
+    "y": 25.107717514000047
+   }
+  },
+  {
+   "attributes": {
+    "Location": "Grecian Rocks",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 12
+   },
+   "geometry": {
+    "x": -80.30609893799993,
+    "y": 25.108917236000014
+   }
+  },
+  {
+   "attributes": {
+    "Location": "Grecian Rocks",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 10
+   },
+   "geometry": {
+    "x": -80.30661773699995,
+    "y": 25.109283447000045
+   }
+  }
+ ]
+}
