@@ -106,13 +106,13 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
             ),
             # Neither owner can be half-written: a private row carries no provenance, a Commons
             # row its source and licence, and a seed its entry and date where a contribution
-            # has neither.
+            # has neither. It names no source of a seed: the bundle's `sources` block admits one.
             CheckConstraint(
                 "(user_id IS NOT NULL AND commons_source IS NULL AND commons_license IS NULL "
                 "AND commons_seed_registry IS NULL AND commons_seed_identifier IS NULL "
                 "AND commons_retrieved IS NULL) "
-                "OR (user_id IS NULL AND commons_license IS NOT NULL AND ("
-                "(commons_source IN ('openstreetmap', 'wikidata') AND commons_seed_registry IS NOT NULL "
+                "OR (user_id IS NULL AND commons_source IS NOT NULL AND commons_license IS NOT NULL AND ("
+                "(commons_source <> 'contribution' AND commons_seed_registry IS NOT NULL "
                 "AND commons_seed_identifier IS NOT NULL AND commons_retrieved IS NOT NULL) "
                 "OR (commons_source = 'contribution' AND commons_seed_registry IS NULL "
                 "AND commons_seed_identifier IS NULL AND commons_retrieved IS NULL)))",

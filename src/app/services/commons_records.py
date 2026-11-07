@@ -46,6 +46,10 @@ _DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "commons_dive_sit
 # an export names a record in.
 COMMONS_REGISTRY = "opendivingcommons"
 
+# The repository's `CURATED_SOURCES`: public datasets whose identifier is provenance and stays in
+# `seeded_from`, where it is mostly a slug of the site's name. No record lists one in `external_ids`.
+CURATED_SOURCES = frozenset({"noaa-florida-keys-moorings", "noaa-thunder-bay-moorings", "fwc-artificial-reefs"})
+
 # Arbitrary, as `core/setup.py`'s neighbours are; every process running the sync picks the same.
 _SYNC_LOCK_KEY = 8231907441002139
 

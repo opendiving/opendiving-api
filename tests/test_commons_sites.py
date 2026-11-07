@@ -213,15 +213,53 @@ class TestTheOwnerConstraint:
                 "commons_license": "CC0-1.0",
                 "commons_retrieved": date(2026, 10, 17),
             },
-            {"commons_source": "a-scraped-map", "commons_license": "ODbL-1.0"},
+            {"commons_source": "noaa-thunder-bay-moorings", "commons_license": "LicenseRef-US-Gov-PD"},
+            {
+                "commons_license": "ODbL-1.0",
+                "commons_seed_registry": "openstreetmap",
+                "commons_seed_identifier": "node/1",
+                "commons_retrieved": date(2026, 10, 17),
+            },
+            {"commons_license": "CC0-1.0"},
+            {
+                "commons_source": "contribution",
+                "commons_license": "CC0-1.0",
+                "commons_seed_registry": "opendivingcommons",
+                "commons_seed_identifier": "x",
+            },
         ],
-        ids=["nothing", "no-licence", "no-licence-contribution", "no-date", "contribution-with-date", "unknown"],
+        ids=[
+            "nothing",
+            "no-licence",
+            "no-licence-contribution",
+            "no-date",
+            "contribution-with-date",
+            "seed-with-no-entry",
+            "no-source-on-a-seed",
+            "no-source-on-a-contribution",
+            "contribution-with-an-entry",
+        ],
     )
     def test_a_commons_row_cannot_be_half_written(self, db: Session, columns: dict[str, Any]) -> None:
         db.add(DiveSite(user_id=None, name=_marked(), **columns))
         with pytest.raises(IntegrityError, match="ck_dive_site_owner_provenance"):
             db.commit()
         db.rollback()
+
+    def test_any_source_carrying_an_entry_and_a_date_is_a_seed(self, db: Session) -> None:
+        site = DiveSite(
+            user_id=None,
+            name=_marked(),
+            commons_source="noaa-thunder-bay-moorings",
+            commons_license="LicenseRef-US-Gov-PD",
+            commons_seed_registry="noaa-thunder-bay-moorings",
+            commons_seed_identifier="e-b-allen",
+            commons_retrieved=date(2026, 11, 7),
+        )
+        db.add(site)
+        db.commit()
+
+        assert site.id is not None
 
     def test_a_private_row_carries_no_provenance(self, db: Session, diver: User) -> None:
         db.add(DiveSite(user_id=diver.id, name=_marked(), commons_source="contribution", commons_license="CC0-1.0"))

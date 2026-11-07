@@ -321,16 +321,29 @@ the publisher's data, leaves out what it doubts, and writes candidates, which th
 beside the checkout:
 
 ```bash
-uv run python scripts/import_osm_wrecks.py /path/to/opendiving-commons wrecks.geojson
-uv run python scripts/build_commons_bundle.py /path/to/opendiving-commons --batch wrecks.geojson
+uv run python scripts/import_noaa_florida_keys.py keys.geojson
+uv run python scripts/import_noaa_thunder_bay.py thunder-bay.geojson
+uv run python scripts/import_fwc_artificial_reefs.py vessels.geojson
+uv run python scripts/build_commons_bundle.py /path/to/opendiving-commons \
+  --batch keys.geojson --batch thunder-bay.geojson --batch vessels.geojson
 ```
 
-The candidates file is not checked in: the pull request's diff of the bundle is the batch, one line
-per record, and its body gives the count kept, the count left out by each rule, and the names held.
-Read it as a diff before merging, because nothing removes a Commons record once the hosted instance
-has inserted it. **A release's rebuild waits for the publish.** Until the repository's daily publish
-has copied a merged batch, a rebuild from its `main` would lose those records, and the builder fails
-and writes nothing rather than drop them.
+`scripts/import_osm_wrecks.py` is the same, with the checkout as its first argument, since it reads
+the pool to leave out what it already holds. Files are judged in the order named, so the first to
+claim a site keeps it. The candidates file is not checked in: the pull request's diff of the bundle
+is the batch, one line per record, and its body gives the count kept, the count left out by each
+rule, and the names held. Read it as a diff before merging, because nothing removes a Commons record
+once the hosted instance has inserted it. **A release's rebuild waits for the publish.** Until the
+repository's daily publish has copied a merged batch, a rebuild from its `main` would lose those
+records, and the builder fails and writes nothing rather than drop them.
+
+**A further source starts in the repository.** Its token, identifier form and licence go there
+first, because the daily publish fails on a record of a source it does not know. An importer then
+goes in `scripts/`, on `curated_source.py`, with `sources` and `_ATTRIBUTION` in the builder
+crediting the token and the token in `CURATED_SOURCES` in `services/commons_records.py`, and the
+batch follows through the steps above. No migration: a Commons row names no source. A CC BY source
+waits for its publisher's waiver, since the file's ODbL would hand a reuser a permission CC BY does
+not.
 
 **The record count is pinned and the test will tell you.** `tests/test_commons_bundle.py` asserts
 the exact number of records, so a refresh that moves it fails there rather than landing quietly.

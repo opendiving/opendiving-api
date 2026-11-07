@@ -58,8 +58,8 @@ async def propose_dive_site(
     the proposer's read of the site carries `proposal`. The caller's own site is proposed as it
     stands, so `members` is not sent; it needs a pin, a 422 otherwise, and one sharing a registry
     entry with a Commons record is a 409. A change sends in `members` the shared members it wants
-    different: one that changes nothing, clears the pin or takes from a seed the registry entry
-    it was seeded from is a 422.
+    different: one that changes nothing, clears the pin or takes from an OpenStreetMap or Wikidata
+    seed the registry entry it was seeded from is a 422.
 
     `attestation` is the text the diver ticked, word for word, and any other text is a 422. It is
     kept with the proposal, with the time, and goes when the account does.
@@ -156,7 +156,9 @@ async def accept_dive_site_proposal(
 
     A body breaking a record rule is a 422 naming it: a pin at 0, 0 or none at all, a registry
     entry another Commons record carries, an `opendivingcommons` entry naming a record that
-    exists, a seed losing the entry it was seeded from, or a record that is not valid DiveJSON.
+    exists, an OpenStreetMap or Wikidata seed losing the entry it was seeded from, an entry under
+    the registry of a curated dataset, whose identifier stays in a record's provenance, or a record
+    that is not valid DiveJSON.
     409 on one already decided or withdrawn; 404 on no such proposal, on one whose account is being
     deleted, and on an instance that does not edit the Commons.
     """

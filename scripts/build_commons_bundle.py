@@ -42,8 +42,8 @@ registry entry is read off its path, or from `seeded_from` in its provenance. Wh
 always the second shape, one feature per line and each member in one fixed place, so that a refresh
 reads as a diff of the records it moved.
 
-Natural Earth supplies a record's locality where the record names none: neither OpenStreetMap nor
-Wikidata carries a country or a region. It is public domain, consumed here and never shipped, so
+Natural Earth supplies a record's locality where the record names none: no source of the pool
+carries a country or a region. It is public domain, consumed here and never shipped, so
 it adds no licence obligation, and it is named in the notice block anyway because that block's
 job is to say where every field came from.
 """
@@ -73,6 +73,9 @@ from src.app.services.commons_matches import (
 _OUTPUT = Path(__file__).resolve().parent.parent / "src" / "app" / "data" / "commons_dive_sites.geojson"
 
 _REPOSITORY = "https://github.com/opendiving/opendiving-commons"
+
+# The publisher asks that its metadata travel with the data, and the repository holds that copy.
+_FWC_METADATA = f"{_REPOSITORY}/tree/main/sources/fwc-artificial-reefs"
 
 # The pool's own registry token, and the extension key its provenance sits under.
 _REGISTRY = "opendivingcommons"
@@ -107,6 +110,15 @@ _ATTRIBUTION = {
     "openstreetmap": "[Data © OpenStreetMap contributors, ODbL 1.0.](https://osm.org/copyright)",
     "wikidata": "[Data from Wikidata, CC0 1.0.](https://www.wikidata.org/wiki/Wikidata:Licensing)",
     "contribution": f"[Data from OpenDiving Commons contributors, CC0 1.0.]({_REPOSITORY})",
+    "noaa-florida-keys-moorings": (
+        "[Data from NOAA Florida Keys National Marine Sanctuary, public domain.](https://floridakeys.noaa.gov/mbuoy/)"
+    ),
+    "noaa-thunder-bay-moorings": (
+        "[Data from NOAA Thunder Bay National Marine Sanctuary, public domain.](https://thunderbay.noaa.gov/)"
+    ),
+    "fwc-artificial-reefs": (
+        f"[Data from the Florida Fish and Wildlife Conservation Commission (FWC-FWRI), public domain.]({_FWC_METADATA})"
+    ),
 }
 
 # Where each member sits on a line. Fixed because the repository publishes them in another order,
@@ -127,6 +139,7 @@ _MEMBER_ORDER = (
 
 _ODBL_URL = "https://opendatacommons.org/licenses/odbl/1-0/"
 _CC0_URL = "https://creativecommons.org/publicdomain/zero/1.0/"
+_US_GOVERNMENT_WORK_URL = "https://www.law.cornell.edu/uscode/text/17/105"
 
 Ring = tuple[tuple[float, float], ...]
 
@@ -545,8 +558,11 @@ def notice_block(commit: str, today: str, count: int) -> dict[str, Any]:
             "OpenDiving Commons is a Derivative Database of OpenStreetMap under the Open Database "
             "License (ODbL) 1.0. © OpenDiving Commons contributors, "
             f"{_REPOSITORY}. © OpenStreetMap contributors, https://osm.org/copyright. It also "
-            "contains public-domain (CC0) records from Wikidata and from divers' contributions. "
-            "Locality names are from Natural Earth, public domain."
+            "contains public-domain (CC0) records from Wikidata and from divers' contributions, and "
+            "public-domain records from NOAA's Florida Keys and Thunder Bay National Marine "
+            "Sanctuaries and the Florida Fish and Wildlife Conservation Commission. "
+            "Locality names are from Natural Earth, public domain. "
+            "Positions are not for navigation."
         ),
         "sources": [
             {
@@ -576,6 +592,30 @@ def notice_block(commit: str, today: str, count: int) -> dict[str, Any]:
                 "licence_url": _CC0_URL,
                 "supplies": "the records divers contributed",
                 "attribution": _ATTRIBUTION["contribution"],
+            },
+            {
+                "name": "NOAA Florida Keys National Marine Sanctuary",
+                "source": "noaa-florida-keys-moorings",
+                "licence": "public domain",
+                "licence_url": _US_GOVERNMENT_WORK_URL,
+                "supplies": "the records seeded from it",
+                "attribution": _ATTRIBUTION["noaa-florida-keys-moorings"],
+            },
+            {
+                "name": "NOAA Thunder Bay National Marine Sanctuary",
+                "source": "noaa-thunder-bay-moorings",
+                "licence": "public domain",
+                "licence_url": _US_GOVERNMENT_WORK_URL,
+                "supplies": "the records seeded from it",
+                "attribution": _ATTRIBUTION["noaa-thunder-bay-moorings"],
+            },
+            {
+                "name": "Florida Fish and Wildlife Conservation Commission",
+                "source": "fwc-artificial-reefs",
+                "licence": "public domain",
+                "licence_url": _FWC_METADATA,
+                "supplies": "the records seeded from it",
+                "attribution": _ATTRIBUTION["fwc-artificial-reefs"],
             },
             {
                 "name": "Natural Earth",

@@ -58,7 +58,7 @@ from .cache_invalidation import (
     invalidate_trip_caches,
 )
 from .commons_matches import find_commons_matches
-from .commons_records import COMMONS_REGISTRY, SHARED_MEMBER_COLUMNS, feature_of
+from .commons_records import COMMONS_REGISTRY, CURATED_SOURCES, SHARED_MEMBER_COLUMNS, feature_of
 
 CONTRIBUTION_SOURCE = "contribution"
 CONTRIBUTION_LICENSE = "CC0-1.0"
@@ -89,8 +89,9 @@ def _shared_members(row: Mapping[str, Any], *, prefix: str = "") -> dict[str, An
 
 
 def _seed_entry(site: Mapping[str, Any]) -> dict[str, str] | None:
-    """The registry entry a seed's file in the repository is placed by."""
-    if site["commons_seed_registry"] is None:
+    """The registry entry a seed from OpenStreetMap or Wikidata lists. A curated source's record
+    is placed by its provenance too, but lists none."""
+    if site["commons_seed_registry"] is None or site["commons_seed_registry"] in CURATED_SOURCES:
         return None
     return {"registry": site["commons_seed_registry"], "identifier": site["commons_seed_identifier"]}
 
@@ -318,6 +319,9 @@ async def _record_rule_refusals(
         refusals.append(refusal)
 
     entries = {(entry["registry"], entry["identifier"]) for entry in columns["external_ids"]}
+    for registry, identifier in sorted(entries):
+        if registry in CURATED_SOURCES:
+            refusals.append(f"the entry {registry} {identifier} names a curated source, which a record does not list")
     if entries:
         carriers = await db.execute(
             select(DiveSite.name, DiveSite.external_ids).where(

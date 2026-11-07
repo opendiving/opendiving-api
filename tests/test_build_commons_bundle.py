@@ -280,7 +280,29 @@ class TestTheNoticeBlock:
     def test_it_credits_every_source_a_record_can_have(self, notice: dict[str, Any]) -> None:
         credited = {source["source"] for source in notice["sources"] if source.get("attribution")}
 
-        assert credited == {"openstreetmap", "wikidata", "contribution"}
+        assert credited == {
+            "openstreetmap",
+            "wikidata",
+            "contribution",
+            "noaa-florida-keys-moorings",
+            "noaa-thunder-bay-moorings",
+            "fwc-artificial-reefs",
+        }
+
+    def test_no_credit_s_label_holds_what_the_phone_renders_as_emphasis(self, notice: dict[str, Any]) -> None:
+        labels = [source["attribution"].partition("](")[0] for source in notice["sources"] if "attribution" in source]
+
+        assert labels and not [label for label in labels if "*" in label or "_" in label]
+
+    def test_the_florida_credit_links_the_copy_of_its_metadata(self, notice: dict[str, Any]) -> None:
+        florida = next(source for source in notice["sources"] if source.get("source") == "fwc-artificial-reefs")
+
+        assert "/tree/main/sources/fwc-artificial-reefs)" in florida["attribution"]
+
+    def test_it_says_what_the_positions_are_not_for(self, notice: dict[str, Any]) -> None:
+        assert "NOAA" in notice["notice"]
+        assert "Florida Fish and Wildlife Conservation Commission" in notice["notice"]
+        assert "not for navigation" in notice["notice"]
 
     def test_natural_earth_is_named_and_credits_no_record(self, notice: dict[str, Any]) -> None:
         natural_earth = next(source for source in notice["sources"] if source["name"] == "Natural Earth")

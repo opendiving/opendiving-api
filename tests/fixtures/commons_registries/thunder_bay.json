@@ -1,0 +1,48 @@
+{
+ "features": [
+  {
+   "attributes": {
+    "Name": "<b><i><font color=\"#ff4500\">E. B. Allen - BUOY REMOVED FOR SEASONAL MAINTENANCE</font></i></b>",
+    "Description": "<b><font color=\"black\">Mooring system removed for seasonal maintenance.<br></font></b><font color=\"\"\"\"white\"\"\"\" style=\"\"\"\"outline: none;\"\"\"\"><b>Depth:</b> 100 Feet<br><b>Latitude:</b> 45.01621<br><b>Longitude:</b> -83.16496<br><a href=\"http://thunderbay.noaa.gov/shipwrecks/eb_allen.html\" target=\"\"\"\"_blank\"\"\"\" style=\"\"\"\"outline: none;\"\"\"\">Click here to learn more.</a></font>",
+    "Icon_Title": "E. B. Allen"
+   },
+   "geometry": {
+    "x": -83.11988,
+    "y": 45.02951000000001
+   }
+  },
+  {
+   "attributes": {
+    "Name": "<b><i><font color=\"#32CD32\">Monohansett - BUOY CURRENTLY INSTALLED</font></i></b>",
+    "Description": "<font color=\"white\" style=\"\"\"\"outline: none;\"\"\"\"><b>Depth:</b> 18 Feet<br><b>Latitude:</b> 45.03360<br><b>Longitude:</b> -83.20000<br><a href=\"http://thunderbay.noaa.gov/shipwrecks/monohansett.html\" target=\"\"\"\"_blank\"\"\"\" style=\"\"\"\"outline: none;\"\"\"\">Click here to learn more.</a></font>",
+    "Icon_Title": "Monohansett"
+   },
+   "geometry": {
+    "x": -83.19657999999998,
+    "y": 45.03045
+   }
+  },
+  {
+   "attributes": {
+    "Name": "<b><i><font color=\"#ff4500\">New Orleans (1838) - BUOY REMOVED FOR SEASONAL MAINTENANCE</font></i></u></b>",
+    "Description": "<b><font color=\"black\">Mooring system removed for seasonal maintenance.<br></font></b><font color=\"\"\"\"white\"\"\"\" style=\"\"\"\"outline: none;\"\"\"\"><b>Depth:</b> 13 Feet<br><b>Latitude:</b> 45.04298<br><b>Longitude:</b> -83.24042<br><a href=\"http://thunderbay.noaa.gov/shipwrecks/neworleans.html\" target=\"\"\"\"_blank\"\"\"\" style=\"\"\"\"outline: none;\"\"\"\">Click here to learn more.</a></font>",
+    "Icon_Title": "New Orleans (1838)"
+   },
+   "geometry": {
+    "x": -83.23999999999998,
+    "y": 45.0429
+   }
+  },
+  {
+   "attributes": {
+    "Name": "<b>About This Map</b>",
+    "Description": "<font color=\"black\" style=\"outline: none;\">To provide better access to the region’s historic shipwrecks Thunder Bay NMS installs seasonal mooring buoys on over 40 sites in a wide range of depths. Explore sites accessible from shore and boat. Buoys that are currently installed are in blue, buoys removed for the season are in red. </font>",
+    "Icon_Title": null
+   },
+   "geometry": {
+    "x": -83.447,
+    "y": 45.059999999999995
+   }
+  }
+ ]
+}

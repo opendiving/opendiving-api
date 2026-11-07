@@ -132,6 +132,26 @@ def create_commons_site(db: Session, *, name: str | None = None, **values: Any) 
     )
 
 
+def create_curated_site(db: Session, *, name: str | None = None, **values: Any) -> models.DiveSite:
+    """A Commons record from a curated source: provenance, and no registry entry."""
+    identifier = f"reef-{uuid7().hex[-8:]}"
+    return _persist(
+        db,
+        models.DiveSite(
+            user_id=None,
+            name=name or f"Curated {uuid7().hex[-8:]}",
+            latitude=values.pop("latitude", 25.034149),
+            longitude=values.pop("longitude", -80.348549),
+            commons_source="noaa-florida-keys-moorings",
+            commons_license="LicenseRef-US-Gov-PD",
+            commons_seed_registry="noaa-florida-keys-moorings",
+            commons_seed_identifier=identifier,
+            commons_retrieved=date(2026, 11, 7),
+            **values,
+        ),
+    )
+
+
 def create_contact(db: Session, user: models.User, *, roles: list[str] | None = None) -> models.Contact:
     """A contact of this user's, named uniquely because `ux_contact_user_id_name_lower`
     would refuse a second run's row of the same name."""
