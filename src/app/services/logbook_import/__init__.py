@@ -3,7 +3,8 @@
 The mirror of `services/export`, and deliberately the same shape as its writer half - one
 module that knows about the containers, one that knows what the records mean, one that
 touches the database - with a fourth that runs an import of several files as those files
-imported one at a time. The route layer sees a handful of functions and no internals.
+imported one at a time, and a fifth that holds an import from its upload to the end of its
+history. The route layer sees a handful of functions and no internals.
 
 Four stages, in this order, and the order is the design:
 
@@ -14,12 +15,12 @@ Four stages, in this order, and the order is the design:
 3. `species.resolve_catalog_gaps` fills the shared catalog from WoRMS - before anything
    is written, because it commits and can take a minute.
 4. `batch.import_batch` plans each file (`planner.plan_import`) and writes it
-   (`writer.write_import`) before the next is planned, in one transaction; the preview
-   rolls it back, and the apply's caller commits, once.
+   (`writer.write_import`) before the next is planned, in one transaction; the upload's
+   pass rolls it back, and the apply's caller commits, once.
 """
 
 from .batch import BatchReport, batch_species, import_batch
-from .parts import MAX_PARTS, ImportPart, ImportRequest, MalformedRequestError, batch_digest, read_import_request
+from .parts import MAX_PARTS, ImportPart, ImportRequest, MalformedRequestError, read_import_request
 from .planner import ImportPlan, plan_import, unresolved_aphia_ids
 from .reader import (
     MAX_ARCHIVE_SIZE,
@@ -54,7 +55,6 @@ __all__ = [
     "MalformedImportError",
     "MalformedRequestError",
     "UnsupportedImportError",
-    "batch_digest",
     "batch_species",
     "formats_this_build_reads",
     "import_batch",

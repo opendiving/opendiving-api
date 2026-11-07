@@ -1019,7 +1019,7 @@ neither payload is loaded.
 ## Gas use is computed on read, never stored, and deliberately refuses multi-tank dives
 
 `compute_gas_use()` in `services/dive_gas.py` derives `gas_used`, `rmv` and `sac_bar_per_min` from
-`submerged_time`, `avg_depth` and the one mixture's pressures; `_to_public_dive_with_mixtures()`
+`submerged_time`, `avg_depth` and the one mixture's pressures; `to_public_dive_with_mixtures()`
 attaches it as `gas_use`, the formula's one call site.
 
 Computed, not denormalized like `user_dive_stats` or `gear_item.dive_count`: it is arithmetic on
@@ -1100,8 +1100,8 @@ deduped against the picks.
 `POST /dive/parse` returns the form's values and no samples: readings the form has no use for,
 returned to be posted back, would make stored samples client-supplied, the trust problem the parse
 token closes. Samples are read on `POST /dive/{uuid}/recordings`, which has the bytes and their
-provenance, by the same reader over the stored file. `POST /import/logbook` is the one path storing
-client-supplied samples.
+provenance, by the same reader over the stored file. `POST /import/{uuid}/apply` is the one path
+storing client-supplied samples.
 
 ## Profile extraction is idempotent on (file digest, extractor version, reader version), and never fails an upload
 
@@ -5838,8 +5838,9 @@ A fifth remap — two records of one collection claiming one uuid — is decided
 they differ in what happened to other records*.
 
 The remap branch cannot be idempotent: `dive` has no unique constraint, so a second import creates a
-second copy; the preview reports the creation set first. Rejected: a source-uuid provenance column,
-a schema-wide change for one corner case.
+second copy; the review reports the creation set first. The upload's pass keeps what it minted and
+the apply's takes the same uuids, so a dive is written at the uuid the review showed. Rejected: a
+source-uuid provenance column, a schema-wide change for one corner case.
 
 `species` is exempt: it belongs to nobody, and import never creates or claims a catalog row.
 
@@ -5849,12 +5850,12 @@ A document record whose uuid is the caller's soft-deleted row (`Dive`, `Certific
 `GearServiceRecord`) is skipped with a note. A deleted dive's recordings still go through the
 recording gates, so a re-download of a dive the diver deleted and logged again from another source
 fills that dive. Rejected: restoring the row, and creating it under a fresh uuid, which is the same
-restore. Dives have no un-delete path; a trash bin would be its own feature. `restored` stays on the
-collection report, always 0, until the web and iOS apps stop decoding it as required.
+restore. Dives have no un-delete path; a trash bin would be its own feature.
 
 The dedupe lookup branches on `is_deleted` rather than filtering it: an `is_deleted=False` query
-would call the husk's uuid unclaimed and hit the full `uuid` index. Apply re-plans the document
-rather than carrying the preview's plan, a row being deletable between the two calls.
+would call the husk's uuid unclaimed and hit the full `uuid` index. A dive the review showed that is
+deleted or merged away before the apply is skipped by its document dives, ahead of the gates: those
+read live dives alone, so a file's dive would otherwise be created again, or fill the survivor.
 
 ## No uniqueness rule anywhere fails an import
 
@@ -5875,7 +5876,7 @@ caller owns the item and the document's canonical gear uuid where the import cre
 `tests/test_logbook_import.py::TestTwoSchedulesOnOneNewGearItem` covers it.
 
 `ux_dive_file_user_id_sha256` has no link available (one `dive_file` row names one `recording_id`,
-and `ux_dive_file_storage_key` forbids sharing a key), so it is skip-and-report: the preview names
+and `ux_dive_file_storage_key` forbids sharing a key), so it is skip-and-report: the review names
 the missing file.
 
 ## Where the format is optional and this app is not, the record goes rather than a value being invented
@@ -5994,11 +5995,11 @@ none, with two, or with one off the form or past the `Integer` column is unmatch
 and its sighting links dropped and reported — never the dive. A `wikidata` entry is written and
 never read back, and a document carrying the retired `aphia_id` member reads as one with no entry.
 
-It runs as a batch before the apply transaction: preview stores nothing, and `resolve_species`
-manages its own transaction around the outbound call. The worst case is two
-`_RESOLVE_BUDGET_SECONDS` passes plus `_ENRICHMENT_BUDGET_SECONDS`, so
-`IMPORT_SPECIES_BUDGET_SECONDS` is sized against that ceiling; unknowns outstanding at expiry are
-skipped and reported.
+It runs as a batch at the upload, before the review is made and the row claimed: the review is the
+contract, so a sighting it left out would stay out, and `resolve_species` manages its own
+transaction around the outbound call. The worst case is two `_RESOLVE_BUDGET_SECONDS` passes plus
+`_ENRICHMENT_BUDGET_SECONDS`, so `IMPORT_SPECIES_BUDGET_SECONDS` is sized against that ceiling;
+unknowns outstanding at expiry are skipped and reported.
 
 `resolve_species` raises 503 on budget expiry and on a WoRMS outage; the pre-pass converts each to
 skip-and-report.
@@ -6034,7 +6035,7 @@ A document's owner — name and `created_at` — and its preferences under this 
 applied: changing a live account's identity or settings as a side effect of a restore is a worse
 surprise than setting them once. The archive's avatar is not restored either.
 
-The check-in details and the portrait are shown in the preview beside the account's, and the apply
+The check-in details and the portrait are shown in the review beside the account's, and the apply
 writes exactly those the diver submits (§6.1's SHOULD NOT): the importer cannot tell a restore from
 a buddy's file. Matching rows are proposed as the account's, never merged member by member, which
 would pair one insurer with another's policy number. The sign-in address, which every older export
@@ -6061,12 +6062,13 @@ certification's requiredness is what governs it.
 
 ## Logbook import spools its upload and still parses the document whole
 
-The routes read their own multipart body after the session and the rate limit, one
-`SpooledTemporaryFile` per file part, together never past one `SPOOL_THRESHOLD` in memory
-(`parts.py` says why not the framework's form reader).
+The upload reads its own multipart body after the session, the rate limit and the account's slot,
+one `SpooledTemporaryFile` per file part, together never past one `SPOOL_THRESHOLD` in memory
+(`parts.py` says why not the framework's form reader). Its readable files then go to the blob store
+under `import-files`, streamed, and the apply spools them back under the same bound.
 
 Parsing still materializes every document, so `MAX_DOCUMENT_SIZE` over what one import plans is the
-memory ceiling; a streaming parser, an arq job or a preview-token-keyed spool are unbuilt.
+memory ceiling; a streaming parser and an arq job are unbuilt.
 
 Zip bombs are refused before a byte inflates: declared sizes must sum under
 `MAX_ARCHIVE_EXTRACTED_SIZE`, `zipfile` verifies the CRC, and `archive_path` is a member name, never
@@ -6076,13 +6078,15 @@ and `MAX_ARCHIVE_ENTRIES`, as `zipfile` builds an object per entry.
 `archive.read(...)` failures (password, CRC, compression) are caught: a failing `logbook.divejson`
 is a 422 naming the password case; a failing blob member reads as `None`.
 
-Both endpoints rate-limit per user on their own budget: twenty, one import being two calls.
+The upload and the apply each rate-limit per user on a budget of ten, apart, so one import is one
+call against each and a refused apply cannot repeat its pass freely. An import's reads are not
+limited.
 
-## Logbook import reads whatever the converter reads, and the routes are `/import/logbook/*`
+## Logbook import reads whatever the converter reads, and the routes are `/imports`
 
-`POST /import/logbook/preview` and `POST /import/logbook` accept any number of `file` parts, each a
-DiveJSON document, any format in `divejson.read_formats()`, or a `.zip` of those; labels are
-`FORMAT_LABELS` (see *"A version bump can add a reader, and only a test notices"*).
+`POST /imports` accepts any number of `file` parts, each a DiveJSON document, any format in
+`divejson.read_formats()`, or a `.zip` of those; labels are `FORMAT_LABELS` (see *"A version bump
+can add a reader, and only a test notices"*).
 
 `divejson.sniff` decides each file on `divejson.SNIFF_BYTES`. A zip without `logbook.divejson` is
 opened one level deep; every document and every file a reader claims sum, by declared size, under
@@ -6094,9 +6098,9 @@ the package's inflation cap is the caller's, and a fixed one in the reader would
 account that the api's own limits admit. Conversion and parsing run behind `CONVERT_LIMITER`
 (`run_in_conversion_thread`).
 
-A head starting `{` keeps the 422 "not valid JSON"; other unclaimed bytes are 415. The token covers
-each uploaded file's name and digest and apply converts again, deterministic except `exported_at`,
-passed in UTC via `_conversion_moment`.
+A head starting `{` keeps the 422 "not valid JSON"; other unclaimed bytes are 415. The apply
+converts the held files again, deterministic except `exported_at`, passed in UTC via
+`_conversion_moment`.
 
 A row's note and a report group keep `code` and `kind` plain strings, never `StrEnum` or `Literal`:
 they carry the package's codes and kinds beside the import's own, and a dependency bump can add
@@ -7404,3 +7408,15 @@ hosted instance within minutes, untested as merged. `semantic-title` has no titl
 group and skips; a skipped job reports success. The release coordinator in opendiving/opendiving
 merges bump pull requests with `gh pr merge`, which a required queue enqueues instead of merging, so
 the queue goes on only once that flow can merge past it.
+
+## An import's review is the writer's effect, stored, and the apply holds to it
+
+A dive's `changes` are the difference between two reads of it around the rolled-back pass: fills
+decide inside SQL, so a predicate over the plan would be a second account of the writer. The apply
+re-runs the pass from the held files, then sets each value entry to its reviewed `after`, because a
+fill never overwrites and an edit made in between would stand against what the diver approved.
+Rejected: writing the after-state directly, a second writer.
+
+`review` and `notes` are served as stored, so an earlier build's row still answers. A change to any
+schema they embed bumps `REVIEW_SHAPE` and owes a call: migrate the stored rows or retire them.
+Rejected: validating on read, which turns a new required member into a 500 on every pending import.

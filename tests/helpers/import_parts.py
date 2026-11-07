@@ -84,7 +84,7 @@ def import_request(files: list[tuple[str, bytes]], fields: dict[str, Any] | None
     scope = {
         "type": "http",
         "method": "POST",
-        "path": "/api/v1/import/logbook",
+        "path": "/api/v1/imports",
         "headers": [(b"content-type", content_type.encode()), (b"content-length", str(len(body)).encode())],
         "query_string": b"",
     }

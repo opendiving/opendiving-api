@@ -10,10 +10,10 @@ from ..api.v1 import router as v1_router
 # the multipart framing and the form fields around it.
 MAX_REQUEST_BODY_SIZE = 11 * 1024 * 1024
 
-# The logbook import routes authenticate before they read a byte, then stream their own body
-# under caps of their own, which run to hundreds of megabytes.
+# An import's upload authenticates before it reads a byte, then streams its own body under
+# caps of its own, which run to hundreds of megabytes.
 _API_PREFIX = f"{api_router.prefix}{v1_router.prefix}"
-UNLIMITED_PATHS = frozenset({f"{_API_PREFIX}/import/logbook/preview", f"{_API_PREFIX}/import/logbook"})
+UNLIMITED_PATHS = frozenset({f"{_API_PREFIX}/imports"})
 
 _DETAIL = f"Request body too large. The maximum is {MAX_REQUEST_BODY_SIZE // (1024 * 1024)} MB."
 

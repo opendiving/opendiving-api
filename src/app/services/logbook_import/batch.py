@@ -1,7 +1,7 @@
 """An import of many files: each imported in turn, inside one transaction, with one report.
 
 **A batch writes what its files would write imported one at a time, in the batch's order** -
-each as an import of its own, previewed and applied - and that is the whole of what two files
+each as an import of its own, reviewed and applied - and that is the whole of what two files
 make of each other but for dive numbers, given after the last file in date order
 (`assign_suggested_numbers`). Each file is planned against the logbook as the files before it
 left it, and written before the next is planned, so every rule the import has about a
@@ -11,20 +11,24 @@ dive, and a file whose bytes already gave a dive its identity links. The FIT and
 one dive are one dive with one recording holding both files, whether they arrive together or
 on two days, and the same batch twice writes nothing the second time.
 
-**The preview runs the same pass and rolls it back**, which is what makes its counts the
-apply's rather than a prediction of them: a later file's outcome depends on what the earlier
-ones wrote, and nothing short of writing them says what that is. No object is written by a
-preview, and none by an apply until the whole batch has fitted the account's storage limit
+**The upload runs the same pass and rolls it back**, which is what makes its review the
+apply's rather than a prediction of it: a later file's outcome depends on what the earlier
+ones wrote, and nothing short of writing them says what that is. No object is written by that
+pass, and none by the apply's until the whole batch has fitted the account's storage limit
 (`staging.py`).
+
+**Each dive's outcome is read off the dive**: the pass reads a stored dive before the first file
+writes to it and every dive it touched or created after the last, and `changes.py` says what
+differs, so "unchanged" is the writer's fact rather than a prediction.
 
 `DECISIONS.md`, *"An import is its files imported one at a time"*, has the reasoning.
 """
 
 import uuid as uuid_pkg
 from collections import Counter, defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -33,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...core.utils.datetime_offset import combine_dive_start_time, split_dive_start_time
 from ...models.dive import Dive
 from ...models.dive_recording import DiveRecording
+from ...models.user import User
 from ...schemas.dive import RecordingDevice
 from ...schemas.logbook_import import (
     ImportCheckInDetail,
@@ -42,8 +47,6 @@ from ...schemas.logbook_import import (
     ImportDive,
     ImportDiveNote,
     ImportDiveOutcome,
-    ImportDiveReport,
-    ImportDocument,
     ImportFileReport,
     ImportMemberReport,
     ImportNote,
@@ -53,9 +56,11 @@ from ...schemas.logbook_import import (
     ImportPortraitOffer,
     ImportSpecies,
 )
+from ..dive_detail import load_dive_detail
 from ..dive_numbering import assign_suggested_numbers
 from ..dive_recordings import DEVICE_COLUMNS
 from ..storage_usage import ensure_room, get_storage_usage, storage_limit_bytes
+from .changes import dive_changes
 from .notes import (
     MAX_DIVE_NOTES,
     DiveSource,
@@ -71,19 +76,10 @@ from .notes import (
     line_key,
     stored_dives,
 )
-from .planner import COLLECTIONS, Action, ImportPlan, plan_import, portrait_change
+from .planner import COLLECTIONS, Action, ImportPlan, MintedUuids, plan_import, portrait_change
 from .reader import LoadedBatch, LoadedImport
 from .staging import StagedFiles
 from .writer import WrittenImport, write_import
-
-# Which outcome of one dive says more, where several files reach it: created over a file or a
-# recording added, over a link.
-_RANK = {
-    ImportDiveOutcome.LINKED: 0,
-    ImportDiveOutcome.UPDATED: 1,
-    ImportDiveOutcome.CREATED: 2,
-}
-
 
 # A document dive, as the batch member it came from and the uuid that document gives it: two
 # files' documents can give one uuid to two dives, and a stored dive's uuid can be neither.
@@ -92,16 +88,17 @@ type _Source = tuple[int, uuid_pkg.UUID]
 
 @dataclass(slots=True)
 class _DiveRow:
-    outcome: ImportDiveOutcome
     dive_id: int | None
     members: list[int]
-    files_added: int = 0
-    recordings_added: int = 0
+    created: bool = False
     reason: str | None = None
     # A skipped dive's own figures, where there is no stored dive to read them from.
     source: ImportDive | None = None
     # The document dives whose notes this row carries, each as (member, the document's uuid).
     sources: list[_Source] = field(default_factory=list)
+    # Every document dive that reached this row. A dive whose recordings partly matched dives
+    # the caller has reaches several, and its notes go on the first alone.
+    reached_by: list[_Source] = field(default_factory=list)
 
 
 def _reason(plan: ImportPlan, source_uuid: Any) -> str | None:
@@ -114,6 +111,46 @@ def _reason(plan: ImportPlan, source_uuid: Any) -> str | None:
         ),
         None,
     )
+
+
+@dataclass(slots=True)
+class BatchDive:
+    """One dive the batch's files hold, and what the pass did to it. `dive` is the dive after
+    the pass as a dive read gives it, and `changes` what differs from the dive before it."""
+
+    outcome: ImportDiveOutcome
+    uuid: uuid_pkg.UUID | None = None
+    dive: dict[str, Any] | None = None
+    changes: list[dict[str, Any]] = field(default_factory=list)
+    start_time: datetime | date | None = None
+    device: RecordingDevice | None = None
+    members: list[int] = field(default_factory=list)
+    reason: str | None = None
+    notes: list[ImportDiveNote] = field(default_factory=list)
+    notes_truncated: int = 0
+    # The document dives that reached this row, each as (the batch row, the document's uuid).
+    sources: list[_Source] = field(default_factory=list)
+
+
+class _DiveDetails:
+    """The pass's reads of dives, in the detail route's shape, as JSON."""
+
+    def __init__(self, db: AsyncSession, user_id: int) -> None:
+        self._db = db
+        self._user_id = user_id
+        self._owner_uuid: uuid_pkg.UUID | None = None
+        self.before: dict[uuid_pkg.UUID, dict[str, Any]] = {}
+
+    async def read(self, uuid: uuid_pkg.UUID) -> dict[str, Any]:
+        if self._owner_uuid is None:
+            self._owner_uuid = (await self._db.execute(select(User.uuid).where(User.id == self._user_id))).scalar_one()
+        detail = await load_dive_detail(self._db, user_id=self._user_id, owner_uuid=self._owner_uuid, uuid=uuid)
+        return detail.model_dump(mode="json", by_alias=True)
+
+    async def note_before(self, uuid: uuid_pkg.UUID) -> None:
+        """Read a stored dive before the first file writes to it."""
+        if uuid not in self.before:
+            self.before[uuid] = await self.read(uuid)
 
 
 @dataclass(slots=True)
@@ -153,26 +190,17 @@ class _Dives:
             self._claimed.add(source)
             row.sources.append(source)
 
-    def _touch(
-        self,
-        dive_id: int,
-        source: _Source,
-        outcome: ImportDiveOutcome,
-        *,
-        files: int = 0,
-        recordings: int = 0,
-    ) -> None:
+    def _touch(self, dive_id: int, source: _Source, *, created: bool = False) -> None:
         member = source[0]
         row = self._by_dive.get(dive_id)
         if row is None:
-            row = self._by_dive[dive_id] = _DiveRow(outcome=outcome, dive_id=dive_id, members=[])
+            row = self._by_dive[dive_id] = _DiveRow(dive_id=dive_id, members=[])
             self.rows.append(row)
-        elif _RANK[outcome] > _RANK[row.outcome]:
-            row.outcome = outcome
+        row.created = row.created or created
         if member not in row.members:
             row.members.append(member)
-        row.files_added += files
-        row.recordings_added += recordings
+        if source not in row.reached_by:
+            row.reached_by.append(source)
         self._claim(row, source)
 
     def add(self, member: int, loaded: LoadedImport, plan: ImportPlan, written: WrittenImport) -> None:
@@ -209,29 +237,21 @@ class _Dives:
         for record in plan.records.get("dives", {}).values():
             source = (member, record.source_uuid)
             if record.action is Action.CREATE:
-                self._touch(written.dive_ids[record.source_uuid], source, ImportDiveOutcome.CREATED)
+                self._touch(written.dive_ids[record.source_uuid], source, created=True)
             elif record.action is Action.LINK and record.row_id is not None:
-                self._touch(record.row_id, source, ImportDiveOutcome.LINKED)
+                self._touch(record.row_id, source)
             elif record.action is Action.SKIP and record.source_uuid not in matched:
                 row = _DiveRow(
-                    outcome=ImportDiveOutcome.SKIPPED,
                     dive_id=None,
                     members=[member],
                     reason=_reason(plan, record.source_uuid),
                     source=documented.get(record.source_uuid),
+                    reached_by=[source],
                 )
                 self.rows.append(row)
                 self._claim(row, source)
-        for match, files in zip(plan.recording_matches, written.match_files, strict=True):
-            recordings = 1 if match.kind == "attach" else 0
-            source = (member, match.source_uuid)
-            # A fill whose samples replaced the recording's stored ones changed the dive's curves
-            # even where it brought no file. One that changed none of them is the dive the logbook
-            # already has, as its note says, rather than a dive this import declined.
-            if files or recordings or match.replaces_profile:
-                self._touch(match.dive_id, source, ImportDiveOutcome.UPDATED, files=files, recordings=recordings)
-            else:
-                self._touch(match.dive_id, source, ImportDiveOutcome.LINKED)
+        for match in plan.recording_matches:
+            self._touch(match.dive_id, (member, match.source_uuid))
 
     def _own_notes(self, source: _Source) -> list[ImportNote]:
         """The import's own notes about one document dive, in its plan's order."""
@@ -292,23 +312,19 @@ class _Dives:
                 say(source, found.note, finding_note(found))
         return shown
 
-    async def reports(self, db: AsyncSession) -> tuple[list[ImportDiveReport], list[ImportNoteGroup], int]:
-        """The rows, each read off the dive as the dive read gives it, with its notes - and the
-        groups of every note on no row, a row's overflow among them."""
+    async def reports(
+        self, db: AsyncSession, details: _DiveDetails, *, serialise_new: bool
+    ) -> tuple[list[BatchDive], list[ImportNoteGroup], int]:
+        """The rows, each with its outcome and changes read off the dive as the dive read gives
+        it, with its notes - and the groups of every note on no row, a row's overflow among them."""
         ids = [row.dive_id for row in self.rows if row.dive_id is not None]
         dives = (
             {
                 one.id: one
                 for one in await db.execute(
-                    select(
-                        Dive.id,
-                        Dive.uuid,
-                        Dive.start_time,
-                        Dive.utc_offset_minutes,
-                        Dive.start_date_only,
-                        Dive.submerged_time,
-                        Dive.max_depth,
-                    ).where(Dive.id.in_(ids))
+                    select(Dive.id, Dive.uuid, Dive.start_time, Dive.utc_offset_minutes, Dive.start_date_only).where(
+                        Dive.id.in_(ids)
+                    )
                 )
             }
             if ids
@@ -339,45 +355,34 @@ class _Dives:
         reports = []
         for row in self.rows:
             shown = self._shown(row, None if row.dive_id is None else compared.get(row.dive_id))
-            if row.outcome is ImportDiveOutcome.SKIPPED:
+            if row.dive_id is None:
                 # The reason is said once, as the row's outcome, rather than again as its note.
                 reason = [entry for entry in shown if entry[1].code == ImportNoteCode.RECORD_SKIPPED.value]
                 on_rows.update(id(note) for notes, _ in reason for note in notes)
                 shown = [entry for entry in shown if entry not in reason]
             listed = shown[:MAX_DIVE_NOTES]
             on_rows.update(id(note) for notes, _ in listed for note in notes)
-            updated = row.outcome is ImportDiveOutcome.UPDATED
             stored = None if row.dive_id is None else dives.get(row.dive_id)
-            figures: dict[str, Any] = {}
-            if stored is not None:
-                figures = {
-                    "uuid": stored.uuid,
-                    "start_time": combine_dive_start_time(
-                        stored.start_time, stored.utc_offset_minutes, stored.start_date_only
-                    ),
-                    "submerged_time": stored.submerged_time,
-                    "max_depth": stored.max_depth,
-                    "device": devices.get(stored.id),
-                }
-            elif row.source is not None:
-                figures = {
-                    "start_time": row.source.started_at,
-                    "submerged_time": row.source.submerged_time,
-                    "max_depth": row.source.max_depth,
-                    "device": _documented_device(row.source),
-                }
-            reports.append(
-                ImportDiveReport(
-                    outcome=row.outcome,
-                    files_added=row.files_added if updated else 0,
-                    recordings_added=row.recordings_added if updated else 0,
-                    reason=row.reason if row.outcome is ImportDiveOutcome.SKIPPED else None,
-                    members=row.members,
-                    notes=[note for _, note in listed],
-                    notes_truncated=len(shown) - len(listed),
-                    **figures,
-                )
+            report = BatchDive(
+                outcome=ImportDiveOutcome.SKIPPED,
+                reason=row.reason,
+                members=row.members,
+                notes=[note for _, note in listed],
+                notes_truncated=len(shown) - len(listed),
+                sources=row.reached_by,
             )
+            if stored is not None:
+                report.reason = None
+                report.uuid = stored.uuid
+                report.start_time = combine_dive_start_time(
+                    stored.start_time, stored.utc_offset_minutes, stored.start_date_only
+                )
+                report.device = devices.get(stored.id)
+                await _settle_outcome(report, row, stored.uuid, details, serialise_new=serialise_new)
+            elif row.source is not None:
+                report.start_time = row.source.started_at
+                report.device = _documented_device(row.source)
+            reports.append(report)
         reports.sort(key=_logbook_order, reverse=True)
         groups, truncated = grouped(self._unlisted(on_rows | self._left_out))
         return reports, groups, truncated
@@ -409,7 +414,28 @@ def _placed_recordings(plan: ImportPlan, written: WrittenImport) -> dict[uuid_pk
     return placed
 
 
-def _logbook_order(row: ImportDiveReport) -> tuple[bool, datetime]:
+async def _settle_outcome(
+    report: BatchDive, row: _DiveRow, uuid: uuid_pkg.UUID, details: _DiveDetails, *, serialise_new: bool
+) -> None:
+    """A stored row's outcome: new where the pass created the dive, and otherwise what differs
+    between the dive before the pass and after it."""
+    if row.created:
+        report.outcome = ImportDiveOutcome.NEW
+        if serialise_new:
+            report.dive = await details.read(uuid)
+        return
+    report.outcome = ImportDiveOutcome.UNCHANGED
+    before = details.before.get(uuid)
+    if before is None:
+        return
+    after = await details.read(uuid)
+    report.changes = dive_changes(before, after)
+    if report.changes:
+        report.outcome = ImportDiveOutcome.MODIFIED
+        report.dive = after
+
+
+def _logbook_order(row: BatchDive) -> tuple[bool, datetime]:
     """Where a row's dive sits in the logbook's newest-first list: by the value its start is
     stored as, so a start with no offset sorts as its wall clock read as UTC and a bare date as
     its midnight. Rows with no start go last, and `reverse` keeps ties in the import's order."""
@@ -433,19 +459,26 @@ def _documented_device(dive: ImportDive) -> RecordingDevice | None:
 
 @dataclass(slots=True)
 class BatchReport:
-    """Everything both routes answer with, over the whole batch."""
+    """Everything the pass has to say, over the whole batch."""
 
     collections: list[ImportCollectionReport]
     files: ImportFileReport
     notes: list[ImportNoteGroup]
     notes_truncated: int
     members: list[ImportMemberReport]
-    dives: list[ImportDiveReport]
+    dives: list[BatchDive]
     check_in_details: list[ImportCheckInDetail]
-    # The archive's portrait beside the account's, on a preview.
+    # The archive's portrait beside the account's, on the upload's pass.
     portrait: ImportPortraitOffer | None
-    first: ImportDocument
     archive: bool
+    # What this pass minted, by `file_key`, for the apply's to take again.
+    minted: dict[str, MintedUuids]
+
+
+def file_key(name: str, sha256: str) -> str:
+    """One file across the two passes. Never its place in the batch: a refused file holds a row
+    in the batch the upload reads and none in the batch the apply reads from what was stored."""
+    return f"{sha256}/{name}"
 
 
 def batch_species(batch: LoadedBatch) -> list[ImportSpecies]:
@@ -493,22 +526,27 @@ async def import_batch(
     user_id: int,
     batch: LoadedBatch,
     apply: bool,
+    resolution_ran: bool = False,
     newly_resolved_aphia_ids: frozenset[int] = frozenset(),
     check_in: ImportCheckInSubmission | None = None,
     portrait: ImportPortraitChoice | None = None,
+    gone_dives: Mapping[str, frozenset[uuid_pkg.UUID]] | None = None,
+    minted: Mapping[str, Mapping[str, Mapping[str, list[str]]]] | None = None,
 ) -> BatchReport:
     """Import every file of the batch in turn, and report the whole.
 
-    **The preview writes and rolls back; the apply writes and leaves the commit to the
-    caller**, who commits once. Either way, the files the batch stores are checked against
-    the account's storage limit after the last file is planned and before any object is
-    written, and an import that would cross it is refused whole with the 413 every other
-    write gives.
+    **Without `apply` it writes inside a savepoint and rolls that back**, so whatever the caller
+    holds in its transaction stands; with it, it writes and leaves the commit to the caller, who
+    commits once. Either way, the files the batch stores are checked against the account's
+    storage limit after the last file is planned and before any object is written, and an
+    import that would cross it is refused whole with the 413 every other write gives.
 
-    `check_in` and `portrait` are what the diver confirmed in the preview, handed to every
-    file: a detail a file does not carry, or one already written, writes nothing, and only
-    an archive carries a portrait. The apply spends the limit on linking people as it links
-    them; the preview reads it.
+    `resolution_ran` says the species pre-pass has run, so a species the catalog lacks is one
+    the register could not answer for. `check_in` and `portrait` are what the diver confirmed in
+    the review, handed to every file: a detail a file does not carry, or one already written,
+    writes nothing, and only an archive carries a portrait. An apply spends the limit on linking
+    people as it links them; the upload's pass reads it. `gone_dives` and `minted` are the
+    apply's, each by `file_key`: the document dives to skip, and what the upload's pass minted.
     """
     # What the account holds before the batch writes a row, which is the figure the limit is
     # checked against: only an archive and a file kept as itself can store anything.
@@ -522,24 +560,34 @@ async def import_batch(
     written_dives: set[int] = set()
     unnumbered: list[int] = []
     dives = _Dives()
+    details = _DiveDetails(db, user_id)
     plans: list[ImportPlan] = []
+    made: dict[str, MintedUuids] = {}
     retired = 0
+    savepoint = None if apply else await db.begin_nested()
     try:
         for index, row in enumerate(batch.rows):
             if row.loaded is None:
                 continue
+            key = file_key(row.name, row.sha256)
+            file_minted = made.setdefault(key, MintedUuids(earlier=(minted or {}).get(key, {})))
             plan = await plan_import(
                 db,
                 user_id=user_id,
                 loaded=row.loaded,
-                resolution_ran=apply,
+                resolution_ran=resolution_ran,
                 newly_resolved_aphia_ids=newly_resolved_aphia_ids,
                 check_in=check_in,
                 portrait=portrait,
                 claim_links=apply,
                 batch_dive_ids=frozenset(written_dives),
                 held=staged.held,
+                gone_dives=(gone_dives or {}).get(key, frozenset()),
+                minted=file_minted,
             )
+            for match in plan.recording_matches:
+                if match.dive_id not in written_dives:
+                    await details.note_before(match.dive_uuid)
             written = await write_import(db, user_id=user_id, loaded=row.loaded, plan=plan, staged=staged)
             written_dives.update(written.dive_ids.values())
             unnumbered.extend(written.dive_ids[source] for source in plan.unnumbered_dives)
@@ -557,7 +605,8 @@ async def import_batch(
         if apply:
             await staged.write(db)
         documents = batch.documents
-        rows, notes, notes_truncated = await dives.reports(db)
+        # An apply's new dives are the review's, which already holds them.
+        rows, notes, notes_truncated = await dives.reports(db, details, serialise_new=not apply)
         return BatchReport(
             collections=_collections(plans),
             files=_files(plans),
@@ -567,16 +616,16 @@ async def import_batch(
             dives=rows,
             check_in_details=_check_in_details(plans),
             portrait=None if apply else await _portrait_offer(plans),
-            first=documents[0].document,
             archive=any(loaded.is_archive for loaded in documents),
+            minted=made,
         )
     finally:
-        if not apply:
-            await db.rollback()
+        if savepoint is not None:
+            await savepoint.rollback()
 
 
 async def _portrait_offer(plans: Sequence[ImportPlan]) -> ImportPortraitOffer | None:
-    """The archive's portrait, as the preview offers it - only an archive carries one."""
+    """The archive's portrait, as the review offers it - only an archive carries one."""
     for plan in plans:
         if (offer := await plan.portrait_offer()) is not None:
             return offer

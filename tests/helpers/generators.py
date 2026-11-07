@@ -371,6 +371,26 @@ def create_dive_draft(
     )
 
 
+def create_logbook_import(
+    db: Session, user: models.User, *, storage_key: str | None = None, status: str = "pending"
+) -> models.LogbookImport:
+    """An import of this user's holding one file under `storage_key`."""
+    held = _persist(db, models.LogbookImport(user_id=user.id, review_shape=1, status=status))
+    _persist(
+        db,
+        models.LogbookImportFile(
+            logbook_import_id=held.id,
+            role="part",
+            part=0,
+            filename="dive.fit",
+            byte_size=1,
+            sha256="e" * 64,
+            storage_key=storage_key or f"import-files/ee/{uuid7()}_{'e' * 64}",
+        ),
+    )
+    return held
+
+
 def create_species(db: Session, *, aphia_id: int | None = None, **overrides: Any) -> models.Species:
     """A catalog row.
 

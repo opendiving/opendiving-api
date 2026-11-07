@@ -15,6 +15,7 @@ Suunto app JSON and UDDF for the cases a fixture does not cover.
 import hashlib
 import io
 import json
+import re
 import uuid as uuid_pkg
 import zipfile
 from datetime import UTC, datetime
@@ -38,6 +39,7 @@ from src.app.models.dive_file import DiveFile
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
+from src.app.models.tag import Tag
 from src.app.models.user import User
 from src.app.schemas.dive import RecordingUpdateRequest
 from src.app.schemas.dive_mixture import DiveMixtureCreate
@@ -63,6 +65,7 @@ from src.app.services.export import load_export_bundle, write_divejson
 from src.app.services.export.archive import DIVEJSON_NAME
 from src.app.services.export.paths import plan_archive_paths
 from src.app.services.logbook_import import BatchReport, import_batch, load_import
+from src.app.services.logbook_import.batch import BatchDive
 from tests.conftest import db_available
 from tests.helpers.dive_files import suunto_json
 from tests.helpers.generators import create_dive, create_dive_recording, create_user
@@ -207,12 +210,27 @@ def no_redis(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def _import(db: AsyncSession, user: User, files: list[tuple[str, bytes]], *, apply: bool = True) -> BatchReport:
-    """One request's worth of files, previewed or applied as the routes do."""
+    """One request's worth of files, reviewed or applied as the routes do."""
     with await load_import(parts_of(*files)) as batch:
         report = await import_batch(db, user_id=user.id, batch=batch, apply=apply)
         if apply:
             await db.commit()
         return report
+
+
+def _recordings_added(row: BatchDive) -> int:
+    return sum(re.fullmatch(r"recordings/\d+", change["member"]) is not None for change in row.changes)
+
+
+def _files_added(row: BatchDive) -> int:
+    """The files a row's changes add, a recording added bringing its own."""
+    added = 0
+    for change in row.changes:
+        if re.fullmatch(r"recordings/\d+/files/\d+", change["member"]):
+            added += 1
+        elif re.fullmatch(r"recordings/\d+", change["member"]):
+            added += len(change["after"]["files"])
+    return added
 
 
 def _shown(report: BatchReport) -> list[ImportDiveNote]:
@@ -357,7 +375,7 @@ class TestThePair:
 
         assert [row.kept for row in report.members] == [True, True]
         [row] = report.dives
-        assert row.outcome is ImportDiveOutcome.CREATED
+        assert row.outcome is ImportDiveOutcome.NEW
         assert row.members == [0, 1]
         assert row.device is not None and row.device.serial == "253810000400"
         assert not _codes(report) & {
@@ -439,21 +457,21 @@ class TestTheBatchIsItsFilesInOrder:
         assert len(await _dive_ids(async_db, together)) == 3
 
     @pytest.mark.asyncio
-    async def test_the_preview_counts_what_the_apply_writes(
+    async def test_the_review_counts_what_the_apply_writes(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         """Each file is counted as its own import would count it, after the files before it
         - so the pair's FIT is a dive skipped, its recording having filled the JSON's."""
         diver = create_user(db)
 
-        preview = await _import(async_db, diver, self.FILES, apply=False)
-        assert await _dive_ids(async_db, diver) == [], "a preview writes nothing"
+        review = await _import(async_db, diver, self.FILES, apply=False)
+        assert await _dive_ids(async_db, diver) == [], "a review writes nothing"
         result = await _import(async_db, diver, self.FILES)
 
         [dives] = [report for report in result.collections if report.collection == "dives"]
         assert (dives.created, dives.skipped) == (3, 3)
-        assert preview.collections == result.collections
-        assert [(row.outcome, row.members) for row in preview.dives] == [
+        assert review.collections == result.collections
+        assert [(row.outcome, row.members) for row in review.dives] == [
             (row.outcome, row.members) for row in result.dives
         ]
         stored = (await async_db.execute(select(Dive.uuid).where(Dive.user_id == diver.id))).scalars()
@@ -542,7 +560,7 @@ class TestIdempotence:
             == profiles
         ), "no profile is rewritten"
         assert set(blob_store.iter_keys()) == keys, "no object is written"
-        assert [row.outcome for row in report.dives][:2] == [ImportDiveOutcome.LINKED, ImportDiveOutcome.LINKED]
+        assert [row.outcome for row in report.dives][:2] == [ImportDiveOutcome.UNCHANGED, ImportDiveOutcome.UNCHANGED]
         assert {row.not_kept for row in report.members} == {ImportMemberNotKept.ALREADY_STORED}
         assert {row.kept for row in report.members} == {False}
 
@@ -557,7 +575,7 @@ class TestIdempotence:
         [dive] = await _logbook(async_db, diver)
         assert len(dive["recordings"][0]["files"]) == 2
         [row] = report.dives
-        assert row.outcome is ImportDiveOutcome.CREATED and sorted(row.members) == [0, 1, 2]
+        assert row.outcome is ImportDiveOutcome.NEW and sorted(row.members) == [0, 1, 2]
 
     @pytest.mark.asyncio
     async def test_two_bare_fit_files_of_two_dives_are_two_dives(
@@ -573,7 +591,7 @@ class TestIdempotence:
 
         assert len(await _dive_ids(async_db, together)) == 2
         assert len(await _dive_ids(async_db, apart)) == 2
-        assert [row.outcome for row in second.dives] == [ImportDiveOutcome.CREATED]
+        assert [row.outcome for row in second.dives] == [ImportDiveOutcome.NEW]
 
     @pytest.mark.asyncio
     async def test_the_identity_follows_the_bytes_and_not_the_name(
@@ -585,7 +603,7 @@ class TestIdempotence:
 
         [again] = (await _import(async_db, diver, [("Suunto/renamed.json", export)])).dives
 
-        assert again.outcome is ImportDiveOutcome.LINKED
+        assert again.outcome is ImportDiveOutcome.UNCHANGED
         assert again.uuid == first.uuid
 
 
@@ -724,7 +742,7 @@ class TestTwoComputers:
         labels = {row["gas_number"] for row in dive["cylinders"]}
         assert {series["gas_number"] for series in ocean["profile"]["data"]["pressure"]} <= labels
         [row] = report.dives
-        assert (row.outcome, row.members) == (ImportDiveOutcome.CREATED, [0, 1, 2])
+        assert (row.outcome, row.members) == (ImportDiveOutcome.NEW, [0, 1, 2])
         assert row.device is not None and row.device.model == "Perdix 3"
 
     @pytest.mark.asyncio
@@ -737,8 +755,101 @@ class TestTwoComputers:
 
         assert await _logbook(async_db, together) == await _logbook(async_db, apart)
         [row] = report.dives
-        assert (row.outcome, row.files_added, row.recordings_added) == (ImportDiveOutcome.UPDATED, 2, 1)
+        assert (row.outcome, _files_added(row), _recordings_added(row)) == (ImportDiveOutcome.MODIFIED, 2, 1)
         assert ImportNoteCode.RECORDING_ATTACHED in _codes(report)
+
+
+class TestTheChangesOfADive:
+    """What a row says changes, against what the writer actually did: each pass here is rolled
+    back, and the changes are the difference between two reads of the dive either side of it."""
+
+    @pytest.mark.asyncio
+    async def test_a_file_added_is_a_change_even_where_no_value_moves(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        await _import(async_db, diver, [("dive.fit", OCEAN_FIT)])
+
+        report = await _import(async_db, diver, [("dive.json", OCEAN_JSON)], apply=False)
+
+        [row] = report.dives
+        assert row.outcome is ImportDiveOutcome.MODIFIED
+        added = next(change for change in row.changes if change["member"] == "recordings/0/files/1")
+        assert added["before"] is None and added["after"]["original_filename"] == "dive.json"
+        assert row.dive is not None and len(row.dive["recordings"][0]["files"]) == 2
+        assert await _count(async_db, DiveFile, diver) == 1, "the pass was rolled back"
+
+    @pytest.mark.asyncio
+    async def test_a_value_a_file_fills_is_one_entry_with_what_it_was(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        await _import(async_db, diver, [("dive.fit", OCEAN_FIT)])
+
+        report = await _import(async_db, diver, [("dive.json", OCEAN_JSON)], apply=False)
+
+        [row] = report.dives
+        [recording] = (await async_db.scalars(select(DiveRecording).where(DiveRecording.user_id == diver.id))).all()
+        filled = [change for change in row.changes if change["member"].startswith("recordings/0/device/")]
+        assert filled
+        for change in filled:
+            member = change["member"].rsplit("/", 1)[1]
+            assert change["before"] == getattr(recording, DEVICE_COLUMNS[member])
+            assert change["after"] == row.dive["recordings"][0]["device"][member]  # type: ignore[index]
+
+    @pytest.mark.asyncio
+    async def test_a_second_computer_is_one_entry_naming_the_recording(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        await _import(async_db, diver, [("dive.fit", OCEAN_FIT)])
+
+        report = await _import(async_db, diver, [("perdix.uddf", _perdix_uddf())], apply=False)
+
+        [row] = report.dives
+        added = next(change for change in row.changes if change["member"] == "recordings/1")
+        assert added["before"] is None and added["after"]["device"]["model"] == "Perdix 3"
+        assert not any(change["member"].startswith("recordings/1/") for change in row.changes)
+
+    @pytest.mark.asyncio
+    async def test_a_second_file_that_changes_nothing_is_unchanged(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        await _import(async_db, diver, PAIR)
+
+        report = await _import(async_db, diver, PAIR, apply=False)
+
+        assert [(row.outcome, row.dive, row.changes) for row in report.dives] == [
+            (ImportDiveOutcome.UNCHANGED, None, [])
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_new_dive_carries_itself_with_its_number_and_no_changes(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+
+        report = await _import(async_db, diver, PAIR, apply=False)
+
+        [row] = report.dives
+        assert (row.outcome, row.changes) == (ImportDiveOutcome.NEW, [])
+        assert row.dive is not None and row.dive["uuid"] == str(row.uuid) and row.dive["dive_number"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_pass_that_writes_nothing_leaves_what_the_caller_holds_in_its_transaction(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """Its rollback is of a savepoint, so the row an upload claimed stands."""
+        diver = create_user(db)
+        async_db.add(Tag(user_id=diver.id, name="Held"))
+        await async_db.flush()
+
+        await _import(async_db, diver, PAIR, apply=False)
+
+        assert await _count(async_db, Dive, diver) == 0
+        assert await _count(async_db, Tag, diver) == 1
+        await async_db.rollback()
 
 
 class TestTheFilesKept:
@@ -802,7 +913,7 @@ class TestTheFilesKept:
         assert await _count(async_db, DiveFile, diver) == 1
         assert report.members[0].not_kept is ImportMemberNotKept.ALREADY_STORED
         assert ImportNoteCode.FILE_SKIPPED in _codes(report)
-        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.CREATED]
+        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.NEW]
 
     @pytest.mark.asyncio
     async def test_a_file_the_recording_it_reaches_holds_adds_nothing_and_notes_nothing(
@@ -817,7 +928,7 @@ class TestTheFilesKept:
         assert report.members[0].not_kept is ImportMemberNotKept.ALREADY_STORED
         assert ImportNoteCode.FILE_SKIPPED not in _codes(report)
         [row] = report.dives
-        assert (row.outcome, row.reason) == (ImportDiveOutcome.LINKED, None)
+        assert (row.outcome, row.reason) == (ImportDiveOutcome.UNCHANGED, None)
 
 
 class TestAFileOnAFileLessRecording:
@@ -845,7 +956,7 @@ class TestAFileOnAFileLessRecording:
         assert recording["profile"]["parser_key"] == "fit"
         assert recording["profile"]["reader_version"] is not None
         [row] = report.dives
-        assert (row.outcome, row.files_added) == (ImportDiveOutcome.UPDATED, 1)
+        assert (row.outcome, _files_added(row)) == (ImportDiveOutcome.MODIFIED, 1)
 
 
 class TestRowsAndRefusals:
@@ -985,10 +1096,10 @@ class TestADeletedDiveStaysDeleted:
         [created] = (await _import(async_db, diver, files)).dives
         await _delete(async_db, created.uuid)
 
-        preview = await _import(async_db, diver, files, apply=False)
+        review = await _import(async_db, diver, files, apply=False)
         [skipped] = (await _import(async_db, diver, files)).dives
 
-        assert [row.outcome for row in preview.dives] == [ImportDiveOutcome.SKIPPED]
+        assert [row.outcome for row in review.dives] == [ImportDiveOutcome.SKIPPED]
         assert skipped.outcome is ImportDiveOutcome.SKIPPED
         assert skipped.reason is not None and "You deleted this record here" in skipped.reason
         assert await _dive_ids(async_db, diver) == []
@@ -1022,7 +1133,7 @@ class TestADeletedDiveStaysDeleted:
 
         [row] = (await _import(async_db, diver, [("download.zip", download)])).dives
 
-        assert (row.outcome, row.files_added) == (ImportDiveOutcome.UPDATED, 1)
+        assert (row.outcome, _files_added(row)) == (ImportDiveOutcome.MODIFIED, 1)
         assert row.uuid != downloaded.uuid
         assert len(await _dive_ids(async_db, diver)) == 2
         [stored] = (await _dive(async_db, eighth))["recordings"]
@@ -1033,16 +1144,16 @@ class TestADeletedDiveStaysDeleted:
 
 class TestTheDiveRows:
     @pytest.mark.asyncio
-    async def test_the_result_carries_the_preview_s_uuids(
+    async def test_the_result_carries_the_review_s_uuids(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         diver = create_user(db)
         files = [("a.json", _unique_export()), ("b.json", _unique_export("2026-09-11T09:30:00.000+03:00"))]
 
-        preview = await _import(async_db, diver, files, apply=False)
+        review = await _import(async_db, diver, files, apply=False)
         result = await _import(async_db, diver, files)
 
-        assert [row.uuid for row in result.dives] == [row.uuid for row in preview.dives]
+        assert [row.uuid for row in result.dives] == [row.uuid for row in review.dives]
         assert None not in [row.uuid for row in result.dives]
 
     @pytest.mark.asyncio
@@ -1062,7 +1173,7 @@ class TestTheDiveRows:
         report = await _import(async_db, diver, [("log.divejson", json_module.dumps(document).encode())])
 
         [row] = report.dives
-        assert (row.outcome, row.uuid, row.max_depth) == (ImportDiveOutcome.SKIPPED, None, 12.5)
+        assert (row.outcome, row.uuid, row.dive) == (ImportDiveOutcome.SKIPPED, None, None)
         assert row.reason is not None and "start time" in row.reason
 
 
@@ -1106,9 +1217,9 @@ class TestARicherReadingOfADive:
         richer = await _import(async_db, diver, [("log.divejson", self._logbook(4_010_000, tts=True))])
         poorer = await _import(async_db, diver, [("uddf.divejson", self._logbook(3_730_000, tts=False))])
 
-        assert [(row.outcome, row.uuid) for row in richer.dives] == [(ImportDiveOutcome.UPDATED, stored.uuid)]
+        assert [(row.outcome, row.uuid) for row in richer.dives] == [(ImportDiveOutcome.MODIFIED, stored.uuid)]
         assert [(row.outcome, row.uuid, row.reason) for row in poorer.dives] == [
-            (ImportDiveOutcome.LINKED, stored.uuid, None)
+            (ImportDiveOutcome.UNCHANGED, stored.uuid, None)
         ]
 
     @staticmethod
@@ -1154,7 +1265,7 @@ class TestARicherReadingOfADive:
         report = await _import(async_db, diver, [("dive.json", self._file(serial))])
 
         [row] = report.dives
-        assert (row.outcome, row.uuid, row.files_added) == (ImportDiveOutcome.UPDATED, stored.uuid, 1)
+        assert (row.outcome, row.uuid, _files_added(row)) == (ImportDiveOutcome.MODIFIED, stored.uuid, 1)
         [note] = [note for note in row.notes if note.code == ImportNoteCode.RECORDING_FILLED]
         assert "kept everything it already recorded" in note.message
         profile = await self._profile_of(async_db, stored.uuid)
@@ -1203,7 +1314,7 @@ class TestShearwaterCloud:
 
         report = await _import(async_db, diver, [("Perdix 3 2026-9-21.db", CLOUD_DATABASE)])
 
-        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.CREATED] * 2
+        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.NEW] * 2
         [member] = report.members
         assert (member.format, member.kept, member.not_kept) == (
             "shearwater_db",
@@ -1236,8 +1347,8 @@ class TestShearwaterCloud:
         report = await _import(async_db, diver, [("Perdix 3 2026-9-21.db", CLOUD_DATABASE)])
 
         assert sorted((row.outcome, row.uuid == stored.uuid) for row in report.dives) == [
-            (ImportDiveOutcome.CREATED, False),
-            (ImportDiveOutcome.UPDATED, True),
+            (ImportDiveOutcome.MODIFIED, True),
+            (ImportDiveOutcome.NEW, False),
         ]
         assert len(await _dive_ids(async_db, diver)) == 2
         eighth = (await self._profiles(async_db, diver))[1]
@@ -1254,7 +1365,7 @@ class TestShearwaterCloud:
         report = await _import(async_db, diver, [("Perdix 3 2026-9-21.xml", CLOUD_XML)])
 
         [row] = report.dives
-        assert (row.outcome, row.files_added) == (ImportDiveOutcome.UPDATED, 1)
+        assert (row.outcome, _files_added(row)) == (ImportDiveOutcome.MODIFIED, 1)
         assert len(await _dive_ids(async_db, diver)) == 2
         eighth = (await self._profiles(async_db, diver))[1]
         assert (eighth.parser_key, eighth.depth_sample_count, eighth.max_cns_pct10) == (IMPORT_PARSER_KEY, 402, 20)
@@ -1266,14 +1377,14 @@ class TestTheNotesOfADive:
     uuid nor, across a batch, unique."""
 
     @pytest.mark.asyncio
-    async def test_a_sighting_s_note_is_on_its_dive_in_the_preview_and_the_result(
+    async def test_a_sighting_s_note_is_on_its_dive_in_the_review_and_the_result(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         diver = create_user(db)
         files = [("log.divejson", _logbook_of(_sighted(), {"started_at": "2026-08-02T10:00:00+02:00"}))]
 
         for report in (await _import(async_db, diver, files, apply=False), await _import(async_db, diver, files)):
-            assert [row.outcome for row in report.dives] == [ImportDiveOutcome.CREATED] * 2
+            assert [row.outcome for row in report.dives] == [ImportDiveOutcome.NEW] * 2
             assert _on_rows(report) == [[], [ImportNoteCode.SPECIES_UNRESOLVED]]
 
     @pytest.mark.asyncio
@@ -1300,7 +1411,7 @@ class TestTheNotesOfADive:
         report = await _import(async_db, diver, [PAIR[1]])
 
         [row] = report.dives
-        assert (row.outcome, row.uuid) == (ImportDiveOutcome.UPDATED, stored.uuid)
+        assert (row.outcome, row.uuid) == (ImportDiveOutcome.MODIFIED, stored.uuid)
         assert _listed(row) == [(ImportNoteCode.RECORDING_FILLED, None)]
         assert report.notes == []
 
@@ -1317,7 +1428,7 @@ class TestTheNotesOfADive:
 
         report = await _import(async_db, diver, files, apply=False)
 
-        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.CREATED, ImportDiveOutcome.SKIPPED]
+        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.NEW, ImportDiveOutcome.SKIPPED]
         # The skip's sentence is the row's reason, and listed nowhere else.
         assert report.dives[1].reason is not None
         assert _on_rows(report) == [[ImportNoteCode.SPECIES_UNRESOLVED], []]
@@ -1410,7 +1521,7 @@ class TestOneListPerDive:
 
         [row] = (await _import(async_db, diver, [PAIR[0]], apply=False)).dives
 
-        assert row.outcome is ImportDiveOutcome.UPDATED
+        assert row.outcome is ImportDiveOutcome.MODIFIED
         assert _listed(row) == [(ImportNoteCode.RECORDING_FILLED, None), ("oxygen_figure_missing", "absent")]
 
     @pytest.mark.asyncio
@@ -1557,8 +1668,8 @@ class TestAFolderAfterItsFitFiles:
         [dive] = await _logbook(async_db, diver)
         assert [parser_key for _, parser_key, _ in dive["recordings"][0]["files"]] == ["fit", "suunto_json"]
         [row] = report.dives
-        assert (row.outcome, row.files_added, row.recordings_added, row.members) == (
-            ImportDiveOutcome.UPDATED,
+        assert (row.outcome, _files_added(row), _recordings_added(row), row.members) == (
+            ImportDiveOutcome.MODIFIED,
             1,
             0,
             [0, 1],
@@ -2047,10 +2158,10 @@ class TestADiveWithNoNumberIsNumberedAsTheFormWould:
     @pytest.mark.parametrize(
         ("first", "second", "outcome"),
         [
-            pytest.param(None, None, ImportDiveOutcome.LINKED, id="linked"),
-            pytest.param(("dive.fit", OCEAN_FIT), ("dive.json", OCEAN_JSON), ImportDiveOutcome.UPDATED, id="filled"),
+            pytest.param(None, None, ImportDiveOutcome.UNCHANGED, id="linked"),
+            pytest.param(("dive.fit", OCEAN_FIT), ("dive.json", OCEAN_JSON), ImportDiveOutcome.MODIFIED, id="filled"),
             pytest.param(
-                ("dive.fit", OCEAN_FIT), ("perdix.uddf", _perdix_uddf()), ImportDiveOutcome.UPDATED, id="attached"
+                ("dive.fit", OCEAN_FIT), ("perdix.uddf", _perdix_uddf()), ImportDiveOutcome.MODIFIED, id="attached"
             ),
         ],
     )
@@ -2214,16 +2325,16 @@ class TestTheDiveRowsReadAsTheLogbookLists:
     ]
 
     @pytest.mark.asyncio
-    async def test_the_preview_and_the_result_list_their_dives_newest_first(
+    async def test_the_review_and_the_result_list_their_dives_newest_first(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         diver = create_user(db)
         files = [("logbook.divejson", _logbook_of(*self.DIVES))]
 
-        preview = await _import(async_db, diver, files, apply=False)
+        review = await _import(async_db, diver, files, apply=False)
         result = await _import(async_db, diver, files)
 
-        for report in (preview, result):
+        for report in (review, result):
             assert [row.start_time.isoformat() for row in report.dives if row.start_time] == self.NEWEST_FIRST
         listed = await async_db.execute(
             select(Dive.uuid).where(Dive.user_id == diver.id).order_by(Dive.start_time.desc())

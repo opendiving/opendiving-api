@@ -189,7 +189,7 @@ async def _patch_start_time(
     )
 
 
-async def _preview(db: AsyncSession, user_id: int, data: bytes, filename: str = "logbook.divejson") -> Any:
+async def _review(db: AsyncSession, user_id: int, data: bytes, filename: str = "logbook.divejson") -> Any:
     with await load_one(data, filename) as loaded:
         return await plan_import(db, user_id=user_id, loaded=loaded)
 
@@ -202,7 +202,7 @@ async def _apply(
     check_in: ImportCheckInSubmission | None = None,
     portrait: ImportPortraitChoice | None = None,
 ) -> Any:
-    """Plan and write in one transaction, exactly as `POST /import/logbook` does.
+    """Plan and write in one transaction, exactly as `POST /imports` does.
 
     The species pre-pass is deliberately absent: it makes an outbound call, and every
     species in these tests is either already in the catalog or meant to be reported as
@@ -225,8 +225,7 @@ async def _apply(
 
 def _counts(plan: Any) -> dict[str, tuple[int, int, int, int]]:
     return {
-        report.collection: (report.created, report.linked, report.restored, report.skipped)
-        for report in plan.collection_reports()
+        report.collection: (report.created, report.linked, 0, report.skipped) for report in plan.collection_reports()
     }
 
 
@@ -345,7 +344,7 @@ class TestConvertedUploads:
     async def test_converting_twice_plans_identically(
         self, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Why apply can re-convert instead of spooling the preview's result.
+        """Why the apply can re-convert instead of keeping the upload's result.
 
         `exported_at` is the one value in a converted document that is not a function of the
         source, and nothing downstream reads it - which is what makes the token over the
@@ -540,24 +539,24 @@ class TestIdempotence:
         record = parsed[collection][0]
         del record[member]
 
-        plan = await _preview(async_db, user.id, json.dumps(parsed).encode())
+        plan = await _review(async_db, user.id, json.dumps(parsed).encode())
 
         assert _counts(plan)[collection] == (0, len(parsed[collection]), 0, 0)
         notes = [note.code for note in plan.notes if note.uuid == uuid_pkg.UUID(record["uuid"])]
         assert notes == [ImportNoteCode.RECORD_LINKED]
 
     @pytest.mark.asyncio
-    async def test_a_cross_account_import_run_twice_duplicates_and_the_preview_says_so(
+    async def test_a_cross_account_import_run_twice_duplicates_and_the_review_says_so(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
         """The branch where idempotence is impossible by construction, pinned so that the
-        honest guard - a preview that reports the full creation set again - cannot quietly
+        honest guard - a review that reports the full creation set again - cannot quietly
         become a wrong claim."""
         _, document = seeded
         destination = create_user(db)
         await _apply(async_db, destination.id, document)
 
-        second = await _preview(async_db, destination.id, document)
+        second = await _review(async_db, destination.id, document)
 
         assert _counts(second)["dives"] == (1, 0, 0, 0)
 
@@ -882,8 +881,8 @@ class TestUniquenessNeverFailsAnImport:
         linked = _site_document({"name": "Blue Hole", "location": location})
         created = _site_document({"name": "Canyon", "location": location})
 
-        linking = await _preview(async_db, destination.id, linked)
-        creating = await _preview(async_db, destination.id, created)
+        linking = await _review(async_db, destination.id, linked)
+        creating = await _review(async_db, destination.id, created)
 
         assert _counts(linking)["sites"] == (0, 1, 0, 0)
         assert ImportNoteCode.VALUE_DROPPED not in _codes(linking)
@@ -1171,8 +1170,8 @@ class TestFilesFollowTheirBytes:
         ).encode()
         destination = create_user(db)
 
-        bare = await _preview(async_db, destination.id, document)
-        archived = await _preview(async_db, destination.id, _zip_of(document, {}), filename="logbook.zip")
+        bare = await _review(async_db, destination.id, document)
+        archived = await _review(async_db, destination.id, _zip_of(document, {}), filename="logbook.zip")
 
         assert _counts(bare)["certifications"] == (0, 0, 0, 2)
         assert (bare.files_referenced, bare.files_not_contained, bare.files_skipped) == (2, 2, 0)
@@ -1828,7 +1827,7 @@ class TestTheDecompressionMembersRoundTrip:
 
 class TestSpeciesLinks:
     """The catalog is global and ownerless, so a sighting is the one reference an import can
-    lose without losing the dive - and the one whose *preview* has to say something the
+    lose without losing the dive - and the one whose *review* has to say something the
     apply will agree with."""
 
     @pytest.mark.asyncio
@@ -1856,10 +1855,10 @@ class TestSpeciesLinks:
         assert linked == {catalog_id}
 
     @pytest.mark.asyncio
-    async def test_a_preview_does_not_claim_a_pending_lookup_was_dropped(
+    async def test_a_review_does_not_claim_a_pending_lookup_was_dropped(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
-        """The preview counts an unknown AphiaID as one it *will* look up. A per-dive note
+        """The review counts an unknown AphiaID as one it *will* look up. A per-dive note
         saying the sighting "was not imported" would contradict that in the same report -
         and would spend one note per dive against the cap for a logbook full of new
         species."""
@@ -1868,7 +1867,7 @@ class TestSpeciesLinks:
         _name_in_worms(parsed["species"][0], 900_000_000 + int(uuid7().hex[-6:], 16))
         destination = create_user(db)
 
-        plan = await _preview(async_db, destination.id, json.dumps(parsed).encode())
+        plan = await _review(async_db, destination.id, json.dumps(parsed).encode())
 
         assert _counts(plan)["species"] == (1, 0, 0, 0)
         assert not [
@@ -2141,7 +2140,7 @@ class TestSpeciesLinks:
         ]
 
     @pytest.mark.asyncio
-    async def test_a_preview_reports_a_repeat_the_apply_will_drop(
+    async def test_a_review_reports_a_repeat_the_apply_will_drop(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
         """Keyed on the AphiaID, so a species the pre-pass has not looked up yet is caught
@@ -2153,7 +2152,7 @@ class TestSpeciesLinks:
         parsed["dives"][0]["sightings"] = [{"species_uuid": species["uuid"]}, {"species_uuid": species["uuid"]}]
         destination = create_user(db)
 
-        plan = await _preview(async_db, destination.id, json.dumps(parsed).encode())
+        plan = await _review(async_db, destination.id, json.dumps(parsed).encode())
 
         assert [note.message for note in plan.notes if note.code is ImportNoteCode.VALUE_DROPPED] == [
             f"A second sighting of {species['scientific_name']} was dropped: a dive records each species once, and "
@@ -3051,17 +3050,17 @@ class TestContacts:
     ) -> None:
         """Every backup made before contacts carries its training centers as strings, and the
         format counts them among a diver's identity documents - so one contact per distinct
-        string, a school, which the course and the card both name. The preview predicts it."""
+        string, a school, which the course and the card both name. The review predicts it."""
         _, document = seeded
         legacy = _legacy(document, "Blue Ocean")
         destination = create_user(db)
 
-        preview = await _preview(async_db, destination.id, legacy)
-        # A preview predicts; it creates nothing.
+        review = await _review(async_db, destination.id, legacy)
+        # A review predicts; it creates nothing.
         assert (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalars().all() == []
         plan = await _apply(async_db, destination.id, legacy)
 
-        assert _counts(preview)["contacts"] == _counts(plan)["contacts"] == (1, 0, 0, 0)
+        assert _counts(review)["contacts"] == _counts(plan)["contacts"] == (1, 0, 0, 0)
         (contact,) = (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalars().all()
         assert (contact.name, contact.roles) == ("Blue Ocean", ["school"])
         course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalar_one()
@@ -3378,7 +3377,7 @@ class TestPeople:
         assert on_dive == person.id
 
     @pytest.mark.asyncio
-    async def test_the_preview_spends_nothing_and_says_what_is_past_the_limit(
+    async def test_the_review_spends_nothing_and_says_what_is_past_the_limit(
         self, seeded: Any, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _, document = seeded
@@ -3391,10 +3390,10 @@ class TestPeople:
         monkeypatch.setattr(planner_module, "link_budget_remaining", AsyncMock(return_value=1))
         monkeypatch.setattr(planner_module, "claim_link_slot", claim)
 
-        preview = await _preview(async_db, destination.id, _with_people(document, people))
+        review = await _review(async_db, destination.id, _with_people(document, people))
 
         claim.assert_not_awaited()
-        notes = [note for note in preview.notes if note.collection == "people"]
+        notes = [note for note in review.notes if note.collection == "people"]
         assert [note.code for note in notes] == [ImportNoteCode.ACCOUNT_LINKED, ImportNoteCode.VALUE_DROPPED]
         assert "will be linked" in notes[0].message
         assert await _people_of(async_db, destination.id) == {}
@@ -3426,7 +3425,7 @@ class TestPeople:
     ) -> None:
         """Every backup made before people carries its instructors as strings, and a name the
         diver already has is that person, listed on the course and named by the card. The
-        preview predicts the same."""
+        review predicts the same."""
         _, document = seeded
         parsed = json.loads(document)
         parsed.pop("people", None)
@@ -3439,10 +3438,10 @@ class TestPeople:
         existing = create_person(db, destination, name="JAE KIM")
         existing_id = existing.id
 
-        preview = await _preview(async_db, destination.id, legacy)
+        review = await _review(async_db, destination.id, legacy)
         plan = await _apply(async_db, destination.id, legacy)
 
-        assert _counts(preview)["people"] == _counts(plan)["people"] == (0, 0, 0, 0)
+        assert _counts(review)["people"] == _counts(plan)["people"] == (0, 0, 0, 0)
         course = (await async_db.execute(select(Course).where(Course.user_id == destination.id))).scalar_one()
         card = (
             await async_db.execute(select(Certification).where(Certification.user_id == destination.id))
@@ -3556,14 +3555,14 @@ class TestTheClassificationConditionsAndTags:
     ) -> None:
         """The tag on no dive comes back from the diver's extension alone, the first value the
         import reads from that block. The report counts no tag row - a tag is a member of a
-        dive, not a collection - and the preview names every tag it will add instead."""
+        dive, not a collection - and the review names every tag it will add instead."""
         document = await _export(async_db, _seed_tagged_logbook(db).id)
         destination = create_user(db)
 
-        preview = await _preview(async_db, destination.id, document)
+        review = await _review(async_db, destination.id, document)
         plan = await _apply(async_db, destination.id, document)
 
-        (note,) = [note for note in preview.notes if note.code is ImportNoteCode.TAGS_CREATED]
+        (note,) = [note for note in review.notes if note.code is ImportNoteCode.TAGS_CREATED]
         assert note.message == 'This import adds these tags to your list: "Wreck", "night dive", "drift".'
         assert "tags" not in _counts(plan)
         assert await _tags_of(async_db, destination.id) == ["drift", "night dive", "Wreck"]
@@ -4343,7 +4342,7 @@ class TestTwoRecordsClaimingOneIdentifier:
         )
         destination = create_user(db)
 
-        assert _counts(await _preview(async_db, destination.id, document))["sites"] == (2, 0, 0, 0)
+        assert _counts(await _review(async_db, destination.id, document))["sites"] == (2, 0, 0, 0)
         plan = await _apply(async_db, destination.id, document)
 
         assert ImportNoteCode.RECORD_REMAPPED_REFERENCES_STAY in _codes(plan)
@@ -4506,7 +4505,7 @@ def _details(plan: Any) -> dict[str, Any]:
 
 
 def _as_proposed(plan: Any) -> ImportCheckInSubmission:
-    """Every member the preview offered, kept exactly as proposed."""
+    """Every member the review offered, kept exactly as proposed."""
     return ImportCheckInSubmission.model_validate(
         {detail: entry.model_dump(mode="json")["proposed"] for detail, entry in _details(plan).items()}
     )
@@ -4517,14 +4516,14 @@ def _dropped(plan: Any) -> list[str]:
 
 
 class TestTheCheckInDetails:
-    """Offered in the preview beside the account's own, and written only as submitted.
+    """Offered in the review beside the account's own, and written only as submitted.
 
     The importer cannot tell a restore from a buddy's file, so nothing here is written on
     the document's say-so: a client that shows no section and sends nothing writes nothing.
     """
 
     @pytest.mark.asyncio
-    async def test_the_preview_offers_each_member_the_document_carries(
+    async def test_the_review_offers_each_member_the_document_carries(
         self, db: Session, async_db: AsyncSession
     ) -> None:
         source = create_user(db)
@@ -4532,7 +4531,7 @@ class TestTheCheckInDetails:
         document = await _export(async_db, source.id)
         destination = create_user(db)
 
-        plan = await _preview(async_db, destination.id, document)
+        plan = await _review(async_db, destination.id, document)
         details = _details(plan)
 
         assert list(details) == ["email", "phone", "date_of_birth", "emergency_contacts", "insurance_policies"]
@@ -4624,7 +4623,7 @@ class TestTheCheckInDetails:
         _fill_check_in(db, source, **FILLED_CHECK_IN)
         document = await _export(async_db, source.id)
         destination = create_user(db)
-        submission = _as_proposed(await _preview(async_db, destination.id, document))
+        submission = _as_proposed(await _review(async_db, destination.id, document))
 
         await _apply(async_db, destination.id, document, check_in=submission)
         second = await _apply(async_db, destination.id, document, check_in=submission)
@@ -4652,7 +4651,7 @@ class TestTheCheckInDetails:
             ]
         )
 
-        policies = _details(await _preview(async_db, destination.id, document))["insurance_policies"]
+        policies = _details(await _review(async_db, destination.id, document))["insurance_policies"]
 
         assert policies.model_dump()["account"] == [dan, assure]
         assert policies.model_dump()["proposed"] == [
@@ -4675,7 +4674,7 @@ class TestTheCheckInDetails:
             insurances=[{"provider": " ", "number": "DE-4471902"}],
         )
 
-        plan = await _preview(async_db, destination.id, document)
+        plan = await _review(async_db, destination.id, document)
 
         assert list(_details(plan)) == ["emergency_contacts"]
         assert [row.name for row in _details(plan)["emergency_contacts"].proposed] == names[:-1]
@@ -4690,7 +4689,7 @@ class TestTheCheckInDetails:
         `email`. Applied by default, it would put the sign-in address on the sheet."""
         destination = create_user(db)
 
-        plan = await _preview(async_db, destination.id, _diver_document(email=destination.email.upper()))
+        plan = await _review(async_db, destination.id, _diver_document(email=destination.email.upper()))
 
         assert "email" not in _details(plan)
         assert any("signs in with" in message for message in _dropped(plan))
@@ -4702,7 +4701,7 @@ class TestTheCheckInDetails:
         destination = create_user(db)
         _fill_check_in(db, destination, email=destination.email)
 
-        plan = await _preview(async_db, destination.id, _diver_document(email=destination.email.upper()))
+        plan = await _review(async_db, destination.id, _diver_document(email=destination.email.upper()))
 
         email = _details(plan)["email"]
         assert (email.account, email.proposed) == (destination.email, destination.email)
@@ -4728,7 +4727,7 @@ class TestTheCheckInDetails:
     ) -> None:
         destination = create_user(db)
 
-        plan = await _preview(async_db, destination.id, _diver_document(email=" Desk@EXAMPLE.org "))
+        plan = await _review(async_db, destination.id, _diver_document(email=" Desk@EXAMPLE.org "))
 
         assert _details(plan)["email"].proposed == "Desk@example.org"
 
@@ -4776,11 +4775,11 @@ class TestTheCheckInDetails:
         bundle = await load_export_bundle(async_db, user_id=owner.id)
         uddf = b"".join([chunk async for chunk in write_uddf(async_db, bundle, exported_at=datetime.now(UTC))])
 
-        preview = await _preview(async_db, owner.id, uddf, "logbook.uddf")
-        plan = await _apply(async_db, owner.id, uddf, "logbook.uddf", check_in=_as_proposed(preview))
+        review = await _review(async_db, owner.id, uddf, "logbook.uddf")
+        plan = await _apply(async_db, owner.id, uddf, "logbook.uddf", check_in=_as_proposed(review))
 
-        assert list(_details(preview)) == ["email", "phone", "date_of_birth", "insurance_policies"]
-        assert [policy.number for policy in _details(preview)["insurance_policies"].proposed] == ["DE-4471902", "DA-1"]
+        assert list(_details(review)) == ["email", "phone", "date_of_birth", "insurance_policies"]
+        assert [policy.number for policy in _details(review)["insurance_policies"].proposed] == ["DE-4471902", "DA-1"]
         assert await _check_in(async_db, owner.id) == FILLED_CHECK_IN
         assert ImportNoteCode.CHECK_IN_DETAIL_WRITTEN not in _codes(plan)
 
@@ -4864,7 +4863,7 @@ class TestThePortrait:
         return tmp_path
 
     @pytest.mark.asyncio
-    async def test_the_preview_offers_the_archive_s_beside_the_account_s(
+    async def test_the_review_offers_the_archive_s_beside_the_account_s(
         self, db: Session, async_db: AsyncSession
     ) -> None:
         source, destination = create_user(db), create_user(db)
@@ -4872,7 +4871,7 @@ class TestThePortrait:
         await _give_portrait(async_db, destination.id, OTHER_PORTRAIT, OTHER_CROP)
         archive = await _archive(async_db, source.id)
 
-        plan = await _preview(async_db, destination.id, archive, "logbook.zip")
+        plan = await _review(async_db, destination.id, archive, "logbook.zip")
         offer = await plan.portrait_offer()
 
         assert offer is not None
@@ -4890,7 +4889,7 @@ class TestThePortrait:
         await _give_portrait(async_db, source.id, SOURCE_PORTRAIT, SOURCE_CROP)
         await _give_portrait(async_db, destination.id, OTHER_PORTRAIT, OTHER_CROP)
         archive = await _archive(async_db, source.id)
-        offer = await (await _preview(async_db, destination.id, archive, "logbook.zip")).portrait_offer()
+        offer = await (await _review(async_db, destination.id, archive, "logbook.zip")).portrait_offer()
         assert offer is not None
         before = await _portrait_row(async_db, destination.id)
 
@@ -4961,13 +4960,13 @@ class TestThePortrait:
         assert (await _check_in(async_db, destination.id))["phone"] == "+20 100 123 4567"
 
     @pytest.mark.asyncio
-    async def test_a_portrait_changed_since_the_preview_is_kept_with_a_note(
+    async def test_a_portrait_changed_since_the_review_is_kept_with_a_note(
         self, db: Session, async_db: AsyncSession
     ) -> None:
         source, destination = create_user(db), create_user(db)
         await _give_portrait(async_db, source.id, SOURCE_PORTRAIT, SOURCE_CROP)
         archive = await _archive(async_db, source.id)
-        offer = await (await _preview(async_db, destination.id, archive, "logbook.zip")).portrait_offer()
+        offer = await (await _review(async_db, destination.id, archive, "logbook.zip")).portrait_offer()
         assert offer is not None and offer.account_sha256 is None
         await _give_portrait(async_db, destination.id, OTHER_PORTRAIT, OTHER_CROP)
         before = await _portrait_row(async_db, destination.id)
@@ -5021,12 +5020,12 @@ class TestThePortrait:
         await _give_portrait(async_db, source.id, SOURCE_PORTRAIT, SOURCE_CROP)
         document = await _export(async_db, source.id)
 
-        preview = await _preview(async_db, destination.id, document)
+        review = await _review(async_db, destination.id, document)
         plan = await _apply(async_db, destination.id, document, portrait=_take(None))
 
-        assert preview.portrait is None
-        assert ImportNoteCode.FILE_NOT_CONTAINED in _codes(preview)
-        assert (preview.files_referenced, preview.files_not_contained) == (0, 0)
+        assert review.portrait is None
+        assert ImportNoteCode.FILE_NOT_CONTAINED in _codes(review)
+        assert (review.files_referenced, review.files_not_contained) == (0, 0)
         assert ImportNoteCode.FILE_NOT_CONTAINED in _codes(plan)
         assert await _portrait_row(async_db, destination.id) is None
 
@@ -5040,11 +5039,11 @@ class TestThePortrait:
         archive = await _archive(async_db, owner.id)
         before = await _portrait_row(async_db, owner.id)
 
-        preview = await _preview(async_db, owner.id, archive, "logbook.zip")
+        review = await _review(async_db, owner.id, archive, "logbook.zip")
         first = await _apply(async_db, owner.id, archive, "logbook.zip", portrait=_take(before.rendition_sha256))
         second = await _apply(async_db, owner.id, archive, "logbook.zip", portrait=_take(before.rendition_sha256))
 
-        assert preview.portrait is None
+        assert review.portrait is None
         assert await _portrait_row(async_db, owner.id) == before
         for plan in (first, second):
             assert _codes(plan).isdisjoint({ImportNoteCode.CHECK_IN_DETAIL_WRITTEN, ImportNoteCode.PORTRAIT_KEPT})
@@ -5060,7 +5059,7 @@ class TestThePortrait:
             async_db, user_id=owner.id, frame=PORTRAIT_FRAME, crop=PictureCrop(x=0, y=0, width=420, height=540)
         )
         before = await _portrait_row(async_db, owner.id)
-        offer = await (await _preview(async_db, owner.id, archive, "logbook.zip")).portrait_offer()
+        offer = await (await _review(async_db, owner.id, archive, "logbook.zip")).portrait_offer()
         assert offer is not None
 
         await _apply(async_db, owner.id, archive, "logbook.zip", portrait=_take(offer.account_sha256))
@@ -5085,14 +5084,14 @@ class TestThePortrait:
     async def test_a_portrait_that_cannot_be_stored_is_noted_and_never_offered(
         self, db: Session, async_db: AsyncSession, member: bytes | None, sha256: str | None
     ) -> None:
-        """Noted at the preview, where the pipeline first runs, and the apply agrees."""
+        """Noted at the review, where the pipeline first runs, and the apply agrees."""
         destination = create_user(db)
         archive = _foreign_archive(member, sha256=sha256)
 
-        preview = await _preview(async_db, destination.id, archive, "logbook.zip")
+        review = await _review(async_db, destination.id, archive, "logbook.zip")
         plan = await _apply(async_db, destination.id, archive, "logbook.zip", portrait=_take(None))
 
-        for report in (preview, plan):
+        for report in (review, plan):
             assert report.portrait is None
             assert ImportNoteCode.FILE_SKIPPED in _codes(report)
             assert (report.files_referenced, report.files_skipped) == (0, 0)

@@ -1,11 +1,11 @@
-"""The check-in details a document carries: offered in the preview, written as confirmed.
+"""The check-in details a document carries: offered in the review, written as confirmed.
 
 The importer cannot tell a restore of this account's own export from a buddy's file or a
-stranger's UDDF, so no detail is written on the document's say-so. The preview shows, for
+stranger's UDDF, so no detail is written on the document's say-so. The review shows, for
 each member of the check-in details the document carries, the account's value beside a
-proposal; the apply writes exactly the members submitted beside the token and changed by
-them, so a client that never showed the section writes nothing, and a member the document
-does not carry is neither shown nor written.
+proposal; the apply writes exactly the members submitted and changed by them, so a client
+that never showed the section writes nothing, and a member the document does not carry is
+neither shown nor written.
 
 **A list is proposed as a list, row by row against the account's rows.** For each document
 row, in document order, the first account row not already matched whose members equal every
@@ -128,7 +128,7 @@ def _matched[R: (EmergencyContact, InsurancePolicy)](document: list[R], account:
 
 
 def propose(diver: ImportDiver, account: CheckinDetailsRead, sign_in: str, note: Note) -> list[ImportCheckInDetail]:
-    """The preview's section: one entry per member `diver` carries, in the object's order.
+    """The review's section: one entry per member `diver` carries, in the object's order.
 
     `sign_in` is the account's sign-in address, which is never proposed as its check-in email.
     """
@@ -208,8 +208,8 @@ def to_write(
         label, verb = _LABELS[member], "were" if isinstance(value, list) else "was"
         note(
             ImportNoteCode.CHECK_IN_DETAIL_WRITTEN,
-            f"The {label} {verb} cleared from this account, as confirmed in the preview."
+            f"The {label} {verb} cleared from this account, as confirmed in the review."
             if value is None or value == []
-            else f"The {label} confirmed in the preview {verb} saved to this account.",
+            else f"The {label} confirmed in the review {verb} saved to this account.",
         )
     return values

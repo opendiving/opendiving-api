@@ -31,8 +31,8 @@ class DiveProfile(Base, PublicUUIDMixin, TimestampMixin):
     **The exception is logbook import of a document, or of a file it does not keep**, which
     does write samples the client supplied. It is the one sanctioned path, on the terms
     `DECISIONS.md` records under *"Importing a logbook is the one client-supplied profile"*:
-    the samples land in the importer's own logbook and nowhere else, through a two-phase
-    preview/apply, with every channel re-validated and re-normalized before it is stored.
+    the samples land in the importer's own logbook and nowhere else, through a reviewed
+    upload and an apply, with every channel re-validated and re-normalized before it is stored.
     Deliberately not "the caller's own backup" - that route converts a UDDF file or a
     `.ssrf` on the way in, so the document may have been written by another application
     entirely, and the argument is about whose logbook it lands in rather than about who

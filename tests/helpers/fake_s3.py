@@ -19,6 +19,7 @@ of S3 for six calls. See *"A second backend, because the hosted disk is not shar
 `DECISIONS.md`.
 """
 
+import io
 from datetime import UTC, datetime
 from typing import Any
 
@@ -42,11 +43,11 @@ class _Body:
     """What `get_object` hands back under `"Body"`: a stream the caller reads and closes."""
 
     def __init__(self, data: bytes) -> None:
-        self._data = data
+        self._data = io.BytesIO(data)
         self.closed = False
 
-    def read(self) -> bytes:
-        return self._data
+    def read(self, amount: int | None = None) -> bytes:
+        return self._data.read(amount)
 
     def close(self) -> None:
         self.closed = True
@@ -121,7 +122,8 @@ class FakeS3Client:
     def put_object(self, **kwargs: Any) -> dict[str, Any]:
         self.record("put_object", kwargs)
         self._check_bucket(kwargs["Bucket"], "PutObject")
-        self.objects[kwargs["Key"]] = bytes(kwargs["Body"])
+        body = kwargs["Body"]
+        self.objects[kwargs["Key"]] = body.read() if hasattr(body, "read") else bytes(body)
         self.modified[kwargs["Key"]] = datetime.now(UTC)
         return {}
 

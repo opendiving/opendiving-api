@@ -20,6 +20,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 from ..models.certification import Certification
 from ..models.certification_file import CertificationFile
 from ..models.dive_file import DiveFile
+from ..models.logbook_import import LogbookImport, LogbookImportFile
 from ..models.map_tile import MapTile
 from ..models.species import Species
 from ..models.user_picture import UserPicture
@@ -38,6 +39,13 @@ BLOB_KEY_COLUMNS: tuple[BlobKeyColumn, ...] = (
         CertificationFile.storage_key,
         lambda user_id: CertificationFile.certification_id.in_(
             select(Certification.id).where(Certification.user_id == user_id)
+        ),
+    ),
+    # Nor has `logbook_import_file`; it hangs off `logbook_import`.
+    BlobKeyColumn(
+        LogbookImportFile.storage_key,
+        lambda user_id: LogbookImportFile.logbook_import_id.in_(
+            select(LogbookImport.id).where(LogbookImport.user_id == user_id)
         ),
     ),
     BlobKeyColumn(UserPicture.rendition_storage_key, lambda user_id: UserPicture.user_id == user_id),

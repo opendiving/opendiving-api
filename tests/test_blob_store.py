@@ -13,6 +13,7 @@ Three things are worth pinning and the rest is plumbing:
   data loss, and the one report that would stop anyone investigating is a 404.
 """
 
+import io
 import os
 import threading
 import time
@@ -145,6 +146,48 @@ def _suunto_like_json(samples: int = 2000) -> bytes:
         for n in range(samples)
     )
     return f'{{"DeviceLog":{{"Header":{{"Mode":"Air"}},"Samples":[{body}]}}}}'.encode()
+
+
+class TestAFileObject:
+    """What an import's held upload goes through, its bytes on a spool and never in one `bytes`."""
+
+    @pytest.mark.asyncio
+    async def test_what_goes_in_comes_back_out(self, volume: Path) -> None:
+        key = blob_store.new_key("import-files", sha256="a" * 64)
+        data = bytes(range(256)) * 9000
+        out = io.BytesIO()
+
+        await blob_store.put_file(key, io.BytesIO(data))
+        await blob_store.get_file(key, out)
+
+        assert out.getvalue() == data
+        assert await blob_store.get(key) == data
+
+    @pytest.mark.asyncio
+    async def test_a_failed_read_of_the_source_leaves_neither_object_nor_temp_file(self, volume: Path) -> None:
+        class Failing(io.BytesIO):
+            def read(self, size: int | None = -1) -> bytes:
+                raise OSError("the spool went away")
+
+        key = blob_store.new_key("import-files", sha256="a" * 64)
+
+        with pytest.raises(OSError, match="spool"):
+            await blob_store.put_file(key, Failing(b"x"))
+
+        assert not await blob_store.has(key)
+        assert list((volume / blob_store.TMP_DIRNAME).iterdir()) == []
+
+    @pytest.mark.asyncio
+    async def test_reading_a_key_with_no_file_raises_blob_missing(self, volume: Path) -> None:
+        with pytest.raises(blob_store.BlobMissingError):
+            await blob_store.get_file(blob_store.new_key("import-files", sha256="a" * 64), io.BytesIO())
+
+    @pytest.mark.asyncio
+    async def test_a_compressed_kind_is_refused_rather_than_written_raw(self, volume: Path) -> None:
+        key = blob_store.new_key("dive-files", sha256="a" * 64)
+
+        with pytest.raises(ValueError, match="compressed"):
+            await blob_store.put_file(key, io.BytesIO(b"x"))
 
 
 class TestCompression:

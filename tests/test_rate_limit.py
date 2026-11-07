@@ -195,7 +195,7 @@ class TestRedisIsDown:
 
 class TestTheAnsweringForms:
     """What a caller for whom an exhausted window is an ordinary branch uses: a logbook
-    import's links, spent at the apply and only read at the preview."""
+    import's links, spent at the apply and only read at the upload."""
 
     @pytest.mark.asyncio
     async def test_a_claim_answers_rather_than_raises(self):

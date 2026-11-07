@@ -53,7 +53,7 @@ async def claim_link_slot(user_id: int) -> bool:
 
 
 async def link_budget_remaining(user_id: int) -> int:
-    """What the window has left, unspent - the preview's half of `claim_link_slot`."""
+    """What the window has left, unspent - the upload's half of `claim_link_slot`."""
     return await remaining_in_window(_link_key(user_id), settings.PERSON_LINK_RATE_LIMIT_PER_USER)
 
 

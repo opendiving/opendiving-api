@@ -108,11 +108,12 @@ else; what is here is the source, and the notes for working on it.
   maintains, and this is its reference implementation: a lossless structured copy of the whole
   logbook, where UDDF measurably loses trips, gear, weights and UTC offsets.
 - **Logbook import** — put any number of files into an account at once, in any mix of the formats it
-  reads, in two phases: a preview that reports exactly what would be created, linked to something
-  you already have or skipped, file by file and dive by dive, and then an apply that writes the lot
-  in one transaction. A DiveJSON document or a full-export archive goes in as it is; a UDDF file, a
-  Subsurface `.ssrf`, a FIT file, a Suunto app export, a Suunto DM5 XML export, a Shearwater Cloud
-  database or XML export, or a `.zip` of any of those is converted on the way in by the
+  reads. They are uploaded once and held on the server, with a review of each dive that is new, what
+  changes on the ones you have, and what is skipped, which any device of the account can read; the
+  apply writes the lot as reviewed in one transaction, and the import stays in its history. A
+  DiveJSON document or a full-export archive goes in as it is; a UDDF file, a Subsurface `.ssrf`, a
+  FIT file, a Suunto app export, a Suunto DM5 XML export, a Shearwater Cloud database or XML export,
+  or a `.zip` of any of those is converted on the way in by the
   [`divejson`](https://pypi.org/project/divejson/) package, and each dive's row lists what its files
   did not record, what the import worked out, and which of the dive's values it left out. A file
   that is one dive is kept on the dive it becomes, and one recording exported twice - a Suunto's FIT
@@ -303,15 +304,19 @@ And a whole logbook, in and out:
 # Out: one DiveJSON document, or a zip with the stored files beside it
 curl -OJ http://localhost:8000/api/v1/export/divejson -H "Authorization: Bearer $TOKEN"
 
-# Back in, in two phases. The preview writes nothing and reports what it would do;
-# the token it returns says which files that report was about. Send `file` once per
-# file, in any format the converter reads - `dives.uddf`, `Dive.fit` beside `Dive.json`,
-# `garmin-export.zip` - and each dive's row in the report lists what its files did not record.
-curl -X POST http://localhost:8000/api/v1/import/logbook/preview \
+# Back in. The upload holds the files and answers with the review, writing nothing to the
+# logbook; `uuid` in the answer names the import. Send `file` once per file, in any format the
+# converter reads - `dives.uddf`, `Dive.fit` beside `Dive.json`, `garmin-export.zip`.
+curl -X POST http://localhost:8000/api/v1/imports \
   -H "Authorization: Bearer $TOKEN" -F "file=@Dive.fit" -F "file=@Dive.json"
 
-curl -X POST http://localhost:8000/api/v1/import/logbook \
-  -H "Authorization: Bearer $TOKEN" -F "file=@Dive.fit" -F "file=@Dive.json" -F "token=$PREVIEW_TOKEN"
+# Read it again from anywhere, with what its files did not record in its log.
+curl http://localhost:8000/api/v1/imports/pending -H "Authorization: Bearer $TOKEN"
+curl http://localhost:8000/api/v1/import/{uuid}/notes -H "Authorization: Bearer $TOKEN"
+
+# Write it as reviewed. No bytes travel again.
+curl -X POST http://localhost:8000/api/v1/import/{uuid}/apply \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{}'
 ```
 
 ## Development notes

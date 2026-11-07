@@ -1,7 +1,7 @@
 import hashlib
 import uuid as uuid_pkg
 from datetime import date, datetime
-from typing import Annotated, Any, cast
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -31,8 +31,7 @@ from ...core.utils.datetime_offset import (
 from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...core.utils.uploads import content_disposition_attachment, read_upload_within_limit
-from ...crud.crud_contacts import get_contact_uuids_by_ids
-from ...crud.crud_courses import get_course_uuids_by_ids, resolve_course_id_for_user
+from ...crud.crud_courses import resolve_course_id_for_user
 from ...crud.crud_dive_dive_sites import (
     get_dive_sites_for_dive,
     replace_dive_sites_for_dive,
@@ -67,7 +66,7 @@ from ...crud.crud_gear_items import get_gear_item_types_for_user, resolve_gear_i
 from ...crud.crud_people import get_people_for_dives, replace_people_for_dive, resolve_person_ids_for_user
 from ...crud.crud_species import resolve_species_ids
 from ...crud.crud_tags import get_tags_for_dives, replace_tags_for_dive, resolve_tag_id_for_user, resolve_tag_ids
-from ...crud.crud_trips import get_trip_uuids_by_ids, resolve_trip_id_for_user
+from ...crud.crud_trips import resolve_trip_id_for_user
 from ...models.dive import Dive
 from ...models.dive_draft import DiveDraft
 from ...schemas.dive import (
@@ -84,24 +83,21 @@ from ...schemas.dive import (
     DiveReadWithMixtures,
     DiveRenumberRequest,
     DiveRenumberResult,
-    DiveSiteInfo,
     DiveStartTime,
     DiveType,
     DiveUpdateRequest,
     RecordingRead,
     RecordingUpdateRequest,
-    SightingRead,
     SightingWrite,
     validate_depth_pair,
 )
-from ...schemas.dive_conditions import DiveConditionsRead
 from ...schemas.dive_draft import DIVE_DRAFT_NOT_FOUND, DiveDraftReadInternal
-from ...schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, RecentVolumes
+from ...schemas.dive_mixture import DiveMixtureCreate, RecentVolumes
 from ...schemas.dive_profile import RecordingProfileRead
-from ...schemas.gear_item import GearItemInfo, GearType
+from ...schemas.gear_item import GearType
 from ...schemas.lookup import LookupUntil, lookup_bound
 from ...schemas.parsed_dive import ParsedDevice, ParsedDiveMatch, ParsedDiveResponse, ParsedDiveSchema
-from ...schemas.person import PERSON_NOT_FOUND, PersonReferenceRead
+from ...schemas.person import PERSON_NOT_FOUND
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import (
     invalidate_contact_caches,
@@ -112,7 +108,8 @@ from ...services.cache_invalidation import (
     invalidate_trip_caches,
 )
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
-from ...services.dive_conditions import apply_diver_edits, get_conditions
+from ...services.dive_conditions import apply_diver_edits
+from ...services.dive_detail import load_dive_detail, to_public_dive_with_mixtures
 from ...services.dive_files import (
     MAX_DIVE_FILE_SIZE,
     DiveFileAlreadyLinkedError,
@@ -130,15 +127,12 @@ from ...services.dive_files import (
     resolve_dive_file,
     store_recording_file,
 )
-from ...services.dive_gas import resolve_gas_use
-from ...services.dive_list_items import INTERNAL_KEYS, to_dive_list_items, to_public_start_time
+from ...services.dive_list_items import to_dive_list_items
 from ...services.dive_merge import DiveNotMergeableError, merge_dives
 from ...services.dive_neighbors import find_dive_neighbors
 from ...services.dive_numbering import renumber_dives, suggest_dive_number, summarize_numbering
 from ...services.dive_profiles import (
     NormalizedProfile,
-    ProfileGasAttribution,
-    get_gas_attribution_for_dives,
     get_profile_version,
     load_profile,
     to_recording_read_schema,
@@ -433,63 +427,6 @@ async def _get_owned_dive(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: d
         current_user=current_user,
         schema=DiveReadInternal,
         not_found_message="Dive not found",
-    )
-
-
-def _to_public_dive_with_mixtures(
-    db_dive: DiveReadInternal | dict[str, Any],
-    *,
-    user_uuid: uuid_pkg.UUID,
-    trip_uuid: uuid_pkg.UUID | None,
-    course_uuid: uuid_pkg.UUID | None,
-    contact_uuid: uuid_pkg.UUID | None,
-    dive_sites: list[DiveSiteInfo],
-    gear_items: list[GearItemInfo],
-    mixtures: list[DiveMixtureRead],
-    sightings: list[SightingRead],
-    people: list[PersonReferenceRead],
-    tags: list[str],
-    recordings: list[RecordingRead] | None = None,
-    attribution: ProfileGasAttribution | None = None,
-    conditions: DiveConditionsRead | None = None,
-) -> DiveReadWithMixtures:
-    """Assemble a dive's public shape from the row plus everything a read embeds.
-
-    Internal FKs are dropped in favour of the related resources' uuids and summaries, so
-    the related rows are passed in already fetched - the caller batches them across a page
-    rather than querying per dive.
-
-    `attribution` is the one input here that never reaches the response as itself: it is
-    the primary recording's account of which cylinder was breathed when, and it exists
-    solely so a multi-cylinder dive can produce `gas_use`. `None` on the create path, where
-    the dive cannot yet have a recording to have been extracted from - which is also why
-    `recordings` defaults to empty there rather than being queried for.
-    """
-    data = to_public_start_time(db_dive if isinstance(db_dive, dict) else db_dive.model_dump())
-    return DiveReadWithMixtures(
-        **{k: v for k, v in data.items() if k not in INTERNAL_KEYS},
-        user_uuid=user_uuid,
-        trip_uuid=trip_uuid,
-        course_uuid=course_uuid,
-        contact_uuid=contact_uuid,
-        dive_sites=dive_sites,
-        gear_items=gear_items,
-        mixtures=mixtures,
-        sightings=sightings,
-        people=people,
-        tags=tags,
-        recordings=recordings or [],
-        # Both callers of this function (creating a dive, and the cached single-dive
-        # read) go through here, so gas use is derived in exactly one place. Safe to
-        # compute before caching, unlike gear service status: nothing about it depends
-        # on when it's read.
-        gas_use=resolve_gas_use(
-            submerged_time=data["submerged_time"],
-            avg_depth=data["avg_depth"],
-            mixtures=mixtures,
-            attribution=attribution,
-        ),
-        conditions=conditions,
     )
 
 
@@ -813,7 +750,7 @@ async def _read_logged_dive(
     stored_sightings = await get_species_for_dive(db=db, dive_id=created_dive.id)
     stored_people = (await get_people_for_dives(db, [created_dive.id]))[created_dive.id] if dive.people else []
     stored_tags = (await get_tags_for_dives(db, [created_dive.id]))[created_dive.id] if dive.tags else []
-    return _to_public_dive_with_mixtures(
+    return to_public_dive_with_mixtures(
         created_dive,
         user_uuid=current_user["uuid"],
         trip_uuid=dive.trip_uuid,
@@ -1203,65 +1140,7 @@ async def _cached_read_dive(
     `user_id` is always the dive's owner (the route rejects anyone else), so it both
     scopes the cache key and can't be used to read another user's dive.
     """
-    db_dive = await crud_dives.get(db=db, uuid=uuid, is_deleted=False, schema_to_select=DiveReadInternal)
-    if db_dive is None:
-        raise NotFoundException("Dive not found")
-    db_dive = cast(dict[str, Any], db_dive)
-
-    trip_uuid: uuid_pkg.UUID | None = None
-    if db_dive["trip_id"] is not None:
-        trip_uuid_by_id = await get_trip_uuids_by_ids(db=db, trip_ids=[db_dive["trip_id"]], user_id=user_id)
-        trip_uuid = trip_uuid_by_id.get(db_dive["trip_id"])
-
-    course_uuid: uuid_pkg.UUID | None = None
-    if db_dive["course_id"] is not None:
-        course_uuid_by_id = await get_course_uuids_by_ids(db=db, course_ids=[db_dive["course_id"]], user_id=user_id)
-        course_uuid = course_uuid_by_id.get(db_dive["course_id"])
-
-    contact_uuid = (await get_contact_uuids_by_ids(db=db, contact_ids=[db_dive["contact_id"]], user_id=user_id)).get(
-        db_dive["contact_id"]
-    )
-
-    mixtures = await get_mixtures_for_dive(db=db, dive_id=db_dive["id"])
-    dive_sites = await get_dive_sites_for_dive(db=db, dive_id=db_dive["id"])
-    gear_items = await get_gear_items_for_dive(db=db, dive_id=db_dive["id"])
-    sightings = await get_species_for_dive(db=db, dive_id=db_dive["id"])
-    people = (await get_people_for_dives(db, [db_dive["id"]]))[db_dive["id"]]
-    tags = (await get_tags_for_dives(db, [db_dive["id"]]))[db_dive["id"]]
-    # Written batched though only ever called with one id - see `get_recordings_for_dives`.
-    # This is three queries rather than the two `source_file` and `profile` used to cost, and
-    # the third is what a dive with two computers needs: its recordings, their files and
-    # their profile summaries cannot be read as one row any more.
-    recordings = (await get_recordings_for_dives(db=db, dive_ids=[db_dive["id"]])).get(db_dive["id"], [])
-    # A second narrow read of the same row, rather than a column on the summary above: this
-    # one is never serialized, and it is the query `gas_use_history` needs on its own over
-    # a whole log. See `get_gas_attribution_for_dives`.
-    #
-    # Only for a dive that can use it, which the mixtures just read already say. Anything
-    # else - every single-cylinder dive, and every dive logged without a cylinder at all -
-    # would be paying a round trip against the row the recordings read just touched, for a
-    # value `compute_multi_tank_gas_use` discards on its first line.
-    attribution = None
-    if len(mixtures) >= 2:
-        attribution = (await get_gas_attribution_for_dives(db=db, dive_ids=[db_dive["id"]]))[db_dive["id"]]
-    conditions = await get_conditions(db, db_dive["id"])
-
-    return _to_public_dive_with_mixtures(
-        db_dive,
-        user_uuid=owner_uuid,
-        trip_uuid=trip_uuid,
-        course_uuid=course_uuid,
-        contact_uuid=contact_uuid,
-        dive_sites=dive_sites,
-        gear_items=gear_items,
-        mixtures=mixtures,
-        sightings=sightings,
-        people=people,
-        tags=tags,
-        recordings=recordings,
-        attribution=attribution,
-        conditions=conditions,
-    )
+    return await load_dive_detail(db, user_id=user_id, owner_uuid=owner_uuid, uuid=uuid)
 
 
 @router.get("/dive/{uuid}", response_model=DiveReadWithMixtures)

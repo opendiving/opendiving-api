@@ -214,24 +214,6 @@ class DiveFileTokenData(BaseModel):
     parser_key: str
 
 
-class LogbookImportTokenData(BaseModel):
-    """Decoded payload of a logbook-import token (see `create_logbook_import_token`/
-    `verify_logbook_import_token` in `core.security`), minted by
-    `POST /import/logbook/preview` and presented again by `POST /import/logbook`.
-
-    The same shape and the same modest claim as `DiveFileTokenData` above, minus the
-    parser: this server read *these exact files* for *this user* and showed them a report
-    of what importing them would do. `sha256` is the digest over every file's name and
-    digest (`batch_digest`), so the claim covers the set a diver picked. It carries no
-    authority - apply re-plans every document from scratch inside its own transaction - so
-    what it actually buys is that the report a diver approved describes the files they then
-    applied.
-    """
-
-    user_uuid: str
-    sha256: str
-
-
 class DownloadTokenData(BaseModel):
     """Decoded payload of a download ticket (see `create_download_token`/
     `verify_download_token` in `core.security`), minted by `POST /user/download-ticket` and

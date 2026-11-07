@@ -2950,7 +2950,7 @@ class TestWriteDiveEmbedsSightings:
                 ]
             ),
         )
-        monkeypatch.setattr(dives_module, "_to_public_dive_with_mixtures", lambda *a, **kw: kw)
+        monkeypatch.setattr(dives_module, "to_public_dive_with_mixtures", lambda *a, **kw: kw)
         return seen
 
     async def _write(self, species_uuids: list[uuid_pkg.UUID]) -> Any:

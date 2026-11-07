@@ -286,7 +286,7 @@ class LoadedImport:
         nothing else** - no filesystem call takes it, so a `../../.bashrc` in it addresses a
         member that does not exist rather than a path outside anything.
 
-        Split from `read_member` so the *preview* can say which files would restore without
+        Split from `read_member` so the *review* can say which files would restore without
         inflating a byte of any of them, and so "not in this archive" and "too big to store"
         stay two different answers to the diver. It comes out of the central directory, so
         it is a dictionary lookup.
@@ -694,7 +694,7 @@ def _conversion_moment() -> datetime:
 
     Its own function so that a test can say "convert these bytes as if it were another
     hour" and hold the rest of the document to being identical - which is the whole claim
-    behind re-converting on apply instead of spooling the preview's result.
+    behind re-converting at the apply instead of keeping the upload's result.
     """
     return datetime.now(UTC)
 
@@ -727,7 +727,7 @@ def _convert(wrapper: IO[bytes], *, max_inflated_size: int) -> Conversion:
 
     `exported_at` is passed rather than defaulted because the library's default is *now, in
     the local zone*, and this is the one value in a converted document that is not a function
-    of the source. Preview and apply convert the same bytes minutes apart and must plan
+    of the source. The upload and the apply convert the same bytes hours apart and must plan
     identically, so nothing downstream reads it - `divejson.compared` drops it, and the
     planner never looks.
     """
@@ -979,6 +979,17 @@ class BatchRow:
     _archive: zipfile.ZipFile | None = None
     _info: zipfile.ZipInfo | None = None
     _zip: BatchRow | None = None
+
+    @property
+    def in_zip(self) -> bool:
+        return self._zip is not None
+
+    def copy_member_to(self, sink: IO[bytes]) -> None:
+        """A zip's member onto `sink`, a chunk at a time, and `sink` rewound."""
+        assert self._source is not None
+        with self._source() as member:
+            shutil.copyfileobj(member, sink, _READ_CHUNK_SIZE)
+        sink.seek(0)
 
 
 @dataclass(slots=True)

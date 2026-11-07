@@ -505,6 +505,22 @@ FETCH_OWNED_ROUTES = [
 # own assertions: at this seam the two cases are already one, so the thing worth checking
 # is that the route hands the resolver the *caller's own* id.
 RESOLVER_OWNED_ROUTES = [
+    OwnedRoute("GET", "/api/v1/import/{uuid}", "src.app.api.v1.logbook_import:find_import", "Import not found"),
+    OwnedRoute("GET", "/api/v1/import/{uuid}/notes", "src.app.api.v1.logbook_import:find_import", "Import not found"),
+    OwnedRoute(
+        "POST",
+        "/api/v1/import/{uuid}/apply",
+        "src.app.api.v1.logbook_import:find_import",
+        "Import not found",
+        {"json": {}},
+    ),
+    OwnedRoute(
+        "DELETE",
+        "/api/v1/import/{uuid}",
+        "src.app.api.v1.logbook_import:lock_import",
+        "Import not found",
+        {"params": {"status": "pending"}},
+    ),
     *(
         OwnedRoute(
             method,

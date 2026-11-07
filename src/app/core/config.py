@@ -827,21 +827,28 @@ class LogbookImportSettings(BaseSettings):
     # Its own budget rather than a share of the export one: an import is a different kind
     # of expensive - it spools up to half a gigabyte, parses a whole logbook and may make
     # outbound WoRMS calls - and a diver restoring a backup should not find their next
-    # export refused because of it.
-    #
-    # Twenty rather than ten because **one import is two calls**: a preview and an apply,
-    # each uploading the file. Ten imports an hour is the same generosity the export limit
-    # means by ten downloads.
+    # export refused because of it. An import is one upload, and ten an hour is the same
+    # generosity the export limit means by ten downloads. Its apply counts apart, on the same
+    # figures.
     IMPORT_RATE_LIMIT_WINDOW_SECONDS: int = config("IMPORT_RATE_LIMIT_WINDOW_SECONDS", default=3600)
-    IMPORT_RATE_LIMIT_PER_USER: int = config("IMPORT_RATE_LIMIT_PER_USER", default=20)
+    IMPORT_RATE_LIMIT_PER_USER: int = config("IMPORT_RATE_LIMIT_PER_USER", default=10)
 
-    # How long the preview receipt stays spendable. A staleness bound rather than a
-    # credential lifetime, exactly like `DIVE_FILE_TOKEN_EXPIRE_MINUTES`: it attests which
-    # bytes were previewed, and grants nothing beyond importing bytes this server has
-    # already shown the same caller a report for. An hour is long enough to read a report
-    # over a logbook's worth of records and short enough that the instance it was planned
-    # against has probably not moved.
-    IMPORT_TOKEN_EXPIRE_MINUTES: int = config("IMPORT_TOKEN_EXPIRE_MINUTES", default=60)
+    # How long an uploaded import waits to be applied or discarded before it and its files are
+    # deleted. Blank keeps it until the diver finishes it; below 1 refuses startup
+    # (`Settings._require_usable_import_lifetimes`). A change applies to imports uploaded from
+    # then on: the row holds its own expiry.
+    IMPORT_PENDING_LIFETIME_HOURS: int | None = config("IMPORT_PENDING_LIFETIME_HOURS", default=24)
+
+    # How long an applied import's review and log stay in its history. Blank keeps each until
+    # the diver deletes it; below 1 refuses startup. A change applies to imports applied from
+    # then on.
+    IMPORT_HISTORY_RETENTION_DAYS: int | None = config("IMPORT_HISTORY_RETENTION_DAYS", default=30)
+
+    @field_validator("IMPORT_PENDING_LIFETIME_HOURS", "IMPORT_HISTORY_RETENTION_DAYS", mode="before")
+    @classmethod
+    def _blank_import_lifetime_is_none(cls, value: object) -> object:
+        """A blank value is no limit, arriving from `env_file` as the empty string."""
+        return None if isinstance(value, str) and not value.strip() else value
 
     # Total wall-clock budget for the WoRMS pre-pass that resolves species the catalog does
     # not hold yet. Sized against `resolve_species`'s own ceiling rather than its typical
@@ -1419,6 +1426,25 @@ class Settings(
                 "upload. Set it in your .env to the MB one account may store, or leave it blank for no "
                 "limit."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_usable_import_lifetimes(self) -> Self:
+        """Refuses to boot with an import lifetime below 1.
+
+        `0` is refused rather than read: beside `ACCOUNT_DELETION_GRACE_DAYS`, where it means
+        "on the next sweep", it reads as that to one operator and as "no limit" to another, and
+        blank is the one spelling of no limit.
+        """
+        for name, value, unit in (
+            ("IMPORT_PENDING_LIFETIME_HOURS", self.IMPORT_PENDING_LIFETIME_HOURS, "hours"),
+            ("IMPORT_HISTORY_RETENTION_DAYS", self.IMPORT_HISTORY_RETENTION_DAYS, "days"),
+        ):
+            if value is not None and value < 1:
+                raise ValueError(
+                    f"{name} is {value}. Set it in your .env to the {unit} an import is kept, at least 1, or "
+                    "leave it blank for no limit."
+                )
         return self
 
     @model_validator(mode="after")

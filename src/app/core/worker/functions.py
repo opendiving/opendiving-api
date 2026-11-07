@@ -46,6 +46,7 @@ from ...services.gear_service import (
     service_status,
     should_notify,
 )
+from ...services.logbook_import import imports as logbook_imports
 from ...services.renewals import (
     CERTIFICATION_EXPIRING_SOON_DAYS,
     certification_label,
@@ -376,6 +377,30 @@ async def purge_unserved_map_tiles(ctx: dict[Any, Any]) -> str:
 
     logger.info("Purged %d unserved map tile(s)", purged)
     return f"Purged {purged} unserved map tile(s)"
+
+
+async def purge_expired_logbook_imports(ctx: dict[Any, Any]) -> str:
+    """Delete the imports past their expiry and their files, a batch per transaction until none
+    is left: a pending import nobody finished, and an applied one past the history's retention.
+
+    A read refuses an expired import to the minute whether or not this has run; this is what
+    frees the bytes of a diver who walks away.
+    """
+    now = datetime.now(UTC)
+    purged = 0
+    while True:
+        async with local_session() as db:
+            batch = await logbook_imports.purge_expired(db, now=now, limit=logbook_imports.PURGE_BATCH_SIZE)
+        purged += batch
+        if batch < logbook_imports.PURGE_BATCH_SIZE:
+            break
+
+    if purged == 0:
+        logger.info("No expired logbook imports to purge")
+        return "No expired logbook imports to purge"
+
+    logger.info("Purged %d expired logbook import(s)", purged)
+    return f"Purged {purged} expired logbook import(s)"
 
 
 # One sweep's worth of accounts. The work per account is a cascade delete over every dive,

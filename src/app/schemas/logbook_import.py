@@ -1,11 +1,11 @@
 """The shapes logbook import reads and reports - a DiveJSON document seen from the
-*reader* side, and the report that says what importing one would do.
+*reader* side, and the import the server holds, which says what importing one would do.
 
 A converted file - a UDDF file, a `.ssrf`, a FIT, a Suunto app or DM5 XML export, a Shearwater
 Cloud database or XML export, each file of a zip of them - arrives here as a DiveJSON document
 like any other, because the converter's output is one. What the report says of each file is its
-row in `ImportReport.members`, and what a file did not record, or recorded one way where it could
-be read another, is a note like the import's own: on its dive's row, or in `ImportReport.notes`.
+row in `LogbookImportRead.members`, and what a file did not record, or recorded one way where it
+could be read another, is a note like the import's own: on its dive's row, or in the log's `notes`.
 
 **This is not `schemas/export.py` inverted, and the differences are the whole point.**
 That module is the writer's declaration: it emits exactly what DiveJSON 1.0 defines and a
@@ -54,6 +54,8 @@ from .dive import (
     Current,
     DecoAlgorithm,
     DiveMode,
+    DiveNumberingSummary,
+    DiveReadWithMixtures,
     DiveType,
     EntryType,
     RecordingDevice,
@@ -211,7 +213,7 @@ class ImportStoredFile(_ReadModel):
 
 class ImportDiver(_ReadModel):
     """Whose logbook the document is. Its identity and settings are read and reported, and
-    never applied; its check-in details and its portrait are offered in the preview and
+    never applied; its check-in details and its portrait are offered in the review and
     written as the diver confirms them - see `DECISIONS.md`. The tag list this app's writer
     puts under its key is read, so a tag on no dive or site comes back. Every member is optional
     because §6.1 makes them so: a converter whose source records nothing about an owner
@@ -717,6 +719,16 @@ class ImportNoteCode(StrEnum):
     # An existing row of the caller's already says this, so the import pointed at it
     # rather than creating a duplicate.
     RECORD_LINKED = "record_linked"
+    # The dive changed between the review and the apply, so part of what the review showed
+    # could not be written: the one value entry with nowhere to land, or an element the second
+    # pass did not produce.
+    REVIEW_NOT_HELD = "review_not_held"
+    # A dive the review showed as new reached the logbook another way before the apply, so the
+    # apply created none, and the row is the dive that holds it.
+    REVIEW_OVERTAKEN = "review_overtaken"
+    # The apply reached a dive the review has no row for, the logbook having moved: the file of
+    # a dive that lost its recording in between makes a dive of its own, which is written.
+    REVIEW_UNSHOWN = "review_unshown"
     # The two remap codes say the same thing about *this* record - it was imported under an
     # identifier other than the one the document gave it, and neither is an error. They
     # differ in what happened to every **other** record's reference to that identifier, and
@@ -761,13 +773,13 @@ class ImportNoteCode(StrEnum):
     # nobody, a policy that names no insurer, a row past the list's cap, or an email that is
     # not an address or is this account's sign-in address.
     CHECK_IN_DETAIL_DROPPED = "check_in_detail_dropped"
-    # A check-in detail the diver confirmed in the preview was written to the account; the
+    # A check-in detail the diver confirmed in the review was written to the account; the
     # portrait they took from the archive among them.
     CHECK_IN_DETAIL_WRITTEN = "check_in_detail_written"
-    # The diver took the archive's portrait, and the account's changed after the preview they
+    # The diver took the archive's portrait, and the account's changed after the review they
     # chose from, so the account's was kept.
     PORTRAIT_KEPT = "portrait_kept"
-    # A person was linked (apply), or would be (preview), to the account on this instance its
+    # A person was linked (apply), or would be (upload), to the account on this instance its
     # entry names - the sentence names that account's current username.
     ACCOUNT_LINKED = "account_linked"
     # The tags the import adds to the caller's list, named in one note. Tags are members of a
@@ -794,7 +806,7 @@ class ImportNote(BaseModel):
     report puts it on its dive's row or into a group.
 
     `uuid` is the document's own identifier for the record, not the row's: on the remap
-    branch there is no row yet at preview time, and the document is what the diver can
+    branch there is no row yet at the upload, and the document is what the diver can
     look the record up in.
     """
 
@@ -810,22 +822,19 @@ class ImportNote(BaseModel):
 
 
 class ImportCollectionReport(BaseModel):
-    """What would happen (preview) or did happen (apply) to one envelope collection.
+    """What the import will do, or did, to one envelope collection.
 
-    The four counts are disjoint and sum to the number of records the import's documents
+    The three counts are disjoint and sum to the number of records the import's documents
     carry in this collection - and for `contacts` and `people`, the records made of the
     training centers and the instructors an export written before either existed names on its
     courses and certifications, which it carries as strings rather than records. Each file's
     records are counted as an import of that file alone would count them, after the files
-    before it. A record the caller deleted here is skipped, never brought back, so `restored` is
-    always zero.
+    before it. A record the caller deleted here is skipped, never brought back.
     """
 
     collection: Annotated[str, Field(examples=["dives"])]
     created: int
     linked: Annotated[int, Field(description="Matched an existing row of the caller's; nothing was written")]
-    # On the wire until the web app and the iOS app stop decoding it as a required count.
-    restored: Annotated[int, Field(description="Always 0: an import never brings back a deleted record")] = 0
     skipped: int
 
 
@@ -836,7 +845,7 @@ class ImportFileReport(BaseModel):
     A bare document carries file *metadata* and no bytes, so `restored` is zero and
     `not_contained` is every referenced file - which is not an error, just a smaller
     restore. Of the files a document names, only an archive puts bytes back. A dive-computer
-    file imported as itself is not counted here: its row in `ImportReport.members` says
+    file imported as itself is not counted here: its row in `LogbookImportRead.members` says
     whether it was kept. The diver's portrait is not among them either: it is offered apart,
     beside the check-in details.
     """
@@ -976,77 +985,15 @@ class ImportMemberReport(BaseModel):
 
 
 class ImportDiveOutcome(StrEnum):
-    """What the import does to one dive, as the most that happens to it."""
+    """What the import does to one dive: the writer's fact, read off the dive before and after
+    the pass rather than predicted from the plan."""
 
-    CREATED = "created"
-    # Already in your logbook; at most its blanks are filled, and nothing it holds is changed.
-    LINKED = "linked"
-    # A dive you have, gaining a file or another computer's recording.
-    UPDATED = "updated"
+    NEW = "new"
+    # A dive the logbook has, whose `changes` say what the import does to it.
+    MODIFIED = "modified"
+    # A dive the logbook has, which the import leaves as it is.
+    UNCHANGED = "unchanged"
     SKIPPED = "skipped"
-
-
-class ImportDiveReport(BaseModel):
-    """One dive the import creates or touches, and the files it came from.
-
-    The result's rows are the dives an import wrote, by the identifiers they carry, so a
-    later action over "the dives this import brought in" has its selection here.
-    """
-
-    uuid: Annotated[
-        uuid_pkg.UUID | None,
-        Field(
-            default=None,
-            description="The dive's identifier once written - yours for a dive you already have - or `null` for a "
-            "dive the import skips",
-        ),
-    ]
-    outcome: ImportDiveOutcome
-    files_added: Annotated[
-        int, Field(default=0, description="On an `updated` dive, how many files it gains; 0 on any other")
-    ]
-    recordings_added: Annotated[
-        int,
-        Field(default=0, description="On an `updated` dive, how many computers' recordings it gains; 0 on any other"),
-    ]
-    reason: Annotated[
-        str | None, Field(default=None, description="On a `skipped` dive, why, in one sentence; `null` on any other")
-    ]
-    start_time: Annotated[
-        datetime | date | None,
-        Field(
-            default=None,
-            description="When the dive started, as the dive read gives it: with the dive's own UTC offset, naive "
-            "where it records none, a bare date where it states no time",
-        ),
-    ]
-    submerged_time: Annotated[int | None, Field(default=None, description="Seconds")]
-    max_depth: Annotated[float | None, Field(default=None, description="Metres")]
-    device: Annotated[
-        RecordingDevice | None,
-        Field(
-            default=None, description="What recorded the dive: its first recording's device, as the dive read has it"
-        ),
-    ]
-    members: Annotated[
-        list[int], Field(default_factory=list, description="The indexes in `members` of the files the dive came from")
-    ]
-    notes: Annotated[
-        list[ImportDiveNote],
-        Field(
-            default_factory=list,
-            description="Everything to say about this dive, in the import's order: its own decisions first, then "
-            "what its files did not record, worked out, or read one way of several. None of these is in the "
-            "report's `notes` as well.",
-        ),
-    ]
-    notes_truncated: Annotated[
-        int,
-        Field(
-            default=0,
-            description="This dive's notes past the row's cap, which `notes` leaves out and the report's `notes` holds",
-        ),
-    ]
 
 
 # ---------------------------------------------------------------- the check-in details
@@ -1104,8 +1051,8 @@ ImportCheckInDetail = Annotated[
 
 
 class ImportCheckInSubmission(CheckinDetailsUpdate):
-    """The check-in details the diver confirmed in the preview, sent back beside the token,
-    keyed and bounded as `PATCH /user/checkin-details` keys and bounds them.
+    """The check-in details the diver confirmed in the review, keyed and bounded as
+    `PATCH /user/checkin-details` keys and bounds them.
 
     A member left out is not written; a scalar sent as `null` is cleared, and a list sent
     replaces the account's whole. A member the document does not carry is not written
@@ -1137,43 +1084,229 @@ class ImportPortraitOffer(BaseModel):
 
 
 class ImportPortraitChoice(BaseModel):
-    """What the diver chose for the archive's portrait, sent back beside the token.
+    """What the diver chose for the archive's portrait.
 
-    `account_sha256` is the account's portrait as the preview showed it, so a portrait
+    `account_sha256` is the account's portrait as the review showed it, so a portrait
     replaced or removed since is kept whatever the choice.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    choice: Literal["take", "keep"]
+    choice: Annotated[
+        Literal["take", "keep"], Field(description="`take` for the archive's portrait, `keep` for the account's")
+    ]
     account_sha256: Annotated[
-        str | None, Field(min_length=_SHA256_LENGTH, max_length=_SHA256_LENGTH, pattern=r"^[0-9a-f]+$")
+        str | None,
+        Field(
+            min_length=_SHA256_LENGTH,
+            max_length=_SHA256_LENGTH,
+            pattern=r"^[0-9a-f]+$",
+            description="The account's portrait as the review showed it, or `null` where it showed none",
+        ),
     ]
 
 
-class ImportReport(BaseModel):
-    """The body of both responses: the same shape whether it is a plan or a result.
+# ---------------------------------------------------------------- an import the server holds
 
-    Deliberately one model rather than two: a preview a diver approved and the result they
-    got back are only worth comparing if they are the same shape, and the two are produced
-    by the same planner run against the same files.
+# The shape `review` and `notes` are stored in, which every row records. A stored import is
+# served as it was stored and never validated again, so a change to any model below - or to
+# what they embed - owes this a bump and a call on the rows already stored: migrate them to the
+# new shape, or retire them. `tests/test_logbook_import_held.py` fails until the number moves.
+REVIEW_SHAPE = 1
 
-    An import of several files reports what importing each would, one after another in the
-    import's order: the counts in `collections` are their sums, and `notes` their notes in
-    that order. `members` and `dives` are the report's own rows over the batch, on the
-    preview and on the result alike.
 
-    `notes` holds what is about no dive's row, and a row's notes past its cap: one line per
-    habit, with a count. It is on the report rather than on the preview alone because the
-    result panel is what stays on screen after an import, and a diver told at preview that a
-    file recorded no gas should still be told it afterwards.
+class LogbookImportStatus(StrEnum):
+    PENDING = "pending"
+    APPLIED = "applied"
+
+
+class LogbookImportChange(BaseModel):
+    """One member of a dive the import changes, what it was and what it becomes."""
+
+    member: Annotated[
+        str,
+        Field(
+            description="Where in the dive's read shape, as a path: `recordings/0/device/name`, "
+            "`mixtures/1/start_pressure`, `entry_latitude`. A list element added or removed is one entry naming the "
+            "element, such as `recordings/1` or `recordings/0/files/1`.",
+            examples=["recordings/0/device/firmware"],
+        ),
+    ]
+    before: Annotated[
+        Any, Field(description="The member's value as a dive read gives it; `null` where it did not exist")
+    ]
+    after: Annotated[Any, Field(description="Its value after the import; `null` where it no longer exists")]
+
+
+class LogbookImportDive(BaseModel):
+    """One dive the import's files hold, and what the import does to it.
+
+    A row is `modified` if and only if `changes` is not empty, and `new` when the dive did not
+    exist before the import.
     """
 
+    uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Field(
+            default=None,
+            description="The dive's identifier, a new dive's as it will be written - or `null` for a dive the upload "
+            "skipped",
+        ),
+    ]
+    outcome: ImportDiveOutcome
+    dive: Annotated[
+        DiveReadWithMixtures | None,
+        Field(
+            default=None,
+            description="The dive as the import leaves it, on a `new` or `modified` row, in the shape a dive read "
+            "gives, and on a row the apply skipped, the dive the review showed. A recording or file inside it that "
+            "the review made takes a new identifier at the apply, and an applied import keeps the one the review "
+            "showed, which names nothing.",
+        ),
+    ]
+    changes: Annotated[
+        list[LogbookImportChange],
+        Field(default_factory=list, description="What changes on a `modified` dive; empty on any other"),
+    ]
+    start_time: Annotated[
+        datetime | date | None,
+        Field(
+            default=None,
+            description="When the dive started, as the dive read gives it: with the dive's own UTC offset, naive "
+            "where it records none, a bare date where it states no time",
+        ),
+    ]
+    device: Annotated[
+        RecordingDevice | None,
+        Field(
+            default=None, description="What recorded the dive: its first recording's device, as the dive read has it"
+        ),
+    ]
+    members: Annotated[
+        list[int], Field(default_factory=list, description="The indexes in `members` of the files the dive came from")
+    ]
+    reason: Annotated[
+        str | None, Field(default=None, description="On a `skipped` dive, why, in one sentence; `null` on any other")
+    ]
+
+
+class LogbookImportRead(BaseModel):
+    """An import the server holds: the review before it is applied, and the result after.
+
+    One shape for both, so a review a diver approved and what became of it can be compared. An
+    import of several files reports what importing each would, one after another in the
+    import's order, and `collections` holds their sums.
+    """
+
+    uuid: uuid_pkg.UUID
+    status: LogbookImportStatus
+    created_at: datetime
+    applied_at: Annotated[datetime | None, Field(default=None, description="`null` while the import is pending")]
+    expires_at: Annotated[
+        datetime | None,
+        Field(default=None, description="When this import is deleted, or `null` where this instance sets no limit"),
+    ]
+    archive: Annotated[
+        bool,
+        Field(
+            description="Whether the import carries a full-export archive, the container that restores the stored "
+            "files its logbook names. A zip of dive-computer files is not one: its files are read one by one."
+        ),
+    ]
+    members: Annotated[
+        list[ImportMemberReport],
+        Field(
+            default_factory=list,
+            description="One row per file: each part of the upload and each file a zip among them held, in the "
+            "order the import reads them. A row with a `refusal` is a file that is not held.",
+        ),
+    ]
     collections: Annotated[
         list[ImportCollectionReport],
         Field(default_factory=list, description="One entry per envelope collection, in the envelope's own order"),
     ]
     files: ImportFileReport
+    dives: Annotated[
+        list[LogbookImportDive],
+        Field(
+            default_factory=list,
+            description="One row per dive the files hold, newest first as the logbook lists them; a start with no UTC "
+            "offset sorts by its wall clock read as UTC, and ties keep the import's order. On an applied import, a "
+            "dive the review did not show follows them.",
+        ),
+    ]
+    check_in_details: Annotated[
+        list[ImportCheckInDetail],
+        Field(
+            default_factory=list,
+            description="One entry per check-in detail the document carries, the account's value beside the "
+            "proposal, on a pending import. Send back the ones the diver keeps or edits as `check_in_details`; "
+            "nothing else is written.",
+        ),
+    ]
+    portrait: Annotated[
+        ImportPortraitOffer | None,
+        Field(
+            default=None,
+            description="The archive's portrait, offered beside the account's on a pending import. `null` when the "
+            "import carries none it can offer - the log says why - or carries the account's own, framed the same.",
+        ),
+    ]
+    numbering: Annotated[
+        DiveNumberingSummary,
+        Field(description="The logbook's numbering as `GET /dives/numbering` gave it when the files were uploaded"),
+    ]
+
+
+class LogbookImportSummary(BaseModel):
+    """One applied import, as the history lists it."""
+
+    uuid: uuid_pkg.UUID
+    created_at: datetime
+    applied_at: datetime
+    counts: Annotated[
+        dict[ImportDiveOutcome, int],
+        Field(description="How many of its dive rows came to each outcome; an outcome none did is left out"),
+    ]
+
+
+class LogbookImportDiveNotes(BaseModel):
+    """Everything an import has to say about one dive."""
+
+    uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description="The dive row's `uuid`")]
+    start_time: Annotated[datetime | date | None, Field(default=None, description="As the dive row gives it")]
+    device: Annotated[RecordingDevice | None, Field(default=None, description="As the dive row gives it")]
+    outcome: Annotated[ImportDiveOutcome, Field(description="As the dive row gives it")]
+    reason: Annotated[
+        str | None, Field(default=None, description="As the dive row gives it: why a `skipped` dive was skipped")
+    ]
+    notes: Annotated[
+        list[ImportDiveNote],
+        Field(
+            default_factory=list,
+            description="In the import's order: its own decisions first, then what the dive's files did not record, "
+            "worked out, or read one way of several. None of these is in the log's `notes` as well.",
+        ),
+    ]
+    notes_truncated: Annotated[
+        int,
+        Field(
+            default=0,
+            description="This dive's notes past the row's cap, which `notes` leaves out and the log's `notes` holds",
+        ),
+    ]
+
+
+class LogbookImportNotes(BaseModel):
+    """The import's log: each dive's notes, and what is about no dive.
+
+    `notes` holds what is on no dive's row, and a row's notes past its cap: one line per habit,
+    with a count.
+    """
+
+    dives: Annotated[
+        list[LogbookImportDiveNotes], Field(default_factory=list, description="One per dive row, in the review's order")
+    ]
     notes: Annotated[
         list[ImportNoteGroup],
         Field(
@@ -1189,70 +1322,27 @@ class ImportReport(BaseModel):
             "the counts are still complete.",
         ),
     ]
-    members: Annotated[
-        list[ImportMemberReport],
-        Field(
-            default_factory=list,
-            description="One row per file: each part of the request and each file a zip among them held, in the "
-            "order the import reads them",
-        ),
-    ]
-    dives: Annotated[
-        list[ImportDiveReport],
-        Field(
-            default_factory=list,
-            description="One row per dive the import creates or touches, newest first as the logbook lists "
-            "them; a start with no UTC offset sorts by its wall clock read as UTC, and ties keep the import's order",
-        ),
-    ]
 
 
-class ImportPreview(ImportReport):
-    """What `POST /import/logbook/preview` returns. Nothing has been written.
+class LogbookImportApply(BaseModel):
+    """What the diver confirmed in the review."""
 
-    `format`, `version` and `generator` are the *imported document's* - the first the import
-    reads - which for a converted file is the converter's output rather than the file a diver
-    picked, so they read `divejson`, `1.0` and `divejson convert` there. What the diver's
-    files were is each row of `members`.
-    """
+    model_config = ConfigDict(extra="forbid")
 
-    format: Annotated[str, Field(description="The imported document's own `format` marker", examples=["divejson"])]
-    version: Annotated[str, Field(description="The imported document's declared version", examples=["1.0"])]
-    generator: Annotated[
-        ImportGenerator | None, Field(default=None, description="What produced the imported document, if it said")
-    ]
-    archive: Annotated[
-        bool,
-        Field(
-            description="Whether the import carries a full-export archive, the container that restores the stored "
-            "files its logbook names. A zip of dive-computer files is not one: its files are read one by one."
-        ),
-    ]
-    token: Annotated[
-        str,
-        Field(
-            description="Hand this back to `POST /import/logbook` with the same files under the same names. It "
-            "attests which bytes this report describes and nothing else - the import re-reads, re-converts and "
-            "re-plans from scratch."
-        ),
-    ]
     check_in_details: Annotated[
-        list[ImportCheckInDetail],
+        ImportCheckInSubmission | None,
         Field(
-            default_factory=list,
-            description="One entry per check-in detail the document carries, the account's value beside the "
-            "proposal. Send back the ones the diver keeps or edits as `check_in_details`; nothing else is written.",
+            default=None,
+            description="The check-in details to write, keyed as `PATCH /user/checkin-details` keys them: the "
+            "review's proposals as kept or edited. A member left out is not written, `null` clears a scalar, and a "
+            "list replaces the account's whole.",
         ),
     ]
     portrait: Annotated[
-        ImportPortraitOffer | None,
+        ImportPortraitChoice | None,
         Field(
             default=None,
-            description="The archive's portrait, offered beside the account's. `null` when the import carries none "
-            "it can offer - `notes` say why - or carries the account's own, framed the same.",
+            description="The choice made for the review's `portrait`: `take` or `keep`, with the `account_sha256` the "
+            "review showed. Left out, the account keeps its portrait.",
         ),
     ]
-
-
-class ImportResult(ImportReport):
-    """What `POST /import/logbook` returns. Everything in it has been committed."""

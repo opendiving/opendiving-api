@@ -34,15 +34,16 @@ from src.app.api.v1 import logbook_import as import_routes
 from src.app.api.v1.dives import parse_dive
 from src.app.api.v1.users import read_storage_usage
 from src.app.core.config import settings
-from src.app.core.security import create_dive_file_token, create_logbook_import_token
+from src.app.core.security import create_dive_file_token
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
 from src.app.models.dive import Dive
 from src.app.models.dive_file import DiveFile
 from src.app.models.dive_species import DiveSpecies
+from src.app.models.logbook_import import LogbookImport
 from src.app.models.user import User
 from src.app.schemas.certification import CertificationSide
-from src.app.schemas.logbook_import import ImportPortraitChoice
+from src.app.schemas.logbook_import import ImportPortraitChoice, LogbookImportStatus
 from src.app.schemas.user_picture import PictureCrop
 from src.app.services import blob_store
 from src.app.services.certification_files import store_certification_file
@@ -50,7 +51,6 @@ from src.app.services.dive_files import KEY_KIND as DIVE_FILE_KIND
 from src.app.services.dive_files import store_recording_file
 from src.app.services.export import load_export_bundle
 from src.app.services.export.archive import DIVEJSON_NAME, write_archive
-from src.app.services.logbook_import import batch_digest
 from src.app.services.storage_usage import format_size, get_storage_usage
 from src.app.services.user_pictures import (
     AVATAR_FRAME,
@@ -61,8 +61,8 @@ from src.app.services.user_pictures import (
 )
 from tests.conftest import db_available
 from tests.helpers.generators import create_certification, create_dive, create_species, create_user
+from tests.helpers.held_imports import apply, discard, upload
 from tests.helpers.images import phone_jpeg, plain_png
-from tests.helpers.import_parts import import_request, part_of
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -110,7 +110,7 @@ def one_megabyte(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def no_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     """The import routes throttle and drop caches through Redis, which is beside the point."""
-    monkeypatch.setattr(import_routes, "_enforce_import_limit", AsyncMock())
+    monkeypatch.setattr(import_routes, "enforce_rate_limit", AsyncMock())
     monkeypatch.setattr(import_routes, "resolve_catalog_gaps", AsyncMock(return_value=frozenset()))
     for name in dir(import_routes):
         if name.startswith("invalidate_"):
@@ -170,19 +170,13 @@ async def _archive_of(async_db: AsyncSession, user: User) -> bytes:
         buffer.close()
 
 
-async def _preview(async_db: AsyncSession, user: User, archive: bytes) -> Any:
-    return await _preview_files(async_db, user, [("logbook.zip", archive)])
-
-
-async def _preview_files(async_db: AsyncSession, user: User, files: list[tuple[str, bytes]]) -> Any:
-    return await import_routes.preview_logbook_import(
-        request=import_request(files), current_user=_caller(user), db=async_db
-    )
+async def _upload_archive(async_db: AsyncSession, user: User, archive: bytes) -> dict[str, Any]:
+    return await upload(async_db, user, [("logbook.zip", archive)])
 
 
 async def _apply(
     async_db: AsyncSession, user: User, archive: bytes, portrait: ImportPortraitChoice | None = None
-) -> Any:
+) -> dict[str, Any]:
     return await _apply_files(async_db, user, [("logbook.zip", archive)], portrait)
 
 
@@ -191,14 +185,9 @@ async def _apply_files(
     user: User,
     files: list[tuple[str, bytes]],
     portrait: ImportPortraitChoice | None = None,
-) -> Any:
-    parts = [part_of(data, name, index) for index, (name, data) in enumerate(files)]
-    fields: dict[str, Any] = {"token": create_logbook_import_token(user_uuid=user.uuid, sha256=batch_digest(parts))}
-    if portrait is not None:
-        fields["portrait"] = portrait.model_dump()
-    return await import_routes.apply_logbook_import(
-        request=import_request(files, fields), current_user=_caller(user), db=async_db
-    )
+) -> dict[str, Any]:
+    held = await upload(async_db, user, files)
+    return await apply(async_db, user, held["uuid"], portrait=portrait)
 
 
 # A dive computer's two exports of one dive, which an import keeps on the dive it becomes.
@@ -502,23 +491,31 @@ def _archive_with_a_portrait(member: bytes) -> bytes:
 
 class TestAnImport:
     @pytest.mark.asyncio
-    async def test_the_preview_refuses_what_the_apply_would_and_the_apply_writes_no_row(
+    async def test_the_upload_refuses_what_the_apply_would_and_the_apply_writes_no_row(
         self, db: Session, async_db: AsyncSession
     ) -> None:
         archive = (await _an_archive_with_files(db, async_db, create_user(db)))["archive"]
         growth = await _growth(_site("import"), db, async_db)
         diver = create_user(db)
+        held = await _upload_archive(async_db, diver, archive)
         _hold(db, diver, LIMIT + 1 - growth)
 
-        with pytest.raises(HTTPException) as previewed:
-            await _preview(async_db, diver, archive)
-        await async_db.rollback()
         with pytest.raises(HTTPException) as applied:
-            await _apply(async_db, diver, archive)
+            await apply(async_db, diver, held["uuid"])
+        await async_db.rollback()
+        await discard(async_db, diver, held["uuid"], LogbookImportStatus.PENDING)
+        with pytest.raises(HTTPException) as uploaded:
+            await _upload_archive(async_db, diver, archive)
         await async_db.rollback()
 
-        assert previewed.value.status_code == applied.value.status_code == 413
-        assert REFUSAL in previewed.value.detail and REFUSAL in applied.value.detail
+        assert uploaded.value.status_code == applied.value.status_code == 413
+        assert REFUSAL in uploaded.value.detail and REFUSAL in applied.value.detail
+        assert (
+            await async_db.scalar(
+                select(func.count()).select_from(LogbookImport).where(LogbookImport.user_id == diver.id)
+            )
+            == 0
+        )
         for model in (Dive, DiveFile):
             owned = await async_db.scalar(select(func.count()).select_from(model).where(model.user_id == diver.id))
             assert owned == 0, model.__tablename__
@@ -530,24 +527,28 @@ class TestAnImport:
         ), "only the filler's certification"
 
     @pytest.mark.asyncio
-    async def test_files_kept_as_themselves_are_refused_whole_at_the_preview_and_at_the_apply(
+    async def test_files_kept_as_themselves_are_refused_whole_at_the_upload_and_at_the_apply(
         self, db: Session, async_db: AsyncSession
     ) -> None:
         """Measured as they would be stored, both of them, before a row or an object of either
         is written."""
         growth = await _growth(_site("import files"), db, async_db)
         diver = create_user(db)
+        held = await upload(async_db, diver, DIVE_FILES)
         _hold(db, diver, LIMIT + 1 - growth)
         keys = set(blob_store.iter_keys())
 
-        with pytest.raises(HTTPException) as previewed:
-            await _preview_files(async_db, diver, DIVE_FILES)
-        await async_db.rollback()
         with pytest.raises(HTTPException) as applied:
-            await _apply_files(async_db, diver, DIVE_FILES)
+            await apply(async_db, diver, held["uuid"])
+        await async_db.rollback()
+        assert set(blob_store.iter_keys()) == keys
+        await discard(async_db, diver, held["uuid"], LogbookImportStatus.PENDING)
+        keys = set(blob_store.iter_keys())
+        with pytest.raises(HTTPException) as uploaded:
+            await upload(async_db, diver, DIVE_FILES)
         await async_db.rollback()
 
-        assert previewed.value.status_code == applied.value.status_code == 413
+        assert uploaded.value.status_code == applied.value.status_code == 413
         assert growth == sum([await blob_store.stored_size(DIVE_FILE_KIND, data) for _, data in DIVE_FILES]), (
             "each file counts at the size it is stored at"
         )
@@ -560,7 +561,7 @@ class TestAnImport:
     async def test_the_archive_s_portrait_counts_only_once_it_is_taken(
         self, db: Session, async_db: AsyncSession
     ) -> None:
-        """The preview measures the import with the account's own portrait kept, which is the
+        """The upload measures the import with the account's own portrait kept, which is the
         apply's default - so a portrait that tips the account over is refused at the apply
         that takes it, and nowhere else."""
         archive = _archive_with_a_portrait(phone_jpeg(size=(320, 240), orientation=None))
@@ -570,12 +571,15 @@ class TestAnImport:
         diver = create_user(db)
         _hold(db, diver, LIMIT + 1 - growth)
 
-        preview = await _preview(async_db, diver, archive)
-        await _apply(async_db, diver, archive, ImportPortraitChoice(choice="keep", account_sha256=None))
+        offered = await _apply(async_db, diver, archive, ImportPortraitChoice(choice="keep", account_sha256=None))
+        held = await _upload_archive(async_db, diver, archive)
         with pytest.raises(HTTPException) as refused:
-            await _apply(async_db, diver, archive, ImportPortraitChoice(choice="take", account_sha256=None))
+            await apply(
+                async_db, diver, held["uuid"], portrait=ImportPortraitChoice(choice="take", account_sha256=None)
+            )
 
-        assert preview.portrait is not None
+        assert offered["portrait"] is None, "an applied import offers nothing"
+        assert held["portrait"] is not None and held["portrait"]["proposed"].startswith("data:image/webp;base64,")
         assert refused.value.status_code == 413
 
     @pytest.mark.asyncio
@@ -594,7 +598,7 @@ class TestAnImport:
 
         result = await _apply(async_db, diver, archive)
 
-        assert result.files.restored == 0
+        assert result["files"]["restored"] == 0
         assert await _used(async_db, diver) == LIMIT
 
 

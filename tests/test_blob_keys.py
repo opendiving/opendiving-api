@@ -27,6 +27,7 @@ from tests.helpers.generators import (
     create_certification,
     create_dive,
     create_dive_recording,
+    create_logbook_import,
     create_map_tile,
     create_species,
     create_user,
@@ -144,6 +145,12 @@ def _certification_file(db: Session, diver: models.User) -> str:
     return key
 
 
+def _held_file(db: Session, diver: models.User) -> str:
+    key = blob_store.new_key("import-files", sha256="e" * 64)
+    create_logbook_import(db, diver, storage_key=key)
+    return key
+
+
 def _diver_with_every_kind(db: Session) -> tuple[models.User, set[str]]:
     """A diver holding one of each per-account kind, and the keys they own."""
     diver = create_user(db)
@@ -152,6 +159,7 @@ def _diver_with_every_kind(db: Session) -> tuple[models.User, set[str]]:
     keys = {
         _dive_file(db, diver),
         _certification_file(db, diver),
+        _held_file(db, diver),
         avatar.rendition_storage_key,
         avatar.original_storage_key,
         portrait.rendition_storage_key,

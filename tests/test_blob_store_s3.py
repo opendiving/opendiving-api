@@ -23,6 +23,7 @@ Four things are worth pinning and the rest is plumbing:
 """
 
 import asyncio
+import io
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
@@ -102,6 +103,25 @@ class TestRoundTrip:
     async def test_what_goes_in_comes_back_out(self, s3: FakeS3Client) -> None:
         await blob_store.put(KEY, DATA)
         assert await blob_store.get(KEY) == DATA
+
+    @pytest.mark.asyncio
+    async def test_a_file_object_goes_in_as_itself_and_comes_back_a_chunk_at_a_time(self, s3: FakeS3Client) -> None:
+        """A held upload may be the whole request bound, on a half-gigabyte instance."""
+        key = blob_store.new_key("import-files", sha256="a" * 64)
+        spool = io.BytesIO(DATA)
+        out = io.BytesIO()
+
+        await blob_store.put_file(key, spool)
+        await blob_store.get_file(key, out)
+
+        [(_, written)] = [call for call in s3.calls if call[0] == "put_object"]
+        assert written["Body"] is spool
+        assert out.getvalue() == DATA
+
+    @pytest.mark.asyncio
+    async def test_a_file_object_read_of_a_missing_key_raises_blob_missing(self, s3: FakeS3Client) -> None:
+        with pytest.raises(blob_store.BlobMissingError):
+            await blob_store.get_file(blob_store.new_key("import-files", sha256="a" * 64), io.BytesIO())
 
     @pytest.mark.asyncio
     async def test_rewriting_a_key_is_one_request_and_no_temp_object(self, s3: FakeS3Client) -> None:
