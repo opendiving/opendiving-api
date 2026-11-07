@@ -70,7 +70,7 @@ KEY_KIND = "import-files"
 ROLE_PART = "part"
 ROLE_PORTRAIT = "portrait"
 
-_OVERTAKEN = "This dive reached your logbook another way after the review, so the import added its file to that dive."
+_OVERTAKEN = "This dive reached your logbook another way after the review, so the import did not create it."
 _UNREAD_SINCE = "This dive's file could no longer be read when the import was applied, so nothing was written for it."
 
 
@@ -547,7 +547,8 @@ class _Application:
         _adopt(dive, settled)
         if settled.outcome is ImportDiveOutcome.NEW and dive["dive"] is None:
             dive["dive"] = await self._read(dive["uuid"])
-        return [_overtaken_note()] if reviewed is ImportDiveOutcome.NEW else []
+        overtaken = reviewed is ImportDiveOutcome.NEW and settled.outcome is not ImportDiveOutcome.SKIPPED
+        return [_overtaken_note()] if overtaken else []
 
     async def extra_row(self, row: BatchDive, members: list[int]) -> dict[str, Any]:
         """A dive the second pass reached that the review has no row for. `members` are its files

@@ -723,8 +723,8 @@ class ImportNoteCode(StrEnum):
     # could not be written: the one value entry with nowhere to land, or an element the second
     # pass did not produce.
     REVIEW_NOT_HELD = "review_not_held"
-    # A dive the review showed as new reached the logbook another way before the apply, and the
-    # file was added to that dive.
+    # A dive the review showed as new reached the logbook another way before the apply, so the
+    # apply created none, and the row is the dive that holds it.
     REVIEW_OVERTAKEN = "review_overtaken"
     # The two remap codes say the same thing about *this* record - it was imported under an
     # identifier other than the one the document gave it, and neither is an error. They

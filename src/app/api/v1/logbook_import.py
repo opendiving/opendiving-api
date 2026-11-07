@@ -397,12 +397,15 @@ async def apply_logbook_import(
     """Write a pending import as it was reviewed, and answer with the import, now `applied`.
 
     The review is what is written, from the files the upload left on the server, and no bytes
-    are sent. Each value a `modified` dive's `changes` lists is written as its `after`, even
-    where the stored value moved since; a cylinder's value is the exception where the dive's
-    cylinder list was reshaped in between, and a note on the dive says so. A dive the review
-    showed that has since been deleted or merged away is skipped, and nothing is written for it.
-    A dive the review showed as `new` that reached your logbook another way in between takes the
-    outcome and `uuid` of the dive that holds it. `GET /import/{uuid}/notes` has what happened.
+    are sent. A value of a recording or a cylinder that a `modified` dive's `changes` lists is
+    written as its `after`, even where the stored value moved since, unless it has nowhere to
+    land: the recording has gone, the dive's cylinder list was reshaped in between, or the row can
+    no longer hold it. Everything else `changes` lists - a file, a recording, a profile, a position
+    read from the files, a cylinder's link to a gear item - comes of the files themselves. What did
+    not arrive is named by a note on the dive. A dive the review showed that has since been
+    deleted or merged away is skipped, and nothing is written for it. A dive the review showed as
+    `new` that reached your logbook another way in between takes the outcome and `uuid` of the
+    dive that holds it. `GET /import/{uuid}/notes` has what happened.
 
     **All or nothing in rows.** A failure at any point writes no records at all, so a retry
     after a timeout can never half-duplicate a logbook. Applied, the import's uploaded files are
