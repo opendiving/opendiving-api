@@ -176,9 +176,7 @@ class TestTheFloridaKeys:
         }
         assert left_out == {"not a mooring buoy": 3, "left out by name": 2}
 
-    @pytest.mark.parametrize(
-        "name", ["Archer Key", "Cottrell Key", "Grecian", "Marker 48", "Mule Key", "Mule Key 2", "Toppinos Marker 32"]
-    )
+    @pytest.mark.parametrize("name", ["Archer Key", "Cottrell Key", "Grecian", "Marker 48", "Mule Key", "Mule Key 2"])
     def test_a_site_left_out_by_name_is_out(self, name: str) -> None:
         mooring = {
             "attributes": {"Location": name, "BuoyType": "Mooring", "Depth__ft_": 8},
@@ -188,7 +186,7 @@ class TestTheFloridaKeys:
         assert keys.candidates([mooring], _RETRIEVED) == ([], {"left out by name": 1})
 
     def test_every_entry_left_out_by_name_is_an_identifier_with_a_reason(self) -> None:
-        assert len(keys._LEFT_OUT_BY_NAME) == 7
+        assert len(keys._LEFT_OUT_BY_NAME) == 6
         assert all(_SLUG.fullmatch(identifier) and reason for identifier, reason in keys._LEFT_OUT_BY_NAME.items())
 
     def test_the_depths_are_the_ends_of_its_moorings_in_metres(self, kept: dict[str, dict[str, Any]]) -> None:

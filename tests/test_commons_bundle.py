@@ -23,7 +23,7 @@ from src.app.services.geocoding_service import _DEFAULT_ATTRIBUTION
 # The tripwire. A refresh that moves this fails here, so it becomes a decision somebody takes
 # rather than a diff somebody accepts: a shrinking pool is usually a broken reader, not the world
 # losing dive sites.
-COMMONS_RECORDS = 4267
+COMMONS_RECORDS = 4268
 
 
 @pytest.fixture
@@ -136,6 +136,11 @@ class TestTheBatchFromTheRegistries:
 
         assert record["commons_source"] == "noaa-florida-keys-moorings"
 
+    def test_a_site_the_register_types_a_wreck_stays_whatever_it_is_named_for(self, bundle: CommonsBundle) -> None:
+        (record,) = self._named(bundle, "Toppinos Marker 32")
+
+        assert record["commons_source"] == "noaa-florida-keys-moorings"
+
     def test_thunder_bay_keeps_its_own_grecian(self, bundle: CommonsBundle) -> None:
         """A wreck, sharing an identifier with the Florida Keys buoy and no list with it."""
         (record,) = self._named(bundle, "Grecian")
@@ -155,7 +160,6 @@ class TestTheBatchFromTheRegistries:
             "Marker 48",
             "Mule Key",
             "Mule Key 2",
-            "Toppinos Marker 32",
             "Hoyt Vandenberg",
             "Cayman Salvage Master",
             "OSJ Site - Drydocks",

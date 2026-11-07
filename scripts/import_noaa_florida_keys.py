@@ -40,7 +40,6 @@ _LEFT_OUT_BY_NAME = {
     "marker-48": "Marker 48, named for a marker in 2.7 to 4.3 m, which does not read as a dive site",
     "mule-key": "Mule Key, a mooring at a key in 2.4 m, which does not read as a dive site",
     "mule-key-2": "Mule Key 2, the next mooring at the same key, 110 m from Mule Key",
-    "toppinos-marker-32": "Toppinos Marker 32, named for a marker, which does not read as a dive site",
 }
 
 
