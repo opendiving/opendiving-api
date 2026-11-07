@@ -447,7 +447,7 @@ class ParsedDiveSchema(_ParserOutput):
     # above: the device's own accounting, written server-side onto the recording at file
     # attach - as the import stores it, unrounded - rather than pre-filling anything. They
     # ride on this schema anyway, CNS and OTU rounded to the form's two decimals, because
-    # `/dive/parse` returns it, which makes them visible in the import preview for free.
+    # `/dive/parse` returns it, which makes them visible in the form's import for free.
     cns_start: float | None = None
     cns_end: float | None = None
     otu_start: float | None = None

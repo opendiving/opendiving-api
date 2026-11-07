@@ -6,11 +6,11 @@ converts the document's members into column values, drops what the database woul
 and builds the report a diver reads. `writer.py` then walks the result and issues
 statements; it makes no decisions of its own.
 
-**Preview and apply run the same planner, and apply runs it again rather than replaying a
-plan.** Preview stores nothing, so its answer is a prediction; between the two calls a row
-can be deleted, or created under a name the document also uses. Replanning inside the
-apply transaction is what makes the deleted-here branch's re-evaluation automatic rather
-than a rule somebody has to remember, and it costs a handful of indexed lookups.
+**The upload and the apply run the same planner, and the apply runs it again rather than
+replaying a plan.** Between the two a row can be deleted, or created under a name the document
+also uses, and the plan is what writes the files, recordings and records as the logbook then
+stands; what holds the apply to the review is `imports.py`, around this. Replanning inside the
+apply transaction costs a handful of indexed lookups.
 
 Four rules run through everything below, and each is the format's rather than this app's:
 
@@ -379,8 +379,8 @@ class PlannedRecordingMatch:
 class PlannedPortrait:
     """The archive's portrait, read, verified and rendered, and the account's as it stood.
 
-    Planned whenever there is one to offer, preview and apply alike, so the apply's notes
-    agree with the preview's; `take` is whether the apply writes it.
+    Planned whenever there is one to offer, at the upload and the apply alike, so the apply's
+    notes agree with the upload's; `take` is whether the apply writes it.
     """
 
     picture: ImportedPicture
@@ -445,7 +445,7 @@ class ImportPlan:
     files_restored: int
     files_not_contained: int
     files_skipped: int
-    # The preview's section, one entry per check-in detail the document carries, and the
+    # The review's section, one entry per check-in detail the document carries, and the
     # account columns the apply writes from what the diver submitted - see `check_in.py`.
     check_in_details: list[ImportCheckInDetail] = field(default_factory=list)
     check_in_values: dict[str, Any] = field(default_factory=dict)
@@ -464,7 +464,7 @@ class ImportPlan:
     unnumbered_dives: list[uuid_pkg.UUID] = field(default_factory=list)
 
     async def portrait_offer(self) -> ImportPortraitOffer | None:
-        """The preview's portrait fields, the archive's drawn small enough to travel inline."""
+        """The review's portrait fields, the archive's drawn small enough to travel inline."""
         if self.portrait is None:
             return None
         held = self.portrait.held
@@ -821,9 +821,8 @@ class _Planner:
         self._batch_dive_ids = batch_dive_ids
         self._kept = False
         self._not_kept: ImportMemberNotKept | None = loaded.not_kept
-        # `resolution_ran` is what makes preview and apply tell the truth about species
-        # without telling two different stories: before the pre-pass an unknown AphiaID is
-        # something this import *will* look up, after it an unknown one is something WoRMS
+        # `resolution_ran` is what keeps the plan true about species: before the pre-pass an
+        # unknown AphiaID is something this import *will* look up, after it one WoRMS
         # could not answer for.
         self._resolution_ran = resolution_ran
         self._newly_resolved = newly_resolved_aphia_ids
@@ -871,9 +870,9 @@ class _Planner:
         self._link_aliases: dict[int, uuid_pkg.UUID] = {}
         self._accounts: dict[uuid_pkg.UUID, Account] = {}
         # **Where a link's count is spent.** The apply claims one slot per link it makes, an
-        # exhausted window dropping that link rather than the import; the preview reads what
+        # exhausted window dropping that link rather than the import; the upload reads what
         # the window has left and spends nothing, so the plan is made twice and counted once.
-        # Read on the first link the preview meets, so an import that links nobody never asks.
+        # Read on the first link the upload meets, so an import that links nobody never asks.
         self._claim_links = claim_links
         self._link_budget: int | None = None
         # The caller's tags by `tag_key`, the names of this document's diver's tag list, and
@@ -1012,7 +1011,7 @@ class _Planner:
             # it changes: the import mints a fresh identity, and every reference to the
             # document's uuid follows it, which is what keeps the copy internally
             # consistent. Idempotence is impossible on this branch by construction - see
-            # `DECISIONS.md` - and the preview saying so is the honest guard.
+            # `DECISIONS.md` - and the review saying so is the honest guard.
             self._note(
                 ImportNoteCode.RECORD_REMAPPED_REFERENCES_FOLLOW,
                 "That identifier already belongs to another account here, so this record was imported under a new "
@@ -1425,7 +1424,7 @@ class _Planner:
     async def _plan_portrait(self) -> None:
         """The archive's portrait, offered beside the account's and taken only as chosen.
 
-        Read, verified and rendered here, where the preview runs, so a file the pipeline
+        Read, verified and rendered here, where the upload runs, so a file the pipeline
         refuses is noted before the diver chooses anything and the apply, re-running this,
         agrees. Never counted among the files. An archive portrait that is the account's own
         original is offered only where its crop differs, and then as a re-crop.
@@ -1465,14 +1464,14 @@ class _Planner:
             else:
                 self._note(
                     ImportNoteCode.PORTRAIT_KEPT,
-                    "This account's portrait was kept: it changed after the preview the archive's was chosen in.",
+                    "This account's portrait was kept: it changed after the review the archive's was chosen in.",
                 )
         self._portrait = planned
 
     def _portrait_bytes(self, stored: ImportStoredFile, archive_path: str) -> bytes | None:
         """The archive's portrait, checked against its digest and the upload ceiling, or `None`
         with a note saying why not - `_plan_card_file`'s checks, made here rather than by the
-        writer because the preview renders it."""
+        writer because the review renders it."""
         size = self._loaded.member_size(archive_path)
         if stored.sha256 is None:
             reason = "The portrait carries no digest to verify it against, so it is not offered."
@@ -1583,7 +1582,7 @@ class _Planner:
         trimmed name, claimed against the caller's contacts and this document's own as any
         contact is: one the caller already has is linked by row id (`contact_id`), and any
         other is planned as a new contact with the `school` role, which the next record naming
-        the same string then shares. Planned here, never created: a preview predicts. So the
+        the same string then shares. Planned here, never created: a review predicts. So the
         contacts collection's counts include the contacts an old export's training centers
         make, beyond the records its `contacts[]` carries.
         """
@@ -1790,7 +1789,7 @@ class _Planner:
         Claimed by trimmed name against the caller's people and this document's own, as any
         person is: one the caller already has is referenced by row id, and any other is
         planned as a new person, which the next record naming the same string then shares.
-        Planned here, never created - a preview predicts - so the people collection's counts
+        Planned here, never created - a review predicts - so the people collection's counts
         include the people an old export's instructors make.
         """
         name = (instructor_name or "").strip()
@@ -2177,7 +2176,7 @@ class _Planner:
                 "The World Register of Marine Species could not be reached for this species, so the sightings "
                 "naming it were imported without it.",
             )
-        # Preview. Nothing has been looked up yet, and saying "skipped" here would be a
+        # Nothing has been looked up yet, and saying "skipped" here would be a
         # worse prediction than saying "will be added": the catalog is filled from WoRMS on
         # demand and the ordinary answer is that it resolves.
         self._note(
@@ -3033,7 +3032,7 @@ class _Planner:
 
     def _note_new_tags(self) -> None:
         """Name the tags the import makes, in one note. Not a report line: a tag is a member of
-        a dive, not a collection the document carries - but a preview says what it creates."""
+        a dive, not a collection the document carries - but a review says what it creates."""
         if not self._new_tags:
             return
         names = ", ".join(f'"{name}"' for name in self._new_tags.values())
@@ -3057,7 +3056,7 @@ class _Planner:
         collapsing their sightings to one is this app's reading of a dive, which the format
         leaves to the reader. Folding the two, as a merge does, would invent a sighting
         neither record holds. Keyed on the AphiaID, which every sighting reaching that check
-        carries and which preview can see before the pre-pass has found a row.
+        carries and which a plan can see before the pre-pass has found a row.
         """
         sightings: list[StoredSighting] = []
         listed: set[int | None] = set()
@@ -3095,7 +3094,7 @@ class _Planner:
             notes = self._notes_text("dives", dive.uuid, sighting.notes)
             row_id = self._species_row_by_uuid.get(sighting.species_uuid)
             if row_id is None:
-                # Preview, and this species is one the pre-pass has not looked up yet. The
+                # This species is one the pre-pass has not looked up yet. The
                 # species collection's own note already says it will be, and saying "the
                 # sighting was not imported" here would contradict that in the same report -
                 # while every dive naming a new species spent a note against the cap.
@@ -3571,7 +3570,7 @@ async def plan_import(
 def portrait_change(plan: ImportPlan) -> tuple[int, int]:
     """What taking the archive's portrait adds and retires, as `(incoming, retired)`.
 
-    Nothing unless the plan takes it, so a preview - which has no choice yet - measures the
+    Nothing unless the plan takes it, so the upload - which has no choice yet - measures the
     import with the account's own portrait kept, the apply's default. Where the account
     already holds this original only the rendition is written, as `write_imported_portrait`
     does.

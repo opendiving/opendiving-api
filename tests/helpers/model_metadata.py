@@ -88,6 +88,12 @@ NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
         "this diverges from `UserSession`: a second delete of an *accepted* invitation is a 409, which "
         "is a refusal about the row's state rather than about its absence."
     ),
+    "LogbookImport": (
+        "`DELETE /import/{uuid}` is its one way out, and `tests/test_logbook_import_held.py` pins it: the "
+        "delete names the status it deletes, takes the blobs of the files the import holds, and a second is "
+        "a 404. It has no name to free and no crud to register, and the panel does not list it: a review "
+        "holds a diver's proposed check-in details, and a row written there would be no import at all."
+    ),
     "CertificationFile": (
         "A card image reached through its certification: `DELETE /certification/{uuid}/file/{side}` "
         "owns its lifecycle, along with the blob it writes to whichever store "

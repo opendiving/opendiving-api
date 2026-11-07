@@ -262,6 +262,7 @@ PAGINATED_LIST_ROUTES: dict[str, tuple[str, ...]] = {
     "gear_service.py": ("read_gear_service_records", "read_gear_service_schedules"),
     "gear_sets.py": ("read_gear_sets",),
     "invitations.py": ("read_invitations",),
+    "logbook_import.py": ("read_logbook_imports",),
     "people.py": ("lookup_people", "read_people"),
     "tags.py": ("read_tags",),
     "trips.py": ("lookup_trips", "read_trip_dives", "read_trips"),

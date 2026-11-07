@@ -15,8 +15,8 @@ Four stages, in this order, and the order is the design:
 3. `species.resolve_catalog_gaps` fills the shared catalog from WoRMS - before anything
    is written, because it commits and can take a minute.
 4. `batch.import_batch` plans each file (`planner.plan_import`) and writes it
-   (`writer.write_import`) before the next is planned, in one transaction; the preview
-   rolls it back, and the apply's caller commits, once.
+   (`writer.write_import`) before the next is planned, in one transaction; the upload's
+   pass rolls it back, and the apply's caller commits, once.
 """
 
 from .batch import BatchReport, batch_species, import_batch

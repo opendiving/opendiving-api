@@ -52,9 +52,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...api.dependencies import get_current_user
 from ...core.config import settings
 from ...core.db.database import async_get_db, release_read_transaction
-from ...core.exceptions.http_exceptions import BadRequestException, UnprocessableEntityException
+from ...core.exceptions.http_exceptions import BadRequestException, NotFoundException, UnprocessableEntityException
 from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.rate_limit import enforce_rate_limit
+from ...models.logbook_import import LogbookImport
 from ...schemas.logbook_import import (
     LogbookImportApply,
     LogbookImportNotes,
@@ -143,6 +144,12 @@ async def _enforce_import_limit(user_id: int) -> None:
         settings.IMPORT_RATE_LIMIT_PER_USER,
         settings.IMPORT_RATE_LIMIT_WINDOW_SECONDS,
     )
+
+
+def _found(row: LogbookImport | None) -> LogbookImport:
+    if row is None:
+        raise NotFoundException("Import not found")
+    return row
 
 
 def _missing(field: str) -> RequestValidationError:
@@ -317,7 +324,8 @@ async def read_pending_logbook_import(
 ) -> JSONResponse:
     """Return your account's pending import, the review `POST /imports` answered with, from any
     device. 404 when there is none, or when it is past its limit."""
-    return JSONResponse(content=await import_body(db, await find_pending_import(db, user_id=current_user["id"])))
+    row = _found(await find_pending_import(db, user_id=current_user["id"]))
+    return JSONResponse(content=await import_body(db, row))
 
 
 @router.get("/import/{uuid}", response_model=LogbookImportRead)
@@ -333,7 +341,8 @@ async def read_logbook_import(
     added to a dive you already had carries that dive's `uuid`. 404 for an import that is not
     there, is past its limit, or is someone else's.
     """
-    return JSONResponse(content=await import_body(db, await find_import(db, user_id=current_user["id"], uuid=uuid)))
+    row = _found(await find_import(db, user_id=current_user["id"], uuid=uuid))
+    return JSONResponse(content=await import_body(db, row))
 
 
 @router.get("/import/{uuid}/notes", response_model=LogbookImportNotes)
@@ -352,7 +361,7 @@ async def read_logbook_import_notes(
     found, with what it could not hold to the review. Treat a `code` or `kind` you do not recognise
     as information. 404 as `GET /import/{uuid}`.
     """
-    return JSONResponse(content=(await find_import(db, user_id=current_user["id"], uuid=uuid)).notes)
+    return JSONResponse(content=_found(await find_import(db, user_id=current_user["id"], uuid=uuid)).notes)
 
 
 @router.post("/import/{uuid}/apply", response_model=LogbookImportRead)
@@ -383,7 +392,7 @@ async def apply_logbook_import(
     carry, stays as it is. What is sent meets the bounds `PATCH /user/checkin-details` does,
     so an emergency contact without a name or a policy without a provider is a 422.
 
-    The archive's portrait replaces your account's only when `portrait` says `take`, and
+    The archive's portrait replaces your account's only when `portrait` chooses the archive's, and
     only while your portrait is still the one the review showed; otherwise yours is kept,
     and a note says so when you had chosen the archive's.
 
@@ -398,7 +407,7 @@ async def apply_logbook_import(
     # The files an import stores are written before the rows that name them commit, so a failure
     # can strand an unreferenced file - harmless, and swept.
     user_id = current_user["id"]
-    row = await lock_import(db, user_id=user_id, uuid=uuid)
+    row = _found(await lock_import(db, user_id=user_id, uuid=uuid))
     refuse_unless_pending(row)
     with await held_parts(db, row) as held, await _load(held.parts) as batch:
         await apply_held(
@@ -439,6 +448,5 @@ async def delete_logbook_import(
     A 409 when the import's status is not the one named, so a discard sent from a review another
     device has since applied deletes nothing. 404 as `GET /import/{uuid}`.
     """
-    row = await lock_import(db, user_id=current_user["id"], uuid=uuid)
-    await delete_import(db, row=row, status=status)
+    await delete_import(db, row=_found(await lock_import(db, user_id=current_user["id"], uuid=uuid)), status=status)
     return Response(status_code=204)

@@ -214,7 +214,7 @@ def test_the_unlimited_paths_are_the_import_routes(app: FastAPI) -> None:
     then held to a ceiling a fraction of their own."""
     posts = {route.path for route in iter_api_routes(app) if route.method == "POST"}
 
-    assert UNLIMITED_PATHS == {"/api/v1/import/logbook/preview", "/api/v1/import/logbook"}
+    assert UNLIMITED_PATHS == {"/api/v1/imports"}
     assert posts >= UNLIMITED_PATHS
 
 

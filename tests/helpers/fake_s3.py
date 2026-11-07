@@ -45,7 +45,7 @@ class _Body:
         self._data = data
         self.closed = False
 
-    def read(self) -> bytes:
+    def read(self, amount: int | None = None) -> bytes:
         return self._data
 
     def close(self) -> None:
@@ -121,7 +121,8 @@ class FakeS3Client:
     def put_object(self, **kwargs: Any) -> dict[str, Any]:
         self.record("put_object", kwargs)
         self._check_bucket(kwargs["Bucket"], "PutObject")
-        self.objects[kwargs["Key"]] = bytes(kwargs["Body"])
+        body = kwargs["Body"]
+        self.objects[kwargs["Key"]] = body.read() if hasattr(body, "read") else bytes(body)
         self.modified[kwargs["Key"]] = datetime.now(UTC)
         return {}
 

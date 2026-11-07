@@ -225,8 +225,7 @@ async def _apply(
 
 def _counts(plan: Any) -> dict[str, tuple[int, int, int, int]]:
     return {
-        report.collection: (report.created, report.linked, report.restored, report.skipped)
-        for report in plan.collection_reports()
+        report.collection: (report.created, report.linked, 0, report.skipped) for report in plan.collection_reports()
     }
 
 

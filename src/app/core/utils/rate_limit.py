@@ -101,7 +101,7 @@ async def claim_rate_limit_slot(key: str, max_requests: int, window_seconds: int
 
 async def remaining_in_window(key: str, max_requests: int) -> int:
     """How many more requests the window at `key` admits, **without spending one** - for a
-    preview that has to say what its apply would be allowed. Fails open, as the limiter
+    review that has to say what its apply would be allowed. Fails open, as the limiter
     does."""
     if cache.client is None:
         return max_requests

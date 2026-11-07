@@ -145,13 +145,13 @@ class TestTheDiveReadsScopeThatLookup:
         lookup = AsyncMock(return_value={})
 
         with (
-            patch("src.app.api.v1.dives.crud_dives.get", AsyncMock(return_value=row)),
-            patch("src.app.api.v1.dives.get_trip_uuids_by_ids", lookup),
-            patch("src.app.api.v1.dives.get_mixtures_for_dive", AsyncMock(return_value=[])),
-            patch("src.app.api.v1.dives.get_dive_sites_for_dive", AsyncMock(return_value=[])),
-            patch("src.app.api.v1.dives.get_gear_items_for_dive", AsyncMock(return_value=[])),
-            patch("src.app.api.v1.dives.get_recordings_for_dives", AsyncMock(return_value={})),
-            patch("src.app.api.v1.dives.get_conditions", AsyncMock(return_value=None)),
+            patch("src.app.services.dive_detail.crud_dives.get", AsyncMock(return_value=row)),
+            patch("src.app.services.dive_detail.get_trip_uuids_by_ids", lookup),
+            patch("src.app.services.dive_detail.get_mixtures_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.services.dive_detail.get_dive_sites_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.services.dive_detail.get_gear_items_for_dive", AsyncMock(return_value=[])),
+            patch("src.app.services.dive_detail.get_recordings_for_dives", AsyncMock(return_value={})),
+            patch("src.app.services.dive_detail.get_conditions", AsyncMock(return_value=None)),
         ):
             await _read_dive_uncached(request=None, user_id=7, uuid=row["uuid"], owner_uuid=uuid7(), db=AsyncMock())
 

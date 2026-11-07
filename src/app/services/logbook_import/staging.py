@@ -3,12 +3,12 @@
 An import of several files cannot know what it stores until it has planned and written the
 last of them: each file is planned against the logbook the files before it left, and a
 second export of one recording stores nothing where its bytes are already there. Yet the
-storage limit refuses the whole import before anything is written, at the preview and again
+storage limit refuses the whole import before anything is written, at the upload and again
 at the apply. So the writer mints each file's key and writes its row inside the import's
 transaction, and holds the bytes back here; the batch then checks the account's room over
 everything held, and only an apply that fits writes the objects - all of them before the
 commit, which is the ordering every other write keeps: every database-visible state names
-bytes that exist. A preview never writes one, and rolls its rows back.
+bytes that exist. The upload's pass never writes one, and rolls its rows back.
 
 What a row records of its object's size before the object exists is the most it can occupy;
 the write corrects it to what the store reports.

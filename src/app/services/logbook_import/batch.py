@@ -1,7 +1,7 @@
 """An import of many files: each imported in turn, inside one transaction, with one report.
 
 **A batch writes what its files would write imported one at a time, in the batch's order** -
-each as an import of its own, previewed and applied - and that is the whole of what two files
+each as an import of its own, reviewed and applied - and that is the whole of what two files
 make of each other but for dive numbers, given after the last file in date order
 (`assign_suggested_numbers`). Each file is planned against the logbook as the files before it
 left it, and written before the next is planned, so every rule the import has about a

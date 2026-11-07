@@ -9,9 +9,10 @@ A reader matches a species on its `worms` entry, an AphiaID (spec §6.11), and t
 sanctioned way to turn one into a row: the same `resolve_species` call `POST /species/resolve`
 makes.
 
-**Three reasons it runs here rather than anywhere else.** It cannot run during preview,
-which stores nothing. It cannot run inside the apply transaction, because `resolve_species`
-rolls its own transaction back before going outbound and commits when it succeeds. And its
+**Three reasons it runs here rather than anywhere else.** It runs at the upload, before the
+review, because the review is the contract and a sighting it left out would stay out. It cannot
+run inside the import's transaction, because `resolve_species` rolls its own transaction back
+before going outbound and commits when it succeeds. And its
 worst case is long: two `_RESOLVE_BUDGET_SECONDS` passes (the synonym branch) plus
 `_ENRICHMENT_BUDGET_SECONDS`, on the order of a minute per unknown AphiaID. So it is a
 batch, before the write, under one total budget sized against that ceiling rather than
@@ -19,7 +20,7 @@ against the typical cost.
 
 Its rows are the second deliberate exception to the import's all-or-nothing guarantee, and
 a harmless one: they are global, idempotent, and identical to what a diver picking the same
-animal by hand would have created. A failed apply leaves them behind and the next attempt
+animal by hand would have created. A discarded import leaves them behind and the next attempt
 reuses them.
 """
 

@@ -1,7 +1,7 @@
 """Turning a plan into rows, in one transaction and with no judgement of its own.
 
 Everything worth deciding was decided in `planner.py`; this module issues the statements.
-That split is what makes the preview honest - the report a diver approves is produced by
+That split is what makes the review honest - the report a diver approves is produced by
 the same pass that decides what to write - and it is why the only notes added here are the
 ones a plan genuinely cannot predict: a restored file whose bytes do not match their digest,
 one whose bytes are not a format this app stores, and whether the portrait the diver took was
@@ -335,7 +335,7 @@ class _Writer:
 
         `member_size` told the plan the member was there and small enough; only reading it
         can say whether it is the file the document claims. So the count moves here rather
-        than the preview being vaguer about it.
+        than the review being vaguer about it.
         """
         self._plan.files_restored -= 1
         self._plan.files_skipped += 1
@@ -392,7 +392,7 @@ class _Writer:
             put=self._staged.put,
         ):
             self._note(
-                ImportNoteCode.CHECK_IN_DETAIL_WRITTEN, "The portrait chosen in the preview was saved to this account."
+                ImportNoteCode.CHECK_IN_DETAIL_WRITTEN, "The portrait chosen in the review was saved to this account."
             )
         else:
             self._note(

@@ -52,6 +52,7 @@ from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
 from src.app.models.invite_link import InviteLink
+from src.app.models.logbook_import import LogbookImport, LogbookImportFile
 from src.app.models.person import Person
 from src.app.models.saved_site import SavedSite
 from src.app.models.tag import Tag
@@ -75,6 +76,7 @@ from tests.helpers.generators import (
     create_gear_service_record,
     create_gear_service_schedule,
     create_gear_set,
+    create_logbook_import,
     create_person,
     create_tag,
     create_trip,
@@ -150,6 +152,7 @@ class TestDeletingAUserTakesEverythingWithIt:
         gear_set = create_gear_set(db, diver)
         create_dive_form_preset(db, diver)
         create_dive_draft(db, diver, gear_set=gear_set)
+        create_logbook_import(db, diver)
         certification = Certification(user_id=diver.id, agency="padi", name="Rescue Diver", notes="")
         db.add_all(
             [
@@ -256,6 +259,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             GearServiceSchedule,
             GearSet,
             InviteLink,
+            LogbookImport,
             Person,
             SavedSite,
             Tag,
@@ -277,6 +281,7 @@ class TestDeletingAUserTakesEverythingWithIt:
                 DivePerson,
                 DiveTag,
                 GearSetItem,
+                LogbookImportFile,
                 TripPart,
                 TripPerson,
             )

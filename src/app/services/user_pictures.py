@@ -149,8 +149,8 @@ RENDITION_CONTENT_TYPE = "image/webp"
 _WEBP_QUALITY = 85
 _WEBP_METHOD = 6
 
-# An import preview's copy of the archive's portrait travels inside the JSON, so it is drawn
-# at the size a preview shows it rather than the rendition's.
+# An import review's copy of the archive's portrait travels inside the JSON, so it is drawn
+# at the size a review shows it rather than the rendition's.
 PREVIEW_MAX_HEIGHT = 360
 
 # Guards on the one URL this server will fetch an image from (see `import_google_avatar`).

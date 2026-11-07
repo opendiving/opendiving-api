@@ -34,6 +34,7 @@ from src.app.models.user import User
 from src.app.schemas.dive import DiveReadInternal
 from src.app.schemas.dive_mixture import DiveMixtureCreate
 from src.app.schemas.logbook_import import (
+    REVIEW_SHAPE,
     ImportDiveOutcome,
     ImportNoteCode,
     LogbookImportNotes,
@@ -42,12 +43,20 @@ from src.app.schemas.logbook_import import (
 )
 from src.app.services import blob_store
 from src.app.services.dive_merge import merge_dives
+from src.app.services.dive_recordings import DEVICE_COLUMNS
+from src.app.services.export.archive import DIVEJSON_NAME
+from src.app.services.logbook_import import import_batch, load_import
 from src.app.services.logbook_import.planner import DELETED_HERE
 from tests.conftest import db_available
-from tests.helpers.generators import create_user
+from tests.helpers.generators import create_dive, create_user
 from tests.helpers.held_imports import apply, body_of, caller, discard, upload, upload_and_apply
+from tests.helpers.images import phone_jpeg
+from tests.helpers.import_parts import parts_of
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
+
+# The digest `_shape_digest` answers at `REVIEW_SHAPE`. It moves with the number, on purpose.
+EMBEDDED_SHAPE = "0"
 
 FIXTURES = Path(__file__).parent / "fixtures" / "dive_files"
 OCEAN_FIT = (FIXTURES / "suunto-ocean-2026.fit").read_bytes()
@@ -85,6 +94,56 @@ def _zip_of(*files: tuple[str, bytes]) -> bytes:
         for name, data in files:
             archive.writestr(name, data)
     return buffer.getvalue()
+
+
+def _archive(**document: Any) -> bytes:
+    """A full-export archive of one dive of its own."""
+    logbook = json.loads(_logbook({"started_at": "2026-05-05T10:00:00+02:00"}))
+    return _zip_of((DIVEJSON_NAME, json.dumps({**logbook, **document}).encode()))
+
+
+def _archive_with_a_portrait() -> bytes:
+    picture = phone_jpeg(size=(320, 240), orientation=None)
+    stored = {
+        "uuid": str(uuid_pkg.uuid4()),
+        "original_filename": "portrait.jpg",
+        "content_type": "image/jpeg",
+        "byte_size": len(picture),
+        "sha256": hashlib.sha256(picture).hexdigest(),
+        "archive_path": "files/portrait.jpg",
+    }
+    document = json.dumps({"format": "divejson", "version": "1.0", "diver": {"portrait_file": stored}}).encode()
+    return _zip_of((DIVEJSON_NAME, document), ("files/portrait.jpg", picture))
+
+
+async def _internal(db: AsyncSession, dive_id: int) -> DiveReadInternal:
+    row = await db.scalar(select(Dive).where(Dive.id == dive_id))
+    return DiveReadInternal.model_validate(row, from_attributes=True)
+
+
+def _without_docs(node: Any) -> Any:
+    """A schema with the words the published docs carry taken out, whatever a property is called."""
+    if isinstance(node, dict):
+        return {
+            key: value if key == "properties" and not isinstance(value, dict) else _without_doc_members(key, value)
+            for key, value in node.items()
+            if key not in {"title", "description", "examples"}
+        }
+    if isinstance(node, list):
+        return [_without_docs(value) for value in node]
+    return node
+
+
+def _without_doc_members(key: str, value: Any) -> Any:
+    if key == "properties":
+        return {name: _without_docs(member) for name, member in value.items()}
+    return _without_docs(value)
+
+
+def _shape_digest() -> str:
+    """Every model `review` and `notes` embed, by what they hold and not how they are described."""
+    shapes = [_without_docs(model.model_json_schema()) for model in (LogbookImportRead, LogbookImportNotes)]
+    return hashlib.sha256(json.dumps(shapes, sort_keys=True).encode()).hexdigest()
 
 
 async def _rows(db: AsyncSession, user: User) -> list[LogbookImport]:
@@ -381,7 +440,9 @@ class TestTheApply:
         assert not any([await blob_store.has(file.storage_key) for file in held])
         kept = await async_db.scalars(select(DiveFile.storage_key).where(DiveFile.user_id == diver.id))
         assert all([await blob_store.has(key) for key in kept.all()])
-        assert (await async_db.scalar(select(func.count()).select_from(DiveFile).where(DiveFile.user_id == diver.id))) == 2
+        assert (
+            await async_db.scalar(select(func.count()).select_from(DiveFile).where(DiveFile.user_id == diver.id))
+        ) == 2
         LogbookImportRead.model_validate(applied)
 
     @pytest.mark.asyncio
@@ -439,7 +500,9 @@ class TestDiscardingAndTheHistory:
     async def test_the_history_lists_applied_imports_newest_first(self, async_db: AsyncSession, db: Session) -> None:
         diver = create_user(db)
         first = await upload_and_apply(async_db, diver, [("one.json", _logbook({}))])
-        second = await upload_and_apply(async_db, diver, [("two.json", _logbook({}, {"started_at": "2026-05-02T10:00:00+02:00"}))])
+        second = await upload_and_apply(
+            async_db, diver, [("two.json", _logbook({}, {"started_at": "2026-05-02T10:00:00+02:00"}))]
+        )
         await upload(async_db, diver, [("three.json", _logbook({"started_at": "2026-05-03T10:00:00+02:00"}))])
 
         history = await _history(async_db, diver)
@@ -510,7 +573,6 @@ class TestAppliedAsReviewed:
         mixtures = (
             await async_db.scalars(select(DiveMixture).where(DiveMixture.dive_id == dive.id).order_by(DiveMixture.id))
         ).all()
-        edited = values[0]["member"].split("/")
         await replace_mixtures_for_dive(
             db=async_db,
             dive_id=dive.id,
@@ -541,6 +603,216 @@ class TestAppliedAsReviewed:
         for change in values:
             _, index, member = change["member"].split("/")
             assert getattr(stored[int(index)], member) == change["after"]
-        assert edited
         await async_db.refresh(dive)
-        assert dive.max_depth == 11.5
+        assert dive.max_depth == 11.5, "the review did not list it, so the edit stands"
+
+    @pytest.mark.asyncio
+    async def test_a_cylinder_list_reshaped_since_is_a_note_rather_than_a_write_onto_another_cylinder(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        await upload_and_apply(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        review = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
+        dive = await async_db.scalar(select(Dive).where(Dive.user_id == diver.id))
+        assert dive is not None
+        await replace_mixtures_for_dive(
+            db=async_db, dive_id=dive.id, mixtures=[DiveMixtureCreate(oxygen=0.5, gas_number=9)]
+        )
+        await async_db.commit()
+
+        applied = await apply(async_db, diver, review["uuid"])
+
+        [mixture] = (await async_db.scalars(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).all()
+        assert (mixture.oxygen, mixture.gas_number) == (0.5, 9)
+        assert applied["dives"][0]["outcome"] == "modified"
+        [row] = (await _notes(async_db, diver, review["uuid"]))["dives"]
+        assert ImportNoteCode.REVIEW_NOT_HELD.value in {note["code"] for note in row["notes"]}
+
+    @pytest.mark.asyncio
+    async def test_a_recording_value_is_held_by_the_recording_s_uuid(self, async_db: AsyncSession, db: Session) -> None:
+        diver = create_user(db)
+        await upload_and_apply(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        review = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
+        [row] = review["dives"]
+        filled = [change for change in row["changes"] if change["member"].startswith("recordings/0/device/")]
+        assert filled, "the fixture's JSON should fill a device member the FIT left blank"
+        change = filled[0]
+        column = DEVICE_COLUMNS[change["member"].rsplit("/", 1)[1]]
+        await async_db.execute(
+            update(DiveRecording).values({column: "Edited since"}).where(DiveRecording.user_id == diver.id)
+        )
+        await async_db.commit()
+
+        await apply(async_db, diver, review["uuid"])
+
+        recording = await async_db.scalar(
+            select(DiveRecording).where(DiveRecording.user_id == diver.id).execution_options(populate_existing=True)
+        )
+        assert recording is not None and getattr(recording, column) == change["after"]
+
+    @pytest.mark.parametrize("second", ["dive.json", "dive.fit"], ids=["modified", "unchanged"])
+    @pytest.mark.asyncio
+    async def test_a_reviewed_dive_deleted_since_is_skipped_and_not_brought_back(
+        self, async_db: AsyncSession, db: Session, second: str
+    ) -> None:
+        diver = create_user(db)
+        await upload_and_apply(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        review = await upload(async_db, diver, [(second, OCEAN_JSON if second == "dive.json" else OCEAN_FIT)])
+        [reviewed] = review["dives"]
+        await async_db.execute(update(Dive).where(Dive.user_id == diver.id).values(is_deleted=True))
+        await async_db.commit()
+
+        applied = await apply(async_db, diver, review["uuid"])
+
+        [row] = applied["dives"]
+        assert (row["outcome"], row["reason"]) == ("skipped", DELETED_HERE)
+        assert (row["uuid"], row["dive"], row["changes"]) == (reviewed["uuid"], reviewed["dive"], [])
+        assert await async_db.scalar(select(func.count()).select_from(Dive).where(Dive.user_id == diver.id)) == 1
+        kept = await async_db.scalar(select(func.count()).select_from(DiveFile).where(DiveFile.user_id == diver.id))
+        assert kept == 1, "the second file is not stored on the deleted dive"
+
+    @pytest.mark.asyncio
+    async def test_a_reviewed_dive_merged_away_since_is_skipped_and_the_survivor_is_untouched(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        await upload_and_apply(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        reviewed_dive = await async_db.scalar(select(Dive).where(Dive.user_id == diver.id))
+        assert reviewed_dive is not None
+        survivor = create_dive(
+            db, diver, start_time=reviewed_dive.start_time - timedelta(minutes=5), utc_offset_minutes=120
+        )
+        review = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
+        assert review["dives"][0]["outcome"] == "modified"
+        first = await _internal(async_db, survivor.id)
+        second = await _internal(async_db, reviewed_dive.id)
+        await merge_dives(async_db, first=first, second=second)
+        await async_db.commit()
+        files_before = await async_db.scalar(
+            select(func.count()).select_from(DiveFile).where(DiveFile.user_id == diver.id)
+        )
+
+        applied = await apply(async_db, diver, review["uuid"])
+
+        assert (applied["dives"][0]["outcome"], applied["dives"][0]["reason"]) == ("skipped", DELETED_HERE)
+        files_after = await async_db.scalar(
+            select(func.count()).select_from(DiveFile).where(DiveFile.user_id == diver.id)
+        )
+        assert files_after == files_before
+
+    @pytest.mark.asyncio
+    async def test_a_record_another_account_holds_is_written_at_the_uuid_the_review_showed(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        taken = uuid_pkg.uuid4()
+        document = _logbook({}, uuid=taken)
+        await upload_and_apply(async_db, create_user(db), [("one.divejson", document)])
+        diver = create_user(db)
+
+        review = await upload(async_db, diver, [("one.divejson", document)])
+        [reviewed] = review["dives"]
+        applied = await apply(async_db, diver, review["uuid"])
+
+        assert reviewed["outcome"] == "new" and reviewed["uuid"] != str(taken)
+        assert [row["uuid"] for row in applied["dives"]] == [reviewed["uuid"]]
+        stored = await async_db.scalar(select(Dive.uuid).where(Dive.user_id == diver.id))
+        assert str(stored) == reviewed["uuid"]
+
+    @pytest.mark.asyncio
+    async def test_a_new_dive_that_reached_the_logbook_since_takes_the_outcome_of_the_dive_that_holds_it(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        document = _logbook({})
+        review = await upload(async_db, diver, [("one.divejson", document)])
+        with await load_import(parts_of(("copy.divejson", document))) as batch:
+            await import_batch(async_db, user_id=diver.id, batch=batch, apply=True)
+            await async_db.commit()
+
+        applied = await apply(async_db, diver, review["uuid"])
+
+        [row] = applied["dives"]
+        assert (row["outcome"], row["uuid"]) == ("unchanged", review["dives"][0]["uuid"])
+        [log] = (await _notes(async_db, diver, review["uuid"]))["dives"]
+        assert ImportNoteCode.REVIEW_OVERTAKEN.value in {note["code"] for note in log["notes"]}
+        assert await async_db.scalar(select(func.count()).select_from(Dive).where(Dive.user_id == diver.id)) == 1
+
+    @pytest.mark.parametrize(
+        "refused",
+        [
+            pytest.param(("b.fit", OCEAN_FIT[:40]), id="a FIT that does not convert"),
+            pytest.param(("b.zip", "second archive"), id="a second full-export archive"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_refused_file_sorting_among_the_readable_ones_moves_no_row(
+        self, async_db: AsyncSession, db: Session, refused: tuple[str, Any]
+    ) -> None:
+        """A refused file holds a row in the batch the upload reads and none in the batch the
+        apply reads from what is stored, so a key by position would shift every row after it."""
+        diver, stranger = create_user(db), create_user(db)
+        foreign = _logbook({"started_at": "2026-05-03T10:00:00+02:00"})
+        await upload_and_apply(async_db, stranger, [("c.divejson", foreign)])
+        doomed = _logbook({"started_at": "2026-05-04T10:00:00+02:00"})
+        await upload_and_apply(async_db, diver, [("d.divejson", doomed)])
+        name, data = refused
+        files = [("a.divejson", _logbook({})), ("c.divejson", foreign), ("d.divejson", doomed)]
+        if data == "second archive":
+            files = [("a.zip", _archive()), *files[1:], (name, _archive())]
+        else:
+            files.append((name, data))
+        review = await upload(async_db, diver, files)
+        assert any(member["refusal"] for member in review["members"])
+        await async_db.execute(
+            update(Dive)
+            .where(Dive.user_id == diver.id, Dive.uuid == uuid_pkg.UUID(json.loads(doomed)["dives"][0]["uuid"]))
+            .values(is_deleted=True)
+        )
+        await async_db.commit()
+
+        applied = await apply(async_db, diver, review["uuid"])
+
+        by_uuid = {row["uuid"]: row for row in applied["dives"]}
+        assert [row["uuid"] for row in applied["dives"]] == [row["uuid"] for row in review["dives"]]
+        doomed_row = by_uuid[json.loads(doomed)["dives"][0]["uuid"]]
+        assert doomed_row["outcome"] == "skipped"
+        written = await async_db.scalars(select(Dive.uuid).where(Dive.user_id == diver.id, Dive.is_deleted.is_(False)))
+        assert {str(uuid) for uuid in written.all()} == {
+            row["uuid"] for row in applied["dives"] if row["outcome"] == "new"
+        }
+
+
+class TestThePortrait:
+    @pytest.mark.asyncio
+    async def test_the_offer_is_a_file_of_the_import_and_goes_with_the_apply(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+
+        review = await upload(async_db, diver, [("logbook.zip", _archive_with_a_portrait())])
+
+        assert review["portrait"]["proposed"].startswith("data:image/webp;base64,")
+        stored = (await _rows(async_db, diver))[0].review["portrait"]
+        assert "proposed" not in stored, "the picture is in the store, not the column"
+        roles = sorted(file.role for file in await _files(async_db, diver))
+        assert roles == ["part", "portrait"]
+        assert await _pending(async_db, diver) == review
+
+        applied = await apply(async_db, diver, review["uuid"])
+
+        assert applied["portrait"] is None and applied["check_in_details"] == []
+        assert await _files(async_db, diver) == []
+
+
+class TestTheShapeOfWhatIsStored:
+    def test_the_stored_shape_is_pinned_beside_its_number(self) -> None:
+        """A review is served as it was stored, so a change to a schema it embeds reaches rows no
+        deploy rewrites. If this fails, bump `REVIEW_SHAPE`, make the call on the stored rows -
+        migrate them or retire them - and only then write the new digest and number here."""
+        assert (REVIEW_SHAPE, _shape_digest()) == (1, EMBEDDED_SHAPE)
+
+    def test_a_change_of_wording_moves_nothing(self) -> None:
+        first = _without_docs({"title": "A", "description": "x", "examples": [1], "properties": {"title": {}}})
+        second = _without_docs({"title": "B", "description": "y", "examples": [2], "properties": {"title": {}}})
+
+        assert first == second == {"properties": {"title": {}}}

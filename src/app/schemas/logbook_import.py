@@ -1,11 +1,11 @@
 """The shapes logbook import reads and reports - a DiveJSON document seen from the
-*reader* side, and the report that says what importing one would do.
+*reader* side, and the import the server holds, which says what importing one would do.
 
 A converted file - a UDDF file, a `.ssrf`, a FIT, a Suunto app or DM5 XML export, a Shearwater
 Cloud database or XML export, each file of a zip of them - arrives here as a DiveJSON document
 like any other, because the converter's output is one. What the report says of each file is its
-row in `ImportReport.members`, and what a file did not record, or recorded one way where it could
-be read another, is a note like the import's own: on its dive's row, or in `ImportReport.notes`.
+row in `LogbookImportRead.members`, and what a file did not record, or recorded one way where it
+could be read another, is a note like the import's own: on its dive's row, or in the log's `notes`.
 
 **This is not `schemas/export.py` inverted, and the differences are the whole point.**
 That module is the writer's declaration: it emits exactly what DiveJSON 1.0 defines and a
@@ -213,7 +213,7 @@ class ImportStoredFile(_ReadModel):
 
 class ImportDiver(_ReadModel):
     """Whose logbook the document is. Its identity and settings are read and reported, and
-    never applied; its check-in details and its portrait are offered in the preview and
+    never applied; its check-in details and its portrait are offered in the review and
     written as the diver confirms them - see `DECISIONS.md`. The tag list this app's writer
     puts under its key is read, so a tag on no dive or site comes back. Every member is optional
     because §6.1 makes them so: a converter whose source records nothing about an owner
@@ -770,13 +770,13 @@ class ImportNoteCode(StrEnum):
     # nobody, a policy that names no insurer, a row past the list's cap, or an email that is
     # not an address or is this account's sign-in address.
     CHECK_IN_DETAIL_DROPPED = "check_in_detail_dropped"
-    # A check-in detail the diver confirmed in the preview was written to the account; the
+    # A check-in detail the diver confirmed in the review was written to the account; the
     # portrait they took from the archive among them.
     CHECK_IN_DETAIL_WRITTEN = "check_in_detail_written"
-    # The diver took the archive's portrait, and the account's changed after the preview they
+    # The diver took the archive's portrait, and the account's changed after the review they
     # chose from, so the account's was kept.
     PORTRAIT_KEPT = "portrait_kept"
-    # A person was linked (apply), or would be (preview), to the account on this instance its
+    # A person was linked (apply), or would be (upload), to the account on this instance its
     # entry names - the sentence names that account's current username.
     ACCOUNT_LINKED = "account_linked"
     # The tags the import adds to the caller's list, named in one note. Tags are members of a
@@ -803,7 +803,7 @@ class ImportNote(BaseModel):
     report puts it on its dive's row or into a group.
 
     `uuid` is the document's own identifier for the record, not the row's: on the remap
-    branch there is no row yet at preview time, and the document is what the diver can
+    branch there is no row yet at the upload, and the document is what the diver can
     look the record up in.
     """
 
@@ -1089,9 +1089,17 @@ class ImportPortraitChoice(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    choice: Literal["take", "keep"]
+    choice: Annotated[
+        Literal["take", "keep"], Field(description="`take` for the archive's portrait, `keep` for the account's")
+    ]
     account_sha256: Annotated[
-        str | None, Field(min_length=_SHA256_LENGTH, max_length=_SHA256_LENGTH, pattern=r"^[0-9a-f]+$")
+        str | None,
+        Field(
+            min_length=_SHA256_LENGTH,
+            max_length=_SHA256_LENGTH,
+            pattern=r"^[0-9a-f]+$",
+            description="The account's portrait as the review showed it, or `null` where it showed none",
+        ),
     ]
 
 

@@ -27,7 +27,6 @@ from typing import Any
 
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
-from fastcrud.exceptions.http_exceptions import NotFoundException
 from sqlalchemy import ColumnElement, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,8 +60,6 @@ from .reader import BatchRow, LoadedBatch
 from .reconcile import hold_reviewed_values, review_note, unlanded
 
 KEY_KIND = "import-files"
-
-NOT_FOUND = "Import not found"
 
 ROLE_PART = "part"
 ROLE_PORTRAIT = "portrait"
@@ -298,48 +295,36 @@ async def hold_upload(
     return held
 
 
-async def find_import(db: AsyncSession, *, user_id: int, uuid: uuid_pkg.UUID) -> LogbookImport:
-    """One of the account's imports, or the 404 an absent, expired or someone else's one gets."""
-    row = (
-        await db.execute(
-            select(LogbookImport).where(
-                LogbookImport.uuid == uuid, LogbookImport.user_id == user_id, _is_live(datetime.now(UTC))
-            )
+async def find_import(db: AsyncSession, *, user_id: int, uuid: uuid_pkg.UUID) -> LogbookImport | None:
+    """One of the account's imports, or `None` for an absent, expired or someone else's one."""
+    found = await db.execute(
+        select(LogbookImport).where(
+            LogbookImport.uuid == uuid, LogbookImport.user_id == user_id, _is_live(datetime.now(UTC))
         )
-    ).scalar_one_or_none()
-    if row is None:
-        raise NotFoundException(NOT_FOUND)
-    return row
+    )
+    return found.scalar_one_or_none()
 
 
-async def lock_import(db: AsyncSession, *, user_id: int, uuid: uuid_pkg.UUID) -> LogbookImport:
+async def lock_import(db: AsyncSession, *, user_id: int, uuid: uuid_pkg.UUID) -> LogbookImport | None:
     """`find_import`, holding the row, so an apply and a discard from two devices run one after
     the other and the second finds what the first left."""
-    row = (
-        await db.execute(
-            select(LogbookImport)
-            .where(LogbookImport.uuid == uuid, LogbookImport.user_id == user_id, _is_live(datetime.now(UTC)))
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        raise NotFoundException(NOT_FOUND)
-    return row
+    found = await db.execute(
+        select(LogbookImport)
+        .where(LogbookImport.uuid == uuid, LogbookImport.user_id == user_id, _is_live(datetime.now(UTC)))
+        .with_for_update()
+    )
+    return found.scalar_one_or_none()
 
 
-async def find_pending_import(db: AsyncSession, *, user_id: int) -> LogbookImport:
-    row = (
-        await db.execute(
-            select(LogbookImport).where(
-                LogbookImport.user_id == user_id,
-                LogbookImport.status == LogbookImportStatus.PENDING.value,
-                _is_live(datetime.now(UTC)),
-            )
+async def find_pending_import(db: AsyncSession, *, user_id: int) -> LogbookImport | None:
+    found = await db.execute(
+        select(LogbookImport).where(
+            LogbookImport.user_id == user_id,
+            LogbookImport.status == LogbookImportStatus.PENDING.value,
+            _is_live(datetime.now(UTC)),
         )
-    ).scalar_one_or_none()
-    if row is None:
-        raise NotFoundException(NOT_FOUND)
-    return row
+    )
+    return found.scalar_one_or_none()
 
 
 async def list_applied(db: AsyncSession, *, user_id: int, offset: int, limit: int) -> tuple[list[Any], int]:
