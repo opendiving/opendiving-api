@@ -66,7 +66,8 @@ async def propose_dive_site(
 
     One proposal per account and site waits at a time, and proposing again replaces it. Proposals
     are limited per account per day: 429 past it. 404 on another user's private site, exactly as
-    for a site that doesn't exist, and on an instance that does not edit the Commons.
+    for a site that doesn't exist, on the uuid of a site the caller replaced with a Commons record,
+    and on an instance that does not edit the Commons.
     """
     site = await fetch_owned_or_raise(
         db=db,

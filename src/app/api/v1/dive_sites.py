@@ -618,7 +618,8 @@ async def read_dive_site(
     it. Either may trail a change made elsewhere by the read's cache.
 
     The uuid of a site the caller replaced with a Commons record reads as that record, its `uuid`
-    the record's, here and wherever the caller names a site by uuid.
+    the record's, here and wherever the caller reads, saves or edits a site or names one on a dive.
+    Deleting, replacing or proposing by that uuid is a 404.
 
     404 when no such site exists - and the same 404 when it is another user's private site, so
     someone else's uuid stays unprobeable.
