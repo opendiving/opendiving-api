@@ -376,9 +376,9 @@ async def read_logbook_import_notes(
 ) -> JSONResponse:
     """Return an import's log.
 
-    `dives` has an entry for each dive row, in the review's order, with its `notes`: each decision
-    that is not a plain create, and what its files did not record, worked out, or read one way of
-    several, one sentence at a time. A line about a value goes when another file of the dive
+    `dives` has an entry for each dive row, in the review's order, with its `outcome`, the `reason`
+    a skipped one was skipped, and its `notes`: each decision that is not a plain create, and what
+    its files did not record, worked out, or read one way of several, one sentence at a time. A line about a value goes when another file of the dive
     supplied it. Everything about no dive is in `notes`, one group per code and sentence with a
     count and up to three places in your files. On an applied import these are what the apply
     found, with what it could not hold to the review. Treat a `code` or `kind` you do not recognise
@@ -406,7 +406,9 @@ async def apply_logbook_import(
     review showed that has since been deleted or merged away is skipped, and nothing is written
     for it. A dive the review showed as
     `new` that reached your logbook another way in between takes the outcome and `uuid` of the
-    dive that holds it. `GET /import/{uuid}/notes` has what happened.
+    dive that holds it. A dive the review did not show that the files now reach, the logbook
+    having moved, is written too, and follows the rows the review showed with a note saying so.
+    `GET /import/{uuid}/notes` has what happened.
 
     **All or nothing in rows.** A failure at any point writes no records at all, so a retry
     after a timeout can never half-duplicate a logbook. Applied, the import's uploaded files are

@@ -71,6 +71,7 @@ ROLE_PART = "part"
 ROLE_PORTRAIT = "portrait"
 
 _OVERTAKEN = "This dive reached your logbook another way after the review, so the import did not create it."
+_UNSHOWN = "The review did not show this dive, because your logbook changed after it."
 _UNREAD_SINCE = "This dive's file could no longer be read when the import was applied, so nothing was written for it."
 
 
@@ -145,6 +146,8 @@ def _row_notes(dive: dict[str, Any], notes: list[ImportDiveNote], truncated: int
         "uuid": dive["uuid"],
         "start_time": dive["start_time"],
         "device": dive["device"],
+        "outcome": dive["outcome"],
+        "reason": dive["reason"],
         "notes": [note.model_dump(mode="json") for note in notes],
         "notes_truncated": truncated,
     }
@@ -507,6 +510,10 @@ def _skip_row(dive: dict[str, Any], reason: str) -> None:
     dive["reason"] = reason
 
 
+def _unshown_note() -> ImportDiveNote:
+    return ImportDiveNote(code=ImportNoteCode.REVIEW_UNSHOWN, kind=None, collection="dives", message=_UNSHOWN)
+
+
 def _overtaken_note() -> ImportDiveNote:
     return ImportDiveNote(code=ImportNoteCode.REVIEW_OVERTAKEN, kind=None, collection="dives", message=_OVERTAKEN)
 
@@ -624,7 +631,7 @@ async def apply_held(
             files = (batch.rows[index] for index in extra.members)
             dive = await application.extra_row(extra, [reviewed_files[file.name, file.sha256] for file in files])
             rows.append(dive)
-            notes.append(_row_notes(dive, extra.notes, extra.notes_truncated))
+            notes.append(_row_notes(dive, [_unshown_note(), *extra.notes], extra.notes_truncated))
 
     if application.wrote:
         await recalculate_dive_stats(db, user_id=user_id, commit=False)

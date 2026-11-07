@@ -726,6 +726,9 @@ class ImportNoteCode(StrEnum):
     # A dive the review showed as new reached the logbook another way before the apply, so the
     # apply created none, and the row is the dive that holds it.
     REVIEW_OVERTAKEN = "review_overtaken"
+    # The apply reached a dive the review has no row for, the logbook having moved: the file of
+    # a dive that lost its recording in between makes a dive of its own, which is written.
+    REVIEW_UNSHOWN = "review_unshown"
     # The two remap codes say the same thing about *this* record - it was imported under an
     # identifier other than the one the document gave it, and neither is an error. They
     # differ in what happened to every **other** record's reference to that identifier, and
@@ -1156,8 +1159,9 @@ class LogbookImportDive(BaseModel):
         Field(
             default=None,
             description="The dive as the import leaves it, on a `new` or `modified` row, in the shape a dive read "
-            "gives, and on a row the apply skipped, the dive the review showed. Its nested identifiers name nothing "
-            "until the import is applied, and on an applied import it stays what the review showed.",
+            "gives, and on a row the apply skipped, the dive the review showed. Only the row's own `uuid` is a link: "
+            "a recording or file inside it that the review made takes a new identifier at the apply, and an applied "
+            "import keeps the one the review showed, which names nothing.",
         ),
     ]
     changes: Annotated[
@@ -1227,7 +1231,8 @@ class LogbookImportRead(BaseModel):
         Field(
             default_factory=list,
             description="One row per dive the files hold, newest first as the logbook lists them; a start with no UTC "
-            "offset sorts by its wall clock read as UTC, and ties keep the import's order",
+            "offset sorts by its wall clock read as UTC, and ties keep the import's order. On an applied import, a "
+            "dive the review did not show follows them.",
         ),
     ]
     check_in_details: Annotated[
@@ -1271,6 +1276,10 @@ class LogbookImportDiveNotes(BaseModel):
     uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description="The dive row's `uuid`")]
     start_time: Annotated[datetime | date | None, Field(default=None, description="As the dive row gives it")]
     device: Annotated[RecordingDevice | None, Field(default=None, description="As the dive row gives it")]
+    outcome: Annotated[ImportDiveOutcome, Field(description="As the dive row gives it")]
+    reason: Annotated[
+        str | None, Field(default=None, description="As the dive row gives it: why a `skipped` dive was skipped")
+    ]
     notes: Annotated[
         list[ImportDiveNote],
         Field(

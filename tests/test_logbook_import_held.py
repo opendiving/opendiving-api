@@ -59,7 +59,7 @@ from tests.helpers.import_parts import parts_of
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 # The digest `_shape_digest` answers at `REVIEW_SHAPE`. It moves with the number, on purpose.
-EMBEDDED_SHAPE = "8f23977401aa345f689d8f87b6cb31d86177a75b43bd6b8b19302ee107d9208a"
+EMBEDDED_SHAPE = "bcf091dbec136ea5201ece5155bbf2505c21bc744f9187d2499ffb141fe79bf9"
 
 FIXTURES = Path(__file__).parent / "fixtures" / "dive_files"
 OCEAN_FIT = (FIXTURES / "suunto-ocean-2026.fit").read_bytes()
@@ -357,6 +357,48 @@ class TestTheUpload:
         body = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
 
         assert body["numbering"]["total_dives"] == 0
+
+
+class TestTheLog:
+    @staticmethod
+    def _with_a_dive_it_cannot_write(document: bytes) -> bytes:
+        logbook = json.loads(document)
+        logbook["dives"].append({"uuid": str(uuid_pkg.uuid4()), "max_depth": 12.5})
+        return json.dumps(logbook).encode()
+
+    @pytest.mark.asyncio
+    async def test_a_pending_import_s_rows_say_what_the_review_says(self, async_db: AsyncSession, db: Session) -> None:
+        diver = create_user(db)
+        document = self._with_a_dive_it_cannot_write(_logbook({}))
+
+        review = await upload(async_db, diver, [("log.divejson", document)])
+        log = await _notes(async_db, diver, review["uuid"])
+
+        LogbookImportNotes.model_validate(log)
+        rows = [(row["uuid"], row["outcome"], row["reason"]) for row in log["dives"]]
+        assert rows == [(row["uuid"], row["outcome"], row["reason"]) for row in review["dives"]]
+        assert sorted(row["outcome"] for row in log["dives"]) == ["new", "skipped"]
+        [skipped] = [row for row in log["dives"] if row["outcome"] == "skipped"]
+        assert "start time" in skipped["reason"]
+
+    @pytest.mark.asyncio
+    async def test_an_applied_import_s_rows_say_what_the_apply_settled(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        await upload_and_apply(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        review = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
+        [pending] = (await _notes(async_db, diver, review["uuid"]))["dives"]
+        assert (pending["outcome"], pending["reason"]) == ("modified", None)
+        await async_db.execute(update(Dive).where(Dive.user_id == diver.id).values(is_deleted=True))
+        await async_db.commit()
+
+        await apply(async_db, diver, review["uuid"])
+        log = await _notes(async_db, diver, review["uuid"])
+
+        LogbookImportNotes.model_validate(log)
+        [row] = log["dives"]
+        assert (row["uuid"], row["outcome"], row["reason"]) == (pending["uuid"], "skipped", DELETED_HERE)
 
 
 class TestTheLifetimes:
@@ -1003,6 +1045,11 @@ class TestAppliedAsReviewed:
         assert reviewed["uuid"] == review["dives"][0]["uuid"]
         assert extra["outcome"] == "new" and extra["dive"]["uuid"] == extra["uuid"]
         assert [applied["members"][index]["name"] for index in extra["members"]] == ["dive.json"]
+        written = await async_db.scalar(select(Dive.uuid).where(Dive.uuid == uuid_pkg.UUID(extra["uuid"])))
+        assert str(written) == extra["uuid"], "the file is not lost"
+        _, shown = (await _notes(async_db, diver, review["uuid"]))["dives"]
+        assert (shown["uuid"], shown["outcome"]) == (extra["uuid"], "new")
+        assert ImportNoteCode.REVIEW_UNSHOWN.value in {note["code"] for note in shown["notes"]}
 
 
 class TestThePortrait:
