@@ -74,6 +74,7 @@ from ...services.cache_invalidation import (
     invalidate_gear_caches,
     invalidate_trip_caches,
 )
+from ...services.dive_reader import formats_this_build_reads
 from ...services.logbook_import import (
     MAX_PARTS,
     ImportPart,
@@ -84,7 +85,6 @@ from ...services.logbook_import import (
     MalformedRequestError,
     UnsupportedImportError,
     batch_species,
-    formats_this_build_reads,
     load_import,
     read_import_request,
     resolve_catalog_gaps,

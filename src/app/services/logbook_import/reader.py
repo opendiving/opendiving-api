@@ -80,7 +80,6 @@ from ..dive_files import MAX_DIVE_FILE_SIZE, FileExtraction, extraction_of
 from ..dive_reader import (
     attach_rank,
     first_dive,
-    formats_this_build_reads,
     is_logbook_format,
     run_in_conversion_thread,
 )
@@ -344,14 +343,9 @@ def _validate_envelope(raw: Any) -> ImportDocument:
     is broken.
     """
     if not isinstance(raw, dict):
-        raise UnsupportedImportError(
-            f"This file is not a DiveJSON document. This app also reads: {formats_this_build_reads()}."
-        )
+        raise UnsupportedImportError("This file is not a DiveJSON document.")
     if raw.get("format") != DIVEJSON_FORMAT:
-        raise UnsupportedImportError(
-            "This file is not a DiveJSON document - it does not say it is one. "
-            f"This app also reads: {formats_this_build_reads()}."
-        )
+        raise UnsupportedImportError("This file is not a DiveJSON document - it does not say it is one.")
 
     version = raw.get("version")
     if not isinstance(version, str) or version.split(".", 1)[0] != _SUPPORTED_MAJOR:
@@ -670,10 +664,7 @@ def _first_error(exc: ValidationError) -> str:
 
 
 def _unrecognized() -> UnsupportedImportError:
-    return UnsupportedImportError(
-        "This file is not a logbook this app can read. It reads a DiveJSON document, the full-export archive, "
-        f"and dive-computer exports in these formats: {formats_this_build_reads()}."
-    )
+    return UnsupportedImportError("This file is not a logbook this app can read.")
 
 
 def _claims_to_be_json(head: bytes) -> bool:

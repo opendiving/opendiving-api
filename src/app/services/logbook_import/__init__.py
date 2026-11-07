@@ -32,7 +32,6 @@ from .reader import (
     LoadedImport,
     MalformedImportError,
     UnsupportedImportError,
-    formats_this_build_reads,
     load_import,
     parse_document,
 )
@@ -56,7 +55,6 @@ __all__ = [
     "MalformedRequestError",
     "UnsupportedImportError",
     "batch_species",
-    "formats_this_build_reads",
     "import_batch",
     "load_import",
     "parse_document",

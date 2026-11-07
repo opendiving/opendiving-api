@@ -964,8 +964,6 @@ class TestRowsAndRefusals:
     async def test_a_file_nothing_reads_is_a_refused_row_and_the_rest_imports(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
-        from src.app.services.dive_reader import formats_this_build_reads
-
         diver = create_user(db)
 
         report = await _import(async_db, diver, [*PAIR, ("notes.pdf", b"%PDF-1.7 not a logbook")])
@@ -973,7 +971,7 @@ class TestRowsAndRefusals:
         assert len(await _dive_ids(async_db, diver)) == 1
         refused = next(row for row in report.members if row.name == "notes.pdf")
         assert refused.format is None and refused.refusal is not None
-        assert formats_this_build_reads() in refused.refusal
+        assert refused.refusal == "This file is not a logbook this app can read."
 
     @pytest.mark.asyncio
     async def test_a_run_in_fit_is_a_refused_row_carrying_the_package_s_message(

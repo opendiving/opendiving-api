@@ -426,16 +426,14 @@ class TestTheFormatsItAccepts:
         # files its document names.
         assert body["archive"] is False
 
-    def test_a_zip_of_files_no_reader_claims_is_415_naming_the_formats(
-        self, signed_in: Any, client: TestClient
-    ) -> None:
+    def test_a_zip_of_files_no_reader_claims_is_415(self, signed_in: Any, client: TestClient) -> None:
         """Every file of the zip is a row refused on its own, so the import answers as the
         first of them would alone."""
         payload = _zip({"a.txt": NOT_A_LOGBOOK, "b.txt": NOT_A_LOGBOOK})
         response = client.post(UPLOAD_PATH, files=_files(payload, "notes.zip"))
 
         assert response.status_code == 415
-        assert reader.formats_this_build_reads() in response.json()["detail"]
+        assert response.json()["detail"] == "This file is not a logbook this app can read."
 
     def test_a_zip_holding_only_packaging_is_415(self, signed_in: Any, client: TestClient) -> None:
         """A folder zipped on a Mac with nothing in it: a directory entry and the `__MACOSX`
@@ -478,17 +476,22 @@ class TestTheFormatsItAccepts:
         zip_index = body["members"].index(rows["mixed.zip"])
         assert rows["a.uddf"]["container"] == rows["b.ssrf"]["container"] == zip_index
 
-    def test_a_file_no_reader_claims_is_415_naming_the_formats(self, signed_in: Any, client: TestClient) -> None:
+    def test_a_file_no_reader_claims_is_415_in_one_sentence(self, signed_in: Any, client: TestClient) -> None:
         """A 415 rather than the 422 it used to get. "This DiveJSON document is not valid
-        JSON" is the wrong sentence for a file that never claimed to be one."""
+        JSON" is the wrong sentence for a file that never claimed to be one. The formats stay
+        out of it: the picker already names them."""
         response = client.post(UPLOAD_PATH, files=_files(NOT_A_LOGBOOK, "dives.csv"))
 
         assert response.status_code == 415
-        detail = response.json()["detail"]
-        assert "not a logbook this app can read" in detail
-        # Derived from the registry rather than written out here, which is the point of the
-        # sentence: a build that reads a fifth format says so without anyone editing this.
-        assert reader.formats_this_build_reads() in detail
+        assert response.json()["detail"] == "This file is not a logbook this app can read."
+
+    def test_json_that_is_not_a_divejson_document_is_415_in_one_sentence(
+        self, signed_in: Any, client: TestClient
+    ) -> None:
+        response = client.post(UPLOAD_PATH, files=_files(b'{"format": "something else"}', "settings.json"))
+
+        assert response.status_code == 415
+        assert response.json()["detail"] == "This file is not a DiveJSON document - it does not say it is one."
 
     def test_bytes_that_are_not_text_at_all_are_415(self, signed_in: Any, client: TestClient) -> None:
         response = client.post(UPLOAD_PATH, files=_files(b"\x89PNG\r\n\x1a\n\x00\x01\x02\x03", "photo.png"))
