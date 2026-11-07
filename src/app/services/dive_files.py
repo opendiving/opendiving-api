@@ -657,7 +657,7 @@ def fill_from_pair(pair: CylinderPair, *, trust_position: bool) -> dict[str, flo
     - A pair whose recorded fractions disagree fills nothing: it is a positional pair
       describing another tank.
     - A row the fill would leave outside the table's constraints is left whole
-      (`_fill_is_storable`).
+      (`fill_is_storable`).
 
     **`trust_position` is the primary recording's, whose rows came from its own file.** For
     any other recording, and for the merge's absorbed rows, a pair made by position is a
@@ -679,7 +679,7 @@ def fill_from_pair(pair: CylinderPair, *, trust_position: bool) -> dict[str, flo
         values["start_pressure"] = incoming.start_pressure
         if incoming.end_pressure is not None:
             values["end_pressure"] = incoming.end_pressure
-    return values if _fill_is_storable(row, values) else {}
+    return values if fill_is_storable(row, values) else {}
 
 
 def pair_may_fill(pair: CylinderPair, *, trust_position: bool) -> bool:
@@ -716,7 +716,7 @@ def fold_tank_pressures(
             "end_pressure": earlier.end_pressure if later.end_pressure is None else later.end_pressure,
         }
         unchanged = values == {"start_pressure": pair.row.start_pressure, "end_pressure": pair.row.end_pressure}
-        if not unchanged and _fill_is_storable(pair.row, values):
+        if not unchanged and fill_is_storable(pair.row, values):
             pressures[pair.row.id] = values
     return pressures
 
@@ -874,7 +874,7 @@ def apply_gas_mapping(profile: NormalizedProfile | None, mapping: dict[int, int]
     )
 
 
-def _fill_is_storable(stored_mix: IncomingCylinder, values: Mapping[str, float | None]) -> bool:
+def fill_is_storable(stored_mix: IncomingCylinder, values: Mapping[str, float | None]) -> bool:
     """Would the row `values` produces still satisfy `dive_mixture`'s own constraints?
 
     The table's `CHECK`s over these five columns, restated here because a fill is the one
@@ -921,7 +921,7 @@ def join_file_mixtures(
     list: two rows agreeing on `(oxygen, helium)` are the same tank, and position is the
     fallback where a file records no mix - the Ocean's JSON records none, so its cylinders
     join the FIT's by position. A positional pair whose recorded fractions disagree is not a
-    pair. A matched cylinder takes the members it lacks, under `_fill_is_storable`'s rule, and
+    pair. A matched cylinder takes the members it lacks, under `fill_is_storable`'s rule, and
     a **label** where it has none: the FIT labels nothing where the package has no channel to
     point at, and its JSON's label is then the recording's, whichever file came first. A
     later cylinder nothing matches is one the later file saw, and is appended with its label,
@@ -973,7 +973,7 @@ def join_file_mixtures(
             for name in FILLABLE_MIXTURE_FIELDS
             if (reading := getattr(incoming, name)) is not None and getattr(row, name) is None
         }
-        if not _fill_is_storable(row, values):
+        if not fill_is_storable(row, values):
             values = {}
         label = row.gas_number
         if label is None and incoming.gas_number is not None:

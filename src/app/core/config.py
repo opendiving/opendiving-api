@@ -828,7 +828,8 @@ class LogbookImportSettings(BaseSettings):
     # of expensive - it spools up to half a gigabyte, parses a whole logbook and may make
     # outbound WoRMS calls - and a diver restoring a backup should not find their next
     # export refused because of it. An import is one upload, and ten an hour is the same
-    # generosity the export limit means by ten downloads.
+    # generosity the export limit means by ten downloads. Its apply counts apart, on the same
+    # figures.
     IMPORT_RATE_LIMIT_WINDOW_SECONDS: int = config("IMPORT_RATE_LIMIT_WINDOW_SECONDS", default=3600)
     IMPORT_RATE_LIMIT_PER_USER: int = config("IMPORT_RATE_LIMIT_PER_USER", default=10)
 

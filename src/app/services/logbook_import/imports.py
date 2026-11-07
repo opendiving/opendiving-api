@@ -476,6 +476,11 @@ class _SecondPass:
             found = next((row for row in shared if row is not None and id(row) not in self.taken), None)
         if found is not None:
             self.taken.add(id(found))
+        # Each file of a gone dive skips on its own, and they are all this one row.
+        for source in sources:
+            skipped = self.by_source.get((source["file"], source["dive"]))
+            if skipped is not None and skipped.uuid is None:
+                self.taken.add(id(skipped))
         return found
 
 

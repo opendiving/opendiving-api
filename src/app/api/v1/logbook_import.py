@@ -23,7 +23,7 @@ the service layer, because each is an HTTP concern:
   export endpoints' docstring records why a whole-logbook endpoint is throttled at all, and
   this one is dearer than any export. The upload reads its own body, after the session, the
   limit and the account's slot have been checked, so a request refused for any of them reads
-  none of it. The reads of an import are not limited.
+  none of it. The apply has a budget of the same size beside it, and the reads are not limited.
 - **The error taxonomy is `POST /dive/parse`'s.** 415 is "no reader here claims these
   bytes", 422 is "one did, and it failed", 413 is past a bound of the request or over the
   account's storage limit. A file that cannot be read is a row of the report, not a refusal
@@ -144,6 +144,16 @@ _UPLOAD_BODY = {
 async def _enforce_import_limit(user_id: int) -> None:
     await enforce_rate_limit(
         f"import:user:{user_id}",
+        settings.IMPORT_RATE_LIMIT_PER_USER,
+        settings.IMPORT_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+
+async def _enforce_apply_limit(user_id: int) -> None:
+    """A budget beside the upload's rather than a share of it, so one import is one call against
+    each: a refused apply stays pending, and repeats the whole read and pass."""
+    await enforce_rate_limit(
+        f"import-apply:user:{user_id}",
         settings.IMPORT_RATE_LIMIT_PER_USER,
         settings.IMPORT_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -413,7 +423,8 @@ async def apply_logbook_import(
     and one past it is dropped with a note rather than failing the import. A link counts
     whether or not the import completes.
 
-    A 409 when the import is already applied, or another device's apply got there first. Files
+    A 409 when the import is already applied, or another device's apply got there first. Rate
+    limited per account, on a budget of its own; a request over it is a 429 and writes nothing. Files
     that would take your account past its storage limit refuse the import whole with a 413, which
     here also counts the archive's portrait if `portrait` takes it. 404 as `GET /import/{uuid}`.
     """
@@ -422,6 +433,7 @@ async def apply_logbook_import(
     user_id = current_user["id"]
     row = _found(await find_import(db, user_id=user_id, uuid=uuid))
     refuse_unless_pending(row)
+    await _enforce_apply_limit(user_id)
     files = await held_files(db, row)
     await release_read_transaction(db)
     with await _read_held(db, user_id, uuid, files) as held, await _load(held.parts) as batch:

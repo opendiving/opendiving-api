@@ -11,7 +11,7 @@ a fix, `gas_use` - are what the second pass produces from the same bytes, and a 
 a gear item is not the import's to set; each is read back, and where it is not what the review
 showed the row says so. A cylinder has no identity of its own: a patch replaces the whole list
 and reads order it by row id, so a cylinder value is written by its index only while the list
-kept its length and `gas_number` there, and otherwise has nowhere to land.
+kept its length and `gas_number` there and the row can hold it, and otherwise has nowhere to land.
 """
 
 import uuid as uuid_pkg
@@ -25,8 +25,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...core.utils.datetime_offset import split_dive_start_time
 from ...models.dive_mixture import DiveMixture
 from ...models.dive_recording import DiveRecording
+from ...schemas.dive_mixture import DiveMixtureRead
 from ...schemas.logbook_import import ImportDiveNote, ImportNoteCode
-from ..dive_files import FILLABLE_MIXTURE_FIELDS
+from ..dive_files import FILLABLE_MIXTURE_FIELDS, fill_is_storable
 from ..dive_recordings import DECO_MODEL_COLUMNS, DEVICE_COLUMNS, READOUT_COLUMNS
 from .changes import same_content, value_at
 
@@ -67,16 +68,31 @@ def _recording_with(stored: dict[str, Any], uuid: str) -> dict[str, Any] | None:
     return next((one for one in stored["recordings"] if one["uuid"] == uuid), None)
 
 
+def _gradient_factors_hold(recording: dict[str, Any], columns: dict[str, Any]) -> bool:
+    """`ck_dive_recording_deco_gf_low_within_high`, over the row the write would leave."""
+    deco = recording["deco_model"] or {}
+    low = columns.get("deco_gf_low", deco.get("gf_low"))
+    high = columns.get("deco_gf_high", deco.get("gf_high"))
+    return low is None or high is None or low <= high
+
+
 class _Reconciliation:
+    """One dive's value entries, gathered per row and written one `UPDATE` a row: `CHECK`s are not
+    deferrable, so a pair of members written apart could break one between the two statements,
+    and a row whose reviewed values no longer fit what it holds is left whole, as a fill leaves
+    it, since a refusal here would fail the apply on every retry."""
+
     def __init__(self, db: AsyncSession, reviewed: dict[str, Any], stored: dict[str, Any]) -> None:
         self._db = db
         self._reviewed = reviewed
         self._stored = stored
+        self._recordings: dict[str, dict[str, Any]] = {}
+        self._mixtures: dict[int, dict[str, Any]] = {}
         self.wrote = False
         self.moved: set[str] = set()
 
-    async def _hold_recording(self, change: dict[str, Any], index: int, path: list[str]) -> bool:
-        """Whether this entry is a recording's value, written where it has moved. Keyed by the
+    def _gather_recording(self, change: dict[str, Any], index: int, path: list[str]) -> bool:
+        """Whether this entry is a recording's value, gathered where it has moved. Keyed by the
         recording's uuid, since a deletion or a promotion in between shifts every ordinal."""
         columns = _recording_columns(path, change["after"])
         if columns is None:
@@ -86,31 +102,44 @@ class _Reconciliation:
         if recording is None:
             self.moved.add(_ELEMENT_MOVED)
         elif value_at(recording, "/".join(path)) != change["after"]:
-            await self._db.execute(
-                update(DiveRecording).where(DiveRecording.uuid == uuid_pkg.UUID(recording["uuid"])).values(**columns)
-            )
-            self.wrote = True
+            self._recordings.setdefault(recording["uuid"], {}).update(columns)
         return True
 
-    async def _hold_mixture(self, change: dict[str, Any], index: int, member: str) -> None:
+    def _gather_mixture(self, change: dict[str, Any], index: int, member: str) -> None:
         reviewed, stored = self._reviewed["mixtures"], self._stored["mixtures"]
         if len(stored) != len(reviewed) or stored[index]["gas_number"] != reviewed[index]["gas_number"]:
             self.moved.add(_CYLINDERS_MOVED)
         elif stored[index][member] != change["after"]:
-            await self._db.execute(
-                update(DiveMixture).where(DiveMixture.id == stored[index]["id"]).values({member: change["after"]})
-            )
-            self.wrote = True
+            self._mixtures.setdefault(index, {})[member] = change["after"]
 
-    async def hold(self, change: dict[str, Any]) -> bool:
+    def gather(self, change: dict[str, Any]) -> bool:
         """Whether this entry is a value entry, and so settled here."""
         head, *rest = change["member"].split("/")
         if head == "recordings" and len(rest) > 1:
-            return await self._hold_recording(change, int(rest[0]), rest[1:])
+            return self._gather_recording(change, int(rest[0]), rest[1:])
         if head == "mixtures" and len(rest) == 2 and rest[1] in _MIXTURE_MEMBERS:
-            await self._hold_mixture(change, int(rest[0]), rest[1])
+            self._gather_mixture(change, int(rest[0]), rest[1])
             return True
         return False
+
+    async def write(self) -> None:
+        for uuid, columns in self._recordings.items():
+            recording = _recording_with(self._stored, uuid)
+            assert recording is not None
+            if not _gradient_factors_hold(recording, columns):
+                self.moved.add(_ELEMENT_MOVED)
+                continue
+            await self._db.execute(
+                update(DiveRecording).where(DiveRecording.uuid == uuid_pkg.UUID(uuid)).values(**columns)
+            )
+            self.wrote = True
+        for index, members in self._mixtures.items():
+            row = self._stored["mixtures"][index]
+            if not fill_is_storable(DiveMixtureRead.model_validate(row), members):
+                self.moved.add(_CYLINDERS_MOVED)
+                continue
+            await self._db.execute(update(DiveMixture).where(DiveMixture.id == row["id"]).values(**members))
+            self.wrote = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +162,8 @@ async def hold_reviewed_values(
     the read shape.
     """
     reconciliation = _Reconciliation(db, reviewed, stored)
-    others = [change for change in changes if not await reconciliation.hold(change)]
+    others = [change for change in changes if not reconciliation.gather(change)]
+    await reconciliation.write()
     return HeldValues(wrote=reconciliation.wrote, others=others, moved=sorted(reconciliation.moved))
 
 

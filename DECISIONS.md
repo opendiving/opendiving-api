@@ -1019,7 +1019,7 @@ neither payload is loaded.
 ## Gas use is computed on read, never stored, and deliberately refuses multi-tank dives
 
 `compute_gas_use()` in `services/dive_gas.py` derives `gas_used`, `rmv` and `sac_bar_per_min` from
-`submerged_time`, `avg_depth` and the one mixture's pressures; `_to_public_dive_with_mixtures()`
+`submerged_time`, `avg_depth` and the one mixture's pressures; `to_public_dive_with_mixtures()`
 attaches it as `gas_use`, the formula's one call site.
 
 Computed, not denormalized like `user_dive_stats` or `gear_item.dive_count`: it is arithmetic on
@@ -6055,7 +6055,9 @@ and `MAX_ARCHIVE_ENTRIES`, as `zipfile` builds an object per entry.
 `archive.read(...)` failures (password, CRC, compression) are caught: a failing `logbook.divejson`
 is a 422 naming the password case; a failing blob member reads as `None`.
 
-The upload rate-limits per user on its own budget of ten; an import's reads are not limited.
+The upload and the apply each rate-limit per user on a budget of ten, apart, so one import is one
+call against each and a refused apply cannot repeat its pass freely. An import's reads are not
+limited.
 
 ## Logbook import reads whatever the converter reads, and the routes are `/imports`
 

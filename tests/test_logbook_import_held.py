@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from src.app.api.v1 import logbook_import as import_routes
 from src.app.core.config import Settings, settings
+from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.worker import functions as worker_functions
 from src.app.core.worker.functions import purge_expired_logbook_imports
 from src.app.crud.crud_dive_mixtures import replace_mixtures_for_dive
@@ -48,6 +49,7 @@ from src.app.services.dive_recordings import DEVICE_COLUMNS
 from src.app.services.export.archive import DIVEJSON_NAME
 from src.app.services.logbook_import import import_batch, load_import
 from src.app.services.logbook_import.planner import DELETED_HERE
+from src.app.services.logbook_import.reconcile import hold_reviewed_values
 from tests.conftest import db_available
 from tests.helpers.generators import create_dive, create_dive_recording, create_user
 from tests.helpers.held_imports import apply, body_of, caller, discard, upload, upload_and_apply
@@ -494,6 +496,20 @@ class TestTheApply:
         assert (await _refusal(apply(async_db, diver, review["uuid"]))).status_code == 409
 
     @pytest.mark.asyncio
+    async def test_an_apply_over_its_budget_reads_nothing(
+        self, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A refused apply stays pending, so a retry would otherwise repeat the whole pass freely."""
+        diver = create_user(db)
+        review = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        monkeypatch.setattr(import_routes, "enforce_rate_limit", AsyncMock(side_effect=RateLimitException("Too many")))
+        read = AsyncMock()
+        monkeypatch.setattr(import_routes, "held_parts", read)
+
+        assert (await _refusal(apply(async_db, diver, review["uuid"]))).status_code == 429
+        read.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_applying_twice_is_a_conflict(self, async_db: AsyncSession, db: Session) -> None:
         diver = create_user(db)
         review = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
@@ -676,6 +692,97 @@ class TestAppliedAsReviewed:
         assert applied["dives"][0]["outcome"] == "modified"
         [row] = (await _notes(async_db, diver, review["uuid"]))["dives"]
         assert ImportNoteCode.REVIEW_NOT_HELD.value in {note["code"] for note in row["notes"]}
+
+    @pytest.mark.asyncio
+    async def test_a_pair_of_members_lands_together_past_what_the_diver_edited(self, db: Session) -> None:
+        """200/50 over 300/250 written one member at a time would break the order `CHECK`
+        between the two statements."""
+        reviewed = {"mixtures": [{"gas_number": 0}], "recordings": []}
+        stored = {
+            "mixtures": [
+                {
+                    "id": 7,
+                    "gas_number": 0,
+                    "start_pressure": 300.0,
+                    "end_pressure": 250.0,
+                    "oxygen": None,
+                    "helium": None,
+                    "volume": None,
+                }
+            ],
+            "recordings": [],
+        }
+        session = AsyncMock()
+        changes = [
+            {"member": "mixtures/0/start_pressure", "before": None, "after": 200.0},
+            {"member": "mixtures/0/end_pressure", "before": None, "after": 50.0},
+        ]
+
+        held = await hold_reviewed_values(session, reviewed=reviewed, changes=changes, stored=stored)
+
+        session.execute.assert_awaited_once()
+        assert session.execute.await_args is not None
+        written = session.execute.await_args.args[0].compile().params
+        assert (written["start_pressure"], written["end_pressure"]) == (200.0, 50.0)
+        assert (held.wrote, held.moved) == (True, [])
+
+    @pytest.mark.asyncio
+    async def test_a_value_the_row_can_no_longer_hold_is_a_note_and_not_a_refused_apply(self, db: Session) -> None:
+        """Oxygen 32 beside helium the diver set to 80 is a row the table refuses, and a refusal
+        here would fail the apply on every retry."""
+        reviewed = {"mixtures": [{"gas_number": 0}], "recordings": []}
+        stored = {
+            "mixtures": [
+                {
+                    "id": 7,
+                    "gas_number": 0,
+                    "start_pressure": None,
+                    "end_pressure": None,
+                    "oxygen": None,
+                    "helium": 80.0,
+                    "volume": None,
+                }
+            ],
+            "recordings": [],
+        }
+        session = AsyncMock()
+        changes = [{"member": "mixtures/0/oxygen", "before": None, "after": 32.0}]
+
+        held = await hold_reviewed_values(session, reviewed=reviewed, changes=changes, stored=stored)
+
+        session.execute.assert_not_awaited()
+        assert held.wrote is False and len(held.moved) == 1
+
+    @pytest.mark.asyncio
+    async def test_gradient_factors_past_each_other_are_a_note(self, db: Session) -> None:
+        recording = {"uuid": str(uuid_pkg.uuid4()), "deco_model": {"gf_low": None, "gf_high": 30}}
+        session = AsyncMock()
+        changes = [{"member": "recordings/0/deco_model/gf_low", "before": None, "after": 40}]
+
+        held = await hold_reviewed_values(
+            session,
+            reviewed={"mixtures": [], "recordings": [recording]},
+            changes=changes,
+            stored={"mixtures": [], "recordings": [recording]},
+        )
+
+        session.execute.assert_not_awaited()
+        assert held.wrote is False and len(held.moved) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_gone_dive_two_files_reached_is_one_skipped_row(self, async_db: AsyncSession, db: Session) -> None:
+        diver = create_user(db)
+        await upload_and_apply(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        review = await upload(async_db, diver, [("dive.fit", OCEAN_FIT), ("dive.json", OCEAN_JSON)])
+        assert [row["outcome"] for row in review["dives"]] == ["modified"]
+        await async_db.execute(update(Dive).where(Dive.user_id == diver.id).values(is_deleted=True))
+        await async_db.commit()
+
+        applied = await apply(async_db, diver, review["uuid"])
+
+        assert [row["outcome"] for row in applied["dives"]] == ["skipped"]
+        assert (await _rows(async_db, diver))[-1].counts == {"skipped": 1}
+        assert len((await _notes(async_db, diver, review["uuid"]))["dives"]) == 1
 
     @pytest.mark.asyncio
     async def test_a_recording_value_is_held_by_the_recording_s_uuid(self, async_db: AsyncSession, db: Session) -> None:
