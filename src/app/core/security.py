@@ -78,11 +78,6 @@ class TokenType(StrEnum):
     # `verify_dive_file_token` below, and `POST /dive/{uuid}/recordings`. Carries no authority;
     # the upload route still checks that the caller owns the dive.
     DIVE_FILE = "dive_file"
-    # The same kind of receipt for a whole logbook: `POST /import/logbook/preview` read
-    # these bytes for this user and reported what importing them would do - see
-    # `create_logbook_import_token`/`verify_logbook_import_token`, and
-    # `POST /import/logbook`. Its own member rather than a reused `DIVE_FILE` so a parse
-    # receipt cannot be spent at the import endpoint or the other way round.
     # A signed-in session's leave to fetch one download URL with no `Authorization` header,
     # minted by `POST /user/download-ticket` - see `create_download_token`/
     # `verify_download_token` below. Its own member so an access token cannot stand in for

@@ -381,19 +381,19 @@ class TestTheFormatsItAccepts:
     a zip with no `logbook.divejson` member was a flat 415.
     """
 
-    def test_an_ssrf_logbook_previews(self, signed_in: Any, client: TestClient) -> None:
+    def test_an_ssrf_logbook_reviews(self, signed_in: Any, client: TestClient) -> None:
         response = client.post(UPLOAD_PATH, files=_files(SSRF, "logbook.ssrf"))
 
         assert response.status_code == 201
         assert [row["format"] for row in response.json()["members"]] == ["ssrf"]
 
-    def test_a_uddf_logbook_previews(self, signed_in: Any, client: TestClient) -> None:
+    def test_a_uddf_logbook_reviews(self, signed_in: Any, client: TestClient) -> None:
         response = client.post(UPLOAD_PATH, files=_files(_uddf(), "dives.uddf"))
 
         assert response.status_code == 201
         assert [row["format"] for row in response.json()["members"]] == ["uddf"]
 
-    def test_the_whole_uddf_export_corpus_previews(self, signed_in: Any, client: TestClient) -> None:
+    def test_the_whole_uddf_export_corpus_reviews(self, signed_in: Any, client: TestClient) -> None:
         """A real export of a whole demo account, out of this app's own UDDF writer - so
         this is the round trip the feature exists for, at the widest document available
         here."""
@@ -602,7 +602,7 @@ class TestADatabaseOfCompressedLogs:
     of what they cost converted: the batch counts what they declare, weighted, and each
     conversion unpacks under what the batch has left."""
 
-    def test_both_shearwater_exports_preview(self, signed_in: Any, client: TestClient) -> None:
+    def test_both_shearwater_exports_review(self, signed_in: Any, client: TestClient) -> None:
         response = client.post(
             UPLOAD_PATH,
             files=[

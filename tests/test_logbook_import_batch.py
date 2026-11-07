@@ -210,7 +210,7 @@ def no_redis(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def _import(db: AsyncSession, user: User, files: list[tuple[str, bytes]], *, apply: bool = True) -> BatchReport:
-    """One request's worth of files, previewed or applied as the routes do."""
+    """One request's worth of files, reviewed or applied as the routes do."""
     with await load_import(parts_of(*files)) as batch:
         report = await import_batch(db, user_id=user.id, batch=batch, apply=apply)
         if apply:
@@ -457,21 +457,21 @@ class TestTheBatchIsItsFilesInOrder:
         assert len(await _dive_ids(async_db, together)) == 3
 
     @pytest.mark.asyncio
-    async def test_the_preview_counts_what_the_apply_writes(
+    async def test_the_review_counts_what_the_apply_writes(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         """Each file is counted as its own import would count it, after the files before it
         - so the pair's FIT is a dive skipped, its recording having filled the JSON's."""
         diver = create_user(db)
 
-        preview = await _import(async_db, diver, self.FILES, apply=False)
-        assert await _dive_ids(async_db, diver) == [], "a preview writes nothing"
+        review = await _import(async_db, diver, self.FILES, apply=False)
+        assert await _dive_ids(async_db, diver) == [], "a review writes nothing"
         result = await _import(async_db, diver, self.FILES)
 
         [dives] = [report for report in result.collections if report.collection == "dives"]
         assert (dives.created, dives.skipped) == (3, 3)
-        assert preview.collections == result.collections
-        assert [(row.outcome, row.members) for row in preview.dives] == [
+        assert review.collections == result.collections
+        assert [(row.outcome, row.members) for row in review.dives] == [
             (row.outcome, row.members) for row in result.dives
         ]
         stored = (await async_db.execute(select(Dive.uuid).where(Dive.user_id == diver.id))).scalars()
@@ -1096,10 +1096,10 @@ class TestADeletedDiveStaysDeleted:
         [created] = (await _import(async_db, diver, files)).dives
         await _delete(async_db, created.uuid)
 
-        preview = await _import(async_db, diver, files, apply=False)
+        review = await _import(async_db, diver, files, apply=False)
         [skipped] = (await _import(async_db, diver, files)).dives
 
-        assert [row.outcome for row in preview.dives] == [ImportDiveOutcome.SKIPPED]
+        assert [row.outcome for row in review.dives] == [ImportDiveOutcome.SKIPPED]
         assert skipped.outcome is ImportDiveOutcome.SKIPPED
         assert skipped.reason is not None and "You deleted this record here" in skipped.reason
         assert await _dive_ids(async_db, diver) == []
@@ -1144,16 +1144,16 @@ class TestADeletedDiveStaysDeleted:
 
 class TestTheDiveRows:
     @pytest.mark.asyncio
-    async def test_the_result_carries_the_preview_s_uuids(
+    async def test_the_result_carries_the_review_s_uuids(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         diver = create_user(db)
         files = [("a.json", _unique_export()), ("b.json", _unique_export("2026-09-11T09:30:00.000+03:00"))]
 
-        preview = await _import(async_db, diver, files, apply=False)
+        review = await _import(async_db, diver, files, apply=False)
         result = await _import(async_db, diver, files)
 
-        assert [row.uuid for row in result.dives] == [row.uuid for row in preview.dives]
+        assert [row.uuid for row in result.dives] == [row.uuid for row in review.dives]
         assert None not in [row.uuid for row in result.dives]
 
     @pytest.mark.asyncio
@@ -1377,7 +1377,7 @@ class TestTheNotesOfADive:
     uuid nor, across a batch, unique."""
 
     @pytest.mark.asyncio
-    async def test_a_sighting_s_note_is_on_its_dive_in_the_preview_and_the_result(
+    async def test_a_sighting_s_note_is_on_its_dive_in_the_review_and_the_result(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         diver = create_user(db)
@@ -2325,16 +2325,16 @@ class TestTheDiveRowsReadAsTheLogbookLists:
     ]
 
     @pytest.mark.asyncio
-    async def test_the_preview_and_the_result_list_their_dives_newest_first(
+    async def test_the_review_and_the_result_list_their_dives_newest_first(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         diver = create_user(db)
         files = [("logbook.divejson", _logbook_of(*self.DIVES))]
 
-        preview = await _import(async_db, diver, files, apply=False)
+        review = await _import(async_db, diver, files, apply=False)
         result = await _import(async_db, diver, files)
 
-        for report in (preview, result):
+        for report in (review, result):
             assert [row.start_time.isoformat() for row in report.dives if row.start_time] == self.NEWEST_FIRST
         listed = await async_db.execute(
             select(Dive.uuid).where(Dive.user_id == diver.id).order_by(Dive.start_time.desc())

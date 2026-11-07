@@ -3,8 +3,9 @@
 The importer cannot tell a restore of this account's own export from a buddy's file or a
 stranger's UDDF, so no detail is written on the document's say-so. The review shows, for
 each member of the check-in details the document carries, the account's value beside a
-proposal; the apply writes exactly the members submitted and changed by them, so a client that never showed the section writes nothing, and a member the document
-does not carry is neither shown nor written.
+proposal; the apply writes exactly the members submitted and changed by them, so a client
+that never showed the section writes nothing, and a member the document does not carry is
+neither shown nor written.
 
 **A list is proposed as a list, row by row against the account's rows.** For each document
 row, in document order, the first account row not already matched whose members equal every
