@@ -5434,10 +5434,9 @@ file's notice block and in `README.md`. §4.2 notices travel in the data: that b
 its script beside it; the primary, which alters the database and uses it publicly, offers it through
 that route and the repository.
 
-Public-domain sources enter as they are: NOAA's two sanctuaries are US federal works, and the
-Florida register places itself in the public domain, its metadata travelling in the repository,
-which the credit links. A CC BY source waits for a waiver: ODbL 4.7(b) allows technological measures
-that CC BY forbids, so such a row in an ODbL file would hand a reuser what its licensor never gave.
+Public-domain sources enter as they are: NOAA's two sanctuaries, US federal works, and the Florida
+register, whose metadata the repository carries. A CC BY source waits for a waiver: ODbL 4.7(b)
+allows technological measures CC BY forbids.
 
 `load_bundle` builds per-source credit from the file's `sources` block and leaves out any record
 naming an uncredited source: losing the record beats a missing notice. A diver's notes, tags and
