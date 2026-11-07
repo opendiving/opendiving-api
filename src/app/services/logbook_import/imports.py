@@ -16,9 +16,9 @@ review is made and the files are in the store: an upload racing another's does t
 is then refused, rather than an empty pending import blocking every other device for as long as
 a body takes to arrive.
 
-**Neither end holds a connection across the store.** A held file may be the whole request bound,
-so the upload writes its files between the pass and the claim, and the apply reads and converts
-them before it takes the row's lock.
+**No connection is held across the held files.** One may be the whole request bound, so the upload
+writes them between the pass and the claim, and the apply reads and converts them before it takes
+the row's lock. What the apply stores on dives it writes inside its transaction, as any import has.
 """
 
 import base64

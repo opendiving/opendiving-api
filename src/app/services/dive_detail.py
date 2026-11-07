@@ -7,9 +7,9 @@ its own transaction, since a cache hit there would answer for a logbook the impo
 import uuid as uuid_pkg
 from typing import Any, cast
 
-from fastcrud.exceptions.http_exceptions import NotFoundException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.exceptions.http_exceptions import NotFoundException
 from ..crud.crud_contacts import get_contact_uuids_by_ids
 from ..crud.crud_courses import get_course_uuids_by_ids
 from ..crud.crud_dive_dive_sites import get_dive_sites_for_dive
