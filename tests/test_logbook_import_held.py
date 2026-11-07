@@ -807,6 +807,9 @@ class TestAppliedAsReviewed:
         assert [(row["outcome"], row["reason"]) for row in applied["dives"]] == [("skipped", DELETED_HERE)] * 2
         live = select(func.count()).select_from(Dive).where(Dive.user_id == diver.id, Dive.is_deleted.is_(False))
         assert await async_db.scalar(live) == 0
+        log = await _notes(async_db, diver, review["uuid"])
+        said = {note["code"] for row in log["dives"] for note in row["notes"]}
+        assert ImportNoteCode.REVIEW_OVERTAKEN.value not in said, "a skipped row reached no dive"
 
     @pytest.mark.asyncio
     async def test_a_gone_dive_two_files_reached_is_one_skipped_row(self, async_db: AsyncSession, db: Session) -> None:
