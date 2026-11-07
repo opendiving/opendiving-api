@@ -373,6 +373,39 @@
     "x": -80.30593109099993,
     "y": 25.10736656200004
    }
+  },
+  {
+   "attributes": {
+    "Location": "Grecian Rocks",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 22
+   },
+   "geometry": {
+    "x": -80.30699920699999,
+    "y": 25.107717514000047
+   }
+  },
+  {
+   "attributes": {
+    "Location": "Grecian Rocks",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 12
+   },
+   "geometry": {
+    "x": -80.30609893799993,
+    "y": 25.108917236000014
+   }
+  },
+  {
+   "attributes": {
+    "Location": "Grecian Rocks",
+    "BuoyType": "Mooring",
+    "Depth__ft_": 10
+   },
+   "geometry": {
+    "x": -80.30661773699995,
+    "y": 25.109283447000045
+   }
   }
  ]
 }

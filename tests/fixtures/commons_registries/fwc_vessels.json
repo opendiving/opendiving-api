@@ -207,6 +207,70 @@
     "x": -83.00140353700509,
     "y": 28.051205231213103
    }
+  },
+  {
+   "attributes": {
+    "DeployID": "DU0071",
+    "DDate": 19890913,
+    "Description": "615' X 127' X 57' Wood & Steel Drydocks",
+    "Depth": 125.0,
+    "Relief": 0.0,
+    "Name": "OSJ Site - Drydocks",
+    "MatDescrip": "Drydock 615'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.55949999957777,
+    "y": 30.11766666696082
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "MO0062",
+    "DDate": 20090527,
+    "Description": "522' Former Missile Tracking Ship, the \"Hoyt Vandenberg\"",
+    "Depth": 145.0,
+    "Relief": 100.0,
+    "Name": "Hoyt Vandenberg",
+    "MatDescrip": "Missile Tracking Ship 522'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -81.73647000029888,
+    "y": 24.459950000191075
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "MO0024",
+    "DDate": 19850430,
+    "Description": "187' Former US Army Minelayer, the \"Lt. Col. Ellery W. Niles\", Upright in Sand",
+    "Depth": 92.0,
+    "Relief": 0.0,
+    "Name": "Cayman Salvage Master",
+    "MatDescrip": "Minelayer ARMY 187'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -81.7663333325572,
+    "y": 24.453500000057804
+   }
+  },
+  {
+   "attributes": {
+    "DeployID": "SJ0016",
+    "DDate": 19890000,
+    "Description": "615' Long Navy Drydock",
+    "Depth": 125.0,
+    "Relief": 0.0,
+    "Name": "Navy  Drydock",
+    "MatDescrip": "Drydock 615'",
+    "MatCat": "Vessel"
+   },
+   "geometry": {
+    "x": -80.5595000001585,
+    "y": 30.12680000043992
+   }
   }
  ]
 }

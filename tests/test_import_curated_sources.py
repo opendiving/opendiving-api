@@ -169,13 +169,27 @@ class TestTheFloridaKeys:
         assert {record["properties"]["name"] for record in kept} == {
             "Alex’s Mountains",
             "French Reef",
-            "Grecian",
-            "Mule Key",
+            "Grecian Rocks",
             "New Found Harbor",
             "T.J.’s Rise",
             "The Spiegel Grove",
         }
-        assert left_out == {"not a mooring buoy": 3}
+        assert left_out == {"not a mooring buoy": 3, "left out by name": 2}
+
+    @pytest.mark.parametrize(
+        "name", ["Archer Key", "Cottrell Key", "Grecian", "Marker 48", "Mule Key", "Mule Key 2", "Toppinos Marker 32"]
+    )
+    def test_a_site_left_out_by_name_is_out(self, name: str) -> None:
+        mooring = {
+            "attributes": {"Location": name, "BuoyType": "Mooring", "Depth__ft_": 8},
+            "geometry": {"x": 0, "y": 1},
+        }
+
+        assert keys.candidates([mooring], _RETRIEVED) == ([], {"left out by name": 1})
+
+    def test_every_entry_left_out_by_name_is_an_identifier_with_a_reason(self) -> None:
+        assert len(keys._LEFT_OUT_BY_NAME) == 7
+        assert all(_SLUG.fullmatch(identifier) and reason for identifier, reason in keys._LEFT_OUT_BY_NAME.items())
 
     def test_the_depths_are_the_ends_of_its_moorings_in_metres(self, kept: dict[str, dict[str, Any]]) -> None:
         properties = kept["French Reef"]["properties"]
@@ -217,8 +231,21 @@ class TestTheFloridaKeys:
         assert identifiers == sorted(identifiers)
         assert all(_SLUG.fullmatch(identifier) for identifier in identifiers)
 
-    def test_a_location_is_trimmed_before_it_is_a_site(self, kept: dict[str, dict[str, Any]]) -> None:
-        assert _identifier(kept["Mule Key"]) == "mule-key"
+    def test_a_location_is_trimmed_before_it_is_a_site(self) -> None:
+        mooring = {
+            "attributes": {"Location": "Dry Rocks ", "BuoyType": "Mooring", "Depth__ft_": 8},
+            "geometry": {"x": 0, "y": 1},
+        }
+
+        assert _identifier(keys.candidates([mooring], _RETRIEVED)[0][0]) == "dry-rocks"
+
+    def test_trimming_comes_before_the_list_left_out_by_name(self) -> None:
+        mooring = {
+            "attributes": {"Location": "Mule Key ", "BuoyType": "Mooring", "Depth__ft_": 8},
+            "geometry": {"x": 0, "y": 1},
+        }
+
+        assert keys.candidates([mooring], _RETRIEVED)[0] == []
 
 
 class TestThunderBay:
@@ -287,7 +314,20 @@ class TestTheFloridaVessels:
             "no depth above 0": 1,
             "deeper than 60 m": 1,
             "a permit or site code": 2,
+            "left out by name": 3,
         }
+
+    def test_of_the_two_drydocks_the_one_dated_first_stays(self, kept: dict[str, dict[str, Any]]) -> None:
+        assert _identifier(kept["Navy Drydock"]) == "SJ0016"
+        assert "OSJ Site - Drydocks" not in kept
+
+    @pytest.mark.parametrize("deployment", ["DU0071", "MO0024", "MO0062"])
+    def test_a_vessel_left_out_by_name_is_out(self, deployment: str) -> None:
+        assert vessels.candidates([_vessel(DeployID=deployment)], _RETRIEVED) == ([], {"left out by name": 1})
+
+    def test_every_entry_left_out_by_name_is_a_deployment_with_a_reason(self) -> None:
+        assert len(vessels._LEFT_OUT_BY_NAME) == 3
+        assert all(_DEPLOY_ID.fullmatch(key) and reason for key, reason in vessels._LEFT_OUT_BY_NAME.items())
 
     def test_a_row_that_is_no_vessel_is_out(self) -> None:
         assert vessels.candidates([_vessel(MatCat="Concrete")], _RETRIEVED)[1] == {"not a vessel": 1}

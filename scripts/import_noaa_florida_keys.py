@@ -30,6 +30,18 @@ _TOKEN = "noaa-florida-keys-moorings"
 _LICENSE = "LicenseRef-US-Gov-PD"
 
 _NOT_A_MOORING = "not a mooring buoy"
+_BY_NAME = "left out by name"
+
+# Sites that should stay out and that no floor says so of, by identifier, each with its reason.
+_LEFT_OUT_BY_NAME = {
+    "archer-key": "Archer Key, moorings at a key in 2.4 m, which does not read as a dive site",
+    "cottrell-key": "Cottrell Key, moorings at a key in 3 to 4.3 m, which does not read as a dive site",
+    "grecian": "Grecian, one buoy among the moorings of Grecian Rocks, which is the site",
+    "marker-48": "Marker 48, named for a marker in 2.7 to 4.3 m, which does not read as a dive site",
+    "mule-key": "Mule Key, a mooring at a key in 2.4 m, which does not read as a dive site",
+    "mule-key-2": "Mule Key 2, the next mooring at the same key, 110 m from Mule Key",
+    "toppinos-marker-32": "Toppinos Marker 32, named for a marker, which does not read as a dive site",
+}
 
 
 def _is_a_mooring(attributes: dict[str, Any]) -> bool:
@@ -57,7 +69,8 @@ def _depths_of(moorings: list[dict[str, Any]]) -> tuple[float | None, float | No
 
 
 def candidates(features: list[dict[str, Any]], retrieved: str) -> tuple[list[dict[str, Any]], Counter[str]]:
-    """The sites, in the order of their identifier, and the count of rows left out."""
+    """The sites, in the order of their identifier, and the count left out: rows that are no
+    mooring, and sites left out by name."""
     left_out: Counter[str] = Counter()
     sites: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for feature in features:
@@ -68,6 +81,7 @@ def candidates(features: list[dict[str, Any]], retrieved: str) -> tuple[list[dic
 
     named = sorted((slug(name), name) for name in sites)
     refuse_repeats(identifier for identifier, _ in named)
+    left_out[_BY_NAME] = sum(1 for identifier, _ in named if identifier in _LEFT_OUT_BY_NAME)
     return [
         candidate(
             _TOKEN,
@@ -79,6 +93,7 @@ def candidates(features: list[dict[str, Any]], retrieved: str) -> tuple[list[dic
             depths=_depths_of(sites[name]),
         )
         for identifier, name in named
+        if identifier not in _LEFT_OUT_BY_NAME
     ], left_out
 
 
@@ -97,6 +112,9 @@ def main(argv: list[str] | None = None) -> int:
     write_batch(arguments.output, kept)
     print(f"{len(features)} buoys")
     print(f"  {left_out[_NOT_A_MOORING]:>5} {_NOT_A_MOORING}")
+    print(f"  {left_out[_BY_NAME]:>5} {_BY_NAME}")
+    for identifier, reason in _LEFT_OUT_BY_NAME.items():
+        print(f"        {identifier}: {reason}")
     print(f"{arguments.output}: {len(kept)} candidates")
     return 0
 

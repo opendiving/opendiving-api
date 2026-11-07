@@ -41,7 +41,16 @@ _A_BARGE = "a barge"
 _NO_DEPTH = "no depth above 0"
 _TOO_DEEP = "deeper than 60 m"
 _NOT_A_NAME = "a permit or site code"
-_FLOORS = (_NOT_A_VESSEL, _A_BARGE, _NO_DEPTH, _TOO_DEEP, _NOT_A_NAME)
+_BY_NAME = "left out by name"
+_FLOORS = (_NOT_A_VESSEL, _A_BARGE, _NO_DEPTH, _TOO_DEEP, _NOT_A_NAME, _BY_NAME)
+
+# Vessels that should stay out and that no floor says so of, by deployment, each with its reason.
+# The builder's rule misses these: the names differ, and the pins lie too far apart for it to look.
+_LEFT_OUT_BY_NAME = {
+    "DU0071": "OSJ Site - Drydocks, the 615 ft drydock SJ0016 holds, 1 km away and dated later",
+    "MO0024": "Cayman Salvage Master, the wreck the Florida Keys register holds as Cayman Salvor",
+    "MO0062": "Hoyt Vandenberg, the pool's USNS General Hoyt S. Vandenberg, 1.1 km from this pin",
+}
 
 # A permit's letters and number, `MB 218`, or the county's numbered site, `Site #3_1995`.
 _CODE = re.compile(r"[A-Z]+[ -]?\d+|Site #\d+(_\d+)?")
@@ -65,7 +74,9 @@ def _floor_of(attributes: dict[str, Any]) -> str | None:
         return _NO_DEPTH
     if metres(attributes["Depth"]) > _MAX_DEPTH_METRES:
         return _TOO_DEEP
-    return None if is_a_name(attributes) else _NOT_A_NAME
+    if not is_a_name(attributes):
+        return _NOT_A_NAME
+    return _BY_NAME if attributes["DeployID"] in _LEFT_OUT_BY_NAME else None
 
 
 def _oldest_first(feature: dict[str, Any]) -> tuple[bool, int, str]:
@@ -120,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(features)} vessels")
     for floor in _FLOORS:
         print(f"  {left_out[floor]:>5} {floor}")
+    for deployment, reason in _LEFT_OUT_BY_NAME.items():
+        print(f"        {deployment}: {reason}")
     print(f"{arguments.output}: {len(kept)} candidates")
     return 0
 

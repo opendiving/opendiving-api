@@ -23,7 +23,7 @@ from src.app.services.geocoding_service import _DEFAULT_ATTRIBUTION
 # The tripwire. A refresh that moves this fails here, so it becomes a decision somebody takes
 # rather than a diff somebody accepts: a shrinking pool is usually a broken reader, not the world
 # losing dive sites.
-COMMONS_RECORDS = 4275
+COMMONS_RECORDS = 4267
 
 
 @pytest.fixture
@@ -130,6 +130,29 @@ class TestTheBatchFromTheRegistries:
         (record,) = self._named(bundle, "Molasses Reef")
 
         assert record["commons_source"] == "openstreetmap"
+
+    def test_a_buoy_inside_a_site_gave_way_to_the_site(self, bundle: CommonsBundle) -> None:
+        (record,) = self._named(bundle, "Grecian Rocks")
+
+        assert record["commons_source"] == "noaa-florida-keys-moorings"
+        assert not [row for row in self._named(bundle, "Grecian") if row["water_type"] != "fresh"]
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Archer Key",
+            "Cottrell Key",
+            "Marker 48",
+            "Mule Key",
+            "Mule Key 2",
+            "Toppinos Marker 32",
+            "Hoyt Vandenberg",
+            "Cayman Salvage Master",
+            "OSJ Site - Drydocks",
+        ],
+    )
+    def test_what_was_left_out_by_name_is_not_here(self, bundle: CommonsBundle, name: str) -> None:
+        assert not self._named(bundle, name)
 
     def test_a_thunder_bay_site_is_in_fresh_water(self, bundle: CommonsBundle) -> None:
         (record,) = self._named(bundle, "E. B. Allen")
