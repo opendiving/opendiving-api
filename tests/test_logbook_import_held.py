@@ -56,7 +56,7 @@ from tests.helpers.import_parts import parts_of
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 # The digest `_shape_digest` answers at `REVIEW_SHAPE`. It moves with the number, on purpose.
-EMBEDDED_SHAPE = "0"
+EMBEDDED_SHAPE = "8f23977401aa345f689d8f87b6cb31d86177a75b43bd6b8b19302ee107d9208a"
 
 FIXTURES = Path(__file__).parent / "fixtures" / "dive_files"
 OCEAN_FIT = (FIXTURES / "suunto-ocean-2026.fit").read_bytes()
@@ -684,9 +684,13 @@ class TestAppliedAsReviewed:
         await upload_and_apply(async_db, diver, [("dive.fit", OCEAN_FIT)])
         reviewed_dive = await async_db.scalar(select(Dive).where(Dive.user_id == diver.id))
         assert reviewed_dive is not None
-        survivor = create_dive(
-            db, diver, start_time=reviewed_dive.start_time - timedelta(minutes=5), utc_offset_minutes=120
+        survivor = create_dive(db, diver)
+        db.execute(
+            update(Dive)
+            .where(Dive.id == survivor.id)
+            .values(start_time=reviewed_dive.start_time - timedelta(minutes=5), utc_offset_minutes=120)
         )
+        db.commit()
         review = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
         assert review["dives"][0]["outcome"] == "modified"
         first = await _internal(async_db, survivor.id)
