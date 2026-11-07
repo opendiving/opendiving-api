@@ -963,7 +963,7 @@ async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) ->
     async with local_session() as db:
         candidates = (
             await db.execute(
-                select(User.id, User.email, User.units)
+                select(User.id, User.email, User.units, User.unit_preferences)
                 .where(
                     User.is_deleted.is_(False),
                     User.year_in_review_emails.is_(True),
@@ -985,7 +985,9 @@ async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) ->
                 review = await year_in_review(db, candidate.id, year)
                 if review is None:
                     continue
-                await send_year_in_review_email(candidate.email, review, candidate.units)
+                await send_year_in_review_email(
+                    candidate.email, review, candidate.unit_preferences.get("depth", candidate.units)
+                )
                 await db.execute(update(User).where(User.id == candidate.id).values(year_in_review_sent_for=year))
                 await db.commit()
             except Exception:
