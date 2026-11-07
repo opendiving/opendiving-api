@@ -1156,8 +1156,8 @@ class LogbookImportDive(BaseModel):
         Field(
             default=None,
             description="The dive as the import leaves it, on a `new` or `modified` row, in the shape a dive read "
-            "gives. Its nested identifiers name nothing until the import is applied, and on an applied import it "
-            "stays what the review showed.",
+            "gives, and on a row the apply skipped, the dive the review showed. Its nested identifiers name nothing "
+            "until the import is applied, and on an applied import it stays what the review showed.",
         ),
     ]
     changes: Annotated[
