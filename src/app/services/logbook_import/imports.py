@@ -473,7 +473,11 @@ class _SecondPass:
         found = None if uuid is None else self.by_uuid.get(uuid)
         if found is None:
             shared = (self.by_source.get((source["file"], source["dive"])) for source in sources)
-            found = next((row for row in shared if row is not None and id(row) not in self.taken), None)
+            # A skip stands for every row its document dive reached, so a dive it partly made and
+            # a gone dive it partly matched both read it.
+            found = next(
+                (row for row in shared if row is not None and (row.uuid is None or id(row) not in self.taken)), None
+            )
         if found is not None:
             self.taken.add(id(found))
         # Each file of a gone dive skips on its own, and they are all this one row.

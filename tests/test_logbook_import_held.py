@@ -91,6 +91,15 @@ def _logbook(*dives: dict[str, Any], uuid: Any = None) -> bytes:
     ).encode()
 
 
+def _recording(serial: str, start: str) -> dict[str, Any]:
+    """One computer's record of half an hour, in a logbook's terms."""
+    return {
+        "device": {"model": "Perdix 3", "serial": serial},
+        "started_at": start,
+        "profile": {"depth": {"times": [0, 60_000, 1_740_000], "values": [0, 1800, 0]}},
+    }
+
+
 def _settings_with(name: str, value: Any) -> Settings:
     overrides: dict[str, Any] = {name: value}
     return Settings(**overrides)
@@ -628,27 +637,25 @@ class TestAppliedAsReviewed:
         values = [
             change
             for change in row["changes"]
-            if change["member"].startswith("mixtures/") and change["after"] is not None
+            if change["member"].startswith("mixtures/") and change["member"].endswith("_pressure")
         ]
-        assert values, "the fixture's JSON should fill a cylinder member the FIT left blank"
+        assert values, "the fixture's JSON should fill the pressures the FIT left blank"
         dive_id = await async_db.scalar(select(Dive.id).where(Dive.user_id == diver.id))
         assert dive_id is not None
-        # An edit through the form replaces the list row by row, and moves one listed member.
+        # An edit through the form replaces the list row by row, and here gives each listed member
+        # a value of its own: a fill writes blanks, so only the reconciliation can bring `after` back.
         mixtures = (
             await async_db.scalars(select(DiveMixture).where(DiveMixture.dive_id == dive_id).order_by(DiveMixture.id))
         ).all()
+        edited: list[dict[str, Any]] = [
+            {name: getattr(mixture, name) for name in ("oxygen", "helium", "volume", "gas_number")}
+            for mixture in mixtures
+        ]
+        for change in values:
+            _, index, member = change["member"].split("/")
+            edited[int(index)][member] = change["after"] - 10
         await replace_mixtures_for_dive(
-            db=async_db,
-            dive_id=dive_id,
-            mixtures=[
-                DiveMixtureCreate(
-                    **{
-                        name: getattr(mixture, name)
-                        for name in ("oxygen", "helium", "volume", "start_pressure", "end_pressure", "gas_number")
-                    }
-                )
-                for mixture in mixtures
-            ],
+            db=async_db, dive_id=dive_id, mixtures=[DiveMixtureCreate(**cylinder) for cylinder in edited]
         )
         await async_db.execute(update(Dive).where(Dive.id == dive_id).values(max_depth=11.5))
         await async_db.commit()
@@ -768,6 +775,38 @@ class TestAppliedAsReviewed:
 
         session.execute.assert_not_awaited()
         assert held.wrote is False and len(held.moved) == 1
+
+    @pytest.mark.parametrize(
+        "first_start",
+        [
+            pytest.param("2026-08-01T12:00:00+00:00", id="the gone dive sorts ahead"),
+            pytest.param("2026-08-01T08:00:00+00:00", id="the gone dive sorts behind"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_dive_partly_on_a_gone_dive_goes_with_it_for_the_reason_it_did(
+        self, async_db: AsyncSession, db: Session, first_start: str
+    ) -> None:
+        """One document dive, one recording on a stored dive and one of its own: the whole of it
+        is skipped when the stored dive goes, and the new row says why rather than that its file
+        could not be read."""
+        diver = create_user(db)
+        stored = _recording("A1", first_start)
+        await upload_and_apply(
+            async_db, diver, [("stored.divejson", _logbook({"started_at": first_start, "recordings": [stored]}))]
+        )
+        start = "2026-08-01T10:00:00+00:00"
+        partly = _logbook({"started_at": start, "recordings": [_recording("B2", start), stored]})
+        review = await upload(async_db, diver, [("partly.divejson", partly)])
+        assert "new" in {row["outcome"] for row in review["dives"]} and len(review["dives"]) == 2
+        await async_db.execute(update(Dive).where(Dive.user_id == diver.id).values(is_deleted=True))
+        await async_db.commit()
+
+        applied = await apply(async_db, diver, review["uuid"])
+
+        assert [(row["outcome"], row["reason"]) for row in applied["dives"]] == [("skipped", DELETED_HERE)] * 2
+        live = select(func.count()).select_from(Dive).where(Dive.user_id == diver.id, Dive.is_deleted.is_(False))
+        assert await async_db.scalar(live) == 0
 
     @pytest.mark.asyncio
     async def test_a_gone_dive_two_files_reached_is_one_skipped_row(self, async_db: AsyncSession, db: Session) -> None:
