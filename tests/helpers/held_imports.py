@@ -21,8 +21,9 @@ def caller(user: User) -> dict[str, Any]:
     return {"id": user.id, "uuid": user.uuid, "username": user.username, "is_superuser": False}
 
 
-def body_of(response: Response) -> Any:
-    return json.loads(bytes(response.body))
+def body_of(response: Response) -> dict[str, Any]:
+    body: dict[str, Any] = json.loads(bytes(response.body))
+    return body
 
 
 async def upload(db: AsyncSession, user: User, files: list[tuple[str, bytes]]) -> dict[str, Any]:

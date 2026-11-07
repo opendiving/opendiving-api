@@ -88,6 +88,11 @@ def _logbook(*dives: dict[str, Any], uuid: Any = None) -> bytes:
     ).encode()
 
 
+def _settings_with(name: str, value: Any) -> Settings:
+    overrides: dict[str, Any] = {name: value}
+    return Settings(**overrides)
+
+
 def _zip_of(*files: tuple[str, bytes]) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -412,11 +417,11 @@ class TestTheLifetimes:
     @pytest.mark.parametrize("name", ["IMPORT_PENDING_LIFETIME_HOURS", "IMPORT_HISTORY_RETENTION_DAYS"])
     def test_a_lifetime_of_zero_refuses_startup_naming_the_setting(self, name: str) -> None:
         with pytest.raises(ValidationError, match=name):
-            Settings(**{name: 0})
+            _settings_with(name, 0)
 
     @pytest.mark.parametrize("name", ["IMPORT_PENDING_LIFETIME_HOURS", "IMPORT_HISTORY_RETENTION_DAYS"])
     def test_a_blank_lifetime_reads_as_no_limit(self, name: str) -> None:
-        assert getattr(Settings(**{name: ""}), name) is None
+        assert getattr(_settings_with(name, ""), name) is None
 
 
 class TestTheApply:

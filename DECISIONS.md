@@ -5974,10 +5974,9 @@ never read back, and a document carrying the retired `aphia_id` member reads as 
 
 It runs as a batch at the upload, before the review is made and the row claimed: the review is the
 contract, so a sighting it left out would stay out, and `resolve_species` manages its own
-transaction around the outbound call. The worst case is two
-`_RESOLVE_BUDGET_SECONDS` passes plus `_ENRICHMENT_BUDGET_SECONDS`, so
-`IMPORT_SPECIES_BUDGET_SECONDS` is sized against that ceiling; unknowns outstanding at expiry are
-skipped and reported.
+transaction around the outbound call. The worst case is two `_RESOLVE_BUDGET_SECONDS` passes plus
+`_ENRICHMENT_BUDGET_SECONDS`, so `IMPORT_SPECIES_BUDGET_SECONDS` is sized against that ceiling;
+unknowns outstanding at expiry are skipped and reported.
 
 `resolve_species` raises 503 on budget expiry and on a WoRMS outage; the pre-pass converts each to
 skip-and-report.
@@ -6060,8 +6059,9 @@ The upload rate-limits per user on its own budget of ten; an import's reads are 
 
 ## Logbook import reads whatever the converter reads, and the routes are `/imports`
 
-`POST /imports` accepts any number of `file` parts, each a DiveJSON document, any format in `divejson.read_formats()`, or a `.zip` of those; labels are
-`FORMAT_LABELS` (see *"A version bump can add a reader, and only a test notices"*).
+`POST /imports` accepts any number of `file` parts, each a DiveJSON document, any format in
+`divejson.read_formats()`, or a `.zip` of those; labels are `FORMAT_LABELS` (see *"A version bump
+can add a reader, and only a test notices"*).
 
 `divejson.sniff` decides each file on `divejson.SNIFF_BYTES`. A zip without `logbook.divejson` is
 opened one level deep; every document and every file a reader claims sum, by declared size, under
@@ -6073,8 +6073,9 @@ the package's inflation cap is the caller's, and a fixed one in the reader would
 account that the api's own limits admit. Conversion and parsing run behind `CONVERT_LIMITER`
 (`run_in_conversion_thread`).
 
-A head starting `{` keeps the 422 "not valid JSON"; other unclaimed bytes are 415. The apply converts
-the held files again, deterministic except `exported_at`, passed in UTC via `_conversion_moment`.
+A head starting `{` keeps the 422 "not valid JSON"; other unclaimed bytes are 415. The apply
+converts the held files again, deterministic except `exported_at`, passed in UTC via
+`_conversion_moment`.
 
 A row's note and a report group keep `code` and `kind` plain strings, never `StrEnum` or `Literal`:
 they carry the package's codes and kinds beside the import's own, and a dependency bump can add
