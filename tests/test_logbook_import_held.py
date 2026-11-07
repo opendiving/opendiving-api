@@ -25,6 +25,7 @@ from src.app.core.config import Settings, settings
 from src.app.core.worker import functions as worker_functions
 from src.app.core.worker.functions import purge_expired_logbook_imports
 from src.app.crud.crud_dive_mixtures import replace_mixtures_for_dive
+from src.app.crud.crud_dives import crud_dives
 from src.app.models.dive import Dive
 from src.app.models.dive_file import DiveFile
 from src.app.models.dive_mixture import DiveMixture
@@ -122,8 +123,8 @@ def _archive_with_a_portrait() -> bytes:
 
 
 async def _internal(db: AsyncSession, dive_id: int) -> DiveReadInternal:
-    row = await db.scalar(select(Dive).where(Dive.id == dive_id))
-    return DiveReadInternal.model_validate(row, from_attributes=True)
+    row = await crud_dives.get(db=db, id=dive_id, schema_to_select=DiveReadInternal)
+    return DiveReadInternal.model_validate(row)
 
 
 def _without_docs(node: Any) -> Any:
@@ -620,15 +621,16 @@ class TestAppliedAsReviewed:
         review = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
         dive = await async_db.scalar(select(Dive).where(Dive.user_id == diver.id))
         assert dive is not None
+        reshaped = len(review["dives"][0]["dive"]["mixtures"]) + 1
         await replace_mixtures_for_dive(
-            db=async_db, dive_id=dive.id, mixtures=[DiveMixtureCreate(oxygen=0.5, gas_number=9)]
+            db=async_db, dive_id=dive.id, mixtures=[DiveMixtureCreate(oxygen=0.5) for _ in range(reshaped)]
         )
         await async_db.commit()
 
         applied = await apply(async_db, diver, review["uuid"])
 
-        [mixture] = (await async_db.scalars(select(DiveMixture).where(DiveMixture.dive_id == dive.id))).all()
-        assert (mixture.oxygen, mixture.gas_number) == (0.5, 9)
+        stored = (await async_db.scalars(select(DiveMixture.oxygen).where(DiveMixture.dive_id == dive.id))).all()
+        assert stored == [0.5] * reshaped
         assert applied["dives"][0]["outcome"] == "modified"
         [row] = (await _notes(async_db, diver, review["uuid"]))["dives"]
         assert ImportNoteCode.REVIEW_NOT_HELD.value in {note["code"] for note in row["notes"]}
@@ -684,6 +686,7 @@ class TestAppliedAsReviewed:
         await upload_and_apply(async_db, diver, [("dive.fit", OCEAN_FIT)])
         reviewed_dive = await async_db.scalar(select(Dive).where(Dive.user_id == diver.id))
         assert reviewed_dive is not None
+        reviewed_id = reviewed_dive.id
         survivor = create_dive(db, diver)
         db.execute(
             update(Dive)
@@ -694,7 +697,7 @@ class TestAppliedAsReviewed:
         review = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
         assert review["dives"][0]["outcome"] == "modified"
         first = await _internal(async_db, survivor.id)
-        second = await _internal(async_db, reviewed_dive.id)
+        second = await _internal(async_db, reviewed_id)
         await merge_dives(async_db, first=first, second=second)
         await async_db.commit()
         files_before = await async_db.scalar(
