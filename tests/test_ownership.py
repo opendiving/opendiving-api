@@ -509,7 +509,7 @@ RESOLVER_OWNED_ROUTES = [
     OwnedRoute(
         "POST",
         "/api/v1/import/{uuid}/apply",
-        "src.app.api.v1.logbook_import:lock_import",
+        "src.app.api.v1.logbook_import:find_import",
         "Import not found",
         {"json": {}},
     ),

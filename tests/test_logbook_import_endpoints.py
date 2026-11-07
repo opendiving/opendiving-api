@@ -237,13 +237,15 @@ def _uploaded(client: TestClient, monkeypatch: Any, payload: bytes = MINIMAL, na
         held.append(await hold(*args, **kwargs))
         return held[-1]
 
-    async def the_file(db: Any, row: Any) -> ImportRequest:
+    async def the_file(files: Any) -> ImportRequest:
         return ImportRequest(parts=[part_of(payload, name)])
 
     with monkeypatch.context() as patch:
         patch.setattr(import_route, "hold_upload", holding)
         assert client.post(UPLOAD_PATH, files=_files(payload, name)).status_code == 201
+    monkeypatch.setattr(import_route, "find_import", AsyncMock(return_value=held[-1]))
     monkeypatch.setattr(import_route, "lock_import", AsyncMock(return_value=held[-1]))
+    monkeypatch.setattr(import_route, "held_files", AsyncMock(return_value=[]))
     monkeypatch.setattr(import_route, "held_parts", the_file)
     return f"/api/v1/import/{held[-1].uuid}/apply"
 

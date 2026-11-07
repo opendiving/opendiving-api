@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 
@@ -297,7 +297,9 @@ class TestTheUpload:
         refused = await _refusal(upload(async_db, diver, [("dive.json", OCEAN_JSON)]))
 
         assert refused.status_code == 409 and first["uuid"] in str(refused.detail)
-        assert len(await _rows(async_db, diver)) == 1 and len(await _files(async_db, diver)) == 1
+        assert len(await _rows(async_db, diver)) == 1
+        [held] = await _files(async_db, diver)
+        assert list(blob_store.iter_keys()) == [held.storage_key], "the loser takes back what it wrote"
 
     @pytest.mark.asyncio
     async def test_any_session_of_the_account_reads_the_same_review(
@@ -353,7 +355,7 @@ class TestTheLifetimes:
     ) -> None:
         diver = create_user(db)
         old = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
-        [held] = await _files(async_db, diver)
+        [held] = [file.storage_key for file in await _files(async_db, diver)]
         await _age(async_db, diver)
 
         assert (await _refusal(_pending(async_db, diver))).status_code == 404
@@ -362,7 +364,7 @@ class TestTheLifetimes:
         fresh = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
 
         assert fresh["uuid"] != old["uuid"]
-        assert not await blob_store.has(held.storage_key)
+        assert not await blob_store.has(held)
         assert [row.uuid for row in await _rows(async_db, diver)] == [uuid_pkg.UUID(fresh["uuid"])]
 
     @pytest.mark.asyncio
@@ -432,7 +434,7 @@ class TestTheApply:
     ) -> None:
         diver = create_user(db)
         review = await upload(async_db, diver, [("dive.fit", OCEAN_FIT), ("dive.json", OCEAN_JSON)])
-        held = await _files(async_db, diver)
+        held = [file.storage_key for file in await _files(async_db, diver)]
 
         applied = await apply(async_db, diver, review["uuid"])
 
@@ -443,13 +445,53 @@ class TestTheApply:
         stored = await async_db.scalar(select(Dive).where(Dive.user_id == diver.id))
         assert stored is not None and str(stored.uuid) == row["uuid"]
         assert await _files(async_db, diver) == []
-        assert not any([await blob_store.has(file.storage_key) for file in held])
+        assert not any([await blob_store.has(key) for key in held])
         kept = await async_db.scalars(select(DiveFile.storage_key).where(DiveFile.user_id == diver.id))
         assert all([await blob_store.has(key) for key in kept.all()])
         assert (
             await async_db.scalar(select(func.count()).select_from(DiveFile).where(DiveFile.user_id == diver.id))
         ) == 2
         LogbookImportRead.model_validate(applied)
+
+    @pytest.mark.asyncio
+    async def test_no_transaction_is_open_across_the_held_files(
+        self, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """They may be the whole request bound, and a connection idle in a transaction for that
+        long is the pool exhaustion `release_read_transaction` exists to prevent."""
+        diver = create_user(db)
+        review = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        await async_db.rollback()
+        read = import_routes.held_parts
+        open_while_reading: list[bool] = []
+
+        async def reading(files: Any) -> Any:
+            open_while_reading.append(async_db.in_transaction())
+            return await read(files)
+
+        monkeypatch.setattr(import_routes, "held_parts", reading)
+
+        await apply(async_db, diver, review["uuid"])
+
+        assert open_while_reading == [False]
+
+    @pytest.mark.asyncio
+    async def test_an_apply_that_loses_its_files_to_another_device_says_what_became_of_them(
+        self, async_db: AsyncSession, async_sessions: async_sessionmaker[AsyncSession], db: Session, monkeypatch: Any
+    ) -> None:
+        diver = create_user(db)
+        review = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        read = import_routes.held_parts
+
+        async def another_device_first(files: Any) -> Any:
+            async with async_sessions() as another:
+                monkeypatch.setattr(import_routes, "held_parts", read)
+                await apply(another, diver, review["uuid"])
+            return await read(files)
+
+        monkeypatch.setattr(import_routes, "held_parts", another_device_first)
+
+        assert (await _refusal(apply(async_db, diver, review["uuid"]))).status_code == 409
 
     @pytest.mark.asyncio
     async def test_applying_twice_is_a_conflict(self, async_db: AsyncSession, db: Session) -> None:
@@ -573,15 +615,15 @@ class TestAppliedAsReviewed:
             if change["member"].startswith("mixtures/") and change["after"] is not None
         ]
         assert values, "the fixture's JSON should fill a cylinder member the FIT left blank"
-        dive = await async_db.scalar(select(Dive).where(Dive.user_id == diver.id))
-        assert dive is not None
+        dive_id = await async_db.scalar(select(Dive.id).where(Dive.user_id == diver.id))
+        assert dive_id is not None
         # An edit through the form replaces the list row by row, and moves one listed member.
         mixtures = (
-            await async_db.scalars(select(DiveMixture).where(DiveMixture.dive_id == dive.id).order_by(DiveMixture.id))
+            await async_db.scalars(select(DiveMixture).where(DiveMixture.dive_id == dive_id).order_by(DiveMixture.id))
         ).all()
         await replace_mixtures_for_dive(
             db=async_db,
-            dive_id=dive.id,
+            dive_id=dive_id,
             mixtures=[
                 DiveMixtureCreate(
                     **{
@@ -592,7 +634,7 @@ class TestAppliedAsReviewed:
                 for mixture in mixtures
             ],
         )
-        await async_db.execute(update(Dive).where(Dive.id == dive.id).values(max_depth=11.5))
+        await async_db.execute(update(Dive).where(Dive.id == dive_id).values(max_depth=11.5))
         await async_db.commit()
 
         applied = await apply(async_db, diver, review["uuid"])
@@ -601,7 +643,7 @@ class TestAppliedAsReviewed:
         stored = (
             await async_db.scalars(
                 select(DiveMixture)
-                .where(DiveMixture.dive_id == dive.id)
+                .where(DiveMixture.dive_id == dive_id)
                 .order_by(DiveMixture.id)
                 .execution_options(populate_existing=True)
             )
@@ -609,8 +651,8 @@ class TestAppliedAsReviewed:
         for change in values:
             _, index, member = change["member"].split("/")
             assert getattr(stored[int(index)], member) == change["after"]
-        await async_db.refresh(dive)
-        assert dive.max_depth == 11.5, "the review did not list it, so the edit stands"
+        depth = await async_db.scalar(select(Dive.max_depth).where(Dive.id == dive_id))
+        assert depth == 11.5, "the review did not list it, so the edit stands"
 
     @pytest.mark.asyncio
     async def test_a_cylinder_list_reshaped_since_is_a_note_rather_than_a_write_onto_another_cylinder(
@@ -619,17 +661,17 @@ class TestAppliedAsReviewed:
         diver = create_user(db)
         await upload_and_apply(async_db, diver, [("dive.fit", OCEAN_FIT)])
         review = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
-        dive = await async_db.scalar(select(Dive).where(Dive.user_id == diver.id))
-        assert dive is not None
+        dive_id = await async_db.scalar(select(Dive.id).where(Dive.user_id == diver.id))
+        assert dive_id is not None
         reshaped = len(review["dives"][0]["dive"]["mixtures"]) + 1
         await replace_mixtures_for_dive(
-            db=async_db, dive_id=dive.id, mixtures=[DiveMixtureCreate(oxygen=0.5) for _ in range(reshaped)]
+            db=async_db, dive_id=dive_id, mixtures=[DiveMixtureCreate(oxygen=0.5) for _ in range(reshaped)]
         )
         await async_db.commit()
 
         applied = await apply(async_db, diver, review["uuid"])
 
-        stored = (await async_db.scalars(select(DiveMixture.oxygen).where(DiveMixture.dive_id == dive.id))).all()
+        stored = (await async_db.scalars(select(DiveMixture.oxygen).where(DiveMixture.dive_id == dive_id))).all()
         assert stored == [0.5] * reshaped
         assert applied["dives"][0]["outcome"] == "modified"
         [row] = (await _notes(async_db, diver, review["uuid"]))["dives"]
@@ -791,6 +833,27 @@ class TestAppliedAsReviewed:
         assert {str(uuid) for uuid in written.all()} == {
             row["uuid"] for row in applied["dives"] if row["outcome"] == "new"
         }
+
+    @pytest.mark.asyncio
+    async def test_a_dive_the_review_has_no_row_for_names_its_file_in_the_review_s_members(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The stored dive lost its recording since, so the file makes a dive of its own, and the
+        refused file ahead of it holds a place in the review's `members` and none in the apply's
+        batch."""
+        diver = create_user(db)
+        await upload_and_apply(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        review = await upload(async_db, diver, [("a.divejson", b"{not json"), ("dive.json", OCEAN_JSON)])
+        await async_db.execute(delete(DiveFile).where(DiveFile.user_id == diver.id))
+        await async_db.execute(delete(DiveRecording).where(DiveRecording.user_id == diver.id))
+        await async_db.commit()
+
+        applied = await apply(async_db, diver, review["uuid"])
+
+        reviewed, extra = applied["dives"]
+        assert reviewed["uuid"] == review["dives"][0]["uuid"]
+        assert extra["outcome"] == "new" and extra["dive"]["uuid"] == extra["uuid"]
+        assert [applied["members"][index]["name"] for index in extra["members"]] == ["dive.json"]
 
 
 class TestThePortrait:

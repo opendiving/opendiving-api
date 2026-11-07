@@ -41,6 +41,7 @@ the service layer, because each is an HTTP concern:
 
 import logging
 import uuid as uuid_pkg
+from collections.abc import Sequence
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -63,6 +64,7 @@ from ...schemas.logbook_import import (
     LogbookImportStatus,
     LogbookImportSummary,
 )
+from ...services.blob_store import BlobMissingError
 from ...services.cache_invalidation import (
     invalidate_certification_caches,
     invalidate_contact_caches,
@@ -93,6 +95,7 @@ from ...services.logbook_import.imports import (
     delete_import,
     find_import,
     find_pending_import,
+    held_files,
     held_parts,
     hold_upload,
     import_body,
@@ -150,6 +153,16 @@ def _found(row: LogbookImport | None) -> LogbookImport:
     if row is None:
         raise NotFoundException("Import not found")
     return row
+
+
+async def _read_held(db: AsyncSession, user_id: int, uuid: uuid_pkg.UUID, files: Sequence[Any]) -> ImportRequest:
+    """The held files, or what another device left: finishing an import takes its files, so one
+    gone from under this read is that device's apply or discard rather than lost bytes."""
+    try:
+        return await held_parts(files)
+    except BlobMissingError:
+        refuse_unless_pending(_found(await find_import(db, user_id=user_id, uuid=uuid)))
+        raise
 
 
 def _missing(field: str) -> RequestValidationError:
@@ -407,9 +420,15 @@ async def apply_logbook_import(
     # The files an import stores are written before the rows that name them commit, so a failure
     # can strand an unreferenced file - harmless, and swept.
     user_id = current_user["id"]
-    row = _found(await lock_import(db, user_id=user_id, uuid=uuid))
+    row = _found(await find_import(db, user_id=user_id, uuid=uuid))
     refuse_unless_pending(row)
-    with await held_parts(db, row) as held, await _load(held.parts) as batch:
+    files = await held_files(db, row)
+    await release_read_transaction(db)
+    with await _read_held(db, user_id, uuid, files) as held, await _load(held.parts) as batch:
+        # Only now: the files are read and converted with no transaction open, and whichever
+        # device takes the row first is the one that applies. The other finds what it left.
+        row = _found(await lock_import(db, user_id=user_id, uuid=uuid))
+        refuse_unless_pending(row)
         await apply_held(
             db, row=row, user_id=user_id, batch=batch, check_in=choices.check_in_details, portrait=choices.portrait
         )

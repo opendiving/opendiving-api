@@ -104,6 +104,8 @@ class OwnedResourceCache[InternalT, PublicT]:
     - `dive_site_proposals.py` - uncached for `invitations.py`'s reason: a reviewer's decision is
       a write the proposer's own requests never make, and nothing embeds the list, which is
       read when a diver goes looking for an outcome.
+    - `logbook_import.py` - uncached: another device's apply or discard must read as gone at once,
+      or a review would offer an import already finished, and nothing embeds one.
 
     In each of the enriched ones the enrichment is a second query whose results have to be
     zipped back into the page before conversion, which is precisely the step this factory has

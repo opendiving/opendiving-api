@@ -11,9 +11,14 @@ The apply holds to it: the document dives whose reviewed dive has gone are skipp
 first pass minted are minted again, and each modified dive is reconciled to its reviewed values
 (`reconcile.py`).
 
-**The slot is checked before the body and claimed after the conversion**, under a partial unique
-index: an upload racing another's converts too and is then refused, rather than an empty pending
-import blocking every other device for as long as a body takes to arrive.
+**The slot is checked before the body and claimed last**, under a partial unique index, once the
+review is made and the files are in the store: an upload racing another's does that work too and
+is then refused, rather than an empty pending import blocking every other device for as long as
+a body takes to arrive.
+
+**Neither end holds a connection across the store.** A held file may be the whole request bound,
+so the upload writes its files between the pass and the claim, and the apply reads and converts
+them before it takes the row's lock.
 """
 
 import base64
@@ -33,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from ...core.config import settings
+from ...core.db.database import release_read_transaction
 from ...models.dive import Dive
 from ...models.logbook_import import LogbookImport, LogbookImportFile
 from ...models.user import User
@@ -174,9 +180,9 @@ def _sources(batch: LoadedBatch, row: BatchDive) -> list[dict[str, str]]:
     return named
 
 
-async def _hold_file(db: AsyncSession, import_id: int, row: BatchRow, parts: Sequence[ImportPart]) -> None:
+async def _hold_file(row: BatchRow, parts: Sequence[ImportPart]) -> dict[str, Any]:
     """One readable file into the store, from a spool: `PutObject` reads the length off what it
-    is handed, so a zip's member goes onto one first."""
+    is handed, so a zip's member goes onto one first. Answers what its row records."""
     key = blob_store.new_key(KEY_KIND, sha256=row.sha256)
     if row.in_zip:
         with TemporaryFile() as spool:
@@ -187,35 +193,29 @@ async def _hold_file(db: AsyncSession, import_id: int, row: BatchRow, parts: Seq
         assert source is not None
         source.seek(0)
         await blob_store.put_file(key, source)
-    db.add(
-        LogbookImportFile(
-            logbook_import_id=import_id,
-            role=ROLE_PART,
-            part=row.part,
-            filename=row.name,
-            byte_size=row.size,
-            sha256=row.sha256,
-            storage_key=key,
-        )
-    )
+    return {
+        "role": ROLE_PART,
+        "part": row.part,
+        "filename": row.name,
+        "byte_size": row.size,
+        "sha256": row.sha256,
+        "storage_key": key,
+    }
 
 
-async def _hold_portrait(db: AsyncSession, import_id: int, data_url: str) -> None:
+async def _hold_portrait(data_url: str) -> dict[str, Any]:
     """The offered picture in the store rather than the column, inlined again when it is read."""
     data = base64.b64decode(data_url.partition(",")[2])
     digest = hashlib.sha256(data).hexdigest()
     key = blob_store.new_key(KEY_KIND, sha256=digest)
     await blob_store.put(key, data)
-    db.add(
-        LogbookImportFile(
-            logbook_import_id=import_id,
-            role=ROLE_PORTRAIT,
-            filename="portrait",
-            byte_size=len(data),
-            sha256=digest,
-            storage_key=key,
-        )
-    )
+    return {
+        "role": ROLE_PORTRAIT,
+        "filename": "portrait",
+        "byte_size": len(data),
+        "sha256": digest,
+        "storage_key": key,
+    }
 
 
 def _review_of(report: BatchReport, numbering: DiveNumberingSummary, dives: list[dict[str, Any]]) -> dict[str, Any]:
@@ -244,30 +244,13 @@ async def hold_upload(
     batch: LoadedBatch,
     newly_resolved_aphia_ids: frozenset[int],
 ) -> LogbookImport:
-    """Claim the account's slot, review the batch and hold its readable files. Leaves the commit
+    """Review the batch, hold its readable files and claim the account's slot. Leaves the commit
     to the caller, which the files are written ahead of.
 
-    The row goes in first so that the pass, which rolls itself back inside a savepoint, leaves it
-    standing, and so that an upload racing this one waits on the index here rather than after a
-    pass of its own.
+    The claim comes last so that no transaction stays open across the store, and an upload that
+    loses it to another takes back the files it wrote: no row ever named them.
     """
     numbering = await summarize_numbering(db=db, user_id=user_id)
-    now = datetime.now(UTC)
-    held = LogbookImport(user_id=user_id, review_shape=REVIEW_SHAPE, created_at=now, expires_at=_pending_expiry(now))
-    db.add(held)
-    try:
-        await db.flush()
-    except IntegrityError as exc:
-        await db.rollback()
-        winner = (
-            await db.execute(
-                select(LogbookImport.uuid).where(
-                    LogbookImport.user_id == user_id, LogbookImport.status == LogbookImportStatus.PENDING.value
-                )
-            )
-        ).scalar_one()
-        raise _pending_conflict(winner) from exc
-
     report = await import_batch(
         db,
         user_id=user_id,
@@ -276,22 +259,45 @@ async def hold_upload(
         resolution_ran=True,
         newly_resolved_aphia_ids=newly_resolved_aphia_ids,
     )
+    await release_read_transaction(db)
     # Only what the app could read: a zip's own row reads into nothing, its readable members
     # being rows of their own, which is what keeps it and its unreadable ones off the store.
-    for row in batch.read:
-        await _hold_file(db, held.id, row, parts)
+    files = [await _hold_file(row, parts) for row in batch.read]
     if report.portrait is not None:
-        await _hold_portrait(db, held.id, report.portrait.proposed)
+        files.append(await _hold_portrait(report.portrait.proposed))
 
     dives = [_wire_dive(row) for row in report.dives]
-    held.review = _review_of(report, numbering, dives)
-    held.notes = _notes_of(
-        report,
-        [_row_notes(dive, row.notes, row.notes_truncated) for dive, row in zip(dives, report.dives, strict=True)],
+    now = datetime.now(UTC)
+    held = LogbookImport(
+        user_id=user_id,
+        review_shape=REVIEW_SHAPE,
+        created_at=now,
+        expires_at=_pending_expiry(now),
+        review=_review_of(report, numbering, dives),
+        notes=_notes_of(
+            report,
+            [_row_notes(dive, row.notes, row.notes_truncated) for dive, row in zip(dives, report.dives, strict=True)],
+        ),
+        counts=_counts(dives),
+        sources=[_sources(batch, row) for row in report.dives],
+        remaps={"files": _minted_of(report), "species": sorted(newly_resolved_aphia_ids)},
     )
-    held.counts = _counts(dives)
-    held.sources = [_sources(batch, row) for row in report.dives]
-    held.remaps = {"files": _minted_of(report), "species": sorted(newly_resolved_aphia_ids)}
+    db.add(held)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        for file in files:
+            await blob_store.delete(file["storage_key"])
+        winner = (
+            await db.execute(
+                select(LogbookImport.uuid).where(
+                    LogbookImport.user_id == user_id, LogbookImport.status == LogbookImportStatus.PENDING.value
+                )
+            )
+        ).scalar_one()
+        raise _pending_conflict(winner) from exc
+    db.add_all(LogbookImportFile(logbook_import_id=held.id, **file) for file in files)
     return held
 
 
@@ -312,6 +318,7 @@ async def lock_import(db: AsyncSession, *, user_id: int, uuid: uuid_pkg.UUID) ->
         select(LogbookImport)
         .where(LogbookImport.uuid == uuid, LogbookImport.user_id == user_id, _is_live(datetime.now(UTC)))
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     return found.scalar_one_or_none()
 
@@ -373,16 +380,25 @@ async def import_body(db: AsyncSession, row: LogbookImport) -> dict[str, Any]:
     return body
 
 
-async def held_parts(db: AsyncSession, row: LogbookImport) -> ImportRequest:
+async def held_files(db: AsyncSession, row: LogbookImport) -> list[Any]:
+    """What `held_parts` reads, as plain rows, so it needs no session and none is held across it."""
+    found = await db.execute(
+        select(
+            LogbookImportFile.part,
+            LogbookImportFile.filename,
+            LogbookImportFile.byte_size,
+            LogbookImportFile.sha256,
+            LogbookImportFile.storage_key,
+        )
+        .where(LogbookImportFile.logbook_import_id == row.id, LogbookImportFile.role == ROLE_PART)
+        .order_by(LogbookImportFile.id)
+    )
+    return list(found)
+
+
+async def held_parts(files: Sequence[Any]) -> ImportRequest:
     """The held files back on spools, as the parts reader builds them and under its one bound:
     their bytes in memory together never pass one `SPOOL_THRESHOLD`."""
-    files = (
-        await db.execute(
-            select(LogbookImportFile)
-            .where(LogbookImportFile.logbook_import_id == row.id, LogbookImportFile.role == ROLE_PART)
-            .order_by(LogbookImportFile.id)
-        )
-    ).scalars()
     request = ImportRequest(parts=[])
     in_memory = 0
     try:
@@ -528,9 +544,10 @@ class _Application:
             dive["dive"] = await self._read(dive["uuid"])
         return [_overtaken_note()] if reviewed is ImportDiveOutcome.NEW else []
 
-    async def extra_row(self, row: BatchDive) -> dict[str, Any]:
-        """A dive the second pass reached that the review has no row for."""
-        dive = _wire_dive(row)
+    async def extra_row(self, row: BatchDive, members: list[int]) -> dict[str, Any]:
+        """A dive the second pass reached that the review has no row for. `members` are its files
+        in the review's `members`, which the apply's batch numbers differently."""
+        dive = {**_wire_dive(row), "members": members}
         if row.outcome is ImportDiveOutcome.NEW and row.uuid is not None:
             dive["dive"] = await self._read(str(row.uuid))
         return dive
@@ -591,9 +608,11 @@ async def apply_held(
         said = [] if settled is None else settled.notes
         truncated = 0 if settled is None else settled.notes_truncated
         notes.append(_row_notes(dive, [*said, *added], truncated))
+    reviewed_files = {(member["name"], member["sha256"]): index for index, member in enumerate(review["members"])}
     for extra in report.dives:
         if id(extra) not in second.taken:
-            dive = await application.extra_row(extra)
+            files = (batch.rows[index] for index in extra.members)
+            dive = await application.extra_row(extra, [reviewed_files[file.name, file.sha256] for file in files])
             rows.append(dive)
             notes.append(_row_notes(dive, extra.notes, extra.notes_truncated))
 
