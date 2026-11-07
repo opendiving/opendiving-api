@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, Path, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...api.dependencies import get_current_user, refuse_api_keys
+from ...api.dependencies import get_current_user, refuse_unscoped_api_keys
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
 from ...core.utils.binary_responses import not_modified, stored_bytes_response, uncacheable_not_found
@@ -66,7 +66,10 @@ def _image(*, sha256: str, content_type: str, data: bytes) -> Response:
 
 
 @router.post(
-    "/user/checkin-link", response_model=CheckinLinkMinted, status_code=201, dependencies=[Depends(refuse_api_keys)]
+    "/user/checkin-link",
+    response_model=CheckinLinkMinted,
+    status_code=201,
+    dependencies=[Depends(refuse_unscoped_api_keys)],
 )
 async def write_checkin_link(
     body: CheckinLinkCreate,
@@ -85,7 +88,7 @@ async def write_checkin_link(
     return CheckinLinkMinted(token=token, expires_at=expires_at)
 
 
-@router.get("/user/checkin-link", response_model=CheckinLinkRead, dependencies=[Depends(refuse_api_keys)])
+@router.get("/user/checkin-link", response_model=CheckinLinkRead, dependencies=[Depends(refuse_unscoped_api_keys)])
 async def read_checkin_link(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
@@ -101,7 +104,9 @@ async def read_checkin_link(
     return CheckinLinkRead(expires_at=expires_at)
 
 
-@router.delete("/user/checkin-link", response_model=CheckinLinkRevokedResponse, dependencies=[Depends(refuse_api_keys)])
+@router.delete(
+    "/user/checkin-link", response_model=CheckinLinkRevokedResponse, dependencies=[Depends(refuse_unscoped_api_keys)]
+)
 async def erase_checkin_link(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],

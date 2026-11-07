@@ -121,7 +121,12 @@ class FakeS3Client:
     def put_object(self, **kwargs: Any) -> dict[str, Any]:
         self.record("put_object", kwargs)
         self._check_bucket(kwargs["Bucket"], "PutObject")
-        self.objects[kwargs["Key"]] = bytes(kwargs["Body"])
+        body = kwargs["Body"]
+        if isinstance(body, bytes):
+            data = body
+        else:
+            data = b"".join(iter(lambda: body.read(64 * 1024), b""))
+        self.objects[kwargs["Key"]] = data
         self.modified[kwargs["Key"]] = datetime.now(UTC)
         return {}
 

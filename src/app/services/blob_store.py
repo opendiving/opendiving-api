@@ -24,10 +24,8 @@ opaque string keys that are also valid S3 object keys, bytes in and bytes out, a
 caller anywhere holding a `Path`. Keys are identical on both backends, so an install can
 move either way and back (`src/scripts/migrate_blobs.py`).
 
-Whole `bytes` rather than streams, because every caller already holds the whole payload:
-`read_upload_within_limit` buffers at most 10 MB, and the routes, the export archive and
-the backfills all read the entire file. A streaming interface is photo-era work, added
-when there is a caller that can use it.
+`put` accepts bounded byte payloads. `put_file` copies seekable, uncompressed spools
+without materializing them, so MCP downloads retain the export pipeline's memory bound.
 
 **A key names its encoding.** A dive-computer export is stored as one zstd frame under a key
 ending `.zst`, and every other kind as the bytes themselves; `put` encodes and `get` decodes
@@ -37,14 +35,16 @@ by the key, so no caller outside this module ever holds a frame. See `DECISIONS.
 
 import asyncio
 import hashlib
+import io
 import logging
 import os
+import shutil
 from collections.abc import Iterator
 from compression import zstd
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import IO, Any, Protocol
 
 import anyio.to_thread
 import boto3
@@ -259,6 +259,7 @@ class Backend(Protocol):
 
     def ensure_ready(self) -> None: ...
     def write(self, key: str, data: bytes) -> None: ...
+    def write_file(self, key: str, source: IO[bytes]) -> None: ...
     def read(self, key: str) -> bytes: ...
     def remove(self, key: str) -> None: ...
     def discard_many(self, keys: list[str]) -> None: ...
@@ -320,6 +321,9 @@ class LocalBackend:
             ) from exc
 
     def write(self, key: str, data: bytes) -> None:
+        self.write_file(key, io.BytesIO(data))
+
+    def write_file(self, key: str, source: IO[bytes]) -> None:
         """Durable, atomic write of one blob. Runs in a worker thread.
 
         Write to a temp file, `fsync` it, `os.replace` into place, then `fsync` the parent
@@ -334,17 +338,16 @@ class LocalBackend:
         tmp_dir = root / TMP_DIRNAME
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
-        # `os.getpid()` and `id(data)` rather than a random name: the file is renamed away
+        # `os.getpid()` and `id(source)` rather than a random name: the file is renamed away
         # immediately, and a collision only has to be impossible *within* one process's
         # concurrent writes.
-        tmp_path = tmp_dir / f".{os.getpid()}-{id(data):x}.part"
+        tmp_path = tmp_dir / f".{os.getpid()}-{id(source):x}.part"
         try:
             fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            try:
-                os.write(fd, data)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            with os.fdopen(fd, "wb") as destination_file:
+                shutil.copyfileobj(source, destination_file, length=64 * 1024)
+                destination_file.flush()
+                os.fsync(destination_file.fileno())
             os.replace(tmp_path, destination)
         except BaseException:
             tmp_path.unlink(missing_ok=True)
@@ -513,6 +516,9 @@ class S3Backend:
 
     def write(self, key: str, data: bytes) -> None:
         self._client.put_object(Bucket=self._bucket, Key=self._object_key(key), Body=data)
+
+    def write_file(self, key: str, source: IO[bytes]) -> None:
+        self._client.put_object(Bucket=self._bucket, Key=self._object_key(key), Body=source)
 
     def read(self, key: str) -> bytes:
         try:
@@ -764,6 +770,19 @@ async def get(key: str) -> bytes:
     `BlobStoreError` when the store itself fails."""
     with _store_errors(key):
         return await anyio.to_thread.run_sync(_read_decoded, _backend(), key)
+
+
+async def put_file(key: str, source: IO[bytes]) -> None:
+    """Store an uncompressed, seekable spool without materializing it as bytes.
+
+    The caller owns the spool and keeps it open until this finishes. Compressed dive
+    files continue through `put`, which owns their one-shot encoding.
+    """
+    if _is_compressed(key):
+        raise ValueError("Use put for compressed blobs.")
+    source.seek(0)
+    with _store_errors(key):
+        await anyio.to_thread.run_sync(_backend().write_file, key, source)
 
 
 async def delete(key: str) -> None:

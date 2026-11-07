@@ -110,6 +110,8 @@ dependencies = [
     # The `/docs` page on `local` and `staging` (`core/setup.py`). It writes the HTML only; the
     # script that renders it loads from jsDelivr.
     "scalar-fastapi>=1.9.1",
+    "mcp>=2.3.0,<3",
+    "jsonschema>=4.26,<5",
 ]
 
 # An extra, never a `[dependency-groups]` entry: `uv sync` installs the `dev` group by default,

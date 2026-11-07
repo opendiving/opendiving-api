@@ -21,6 +21,7 @@ from ..models.certification import Certification
 from ..models.certification_file import CertificationFile
 from ..models.dive_file import DiveFile
 from ..models.map_tile import MapTile
+from ..models.mcp import McpFile
 from ..models.species import Species
 from ..models.user_picture import UserPicture
 
@@ -32,6 +33,7 @@ class BlobKeyColumn:
 
 
 BLOB_KEY_COLUMNS: tuple[BlobKeyColumn, ...] = (
+    BlobKeyColumn(McpFile.storage_key, lambda user_id: McpFile.user_id == user_id),
     BlobKeyColumn(DiveFile.storage_key, lambda user_id: DiveFile.user_id == user_id),
     # `certification_file` has no `user_id` of its own; it hangs off `certification`.
     BlobKeyColumn(

@@ -571,27 +571,52 @@ shim, and nothing else about the account is affected.
 ### API keys
 
 A diver makes an API key in Settings for a tool of their own, and the tool sends it on the same
-header a browser sends its access token: `Authorization: Bearer odk_...`. Every route accepts one,
-because `get_current_user` branches on the `odk_` prefix before any JWT is decoded: the key path
-hashes the string, finds the `api_key` row by that SHA-256, and resolves it to the owner's account.
-The secret is `odk_` and 43 URL-safe characters (256 random bits), returned once - in the `201` of
-`POST /user/api-keys` - and never stored, logged, emailed or audited; the row keeps its hash and its
-first twelve characters, the `prefix` a list row and an email name it by.
+header a browser sends its access token: `Authorization: Bearer odk_...`. Authentication branches on
+the `odk_` prefix before any JWT is decoded: the key path hashes the string, finds the `api_key` row
+by that SHA-256, and resolves it to the owner's account. The secret is `odk_` and 43 URL-safe
+characters (256 random bits), returned once - in the `201` of `POST /user/api-keys` - and never
+stored, logged, emailed or audited; the row keeps its hash and its first twelve characters, the
+`prefix` a list row and an email name it by.
 
-- `POST /user/api-keys` - `name`, `scope` (`read` | `write`) and `lifetime` (`30d` | `90d` | `1y` |
-  `never`); the server computes `expires_at`. 409 at `API_KEY_MAX_PER_USER` keys (expired ones
-  count), 429 past `API_KEY_CREATE_RATE_LIMIT_PER_USER` creations in the auth window.
+- `POST /user/api-keys` - `name`, `scope` (`scoped` | `read` | `write`), `scopes` and `lifetime`
+  (`30d` | `90d` | `1y` | `never`). A `scoped` key requires a nonempty list of distinct supported
+  permissions; legacy `read` and `write` keys omit `scopes`. The server computes `expires_at`. 409
+  at `API_KEY_MAX_PER_USER` keys (expired ones count), 429 past `API_KEY_CREATE_RATE_LIMIT_PER_USER`
+  creations in the auth window.
+- `GET /user/api-key-permissions` - the supported permission vocabulary, shared with MCP.
 - `GET /user/api-keys` - every key on the account, oldest first, expired ones included, with
   `last_used_at` stamped at most once per five minutes.
 - `DELETE /user/api-key/{uuid}` - a real delete; the key is refused from its very next request.
 
+New keys created in the web interface use detailed permissions. For example:
+
+```json
+{
+  "name": "dive reader",
+  "scope": "scoped",
+  "scopes": ["dives:read"],
+  "lifetime": "1y"
+}
+```
+
+A scoped key grants only the selected operations. Reading, creating/editing and deleting are
+independent. Combined operations require every listed permission, such as `certifications:read` and
+`files:read` for downloading a card. Unclassified authenticated routes refuse scoped keys. The API
+reference publishes each operation's requirements in `x-opendiving-permissions`.
+
+`GET /user` returns only the fields granted by `profile:read` and/or `preferences:read`. An account
+update requires permission for every submitted field; mixed profile and preference updates require
+both write permissions. An unpermitted field rejects the whole update with 403. Check-in sharing
+requires `checkin:share`; legacy keys remain unable to manage sharing links. Existing `read` and
+`write` keys retain their access until revoked. Rotate a key to restrict it.
+
 What a key is refused:
 
-- **A `read` key may use `GET`, `HEAD` and `OPTIONS` and nothing else** - any other method is a 403
-  `"This API key is read-only."` before the route runs.
+- **A legacy `read` key may use `GET`, `HEAD` and `OPTIONS` and nothing else** - any other method is
+  a 403 `"This API key is read-only."` before the route runs.
 - **No key may manage credentials, the sign-in address or the account's existence.** The routes
-  under `/user/api-key`, `/user/passkey`, `/user/session`, `/user/checkin-link`, `/user/invite-link`
-  and `/user/email-change`, and `DELETE /user`, answer a key with 403
+  under `/user/api-key`, `/user/mcp`, `/user/passkey`, `/user/session`, `/user/invite-link`,
+  `/user/email-change` and `/user/download-ticket`, and `DELETE /user`, answer a key with 403
   `"This needs a signed-in browser or app, not an API key."` (`refuse_api_keys`), so a stolen key
   cannot lock its owner out or mint itself a successor.
 - **A key's principal is never a superuser.** The account dict it resolves to carries `is_superuser`

@@ -22,16 +22,24 @@ from ..api.dependencies import (
     get_current_user,
     get_downloading_user,
     refuse_api_keys,
+    refuse_unscoped_api_keys,
 )
+from ..authorization.policy import permission_requirements
 from .security import bearer_scheme
 
 EXTENSION = "x-opendiving-credentials"
 
-Credential = Literal["anonymous", "session", "superuser", "api-key-read", "api-key-write"]
+Credential = Literal["anonymous", "session", "superuser", "api-key-read", "api-key-write", "api-key-scoped"]
 
-#: Ordered from least to most: a superuser's session can call whatever a diver's can, and a write
-#: key whatever a read key can.
-CREDENTIALS: tuple[Credential, ...] = ("anonymous", "session", "superuser", "api-key-read", "api-key-write")
+#: Credential modes shown in the API reference. Scoped access depends on each operation's permissions.
+CREDENTIALS: tuple[Credential, ...] = (
+    "anonymous",
+    "session",
+    "superuser",
+    "api-key-read",
+    "api-key-write",
+    "api-key-scoped",
+)
 
 
 def _calls(dependant: Dependant) -> set[Callable[..., Any]]:
@@ -41,7 +49,7 @@ def _calls(dependant: Dependant) -> set[Callable[..., Any]]:
     return calls
 
 
-def credentials_for(method: str, dependant: Dependant) -> list[Credential]:
+def credentials_for(method: str, dependant: Dependant, path: str) -> list[Credential]:
     """The credentials a request with this method may present to a route with this dependant.
 
     A key is accepted only where `get_current_user` runs, since that is where its prefix is
@@ -58,9 +66,12 @@ def credentials_for(method: str, dependant: Dependant) -> list[Credential]:
 
     accepted: list[Credential] = ["session", "superuser"]
     if resolves_keys and refuse_api_keys not in calls:
-        if method.upper() in SAFE_METHODS:
-            accepted.append("api-key-read")
-        accepted.append("api-key-write")
+        if refuse_unscoped_api_keys not in calls:
+            if method.upper() in SAFE_METHODS:
+                accepted.append("api-key-read")
+            accepted.append("api-key-write")
+        if permission_requirements(method.upper(), path):
+            accepted.append("api-key-scoped")
     return accepted
 
 
@@ -76,4 +87,7 @@ def annotate_credentials(app: FastAPI, document: dict[str, Any]) -> None:
         for method in context.methods or set():
             operation = operations.get(method.lower())
             if operation is not None:
-                operation[EXTENSION] = credentials_for(method, context.dependant)
+                operation[EXTENSION] = credentials_for(method, context.dependant, context.path_format or "")
+                requirements = permission_requirements(method.upper(), context.path_format or "")
+                if "api-key-scoped" in operation[EXTENSION] and requirements:
+                    operation["x-opendiving-permissions"] = {"anyOf": [list(scopes) for scopes in requirements]}

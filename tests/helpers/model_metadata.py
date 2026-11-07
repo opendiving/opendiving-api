@@ -69,6 +69,18 @@ def addressable_hard_deleted() -> set[type[Base]]:
 
 
 NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
+    "McpGrant": (
+        "A delegated credential family. Connection deletion revokes it in place; OAuth tokens and "
+        "consent cannot be minted through the admin panel. MCP HTTP tests cover revocation."
+    ),
+    "McpAudit": (
+        "Content-free connection activity, removed by retention rather than a content delete route. "
+        "It is not editable through the admin panel."
+    ),
+    "McpFile": (
+        "An expiring connection-owned blob handle. DELETE /mcp/files/{handle} removes its row and "
+        "blob; MCP HTTP tests cover deletion and ownership. It is not an admin-editable resource."
+    ),
     "ApiKey": (
         "A credential, and a row that is only its hash: `DELETE /user/api-key/{uuid}` is the one way it "
         "goes, and `tests/test_api_keys.py` pins that delete - the 404 for a stranger's, the row gone, the "

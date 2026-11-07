@@ -576,6 +576,10 @@ UNOWNED_ROUTES: dict[tuple[str, str], str] = {
     ),
 }
 
+# These optional routes are exercised against migrated PostgreSQL in test_mcp.py,
+# including an attempted revocation from another account's browser session.
+INTEGRATION_OWNED_ROUTES = {("DELETE", "/api/v1/user/mcp/connection/{uuid}")} if settings.MCP_ENABLED else set()
+
 OWNER_ID = 7
 SOMEONE_ELSE_ID = 8
 OWNER = {"id": OWNER_ID, "uuid": uuid_pkg.uuid4(), "username": "ada", "is_superuser": False}
@@ -714,7 +718,7 @@ class TestEveryUuidRouteIsAccountedFor:
 
     def test_every_uuid_route_resolves_ownership(self) -> None:
         covered = {route.key for route in FETCH_OWNED_ROUTES} | {route.key for route in RESOLVER_OWNED_ROUTES}
-        covered |= UNOWNED_ROUTES.keys()
+        covered |= UNOWNED_ROUTES.keys() | INTEGRATION_OWNED_ROUTES
 
         unaccounted = sorted(
             route.key for route in iter_api_routes(app) if "{uuid}" in route.path and route.key not in covered
@@ -742,6 +746,7 @@ class TestEveryUuidRouteIsAccountedFor:
             {route.key for route in FETCH_OWNED_ROUTES}
             | {route.key for route in RESOLVER_OWNED_ROUTES}
             | UNOWNED_ROUTES.keys()
+            | INTEGRATION_OWNED_ROUTES
         )
 
         stale = sorted(listed - registered)

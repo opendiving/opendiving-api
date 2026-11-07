@@ -384,7 +384,7 @@ async def send_api_key_created_email(
     made it and is not kept - so a missing `SMTP_HOST` logs this everywhere, as the passkey
     notices do.
     """
-    access = "read and change" if scope == "write" else "read"
+    access = {"write": "read and change", "read": "read", "scoped": "use the selected permissions on"}[scope]
     until = f"until {expires_at:%-d %B %Y}" if expires_at is not None else "until it is revoked"
     if not settings.SMTP_HOST:
         logger.warning(

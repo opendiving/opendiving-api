@@ -23,6 +23,7 @@ Four things are worth pinning and the rest is plumbing:
 """
 
 import asyncio
+import io
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
@@ -98,6 +99,15 @@ class TestKeysAndThePrefix:
 
 
 class TestRoundTrip:
+    @pytest.mark.asyncio
+    async def test_seekable_file_is_sent_to_s3_without_materializing_it(self, s3: FakeS3Client) -> None:
+        with io.BytesIO(DATA) as source:
+            source.seek(5)
+            await blob_store.put_file(KEY, source)
+            assert s3.calls[0][1]["Body"] is source
+            assert not source.closed
+        assert await blob_store.get(KEY) == DATA
+
     @pytest.mark.asyncio
     async def test_what_goes_in_comes_back_out(self, s3: FakeS3Client) -> None:
         await blob_store.put(KEY, DATA)

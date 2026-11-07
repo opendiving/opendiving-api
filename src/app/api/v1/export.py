@@ -24,7 +24,6 @@ layer because each is an HTTP concern:
   can draw a progress bar for the archive.
 """
 
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import IO, Annotated
 
@@ -41,6 +40,7 @@ from ...core.security import DOWNLOAD_TOKEN_EXPIRE_SECONDS
 from ...core.utils import cache
 from ...core.utils.binary_responses import BINARY_CSP
 from ...core.utils.rate_limit import enforce_rate_limit
+from ...core.utils.spooled_response import SpooledResponse
 from ...schemas.export import DIVEJSON_EXTENSION, DIVEJSON_MEDIA_TYPE
 from ...services.export import (
     load_export_bundle,
@@ -89,26 +89,14 @@ async def _enforce_export_limit(request: Request, user_id: int) -> None:
 def _download(buffer: IO[bytes], *, filename: str, media_type: str) -> StreamingResponse:
     """Stream a spooled temp file as a download, and delete it when the response ends.
 
-    A `SpooledTemporaryFile` deletes itself when closed, so the generator's `finally` is
-    the whole lifecycle: whether it runs to the end, the client disconnects mid-download
-    or the server unwinds, the spill file goes with it. No `BackgroundTask` is involved -
-    Starlette closes the body iterator either way.
+    The response closes the spool even if an in-process consumer refuses its declared
+    length before the body iterator starts.
     """
-
-    def chunks() -> Iterator[bytes]:
-        try:
-            while True:
-                chunk = buffer.read(64 * 1024)
-                if not chunk:
-                    return
-                yield chunk
-        finally:
-            buffer.close()
 
     size = buffer.seek(0, 2)
     buffer.seek(0)
-    return StreamingResponse(
-        chunks(),
+    return SpooledResponse(
+        buffer,
         media_type=media_type,
         headers={
             # ASCII-only by construction (`export_filename` scrubs the username), so the

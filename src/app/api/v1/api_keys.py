@@ -15,6 +15,7 @@ from sqlalchemy import CursorResult, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user, refuse_api_keys
+from ...authorization.scopes import SCOPES
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import NotFoundException
@@ -91,6 +92,7 @@ async def write_api_key(
                 prefix=secret[:API_KEY_SHOWN_LENGTH],
                 token_hash=token_hash,
                 scope=body.scope,
+                scopes=body.scopes,
                 expires_at=body.lifetime.expires_at(datetime.now(UTC)),
             ),
             schema_to_select=ApiKeyReadInternal,
@@ -196,3 +198,13 @@ async def erase_api_key(
     )
 
     return ApiKeyRevokedResponse()
+
+
+@router.get("/user/api-key-permissions", response_model=list[str], dependencies=[Depends(refuse_api_keys)])
+async def read_api_key_permissions(current_user: Annotated[dict, Depends(get_current_user)]) -> list[str]:
+    """Supported detailed API-key permissions, from a signed-in session.
+
+    New scoped keys grant only the permissions selected from this list. Credential
+    management and account deletion remain available only to a signed-in session.
+    """
+    return sorted(SCOPES)
