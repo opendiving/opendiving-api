@@ -1,7 +1,7 @@
 """A replaced site leaves an alias
 
 Revision ID: 04c319ff9731
-Revises: d3f8a61c27e4
+Revises: 08cefce15233
 Create Date: 2026-11-07 12:47:06.984740
 
 For one account, the uuid of a site it replaced and the Commons record that uuid now means. A new
@@ -15,7 +15,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "04c319ff9731"
-down_revision: str | None = "d3f8a61c27e4"
+down_revision: str | None = "08cefce15233"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

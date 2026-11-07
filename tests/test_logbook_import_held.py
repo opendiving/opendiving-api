@@ -26,11 +26,14 @@ from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.worker import functions as worker_functions
 from src.app.core.worker.functions import purge_expired_logbook_imports
 from src.app.crud.crud_dive_mixtures import replace_mixtures_for_dive
+from src.app.crud.crud_dive_sites import replace_site_with_record
 from src.app.crud.crud_dives import crud_dives
 from src.app.models.dive import Dive
+from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_file import DiveFile
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_recording import DiveRecording
+from src.app.models.dive_site import DiveSite
 from src.app.models.logbook_import import LogbookImport, LogbookImportFile
 from src.app.models.user import User
 from src.app.schemas.dive import DiveReadInternal
@@ -51,7 +54,13 @@ from src.app.services.logbook_import import import_batch, load_import
 from src.app.services.logbook_import.planner import DELETED_HERE
 from src.app.services.logbook_import.reconcile import hold_reviewed_values
 from tests.conftest import db_available
-from tests.helpers.generators import create_dive, create_dive_recording, create_user
+from tests.helpers.generators import (
+    create_commons_site,
+    create_dive,
+    create_dive_recording,
+    create_dive_site,
+    create_user,
+)
 from tests.helpers.held_imports import apply, body_of, caller, discard, upload, upload_and_apply
 from tests.helpers.images import phone_jpeg
 from tests.helpers.import_parts import parts_of
@@ -1086,3 +1095,28 @@ class TestTheShapeOfWhatIsStored:
         second = _without_docs({"title": "B", "description": "y", "examples": [2], "properties": {"title": {}}})
 
         assert first == second == {"properties": {"title": {}}}
+
+
+class TestASiteReplacedWhileTheImportWaits:
+    @pytest.mark.asyncio
+    async def test_the_apply_links_the_record_and_brings_no_site_back_under_the_uuid(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        site = create_dive_site(db, diver)
+        site_id, uuid = site.id, site.uuid
+        record = create_commons_site(db)
+        document = json.loads(_logbook({"site_uuids": [str(uuid)]}))
+        document["sites"] = [{"uuid": str(uuid), "name": "As it was exported"}]
+        review = await upload(async_db, diver, [("logbook.divejson", json.dumps(document).encode())])
+
+        await replace_site_with_record(async_db, user_id=diver.id, site_id=site_id, record_id=record.id)
+        await async_db.commit()
+        await apply(async_db, diver, review["uuid"])
+
+        assert (await async_db.scalars(select(DiveSite.id).where(DiveSite.user_id == diver.id))).all() == []
+        named = await async_db.scalars(
+            select(DiveDiveSite.dive_site_id)
+            .join(Dive, Dive.id == DiveDiveSite.dive_id)
+            .where(Dive.user_id == diver.id)
+        )
+        assert named.all() == [record.id]
