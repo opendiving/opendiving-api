@@ -3381,9 +3381,9 @@ CI tests what ships. 18 because a major upgrade is a self-hoster's most painful 
 defers it longest. One thing anchors it: `ux_tag_user_id_name_folded` is on `casefold()` under the
 built-in `pg_unicode_fast` collation, both new in 18 - an earlier major cannot build the index.
 Nothing else does: no PostGIS (marine polygons are GeoJSON in `services/marine_areas.py`), no
-pgvector, no extensions; `LargeBinary` columns are plain `bytea`; `asyncpg 0.31.0` tests against 18;
-PG18's incompatibilities (COPY `\.`, VACUUM inheritance, AFTER-trigger roles, FTS collation) touch
-nothing here.
+pgvector, no extension past `pg_trgm` and `unaccent`, which every major ships; `LargeBinary` columns
+are plain `bytea`; `asyncpg 0.31.0` tests against 18; PG18's incompatibilities (COPY `\.`, VACUUM
+inheritance, AFTER-trigger roles, FTS collation) touch nothing here.
 
 The mount is `postgres-data:/var/lib/postgresql`: the 18 image's `VOLUME` is one level up and
 `PGDATA` is `/var/lib/postgresql/18/docker`, so `pg_upgrade --link` can hold both clusters in one
