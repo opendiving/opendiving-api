@@ -101,6 +101,11 @@ _BUILD = (settings.APP_COMMIT or "")[:12] or _source_fingerprint() or settings.A
 _NAMESPACE = f"{_NAMESPACE_ROOT}:{_BUILD}"
 
 
+def current_build() -> str:
+    """What identifies this build, for a key kept outside this module that must not outlive it."""
+    return _BUILD
+
+
 def namespaced(key: str) -> str:
     """The Redis key this build reads and writes for the logical cache key `key`."""
     return f"{_NAMESPACE}:{key}"

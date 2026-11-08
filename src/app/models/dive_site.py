@@ -95,6 +95,18 @@ class DiveSite(Base, PublicUUIDMixin, TimestampMixin):
                 "user_id",
                 "name",
             ),
+            # Serves the site search's name tiers: one text of the name and every other name,
+            # folded for case and accents, since an index over the name alone cannot answer a
+            # condition that is the name *or* an other name. The function is the revision's, and
+            # unqualified here because that is how Postgres reflects it to `alembic check`.
+            Index(
+                "ix_dive_site_search_text_trgm",
+                func.dive_site_search_text(cls.name, cls.other_names).label("search_text"),
+                postgresql_using="gin",
+                postgresql_ops={"search_text": "gin_trgm_ops"},
+            ),
+            # Serves a map view's box and the count of sites near a place.
+            Index("ix_dive_site_latitude_longitude", "latitude", "longitude"),
             CheckConstraint("depth_from IS NULL OR depth_from >= 0", name="ck_dive_site_depth_from_non_negative"),
             CheckConstraint("depth_to IS NULL OR depth_to >= 0", name="ck_dive_site_depth_to_non_negative"),
             CheckConstraint(

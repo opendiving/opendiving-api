@@ -57,6 +57,7 @@ from ...schemas.trip import (
     TripDiveAddRequest,
     TripDiveAddResult,
     TripLookupItem,
+    TripLookupPart,
     TripPartInput,
     TripPartRead,
     TripPartWithCandidatesRead,
@@ -384,9 +385,19 @@ async def _lookup_trips(
         offset=compute_offset(page, items_per_page),
         limit=items_per_page,
     )
-    people_by_trip = await get_people_for_trips(db, [row["id"] for row in data["data"]])
+    trip_ids = [row["id"] for row in data["data"]]
+    people_by_trip = await get_people_for_trips(db, trip_ids)
+    parts_by_trip = await get_parts_for_trips(db=db, trip_ids=trip_ids)
     data["data"] = [
-        TripLookupItem(uuid=row["uuid"], name=row["name"], people=people_by_trip[row["id"]]).model_dump()
+        TripLookupItem(
+            uuid=row["uuid"],
+            name=row["name"],
+            people=people_by_trip[row["id"]],
+            parts=[
+                TripLookupPart(start_date=part.start_date, end_date=part.end_date, location=part.location)
+                for part in parts_by_trip[row["id"]]
+            ],
+        ).model_dump()
         for row in data["data"]
     ]
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
@@ -411,8 +422,8 @@ async def lookup_trips(
     uuid: LookupUuids = None,
 ) -> dict:
     """The caller's trips as a picker lists them: uuid and name, with the people a dive form
-    fills from them. The trip a dive at or before `until` was last on first, then trips no
-    such dive is on, newest created first.
+    fills from them and each part's dates and place, in the trip's order. The trip a dive at or
+    before `until` was last on first, then trips no such dive is on, newest created first.
 
     `search` matches what `GET /trips` matches. `uuid` narrows the rows to the trips named,
     for the ones a form already holds. Out-of-range pagination is clamped.

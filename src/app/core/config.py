@@ -390,6 +390,15 @@ class RegistrationSettings(BaseSettings):
     )
     COMMONS_PROPOSAL_RATE_LIMIT_PER_USER: int = config("COMMONS_PROPOSAL_RATE_LIMIT_PER_USER", default=30)
 
+    # What one account may ask of `GET /dive-sites/search`, which a search box asks once per
+    # debounced keystroke and a map once per *Search this area*. A bound on a burst rather than a
+    # budget: a request a second, sustained for five minutes, is past anyone typing.
+    DIVE_SITE_SEARCH_RATE_LIMIT_WINDOW_SECONDS: int = config("DIVE_SITE_SEARCH_RATE_LIMIT_WINDOW_SECONDS", default=300)
+    DIVE_SITE_SEARCH_RATE_LIMIT_PER_USER: int = config("DIVE_SITE_SEARCH_RATE_LIMIT_PER_USER", default=300)
+    # How long that search waits on the geocoder for its places, counted from when it asks. Past
+    # it the answer goes without places, so a slow geocoder costs the places and nothing else.
+    DIVE_SITE_SEARCH_GEOCODER_BUDGET_SECONDS: float = config("DIVE_SITE_SEARCH_GEOCODER_BUDGET_SECONDS", default=2.0)
+
     # `slug=Label` pairs, comma-separated: each one a link, `/join?via=<slug>`, that admits
     # whoever follows it without an invitation and counts the account under its slug. Empty
     # is the default and turns the feature off everywhere - the resolve route 404s, `GET

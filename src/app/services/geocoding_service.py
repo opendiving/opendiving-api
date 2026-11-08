@@ -68,6 +68,10 @@ _MAX_RESPONSE_BYTES = 512 * 1024
 
 _SEARCH_RESULT_LIMIT = 5
 
+# The lengths of text a place search is asked with, here and from the dive-site search alike.
+SEARCH_QUERY_MIN_LENGTH = 2
+SEARCH_QUERY_MAX_LENGTH = 200
+
 # How many rows a search asks Photon for. More than it returns, because Photon sends one OSM
 # object more than once in one answer, and the rows `_is_place` refuses are not replaced -
 # asking for exactly `_SEARCH_RESULT_LIMIT` would hand back fewer places than Photon had.
@@ -811,6 +815,16 @@ async def reverse_geocode(latitude: float, longitude: float) -> ReverseGeocode:
     return ReverseGeocode(results[0] if results else _offshore(lat, lon), asked=True)
 
 
+def caller_budget_key(user_id: int) -> str:
+    """The rate-limit counter of what one account has asked the geocoder, wherever it asks."""
+    return f"geocode:user:{user_id}"
+
+
+def place_search_enabled() -> bool:
+    """Whether `search_places` can ask anyone at all."""
+    return bool(settings.GEOCODER_URL and settings.GEOCODER_SEARCH_URL)
+
+
 async def search_places(query: str) -> list[GeocodeResult]:
     """Forward search - "ko tao" - returning at most `_SEARCH_RESULT_LIMIT` places.
 
@@ -834,7 +848,7 @@ async def search_places(query: str) -> list[GeocodeResult]:
     if not normalized:
         return []
 
-    if not settings.GEOCODER_URL or not settings.GEOCODER_SEARCH_URL:
+    if not place_search_enabled():
         logger.warning("GEOCODER_URL or GEOCODER_SEARCH_URL is not configured; place search is unavailable.")
         return []
 

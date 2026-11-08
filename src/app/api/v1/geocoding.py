@@ -27,7 +27,13 @@ from ...core.config import settings
 from ...core.db.database import async_get_db, release_read_transaction
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...schemas.geocoding import GeocodeResult
-from ...services.geocoding_service import reverse_geocode, search_places
+from ...services.geocoding_service import (
+    SEARCH_QUERY_MAX_LENGTH,
+    SEARCH_QUERY_MIN_LENGTH,
+    caller_budget_key,
+    reverse_geocode,
+    search_places,
+)
 
 router = APIRouter(tags=["geocoding"])
 
@@ -46,7 +52,7 @@ async def _enforce_geocode_limit(db: AsyncSession, user_id: int) -> None:
     is exactly right.
     """
     await enforce_rate_limit(
-        f"geocode:user:{user_id}",
+        caller_budget_key(user_id),
         settings.GEOCODER_RATE_LIMIT_PER_USER,
         settings.GEOCODER_RATE_LIMIT_WINDOW_SECONDS,
     )
@@ -99,7 +105,14 @@ async def read_reverse_geocode(
 async def read_geocode_search(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    q: Annotated[str, Query(min_length=2, max_length=200, description="Free-text place search.")],
+    q: Annotated[
+        str,
+        Query(
+            min_length=SEARCH_QUERY_MIN_LENGTH,
+            max_length=SEARCH_QUERY_MAX_LENGTH,
+            description="Free-text place search.",
+        ),
+    ],
 ) -> list[GeocodeResult]:
     """Find places by name - "ko tao" is how a diver looks for where a site is.
 

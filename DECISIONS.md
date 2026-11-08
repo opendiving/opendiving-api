@@ -3306,20 +3306,22 @@ path in the app, a query per page for something only the detail page renders.
 `get_species_for_dives` is batched for the day a list surface needs species chips: move it with the
 batched loader, never fetch per row.
 
-## ILIKE with no `pg_trgm`, and no manual DDL anywhere
+## `pg_trgm` and `unaccent` come with a revision, and the species catalog stays on ILIKE
 
-Local search is a plain escaped `ILIKE` through `core/utils/search.py::escape_like`. A
-leading-wildcard pattern cannot use a btree index (see *Substring search over a user's own rows*),
-and the catalog is small by construction, growing only when a diver picks something new. The
-recorded escalation:
+Both extensions are created by the revision that first needs them, `CREATE EXTENSION IF NOT EXISTS`:
+they are trusted, so the database's owner creates them without a superuser, and the suite migrates,
+so CI and every local run create them as an install does. The dive-site search folds a site's name
+and other names into one text through two `IMMUTABLE` SQL functions, `public.opendiving_fold` and
+`public.dive_site_search_text`, and one GIN `gin_trgm_ops` index over it serves the search's `LIKE`s
+and its `<%`. Every name their bodies reach is schema-qualified: `CREATE INDEX` runs them with
+`search_path` set to `pg_catalog, pg_temp`, and a plain dump restores with it empty.
+
+The species catalog's local search stays a plain escaped `ILIKE` (`escape_like`), being small by
+construction. Its recorded escalation is an index, the extension already being there:
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX ix_species_name_name_trgm ON species_name USING gin (name gin_trgm_ops);
 ```
-
-Deferring it keeps the feature at zero manual DDL: `create_all` cannot emit `CREATE EXTENSION`, and
-all three tables are new, so their constraints and indexes arrive with them.
 
 ## The local search query is tested by executing it, not by building it
 
@@ -7420,3 +7422,15 @@ Rejected: writing the after-state directly, a second writer.
 `review` and `notes` are served as stored, so an earlier build's row still answers. A change to any
 schema they embed bumps `REVIEW_SHAPE` and owes a call: migrate the stored rows or retire them.
 Rejected: validating on read, which turns a new required member into a 500 on every pending import.
+
+## The dive-site search answers in tiers, and the places sit where the name tiers end
+
+`GET /dive-sites/search` ranks by tier, never by a blended score, since a tier can be stated, tested
+and explained: the caller's own and saved sites by name, then unsaved Commons records by name, then
+places, then the typo tier, `word_similarity` at 0.3, the least a one-letter typo in a word of five
+letters keeps. The places go on the page where the name tiers end, so no page lists them ahead of a
+name match a later page holds. The page is decided first and asks the geocoder only when it carries
+the places, so a deeper page spends no provider call and none of the caller's geocoder budget; a
+spent budget costs the places, never a 429. The read transaction is released before the ask.
+Rejected: a search engine beside Postgres, a second copy of the sites every self-hoster runs; and
+PostGIS, which nothing measured needs.

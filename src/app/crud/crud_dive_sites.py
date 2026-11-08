@@ -15,6 +15,7 @@ from sqlalchemy import (
     func,
     inspect,
     literal,
+    null,
     or_,
     select,
     true,
@@ -358,6 +359,15 @@ def _distance_from(latitude: float, longitude: float) -> ColumnElement[float]:
     return func.asin(func.least(1.0, func.sqrt(half_chord)))
 
 
+EARTH_RADIUS_M = 6_371_008.8
+
+
+def metres_from(latitude: float, longitude: float) -> ColumnElement[float]:
+    """A pin's great-circle distance from this point in metres, null for a site with no pin -
+    which `_distance_from` alone does not give, `least` passing over a null."""
+    return case((DiveSite.latitude.is_not(None), _distance_from(latitude, longitude) * EARTH_RADIUS_M), else_=null())
+
+
 async def get_unsaved_commons_page(
     db: AsyncSession,
     *,
@@ -492,10 +502,8 @@ async def get_dive_sites_page(
 ) -> dict[str, Any]:
     """One page of a diver's sites, in `get_multi`'s `{data, total_count}` shape.
 
-    Hand-written for the two orders on the summary, which are aggregates over the dives
-    rather than columns of the site: the most dived first, and the most recently dived first
-    with a site no live dive names after every one that has. Ties go by name either way.
-    Rows are plain dicts, `_select_sites`' shape.
+    Hand-written for the two orders on the summary (`in_list_order`). Rows are plain dicts,
+    `_select_sites`' shape.
     """
     conditions: list[ColumnElement[bool]] = []
     if search:
@@ -507,31 +515,35 @@ async def get_dive_sites_page(
 
     total_count = await db.scalar(select(func.count()).select_from(DiveSite).where(saved_by(user_id), *conditions))
 
-    statement = _select_sites(user_id, on_the_list_only=True).where(*conditions)
-    by_name = (DiveSite.name.asc(), DiveSite.id.asc())
-    if sort is DiveSiteListSort.NAME:
-        statement = statement.order_by(*by_name)
-    else:
-        dived = (
-            _live_dives_at_sites(
-                (
-                    DiveDiveSite.dive_site_id,
-                    func.count(Dive.id).label("dive_count"),
-                    func.max(Dive.start_time).label("last_start"),
-                ),
-                user_id=user_id,
-            )
-        ).subquery()
-        statement = statement.outerjoin(dived, dived.c.dive_site_id == DiveSite.id)
-        first = (
-            func.coalesce(dived.c.dive_count, 0).desc()
-            if sort is DiveSiteListSort.DIVE_COUNT
-            else dived.c.last_start.desc().nulls_last()
-        )
-        statement = statement.order_by(first, *by_name)
-
+    statement = in_list_order(_select_sites(user_id, on_the_list_only=True).where(*conditions), sort, user_id=user_id)
     rows = (await db.execute(statement.offset(offset).limit(limit))).mappings().all()
     return {"data": [dict(row) for row in rows], "total_count": total_count or 0}
+
+
+def in_list_order(statement: Select[Any], sort: DiveSiteListSort, *, user_id: int) -> Select[Any]:
+    """`statement`, which reads `DiveSite`, in the order the site list sorts by: the name, or
+    one of the two orders on the summary, which are aggregates over the dives rather than columns
+    of the site - the most dived first, and the most recently dived first with a site no live
+    dive names after every one that has. Ties go by name either way."""
+    by_name = (DiveSite.name.asc(), DiveSite.id.asc())
+    if sort is DiveSiteListSort.NAME:
+        return statement.order_by(*by_name)
+    dived = (
+        _live_dives_at_sites(
+            (
+                DiveDiveSite.dive_site_id,
+                func.count(Dive.id).label("dive_count"),
+                func.max(Dive.start_time).label("last_start"),
+            ),
+            user_id=user_id,
+        )
+    ).subquery()
+    first = (
+        func.coalesce(dived.c.dive_count, 0).desc()
+        if sort is DiveSiteListSort.DIVE_COUNT
+        else dived.c.last_start.desc().nulls_last()
+    )
+    return statement.outerjoin(dived, dived.c.dive_site_id == DiveSite.id).order_by(first, *by_name)
 
 
 class HeldSite(NamedTuple):

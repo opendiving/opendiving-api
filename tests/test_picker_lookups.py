@@ -423,7 +423,7 @@ RESOURCES = [
         _lookup_trips,
         _list_trips,
         _trip_searchable,
-        frozenset({"uuid", "name", "people"}),
+        frozenset({"uuid", "name", "people", "parts"}),
     ),
     _Resource(
         "dive_sites",

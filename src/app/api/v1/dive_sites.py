@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...api.integrity import write_or_422
+from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
     DuplicateValueException,
@@ -20,8 +21,10 @@ from ...core.exceptions.http_exceptions import (
 from ...core.utils.cache import cache
 from ...core.utils.owned_resource_cache import OwnedResourceCache
 from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
+from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_dive_dive_sites import replace_dive_site_on_dives
 from ...crud.crud_dive_site_proposals import get_latest_proposals_for_sites
+from ...crud.crud_dive_site_search import Box
 from ...crud.crud_dive_sites import (
     DIVE_SITE_NAME_KEY,
     DIVE_SITE_SEARCH_COLUMNS,
@@ -74,18 +77,20 @@ from ...schemas.dive_site import (
     DiveSiteUpdateRequest,
     canonical_other_names,
 )
+from ...schemas.dive_site_search import DiveSitePoints, DiveSiteSearchItem, DiveSiteSearchPage, PlaceSearchItem
 from ...schemas.location import (
     DIVE_SITE_LOCATION_PREFIX,
     LOCATION_FIELDS,
     location_columns,
     location_from_row,
 )
-from ...schemas.lookup import LookupUntil, LookupUuids
+from ...schemas.lookup import LookupUntil, LookupUuids, lookup_bound
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches, invalidate_trip_caches
 from ...services.commons_matches import find_commons_matches
 from ...services.commons_proposals import follow_the_edit, proposal_following_an_edit
 from ...services.commons_records import attribution_for
+from ...services.dive_site_search import SiteSearch, SiteSearchResult, search_dive_sites
 from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["dive-sites"])
@@ -573,6 +578,211 @@ async def lookup_dive_sites(
         longitude=longitude if near else None,
         commons_only=commons_only,
     )
+
+
+def _search_item(
+    row: dict[str, Any], *, summary: DiveSiteSummary | None, proposal: DiveSiteProposalState | None
+) -> DiveSiteSearchItem:
+    return DiveSiteSearchItem(
+        **_lookup_item(row, saved=row["saved"]),
+        kind="site",
+        distance_m=row["distance_m"],
+        match=row["match"],
+        depth_from=row["depth_from"],
+        depth_to=row["depth_to"],
+        dives=summary,
+        proposal=proposal,
+    )
+
+
+def _search_rows(
+    result: SiteSearchResult,
+    *,
+    summaries: dict[int, DiveSiteSummary],
+    proposals: dict[int, DiveSiteProposalState],
+) -> list[DiveSiteSearchItem | PlaceSearchItem]:
+    """The page's rows in order: the places go where the result places them among the sites."""
+    sites: list[DiveSiteSearchItem | PlaceSearchItem] = [
+        _search_item(row, summary=summaries.get(row["id"]), proposal=proposals.get(row["id"])) for row in result.sites
+    ]
+    places = [
+        PlaceSearchItem(
+            **found.place.model_dump(), kind="place", distance_m=found.distance_m, sites_nearby=found.sites_nearby
+        )
+        for found in result.places
+    ]
+    return [*sites[: result.places_at], *places, *sites[result.places_at :]]
+
+
+@router.get("/dive-sites/search", response_model=DiveSiteSearchPage)
+async def search_dive_sites_and_places(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    q: Annotated[
+        str | None,
+        Query(max_length=255, description="The text typed: a site's name or other name, or a place's name"),
+    ] = None,
+    latitude: Annotated[
+        float | None, Query(ge=-90, le=90, description="Latitude of the point distances are measured from")
+    ] = None,
+    longitude: Annotated[float | None, Query(ge=-180, le=180, description="Longitude of that point")] = None,
+    south: Annotated[float | None, Query(ge=-90, le=90, description="The view's southern edge")] = None,
+    north: Annotated[float | None, Query(ge=-90, le=90, description="The view's northern edge")] = None,
+    west: Annotated[
+        float | None, Query(ge=-180, le=180, description="The view's western edge; above `east`, the view crosses 180°")
+    ] = None,
+    east: Annotated[float | None, Query(ge=-180, le=180, description="The view's eastern edge")] = None,
+    until: LookupUntil = None,
+    yours: Annotated[bool, Query(description="Only the caller's own sites and the Commons records they saved")] = False,
+    tag_uuid: Annotated[
+        uuid_pkg.UUID | None, Query(description="With `yours`, only the sites carrying this tag of the caller's")
+    ] = None,
+    commons_match: Annotated[
+        bool | None,
+        Query(description="With `yours`, only the caller's own sites sharing a registry entry with a Commons record"),
+    ] = None,
+    sort: Annotated[
+        DiveSiteListSort | None,
+        Query(
+            description="With `yours`, the site rows in this order instead: `name`, `dive_count` or `last_dived_on`, "
+            "as `GET /dive-sites` sorts"
+        ),
+    ] = None,
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
+) -> DiveSiteSearchPage:
+    """Find dive sites and places for a map and a list: one page of rows, sites and places in one
+    order, to render as they come.
+
+    With `q`, in tiers. First the caller's own and saved sites whose name or other name matches,
+    then the Commons records they have not saved whose name or other name matches; within each an
+    exact name before a name starting with `q` before one containing it, and nearer the point
+    before farther. Then up to five places named `q`, nearest the point first and those with no
+    site near them last, each with how many sites the caller can see inside its box, or within 25
+    km of it where it has none. Then the sites that match only allowing for a typo, the closest
+    resemblance first. Case and accents never matter. A site row's `match` says how it matched.
+
+    The places sit after the tiers before them, on the page where those end, and appear on no
+    other page; `has_more` counts site rows alone. Places come from a geocoder, so an answer may
+    have none: a `q` under two characters, a geocoder that is off, slow or unreachable, and an
+    account past its place-search budget all leave them out, and so does a slow geocoder, which
+    costs only the places. A `q` under two characters is matched only as written, with no typo
+    tier.
+
+    Without `q`, with the point: the sites nearest it that have a pin, the caller's and the
+    Commons alike, closest first. Without `q` or the point: the caller's own and saved sites,
+    pinned or not, the one a dive at or before `until` named most recently first, then those no
+    such dive names, newest saved first.
+
+    The point is `latitude` and `longitude` together, and the view `south`, `north`, `west` and
+    `east` together; half of either is a 422, as is `south` above `north`. A `west` above `east`
+    crosses the antimeridian. The view narrows the site rows to those inside it, with `q` and
+    without, and is ignored where neither `q` nor the point is sent.
+
+    `yours=true` narrows every row to the caller's own and saved sites, and a `q` then matches
+    the locality's name as well, those found by their locality alone listed after the rest of the
+    first tier with no `match`. Without `q` it answers every one of them, pinned or not, whatever
+    the view, most recently dived first. With it, `tag_uuid` keeps the sites carrying that tag -
+    one that is not the caller's answers an empty page - `commons_match` the caller's own sites
+    sharing a registry entry with a Commons record, and `sort` orders every site row as
+    `GET /dive-sites` does, the places following them. Any of the three without `yours=true` is a
+    422. `total_count` is the number of site rows, with `yours` alone.
+
+    Each site row carries the summary of the caller's dives there in `dives`, null on a Commons
+    record they have not saved, and their latest proposal on it in `proposal`. Not cached.
+    Rate-limited per account; a request over it is a 429. Out-of-range pagination is clamped.
+    """
+    # Every coordinate is the client's to round before it is sent: the server keeps none, but
+    # its access logs hold the query string.
+    if (latitude is None) != (longitude is None):
+        raise UnprocessableEntityException("latitude and longitude must be sent together")
+    edges = (south, north, west, east)
+    if any(edge is not None for edge in edges) and not all(edge is not None for edge in edges):
+        raise UnprocessableEntityException("south, north, west and east must be sent together")
+    if south is not None and north is not None and south > north:
+        raise UnprocessableEntityException("south must not be above north")
+    if not yours and (tag_uuid is not None or commons_match is not None or sort is not None):
+        raise UnprocessableEntityException("tag_uuid, commons_match and sort need yours=true")
+    await enforce_rate_limit(
+        f"dive-site-search:user:{current_user['id']}",
+        settings.DIVE_SITE_SEARCH_RATE_LIMIT_PER_USER,
+        settings.DIVE_SITE_SEARCH_RATE_LIMIT_WINDOW_SECONDS,
+    )
+    page, items_per_page = clamp_pagination(page, items_per_page)
+    user_id = current_user["id"]
+
+    tag_id: int | None = None
+    if tag_uuid is not None:
+        # -1 can never match a tag, so a foreign or unknown uuid answers an empty page.
+        tag_id = await resolve_tag_id_for_user(db, tag_uuid=tag_uuid, user_id=user_id) or -1
+    camera = None if latitude is None or longitude is None else (latitude, longitude)
+    box = None if south is None or north is None or west is None or east is None else Box(south, north, west, east)
+    result = await search_dive_sites(
+        db,
+        user_id=user_id,
+        search=SiteSearch(
+            term=(q or "").strip() or None,
+            camera=camera,
+            box=box,
+            yours=yours,
+            until=lookup_bound(until),
+            tag_id=tag_id,
+            commons_match=bool(commons_match),
+            sort=sort,
+            page=page,
+            items_per_page=items_per_page,
+        ),
+    )
+    saved_ids = [row["id"] for row in result.sites if row["saved"]]
+    summaries = await get_summaries_for_dive_sites(db, dive_site_ids=saved_ids, user_id=user_id)
+    proposals = await get_latest_proposals_for_sites(db, user_id=user_id, dive_site_ids=saved_ids)
+    return DiveSiteSearchPage(
+        rows=_search_rows(result, summaries=summaries, proposals=proposals),
+        has_more=result.has_more,
+        total_count=result.total_count if yours else None,
+        page=page,
+        items_per_page=items_per_page,
+    )
+
+
+# Under the single site's pattern, so every sweep of the caller's sites - a save, a removal, a
+# review of a record they saved - drops it. A sync's change to a record reaches it at the expiry.
+@cache(key_prefix="user_{user_id}_dive_site:points", resource_id_name="user_id", expiration=60)
+async def _cached_read_dive_site_points(request: Request, user_id: int, db: AsyncSession) -> dict[str, Any]:
+    rows = (
+        await db.execute(
+            select(DiveSite.longitude, DiveSite.latitude, DiveSite.uuid, DiveSite.name, DiveSite.user_id)
+            .join(SavedSite, (SavedSite.dive_site_id == DiveSite.id) & (SavedSite.user_id == user_id))
+            .where(DiveSite.latitude.is_not(None), DiveSite.longitude.is_not(None))
+            .order_by(DiveSite.uuid)
+        )
+    ).all()
+    return DiveSitePoints(
+        points=[
+            (
+                row.longitude,
+                row.latitude,
+                row.uuid,
+                row.name,
+                SITE_OWNER_COMMONS if row.user_id is None else SITE_OWNER_ACCOUNT,
+            )
+            for row in rows
+        ]
+    ).model_dump()
+
+
+@router.get("/dive-sites/points", response_model=DiveSitePoints)
+async def read_dive_site_points(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, Any]:
+    """Every site on the caller's list that has a pin - their own and the Commons records they
+    saved - as `[longitude, latitude, uuid, name, owner]`, for a map to draw. A site with no pin
+    is left out. A change to a saved Commons record may take up to a minute to show here.
+    """
+    # The caller's own rows alone, read under their id: nothing here needs authorizing first.
+    return await _cached_read_dive_site_points(request, user_id=current_user["id"], db=db)
 
 
 @cache(key_prefix="user_{user_id}_dive_site", resource_id_name="uuid", resource_id_type=uuid_pkg.UUID)

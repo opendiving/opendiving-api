@@ -200,12 +200,22 @@ class TripUpdateInternal(TripUpdate):
     updated_at: datetime
 
 
+class TripLookupPart(BaseModel):
+    """A part as a picker's row carries it: when and where, which is what a form opens a map on."""
+
+    start_date: date | None = None
+    end_date: date | None = None
+    location: LocationRead | None = None
+
+
 class TripLookupItem(PublicUUIDSchema):
-    """One row of `GET /trips/lookup`: the name, which usually carries the trip's year, and the
-    people a dive form fills from the trip picked, as `TripRead` carries them."""
+    """One row of `GET /trips/lookup`: the name, which usually carries the trip's year, the
+    people a dive form fills from the trip picked, as `TripRead` carries them, and the parts'
+    dates and places."""
 
     name: str
     people: PeopleRead
+    parts: Annotated[list[TripLookupPart], Field(default_factory=list)]
 
 
 class TripPartDates(BaseModel):
