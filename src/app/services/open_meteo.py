@@ -38,11 +38,14 @@ PROVIDER = "open-meteo"
 # answered instead.
 MODEL = "best_match"
 
-ATTRIBUTION = (
+# The credit alone, for an answer that passes the provider's readings on as they came.
+READINGS_ATTRIBUTION = (
     "[Weather data by Open-Meteo.com](https://open-meteo.com/) "
-    "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), "
-    "with weather, waves and tide times derived from it"
+    "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/))"
 )
+# A dive's record, which carries values derived from the readings: the licence asks that a change
+# be indicated.
+ATTRIBUTION = f"{READINGS_ATTRIBUTION}, with weather, waves and tide times derived from it"
 
 _FREE_HOSTS = {
     "weather": "https://archive-api.open-meteo.com",

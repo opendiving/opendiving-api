@@ -79,9 +79,13 @@ class TestAnAnswer:
         with FakeOpenMeteo(forecast_answers(NOW)) as provider:
             body = _body(await _current(async_db))
 
+        assert body["attribution"] == (
+            "[Weather data by Open-Meteo.com](https://open-meteo.com/) "
+            "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/))"
+        )
         assert body == {
             "provider": "open-meteo",
-            "attribution": open_meteo.ATTRIBUTION,
+            "attribution": open_meteo.READINGS_ATTRIBUTION,
             "at": "2026-11-09T19:00:00+02:00",
             "position": {"latitude": 28.57, "longitude": 34.54},
             "weather": {
@@ -191,7 +195,7 @@ class TestNothingForThePosition:
 
         assert body == {
             "provider": "open-meteo",
-            "attribution": open_meteo.ATTRIBUTION,
+            "attribution": open_meteo.READINGS_ATTRIBUTION,
             "at": None,
             "position": None,
             "weather": None,
@@ -305,7 +309,7 @@ class TestTheRoute:
 
     @pytest.fixture
     def service(self) -> Generator[AsyncMock]:
-        answered = DiveConditionsCurrentRead(provider="open-meteo", attribution=open_meteo.ATTRIBUTION)
+        answered = DiveConditionsCurrentRead(provider="open-meteo", attribution=open_meteo.READINGS_ATTRIBUTION)
         with (
             patch.object(route_module, "current_conditions", new_callable=AsyncMock, return_value=answered) as stub,
             patch.object(route_module, "enforce_rate_limit", new_callable=AsyncMock),
@@ -326,7 +330,7 @@ class TestTheRoute:
         assert response.status_code == 200, response.text
         assert response.json() == {
             "provider": "open-meteo",
-            "attribution": open_meteo.ATTRIBUTION,
+            "attribution": open_meteo.READINGS_ATTRIBUTION,
             "at": None,
             "position": None,
             "weather": None,

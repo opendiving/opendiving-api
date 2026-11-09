@@ -1031,7 +1031,7 @@ async def current_conditions(
         await db.execute(select(_rounded(literal(latitude, Float)), _rounded(literal(longitude, Float))))
     ).one()
     await release_read_transaction(db)
-    nothing = DiveConditionsCurrentRead(provider=open_meteo.PROVIDER, attribution=open_meteo.ATTRIBUTION)
+    nothing = DiveConditionsCurrentRead(provider=open_meteo.PROVIDER, attribution=open_meteo.READINGS_ATTRIBUTION)
 
     if await _cooling_down():
         return None
@@ -1051,7 +1051,7 @@ async def current_conditions(
     values = _weather_values(answer, now)
     return DiveConditionsCurrentRead(
         provider=open_meteo.PROVIDER,
-        attribution=open_meteo.ATTRIBUTION,
+        attribution=open_meteo.READINGS_ATTRIBUTION,
         # The zone's offset at that hour, not the answer's `utc_offset_seconds`, which is now's.
         at=datetime.fromtimestamp(nearest[1], UTC).astimezone(zone),
         position=ConditionsPosition(latitude=rounded_latitude, longitude=rounded_longitude),
