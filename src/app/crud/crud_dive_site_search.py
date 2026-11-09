@@ -175,9 +175,10 @@ async def get_site_search_page(
     last the closer resemblance first. `sort` replaces that order with the list's. The box
     narrows every tier.
 
-    Without `term`: under `yours` every one of the diver's sites in the list's order; with a
-    camera the pinned sites they can see, nearest first, inside the box where one is sent; and
-    with neither their sites by last use at or before `until`, as their lookup orders them.
+    Without `term`: under `yours` the diver's sites in the list's order, every one of them or,
+    where a box is sent, the pinned ones inside it; with a camera the pinned sites they can see,
+    nearest first, inside the box where one is sent; and with neither their sites by last use at
+    or before `until`, as their lookup orders them.
     """
     distance: ColumnElement[Any] = null() if camera is None else metres_from(*camera)
     scope: list[ColumnElement[bool]] = [_ON_THE_LIST if yours else or_(_ON_THE_LIST, in_the_commons())]
@@ -206,8 +207,8 @@ async def get_site_search_page(
         conditions = list(scope)
         if not yours:
             conditions.append(DiveSite.latitude.is_not(None))
-            if box is not None:
-                conditions.append(box.holds())
+        if box is not None:
+            conditions.append(box.holds())
         tier: ColumnElement[Any] = literal(TIER_OWN)
         match: ColumnElement[Any] = null()
         statement = select(*_COLUMNS, distance.label("distance_m"), match.label("match"), tier.label("tier"))

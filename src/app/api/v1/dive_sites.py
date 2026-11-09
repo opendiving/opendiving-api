@@ -677,16 +677,17 @@ async def search_dive_sites_and_places(
     The point is `latitude` and `longitude` together, and the view `south`, `north`, `west` and
     `east` together; half of either is a 422, as is `south` above `north`. A `west` above `east`
     crosses the antimeridian. The view narrows the site rows to those inside it, with `q` and
-    without, and is ignored where neither `q` nor the point is sent.
+    without, and is ignored where neither `q`, the point nor `yours=true` is sent.
 
     `yours=true` narrows every row to the caller's own and saved sites, and a `q` then matches
     the locality's name as well, those found by their locality alone listed after the rest of the
-    first tier with no `match`. Without `q` it answers every one of them, pinned or not, whatever
-    the view, most recently dived first. With it, `tag_uuid` keeps the sites carrying that tag -
-    one that is not the caller's answers an empty page - `commons_match` the caller's own sites
-    sharing a registry entry with a Commons record, and `sort` orders every site row as
-    `GET /dive-sites` does, the places following them. Any of the three without `yours=true` is a
-    422. `total_count` is the number of site rows, with `yours` alone.
+    first tier with no `match`. Without `q` it answers every one of them, pinned or not, most
+    recently dived first, or with the view only the pinned ones inside it, in the same order.
+    With `yours=true`, `tag_uuid` keeps the sites carrying that tag - one that is not the
+    caller's answers an empty page - `commons_match` the caller's own sites sharing a registry
+    entry with a Commons record, and `sort` orders every site row as `GET /dive-sites` does, the
+    places following them. Any of the three without `yours=true` is a 422. `total_count` is the
+    number of site rows, with `yours` alone.
 
     Each site row carries the summary of the caller's dives there in `dives`, null on a Commons
     record they have not saved, and their latest proposal on it in `proposal`. Not cached.
