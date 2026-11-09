@@ -621,9 +621,7 @@ class TestYourSites:
             str(never_dived.uuid),
         ]
         assert first["total_count"] == 3 and first["has_more"] is True and second["has_more"] is False
-        assert {str(outside.uuid), str(pinless.uuid)}.isdisjoint(
-            row["uuid"] for row in first["rows"] + second["rows"]
-        )
+        assert {str(outside.uuid), str(pinless.uuid)}.isdisjoint(row["uuid"] for row in first["rows"] + second["rows"])
 
     @pytest.mark.asyncio
     async def test_without_text_a_view_narrows_tag_commons_match_and_sort_too(
