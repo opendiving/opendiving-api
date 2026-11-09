@@ -42,7 +42,7 @@ class SiteSearch:
     term: str | None
     camera: tuple[float, float] | None
     box: Box | None
-    yours: bool
+    my: bool
     until: datetime | None
     tag_id: int | None
     commons_match: bool
@@ -104,7 +104,7 @@ async def search_dive_sites(db: AsyncSession, *, user_id: int, search: SiteSearc
         term=search.term,
         camera=search.camera,
         box=search.box,
-        yours=search.yours,
+        my=search.my,
         until=search.until,
         tag_id=search.tag_id,
         commons_match=search.commons_match,

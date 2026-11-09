@@ -157,7 +157,7 @@ async def get_site_search_page(
     term: str | None,
     camera: tuple[float, float] | None,
     box: Box | None,
-    yours: bool,
+    my: bool,
     until: datetime | None,
     tag_id: int | None,
     commons_match: bool,
@@ -169,25 +169,25 @@ async def get_site_search_page(
     """One page of site rows, each with `distance_m` from the camera and `match`.
 
     With `term`, the tiers: the diver's own and saved sites whose name matches - and under
-    `yours` those whose locality alone does, after them - then the Commons records they have not
+    `my` those whose locality alone does, after them - then the Commons records they have not
     saved whose name matches, then, where `fuzzy`, the sites only a typo away. Within the first
     two an exact name, then a prefix, then a substring, nearer first within each; within the
     last the closer resemblance first. `sort` replaces that order with the list's. The box
     narrows every tier.
 
-    Without `term`: under `yours` the diver's sites in the list's order, every one of them or,
+    Without `term`: under `my` the diver's sites in the list's order, every one of them or,
     where a box is sent, the pinned ones inside it; with a camera the pinned sites they can see,
     nearest first, inside the box where one is sent; and with neither their sites by last use at
     or before `until`, as their lookup orders them.
     """
     distance: ColumnElement[Any] = null() if camera is None else metres_from(*camera)
-    scope: list[ColumnElement[bool]] = [_ON_THE_LIST if yours else or_(_ON_THE_LIST, in_the_commons())]
+    scope: list[ColumnElement[bool]] = [_ON_THE_LIST if my else or_(_ON_THE_LIST, in_the_commons())]
     if tag_id is not None:
         scope.append(carrying_tag(tag_id))
     if commons_match:
         scope.append(has_commons_match(user_id))
 
-    if term is None and not yours and camera is None:
+    if term is None and not my and camera is None:
         data = await get_lookup_page(
             db,
             model=DiveSite,
@@ -205,7 +205,7 @@ async def get_site_search_page(
 
     if term is None:
         conditions = list(scope)
-        if not yours:
+        if not my:
             conditions.append(DiveSite.latitude.is_not(None))
         if box is not None:
             conditions.append(box.holds())
@@ -213,14 +213,14 @@ async def get_site_search_page(
         match: ColumnElement[Any] = null()
         statement = select(*_COLUMNS, distance.label("distance_m"), match.label("match"), tier.label("tier"))
         statement = statement.select_from(_with_the_list(user_id)).where(*conditions)
-        if yours:
+        if my:
             statement = in_list_order(statement, sort or DiveSiteListSort.LAST_DIVED_ON, user_id=user_id)
         else:
             statement = statement.order_by(distance.asc(), DiveSite.name.asc(), DiveSite.id.asc())
         return await _page(db, statement, conditions, user_id=user_id, offset=offset, limit=limit)
 
     name_match = name_contains(term)
-    locality_match = _locality_contains(term) if yours else false()
+    locality_match = _locality_contains(term) if my else false()
     typo = (fold(term).op("<%")(search_text())) if fuzzy else false()
     if fuzzy:
         # `<%` reads its threshold from this setting, local to the transaction the page runs in.

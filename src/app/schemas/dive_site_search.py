@@ -73,7 +73,7 @@ class DiveSiteSearchPage(BaseModel):
     has_more: Annotated[bool, Field(description="Whether site rows remain past this page")]
     total_count: Annotated[
         int | None,
-        Field(default=None, description="With `yours`, the number of site rows the filters admit; null otherwise"),
+        Field(default=None, description="With `my`, the number of site rows the filters admit; null otherwise"),
     ]
     page: int
     items_per_page: int

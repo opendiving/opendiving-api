@@ -633,18 +633,18 @@ async def search_dive_sites_and_places(
     ] = None,
     east: Annotated[float | None, Query(ge=-180, le=180, description="The view's eastern edge")] = None,
     until: LookupUntil = None,
-    yours: Annotated[bool, Query(description="Only the caller's own sites and the Commons records they saved")] = False,
+    my: Annotated[bool, Query(description="Only the caller's own sites and the Commons records they saved")] = False,
     tag_uuid: Annotated[
-        uuid_pkg.UUID | None, Query(description="With `yours`, only the sites carrying this tag of the caller's")
+        uuid_pkg.UUID | None, Query(description="With `my`, only the sites carrying this tag of the caller's")
     ] = None,
     commons_match: Annotated[
         bool | None,
-        Query(description="With `yours`, only the caller's own sites sharing a registry entry with a Commons record"),
+        Query(description="With `my`, only the caller's own sites sharing a registry entry with a Commons record"),
     ] = None,
     sort: Annotated[
         DiveSiteListSort | None,
         Query(
-            description="With `yours`, the site rows in this order instead: `name`, `dive_count` or `last_dived_on`, "
+            description="With `my`, the site rows in this order instead: `name`, `dive_count` or `last_dived_on`, "
             "as `GET /dive-sites` sorts"
         ),
     ] = None,
@@ -677,17 +677,17 @@ async def search_dive_sites_and_places(
     The point is `latitude` and `longitude` together, and the view `south`, `north`, `west` and
     `east` together; half of either is a 422, as is `south` above `north`. A `west` above `east`
     crosses the antimeridian. The view narrows the site rows to those inside it, with `q` and
-    without, and is ignored where neither `q`, the point nor `yours=true` is sent.
+    without, and is ignored where neither `q`, the point nor `my=true` is sent.
 
-    `yours=true` narrows every row to the caller's own and saved sites, and a `q` then matches
+    `my=true` narrows every row to the caller's own and saved sites, and a `q` then matches
     the locality's name as well, those found by their locality alone listed after the rest of the
     first tier with no `match`. Without `q` it answers every one of them, pinned or not, most
     recently dived first, or with the view only the pinned ones inside it, in the same order.
-    With `yours=true`, `tag_uuid` keeps the sites carrying that tag - one that is not the
+    With `my=true`, `tag_uuid` keeps the sites carrying that tag - one that is not the
     caller's answers an empty page - `commons_match` the caller's own sites sharing a registry
     entry with a Commons record, and `sort` orders every site row as `GET /dive-sites` does, the
-    places following them. Any of the three without `yours=true` is a 422. `total_count` is the
-    number of site rows, with `yours` alone.
+    places following them. Any of the three without `my=true` is a 422. `total_count` is the
+    number of site rows, with `my` alone.
 
     Each site row carries the summary of the caller's dives there in `dives`, null on a Commons
     record they have not saved, and their latest proposal on it in `proposal`. Not cached.
@@ -702,8 +702,8 @@ async def search_dive_sites_and_places(
         raise UnprocessableEntityException("south, north, west and east must be sent together")
     if south is not None and north is not None and south > north:
         raise UnprocessableEntityException("south must not be above north")
-    if not yours and (tag_uuid is not None or commons_match is not None or sort is not None):
-        raise UnprocessableEntityException("tag_uuid, commons_match and sort need yours=true")
+    if not my and (tag_uuid is not None or commons_match is not None or sort is not None):
+        raise UnprocessableEntityException("tag_uuid, commons_match and sort need my=true")
     await enforce_rate_limit(
         f"dive-site-search:user:{current_user['id']}",
         settings.DIVE_SITE_SEARCH_RATE_LIMIT_PER_USER,
@@ -725,7 +725,7 @@ async def search_dive_sites_and_places(
             term=(q or "").strip() or None,
             camera=camera,
             box=box,
-            yours=yours,
+            my=my,
             until=lookup_bound(until),
             tag_id=tag_id,
             commons_match=bool(commons_match),
@@ -740,7 +740,7 @@ async def search_dive_sites_and_places(
     return DiveSiteSearchPage(
         rows=_search_rows(result, summaries=summaries, proposals=proposals),
         has_more=result.has_more,
-        total_count=result.total_count if yours else None,
+        total_count=result.total_count if my else None,
         page=page,
         items_per_page=items_per_page,
     )
