@@ -65,6 +65,7 @@ from ..schemas.dive_conditions import (
     ConditionsPosition,
     ConditionsSea,
     ConditionsWeather,
+    DiveConditionsCurrentRead,
     DiveConditionsLookupRead,
     DiveConditionsRead,
     ExtremeKindName,
@@ -526,12 +527,21 @@ def _times(hourly: dict[str, list[Any]]) -> list[int] | None:
     return times
 
 
-def _weather_values(answer: open_meteo.Answered, instant: datetime) -> dict[str, Any]:
-    """The weather block at the hour nearest `instant`, or none where the answer has no hours."""
+def _nearest_hour(answer: open_meteo.Answered, instant: datetime) -> tuple[int, int] | None:
+    """The index and time of the hour nearest `instant`, or none where the answer has no hours."""
     times = _times(answer.hourly)
     index = None if times is None else nearest_sample(times, int(instant.timestamp()))
-    if index is None:
+    if times is None or index is None:
+        return None
+    return index, times[index]
+
+
+def _weather_values(answer: open_meteo.Answered, instant: datetime) -> dict[str, Any]:
+    """The weather block at the hour nearest `instant`, or none where the answer has no hours."""
+    nearest = _nearest_hour(answer, instant)
+    if nearest is None:
         return {}
+    index = nearest[0]
     code = _number(answer.hourly, "weather_code", index)
     return {
         "weather_model": open_meteo.MODEL,
@@ -1001,6 +1011,51 @@ async def preview_conditions(
         at=answer.instant.astimezone(_zone(answer.offset)),
         utc_offset_minutes=answer.offset,
         filled=ConditionsFilled(**answer.fills),
+    )
+
+
+# -------- the weather now --------
+
+
+async def current_conditions(
+    db: AsyncSession, *, latitude: float, longitude: float, now: datetime
+) -> DiveConditionsCurrentRead | None:
+    """The forecast's weather at the hour nearest `now` at a position, for the map; `None` when
+    the provider could not be asked, which says nothing about the position.
+
+    The position is rounded as a dive's is, and asked about under the same budget and cool-down.
+    A request the provider refuses, an answer with no hours and a zone this server cannot read
+    answer with `at`, `position` and `weather` null.
+    """
+    rounded_latitude, rounded_longitude = (
+        await db.execute(select(_rounded(literal(latitude, Float)), _rounded(literal(longitude, Float))))
+    ).one()
+    await release_read_transaction(db)
+    nothing = DiveConditionsCurrentRead(provider=open_meteo.PROVIDER, attribution=open_meteo.ATTRIBUTION)
+
+    if await _cooling_down():
+        return None
+    answer = await open_meteo.fetch_current_weather(rounded_latitude, rounded_longitude, now)
+    if isinstance(answer, open_meteo.CouldNotAsk):
+        await _stop_asking(answer)
+        return None
+    if isinstance(answer, open_meteo.Refused):
+        return nothing
+    nearest = _nearest_hour(answer, now)
+    if nearest is None or answer.timezone is None:
+        return nothing
+    try:
+        zone = ZoneInfo(answer.timezone)
+    except ZoneInfoNotFoundError, ValueError:
+        return nothing
+    values = _weather_values(answer, now)
+    return DiveConditionsCurrentRead(
+        provider=open_meteo.PROVIDER,
+        attribution=open_meteo.ATTRIBUTION,
+        # The zone's offset at that hour, not the answer's `utc_offset_seconds`, which is now's.
+        at=datetime.fromtimestamp(nearest[1], UTC).astimezone(zone),
+        position=ConditionsPosition(latitude=rounded_latitude, longitude=rounded_longitude),
+        weather=ConditionsWeather(model=values.pop("weather_model"), **values),
     )
 
 

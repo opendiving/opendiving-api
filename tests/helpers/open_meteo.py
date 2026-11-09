@@ -7,7 +7,7 @@ machine. Every request is recorded in `requests`.
 
 import json
 from collections.abc import Callable
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -46,6 +46,20 @@ def dahab_answers(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json=dahab_body(request))
 
 
+def forecast_answers(now: datetime) -> Callable[[httpx.Request], httpx.Response]:
+    """The Blue Hole's recorded forecast, its three hours moved so the middle one is the UTC hour
+    `now` falls in, as the provider's own clock places them."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        body = fixture("dahab-2026-11-09-forecast.json")
+        times = body["hourly"]["time"]
+        hour = int(now.astimezone(UTC).replace(minute=0, second=0, microsecond=0).timestamp())
+        body["hourly"]["time"] = [at + hour - times[1] for at in times]
+        return httpx.Response(200, json=body)
+
+    return answer
+
+
 class FakeOpenMeteo:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response] = dahab_answers) -> None:
         self.requests: list[httpx.Request] = []
@@ -68,5 +82,7 @@ class FakeOpenMeteo:
         self._patcher.stop()
 
     def asked(self, kind: str) -> list[httpx.Request]:
+        if kind == "forecast":
+            return [request for request in self.requests if request.url.path == "/v1/forecast"]
         host = "marine" if kind == "sea" else "archive"
         return [request for request in self.requests if host in request.url.host]

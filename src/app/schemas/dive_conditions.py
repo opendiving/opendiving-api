@@ -100,3 +100,14 @@ class DiveConditionsLookupRead(_Record):
     at: Annotated[datetime | None, Field(description="The instant described, spelled at `utc_offset_minutes`")] = None
     utc_offset_minutes: Annotated[int | None, Field(ge=-_OFFSET_BOUND, le=_OFFSET_BOUND)] = None
     filled: ConditionsFilled
+
+
+class DiveConditionsCurrentRead(_Record):
+    """The weather now at a position, for the map: the forecast's hour nearest the request. `at`,
+    `position` and `weather` are null where the provider has nothing for the position."""
+
+    provider: _Name
+    attribution: Annotated[str, Field(description="The source line the data's licence asks for, as markdown links")]
+    at: Annotated[datetime | None, Field(description="The hour described, spelled at the place's offset")] = None
+    position: ConditionsPosition | None = None
+    weather: ConditionsWeather | None = None

@@ -801,6 +801,16 @@ class DiveConditionsSettings(BaseSettings):
     DIVE_CONDITIONS_LOOKUP_RATE_LIMIT_WINDOW_SECONDS: int = config(
         "DIVE_CONDITIONS_LOOKUP_RATE_LIMIT_WINDOW_SECONDS", default=3600
     )
+    # What one account may spend on `GET /dive-conditions/current`, the map's weather now, cache
+    # hits included. The map asks on every settled pan into a new tenth-of-a-degree cell; a
+    # miss spends one of the instance's calls above, half a lookup's, so the same figure leaves
+    # the worker the same room.
+    DIVE_CONDITIONS_CURRENT_RATE_LIMIT_PER_USER: int = config(
+        "DIVE_CONDITIONS_CURRENT_RATE_LIMIT_PER_USER", default=120
+    )
+    DIVE_CONDITIONS_CURRENT_RATE_LIMIT_WINDOW_SECONDS: int = config(
+        "DIVE_CONDITIONS_CURRENT_RATE_LIMIT_WINDOW_SECONDS", default=3600
+    )
 
     @field_validator("DIVE_CONDITIONS_PROVIDER")
     @classmethod

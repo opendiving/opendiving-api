@@ -1,9 +1,10 @@
-"""The dive form's preview of a dive's surface conditions (`services.dive_conditions`).
+"""The dive form's preview of a dive's surface conditions, and the map's weather now
+(`services.dive_conditions`).
 
 Nothing stored and nothing owned is answered here - only the caller's dive site is read, for its
 pin and water - so there is no `@cache`: the provider's answers are cached in Redis under a
-global key, as the geocoder's are, and a per-user limit bounds what one account can spend of
-the instance's budget.
+global key, as the geocoder's are, and a per-user limit on each route bounds what one account
+can spend of the instance's budget.
 """
 
 import uuid as uuid_pkg
@@ -20,8 +21,8 @@ from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableE
 from ...core.utils.rate_limit import enforce_rate_limit
 from ...crud.crud_dive_sites import get_readable_dive_site
 from ...schemas.dive import DiveLocalStartTime, WaterType
-from ...schemas.dive_conditions import DiveConditionsLookupRead
-from ...services.dive_conditions import preview_conditions
+from ...schemas.dive_conditions import DiveConditionsCurrentRead, DiveConditionsLookupRead
+from ...services.dive_conditions import current_conditions, preview_conditions
 
 router = APIRouter(tags=["dive-conditions"])
 
@@ -102,3 +103,43 @@ async def read_dive_conditions_lookup(
         # Raw `HTTPException`, as `api/v1/health.py` does: there is no 503 class to raise.
         raise HTTPException(status_code=503, detail="Conditions could not be looked up now. Try again later.")
     return preview
+
+
+@router.get(
+    "/dive-conditions/current",
+    response_model=DiveConditionsCurrentRead,
+    dependencies=[Depends(_fetching_conditions)],
+    responses={
+        404: {"description": "This instance fetches no conditions."},
+        503: {"description": "The provider could not be asked now; nothing is known about the position."},
+    },
+)
+async def read_dive_conditions_current(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    latitude: Annotated[float, Query(ge=-90, le=90, description="Latitude of the position, in degrees")],
+    longitude: Annotated[float, Query(ge=-180, le=180, description="Longitude of the position, in degrees")],
+) -> DiveConditionsCurrentRead:
+    """The surface weather now at a position, for a map to show at its centre: the forecast's
+    hour nearest the request, with wind in metres per second and its direction the one it blows
+    from.
+
+    The position is rounded to two decimals, about a kilometre, before the provider is asked, and
+    `position` says where that is. `at` is the hour described, spelled at the place's offset.
+    Answers are shared between callers asking about the same place in the same hour. Rate
+    limited per account.
+
+    `200` with `at`, `position` and `weather` null where the provider has nothing for the
+    position. `503` when the provider could not be asked, which says nothing about the position:
+    over the instance's budget, cooling down, slow or down. 404 when this instance fetches no
+    conditions.
+    """
+    await enforce_rate_limit(
+        f"dive-conditions-current:user:{current_user['id']}",
+        settings.DIVE_CONDITIONS_CURRENT_RATE_LIMIT_PER_USER,
+        settings.DIVE_CONDITIONS_CURRENT_RATE_LIMIT_WINDOW_SECONDS,
+    )
+    current = await current_conditions(db, latitude=latitude, longitude=longitude, now=datetime.now(UTC))
+    if current is None:
+        raise HTTPException(status_code=503, detail="The weather could not be looked up now. Try again later.")
+    return current
