@@ -784,7 +784,7 @@ async def read_dive_site_points(
     """Every site on the caller's list that has a pin - their own and the Commons records they
     saved - as `[longitude, latitude, uuid, name, owner, proposal]`, for a map to draw. `proposal`
     is the status of the caller's latest proposal on the site while it waits or once declined
-    (`waiting` or `declined`), and null otherwise. A site with no pin is left out. A change to a
+    (`"waiting"` or `"declined"`), and null otherwise. A site with no pin is left out. A change to a
     saved Commons record may take up to a minute to show here.
     """
     # The caller's own rows alone, read under their id: nothing here needs authorizing first.
