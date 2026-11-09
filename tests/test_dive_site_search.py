@@ -823,11 +823,11 @@ class TestThePoints:
         assert (await http.put(f"/dive-site/{record.uuid}/saved")).status_code == 200
         after = (await http.get("/dive-sites/points")).json()
 
-        assert before == {"points": [[2.5, 1.5, str(own.uuid), own.name, "account"]]}
+        assert before == {"points": [[2.5, 1.5, str(own.uuid), own.name, "account", None]]}
         assert sorted(after["points"]) == sorted(
             [
-                [2.5, 1.5, str(own.uuid), own.name, "account"],
-                [4.0, 3.0, str(record.uuid), record.name, "opendivingcommons"],
+                [2.5, 1.5, str(own.uuid), own.name, "account", None],
+                [4.0, 3.0, str(record.uuid), record.name, "opendivingcommons", None],
             ]
         )
 

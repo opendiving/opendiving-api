@@ -747,17 +747,19 @@ async def search_dive_sites_and_places(
 
 
 # Under the single site's pattern, so every sweep of the caller's sites - a save, a removal, a
-# review of a record they saved - drops it. A sync's change to a record reaches it at the expiry.
+# review of a record they saved, a proposal of theirs made, withdrawn or decided - drops it. A
+# sync's change to a record reaches it at the expiry.
 @cache(key_prefix="user_{user_id}_dive_site:points", resource_id_name="user_id", expiration=60)
 async def _cached_read_dive_site_points(request: Request, user_id: int, db: AsyncSession) -> dict[str, Any]:
     rows = (
         await db.execute(
-            select(DiveSite.longitude, DiveSite.latitude, DiveSite.uuid, DiveSite.name, DiveSite.user_id)
+            select(DiveSite.id, DiveSite.longitude, DiveSite.latitude, DiveSite.uuid, DiveSite.name, DiveSite.user_id)
             .join(SavedSite, (SavedSite.dive_site_id == DiveSite.id) & (SavedSite.user_id == user_id))
             .where(DiveSite.latitude.is_not(None), DiveSite.longitude.is_not(None))
             .order_by(DiveSite.uuid)
         )
     ).all()
+    proposals = await get_latest_proposals_for_sites(db, user_id=user_id, dive_site_ids=[row.id for row in rows])
     return DiveSitePoints(
         points=[
             (
@@ -766,6 +768,7 @@ async def _cached_read_dive_site_points(request: Request, user_id: int, db: Asyn
                 row.uuid,
                 row.name,
                 SITE_OWNER_COMMONS if row.user_id is None else SITE_OWNER_ACCOUNT,
+                proposal.status if (proposal := proposals.get(row.id)) else None,
             )
             for row in rows
         ]
@@ -779,8 +782,10 @@ async def read_dive_site_points(
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> dict[str, Any]:
     """Every site on the caller's list that has a pin - their own and the Commons records they
-    saved - as `[longitude, latitude, uuid, name, owner]`, for a map to draw. A site with no pin
-    is left out. A change to a saved Commons record may take up to a minute to show here.
+    saved - as `[longitude, latitude, uuid, name, owner, proposal]`, for a map to draw. `proposal`
+    is the status of the caller's latest proposal on the site while it waits or once declined
+    (`waiting` or `declined`), and null otherwise. A site with no pin is left out. A change to a
+    saved Commons record may take up to a minute to show here.
     """
     # The caller's own rows alone, read under their id: nothing here needs authorizing first.
     return await _cached_read_dive_site_points(request, user_id=current_user["id"], db=db)

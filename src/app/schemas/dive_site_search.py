@@ -81,14 +81,18 @@ class DiveSiteSearchPage(BaseModel):
 
 # Compact on purpose: one array per site rather than an object, since every session reads the
 # whole Commons document.
-DiveSitePoint = tuple[float, float, uuid_pkg.UUID, str, DiveSiteOwner]
+DiveSitePoint = tuple[float, float, uuid_pkg.UUID, str, DiveSiteOwner, str | None]
 CommonsDiveSitePoint = tuple[float, float, uuid_pkg.UUID, str, str]
 
 
 class DiveSitePoints(BaseModel):
     points: Annotated[
         list[DiveSitePoint],
-        Field(description="`[longitude, latitude, uuid, name, owner]` for each site on the reader's list with a pin"),
+        Field(
+            description="`[longitude, latitude, uuid, name, owner, proposal]` for each site on the reader's list with a"
+            " pin, where `proposal` is the status of the reader's latest proposal on the site while it waits or once"
+            " declined (`waiting` or `declined`), and null otherwise"
+        ),
     ]
 
 

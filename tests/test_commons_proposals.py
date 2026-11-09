@@ -1842,6 +1842,68 @@ class TestAcceptingIntoARecord:
         assert _row(db, site.uuid) is not None
 
 
+async def _point_proposal(http: httpx.AsyncClient, site: DiveSite) -> tuple[str, str | None]:
+    response = await http.get("/dive-sites/points")
+    assert response.status_code == 200, response.text
+    point = next(point for point in response.json()["points"] if point[2] == str(site.uuid))
+    return point[4], point[5]
+
+
+class TestThePointsCarryTheProposal:
+    """Each read comes before the write it follows, so a stale cached document would fail here."""
+
+    @pytest.mark.asyncio
+    async def test_proposing_declining_and_withdrawing_each_reach_the_map(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        site = _own_site(db, diver)
+        assert await _point_proposal(http, site) == ("account", None)
+
+        proposal = await _propose_site(http, site)
+        assert await _point_proposal(http, site) == ("account", "waiting")
+
+        signed.as_(reviewer)
+        declined = await http.post(f"/admin/dive-site-proposal/{proposal['uuid']}/decline", json={"reason": "No"})
+        assert declined.status_code == 200, declined.text
+        signed.as_(diver)
+        assert await _point_proposal(http, site) == ("account", "declined")
+
+        again = await _propose_site(http, site)
+        assert await _point_proposal(http, site) == ("account", "waiting")
+
+        assert (await http.delete(f"/dive-site-proposal/{again['uuid']}")).status_code == 200
+        assert await _point_proposal(http, site) == ("account", None)
+
+    @pytest.mark.asyncio
+    async def test_an_accepted_proposal_leaves_a_commons_point_with_none(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        site = _own_site(db, diver)
+        proposal = await _propose_site(http, site)
+        assert await _point_proposal(http, site) == ("account", "waiting")
+
+        signed.as_(reviewer)
+        await _accepted(http, proposal, members=_members())
+        signed.as_(diver)
+
+        assert await _point_proposal(http, site) == ("opendivingcommons", None)
+
+    @pytest.mark.asyncio
+    async def test_another_account_s_proposal_is_not_the_reader_s(
+        self, http: httpx.AsyncClient, db: Session, diver: User, other_diver: User, signed: Sign
+    ) -> None:
+        record = _record(db)
+        saved_row(db, record, user=diver)
+        saved_row(db, record, user=other_diver)
+        signed.as_(other_diver)
+        await _propose_change(http, record, depth_to=12.0)
+        assert await _point_proposal(http, record) == ("opendivingcommons", "waiting")
+
+        signed.as_(diver)
+
+        assert await _point_proposal(http, record) == ("opendivingcommons", None)
+
+
 class TestDeclining:
     @pytest.mark.asyncio
     async def test_the_proposer_reads_the_reason_until_they_propose_again(
