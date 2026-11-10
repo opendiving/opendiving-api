@@ -7283,10 +7283,10 @@ geocoder's must not be copied there, nor these to the geocoder.
 ## Provider answers are cached for an hour
 
 Each Open-Meteo answer is cached under a versioned key naming the API, the rounded coordinate, the
-days - for the forecast, the UTC hour asked in - the variables and the `timezone` parameter, for one
-hour whatever the day's age. The cache lets an import's burst and a trip's dives share an answer;
-longer buys little and costs a small Redis its memory - a day of answers at the budget's ceiling is
-about 25 MB.
+days - for the map's forecast and sea now, the UTC hour asked in - the variables and the `timezone`
+parameter, for one hour whatever the day's age. The cache lets an import's burst and a trip's dives
+share an answer; longer buys little and costs a small Redis its memory - a day of answers at the
+budget's ceiling is about 25 MB.
 
 ## A failed conditions row is always safe to delete
 
