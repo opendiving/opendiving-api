@@ -35,8 +35,9 @@ import logging
 import math
 import typing
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
 from enum import StrEnum
 from time import monotonic
 from typing import Any
@@ -421,6 +422,29 @@ def _zone(offset_minutes: int) -> timezone:
     return timezone(timedelta(minutes=offset_minutes))
 
 
+def _sea_read(column: Callable[[str], Any], zone: tzinfo) -> ConditionsSea:
+    """The sea block from its columns, a stored row's or `_sea_values`' alike, every turn spelled
+    in `zone`."""
+
+    def extreme(prefix: str) -> ConditionsExtreme | None:
+        kind, at, height = column(f"{prefix}_kind"), column(f"{prefix}_at"), column(f"{prefix}_height")
+        if kind is None or at is None or height is None:
+            return None
+        return ConditionsExtreme(kind=typing.cast(ExtremeKindName, kind), at=at.astimezone(zone), height=height)
+
+    return ConditionsSea(
+        model=column("sea_model"),
+        sea_level_height=column("sea_level_height"),
+        tide_state=typing.cast(TideStateName | None, column("tide_state")),
+        previous_extreme=extreme("previous_extreme"),
+        next_extreme=extreme("next_extreme"),
+        sea_surface_temperature=column("sea_surface_temperature"),
+        wave_height=column("wave_height"),
+        wave_period=column("wave_period"),
+        swell_wave_height=column("swell_wave_height"),
+    )
+
+
 def to_read(row: DiveConditions) -> DiveConditionsRead:
     """A `fetched` row as the API returns it, every instant at the offset it was resolved at."""
     if (
@@ -433,13 +457,6 @@ def to_read(row: DiveConditions) -> DiveConditionsRead:
     ):
         raise ValueError("only a fetched row has a record to read")
     offset = row.utc_offset_minutes
-
-    def extreme(kind: str | None, at: datetime | None, height: float | None) -> ConditionsExtreme | None:
-        if kind is None or at is None or height is None:
-            return None
-        return ConditionsExtreme(
-            kind=typing.cast(ExtremeKindName, kind), at=at.astimezone(_zone(offset)), height=height
-        )
 
     weather = None
     if row.weather_model is not None:
@@ -455,19 +472,7 @@ def to_read(row: DiveConditions) -> DiveConditionsRead:
             pressure=row.pressure,
             weather_code=row.weather_code,
         )
-    sea = None
-    if row.sea_model is not None:
-        sea = ConditionsSea(
-            model=row.sea_model,
-            sea_level_height=row.sea_level_height,
-            tide_state=typing.cast(TideStateName | None, row.tide_state),
-            previous_extreme=extreme(row.previous_extreme_kind, row.previous_extreme_at, row.previous_extreme_height),
-            next_extreme=extreme(row.next_extreme_kind, row.next_extreme_at, row.next_extreme_height),
-            sea_surface_temperature=row.sea_surface_temperature,
-            wave_height=row.wave_height,
-            wave_period=row.wave_period,
-            swell_wave_height=row.swell_wave_height,
-        )
+    sea = None if row.sea_model is None else _sea_read(lambda name: getattr(row, name), _zone(offset))
     return DiveConditionsRead(
         provider=row.provider,
         fetched_at=row.fetched_at,
@@ -1014,18 +1019,35 @@ async def preview_conditions(
     )
 
 
-# -------- the weather now --------
+# -------- the conditions now --------
+
+
+async def _current_sea(
+    latitude: float, longitude: float, now: datetime, hour: datetime, zone: tzinfo
+) -> ConditionsSea | None:
+    """The marine model's sea at the weather's `hour`, derived as a dive's is, or `None` where it
+    has nothing for the position - inland, a gap, a refused request - or could not be asked. The
+    weather is answered either way: a sea the map cannot show costs it nothing else."""
+    answer = await open_meteo.fetch_current_sea(latitude, longitude, now)
+    if isinstance(answer, open_meteo.CouldNotAsk):
+        await _stop_asking(answer)
+        return None
+    if isinstance(answer, open_meteo.Refused):
+        return None
+    values = _sea_values(answer, hour)
+    return _sea_read(values.get, zone) if values else None
 
 
 async def current_conditions(
     db: AsyncSession, *, latitude: float, longitude: float, now: datetime
 ) -> DiveConditionsCurrentRead | None:
-    """The forecast's weather at the hour nearest `now` at a position, for the map; `None` when
-    the provider could not be asked, which says nothing about the position.
+    """The forecast's weather and the marine model's sea at the hour nearest `now` at a position,
+    for the map; `None` when the forecast could not be asked, which says nothing about the position.
 
     The position is rounded as a dive's is, and asked about under the same budget and cool-down.
-    A request the provider refuses, an answer with no hours and a zone this server cannot read
-    answer with `at`, `position` and `weather` null.
+    A request the forecast refuses, an answer with no hours and a zone this server cannot read
+    answer with `at`, `position`, `weather` and `sea` null. The sea is asked only once the weather
+    has answered (`_current_sea`).
     """
     rounded_latitude, rounded_longitude = (
         await db.execute(select(_rounded(literal(latitude, Float)), _rounded(literal(longitude, Float))))
@@ -1049,13 +1071,16 @@ async def current_conditions(
     except ZoneInfoNotFoundError, ValueError:
         return nothing
     values = _weather_values(answer, now)
+    hour = datetime.fromtimestamp(nearest[1], UTC)
+    sea = await _current_sea(rounded_latitude, rounded_longitude, now, hour, zone)
     return DiveConditionsCurrentRead(
         provider=open_meteo.PROVIDER,
-        attribution=open_meteo.READINGS_ATTRIBUTION,
+        attribution=open_meteo.READINGS_ATTRIBUTION if sea is None else open_meteo.TIDES_ATTRIBUTION,
         # The zone's offset at that hour, not the answer's `utc_offset_seconds`, which is now's.
-        at=datetime.fromtimestamp(nearest[1], UTC).astimezone(zone),
+        at=hour.astimezone(zone),
         position=ConditionsPosition(latitude=rounded_latitude, longitude=rounded_longitude),
         weather=ConditionsWeather(model=values.pop("weather_model"), **values),
+        sea=sea,
     )
 
 

@@ -103,11 +103,14 @@ class DiveConditionsLookupRead(_Record):
 
 
 class DiveConditionsCurrentRead(_Record):
-    """The weather now at a position, for the map: the forecast's hour nearest the request. `at`,
-    `position` and `weather` are null where the provider has nothing for the position."""
+    """The weather and the sea now at a position, for the map: the forecast's hour nearest the
+    request, and the marine model's at that hour. `at`, `position` and `weather` are null where the
+    forecast has nothing for the position; `sea` is null where the marine model has nothing for it
+    or could not be asked."""
 
     provider: _Name
     attribution: Annotated[str, Field(description="The source line the data's licence asks for, as markdown links")]
     at: Annotated[datetime | None, Field(description="The hour described, spelled at the place's offset")] = None
     position: ConditionsPosition | None = None
     weather: ConditionsWeather | None = None
+    sea: ConditionsSea | None = None

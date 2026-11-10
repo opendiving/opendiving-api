@@ -60,6 +60,29 @@ def forecast_answers(now: datetime) -> Callable[[httpx.Request], httpx.Response]
     return answer
 
 
+def current_sea_answers(now: datetime) -> Callable[[httpx.Request], httpx.Response]:
+    """The Blue Hole's recorded marine series, cut to the day either side of 2026-09-15 14:00 UTC
+    and moved so that hour is the UTC hour `now` falls in - two hours after a low, four before a
+    high."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        body = fixture("dahab-2026-09-15-marine.json")
+        centre = 38
+        hourly = {name: series[centre - 24 : centre + 25] for name, series in body["hourly"].items()}
+        hour = int(now.astimezone(UTC).replace(minute=0, second=0, microsecond=0).timestamp())
+        shift = hour - hourly["time"][24]
+        hourly["time"] = [at + shift for at in hourly["time"]]
+        return httpx.Response(200, json={**body, "hourly": hourly})
+
+    return answer
+
+
+def current_answers(now: datetime) -> Callable[[httpx.Request], httpx.Response]:
+    """The forecast and the marine model as the map's conditions now ask them."""
+    weather, sea = forecast_answers(now), current_sea_answers(now)
+    return lambda request: sea(request) if "marine" in request.url.host else weather(request)
+
+
 class FakeOpenMeteo:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response] = dahab_answers) -> None:
         self.requests: list[httpx.Request] = []

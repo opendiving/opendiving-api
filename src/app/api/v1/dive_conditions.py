@@ -1,4 +1,4 @@
-"""The dive form's preview of a dive's surface conditions, and the map's weather now
+"""The dive form's preview of a dive's surface conditions, and the map's conditions now
 (`services.dive_conditions`).
 
 Nothing stored and nothing owned is answered here - only the caller's dive site is read, for its
@@ -111,7 +111,7 @@ async def read_dive_conditions_lookup(
     dependencies=[Depends(_fetching_conditions)],
     responses={
         404: {"description": "This instance fetches no conditions."},
-        503: {"description": "The provider could not be asked now; nothing is known about the position."},
+        503: {"description": "The forecast could not be asked now; nothing is known about the position."},
     },
 )
 async def read_dive_conditions_current(
@@ -120,19 +120,26 @@ async def read_dive_conditions_current(
     latitude: Annotated[float, Query(ge=-90, le=90, description="Latitude of the position, in degrees")],
     longitude: Annotated[float, Query(ge=-180, le=180, description="Longitude of the position, in degrees")],
 ) -> DiveConditionsCurrentRead:
-    """The surface weather now at a position, for a map to show at its centre: the forecast's
-    hour nearest the request, with wind in metres per second and its direction the one it blows
-    from.
+    """The surface weather and the sea now at a position, for a map to show at its centre: the
+    forecast's hour nearest the request, with wind in metres per second and its direction the one
+    it blows from, and the marine model's sea at that hour.
+
+    The sea is the one a dive's record carries: the sea level above the model's mean, the tide
+    `high` or `low` within half an hour of a turn and `rising` or `falling` otherwise, the high or
+    low before that hour and the one after, the sea-surface temperature, and the significant wave
+    height, its period and the swell's height. A turn is found inside a day either side of the
+    hour; where none is, the tide state and that turn are null.
 
     The position is rounded to two decimals, about a kilometre, before the provider is asked, and
-    `position` says where that is. `at` is the hour described, spelled at the place's offset.
-    Answers are shared between callers asking about the same place in the same hour. Rate
-    limited per account.
+    `position` says where that is. `at` is the hour described, and every turn's `at` the instant
+    of that turn, each spelled at the offset the place has then. Answers are shared between
+    callers asking about the same place in the same hour. Rate limited per account.
 
-    `200` with `at`, `position` and `weather` null where the provider has nothing for the
-    position. `503` when the provider could not be asked, which says nothing about the position:
-    over the instance's budget, cooling down, slow or down. 404 when this instance fetches no
-    conditions.
+    `200` with `at`, `position`, `weather` and `sea` null where the forecast has nothing for the
+    position. `sea` alone is null where the marine model has nothing there - inland, on a lake -
+    or could not be asked now: the weather is answered without it. `503` when the forecast could
+    not be asked, which says nothing about the position: over the instance's budget, cooling down,
+    slow or down. 404 when this instance fetches no conditions.
     """
     await enforce_rate_limit(
         f"dive-conditions-current:user:{current_user['id']}",

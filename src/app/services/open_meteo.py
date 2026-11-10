@@ -4,8 +4,9 @@ them.
 A dive's two requests, both with `timeformat=unixtime` so every sample is an instant rather than a
 label: `timezone=auto` labels every hour of every date with the zone's offset *at request
 time*, so a January day comes back wearing the summer offset. The zone's *name* is the one
-thing read from that answer, and only for a dive whose own offset is unknown. The third, the
-weather now at a place, asks the forecast for the hours around the provider's current one.
+thing read from that answer, and only for a dive whose own offset is unknown. The weather and
+the sea now at a place ask the forecast and the marine model for the hours around the provider's
+current one.
 
 What the caller gets back is one of three things, and keeping them apart is this module's
 job. `Answered` is the provider's body - cached, since another dive at the same place and
@@ -46,6 +47,9 @@ READINGS_ATTRIBUTION = (
 # A dive's record, which carries values derived from the readings: the licence asks that a change
 # be indicated.
 ATTRIBUTION = f"{READINGS_ATTRIBUTION}, with weather, waves and tide times derived from it"
+# The map's conditions now with the sea, whose tide state and turns are derived and whose weather
+# and waves are passed on as they came.
+TIDES_ATTRIBUTION = f"{READINGS_ATTRIBUTION}, with tide times derived from it"
 
 _FREE_HOSTS = {
     "weather": "https://archive-api.open-meteo.com",
@@ -88,7 +92,7 @@ TIMEOUT_SECONDS = 35.0
 DEADLINE_SECONDS = 40.0
 # The dive form's preview (`GET /dive-conditions/lookup`) and the map's weather now
 # (`GET /dive-conditions/current`), which a diver is waiting on: five times the slowest warm
-# answer, and the preview's two calls inside about ten seconds. A cold archive call is
+# answer, and either route's two calls inside about ten seconds. A cold archive call is
 # not waited for - the preview is a 503 the form ignores, and the worker's fetch after the
 # save writes the same values.
 PREVIEW_TIMEOUT_SECONDS = 4.0
@@ -311,6 +315,37 @@ async def fetch_current_weather(
         span=hour.strftime("%Y-%m-%dT%H"),
         extra={"wind_speed_unit": "ms"},
         timezone="auto",
+        timeout=timeout,
+        deadline=deadline,
+    )
+
+
+# A day either side of the current hour holds the high or low before it and the one after, each
+# with the sample beyond it that makes it a turn, even for a diurnal tide's turns about twelve and
+# a half hours apart.
+CURRENT_SEA_HOURS = 24
+
+
+async def fetch_current_sea(
+    latitude: float,
+    longitude: float,
+    now: datetime,
+    *,
+    timeout: float = PREVIEW_TIMEOUT_SECONDS,
+    deadline: float = PREVIEW_DEADLINE_SECONDS,
+) -> Outcome:
+    """The marine model's hourly sea level, sea temperature and waves from `CURRENT_SEA_HOURS`
+    before the provider's current hour to as many after, cached under the UTC hour `now` falls in
+    as the forecast's are."""
+    hour = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+    return await _ask(
+        "sea",
+        latitude,
+        longitude,
+        window={"past_hours": str(CURRENT_SEA_HOURS), "forecast_hours": str(CURRENT_SEA_HOURS + 1)},
+        span=hour.strftime("%Y-%m-%dT%H"),
+        extra={},
+        timezone=None,
         timeout=timeout,
         deadline=deadline,
     )

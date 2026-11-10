@@ -1,10 +1,11 @@
-"""`GET /dive-conditions/current`, the map's weather now at a position.
+"""`GET /dive-conditions/current`, the map's weather and sea now at a position.
 
 The service runs against Postgres, for the position's rounding, with Open-Meteo behind a mock
 transport and Redis as `FakeRedis`, as the lookup's tests do; the query parsing and the disabled
 instance run through FastAPI on an app with no database behind it.
 """
 
+import math
 from collections.abc import Generator
 from datetime import UTC, date, datetime
 from typing import Any
@@ -31,7 +32,7 @@ from src.app.services.dive_conditions import COOLDOWN_KEY, current_conditions, r
 from tests.conftest import db_available
 from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_user
-from tests.helpers.open_meteo import FakeOpenMeteo, forecast_answers
+from tests.helpers.open_meteo import FakeOpenMeteo, current_answers, current_sea_answers, forecast_answers
 
 # 19:20 at +02:00 at the Blue Hole.
 NOW = datetime(2026, 11, 9, 17, 20, tzinfo=UTC)
@@ -72,20 +73,39 @@ def _hours(zone: str, times: list[int]) -> httpx.Response:
     return httpx.Response(200, json={"timezone": zone, "utc_offset_seconds": 0, "hourly": hourly})
 
 
+def _sea_alone(sea: Any) -> Any:
+    """The recorded forecast for `NOW`, and `sea` for the marine model."""
+    weather = forecast_answers(NOW)
+    return lambda request: sea(request) if "marine" in request.url.host else weather(request)
+
+
+THE_SEA_AT_NOW = {
+    "model": "best_match",
+    "sea_level_height": -0.15,
+    "tide_state": "rising",
+    "previous_extreme": {"kind": "low", "at": "2026-11-09T17:00:00+02:00", "height": -0.23},
+    "next_extreme": {"kind": "high", "at": "2026-11-09T23:00:00+02:00", "height": 0.26},
+    "sea_surface_temperature": 28.2,
+    "wave_height": 0.3,
+    "wave_period": 2.6,
+    "swell_wave_height": 0.16,
+}
+
+
 @needs_db
 class TestAnAnswer:
     @pytest.mark.asyncio
     async def test_the_hour_nearest_now_at_the_rounded_position(self, async_db: AsyncSession) -> None:
-        with FakeOpenMeteo(forecast_answers(NOW)) as provider:
+        with FakeOpenMeteo(current_answers(NOW)) as provider:
             body = _body(await _current(async_db))
 
         assert body["attribution"] == (
             "[Weather data by Open-Meteo.com](https://open-meteo.com/) "
-            "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/))"
+            "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), with tide times derived from it"
         )
         assert body == {
             "provider": "open-meteo",
-            "attribution": open_meteo.READINGS_ATTRIBUTION,
+            "attribution": open_meteo.TIDES_ATTRIBUTION,
             "at": "2026-11-09T19:00:00+02:00",
             "position": {"latitude": 28.57, "longitude": 34.54},
             "weather": {
@@ -100,8 +120,9 @@ class TestAnAnswer:
                 "pressure": 1019.6,
                 "weather_code": 0,
             },
+            "sea": THE_SEA_AT_NOW,
         }
-        (request,) = provider.requests
+        (request,) = provider.asked("forecast")
         assert (request.url.host, request.url.path) == ("api.open-meteo.com", "/v1/forecast")
         params = request.url.params
         assert (params["latitude"], params["longitude"]) == ("28.57", "34.54")
@@ -109,6 +130,58 @@ class TestAnAnswer:
         assert (params["timezone"], params["timeformat"], params["wind_speed_unit"]) == ("auto", "unixtime", "ms")
         assert params["hourly"].split(",") == list(open_meteo.WEATHER_VARIABLES)
         assert "start_date" not in params
+
+    @pytest.mark.asyncio
+    async def test_the_sea_is_asked_for_a_day_either_side_of_the_hour(self, async_db: AsyncSession) -> None:
+        with FakeOpenMeteo(current_answers(NOW)) as provider:
+            await _current(async_db)
+
+        assert len(provider.requests) == 2
+        (request,) = provider.asked("sea")
+        assert (request.url.host, request.url.path) == ("marine-api.open-meteo.com", "/v1/marine")
+        params = request.url.params
+        assert (params["latitude"], params["longitude"]) == ("28.57", "34.54")
+        assert (params["past_hours"], params["forecast_hours"]) == ("24", "25")
+        assert (params["timeformat"], params["hourly"].split(",")) == ("unixtime", list(open_meteo.SEA_VARIABLES))
+        assert "timezone" not in params and "start_date" not in params
+
+    @pytest.mark.asyncio
+    async def test_the_sea_is_read_at_the_weathers_hour(self, async_db: AsyncSession) -> None:
+        """Past the half hour, both read 18:00 UTC: an hour later on the recorded series."""
+        later = NOW.replace(minute=40)
+
+        with FakeOpenMeteo(_sea_alone(current_sea_answers(NOW))):
+            body = _body(await _current(async_db, later))
+
+        assert body["at"] == "2026-11-09T20:00:00+02:00"
+        assert body["sea"]["sea_level_height"] == -0.04
+        assert body["sea"]["wave_height"] == 0.26
+
+    @pytest.mark.asyncio
+    async def test_each_turn_is_spelled_at_the_offset_its_zone_has_then(self, async_db: AsyncSession) -> None:
+        """Berlin leaves summer time at 01:00 UTC on 2026-10-25: the low three hours before is
+        +02:00, and the high three hours after +01:00."""
+        now = datetime(2026, 10, 25, 0, 50, tzinfo=UTC)
+        hour = int(datetime(2026, 10, 25, 1, 0, tzinfo=UTC).timestamp())
+        hours = range(-24, 25)
+        # A twelve-hour tide, low at 22:00 UTC and high at 04:00 UTC.
+        sea = {
+            "time": [hour + offset * 3600 for offset in hours],
+            "sea_level_height_msl": [round(-math.cos(2 * math.pi * (offset + 3) / 12), 3) for offset in hours],
+        }
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            if "marine" in request.url.host:
+                return httpx.Response(200, json={"timezone": "GMT", "hourly": sea})
+            return _hours("Europe/Berlin", [hour - 3600, hour, hour + 3600])
+
+        with FakeOpenMeteo(answer):
+            body = _body(await _current(async_db, now, (52.52, 13.40)))
+
+        assert body["at"] == "2026-10-25T02:00:00+01:00"
+        assert body["sea"]["tide_state"] == "rising"
+        assert body["sea"]["previous_extreme"] == {"kind": "low", "at": "2026-10-25T00:00:00+02:00", "height": -1.0}
+        assert body["sea"]["next_extreme"] == {"kind": "high", "at": "2026-10-25T05:00:00+01:00", "height": 1.0}
 
     @pytest.mark.asyncio
     async def test_past_the_half_hour_the_next_hour_is_nearest(self, async_db: AsyncSession) -> None:
@@ -138,12 +211,14 @@ class TestAnAnswer:
     ) -> None:
         monkeypatch.setattr(settings, "DIVE_CONDITIONS_OPEN_METEO_API_KEY", SecretStr("subscriber"))
 
-        with FakeOpenMeteo(forecast_answers(NOW)) as provider:
+        with FakeOpenMeteo(current_answers(NOW)) as provider:
             await _current(async_db)
 
-        (request,) = provider.requests
-        assert request.url.host == "customer-api.open-meteo.com"
-        assert request.url.params["apikey"] == "subscriber"
+        assert [request.url.host for request in provider.requests] == [
+            "customer-api.open-meteo.com",
+            "customer-marine-api.open-meteo.com",
+        ]
+        assert {request.url.params["apikey"] for request in provider.requests} == {"subscriber"}
 
 
 @needs_db
@@ -152,29 +227,32 @@ class TestTheAnswerCache:
     async def test_the_same_place_in_the_same_hour_is_asked_once(
         self, async_db: AsyncSession, redis: FakeRedis
     ) -> None:
-        with FakeOpenMeteo(forecast_answers(NOW)) as provider:
+        with FakeOpenMeteo(current_answers(NOW)) as provider:
             first = await _current(async_db)
             # Another diver, a few hundred metres away, later in the hour.
             second = await _current(async_db, NOW.replace(minute=50), (28.5710, 34.5440))
 
-        assert len(provider.requests) == 1
+        assert len(provider.requests) == 2
         assert first is not None and second is not None
         assert first.position == second.position
         assert second.at is not None and second.at.hour == 20
-        (key,) = [key for key in redis.store if key.startswith("conditions:v1:forecast:")]
-        assert key.startswith("conditions:v1:forecast:28.57:34.54:2026-11-09T17:")
-        assert redis.expiries[key] == 3600
+        assert first.sea is not None and second.sea is not None
+        (forecast,) = [key for key in redis.store if key.startswith("conditions:v1:forecast:")]
+        assert forecast.startswith("conditions:v1:forecast:28.57:34.54:2026-11-09T17:")
+        (sea,) = [key for key in redis.store if key.startswith("conditions:v1:sea:")]
+        assert sea.startswith("conditions:v1:sea:28.57:34.54:2026-11-09T17:GMT:")
+        assert redis.expiries[forecast] == redis.expiries[sea] == 3600
 
     @pytest.mark.asyncio
     async def test_the_next_hour_asks_again(self, async_db: AsyncSession) -> None:
         later = NOW.replace(hour=18)
 
-        with FakeOpenMeteo(forecast_answers(NOW)) as provider:
+        with FakeOpenMeteo(current_answers(NOW)) as provider:
             await _current(async_db)
-        with FakeOpenMeteo(forecast_answers(later)) as provider:
+        with FakeOpenMeteo(current_answers(later)) as provider:
             await _current(async_db, later)
 
-        assert len(provider.requests) == 1
+        assert len(provider.requests) == 2
 
 
 @needs_db
@@ -189,8 +267,8 @@ class TestNothingForThePosition:
         ],
         ids=["a refused request", "no hours", "a zone this server cannot read"],
     )
-    async def test_at_position_and_weather_are_null(self, async_db: AsyncSession, answer: httpx.Response) -> None:
-        with FakeOpenMeteo(lambda request: answer):
+    async def test_at_position_weather_and_sea_are_null(self, async_db: AsyncSession, answer: httpx.Response) -> None:
+        with FakeOpenMeteo(lambda request: answer) as provider:
             body = _body(await _current(async_db))
 
         assert body == {
@@ -199,7 +277,61 @@ class TestNothingForThePosition:
             "at": None,
             "position": None,
             "weather": None,
+            "sea": None,
         }
+        assert provider.asked("sea") == []
+
+
+@needs_db
+class TestNoSeaForThePosition:
+    """The weather answered and the sea did not: the weather, with `sea` null."""
+
+    @staticmethod
+    def _inland(request: httpx.Request) -> httpx.Response:
+        times = current_sea_answers(NOW)(request).json()["hourly"]["time"]
+        hourly = {"time": times, **{name: [None] * len(times) for name in open_meteo.SEA_VARIABLES}}
+        return httpx.Response(200, json={"timezone": "GMT", "hourly": hourly})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "sea",
+        [
+            _inland,
+            lambda request: httpx.Response(400, json={"error": True, "reason": "No data"}),
+            lambda request: httpx.Response(502),
+            lambda request: httpx.Response(429),
+        ],
+        ids=["inland", "a refused request", "a failing marine model", "a rate limit"],
+    )
+    async def test_the_weather_without_the_sea(self, async_db: AsyncSession, sea: Any) -> None:
+        with FakeOpenMeteo(_sea_alone(sea)):
+            body = _body(await _current(async_db))
+
+        assert body["at"] == "2026-11-09T19:00:00+02:00"
+        assert body["weather"]["air_temperature"] == 24.0
+        assert body["sea"] is None
+        assert body["attribution"] == open_meteo.READINGS_ATTRIBUTION
+
+    @pytest.mark.asyncio
+    async def test_a_rate_limit_on_the_sea_cools_the_worker_down(
+        self, async_db: AsyncSession, redis: FakeRedis
+    ) -> None:
+        with FakeOpenMeteo(_sea_alone(lambda request: httpx.Response(429))):
+            await _current(async_db)
+
+        assert await redis.get(COOLDOWN_KEY) is not None
+
+    @pytest.mark.asyncio
+    async def test_the_last_of_the_budget_answers_the_weather(
+        self, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "DIVE_CONDITIONS_OPEN_METEO_RATE_LIMIT_REQUESTS", 1)
+
+        with FakeOpenMeteo(current_answers(NOW)) as provider:
+            body = _body(await _current(async_db))
+
+        assert body["weather"] is not None and body["sea"] is None
+        assert provider.asked("sea") == []
 
 
 @needs_db
@@ -248,10 +380,10 @@ class TestTheProviderCouldNotBeAsked:
             return await real(url, **kwargs)
 
         monkeypatch.setattr(open_meteo, "fetch_capped", recorded)
-        with FakeOpenMeteo(forecast_answers(NOW)):
+        with FakeOpenMeteo(current_answers(NOW)):
             await _current(async_db)
 
-        assert asked == [(open_meteo.PREVIEW_TIMEOUT_SECONDS, open_meteo.PREVIEW_DEADLINE_SECONDS)]
+        assert asked == [(open_meteo.PREVIEW_TIMEOUT_SECONDS, open_meteo.PREVIEW_DEADLINE_SECONDS)] * 2
 
 
 @needs_db
@@ -334,6 +466,7 @@ class TestTheRoute:
             "at": None,
             "position": None,
             "weather": None,
+            "sea": None,
         }
         assert service.await_args is not None
         assert (service.await_args.kwargs["latitude"], service.await_args.kwargs["longitude"]) == (28.49, -34.51)
