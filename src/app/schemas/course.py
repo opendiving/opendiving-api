@@ -239,9 +239,12 @@ class CourseUpdateInternal(CourseUpdate):
 
 
 class CourseLookupItem(PublicUUIDSchema):
-    """One row of `GET /courses/lookup`: the name, and the contact and people a dive form fills
+    """One row of `GET /courses/lookup`: the name, and what a dive or certification form fills
     from the course picked, as `CourseRead` carries them."""
 
     name: str
+    agency: StoredVocabulary | None = None
+    agency_other: str | None = None
+    instructor_number: str | None = None
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
     people: PeopleRead

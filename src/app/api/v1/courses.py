@@ -364,7 +364,15 @@ async def _lookup_courses(
     data = await get_lookup_page(
         db,
         model=Course,
-        columns=(Course.id, Course.uuid, Course.name, Contact.uuid.label("contact_uuid")),
+        columns=(
+            Course.id,
+            Course.uuid,
+            Course.name,
+            Course.agency,
+            Course.agency_other,
+            Course.instructor_number,
+            Contact.uuid.label("contact_uuid"),
+        ),
         conditions=conditions,
         used_by=Dive.course_id,
         user_id=user_id,
@@ -379,7 +387,13 @@ async def _lookup_courses(
     people_by_course = await get_people_for_courses(db, [row["id"] for row in data["data"]])
     data["data"] = [
         CourseLookupItem(
-            uuid=row["uuid"], name=row["name"], contact_uuid=row["contact_uuid"], people=people_by_course[row["id"]]
+            uuid=row["uuid"],
+            name=row["name"],
+            agency=row["agency"],
+            agency_other=row["agency_other"],
+            instructor_number=row["instructor_number"],
+            contact_uuid=row["contact_uuid"],
+            people=people_by_course[row["id"]],
         ).model_dump()
         for row in data["data"]
     ]
@@ -404,8 +418,9 @@ async def lookup_courses(
     ] = None,
     uuid: LookupUuids = None,
 ) -> dict:
-    """The caller's courses as a picker lists them: uuid and name, with the contact and people
-    a dive form fills from them. The course a dive at or before `until` was last logged on
+    """The caller's courses as a picker lists them: uuid and name, with what a dive or
+    certification form fills from them - the agency, the instructor's number, the contact and
+    the people. The course a dive at or before `until` was last logged on
     first, then courses no such dive is on, newest created first.
 
     `search` matches what `GET /courses` matches; the list's date, agency and status filters

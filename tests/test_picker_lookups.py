@@ -475,7 +475,7 @@ RESOURCES = [
         _lookup_courses,
         _list_courses,
         _course_searchable,
-        frozenset({"uuid", "name", "contact_uuid", "people"}),
+        frozenset({"uuid", "name", "agency", "agency_other", "instructor_number", "contact_uuid", "people"}),
     ),
     _Resource(
         "gear_items",
@@ -658,6 +658,22 @@ class TestWhatTheFormFills:
             {"person_uuid": instructor.uuid, "role": "instructor"},
         ]
         assert (rows[bare.uuid]["contact_uuid"], rows[bare.uuid]["people"]) == (None, [])
+
+    @pytest.mark.asyncio
+    async def test_a_course_carries_what_a_certification_fills_from_it(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        named, other, bare = create_course(db, diver), create_course(db, diver), create_course(db, diver, agency=None)
+        named.instructor_number = "TDI-4471"
+        other.agency, other.agency_other = "other", "Hydra Divers"
+        db.commit()
+
+        rows = {row["uuid"]: row for row in await _lookup_courses(async_db, diver, None, None)}
+
+        filled = ("agency", "agency_other", "instructor_number")
+        assert [rows[named.uuid][key] for key in filled] == ["tdi", None, "TDI-4471"]
+        assert [rows[other.uuid][key] for key in filled] == ["other", "Hydra Divers", None]
+        assert [rows[bare.uuid][key] for key in filled] == [None, None, None]
 
     @pytest.mark.asyncio
     async def test_a_trip_carries_its_people_in_their_order(
