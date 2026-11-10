@@ -700,8 +700,9 @@ async def verify_restore_token(token: str, db: AsyncSession) -> RestoreTokenData
     take it while the token is in flight, so the caller re-reads the row under a lock (see
     `POST /auth/restore`) rather than trusting this.
 
-    A token with no `idle_timeout` claim was minted by a build that did not sign one in, and
-    is `standard`, the only session a restore started then.
+    A token with no `idle_timeout` claim is `standard`. Only a token minted before the claim
+    existed lacks one, and those are honoured across the deploy that adds it; the default can
+    come out once that deploy is `ONBOARDING_TOKEN_EXPIRE_MINUTES` old.
     """
     if await crud_token_blacklist.exists(db, token=token):
         return None

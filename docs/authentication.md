@@ -504,11 +504,10 @@ expires.
 
 The restore token is its own `TokenType`, is single-use, and expires with
 `ONBOARDING_TOKEN_EXPIRE_MINUTES`. It carries the `idle_timeout` the sign-in asked for, so the
-restored session slides by that window; a token naming none starts a `standard` session. It is never
-emailed: the deletion confirmation tells the user to sign in, because a restore link sitting in an
-inbox for a fortnight would be a standing key to an account its owner asked to have destroyed. See
-`DECISIONS.md` for the full reasoning, including how the row lock settles the race with the purge
-job.
+restored session slides by that window. It is never emailed: the deletion confirmation tells the
+user to sign in, because a restore link sitting in an inbox for a fortnight would be a standing key
+to an account its owner asked to have destroyed. See `DECISIONS.md` for the full reasoning,
+including how the row lock settles the race with the purge job.
 
 ### Sessions
 

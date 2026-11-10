@@ -85,9 +85,9 @@ PURGE_AFTER = DELETED_AT + timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS)
 _request = fake_request
 
 
-def _previous_builds_restore_token(user_uuid: uuid_pkg.UUID) -> str:
-    """A restore token as the build before this one signed it: no `idle_timeout` claim. One
-    in flight across a deploy is redeemed by the new build."""
+def _restore_token_naming_no_window(user_uuid: uuid_pkg.UUID) -> str:
+    """A restore token with no `idle_timeout` claim, as one minted before the claim existed
+    and still unspent across the deploy that adds it."""
     claims = {
         "sub": str(user_uuid),
         "exp": datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=settings.ONBOARDING_TOKEN_EXPIRE_MINUTES),
@@ -587,10 +587,8 @@ class TestRestoreTokens:
         assert await _window_of(token, mock_db) is idle_timeout
 
     @pytest.mark.asyncio
-    async def test_one_minted_by_the_build_before_is_standard(self, mock_db):
-        """Such a token names no window, and a restore then only ever started a `standard`
-        session."""
-        token = _previous_builds_restore_token(USER_UUID)
+    async def test_one_naming_no_window_is_standard(self, mock_db):
+        token = _restore_token_naming_no_window(USER_UUID)
 
         assert await _window_of(token, mock_db) is IdleTimeout.STANDARD
 
@@ -719,11 +717,11 @@ class TestRestoreAgainstPostgres:
         assert listed.idle_timeout is idle_timeout
 
     @pytest.mark.asyncio
-    async def test_a_token_minted_by_the_build_before_restores_into_a_standard_session(
+    async def test_a_token_naming_no_window_restores_into_a_standard_session(
         self, db: Session, async_db: AsyncSession
     ) -> None:
-        """The deploy-skew case: a restore screen opened against the previous build and
-        submitted to this one."""
+        """A restore screen opened before the deploy that adds the claim and submitted
+        after it."""
         diver = create_user(db)
         diver.is_deleted = True
         diver.deleted_at = datetime.now(UTC) - timedelta(days=1)
@@ -734,7 +732,7 @@ class TestRestoreAgainstPostgres:
         with patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock):
             outcome = await restore_account(
                 request=_request(),
-                body=RestoreRequest(restore_token=_previous_builds_restore_token(diver_uuid)),
+                body=RestoreRequest(restore_token=_restore_token_naming_no_window(diver_uuid)),
                 response=Response(),
                 db=async_db,
             )
