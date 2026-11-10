@@ -199,8 +199,10 @@ async def _start_onboarding_or_sign_in(
     an existing account signing in through either kind of link is simply signed in.
 
     `idle_timeout` is the window a sign-in asked for, and only the six-digit code asks: it
-    is the one way in a native client can take. It reaches the first branch alone - an
-    onboarding handoff mints no session, and `POST /auth/complete` starts a `standard` one.
+    is the one way in a native client can take. It reaches the first branch, and the third
+    signs it into the restore token, so the session `POST /auth/restore` starts is the one
+    the sign-in asked for. An onboarding handoff mints no session, and `POST /auth/complete`
+    starts a `standard` one.
     """
     if isinstance(outcome, AuthenticatedUser):
         tokens = await issue_tokens(
@@ -226,7 +228,7 @@ async def _start_onboarding_or_sign_in(
         # to this caller is not a leak - reaching this line took a magic link sent to that
         # inbox, a code from it, a Google identity linked to the account, or possession of a
         # registered authenticator.
-        restore_token = await create_restore_token(outcome.user["uuid"])
+        restore_token = await create_restore_token(outcome.user["uuid"], idle_timeout=idle_timeout)
         await record_auth_event(
             db, event_type=AuthEventType.RESTORE_OFFERED, context=context, user_id=outcome.user["id"]
         )
@@ -521,7 +523,9 @@ async def verify_email_code(
     the same 403 on an invite-only instance.
 
     `idle_timeout` chooses how long the resulting session may sit unused before it ends:
-    `standard` or `extended`, each a window the instance sets. Only this operation takes it.
+    `standard` or `extended`, each a window the instance sets. On a `deletion_pending`
+    outcome it is the window of the session `POST /auth/restore` then starts. Only this
+    operation takes it.
 
     Every rejection is a 401 with the same `detail`, "This code is invalid or has expired.":
     wrong digits, a `request_id` naming no request, a request that expired or was superseded
@@ -921,7 +925,8 @@ async def restore_account(
     Takes the `restore_token` from a `deletion_pending` outcome; the token names the account,
     so nothing else does. Rate limited per IP. The account stays deleted until this is
     called - signing in by any method only ever offers the restore - and the outcome is
-    `authenticated`, with an access token in the body and a `refresh_token` cookie.
+    `authenticated`, with an access token in the body and a `refresh_token` cookie. The
+    session may sit unused for the window the sign-in that offered the restore asked for.
 
     401 with one `detail` for a token that is invalid, expired, or already used; the token is
     single-use. A different 401 `detail` when the grace period ran out and the account is
@@ -948,9 +953,10 @@ async def restore_account(
         settings.MAGIC_LINK_RATE_LIMIT_WINDOW_SECONDS,
     )
 
-    user_uuid = await verify_restore_token(body.restore_token, db)
-    if user_uuid is None:
+    grant = await verify_restore_token(body.restore_token, db)
+    if grant is None:
         raise UnauthorizedException(_RESTORE_REJECTED)
+    user_uuid = grant.user_uuid
 
     locked = (
         await db.execute(select(User.id, User.is_deleted).where(User.uuid == user_uuid).with_for_update())
@@ -983,7 +989,9 @@ async def restore_account(
     context = RequestContext.from_request(request)
     await record_auth_event(db, event_type=AuthEventType.ACCOUNT_RESTORED, context=context, user_id=locked.id)
 
-    tokens = await issue_tokens(response, user_uuid, db=db, context=context, user_id=locked.id)
+    tokens = await issue_tokens(
+        response, user_uuid, db=db, context=context, user_id=locked.id, idle_timeout=grant.idle_timeout
+    )
     return AuthOutcome(status="authenticated", **tokens.body())
 
 

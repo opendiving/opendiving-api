@@ -503,10 +503,12 @@ offer is spent, while the link's token is untouched by the precheck and stays re
 expires.
 
 The restore token is its own `TokenType`, is single-use, and expires with
-`ONBOARDING_TOKEN_EXPIRE_MINUTES`. It is never emailed: the deletion confirmation tells the user to
-sign in, because a restore link sitting in an inbox for a fortnight would be a standing key to an
-account its owner asked to have destroyed. See `DECISIONS.md` for the full reasoning, including how
-the row lock settles the race with the purge job.
+`ONBOARDING_TOKEN_EXPIRE_MINUTES`. It carries the `idle_timeout` the sign-in asked for, so the
+restored session slides by that window; a token naming none starts a `standard` session. It is never
+emailed: the deletion confirmation tells the user to sign in, because a restore link sitting in an
+inbox for a fortnight would be a standing key to an account its owner asked to have destroyed. See
+`DECISIONS.md` for the full reasoning, including how the row lock settles the race with the purge
+job.
 
 ### Sessions
 
@@ -558,10 +560,12 @@ of the sign-in or refresh response, keeps it in its own secure storage, and send
 for `"idle_timeout": "extended"`, which buys it a session that survives
 `EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS` (90 by default) of disuse rather than a week — at the cost of a
 stolen device staying signed in that much longer, until the session is revoked from *Sessions*. Only
-that route takes the member; every other sign-in starts a `standard` session, and the web sends
-nothing. A client that loses a refresh reply should retry once with the same cookie within the
-grace, after a short pause, and the server answers with the pair it already minted. A script or a
-sync job is better served by an API key (below), which needs no refresh at all.
+that route takes the member; a `deletion_pending` outcome from it carries the window into the
+restore token, so `POST /auth/restore` starts the session it asked for. Every other sign-in starts a
+`standard` session, and the web sends nothing. A client that loses a refresh reply should retry once
+with the same cookie within the grace, after a short pause, and the server answers with the pair it
+already minted. A script or a sync job is better served by an API key (below), which needs no
+refresh at all.
 
 **Upgrading signs everyone out once.** Neither half of a pair minted before this feature carries a
 `sid`, and both halves are now refused for want of one - the access token on its next request, the

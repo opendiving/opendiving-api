@@ -61,9 +61,10 @@ class EmailCodeVerifyRequest(BaseModel):
     """`POST /auth/email/verify-code` - the six-digit code from the sign-in email, plus
     the `request_id` that `POST /auth/email/request` handed back to the tab that asked.
 
-    `idle_timeout` is how long the session may then sit unused, and only this route takes
-    it: the code is the one way in a native client has, and the other sign-ins are a
-    browser's. `extended` asks for the operator's longer window; the web sends nothing.
+    `idle_timeout` is how long the session may then sit unused - the one a restore starts,
+    when the outcome is `deletion_pending` - and only this route takes it: the code is the
+    one way in a native client has, and the other sign-ins are a browser's. `extended` asks
+    for the operator's longer window; the web sends nothing.
     """
 
     model_config = ConfigDict(extra="forbid")

@@ -18,15 +18,19 @@ The passkey entry point is tested in `tests/test_passkeys.py`, beside the ceremo
 import uuid as uuid_pkg
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
+from http.cookies import SimpleCookie
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import pytest_asyncio
+from fastapi import Response
+from jose import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from src.app.api.v1.auth import (
+    _start_onboarding_or_sign_in,
     auth_with_google,
     check_email_link,
     complete_profile,
@@ -34,11 +38,16 @@ from src.app.api.v1.auth import (
     verify_email_code,
     verify_email_link,
 )
+from src.app.api.v1.sessions import read_sessions
 from src.app.core.config import settings
 from src.app.core.db.database import async_engine
 from src.app.core.exceptions.http_exceptions import RateLimitException, UnauthorizedException
 from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
 from src.app.core.security import (
+    ALGORITHM,
+    SECRET_KEY,
+    RestoreTokenData,
+    TokenType,
     create_onboarding_token,
     create_restore_token,
     hash_sign_in_code,
@@ -54,7 +63,14 @@ from src.app.schemas.auth import (
     ProfileCompletionRequest,
     RestoreRequest,
 )
-from src.app.services.auth_service import AuthenticatedUser, DeletionPending, OnboardingRequired, resolve_identity
+from src.app.schemas.user_session import IdleTimeout
+from src.app.services.auth_service import (
+    AuthenticatedUser,
+    DeletionPending,
+    OnboardingRequired,
+    issue_tokens,
+    resolve_identity,
+)
 from tests.conftest import db_available
 from tests.helpers.generators import create_user
 from tests.helpers.mocks import email_lookups_on, fake_request, google_auth_body, stub_claim
@@ -67,6 +83,28 @@ PURGE_AFTER = DELETED_AT + timedelta(days=settings.ACCOUNT_DELETION_GRACE_DAYS)
 
 
 _request = fake_request
+
+
+def _previous_builds_restore_token(user_uuid: uuid_pkg.UUID) -> str:
+    """A restore token as the build before this one signed it: no `idle_timeout` claim. One
+    in flight across a deploy is redeemed by the new build."""
+    claims = {
+        "sub": str(user_uuid),
+        "exp": datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=settings.ONBOARDING_TOKEN_EXPIRE_MINUTES),
+        "jti": uuid_pkg.uuid4().hex,
+        "token_type": TokenType.RESTORE,
+    }
+    encoded: str = jwt.encode(claims, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
+    return encoded
+
+
+async def _window_of(restore_token: str, db: Any) -> IdleTimeout:
+    with patch("src.app.core.security.crud_token_blacklist") as blacklist:
+        blacklist.exists = AsyncMock(return_value=False)
+        grant = await verify_restore_token(restore_token, db)
+    assert grant is not None
+    return grant.idle_timeout
+
 
 # `resolve_identity` records a provider-linked audit event on the one branch that
 # writes a link, so it now needs to know where the request came from.
@@ -243,6 +281,48 @@ class TestTheOutcomeOnEveryEntryPoint:
 
             self._assert_offered_the_account_back(outcome, response)
 
+    @pytest.mark.parametrize("idle_timeout", list(IdleTimeout))
+    @pytest.mark.asyncio
+    async def test_the_six_digit_code_signs_its_window_into_the_restore_token(self, mock_db, idle_timeout: IdleTimeout):
+        """The phone asks for `extended` here, and the restore it is offered has to keep
+        it: the restore request carries nothing but the token."""
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
+            patch("src.app.services.auth_service.crud_authentication_providers"),
+            patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
+            patch(
+                "src.app.api.v1.auth.charge_code_attempt",
+                new_callable=AsyncMock,
+                return_value=hash_sign_in_code("481052"),
+            ),
+        ):
+            requests.get = AsyncMock(return_value=_live_auth_request())
+            users.get = AsyncMock(return_value=_pending_row())
+            stub_claim(mock_db)
+
+            outcome = await verify_email_code(
+                _request(),
+                EmailCodeVerifyRequest(request_id=REQUEST_UUID, code="481052", idle_timeout=idle_timeout),
+                Mock(),
+                mock_db,
+            )
+
+        assert outcome.status == "deletion_pending"
+        assert outcome.restore_token is not None
+        assert await _window_of(outcome.restore_token, mock_db) is idle_timeout
+
+    @pytest.mark.asyncio
+    async def test_a_sign_in_that_asks_for_no_window_offers_a_standard_restore(self, mock_db):
+        with patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock):
+            outcome = await _start_onboarding_or_sign_in(
+                Mock(), DeletionPending.for_row(_pending_row()), db=mock_db, context=CONTEXT
+            )
+
+        assert outcome.restore_token is not None
+        assert await _window_of(outcome.restore_token, mock_db) is IdleTimeout.STANDARD
+
     @pytest.mark.asyncio
     async def test_google(self, mock_db):
         with (
@@ -325,7 +405,7 @@ class TestRestoreAccount:
             patch("src.app.api.v1.auth.verify_restore_token", new_callable=AsyncMock) as verify,
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock) as blacklist,
         ):
-            verify.return_value = USER_UUID
+            verify.return_value = RestoreTokenData(USER_UUID, IdleTimeout.STANDARD)
             response = Mock()
             outcome = await self._call(session, token, response)
 
@@ -339,6 +419,23 @@ class TestRestoreAccount:
         blacklist.assert_awaited_once()
         assert blacklist.await_args.args[0] == token or blacklist.await_args.kwargs.get("token") == token
 
+    @pytest.mark.parametrize("idle_timeout", list(IdleTimeout))
+    @pytest.mark.asyncio
+    async def test_the_session_it_starts_has_the_window_the_token_carries(self, idle_timeout: IdleTimeout):
+        session = _RestoreSession(locked=Mock(id=1, is_deleted=True))
+
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.verify_restore_token", new_callable=AsyncMock) as verify,
+            patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.issue_tokens", wraps=issue_tokens) as issue,
+        ):
+            verify.return_value = RestoreTokenData(USER_UUID, idle_timeout)
+            await self._call(session, "tok")
+
+        assert issue.await_args is not None
+        assert issue.await_args.kwargs["idle_timeout"] is idle_timeout
+
     @pytest.mark.asyncio
     async def test_it_takes_the_row_for_update_so_the_purge_cannot_pass_it(self):
         """The whole settlement of the race with `purge_deleted_accounts`: whichever
@@ -351,7 +448,7 @@ class TestRestoreAccount:
             patch("src.app.api.v1.auth.verify_restore_token", new_callable=AsyncMock) as verify,
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
         ):
-            verify.return_value = USER_UUID
+            verify.return_value = RestoreTokenData(USER_UUID, IdleTimeout.STANDARD)
             await self._call(session, "tok")
 
         assert "FOR UPDATE" in session.sql
@@ -368,7 +465,7 @@ class TestRestoreAccount:
             patch("src.app.api.v1.auth.verify_restore_token", new_callable=AsyncMock) as verify,
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock) as blacklist,
         ):
-            verify.return_value = USER_UUID
+            verify.return_value = RestoreTokenData(USER_UUID, IdleTimeout.STANDARD)
 
             with pytest.raises(UnauthorizedException) as raised:
                 await self._call(session, "tok")
@@ -388,7 +485,7 @@ class TestRestoreAccount:
             patch("src.app.api.v1.auth.verify_restore_token", new_callable=AsyncMock) as verify,
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
         ):
-            verify.return_value = USER_UUID
+            verify.return_value = RestoreTokenData(USER_UUID, IdleTimeout.STANDARD)
             outcome = await self._call(session, "tok")
 
         assert outcome.status == "authenticated"
@@ -411,7 +508,7 @@ class TestRestoreAccount:
             patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock, return_value=False),
             patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
         ):
-            verify.return_value = USER_UUID
+            verify.return_value = RestoreTokenData(USER_UUID, IdleTimeout.STANDARD)
 
             with pytest.raises(UnauthorizedException) as raised:
                 await self._call(session, "tok")
@@ -480,7 +577,32 @@ class TestRestoreTokens:
             blacklist.exists = AsyncMock(return_value=False)
             token = await create_restore_token(USER_UUID)
 
-            assert await verify_restore_token(token, mock_db) == USER_UUID
+            assert await verify_restore_token(token, mock_db) == RestoreTokenData(USER_UUID, IdleTimeout.STANDARD)
+
+    @pytest.mark.parametrize("idle_timeout", list(IdleTimeout))
+    @pytest.mark.asyncio
+    async def test_it_carries_the_window_it_was_minted_with(self, mock_db, idle_timeout: IdleTimeout):
+        token = await create_restore_token(USER_UUID, idle_timeout=idle_timeout)
+
+        assert await _window_of(token, mock_db) is idle_timeout
+
+    @pytest.mark.asyncio
+    async def test_one_minted_by_the_build_before_is_standard(self, mock_db):
+        """Such a token names no window, and a restore then only ever started a `standard`
+        session."""
+        token = _previous_builds_restore_token(USER_UUID)
+
+        assert await _window_of(token, mock_db) is IdleTimeout.STANDARD
+
+    @pytest.mark.asyncio
+    async def test_a_window_this_instance_does_not_offer_is_refused(self, mock_db):
+        claims = jwt.get_unverified_claims(await create_restore_token(USER_UUID))
+        token = jwt.encode({**claims, "idle_timeout": "forever"}, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
+
+        with patch("src.app.core.security.crud_token_blacklist") as blacklist:
+            blacklist.exists = AsyncMock(return_value=False)
+
+            assert await verify_restore_token(token, mock_db) is None
 
     @pytest.mark.asyncio
     async def test_a_restore_token_cannot_complete_a_profile(self, mock_db):
@@ -549,6 +671,77 @@ class TestRestoreAgainstPostgres:
 
         db.expire_all()
         assert db.get(User, diver_id) is not None
+
+    @pytest.mark.parametrize(
+        ("mint", "idle_timeout", "setting"),
+        [
+            (
+                lambda user_uuid: create_restore_token(user_uuid, idle_timeout=IdleTimeout.EXTENDED),
+                IdleTimeout.EXTENDED,
+                "EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS",
+            ),
+            (
+                lambda user_uuid: create_restore_token(user_uuid),
+                IdleTimeout.STANDARD,
+                "REFRESH_TOKEN_EXPIRE_DAYS",
+            ),
+        ],
+        ids=["extended", "standard"],
+    )
+    @pytest.mark.asyncio
+    async def test_the_restored_session_has_the_window_its_sign_in_asked_for(
+        self, db: Session, async_db: AsyncSession, mint: Any, idle_timeout: IdleTimeout, setting: str
+    ) -> None:
+        """What the devices list and the refresh cookie both say: the session's row and its
+        `Max-Age` are the window the token carries."""
+        diver = create_user(db)
+        diver.is_deleted = True
+        diver.deleted_at = datetime.now(UTC) - timedelta(days=1)
+        db.commit()
+        diver_id, diver_uuid = diver.id, diver.uuid
+        db.expunge_all()
+
+        response = Response()
+        with patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock):
+            await restore_account(
+                request=_request(),
+                body=RestoreRequest(restore_token=await mint(diver_uuid)),
+                response=response,
+                db=async_db,
+            )
+
+        jar: SimpleCookie = SimpleCookie()
+        for header in response.headers.getlist("set-cookie"):
+            jar.load(header)
+        assert int(jar["refresh_token"]["max-age"]) == getattr(settings, setting) * 24 * 60 * 60
+
+        (listed,) = await read_sessions({"id": diver_id}, None, async_db)
+        assert listed.idle_timeout is idle_timeout
+
+    @pytest.mark.asyncio
+    async def test_a_token_minted_by_the_build_before_restores_into_a_standard_session(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The deploy-skew case: a restore screen opened against the previous build and
+        submitted to this one."""
+        diver = create_user(db)
+        diver.is_deleted = True
+        diver.deleted_at = datetime.now(UTC) - timedelta(days=1)
+        db.commit()
+        diver_id, diver_uuid = diver.id, diver.uuid
+        db.expunge_all()
+
+        with patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock):
+            outcome = await restore_account(
+                request=_request(),
+                body=RestoreRequest(restore_token=_previous_builds_restore_token(diver_uuid)),
+                response=Response(),
+                db=async_db,
+            )
+
+        assert outcome.status == "authenticated"
+        (listed,) = await read_sessions({"id": diver_id}, None, async_db)
+        assert listed.idle_timeout is IdleTimeout.STANDARD
 
     @pytest.mark.asyncio
     async def test_the_token_is_spent_so_the_same_screen_cannot_be_submitted_twice(

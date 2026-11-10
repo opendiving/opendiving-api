@@ -6,7 +6,7 @@ import string
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import Any, NamedTuple
 
 import anyio
 import httpx
@@ -19,6 +19,7 @@ from jose import JWTError, jwt
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..schemas.user_session import IdleTimeout
 from .config import settings
 from .db.crud_token_blacklist import crud_token_blacklist
 from .exceptions.http_exceptions import UnauthorizedException
@@ -645,7 +646,15 @@ async def verify_onboarding_token(token: str, db: AsyncSession) -> OnboardingTok
 
 
 # -------------- restore tokens --------------
-async def create_restore_token(user_uuid: uuid_pkg.UUID) -> str:
+class RestoreTokenData(NamedTuple):
+    """What a verified restore token carries: the account it brings back, and the idle
+    window the sign-in that offered it asked for, which the restored session starts with."""
+
+    user_uuid: uuid_pkg.UUID
+    idle_timeout: IdleTimeout
+
+
+async def create_restore_token(user_uuid: uuid_pkg.UUID, *, idle_timeout: IdleTimeout = IdleTimeout.STANDARD) -> str:
     """Mints the token that `POST /auth/restore` spends to bring a soft-deleted account
     back, handed out by `_start_onboarding_or_sign_in` when a verified identity resolves
     to a row inside its deletion grace period.
@@ -666,10 +675,14 @@ async def create_restore_token(user_uuid: uuid_pkg.UUID) -> str:
     The subject is the `uuid` rather than the email the identity was proven with: on the
     passkey path there is no email in play at all, and the row's address can be rewritten
     by `verify_email_change` while the token is in flight.
+
+    `idle_timeout` is signed in so that `POST /auth/restore` starts the session the sign-in
+    asked for without the restore request having to repeat it.
     """
     expire = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=settings.ONBOARDING_TOKEN_EXPIRE_MINUTES)
     to_encode: dict[str, Any] = {
         "sub": str(user_uuid),
+        "idle_timeout": str(idle_timeout),
         "exp": expire,
         "jti": _new_jti(),
         "token_type": TokenType.RESTORE,
@@ -678,13 +691,17 @@ async def create_restore_token(user_uuid: uuid_pkg.UUID) -> str:
     return encoded_jwt
 
 
-async def verify_restore_token(token: str, db: AsyncSession) -> uuid_pkg.UUID | None:
+async def verify_restore_token(token: str, db: AsyncSession) -> RestoreTokenData | None:
     """Validates a restore JWT - not blacklisted (i.e. not already spent on a restore),
-    unexpired, correctly signed, and of the right type - and returns the account it names.
+    unexpired, correctly signed, and of the right type - and returns the account it names
+    with the window its session starts with.
 
     Says nothing about whether that account still exists or is still deleted: the purge can
     take it while the token is in flight, so the caller re-reads the row under a lock (see
     `POST /auth/restore`) rather than trusting this.
+
+    A token with no `idle_timeout` claim was minted by a build that did not sign one in, and
+    is `standard`, the only session a restore started then.
     """
     if await crud_token_blacklist.exists(db, token=token):
         return None
@@ -702,7 +719,10 @@ async def verify_restore_token(token: str, db: AsyncSession) -> uuid_pkg.UUID | 
         return None
 
     try:
-        return uuid_pkg.UUID(subject)
+        return RestoreTokenData(
+            user_uuid=uuid_pkg.UUID(subject),
+            idle_timeout=IdleTimeout(payload.get("idle_timeout", IdleTimeout.STANDARD)),
+        )
     except ValueError:
         return None
 
