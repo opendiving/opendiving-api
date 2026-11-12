@@ -330,7 +330,13 @@ class TestAgainstPostgres:
     ) -> None:
         diver = create_user(db)
         token = await _mint(http, sign_in, diver)
-        preferences = {"depth": "imperial", "pressure": "metric", "temperature": "metric"}
+        preferences = {
+            "depth": "imperial",
+            "pressure": "metric",
+            "volume": "imperial",
+            "weight": "imperial",
+            "temperature": "metric",
+        }
         changed = await http.patch("/api/v1/user", json={"unit_preferences": preferences})
         assert changed.status_code == 200
         await sign_in(diver)
@@ -340,6 +346,20 @@ class TestAgainstPostgres:
         summary = (await http.get(f"/api/v1/checkin/{token}")).json()
         assert summary["diver"]["units"] == "imperial"
         assert summary["diving"]["max_depth"] == FIGURES["max_depth"]
+        changed = await http.patch("/api/v1/user", json={"year_in_review_emails": False})
+        assert changed.status_code == 200
+        await sign_in(diver)
+        assert (await http.get("/api/v1/user")).json()["unit_preferences"] == preferences
+        for invalid in (None, {"depth": "cubits"}, {"unknown": "metric"}, {"pressure": None}):
+            changed = await http.patch("/api/v1/user", json={"unit_preferences": invalid})
+            assert changed.status_code == 422
+            await sign_in(diver)
+            assert (await http.get("/api/v1/user")).json()["unit_preferences"] == preferences
+        changed = await http.patch("/api/v1/user", json={"unit_preferences": {"temperature": "imperial"}})
+        assert changed.status_code == 200
+        await sign_in(diver)
+        assert (await http.get("/api/v1/user")).json()["unit_preferences"] == {"temperature": "imperial"}
+        assert (await http.get(f"/api/v1/checkin/{token}")).json()["diver"]["units"] == "metric"
         changed = await http.patch("/api/v1/user", json={"units": "metric", "unit_preferences": {}})
         assert changed.status_code == 200
         await sign_in(diver)
