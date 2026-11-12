@@ -325,6 +325,28 @@ class TestAgainstPostgres:
         assert answers == {(404, b'{"detail":"Not found"}', NO_STORE)}
 
     @pytest.mark.asyncio
+    async def test_mixed_unit_preferences_persist_and_the_shared_depth_follows_them(
+        self, db: Session, http: httpx.AsyncClient, sign_in: SignIn
+    ) -> None:
+        diver = create_user(db)
+        token = await _mint(http, sign_in, diver)
+        preferences = {"depth": "imperial", "pressure": "metric", "temperature": "metric"}
+        changed = await http.patch("/api/v1/user", json={"unit_preferences": preferences})
+        assert changed.status_code == 200
+        await sign_in(diver)
+        account = (await http.get("/api/v1/user")).json()
+        assert account["units"] == "metric"
+        assert account["unit_preferences"] == preferences
+        summary = (await http.get(f"/api/v1/checkin/{token}")).json()
+        assert summary["diver"]["units"] == "imperial"
+        assert summary["diving"]["max_depth"] == FIGURES["max_depth"]
+        changed = await http.patch("/api/v1/user", json={"units": "metric", "unit_preferences": {}})
+        assert changed.status_code == 200
+        await sign_in(diver)
+        assert (await http.get("/api/v1/user")).json()["unit_preferences"] == {}
+        assert (await http.get(f"/api/v1/checkin/{token}")).json()["diver"]["units"] == "metric"
+
+    @pytest.mark.asyncio
     async def test_the_summary_is_what_the_signed_in_endpoints_say(
         self, db: Session, async_db: AsyncSession, http: httpx.AsyncClient, sign_in: SignIn
     ) -> None:
