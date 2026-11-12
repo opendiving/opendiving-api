@@ -38,6 +38,8 @@ from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_site import DiveSite
 from src.app.models.dive_site_proposal import DiveSiteProposal
 from src.app.models.dive_site_tag import DiveSiteTag
+from src.app.models.dive_species import DiveSpecies
+from src.app.models.species import Species
 from src.app.models.trip_part import TripPart
 from src.app.models.user import User
 from src.app.schemas.geocoding import GeocodeResult
@@ -47,6 +49,7 @@ from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import (
     create_commons_site,
     create_dive_site,
+    create_species,
     create_tag,
     create_trip,
     save_dive_site,
@@ -205,6 +208,11 @@ def _dive_at(db: Session, user: User, site: DiveSite, start: datetime, *, max_de
     db.add(DiveDiveSite(dive_id=dive.id, dive_site_id=site.id, position=0))
     db.commit()
     return dive
+
+
+def _sighting(db: Session, dive: Dive, species: Species) -> None:
+    db.add(DiveSpecies(dive_id=dive.id, species_id=species.id, position=0))
+    db.commit()
 
 
 # -------------- the revision --------------
@@ -742,8 +750,56 @@ class TestYourSites:
             ("place", None),
         ]
 
+    @pytest.mark.asyncio
+    async def test_species_keeps_the_sites_a_live_dive_of_the_caller_s_saw_it_at(
+        self, http: httpx.AsyncClient, db: Session, diver: User, other_diver: User
+    ) -> None:
+        species = create_species(db)
+        first = _own(db, diver)
+        drift_end = create_commons_site(db)
+        save_dive_site(db, drift_end, user=diver)
+        drift = _dive_at(db, diver, first, datetime(2026, 3, 1, tzinfo=UTC))
+        db.add(DiveDiveSite(dive_id=drift.id, dive_site_id=drift_end.id, position=1))
+        _sighting(db, drift, species)
+        later = _own(db, diver)
+        _sighting(db, _dive_at(db, diver, later, datetime(2026, 5, 1, tzinfo=UTC)), species)
+        _dive_at(db, diver, later, datetime(2026, 6, 1, tzinfo=UTC))
+        _dive_at(db, diver, _own(db, diver), datetime(2026, 7, 1, tzinfo=UTC))
+        deleted_at = _own(db, diver)
+        deleted = _dive_at(db, diver, deleted_at, datetime(2026, 8, 1, tzinfo=UTC))
+        _sighting(db, deleted, species)
+        deleted.is_deleted = True
+        db.commit()
+        shared = create_commons_site(db)
+        save_dive_site(db, shared, user=diver)
+        _sighting(db, _dive_at(db, other_diver, shared, datetime(2026, 9, 1, tzinfo=UTC)), species)
+
+        body = await _search(http, my="true", species_uuid=str(species.uuid))
+
+        uuids = [row["uuid"] for row in body["rows"]]
+        # The drift dive's two sites were last dived together, so their order between them is a tie.
+        assert uuids[0] == str(later.uuid) and set(uuids[1:]) == {str(first.uuid), str(drift_end.uuid)}
+        assert body["total_count"] == 3
+        assert body["rows"][0]["dives"]["dive_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_species_answers_an_empty_page(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        _dive_at(db, diver, _own(db, diver), datetime(2026, 5, 1, tzinfo=UTC))
+
+        body = await _search(http, my="true", species_uuid=str(uuid_pkg.uuid4()))
+
+        assert body["rows"] == [] and body["total_count"] == 0
+
     @pytest.mark.parametrize(
-        "narrowing", [{"tag_uuid": str(uuid_pkg.uuid4())}, {"commons_match": "false"}, {"sort": "name"}]
+        "narrowing",
+        [
+            {"tag_uuid": str(uuid_pkg.uuid4())},
+            {"commons_match": "false"},
+            {"species_uuid": str(uuid_pkg.uuid4())},
+            {"sort": "name"},
+        ],
     )
     @pytest.mark.asyncio
     async def test_each_narrowing_without_my_is_a_422(self, http: httpx.AsyncClient, narrowing: dict[str, str]) -> None:

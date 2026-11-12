@@ -31,6 +31,7 @@ from .crud_dive_sites import (
     in_the_commons,
     metres_from,
     readable_by,
+    where_seen,
 )
 from .crud_lookups import get_lookup_page
 
@@ -161,6 +162,7 @@ async def get_site_search_page(
     until: datetime | None,
     tag_id: int | None,
     commons_match: bool,
+    species_id: int | None,
     sort: DiveSiteListSort | None,
     fuzzy: bool,
     offset: int,
@@ -186,6 +188,8 @@ async def get_site_search_page(
         scope.append(carrying_tag(tag_id))
     if commons_match:
         scope.append(has_commons_match(user_id))
+    if species_id is not None:
+        scope.append(where_seen(species_id, user_id=user_id))
 
     if term is None and not my and camera is None:
         data = await get_lookup_page(

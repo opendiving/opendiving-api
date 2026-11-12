@@ -413,6 +413,16 @@ def carrying_tag(tag_id: int) -> ColumnElement[bool]:
     return DiveSite.id.in_(select(DiveSiteTag.dive_site_id).where(DiveSiteTag.tag_id == tag_id))
 
 
+def where_seen(species_id: int, *, user_id: int) -> ColumnElement[bool]:
+    """The sites a live dive of this diver's names, at any position, whose sightings record this
+    species - what its life-list entry's `dive_site_count` counts."""
+    return DiveSite.id.in_(
+        select(DiveDiveSite.dive_site_id)
+        .join(Dive, (Dive.id == DiveDiveSite.dive_id) & (Dive.user_id == user_id) & Dive.is_deleted.is_(False))
+        .join(DiveSpecies, (DiveSpecies.dive_id == Dive.id) & (DiveSpecies.species_id == species_id))
+    )
+
+
 def _live_dives_at_sites(columns: Sequence[Any], *, user_id: int) -> Any:
     """`dive_dive_site` narrowed to the diver's live dives, one row per site and dive.
 

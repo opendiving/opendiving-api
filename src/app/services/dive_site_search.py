@@ -46,6 +46,7 @@ class SiteSearch:
     until: datetime | None
     tag_id: int | None
     commons_match: bool
+    species_id: int | None
     sort: DiveSiteListSort | None
     page: int
     items_per_page: int
@@ -108,6 +109,7 @@ async def search_dive_sites(db: AsyncSession, *, user_id: int, search: SiteSearc
         until=search.until,
         tag_id=search.tag_id,
         commons_match=search.commons_match,
+        species_id=search.species_id,
         sort=search.sort,
         fuzzy=fuzzy,
         offset=offset,

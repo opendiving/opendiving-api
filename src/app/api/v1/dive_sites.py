@@ -48,6 +48,7 @@ from ...crud.crud_dive_sites import (
     search_condition,
 )
 from ...crud.crud_lookups import get_lookup_page
+from ...crud.crud_species import resolve_species_ids
 from ...crud.crud_tags import (
     get_tags_for_dive_sites,
     replace_tags_for_dive_site,
@@ -641,6 +642,10 @@ async def search_dive_sites_and_places(
         bool | None,
         Query(description="With `my`, only the caller's own sites sharing a registry entry with a Commons record"),
     ] = None,
+    species_uuid: Annotated[
+        uuid_pkg.UUID | None,
+        Query(description="With `my`, only the sites where one of the caller's dives recorded this species"),
+    ] = None,
     sort: Annotated[
         DiveSiteListSort | None,
         Query(
@@ -685,9 +690,11 @@ async def search_dive_sites_and_places(
     recently dived first, or with the view only the pinned ones inside it, in the same order.
     With `my=true`, `tag_uuid` keeps the sites carrying that tag - one that is not the
     caller's answers an empty page - `commons_match` the caller's own sites sharing a registry
-    entry with a Commons record, and `sort` orders every site row as `GET /dive-sites` does, the
-    places following them. Any of the three without `my=true` is a 422. `total_count` is the
-    number of site rows, with `my` alone.
+    entry with a Commons record, `species_uuid` the sites any of the caller's dives names, at any
+    position, whose sightings record that species - an unknown species answers an empty page -
+    and `sort` orders every site row as `GET /dive-sites` does, the places following them. Any of
+    the four without `my=true` is a 422. `total_count` is the number of site rows, with `my`
+    alone.
 
     Each site row carries the summary of the caller's dives there in `dives`, null on a Commons
     record they have not saved, and their latest proposal on it in `proposal`. Not cached.
@@ -702,8 +709,8 @@ async def search_dive_sites_and_places(
         raise UnprocessableEntityException("south, north, west and east must be sent together")
     if south is not None and north is not None and south > north:
         raise UnprocessableEntityException("south must not be above north")
-    if not my and (tag_uuid is not None or commons_match is not None or sort is not None):
-        raise UnprocessableEntityException("tag_uuid, commons_match and sort need my=true")
+    if not my and (tag_uuid is not None or commons_match is not None or species_uuid is not None or sort is not None):
+        raise UnprocessableEntityException("tag_uuid, commons_match, species_uuid and sort need my=true")
     await enforce_rate_limit(
         f"dive-site-search:user:{current_user['id']}",
         settings.DIVE_SITE_SEARCH_RATE_LIMIT_PER_USER,
@@ -716,6 +723,10 @@ async def search_dive_sites_and_places(
     if tag_uuid is not None:
         # -1 can never match a tag, so a foreign or unknown uuid answers an empty page.
         tag_id = await resolve_tag_id_for_user(db, tag_uuid=tag_uuid, user_id=user_id) or -1
+    species_id: int | None = None
+    if species_uuid is not None:
+        # The resolver answers None, not an empty map, for an unknown uuid; -1 matches no species.
+        species_id = (await resolve_species_ids(db, [species_uuid]) or {}).get(species_uuid, -1)
     camera = None if latitude is None or longitude is None else (latitude, longitude)
     box = None if south is None or north is None or west is None or east is None else Box(south, north, west, east)
     result = await search_dive_sites(
@@ -729,6 +740,7 @@ async def search_dive_sites_and_places(
             until=lookup_bound(until),
             tag_id=tag_id,
             commons_match=bool(commons_match),
+            species_id=species_id,
             sort=sort,
             page=page,
             items_per_page=items_per_page,
