@@ -14,7 +14,8 @@ matching the wrapping by hand.
 
 - Location: `src/`
 
-- Credentials: `src/.env` (keep safe, but logging to console is OK locally)
+- Credentials: `src/.env`. Never print credentials, tokens or private keys, including in local logs.
+  Redact secret values from diagnostics and command output.
 
 - **`cp src/.env.example src/.env` is not a working configuration, on purpose.** The template's
   `SECRET_KEY` is a published placeholder and startup rejects it in every environment — generate one
@@ -96,6 +97,29 @@ matching the wrapping by hand.
   a maintainer's setting, and the hook checks before it blocks"* in `DECISIONS.md`.
 
 Test, lint, format and type-check commands are in `CONTRIBUTING.md`.
+
+## Contribution checks
+
+Read `CONTRIBUTING.md` before editing. Identify companion web, iOS and install-bundle changes when
+an API contract or configuration changes, and state the migration and deployment order in the PR.
+Link companion PRs in both directions; a published branch is not an open companion PR.
+
+An adapter that reuses an API handler must preserve its contract. Derive upload cardinality and
+idempotency support from the operation that implements them. Reject excess file handles before
+mutation, and advertise retry protection only where the handler actually honors it. Keep exports
+streamed or bounded on disk, enforce quotas before or during consumption, and preserve filenames and
+media types. Test expiry and revocation at quota boundaries so owners have a working deletion or
+reclamation path.
+
+Account-preference changes cover persistence, omission, explicit nulls, replacement and reset
+semantics, including rejection without losing saved state. Trace exports, shared views, background
+jobs and older clients that consume the preference. Keep stored measurement units separate from
+display and entry preferences.
+
+For review fixes, inspect review bodies, inline comments and discussion attachments. Reconcile each
+item with the current diff, rationale comments, documentation and PR description. State what remains
+unverified or blocked. Run the relevant contribution checks and report skipped database-backed tests
+as a verification gap, not a successful database test run.
 
 ## Constraints
 
