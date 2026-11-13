@@ -519,6 +519,10 @@ class TestCredentialsDoNotRenderThemselves:
     def test_a_dsn_in_the_environment_cannot_outrun_its_parts(self, tmp_path, monkeypatch):
         """A set `POSTGRES_URI` would point the app - and the test suite, past its
         `POSTGRES_DB` redirect - somewhere the parts do not say."""
+        monkeypatch.setenv("POSTGRES_SERVER", "localhost")
+        monkeypatch.setenv("POSTGRES_PORT", "5432")
+        monkeypatch.setenv("REDIS_CACHE_HOST", "localhost")
+        monkeypatch.setenv("REDIS_CACHE_PORT", "6379")
         monkeypatch.setenv("POSTGRES_DB", "opendive_test")
         monkeypatch.setenv("POSTGRES_URI", "elsewhere:pw@other-host:5432/opendive")
         monkeypatch.setenv("REDIS_CACHE_URL", "redis://other-host:6379")

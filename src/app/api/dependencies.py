@@ -70,6 +70,12 @@ async def get_current_user(
     The branch on the API-key prefix comes before `verify_token`, so a key never reaches the
     blacklist or the JWT decoder, and every other string takes the path above unchanged.
     """
+    from ..mcp.actor import internal_account
+
+    delegated = internal_account(request)
+    if delegated is not None:
+        return delegated
+
     if is_api_key(token):
         return await _account_for_api_key(request, token, db)
 

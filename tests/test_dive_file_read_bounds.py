@@ -400,13 +400,13 @@ class TestReadingDiveFilesIsRateLimitedPerAccount:
         missing = AsyncMock(side_effect=NotFoundException("Dive not found"))
         monkeypatch.setattr(dives_module, "_get_owned_dive", missing)
         client = _client()
-        attach = {"files": {"file": ("dive.xml", SUUNTO_XML, "application/xml")}, "data": {"file_token": "t"}}
+        files = {"file": ("dive.xml", SUUNTO_XML, "application/xml")}
         path = f"/dive/{uuid_pkg.uuid4()}/recordings"
         csv = {"file": ("export.csv", b"time,depth\n0,0\n", "text/csv")}
 
         parsed = [client.post("/dive/parse", files=csv).status_code for _ in range(30)]
-        attached = [client.post(path, **attach).status_code for _ in range(30)]
-        over = client.post(path, **attach)
+        attached = [client.post(path, files=files, data={"file_token": "t"}).status_code for _ in range(30)]
+        over = client.post(path, files=files, data={"file_token": "t"})
 
         assert set(parsed) == {415} and set(attached) == {404}
         assert over.status_code == 429

@@ -14,6 +14,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
+from httpx2 import Response as HttpResponse
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -160,7 +161,7 @@ def signed_in_client(bounded_app: Any) -> Generator[TestClient]:
         bounded_app.dependency_overrides = {}
 
 
-def _refused(response: httpx.Response) -> list[tuple[list[Any], str]]:
+def _refused(response: HttpResponse) -> list[tuple[list[Any], str]]:
     assert response.status_code == 422, response.text
     return [(error["loc"], error["type"]) for error in response.json()["detail"]]
 

@@ -23,7 +23,7 @@ from unittest.mock import ANY
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import Response
+from httpx2 import Response
 
 from src.app.api import router
 from src.app.core.config import EnvironmentOption, settings
