@@ -25,7 +25,7 @@ _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "build_commons_bu
 
 
 def _load_script() -> Any:
-    """`scripts/` is not a package and is not on the path - it is build-time tooling that
+    """`scripts/` is not a package and is not on the path - it is tooling run by hand that
     ships nowhere - so it is loaded by location rather than imported."""
     spec = importlib.util.spec_from_file_location("build_commons_bundle", _SCRIPT)
     assert spec is not None and spec.loader is not None

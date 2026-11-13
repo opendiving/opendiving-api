@@ -41,12 +41,12 @@ crudadmin_data
 .idea
 .vscode
 
-# ---- docs and build-time tooling: not needed at runtime ----
+# ---- docs and hand-run tooling: not needed at runtime ----
 docs
 *.md
 !README.md
-# Regenerates `src/app/data/`, by hand and over the network. The generated file ships; the
-# generator has no business in a runtime image.
+# Run by hand from a checkout: the generators of `src/app/data/`, whose output ships and they
+# do not, and an operator's tools that reach an instance through its API.
 scripts
 
 # Claude Code working directory - agent worktrees, easily hundreds of MB, and

@@ -141,6 +141,11 @@ dev = [
     # reference validator that needed it are gone, and `divejson` - a main dependency
     # since the importer converts on the request path - brings it in for the tests that
     # call `divejson.validate_document`.
+    # The model client `scripts/propose_species_photos.py` judges photos with, on an
+    # operator's own machine; nothing under `src/` calls a model. It brings `httpx2`, which
+    # `starlette.testclient` then prefers over `httpx`, so a `TestClient` answers `httpx2`
+    # types.
+    "anthropic>=2.8.0",
 ]
 
 [build-system]

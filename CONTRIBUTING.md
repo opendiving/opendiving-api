@@ -57,13 +57,12 @@ not (see *Things that will bite you* below):
 cd src && POSTGRES_SERVER=localhost uv run alembic check
 ```
 
-Note that lint and type-checking cover `tests/` and the build-time `scripts/` as well as `src/`.
-mypy runs as three separate invocations, for two different reasons. `src` and `tests` are split
-because the app is importable as both `app.*` (via `mypy_path`) and `src.app.*` (how the tests
-import it), and asking it to check both roots at once fails with "source file found twice under
-different module names". `scripts` is third only because it sits under neither root; it needs no
-environment, since mypy reads what `build_commons_bundle.py` imports from the app without running
-it.
+Note that lint and type-checking cover `tests/` and the hand-run `scripts/` as well as `src/`. mypy
+runs as three separate invocations, for two different reasons. `src` and `tests` are split because
+the app is importable as both `app.*` (via `mypy_path`) and `src.app.*` (how the tests import it),
+and asking it to check both roots at once fails with "source file found twice under different module
+names". `scripts` is third only because it sits under neither root; it needs no environment, since
+mypy reads what `build_commons_bundle.py` imports from the app without running it.
 
 mypy and pytest need `ENVIRONMENT=local` and a `SECRET_KEY` in the environment. Any value except a
 placeholder: `Settings._reject_placeholder_secret_key` rejects the one `src/.env.example` ships and
@@ -178,7 +177,7 @@ src/app/
   schemas/     Pydantic request/response schemas
   core/        config, security, exceptions, worker, db setup
 src/scripts/   one-shot maintenance scripts, run inside the container
-scripts/       build-time tooling, run by hand and never shipped
+scripts/       tooling run by hand from a checkout and never shipped
 tests/
 ```
 

@@ -11,6 +11,7 @@ from collections.abc import AsyncGenerator, Callable, Generator
 from typing import Any
 
 import httpx
+import httpx2
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
@@ -160,7 +161,7 @@ def signed_in_client(bounded_app: Any) -> Generator[TestClient]:
         bounded_app.dependency_overrides = {}
 
 
-def _refused(response: httpx.Response) -> list[tuple[list[Any], str]]:
+def _refused(response: httpx2.Response) -> list[tuple[list[Any], str]]:
     assert response.status_code == 422, response.text
     return [(error["loc"], error["type"]) for error in response.json()["detail"]]
 
