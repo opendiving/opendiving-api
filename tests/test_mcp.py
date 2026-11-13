@@ -24,7 +24,7 @@ from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.core.setup import create_application
 from src.app.core.utils.request_context import RequestContext
-from src.app.mcp import dispatch, oauth, resources
+from src.app.mcp import dispatch, maintenance, oauth, resources
 from src.app.mcp.transport import install_mcp
 from src.app.mcp.urls import issuer_url, resource_url
 from src.app.models.mcp import McpAuthorization, McpGrant, McpToken
@@ -217,6 +217,29 @@ async def test_refresh_rotation_replay_and_revoke(
     assert rotated.json()["refresh_token"] != tokens["refresh_token"]
     assert (await mcp_http.post("/api/v1/mcp/oauth/token", data=form)).status_code == 400
     assert (await rpc(mcp_http, rotated.json()["access_token"], "tools/list")).status_code == 401
+
+
+async def test_maintenance_purges_connections_whose_code_was_never_exchanged(
+    mcp_http: httpx.AsyncClient,
+    async_sessions: async_sessionmaker[AsyncSession],
+    diver: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = await browser(async_sessions, diver)
+    await connected(mcp_http, headers, ["dives:read"])
+    await authorize(mcp_http, headers, ["dives:read"])
+    assert len((await mcp_http.get("/api/v1/user/mcp/connections", headers=headers)).json()) == 2
+    past = datetime.now(UTC) - timedelta(minutes=3)
+    async with async_sessions() as db:
+        await db.execute(update(McpGrant).where(McpGrant.user_id == diver.id).values(created_at=past))
+        await db.execute(update(McpAuthorization).values(expires_at=past))
+        await db.commit()
+    monkeypatch.setattr(maintenance, "local_session", async_sessions)
+    await maintenance.purge_expired_mcp_data({})
+    async with async_sessions() as db:
+        grants = (await db.scalars(select(McpGrant).where(McpGrant.user_id == diver.id))).all()
+        assert len(grants) == 1
+        assert await db.scalar(select(McpToken).where(McpToken.grant_id == grants[0].id).limit(1)) is not None
 
 
 async def test_connection_activity_tracks_authenticated_requests(

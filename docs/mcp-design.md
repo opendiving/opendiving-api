@@ -104,8 +104,9 @@ spool. A known oversized content length is refused before capturing body chunks.
 are capped at 512 KiB.
 
 The connection activity endpoint records tool names, status codes and timestamps, without arguments
-or content. An hourly worker task removes expired credentials and temporary files, unreferenced
-client registrations, and audit events older than ninety days.
+or content. An hourly worker task removes expired credentials and temporary files, connections whose
+code was never exchanged, unreferenced client registrations, and audit events older than ninety
+days.
 
 ## Verification
 

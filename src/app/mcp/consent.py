@@ -20,6 +20,8 @@ from ..models.mcp import McpAudit, McpAuthorization, McpClient, McpGrant
 from ..models.user import User
 from ..schemas.auth_audit_event import AuthEventType
 
+CODE_LIFETIME = timedelta(minutes=2)
+
 router = APIRouter(prefix="/api/v1/user/mcp", tags=["connected-apps"], dependencies=[Depends(refuse_api_keys)])
 
 
@@ -105,7 +107,7 @@ async def decide_consent(
                 secret_hash=hash_token(code),
                 client_id=row.client_id,
                 params=row.params,
-                expires_at=datetime.now(UTC) + timedelta(minutes=2),
+                expires_at=datetime.now(UTC) + CODE_LIFETIME,
                 grant_id=grant.id,
             )
         )
