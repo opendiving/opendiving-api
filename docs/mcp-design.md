@@ -57,10 +57,11 @@ compatibility. No client secrets are stored.
 
 ## Content boundary
 
-`catalog.py` is a reviewed, explicit list of operations and required permissions. Adding a REST
-route never exposes it through MCP automatically. Credential management, sign-in identity changes,
-check-in links, account deletion and administration are absent. Scope filtering affects both tool
-listing and execution.
+`src/app/authorization/operations.py` is a reviewed, explicit list of operations and required
+permissions. Adding a REST route never exposes it through MCP automatically:
+`tests/test_authorization_operations.py` fails until each authenticated route is listed there or
+excluded with a reason. Credential management, sign-in identity changes, check-in links, account
+deletion and administration are absent. Scope filtering affects both tool listing and execution.
 
 The catalog explicitly distinguishes JSON results from file downloads. File cardinality and
 retry-key support come from each route's OpenAPI contract. A single-file operation accepts one
