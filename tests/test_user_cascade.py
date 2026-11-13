@@ -56,6 +56,7 @@ from src.app.models.invite_link import InviteLink
 from src.app.models.logbook_import import LogbookImport, LogbookImportFile
 from src.app.models.person import Person
 from src.app.models.saved_site import SavedSite
+from src.app.models.species_photo_proposal import SpeciesPhotoProposal
 from src.app.models.tag import Tag
 from src.app.models.trip import Trip
 from src.app.models.trip_part import TripPart
@@ -79,6 +80,7 @@ from tests.helpers.generators import (
     create_gear_set,
     create_logbook_import,
     create_person,
+    create_species,
     create_tag,
     create_trip,
     create_user,
@@ -183,6 +185,10 @@ class TestDeletingAUserTakesEverythingWithIt:
                     last_dive_on=None,
                 ),
                 InviteLink(user_id=diver.id, token=uuid7().hex),
+                # Declined, the status that bars its file for everyone until the purge takes it.
+                SpeciesPhotoProposal(
+                    user_id=diver.id, species_id=create_species(db).id, file="Fish.jpg", status="declined"
+                ),
                 ApiKey(
                     user_id=diver.id,
                     name="laptop",
@@ -265,6 +271,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             LogbookImport,
             Person,
             SavedSite,
+            SpeciesPhotoProposal,
             Tag,
             Trip,
             UserDiveStats,

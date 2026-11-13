@@ -547,6 +547,12 @@ RESOLVER_OWNED_ROUTES = [
         "src.app.services.commons_proposals:locked_proposal",
         "Proposal not found",
     ),
+    OwnedRoute(
+        "DELETE",
+        "/api/v1/species-photo-proposal/{uuid}",
+        "src.app.services.species_photo_proposals:locked_proposal",
+        "Proposal not found",
+    ),
 ]
 
 # The two kinds of entry that belong here. A resource with no owner at all: the species
@@ -558,6 +564,10 @@ RESOLVER_OWNED_ROUTES = [
 # route resolves against the link rather than against a signed-in caller.
 UNOWNED_ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/species/{uuid}"): "The species catalog is global - there is no owner to compare against.",
+    ("POST", "/api/v1/species/{uuid}/photo-proposals"): (
+        "The uuid is the global catalog's, and any account may propose a photo for any species; what "
+        "is written is the caller's own proposal, under their id."
+    ),
     ("GET", "/api/v1/species/{uuid}/photo"): (
         "Same global catalog, and this one does not even authenticate - see its entry in "
         "`test_route_authentication.ANONYMOUS_BY_DESIGN`. The bytes are a freely licensed "
@@ -570,6 +580,7 @@ UNOWNED_ROUTES: dict[tuple[str, str], str] = {
             ("PUT", "/api/v1/admin/species/{uuid}/photo"),
             ("DELETE", "/api/v1/admin/species/{uuid}/photo"),
             ("POST", "/api/v1/admin/species/{uuid}/photo/refetch"),
+            ("GET", "/api/v1/admin/species/{uuid}/photo-proposals"),
         ),
         "The species catalog is global, and these are the operator's routes over it, gated on "
         "the superuser by the `/admin` router - there is no owner to compare against.",
@@ -578,6 +589,8 @@ UNOWNED_ROUTES: dict[tuple[str, str], str] = {
         (
             ("POST", "/api/v1/admin/dive-site-proposal/{uuid}/accept"),
             ("POST", "/api/v1/admin/dive-site-proposal/{uuid}/decline"),
+            ("POST", "/api/v1/admin/species-photo-proposal/{uuid}/accept"),
+            ("POST", "/api/v1/admin/species-photo-proposal/{uuid}/decline"),
         ),
         "A reviewer decides any account's proposal: gated on the superuser by the `/admin` router, "
         "with no owner to compare the caller against.",

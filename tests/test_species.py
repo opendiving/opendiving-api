@@ -2592,6 +2592,7 @@ def _species_read(uuid: uuid_pkg.UUID) -> Any:
         rank="Species",
         status="accepted",
         created_at=datetime.now(UTC),
+        accepts_photo_proposals=True,
     )
 
 

@@ -2210,10 +2210,11 @@ class CommonsFileMissingError(Exception):
 
 # Wikimedia's Robot Policy for its media hosts: "Always keep a total concurrency of at most 2".
 # **Per process**, and that is accepted rather than overlooked: the api runs several workers,
-# but only the admin's photo picker fetches more than one byte stream at a time, one dialog's
-# request is served by one worker, and a resolve or the backfill fetches one each - so what the
-# instance puts in flight is one admin's dialog plus singletons. A Redis-backed semaphore across
-# processes would be machinery for a second admin who does not exist.
+# but only the admin's photo picker and a species' proposal review fetch more than one byte
+# stream at a time, one such request is served by one worker, and a resolve or the backfill
+# fetches one each - so what the instance puts in flight is one admin's screen plus singletons.
+# A Redis-backed semaphore across processes would be machinery for a second admin who does not
+# exist.
 _MEDIA_LIMITER = anyio.CapacityLimiter(2)
 
 
@@ -2277,10 +2278,11 @@ async def _fetch_media(url: str, *, claim_slot: bool) -> tuple[bytes, str] | Non
     it, which is a setting. It admits the two hosts one `imageinfo` reply can name and nothing
     else.
 
-    `claim_slot` is off only for the admin picker's previews: a dialog's worth would spend a
-    large share of `SPECIES_COMMONS_RATE_LIMIT_REQUESTS` in one click, and a diver's resolve
-    running beside it would then find the counter spent and store a completed no-photo verdict.
-    Previews are bounded by the dialog's own cap and by one admin's pace instead.
+    `claim_slot` is off only for the previews the admin's picker and proposal review show: a
+    dialog's worth would spend a large share of `SPECIES_COMMONS_RATE_LIMIT_REQUESTS` in one
+    click, and a diver's resolve running beside it would then find the counter spent and store a
+    completed no-photo verdict. Previews are bounded by each read's cap of `CANDIDATE_LIMIT`
+    files and by one admin's pace instead.
 
     **The `User-Agent` is not optional here.** Wikimedia's policy is the Foundation's and
     applies across its hosts, blocking generic and empty ones; an empty header was measured
@@ -2576,7 +2578,7 @@ async def fetch_photo_for_species(*, scientific_name: str, aphia_id: int) -> Pho
 # How many files the picker offers. `extmetadata` is the expensive `imageinfo` property and
 # Commons asks for few titles at a time when it is requested, and two dozen fills a grid of
 # two, three or four columns evenly.
-_CANDIDATE_LIMIT = 24
+CANDIDATE_LIMIT = 24
 
 # How many members of a category are listed before the non-raster ones are dropped. A
 # `categorymembers` page is titles only and costs one light call whatever its length.
@@ -2721,7 +2723,7 @@ async def photo_candidates(*, wikidata_qid: str | None, photo_file: str | None, 
     Sources in order, de-duplicated: the item's non-deprecated P18 values - what the rule saw -
     then the file stored now, then the members of the item's P373 category, or of one of the
     stored file's own categories when the item names none. Non-raster files are dropped and the
-    list is cut at `_CANDIDATE_LIMIT`.
+    list is cut at `CANDIDATE_LIMIT`.
 
     **Previews travel inline as `data:` URIs** rather than as links: the page's `img-src` admits
     only this instance, an `<img>` cannot carry the bearer header an authenticated preview
@@ -2755,7 +2757,7 @@ async def photo_candidates(*, wikidata_qid: str | None, photo_file: str | None, 
             titles += await _category_files(category)
 
         normalized = [title for raw in titles if (title := species_photos.normalize_file_title(raw)) is not None]
-        chosen = list(dict.fromkeys(normalized))[:_CANDIDATE_LIMIT]
+        chosen = list(dict.fromkeys(normalized))[:CANDIDATE_LIMIT]
         if chosen:
             infos = await _preview_infos(chosen)
         listed = [title for title in chosen if title in infos]
@@ -2779,6 +2781,42 @@ async def photo_candidates(*, wikidata_qid: str | None, photo_file: str | None, 
             for title in listed
         ],
     )
+
+
+async def proposed_files(titles: list[str]) -> dict[str, PhotoCandidate]:
+    """What Commons says of each proposed file, with a preview, keyed by its title: the
+    picker's metadata call and its previews, under its budget, for files an account named.
+
+    A title is absent when Commons has no such file or when its metadata did not arrive - the
+    counter spent, or the budget run out; a candidate's `preview` is `None` when only the bytes
+    did not. The caller keeps `titles` to `CANDIDATE_LIMIT`, since the previews claim no slot.
+    """
+    infos: dict[str, dict[str, Any]] = {}
+    previews: dict[str, str] = {}
+
+    async def load(title: str) -> None:
+        if (preview := await _preview(infos[title])) is not None:
+            previews[title] = preview
+
+    with anyio.move_on_after(_CANDIDATE_BUDGET_SECONDS):
+        unique = list(dict.fromkeys(titles))
+        if unique:
+            infos = await _preview_infos(unique)
+        async with anyio.create_task_group() as tasks:
+            for title in infos:
+                tasks.start_soon(load, title)
+
+    return {
+        title: PhotoCandidate(
+            file=title,
+            width=_int_or_none(info.get("width")),
+            height=_int_or_none(info.get("height")),
+            credit=species_photos.credit_from_imageinfo(info),
+            preview=previews.get(title),
+            is_current=False,
+        )
+        for title, info in infos.items()
+    }
 
 
 async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:

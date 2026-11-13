@@ -144,6 +144,12 @@ class Species(Base, PublicUUIDMixin, TimestampMixin):
     photo_width: Mapped[int | None] = mapped_column(Integer, default=None)
     photo_height: Mapped[int | None] = mapped_column(Integer, default=None)
 
+    @property
+    def accepts_photo_proposals(self) -> bool:
+        """Whether the rule still decides the photo: once the operator pinned or hid it, a
+        proposal has nothing left to change."""
+        return self.photo_curation is None
+
     __table_args__ = (
         # The same unique index `dive_file`, `certification_file` and `user` carry on their
         # own key columns, for the same reason: two rows naming one key would let either

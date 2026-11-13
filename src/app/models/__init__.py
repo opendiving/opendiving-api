@@ -42,6 +42,7 @@ from .person import Person
 from .saved_site import SavedSite
 from .species import Species
 from .species_name import SpeciesName
+from .species_photo_proposal import SpeciesPhotoProposal
 from .tag import Tag
 from .trip import Trip
 from .trip_part import TripPart

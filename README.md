@@ -72,7 +72,9 @@ else; what is here is the source, and the notes for working on it.
   so no visitor's browser ever contacts Wikimedia. A species whose candidates cannot be told apart
   gets no photo rather than a picture of a different animal, nor does one whose only file is
   narrower than 500 px; the author, licence and source travel with it so a credit line can be
-  rendered. The operator can hide a photo, pin another file from Commons, or ask the rule again.
+  rendered. The operator can hide a photo, pin another file from Commons, or ask the rule again. Any
+  account, an API key included, can propose a better Commons file for a species, and the operator
+  accepts it, which pins it, or declines it; proposing asks Wikimedia nothing.
 - **OpenDiving Commons** — an open pool of real dive sites, bundled in the image, so a picker can
   offer "SS Thistlegorm" rather than only the town it is near. A geocoder knows where Dahab is, not
   where the Blue Hole's north entry is. A Commons site is one shared record: your dive names it,
@@ -238,20 +240,21 @@ dive form, account deletion); **API keys**, which a diver creates, lists and rev
 their own; **dives**, the bulk of it, with their **recordings** — attach an export, read one
 recording's per-sample profile back, fold two dives into one — alongside **trips**, **dive sites**
 with the public **Commons** export where this instance is its primary, the shared **species**
-catalog a dive can reference, a **geocoding** helper for naming a site pinned on a map, and the
-**map tiles** every card and page head is composed from, drawn once for the whole instance, with the
-**map style** they are drawn on; **gear** as items, sets, service schedules and service records;
-**certifications** with their card images and the **courses** that issued them; **export** in
-DiveJSON, UDDF, CSV or full-archive form and **import** back from either of the first and the last,
-or from any format the converter reads; **invitations**, which exist only where the operator has
-closed registration (`REGISTRATION_MODE`, documented with the rest of the settings in
-`src/.env.example`) — a member sends and revokes their own, makes, resets and removes their invite
-link, and the routes answer 404 on an open instance; and **admin**, the operator's own — the queue
-of people who have asked to be let in, inviting or removing them in a batch, the daily totals of
-accounts created, sign-ins and active accounts, and the species catalog with its photos to hide, pin
-or re-fetch — which is the one family gated on `is_superuser` rather than merely on having a token.
-All of those want a bearer token: a browser's access token, or for a tool of your own an **API key**
-— created in Settings, `read` or `write`, lasting thirty days, ninety, a year or until revoked, and
+catalog a dive can reference with the **photo proposals** any account may send for it, a
+**geocoding** helper for naming a site pinned on a map, and the **map tiles** every card and page
+head is composed from, drawn once for the whole instance, with the **map style** they are drawn on;
+**gear** as items, sets, service schedules and service records; **certifications** with their card
+images and the **courses** that issued them; **export** in DiveJSON, UDDF, CSV or full-archive form
+and **import** back from either of the first and the last, or from any format the converter reads;
+**invitations**, which exist only where the operator has closed registration (`REGISTRATION_MODE`,
+documented with the rest of the settings in `src/.env.example`) — a member sends and revokes their
+own, makes, resets and removes their invite link, and the routes answer 404 on an open instance; and
+**admin**, the operator's own — the queue of people who have asked to be let in, inviting or
+removing them in a batch, the daily totals of accounts created, sign-ins and active accounts, and
+the species catalog with its photos to hide, pin or re-fetch and its photo proposals to accept or
+decline — which is the one family gated on `is_superuser` rather than merely on having a token. All
+of those want a bearer token: a browser's access token, or for a tool of your own an **API key** —
+created in Settings, `read` or `write`, lasting thirty days, ninety, a year or until revoked, and
 sent on the same `Authorization: Bearer` header. A key is refused on the routes that manage
 credentials, the sign-in address or the account itself, and a `read` key on anything but a safe
 method; `docs/authentication.md` has the rest. The ones that don't are **support**, the auth routes

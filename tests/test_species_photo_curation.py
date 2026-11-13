@@ -432,7 +432,7 @@ class TestThePicker:
         ):
             found = await species_service.photo_candidates(wikidata_qid="Q1", photo_file=None, genus=None)
 
-        assert len(found.candidates) == species_service._CANDIDATE_LIMIT
+        assert len(found.candidates) == species_service.CANDIDATE_LIMIT
 
     @pytest.mark.asyncio
     async def test_a_preview_that_is_not_a_raster_image_is_left_out(self) -> None:

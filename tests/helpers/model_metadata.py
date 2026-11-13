@@ -121,6 +121,13 @@ NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
         "is no `crud_dive_recordings` singleton for the three behaviour classes to exercise, because "
         "nothing addresses a recording without naming the dive it belongs to."
     ),
+    "SpeciesPhotoProposal": (
+        "`DELETE /species-photo-proposal/{uuid}` **withdraws rather than removes**, as a dive-site "
+        "proposal's does: the row stays so the proposer still reads how it ended, and a declined one is "
+        "what bars its file from waiting again; a second withdraw is a 409. The row goes with its account, "
+        "through the cascade. Not registered in the panel: a form that wrote one could decide it without "
+        "the pin the operator's accept runs."
+    ),
     "Species": (
         "Everybody's row rather than one diver's, and nothing in the app deletes a species by design "
         "(see `models/species.py`)."

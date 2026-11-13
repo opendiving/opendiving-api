@@ -40,6 +40,7 @@ from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db.database import release_read_transaction
+from ..crud.crud_species_photo_proposals import settle_waiting_proposals
 from ..models.species import Species
 from ..schemas.species import PhotoCuration
 from . import blob_store
@@ -663,6 +664,10 @@ async def write_curated_photo(
     to write. It also differs on the no-photo path: there the rule's writer only stamps, while
     an admin who hid a photo or a re-fetch the rule declined means the stored photo goes, so
     every photo column is cleared and the old blob unlinked after the commit.
+
+    A pin or a hide also settles the species' waiting photo proposals in the same transaction,
+    after the row's update has locked it: a proposal that commits first is settled here, and
+    one proposed after waits on the lock and then finds the species curated.
     """
     now = datetime.now(UTC)
     if photo is None:
@@ -678,6 +683,9 @@ async def write_curated_photo(
     await db.execute(
         update(Species).where(Species.id == species_id).values(**values, photo_curation=curation, photo_fetched_at=now)
     )
+    if curation is not None:
+        pinned_file = photo.file if curation is PhotoCuration.PINNED and photo is not None else None
+        await settle_waiting_proposals(db, species_id=species_id, pinned_file=pinned_file, now=now)
     if existing_key is not None and existing_key != key:
         blob_store.delete_after_commit(db, existing_key)
     await db.commit()

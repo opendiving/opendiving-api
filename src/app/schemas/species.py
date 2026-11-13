@@ -115,6 +115,13 @@ class SpeciesRead(SpeciesBase, SpeciesPhotoCredit, PublicUUIDSchema):
     # The same digest `SpeciesInfo` carries, and the same contract - see there. Non-null
     # means there is a photo; the client builds `/species/{uuid}/photo?v=<prefix>` itself.
     photo_sha256: Annotated[str | None, Field(default=None, max_length=64)]
+    accepts_photo_proposals: Annotated[
+        bool,
+        Field(
+            description="True while the automatic selection decides this species' photo, which is when a "
+            "proposed photo can wait for review; false once the operator pinned or hid it"
+        ),
+    ]
 
 
 class SpeciesSearchResult(BaseModel):
@@ -269,16 +276,18 @@ class PhotoCuration(StrEnum):
 
 class AdminSpeciesFilter(StrEnum):
     """The catalog page's chips, each a predicate on the row. `narrow` is a photo under the
-    size floor, which only a pin can hold once the backfill's `--recheck-size` has run."""
+    size floor, which only a pin can hold once the backfill's `--recheck-size` has run;
+    `proposed` is a species with a photo proposal waiting."""
 
     WITH_PHOTO = "with_photo"
     WITHOUT_PHOTO = "without_photo"
     HIDDEN = "hidden"
     PINNED = "pinned"
     NARROW = "narrow"
+    PROPOSED = "proposed"
 
 
-class AdminSpeciesRead(SpeciesRead):
+class AdminSpeciesColumns(SpeciesRead):
     """`SpeciesRead` plus what an operator curating photos needs: when the rule last ran, what
     a human decided, and the stored bytes' size so a grid can reserve the box before the image
     arrives. Only the `/admin` routes return it, which is what keeps `SpeciesRead` - and every
@@ -290,6 +299,16 @@ class AdminSpeciesRead(SpeciesRead):
     ]
     photo_width: Annotated[int | None, Field(default=None, ge=1)]
     photo_height: Annotated[int | None, Field(default=None, ge=1)]
+
+
+class AdminSpeciesRead(AdminSpeciesColumns):
+    """One row of the operator's catalog, as the list and every species photo route answer it:
+    the row's columns and the count of photo proposals waiting on it, which a second query
+    supplies."""
+
+    photo_proposals_waiting: Annotated[
+        int, Field(ge=0, description="How many photo proposals wait for review on this species")
+    ]
 
 
 class AdminSpeciesPhotoPin(BaseModel):

@@ -716,7 +716,9 @@ class SpeciesSettings(BaseSettings):
     # Wikimedia Commons, asked for a photo's credit metadata and thumbnail URL once a Wikidata
     # entity has named the file (P18) or an admin has, and - for an admin choosing one - for
     # the files in a species' Commons category. Unlike the two above it is asked nothing a
-    # diver typed - it receives file and category titles derived from an AphiaID.
+    # diver typed into a search - it receives file and category titles derived from an AphiaID,
+    # and the title of a file an account proposed as a species' photo, when the operator reviews
+    # or accepts that proposal.
     #
     # **A setting, while the hosts the bytes are fetched from are hard-coded.** That asymmetry
     # is the point: `services.species_photos` will only ever fetch image bytes from the two
@@ -742,6 +744,14 @@ class SpeciesSettings(BaseSettings):
     SPECIES_RATE_LIMIT_WINDOW_SECONDS: int = config("SPECIES_RATE_LIMIT_WINDOW_SECONDS", default=3600)
     SPECIES_RATE_LIMIT_PER_USER: int = config("SPECIES_RATE_LIMIT_PER_USER", default=600)
 
+    # How many species photos one account may propose a day. Sized for a tool working through a
+    # life list in one run, each proposal a person's time on review; past it,
+    # `POST /species/{uuid}/photo-proposals` answers 429.
+    SPECIES_PHOTO_PROPOSAL_RATE_LIMIT_WINDOW_SECONDS: int = config(
+        "SPECIES_PHOTO_PROPOSAL_RATE_LIMIT_WINDOW_SECONDS", default=86400
+    )
+    SPECIES_PHOTO_PROPOSAL_RATE_LIMIT_PER_USER: int = config("SPECIES_PHOTO_PROPOSAL_RATE_LIMIT_PER_USER", default=100)
+
     # What the *instance* may spend on each provider, counted across all users and charged
     # only to calls that actually leave. Exceeding one is not a 429 - the counter is global,
     # so raising would mean one diver's search rejecting another's. That provider simply
@@ -760,10 +770,11 @@ class SpeciesSettings(BaseSettings):
     # Lower than Wikidata's: this one is charged at most twice per *new* species (the credit
     # call and the byte fetch) rather than once per enriched search candidate, so a number
     # that would bottleneck a picker cannot bottleneck this. An admin adds to it - two or three
-    # metadata calls to open the photo picker, two for a pin - but the picker's previews are
-    # charged nothing: a dialog's worth would spend a large share of the window in one click
-    # and leave a diver's resolve beside it with no slot. The picker's own cap and one admin's
-    # pace bound those instead.
+    # metadata calls to open the photo picker, one to read a species' photo proposals, two for a
+    # pin or an accepted proposal - but the previews either read shows are charged nothing: a
+    # dialog's worth would spend a large share of the window in one click and leave a diver's
+    # resolve beside it with no slot. Each read's own cap of two dozen files and one admin's pace
+    # bound those instead.
     SPECIES_COMMONS_RATE_LIMIT_WINDOW_SECONDS: int = config("SPECIES_COMMONS_RATE_LIMIT_WINDOW_SECONDS", default=60)
     SPECIES_COMMONS_RATE_LIMIT_REQUESTS: int = config("SPECIES_COMMONS_RATE_LIMIT_REQUESTS", default=120)
 

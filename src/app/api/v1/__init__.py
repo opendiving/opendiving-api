@@ -32,6 +32,7 @@ from .passkeys import router as passkeys_router
 from .people import router as people_router
 from .sessions import router as sessions_router
 from .species import router as species_router
+from .species_photo_proposals import router as species_photo_proposals_router
 from .support import router as support_router
 from .tags import router as tags_router
 from .trips import router as trips_router
@@ -66,6 +67,7 @@ router.include_router(checkin_details_router)
 router.include_router(checkin_links_router)
 router.include_router(download_tickets_router)
 router.include_router(species_router)
+router.include_router(species_photo_proposals_router)
 router.include_router(dives_router)
 router.include_router(dive_drafts_router)
 router.include_router(dive_conditions_router)
