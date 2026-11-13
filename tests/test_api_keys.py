@@ -60,7 +60,8 @@ CONTEXT = RequestContext(ip="203.0.113.7", user_agent="Mozilla/5.0 (X11; Linux x
 # held to it without anyone remembering to add it here.
 REFUSING_PREFIXES = (
     "/api/v1/user/api-key",
-    "/api/v1/user/mcp",
+    # Registered only when the MCP server runs.
+    *(("/api/v1/user/mcp",) if settings.MCP_ENABLED else ()),
     "/api/v1/user/passkey",
     "/api/v1/user/session",
     "/api/v1/user/checkin-link",
