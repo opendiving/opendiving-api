@@ -16,7 +16,8 @@ Four stages, in this order, and the order is the design:
    is written, because it commits and can take a minute.
 4. `batch.import_batch` plans each file (`planner.plan_import`) and writes it
    (`writer.write_import`) before the next is planned, in one transaction; the upload's
-   pass rolls it back, and the apply's caller commits, once.
+   review pass rolls it back, and the caller of a writing pass - the apply, or an upload
+   applied at once - commits, once.
 """
 
 from .batch import BatchReport, batch_species, import_batch

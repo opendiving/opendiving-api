@@ -3,9 +3,11 @@ volume. What the files make of each other is `test_logbook_import_batch.py`; thi
 for how long, and what an apply does with it.
 """
 
+import asyncio
 import hashlib
 import io
 import json
+import re
 import uuid as uuid_pkg
 import zipfile
 from datetime import UTC, datetime, timedelta
@@ -34,6 +36,7 @@ from src.app.models.dive_file import DiveFile
 from src.app.models.dive_mixture import DiveMixture
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.dive_site import DiveSite
+from src.app.models.idempotency_hold import IdempotencyHold
 from src.app.models.logbook_import import LogbookImport, LogbookImportFile
 from src.app.models.user import User
 from src.app.schemas.dive import DiveReadInternal
@@ -62,9 +65,10 @@ from tests.helpers.generators import (
     create_logbook_import,
     create_user,
 )
-from tests.helpers.held_imports import apply, body_of, caller, discard, upload, upload_and_apply
+from tests.helpers.held_imports import apply, apply_at_once, body_of, caller, discard, upload, upload_and_apply
 from tests.helpers.images import phone_jpeg
-from tests.helpers.import_parts import parts_of
+from tests.helpers.import_parts import import_request, parts_of
+from tests.test_logbook_import_batch import _logbook as _what_is_stored
 
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
@@ -1229,3 +1233,348 @@ class TestASiteReplacedWhileTheImportWaits:
             .where(Dive.user_id == diver.id)
         )
         assert named.all() == [record.id]
+
+
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_MINTED_MEMBERS = {"id", "created_at", "updated_at", "applied_at", "expires_at"}
+
+
+def _bar_minted(node: Any) -> Any:
+    """An answer with what each run mints left out: its identifiers, its row ids and its moments."""
+    if isinstance(node, dict):
+        return {key: _bar_minted(value) for key, value in node.items() if key not in _MINTED_MEMBERS}
+    if isinstance(node, list):
+        return [_bar_minted(value) for value in node]
+    if isinstance(node, str):
+        return _UUID.sub("<uuid>", node)
+    return node
+
+
+async def _dive_count(db: AsyncSession, user: User) -> int:
+    return int(
+        await db.scalar(
+            select(func.count()).select_from(Dive).where(Dive.user_id == user.id, Dive.is_deleted.is_(False))
+        )
+        or 0
+    )
+
+
+async def _holds(db: AsyncSession, user: User) -> int:
+    return int(
+        await db.scalar(select(func.count()).select_from(IdempotencyHold).where(IdempotencyHold.user_id == user.id))
+        or 0
+    )
+
+
+def _together(monkeypatch: pytest.MonkeyPatch, *hooks: str) -> None:
+    """Hold the next two requests at `hooks` of the routes until both have reached one, after the
+    body is read and before any pass, so the passes start side by side. Later ones go through."""
+    barrier = asyncio.Barrier(2)
+    reached = 0
+    for name in hooks:
+        original = getattr(import_routes, name)
+
+        async def waiting(*args: Any, _original: Any = original, **kwargs: Any) -> Any:
+            nonlocal reached
+            reached += 1
+            if reached <= 2:
+                await asyncio.wait_for(barrier.wait(), timeout=30)
+            return await _original(*args, **kwargs)
+
+        monkeypatch.setattr(import_routes, name, waiting)
+
+
+class TestAppliedAtOnce:
+    @pytest.mark.parametrize(
+        ("before", "files"),
+        [
+            ([], [("dive.fit", OCEAN_FIT), ("dive.json", OCEAN_JSON), ("notes.csv", UNREADABLE)]),
+            ([("dive.fit", OCEAN_FIT)], [("dive.json", OCEAN_JSON)]),
+            ([("dive.fit", OCEAN_FIT)], [("dive.fit", OCEAN_FIT)]),
+        ],
+        ids=["new", "modified", "unchanged"],
+    )
+    @pytest.mark.asyncio
+    async def test_it_is_the_upload_and_the_apply_in_one(
+        self, async_db: AsyncSession, db: Session, before: list[tuple[str, bytes]], files: list[tuple[str, bytes]]
+    ) -> None:
+        paired, at_once = create_user(db), create_user(db)
+        for diver in (paired, at_once):
+            if before:
+                await upload_and_apply(async_db, diver, before)
+
+        pair = await upload_and_apply(async_db, paired, files)
+        once = await apply_at_once(async_db, at_once, files)
+
+        assert once["status"] == "applied"
+        assert _bar_minted(once) == _bar_minted(pair)
+        assert _bar_minted(await _notes(async_db, at_once, once["uuid"])) == _bar_minted(
+            await _notes(async_db, paired, pair["uuid"])
+        )
+        assert await _what_is_stored(async_db, at_once) == await _what_is_stored(async_db, paired)
+
+    @pytest.mark.asyncio
+    async def test_a_new_row_carries_the_dive_it_wrote(self, async_db: AsyncSession, db: Session) -> None:
+        diver = create_user(db)
+
+        body = await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)])
+
+        [row] = body["dives"]
+        stored = await async_db.scalar(select(Dive).where(Dive.user_id == diver.id))
+        assert stored is not None and row["outcome"] == "new" and row["uuid"] == str(stored.uuid)
+        assert row["dive"]["uuid"] == row["uuid"]
+        assert (body["check_in_details"], body["portrait"]) == ([], None)
+        LogbookImportRead.model_validate(body)
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_held_and_the_import_is_history(self, async_db: AsyncSession, db: Session) -> None:
+        diver = create_user(db)
+
+        body = await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT), ("notes.csv", UNREADABLE)])
+
+        [row] = await _rows(async_db, diver)
+        assert (row.status, row.sources, row.remaps) == ("applied", [], {})
+        assert row.expires_at is not None and row.expires_at > datetime.now(UTC) + timedelta(days=1)
+        assert await _files(async_db, diver) == []
+        kept = (await async_db.scalars(select(DiveFile.storage_key).where(DiveFile.user_id == diver.id))).all()
+        assert sorted(blob_store.iter_keys()) == sorted(kept)
+        assert (await _refusal(_pending(async_db, diver))).status_code == 404
+        [listed] = (await _history(async_db, diver))["data"]
+        assert str(listed["uuid"]) == body["uuid"]
+        read = await import_routes.read_logbook_import(uuid=body["uuid"], current_user=caller(diver), db=async_db)
+        assert body_of(read) == body
+
+        again = await upload(async_db, diver, [("dive.json", OCEAN_JSON)])
+
+        assert again["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_a_pending_import_neither_refuses_it_nor_is_touched(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        review = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        held = [file.storage_key for file in await _files(async_db, diver)]
+
+        once = await apply_at_once(async_db, diver, [("dive.json", OCEAN_JSON)])
+
+        assert [row["outcome"] for row in once["dives"]] == ["new"]
+        assert await _pending(async_db, diver) == review
+        assert [file.storage_key for file in await _files(async_db, diver)] == held
+
+        applied = await apply(async_db, diver, review["uuid"])
+
+        assert [row["outcome"] for row in applied["dives"]] == ["modified"]
+        assert await _dive_count(async_db, diver) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_caches_are_dropped_after_the_commit(self, async_db: AsyncSession, db: Session) -> None:
+        diver = create_user(db)
+
+        await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)])
+
+        import_routes.invalidate_dive_caches.assert_awaited_once_with(diver.id)  # type: ignore[attr-defined]
+        import_routes.invalidate_trip_caches.assert_awaited_once_with(diver.id)  # type: ignore[attr-defined]
+
+    @pytest.mark.parametrize("spent", ["import", "import-apply"])
+    @pytest.mark.asyncio
+    async def test_either_budget_spent_is_a_429_before_the_body(
+        self, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch, spent: str
+    ) -> None:
+        diver = create_user(db)
+
+        async def limit(key: str, *args: Any) -> None:
+            if key.startswith(f"{spent}:user:"):
+                raise RateLimitException("Too many")
+
+        monkeypatch.setattr(import_routes, "enforce_rate_limit", limit)
+        read = AsyncMock()
+        monkeypatch.setattr(import_routes, "read_import_request", read)
+
+        assert (await _refusal(apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)]))).status_code == 429
+        read.assert_not_awaited()
+        assert await _rows(async_db, diver) == []
+
+    @pytest.mark.asyncio
+    async def test_it_spends_one_from_each_budget(
+        self, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        diver = create_user(db)
+        spent: list[str] = []
+
+        async def limit(key: str, *args: Any) -> None:
+            spent.append(key)
+
+        monkeypatch.setattr(import_routes, "enforce_rate_limit", limit)
+
+        await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)])
+
+        assert sorted(spent) == [f"import-apply:user:{diver.id}", f"import:user:{diver.id}"]
+
+
+class TestAppliedAtOnceUnderAKey:
+    @pytest.mark.asyncio
+    async def test_a_repeat_reads_no_body_and_answers_the_first_import(
+        self, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        diver = create_user(db)
+        first = await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)], key="walk-1")
+        read = AsyncMock()
+        monkeypatch.setattr(import_routes, "read_import_request", read)
+
+        repeat = await import_routes.create_logbook_import(
+            request=import_request([("another.json", OCEAN_JSON)]),
+            current_user=caller(diver),
+            db=async_db,
+            apply=True,
+            idempotency_key="walk-1",
+        )
+
+        assert repeat.status_code == 201 and body_of(repeat) == first
+        read.assert_not_awaited()
+        assert len(await _rows(async_db, diver)) == 1
+        assert await _dive_count(async_db, diver) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_key_is_the_account_s_and_the_route_s(self, async_db: AsyncSession, db: Session) -> None:
+        diver, stranger = create_user(db), create_user(db)
+        await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)], key="walk-1")
+
+        theirs = await apply_at_once(async_db, stranger, [("dive.fit", OCEAN_FIT)], key="walk-1")
+
+        assert [row["outcome"] for row in theirs["dives"]] == ["new"]
+
+    @pytest.mark.asyncio
+    async def test_a_repeat_after_the_import_is_gone_is_a_410(self, async_db: AsyncSession, db: Session) -> None:
+        diver = create_user(db)
+        first = await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)], key="walk-1")
+        await apply_at_once(async_db, diver, [("dive.json", OCEAN_JSON)], key="walk-2")
+        await discard(async_db, diver, first["uuid"], LogbookImportStatus.APPLIED)
+        await _age(async_db, diver)
+
+        for key in ("walk-1", "walk-2"):
+            refused = await _refusal(apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)], key=key))
+            assert refused.status_code == 410
+
+    @pytest.mark.asyncio
+    async def test_a_refused_first_leaves_the_key_unused(self, async_db: AsyncSession, db: Session) -> None:
+        diver = create_user(db)
+
+        refused = await _refusal(apply_at_once(async_db, diver, [("notes.csv", UNREADABLE)], key="walk-1"))
+
+        assert refused.status_code == 415
+        assert await _holds(async_db, diver) == 0
+        made = await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)], key="walk-1")
+        assert [row["outcome"] for row in made["dives"]] == ["new"]
+        assert await _holds(async_db, diver) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_first_that_fails_after_its_pass_leaves_the_key_unused(
+        self, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        diver = create_user(db)
+        written = import_routes.apply_upload
+
+        async def failing(*args: Any, **kwargs: Any) -> Any:
+            await written(*args, **kwargs)
+            raise RuntimeError("the connection went")
+
+        monkeypatch.setattr(import_routes, "apply_upload", failing)
+
+        with pytest.raises(RuntimeError):
+            await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)], key="walk-1")
+        await async_db.rollback()
+        monkeypatch.setattr(import_routes, "apply_upload", written)
+
+        assert await _holds(async_db, diver) == 0 and await _dive_count(async_db, diver) == 0
+        made = await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)], key="walk-1")
+        assert [row["outcome"] for row in made["dives"]] == ["new"]
+
+    @pytest.mark.asyncio
+    async def test_a_repeat_sent_while_the_first_runs_is_a_409_and_writes_nothing(
+        self,
+        async_sessions: async_sessionmaker[AsyncSession],
+        async_db: AsyncSession,
+        db: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        diver = create_user(db)
+        _together(monkeypatch, "resolve_catalog_gaps")
+
+        async with async_sessions() as one, async_sessions() as two:
+            answers = await asyncio.gather(
+                apply_at_once(one, diver, [("dive.fit", OCEAN_FIT)], key="walk-1"),
+                apply_at_once(two, diver, [("dive.json", OCEAN_JSON)], key="walk-1"),
+                return_exceptions=True,
+            )
+
+        [made] = [answer for answer in answers if isinstance(answer, dict)]
+        [refused] = [answer for answer in answers if isinstance(answer, HTTPException)]
+        assert refused.status_code == 409
+        assert len(await _rows(async_db, diver)) == 1 and await _holds(async_db, diver) == 1
+        assert await _dive_count(async_db, diver) == 1
+        assert (await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)], key="walk-1")) == made
+
+
+class TestPassesOfOneAccountTakeTurns:
+    """Two passes carrying a dive the account does not have, started side by side."""
+
+    @pytest.mark.asyncio
+    async def test_two_imports_applied_at_once_make_one_dive(
+        self,
+        async_sessions: async_sessionmaker[AsyncSession],
+        async_db: AsyncSession,
+        db: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        diver = create_user(db)
+        _together(monkeypatch, "resolve_catalog_gaps")
+
+        async with async_sessions() as one, async_sessions() as two:
+            answers = await asyncio.gather(
+                apply_at_once(one, diver, [("dive.fit", OCEAN_FIT)]),
+                apply_at_once(two, diver, [("dive.fit", OCEAN_FIT)]),
+            )
+
+        assert sorted(row["outcome"] for answer in answers for row in answer["dives"]) == ["new", "unchanged"]
+        assert await _dive_count(async_db, diver) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_apply_and_an_import_applied_at_once_make_one_dive(
+        self,
+        async_sessions: async_sessionmaker[AsyncSession],
+        async_db: AsyncSession,
+        db: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        diver = create_user(db)
+        review = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        _together(monkeypatch, "resolve_catalog_gaps", "lock_import")
+
+        async with async_sessions() as one, async_sessions() as two:
+            answers = await asyncio.gather(
+                apply(one, diver, review["uuid"]), apply_at_once(two, diver, [("dive.fit", OCEAN_FIT)])
+            )
+
+        assert sorted(row["outcome"] for answer in answers for row in answer["dives"]) == ["new", "unchanged"]
+        assert await _dive_count(async_db, diver) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_upload_s_review_beside_an_import_applied_at_once_writes_one_dive(
+        self,
+        async_sessions: async_sessionmaker[AsyncSession],
+        async_db: AsyncSession,
+        db: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        diver = create_user(db)
+        _together(monkeypatch, "resolve_catalog_gaps")
+
+        async with async_sessions() as one, async_sessions() as two:
+            review, once = await asyncio.gather(
+                upload(one, diver, [("dive.fit", OCEAN_FIT)]), apply_at_once(two, diver, [("dive.fit", OCEAN_FIT)])
+            )
+
+        assert [row["outcome"] for row in once["dives"]] == ["new"]
+        assert [row["outcome"] for row in review["dives"]] in (["new"], ["unchanged"])
+        assert review["status"] == "pending" and await _dive_count(async_db, diver) == 1

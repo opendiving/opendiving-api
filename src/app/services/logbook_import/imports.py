@@ -2,7 +2,14 @@
 
 **The files travel once.** `POST /imports` keeps the readable files in the blob store and the
 review on a `logbook_import` row, one pending per account, so any device can read it and finish
-it. The apply sends no bytes: it reads the held files back and runs the same pass.
+it. The apply sends no bytes: it reads the held files back and runs the same pass. An upload
+applied at once is that pair in one request: one pass that writes, stored as the applied import the
+pair would leave, holding no file and never taking or reading the pending slot.
+
+**An account's passes take turns.** The upload's review pass, the apply's and the one of an upload
+applied at once each run under one lock of the account, held to the end of the pass's transaction:
+the review pass writes the same rows before it rolls them back, so without it two passes carrying
+one new dive race on its uuid.
 
 **The review is the contract.** It is what the pass reported, stored as JSON and served as stored,
 never validated against the current schemas - so a row written by an earlier build still answers,
@@ -73,6 +80,17 @@ ROLE_PORTRAIT = "portrait"
 _OVERTAKEN = "This dive reached your logbook another way after the review, so the import did not create it."
 _UNSHOWN = "The review did not show this dive, because your logbook changed after it."
 _UNREAD_SINCE = "This dive's file could no longer be read when the import was applied, so nothing was written for it."
+
+
+# The namespace of the per-account lock `lock_account_imports` takes, keyed `(this, user_id)`, beside
+# the other two-integer advisory locks' (`crud_invitations`, `crud_authentication_requests`).
+_ACCOUNT_IMPORT_LOCK = 0x0D1E_0004
+
+
+async def lock_account_imports(db: AsyncSession, *, user_id: int) -> None:
+    """Wait for any other import pass of the account, and hold its turn until this transaction
+    ends. Taken before anything the pass reads, so it plans against what the other wrote."""
+    await db.execute(select(func.pg_advisory_xact_lock(_ACCOUNT_IMPORT_LOCK, user_id)))
 
 
 def _is_live(now: datetime) -> ColumnElement[bool]:
@@ -270,6 +288,7 @@ async def hold_upload(
     The claim comes last so that no transaction stays open across the store, and an upload that
     loses it to another takes back the files it wrote: no row ever named them.
     """
+    await lock_account_imports(db, user_id=user_id)
     numbering = await summarize_numbering(db=db, user_id=user_id)
     report = await import_batch(
         db,
@@ -320,6 +339,48 @@ async def hold_upload(
         raise (_overtaken_conflict() if winner is None else _pending_conflict(winner)) from exc
     db.add_all(LogbookImportFile(logbook_import_id=held.id, **file) for file in files)
     return held
+
+
+async def apply_upload(
+    db: AsyncSession, *, user_id: int, batch: LoadedBatch, newly_resolved_aphia_ids: frozenset[int]
+) -> LogbookImport:
+    """Write the batch and store it as an applied import, with no review before it. Leaves the
+    commit to the caller.
+
+    What `hold_upload` then `apply_held` with no choices would leave: the pass the apply runs, its
+    new dives serialised as the review's would have been, and the row the apply settles to, less
+    what only the apply's second pass reads - the held files, the sources and what was minted.
+    """
+    await lock_account_imports(db, user_id=user_id)
+    numbering = await summarize_numbering(db=db, user_id=user_id)
+    report = await import_batch(
+        db,
+        user_id=user_id,
+        batch=batch,
+        apply=True,
+        resolution_ran=True,
+        newly_resolved_aphia_ids=newly_resolved_aphia_ids,
+        serialise_new=True,
+    )
+    dives = [_wire_dive(row) for row in report.dives]
+    now = datetime.now(UTC)
+    applied = LogbookImport(
+        user_id=user_id,
+        review_shape=REVIEW_SHAPE,
+        status=LogbookImportStatus.APPLIED.value,
+        created_at=now,
+        applied_at=now,
+        expires_at=_history_expiry(now),
+        review={**_review_of(report, numbering, dives), "check_in_details": [], "portrait": None},
+        notes=_notes_of(
+            report,
+            [_row_notes(dive, row.notes, row.notes_truncated) for dive, row in zip(dives, report.dives, strict=True)],
+        ),
+        counts=_counts(dives),
+    )
+    db.add(applied)
+    await db.flush()
+    return applied
 
 
 async def find_import(db: AsyncSession, *, user_id: int, uuid: uuid_pkg.UUID) -> LogbookImport | None:
@@ -607,6 +668,7 @@ async def apply_held(
     portrait: ImportPortraitChoice | None,
 ) -> None:
     """Write the import as reviewed, on the locked row. Leaves the commit to the caller."""
+    await lock_account_imports(db, user_id=user_id)
     review = dict(row.review)
     rows = [dict(dive) for dive in review["dives"]]
     held = [

@@ -9,6 +9,10 @@ answered, and performs nothing.
 
 `read` is the path of the record's `GET` as its router declares it, looked up in the app's
 routes at the first replay, because every module defines that handler below its create.
+
+A route that cannot claim before its body runs - one that releases its transaction to read a body
+too large to digest - keeps its holds by hand with `find_hold` and `name_hold` instead: the key
+alone names its request, and the hold is written beside the record, so it never names nothing.
 """
 
 import hashlib
@@ -37,6 +41,9 @@ HOLD_INDEX = "ux_idempotency_hold_user_id_route_key"
 IN_FLIGHT = "A request with this Idempotency-Key is still being performed. Retry it shortly."
 DIFFERENT_REQUEST = "This Idempotency-Key was already used for a different request."
 DELETED = "The request with this Idempotency-Key created a record that has since been deleted."
+
+# The digest of a hold whose key alone names the request, which no body is compared against.
+KEY_ALONE = ""
 
 ReadRoute = Callable[..., Awaitable[Any]]
 
@@ -151,6 +158,32 @@ class IdempotentCreate:
         raise IdempotentReplay(
             held.status_code, jsonable_encoder(response_model.model_validate(record, from_attributes=True))
         )
+
+
+async def find_hold(db: AsyncSession, *, user_id: int, route: str, key: str) -> IdempotencyHold | None:
+    held: IdempotencyHold | None = await db.scalar(
+        select(IdempotencyHold).where(
+            IdempotencyHold.user_id == user_id, IdempotencyHold.route == route, IdempotencyHold.key == key
+        )
+    )
+    return held
+
+
+def name_hold(
+    db: AsyncSession, *, user_id: int, route: str, key: str, status_code: int, record: PublicUUIDMixin
+) -> None:
+    """A hold naming `record`, to commit with it. The caller has made sure the key is unheld,
+    under a lock the account's requests on the route all take."""
+    db.add(
+        IdempotencyHold(
+            user_id=user_id,
+            route=route,
+            key=key,
+            request_digest=KEY_ALONE,
+            status_code=status_code,
+            record_uuid=record.uuid,
+        )
+    )
 
 
 def _name_the_record(session: Session, pending: _Pending) -> None:

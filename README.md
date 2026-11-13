@@ -111,10 +111,12 @@ else; what is here is the source, and the notes for working on it.
 - **Logbook import** — put any number of files into an account at once, in any mix of the formats it
   reads. They are uploaded once and held on the server, with a review of each dive that is new, what
   changes on the ones you have, and what is skipped, which any device of the account can read; the
-  apply writes the lot as reviewed in one transaction, and the import stays in its history. A
-  DiveJSON document or a full-export archive goes in as it is; a UDDF file, a Subsurface `.ssrf`, a
-  FIT file, a Suunto app export, a Suunto DM5 XML export, a Shearwater Cloud database or XML export,
-  or a `.zip` of any of those is converted on the way in by the
+  apply writes the lot as reviewed in one transaction, and the import stays in its history. An
+  upload can instead ask to be applied at once, for a client importing what arrives with nobody
+  there to review it: it writes what that upload and apply would, holds no file and leaves nothing
+  pending. A DiveJSON document or a full-export archive goes in as it is; a UDDF file, a Subsurface
+  `.ssrf`, a FIT file, a Suunto app export, a Suunto DM5 XML export, a Shearwater Cloud database or
+  XML export, or a `.zip` of any of those is converted on the way in by the
   [`divejson`](https://pypi.org/project/divejson/) package, and each dive's row lists what its files
   did not record, what the import worked out, and which of the dive's values it left out. A file
   that is one dive is kept on the dive it becomes, and one recording exported twice - a Suunto's FIT

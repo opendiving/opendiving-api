@@ -17,13 +17,16 @@ the service layer, because each is an HTTP concern:
   `divejson.read_formats()` and never a list written out here.
 - **Uploaded once, reviewed anywhere, applied as reviewed.** `POST /imports` reads, converts and
   plans, and holds the readable files and the review until the import is applied or discarded,
-  so one device can upload and another finish; `POST /import/{uuid}/apply` sends no bytes.
+  so one device can upload and another finish; `POST /import/{uuid}/apply` sends no bytes. With
+  `apply=true` the upload is the pair in one request, for a client that imports what arrives
+  without anyone to read a review: it holds nothing and never meets the pending slot.
 - **Rate limited, per user, on its own budget, and after the caller is known.** An import
   may carry half a gigabyte, parses whole logbooks and may make outbound WoRMS calls; the
   export endpoints' docstring records why a whole-logbook endpoint is throttled at all, and
   this one is dearer than any export. The upload reads its own body, after the session, the
   limit and the account's slot have been checked, so a request refused for any of them reads
-  none of it. The apply has a budget of the same size beside it, and the reads are not limited.
+  none of it. The apply has a budget of the same size beside it, an upload applied at once spends
+  one of each, and the reads are not limited.
 - **The error taxonomy is `POST /dive/parse`'s.** 415 is "no reader here claims these
   bytes", 422 is "one did, and it failed", 413 is past a bound of the request or over the
   account's storage limit. A file that cannot be read is a row of the report, not a refusal
@@ -33,7 +36,8 @@ the service layer, because each is an HTTP concern:
   cannot hold is dropped and reported, and what a file did not record comes back as a note
   on its dive rather than as a refusal.
 - **Atomic in rows.** The apply is one transaction, committed once at the end, so an import
-  that fails or is interrupted writes nothing and a retry cannot half-duplicate a logbook.
+  that fails or is interrupted writes nothing and a retry cannot half-duplicate a logbook. So is
+  an upload applied at once, whose `Idempotency-Key` hold commits with it.
 - **Served as stored.** An import's reads answer with the JSON the row holds, the schema on
   `response_model` being for the published docs alone: validating a stored review against the
   current schemas would turn the next required member into a 500 on every pending import.
@@ -44,7 +48,7 @@ import uuid as uuid_pkg
 from collections.abc import Sequence
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
@@ -56,6 +60,7 @@ from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import BadRequestException, NotFoundException, UnprocessableEntityException
 from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.rate_limit import enforce_rate_limit
+from ...models.idempotency_hold import MAX_IDEMPOTENCY_KEY_LENGTH, IdempotencyHold
 from ...models.logbook_import import LogbookImport
 from ...schemas.logbook_import import (
     LogbookImportApply,
@@ -92,6 +97,7 @@ from ...services.logbook_import import (
 )
 from ...services.logbook_import.imports import (
     apply_held,
+    apply_upload,
     delete_import,
     find_import,
     find_pending_import,
@@ -100,11 +106,13 @@ from ...services.logbook_import.imports import (
     hold_upload,
     import_body,
     list_applied,
+    lock_account_imports,
     lock_import,
     refuse_unless_pending,
     refuse_while_pending,
 )
 from ...services.logbook_import.parts import FILE_FIELD
+from ..idempotency import IN_FLIGHT, find_hold, name_hold
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +167,9 @@ async def _enforce_apply_limit(user_id: int) -> None:
     )
 
 
+_IMPORT_GONE = "The import made under this Idempotency-Key has since been deleted or has expired."
+
+
 def _found(row: LogbookImport | None) -> LogbookImport:
     if row is None:
         raise NotFoundException("Import not found")
@@ -199,6 +210,33 @@ async def _read(request: Request) -> ImportRequest:
     return body
 
 
+async def _invalidate_after_import(user_id: int) -> None:
+    """After the commit, never before: a cache dropped early can be refilled from the
+    pre-import state by any read that lands in between.
+
+    An import fills the dive-site and trip collections as well as everything the other helpers
+    cover, and those two list caches live inside their own routers - see
+    `services/cache_invalidation.py`. Skipping them serves a restored diver empty pages for up to
+    the 60-second list expiry, at exactly the moment they go looking at what they just restored.
+    """
+    await invalidate_dive_caches(user_id)
+    await invalidate_certification_caches(user_id)
+    await invalidate_contact_caches(user_id)
+    await invalidate_course_caches(user_id)
+    await invalidate_gear_caches(user_id)
+    await invalidate_dive_site_caches(user_id)
+    await invalidate_trip_caches(user_id)
+
+
+async def _replay(db: AsyncSession, user_id: int, held: IdempotencyHold) -> JSONResponse:
+    if held.record_uuid is None:
+        raise RuntimeError("A committed idempotency hold names no record.")
+    row = await find_import(db, user_id=user_id, uuid=held.record_uuid)
+    if row is None:
+        raise HTTPException(status_code=410, detail=_IMPORT_GONE)
+    return JSONResponse(content=await import_body(db, row), status_code=held.status_code)
+
+
 async def _load(parts: list[ImportPart]) -> LoadedBatch:
     """Read the files, translating the refusal of an import no file of which reads.
 
@@ -223,13 +261,38 @@ async def create_logbook_import(
     request: Request,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
+    apply: Annotated[
+        bool,
+        Query(
+            description=(
+                "`true` to write the files at once and answer with the applied import, holding no file "
+                "and leaving no import pending; `false`, the default, to answer with the review"
+            )
+        ),
+    ] = False,
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            alias="Idempotency-Key",
+            min_length=1,
+            max_length=MAX_IDEMPOTENCY_KEY_LENGTH,
+            description=(
+                "Optional, chosen by the client, and read only with `apply=true`, where the key alone names "
+                "the upload: a repeat from the same account under it answers the import the first one "
+                "made, as it reads now, and writes nothing; a key whose upload is still running is a 409, "
+                "and one whose import has since been deleted or has expired a 410."
+            ),
+        ),
+    ] = None,
 ) -> JSONResponse:
-    """Upload any number of files, and answer with the review of what importing them would do.
+    """Upload any number of files, and answer with the review of what importing them would do -
+    or, with `apply=true`, import them at once and answer with what was imported.
 
     The readable files are held on the server until the import is applied or discarded, for at
     most the instance's limit, so the import can be finished from any device; `expires_at` says
     when it goes. Files cannot be added to it: a forgotten file means discarding it and uploading
-    again. Nothing in your logbook changes until `POST /import/{uuid}/apply`.
+    again. Nothing in your logbook changes until `POST /import/{uuid}/apply`, unless the upload
+    asks for `apply=true`.
 
     Each file is a `file` part, and the part's description lists what one may be. The files
     are classified by their bytes, never by their names; a zip that is not a full-export
@@ -287,18 +350,35 @@ async def create_logbook_import(
     Species this instance's catalog did not hold are looked up in the World Register of Marine
     Species before the review is made, and stay in the catalog whatever becomes of the import.
 
-    One import at a time: a 409 names the pending import while your account has one, on any
-    device, and its body is not read. An upload overtaken by another of yours while it was read
-    is a 409 too, naming nothing where that other has already been finished. Rate limited per
-    account, on a budget of its own; a
-    request over it is a 429 and its body is not read. A 413 when the files together are past
-    what one import may carry or plan - its `detail` says which - and one naming the storage
-    used and the limit when the files the import would store do not fit in what your account
-    has left, measured as they would be stored and with your own portrait kept. When no file can
-    be read at all, the answer is what the first of them would get on its own: 415 when nothing
-    here reads bytes of that kind, 422 when a reader does and the file is malformed.
+    **With `apply=true`** the files are written at once, as this upload followed by
+    `POST /import/{uuid}/apply` with no choices would write them, and the answer is the import
+    that pair would end with, in status `applied`, as `GET /import/{uuid}` reads it: a `new` row
+    carries the dive that was written, `check_in_details` is empty and `portrait` is null, so
+    neither is written. No file is held and no import is left pending, so it is answered whether
+    or not your account has a pending import, which it leaves as it is. It is in your history like
+    any applied import. Under an `Idempotency-Key` the key alone names the upload, whatever the
+    body: a repeat writes nothing and answers that import as it reads now, a repeat sent while the
+    first is still running is a 409, and one sent once its import has been deleted or has expired
+    a 410. A request refused, or failing before its import is written, leaves the key unused.
+
+    Without `apply=true`, one import at a time: a 409 names the pending import while your
+    account has one, on any device, and its body is not read. An upload overtaken by another of
+    yours while it was read is a 409 too, naming nothing where that other has already been
+    finished.
+
+    Rate limited per account, on a budget of its own; with `apply=true` the request spends one of
+    the apply's budget too. A request over a budget it spends is a 429 and its body is not read,
+    and a repeat under an `Idempotency-Key` spends neither. A 413 when the files
+    together are past what one import may carry or plan - its `detail` says which - and one
+    naming the storage used and the limit when the files the import would store do not fit in
+    what your account has left, measured as they would be stored and with your own portrait
+    kept. When no file can be read at all, the answer is what the first of them would get on its
+    own: 415 when nothing here reads bytes of that kind, 422 when a reader does and the file is
+    malformed.
     """
     user_id = current_user["id"]
+    if apply:
+        return await _apply_at_once(request, db, user_id=user_id, idempotency_key=idempotency_key)
     await _enforce_import_limit(user_id)
     await refuse_while_pending(db, user_id=user_id)
     await release_read_transaction(db)
@@ -312,6 +392,40 @@ async def create_logbook_import(
         )
         await db.commit()
     return JSONResponse(content=await import_body(db, held), status_code=201)
+
+
+async def _apply_at_once(
+    request: Request, db: AsyncSession, *, user_id: int, idempotency_key: str | None
+) -> JSONResponse:
+    """`POST /imports?apply=true`.
+
+    The hold cannot be claimed before the body as `IdempotentCreate` claims it: the read
+    transaction is released before the body arrives and the species lookup commits, so a claim
+    made early would be rolled back or committed naming nothing. It is looked for before the body,
+    so a repeat reads none of it, and again under the account's lock, which every upload applied
+    at once takes before its pass: a repeat that raced the first finds the first's hold there once
+    the first has committed, and the hold is written beside the import it names.
+    """
+    route = request.url.path
+    if idempotency_key is not None:
+        held = await find_hold(db, user_id=user_id, route=route, key=idempotency_key)
+        if held is not None:
+            return await _replay(db, user_id, held)
+    await _enforce_import_limit(user_id)
+    await _enforce_apply_limit(user_id)
+    await release_read_transaction(db)
+    with await _read(request) as body, await _load(body.parts) as batch:
+        newly_resolved = await resolve_catalog_gaps(db, aphia_ids=unresolved_aphia_ids(batch_species(batch)))
+        if idempotency_key is not None:
+            await lock_account_imports(db, user_id=user_id)
+            if await find_hold(db, user_id=user_id, route=route, key=idempotency_key) is not None:
+                raise HTTPException(status_code=409, detail=IN_FLIGHT)
+        applied = await apply_upload(db, user_id=user_id, batch=batch, newly_resolved_aphia_ids=newly_resolved)
+        if idempotency_key is not None:
+            name_hold(db, user_id=user_id, route=route, key=idempotency_key, status_code=201, record=applied)
+        await db.commit()
+    await _invalidate_after_import(user_id)
+    return JSONResponse(content=await import_body(db, applied), status_code=201)
 
 
 @router.get("/imports", response_model=PaginatedListResponse[LogbookImportSummary])
@@ -454,21 +568,7 @@ async def apply_logbook_import(
             db, row=row, user_id=user_id, batch=batch, check_in=choices.check_in_details, portrait=choices.portrait
         )
         await db.commit()
-
-    # After the commit, never before: a cache dropped early can be refilled from the
-    # pre-import state by any read that lands in between. An import fills the dive-site and
-    # trip collections as well as everything the helpers below already cover, and those
-    # two list caches live inside their own routers - see `services/cache_invalidation.py`.
-    # Skipping them serves a restored diver empty pages for up to the 60-second list expiry,
-    # at exactly the moment they go looking at what they just restored.
-    await invalidate_dive_caches(user_id)
-    await invalidate_certification_caches(user_id)
-    await invalidate_contact_caches(user_id)
-    await invalidate_course_caches(user_id)
-    await invalidate_gear_caches(user_id)
-    await invalidate_dive_site_caches(user_id)
-    await invalidate_trip_caches(user_id)
-
+    await _invalidate_after_import(user_id)
     return JSONResponse(content=await import_body(db, row))
 
 

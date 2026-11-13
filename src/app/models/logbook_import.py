@@ -9,13 +9,13 @@ from ..core.db.models import PublicUUIDMixin
 
 
 class LogbookImport(Base, PublicUUIDMixin):
-    """An import the server holds: its files until it is applied or discarded, its review and
-    its log for as long as the history keeps them. One `pending` per account, finished from any
-    device.
+    """An import the server holds: a pending one's files until it is applied or discarded, and
+    its review and its log for as long as the history keeps them. One `pending` per account,
+    finished from any device; an upload applied at once is stored `applied` and holds nothing.
 
     `review` and `notes` are what the routes answer with, as they were stored and never
     validated again; `review_shape` says which shape that is (`services/logbook_import/imports.py`).
-    `remaps` and `sources` are the second pass's, and are never served.
+    `remaps` and `sources` are the second pass's, empty where there was none, and are never served.
 
     Hard-deleted, by `DELETE /import/{uuid}`, the hourly purge past `expires_at`, or with the
     account.

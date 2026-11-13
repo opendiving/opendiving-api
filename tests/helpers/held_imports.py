@@ -33,6 +33,17 @@ async def upload(db: AsyncSession, user: User, files: list[tuple[str, bytes]]) -
     )
 
 
+async def apply_at_once(
+    db: AsyncSession, user: User, files: list[tuple[str, bytes]], *, key: str | None = None
+) -> dict[str, Any]:
+    """`POST /imports?apply=true`, answering the import's body."""
+    return body_of(
+        await import_routes.create_logbook_import(
+            request=import_request(files), current_user=caller(user), db=db, apply=True, idempotency_key=key
+        )
+    )
+
+
 async def apply(
     db: AsyncSession,
     user: User,

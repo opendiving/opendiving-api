@@ -532,6 +532,7 @@ async def import_batch(
     portrait: ImportPortraitChoice | None = None,
     gone_dives: Mapping[str, frozenset[uuid_pkg.UUID]] | None = None,
     minted: Mapping[str, Mapping[str, Mapping[str, list[str]]]] | None = None,
+    serialise_new: bool | None = None,
 ) -> BatchReport:
     """Import every file of the batch in turn, and report the whole.
 
@@ -544,9 +545,12 @@ async def import_batch(
     `resolution_ran` says the species pre-pass has run, so a species the catalog lacks is one
     the register could not answer for. `check_in` and `portrait` are what the diver confirmed in
     the review, handed to every file: a detail a file does not carry, or one already written,
-    writes nothing, and only an archive carries a portrait. An apply spends the limit on linking
-    people as it links them; the upload's pass reads it. `gone_dives` and `minted` are the
-    apply's, each by `file_key`: the document dives to skip, and what the upload's pass minted.
+    writes nothing, and only an archive carries a portrait. A writing pass - an apply, or an upload
+    applied at once - spends the limit on linking people as it links them; the upload's review
+    pass reads it. `gone_dives` and `minted` are the apply's, each by `file_key`: the document
+    dives to skip, and what the upload's pass minted. `serialise_new` says whether a `new` row
+    carries its dive: by default the upload's pass does and an apply's does not, its review
+    already holding them.
     """
     # What the account holds before the batch writes a row, which is the figure the limit is
     # checked against: only an archive and a file kept as itself can store anything.
@@ -605,8 +609,9 @@ async def import_batch(
         if apply:
             await staged.write(db)
         documents = batch.documents
-        # An apply's new dives are the review's, which already holds them.
-        rows, notes, notes_truncated = await dives.reports(db, details, serialise_new=not apply)
+        rows, notes, notes_truncated = await dives.reports(
+            db, details, serialise_new=not apply if serialise_new is None else serialise_new
+        )
         return BatchReport(
             collections=_collections(plans),
             files=_files(plans),

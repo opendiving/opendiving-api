@@ -14,7 +14,7 @@ class IdempotencyHold(Base):
     """One create performed under an `Idempotency-Key`: which account sent it to which path,
     a digest of what it sent, and the uuid of the record it made.
 
-    Claimed at the start of the create's transaction and committed with the record, so one
+    Claimed in the create's transaction and committed with the record, so one
     never exists without the other (`api.idempotency`). It names the record rather than
     holding the response: a replay re-reads the record, and nothing of it is copied here.
     Swept `EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS` after it was made, and gone with its account.
@@ -29,7 +29,8 @@ class IdempotencyHold(Base):
     # another record's sub-route - is another hold.
     route: Mapped[str] = mapped_column(String(255))
     key: Mapped[str] = mapped_column(String(MAX_IDEMPOTENCY_KEY_LENGTH))
-    # SHA-256 of the request body's bytes as received, hex.
+    # SHA-256 of the request body's bytes as received, hex; empty where the key alone names the
+    # request (`api.idempotency.KEY_ALONE`).
     request_digest: Mapped[str] = mapped_column(String(64))
     status_code: Mapped[int] = mapped_column(SmallInteger)
     # Null only between the claim and the record's flush, inside one transaction: the commit

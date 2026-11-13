@@ -7435,3 +7435,14 @@ the places, so a deeper page spends no provider call and none of the caller's ge
 spent budget costs the places, never a 429. The read transaction is released before the ask.
 Rejected: a search engine beside Postgres, a second copy of the sites every self-hoster runs; and
 PostGIS, which nothing measured needs.
+
+## An account's import passes take turns, under one advisory lock
+
+The upload's review pass, the apply's and the pass of an upload applied at once each take
+`pg_advisory_xact_lock(0x0D1E_0004, user_id)` before they read the logbook, and hold it until their
+transaction ends. The review pass writes the same rows before rolling them back, so two passes
+carrying one new dive otherwise race on its uuid, and the loser's unique violation is a 500. The
+lock is transaction-scoped, so it is never held across a body read or the held files. An upload
+applied at once under an `Idempotency-Key` looks for its hold again under the lock and writes it
+beside the import: the lock, not the hold's index, serialises its repeats. Rejected: a row lock on
+the user, which every profile write would then wait behind; and the unique indexes alone.
