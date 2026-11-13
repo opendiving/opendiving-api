@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from mcp.server.auth.provider import AuthorizationParams, construct_redirect_uri
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -14,8 +14,11 @@ from ..api.dependencies import get_current_user, refuse_api_keys
 from ..core.db.database import async_get_db
 from ..core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
 from ..core.security import generate_secure_token, hash_token
+from ..core.utils.request_context import RequestContext
+from ..crud.crud_auth_audit_events import record_auth_event
 from ..models.mcp import McpAudit, McpAuthorization, McpClient, McpGrant
 from ..models.user import User
+from ..schemas.auth_audit_event import AuthEventType
 
 router = APIRouter(prefix="/api/v1/user/mcp", tags=["connected-apps"], dependencies=[Depends(refuse_api_keys)])
 
@@ -59,6 +62,7 @@ async def read_consent(
 
 @router.post("/consent")
 async def decide_consent(
+    request: Request,
     body: ConsentDecision,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
@@ -87,6 +91,14 @@ async def decide_consent(
         grant = McpGrant(user_id=current_user["id"], client_id=row.client_id, scopes=" ".join(body.scopes))
         db.add(grant)
         await db.flush()
+        await record_auth_event(
+            db,
+            event_type=AuthEventType.MCP_CONNECTION_CREATED,
+            context=RequestContext.from_request(request),
+            user_id=current_user["id"],
+            provider="mcp",
+            commit=False,
+        )
         code = generate_secure_token()
         db.add(
             McpAuthorization(
@@ -136,6 +148,7 @@ async def read_connections(
 
 @router.delete("/connection/{uuid}")
 async def revoke_connection(
+    request: Request,
     uuid: UUID,
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
@@ -152,6 +165,14 @@ async def revoke_connection(
     if grant is None:
         raise NotFoundException("Connection not found.")
     grant.revoked_at = datetime.now(UTC)
+    await record_auth_event(
+        db,
+        event_type=AuthEventType.MCP_CONNECTION_REVOKED,
+        context=RequestContext.from_request(request),
+        user_id=current_user["id"],
+        provider="mcp",
+        commit=False,
+    )
     await db.commit()
     return {"message": "Connection revoked"}
 

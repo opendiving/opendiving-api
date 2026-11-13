@@ -45,9 +45,10 @@ authorize new connections.
 
 Access tokens last fifteen minutes. Refresh tokens last thirty days and rotate under a lock on their
 connection. Reusing a spent refresh token revokes that connection, including its successors.
-PostgreSQL stores SHA-256 hashes, never the original codes or bearer secrets. Every request checks
-the live connection and account, so revocation and account deletion take effect immediately.
-Delegated principals always have `is_superuser=false`.
+Approving, revoking (from Settings or by the app) and a refresh replay each write an auth audit
+event in the same transaction. PostgreSQL stores SHA-256 hashes, never the original codes or bearer
+secrets. Every request checks the live connection and account, so revocation and account deletion
+take effect immediately. Delegated principals always have `is_superuser=false`.
 
 HTTPS client metadata documents are supported. Fetches resolve DNS once, reject non-public
 addresses, connect to a checked address, and verify TLS for the original hostname. They neither

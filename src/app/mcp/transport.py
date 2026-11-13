@@ -20,11 +20,12 @@ from ..core.config import settings, split_csv
 from ..core.exceptions.http_exceptions import RateLimitException
 from ..core.utils.client_ip import client_ip_bucket
 from ..core.utils.rate_limit import enforce_rate_limit
+from ..core.utils.request_context import RequestContext
 from .consent import router
 from .cors import McpCorsMiddleware
 from .dispatch import ContentServer
 from .files import router as files_router
-from .oauth import provider
+from .oauth import oauth_request, provider
 from .resources import register_resources
 from .urls import issuer_url, resource_url, validate_configuration
 
@@ -94,7 +95,11 @@ class OAuthBoundary:
                 return {"type": "http.request", "body": body, "more_body": False}
 
             receive = replay_authorize
-        await self.app(scope, receive, send)
+        context = oauth_request.set(RequestContext.from_request(request))
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            oauth_request.reset(context)
 
 
 async def authorization_metadata(request: Request) -> JSONResponse:

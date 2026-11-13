@@ -5,6 +5,7 @@ workers. Reusing any spent refresh token revokes its entire family, including su
 """
 
 import uuid
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -27,15 +28,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..authorization.scopes import DEFAULT_SCOPES, SCOPES, validate_scopes
 from ..core.db.database import local_session
 from ..core.security import generate_secure_token, hash_token
+from ..core.utils.request_context import RequestContext
+from ..crud.crud_auth_audit_events import record_auth_event
 from ..crud.crud_users import read_account
 from ..models.mcp import McpAuthorization, McpClient, McpGrant, McpToken
 from ..models.user import User
+from ..schemas.auth_audit_event import AuthEventType
 from .urls import resource_url, valid_redirect
 
 ACCESS_SECONDS = 900
 REFRESH_SECONDS = 30 * 86400
 # A busy client records activity at most once a minute, including read-only requests.
 LAST_USED_GRANULARITY = timedelta(minutes=1)
+# The SDK calls the provider without the request; the OAuth boundary sets this for audit events.
+oauth_request: ContextVar[RequestContext] = ContextVar("oauth_request")
+
+
+async def record_connection_event(db: AsyncSession, grant: McpGrant, event_type: AuthEventType) -> None:
+    await record_auth_event(
+        db,
+        event_type=event_type,
+        context=oauth_request.get(RequestContext(ip="unknown", user_agent="")),
+        user_id=grant.user_id,
+        provider="mcp",
+        commit=False,
+    )
 
 
 async def issue_tokens(db: AsyncSession, grant: McpGrant, scopes: list[str]) -> OAuthToken:
@@ -241,6 +258,7 @@ class OpenDivingOAuth(OAuthAuthorizationServerProvider[AuthorizationCode, Refres
             now = datetime.now(UTC)
             if row.spent_at is not None:
                 grant.revoked_at = now
+                await record_connection_event(db, grant, AuthEventType.MCP_REFRESH_REPLAY_DETECTED)
                 await db.commit()
                 raise TokenError("invalid_grant", "Refresh token reuse revoked this connection.")
             if row.expires_at <= now or not set(scopes) <= set(row.scopes.split()) & set(grant.scopes.split()):
@@ -291,6 +309,7 @@ class OpenDivingOAuth(OAuthAuthorizationServerProvider[AuthorizationCode, Refres
                 grant = await live_grant(db, row.grant_id, lock=True)
                 if grant and grant.client_id == token.client_id:
                     grant.revoked_at = datetime.now(UTC)
+                    await record_connection_event(db, grant, AuthEventType.MCP_CONNECTION_REVOKED)
                     await db.commit()
 
     async def account(self, access: AccessToken) -> dict[str, Any] | None:
