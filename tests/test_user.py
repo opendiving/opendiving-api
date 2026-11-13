@@ -205,3 +205,29 @@ class TestUnitsPreference:
             UserUpdate.model_validate({"units": None})
 
         assert "cannot be null" in str(exc_info.value)
+
+
+class TestGranularUnits:
+    @pytest.mark.parametrize("value", [None, {"depth": "cubits"}, {"unknown": "metric"}, {"pressure": None}])
+    def test_invalid_preferences_are_rejected(self, value):
+        with pytest.raises(ValidationError):
+            UserUpdate.model_validate({"unit_preferences": value})
+
+    def test_preferences_replace_whole_record_and_allow_reset(self):
+        values = UserUpdate.model_validate({"unit_preferences": {"depth": "imperial", "pressure": "metric"}})
+        assert values.model_dump(exclude_unset=True) == {
+            "unit_preferences": {"depth": "imperial", "pressure": "metric"}
+        }
+        assert UserUpdate.model_validate({"unit_preferences": {}}).model_dump(exclude_unset=True) == {
+            "unit_preferences": {}
+        }
+
+    @pytest.mark.asyncio
+    async def test_patch_saves_mixed_units(self, mock_db, current_user_dict):
+        values = UserUpdate.model_validate({"unit_preferences": {"depth": "imperial", "temperature": "metric"}})
+        with patch("src.app.api.v1.users.crud_users") as crud:
+            crud.update = AsyncMock()
+            await patch_user(Mock(), values, current_user_dict, mock_db)
+            assert crud.update.call_args.kwargs["object"].model_dump(exclude_unset=True) == {
+                "unit_preferences": {"depth": "imperial", "temperature": "metric"}
+            }

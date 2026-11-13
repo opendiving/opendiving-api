@@ -431,6 +431,7 @@ def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
         extensions={
             DIVEJSON_PRODUCER_KEY: {
                 "units": user.units,
+                "unit_preferences": dict(user.unit_preferences),
                 "gear_service_emails": user.gear_service_emails,
                 "renewal_reminder_emails": user.renewal_reminder_emails,
                 "year_in_review_emails": user.year_in_review_emails,

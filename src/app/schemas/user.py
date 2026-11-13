@@ -1,7 +1,7 @@
 import uuid as uuid_pkg
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, ClassVar
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -11,20 +11,13 @@ from .user_picture import PictureCrop
 
 
 class UnitSystem(StrEnum):
-    """Which measurement system a diver reads and types in.
-
-    Two whole systems rather than a choice per dimension (depth, pressure, weight,
-    ...): the two real camps are m/C/bar/kg/L and ft/F/psi/lb/cuft, and one toggle
-    covers both. Per-dimension granularity stays available as a later additive change.
-
-    Nothing the API serves is converted - see DECISIONS.md's *"Measurements are metric
-    in the database and on the wire; `units` is who's looking"*. This is the single
-    source of truth for the vocabulary, and like `GearType` it is deliberately not
-    mirrored by a DB `CHECK` constraint.
-    """
+    """The quick preset and vocabulary for each measurement family's override."""
 
     METRIC = "metric"
     IMPERIAL = "imperial"
+
+
+UnitPreferenceDimension = Literal["depth", "pressure", "volume", "weight", "temperature"]
 
 
 class UserBase(BaseModel):
@@ -74,6 +67,10 @@ class UserRead(PublicUUIDSchema):
     # the whole row through this schema on every authenticated request. See *"A stored
     # vocabulary is read back as a string"* in DECISIONS.md. `UserUpdate` keeps the enum.
     units: StoredVocabulary = UnitSystem.METRIC
+    unit_preferences: Annotated[
+        dict[str, StoredVocabulary],
+        Field(default_factory=dict, description="Per-family unit overrides; absent families follow units"),
+    ]
     # Which dive-form fields this diver keeps hidden. Read on `GET /user` and carried by
     # `get_current_user`, so the form's first paint already omits them - which is the whole
     # reason this lives on the account rather than on the device. Same note as its two
@@ -156,6 +153,7 @@ class UserUpdate(RejectsExplicitNulls):
         "renewal_reminder_emails",
         "year_in_review_emails",
         "units",
+        "unit_preferences",
         "dive_form_hidden_fields",
     )
 
@@ -191,6 +189,16 @@ class UserUpdate(RejectsExplicitNulls):
     # page's units select would 422 rather than save.
     units: Annotated[
         UnitSystem | None, Field(default=None, description="Measurement system to display and accept values in")
+    ]
+    unit_preferences: Annotated[
+        dict[UnitPreferenceDimension, UnitSystem] | None,
+        Field(
+            default=None,
+            description=(
+                "Replace per-family overrides for depth, pressure, volume, weight and temperature; "
+                "an empty object follows units"
+            ),
+        ),
     ]
     # Same `extra="forbid"` reasoning again: without this field the dive form's Fields panel
     # would 422 rather than save a toggle. Replaced wholesale - there is no "hide this one
