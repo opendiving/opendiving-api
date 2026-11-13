@@ -55,6 +55,11 @@ async def test_expired_files_release_quota_without_waiting_for_worker(
     assert key is not None
     assert not await blob_store.has(key)
     assert (await mcp_http.get("/api/v1/mcp/files/" + first.json()["handle"], headers=headers)).status_code == 404
+    stored = {key for key in blob_store.iter_keys() if key.startswith("mcp-files/")}
+    over = await mcp_http.post("/api/v1/mcp/files", headers=headers, files={"file": ("over.txt", b"abc")})
+    assert over.status_code == 413, over.text
+    # Uploaded before the quota check, and removed again when it fails.
+    assert {key for key in blob_store.iter_keys() if key.startswith("mcp-files/")} == stored
 
 
 async def test_expired_handles_can_be_discarded_by_their_owner(

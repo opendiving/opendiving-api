@@ -73,6 +73,10 @@ async def store_file(
             return await store_file(db, access, source, filename, content_type)
     size, digest = await run_in_threadpool(file_digest, data)
     grant_id = (access.claims or {})["grant_id"]
+    # Upload before taking the account lock, which other writes to the account wait on. A row
+    # that then fails to commit leaves an orphan for `sweep_orphaned_files`.
+    key = blob_store.new_key("mcp-files", sha256=digest)
+    await blob_store.put_file(key, data)
     # The account lock serializes quota checks across all its connected apps.
     await db.scalar(select(User).where(User.id == int(access.subject or "0")).with_for_update())
     retired = (
@@ -87,10 +91,9 @@ async def store_file(
         select(func.coalesce(func.sum(McpFile.byte_size), 0)).where(McpFile.user_id == int(access.subject or "0"))
     )
     if (used or 0) + size > MAX_STAGED_BYTES:
+        await db.rollback()
+        await blob_store.delete(key)
         raise HTTPException(413, "Temporary file quota exceeded. Delete unused handles.")
-    key = blob_store.new_key("mcp-files", sha256=digest)
-    data.seek(0)  # `file_digest` read it to the end; `put_file` writes from where it stands.
-    await blob_store.put_file(key, data)
     row = McpFile(
         user_id=int(access.subject or "0"),
         grant_id=grant_id,
