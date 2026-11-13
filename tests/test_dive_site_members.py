@@ -439,10 +439,10 @@ class TestEveryWriteThatMovesASummaryDropsTheSiteReads:
         # Every exclusion still names a route that drops the trip reads, so none goes stale.
         assert self.TRIP_MEMBERS_ONLY <= dropping_trips
         # And the floor: the helper the four dive writes share (`test_picker_lookups` holds
-        # them to it), the import and the site delete.
+        # them to it), the one both writing imports share, and the site delete.
         assert {
             ("dives.py", "_after_dive_write"),
-            ("logbook_import.py", "apply_logbook_import"),
+            ("logbook_import.py", "_invalidate_after_import"),
             ("dive_sites.py", "erase_dive_site"),
         } <= dropping_trips - self.TRIP_MEMBERS_ONLY
 
