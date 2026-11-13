@@ -241,12 +241,12 @@ class TestCredentials:
 
 
 class TestScopedKeyDocumentation:
-    def test_sharing_requires_explicit_scope_and_bans_legacy_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_permissions_are_published_and_sharing_stays_session_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         paths = _document(monkeypatch)["paths"]
         for method in ("get", "post", "delete"):
             operation = paths["/api/v1/user/checkin-link"][method]
-            assert operation[EXTENSION] == ["session", "superuser", "api-key-scoped"]
-            assert operation["x-opendiving-permissions"] == {"anyOf": [["checkin:share"]]}
+            assert operation[EXTENSION] == ["session", "superuser"]
+            assert "x-opendiving-permissions" not in operation
         assert paths["/api/v1/certification/{uuid}/file/{side}"]["get"]["x-opendiving-permissions"] == {
             "anyOf": [["certifications:read", "files:read"]]
         }

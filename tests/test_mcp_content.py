@@ -151,24 +151,18 @@ async def test_export_download_keeps_its_filename_media_type_and_bytes(
 async def test_retry_keys_are_only_accepted_by_operations_that_support_them(
     mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
 ) -> None:
-    tokens = await connected(mcp_http, await browser(async_sessions, diver), ["checkin:share", "people:write"])
+    tokens = await connected(mcp_http, await browser(async_sessions, diver), ["presets:write", "people:write"])
     token = tokens["access_token"]
     person = {"name": "write_person", "arguments": {"body": {"name": "MCP Buddy"}, "idempotency_key": "person-once"}}
     first = tool_data(await rpc(mcp_http, token, "tools/call", person))
     repeated = tool_data(await rpc(mcp_http, token, "tools/call", person))
     assert first["data"]["uuid"] == repeated["data"]["uuid"]
-    link: dict[str, Any] = {
-        "name": "write_checkin_link",
-        "arguments": {"body": {"total_dives": 0, "max_depth": None, "last_dive_on": None}},
-    }
-    original = tool_data(await rpc(mcp_http, token, "tools/call", link))
+    defaults: dict[str, Any] = {"name": "restore_default_dive_form_presets", "arguments": {}}
+    assert tool_data(await rpc(mcp_http, token, "tools/call", defaults))["status"] == 200
     refused = tool_data(
-        await rpc(
-            mcp_http, token, "tools/call", {**link, "arguments": {**link["arguments"], "idempotency_key": "ignored"}}
-        )
+        await rpc(mcp_http, token, "tools/call", {**defaults, "arguments": {"idempotency_key": "ignored"}})
     )
     assert refused["status"] == 422
-    assert (await mcp_http.get("/api/v1/checkin/" + original["data"]["token"])).status_code == 200
 
 
 async def test_single_file_tools_refuse_multiple_handles_before_mutating(

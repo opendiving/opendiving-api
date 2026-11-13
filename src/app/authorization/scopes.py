@@ -23,7 +23,6 @@ SCOPES = frozenset(f"{domain}:{action}" for domain in DOMAINS for action in ("re
     "files:write",
     "export:read",
     "import:write",
-    "checkin:share",
 }
 DEFAULT_SCOPES = ["dives:read"]
 

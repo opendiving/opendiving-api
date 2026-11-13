@@ -34,8 +34,8 @@ References checked on 2026-11-01:
 
 Each browser approval creates a connection owned by one account and one OAuth client. The user
 selects requested permissions, with reads selected initially. Write and delete permissions are
-separate for each content domain. Profile and preference permissions are independent. Check-in
-sharing requires its own explicit permission. Import permission authorizes restoring content across
+separate for each content domain. Profile and preference permissions are independent. Check-in links
+stay browser-only, like credential management. Import permission authorizes restoring content across
 logbook domains.
 
 Codes expire after two minutes and are consumed under a database lock. They bind the user, client,
@@ -59,8 +59,8 @@ compatibility. No client secrets are stored.
 
 `catalog.py` is a reviewed, explicit list of operations and required permissions. Adding a REST
 route never exposes it through MCP automatically. Credential management, sign-in identity changes,
-account deletion and administration are absent. Scope filtering affects both tool listing and
-execution.
+check-in links, account deletion and administration are absent. Scope filtering affects both tool
+listing and execution.
 
 The catalog explicitly distinguishes JSON results from file downloads. File cardinality and
 retry-key support come from each route's OpenAPI contract. A single-file operation accepts one

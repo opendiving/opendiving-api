@@ -22,7 +22,6 @@ from ..api.dependencies import (
     get_current_user,
     get_downloading_user,
     refuse_api_keys,
-    refuse_unscoped_api_keys,
 )
 from ..authorization.policy import permission_requirements
 from .security import bearer_scheme
@@ -66,10 +65,9 @@ def credentials_for(method: str, dependant: Dependant, path: str) -> list[Creden
 
     accepted: list[Credential] = ["session", "superuser"]
     if resolves_keys and refuse_api_keys not in calls:
-        if refuse_unscoped_api_keys not in calls:
-            if method.upper() in SAFE_METHODS:
-                accepted.append("api-key-read")
-            accepted.append("api-key-write")
+        if method.upper() in SAFE_METHODS:
+            accepted.append("api-key-read")
+        accepted.append("api-key-write")
         if permission_requirements(method.upper(), path):
             accepted.append("api-key-scoped")
     return accepted

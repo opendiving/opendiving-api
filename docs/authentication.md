@@ -609,8 +609,7 @@ reference publishes each operation's requirements in `x-opendiving-permissions`.
 
 `GET /user` returns only the fields granted by `profile:read` and/or `preferences:read`. An account
 update requires permission for every submitted field; mixed profile and preference updates require
-both write permissions. An unpermitted field rejects the whole update with 403. Check-in sharing
-requires `checkin:share`; legacy keys remain unable to manage sharing links. Existing `read` and
+both write permissions. An unpermitted field rejects the whole update with 403. Existing `read` and
 `write` keys retain their access until revoked. Rotate a key to restrict it.
 
 What a key is refused:
@@ -618,10 +617,10 @@ What a key is refused:
 - **A legacy `read` key may use `GET`, `HEAD` and `OPTIONS` and nothing else** - any other method is
   a 403 `"This API key is read-only."` before the route runs.
 - **No key may manage credentials, the sign-in address or the account's existence.** The routes
-  under `/user/api-key`, `/user/mcp`, `/user/passkey`, `/user/session`, `/user/invite-link`,
-  `/user/email-change` and `/user/download-ticket`, and `DELETE /user`, answer a key with 403
-  `"This needs a signed-in browser or app, not an API key."` (`refuse_api_keys`), so a stolen key
-  cannot lock its owner out or mint itself a successor.
+  under `/user/api-key`, `/user/mcp`, `/user/passkey`, `/user/session`, `/user/checkin-link`,
+  `/user/invite-link`, `/user/email-change` and `/user/download-ticket`, and `DELETE /user`, answer
+  a key with 403 `"This needs a signed-in browser or app, not an API key."` (`refuse_api_keys`), so
+  a stolen key cannot lock its owner out or mint itself a successor.
 - **A key's principal is never a superuser.** The account dict it resolves to carries `is_superuser`
   false whatever the column says, so the operator's routes answer the superuser gate's own 403 and
   `GET /user` reports `false`.

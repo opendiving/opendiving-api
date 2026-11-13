@@ -182,7 +182,4 @@ OPERATIONS = (
         ("profile:read", "files:read"),
         result_kind="file",
     ),
-    Operation("read_checkin_link", "GET", "/api/v1/user/checkin-link", ("checkin:share",)),
-    Operation("write_checkin_link", "POST", "/api/v1/user/checkin-link", ("checkin:share",)),
-    Operation("erase_checkin_link", "DELETE", "/api/v1/user/checkin-link", ("checkin:share",)),
 )

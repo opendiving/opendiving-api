@@ -571,36 +571,24 @@ async def test_scoped_key_account_writes_require_all_provided_fields(
     ).status_code == 200
 
 
-async def test_scoped_key_sharing_is_explicit_and_credentials_stay_session_only(
+async def test_scoped_keys_never_reach_sharing_or_credential_routes(
     mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
 ) -> None:
     headers = await browser(async_sessions, diver)
-    key = await scoped_key(mcp_http, headers, ["checkin:share"])
-    minted = await mcp_http.post(
-        "/api/v1/user/checkin-link",
-        headers=key,
-        json={
-            "total_dives": None,
-            "max_depth": None,
-            "last_dive_on": None,
-        },
-    )
-    assert minted.status_code == 201, minted.text
-    assert (await mcp_http.get("/api/v1/user/checkin-link", headers=key)).status_code == 200
-    assert (await mcp_http.delete("/api/v1/user/checkin-link", headers=key)).status_code == 200
-    content = await scoped_key(mcp_http, headers, ["checkin:read", "checkin:write"])
-    assert (await mcp_http.get("/api/v1/user/checkin-link", headers=content)).status_code == 403
     all_permissions = await scoped_key(mcp_http, headers, sorted(SCOPES))
     for method, path in [
         ("GET", "/api/v1/user/api-keys"),
         ("GET", "/api/v1/user/api-key-permissions"),
         ("GET", "/api/v1/user/sessions"),
         ("GET", "/api/v1/user/passkeys"),
+        ("GET", "/api/v1/user/checkin-link"),
+        ("POST", "/api/v1/user/checkin-link"),
+        ("DELETE", "/api/v1/user/checkin-link"),
         ("DELETE", "/api/v1/user"),
         ("GET", "/api/v1/admin/stats"),
     ]:
         assert (await mcp_http.request(method, path, headers=all_permissions)).status_code == 403
-    # Legacy keys retain the earlier categorical sharing restriction.
+    # Legacy keys stay refused on sharing links too.
     legacy = await mcp_http.post(
         "/api/v1/user/api-keys", json={"name": "Legacy", "scope": "write", "lifetime": "30d"}, headers=headers
     )

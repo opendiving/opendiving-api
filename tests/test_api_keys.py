@@ -63,6 +63,7 @@ REFUSING_PREFIXES = (
     "/api/v1/user/mcp",
     "/api/v1/user/passkey",
     "/api/v1/user/session",
+    "/api/v1/user/checkin-link",
     "/api/v1/user/invite-link",
     "/api/v1/user/email-change",
     "/api/v1/user/download-ticket",
