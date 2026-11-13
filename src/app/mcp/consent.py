@@ -107,7 +107,11 @@ async def read_connections(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> list[dict[str, Any]]:
-    """List up to 100 active connected applications, newest first, including their permissions."""
+    """List up to 100 active connected applications, newest first, including their permissions.
+
+    Last used is the latest authenticated MCP request, recorded at most once a minute.
+    A null timestamp means no activity has been recorded for the connection.
+    """
     rows = (
         await db.execute(
             select(McpGrant, McpClient)
@@ -124,6 +128,7 @@ async def read_connections(
             "client_id": grant.client_id,
             "scopes": grant.scopes.split(),
             "created_at": grant.created_at,
+            "last_used_at": grant.last_used_at,
         }
         for grant, client in rows
     ]

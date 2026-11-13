@@ -28,6 +28,7 @@ class McpGrant(Base, PublicUUIDMixin):
     scopes: Mapped[str] = mapped_column(String(4096))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
 class McpAuthorization(Base):

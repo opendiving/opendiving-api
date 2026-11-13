@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -12,7 +13,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import Response
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from uuid6 import uuid7
 
@@ -26,7 +27,7 @@ from src.app.mcp.catalog import OPERATIONS
 from src.app.mcp.permissions import SCOPES
 from src.app.mcp.transport import install_mcp
 from src.app.mcp.urls import issuer_url, resource_url
-from src.app.models.mcp import McpAuthorization, McpToken
+from src.app.models.mcp import McpAuthorization, McpGrant, McpToken
 from src.app.models.user import User
 from src.app.services.auth_service import issue_tokens
 from tests.conftest import db_available
@@ -212,6 +213,49 @@ async def test_refresh_rotation_replay_and_revoke(
     assert rotated.json()["refresh_token"] != tokens["refresh_token"]
     assert (await mcp_http.post("/api/v1/mcp/oauth/token", data=form)).status_code == 400
     assert (await rpc(mcp_http, rotated.json()["access_token"], "tools/list")).status_code == 401
+
+
+async def test_connection_activity_tracks_authenticated_requests(
+    mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
+) -> None:
+    headers = await browser(async_sessions, diver)
+    tokens = await connected(mcp_http, headers, ["dives:read"])
+    path = "/api/v1/user/mcp/connections"
+    connection = (await mcp_http.get(path, headers=headers)).json()[0]
+    assert connection["last_used_at"] is None
+    started = datetime.now(UTC)
+    assert (await rpc(mcp_http, tokens["access_token"], "tools/list")).status_code == 200
+    used = (await mcp_http.get(path, headers=headers)).json()[0]
+    assert started <= datetime.fromisoformat(used["last_used_at"]) <= datetime.now(UTC)
+    assert (await rpc(mcp_http, tokens["access_token"], "tools/list")).status_code == 200
+    assert (await mcp_http.get(path, headers=headers)).json()[0]["last_used_at"] == used["last_used_at"]
+
+    previous = started - timedelta(minutes=5)
+    async with async_sessions() as db:
+        await db.execute(update(McpGrant).where(McpGrant.uuid == connection["uuid"]).values(last_used_at=previous))
+        await db.commit()
+    await connected(mcp_http, headers, ["dives:read"])
+    assert (await rpc(mcp_http, tokens["access_token"], "tools/list")).status_code == 200
+    rows = (await mcp_http.get(path, headers=headers)).json()
+    assert rows[0]["last_used_at"] is None
+    assert datetime.fromisoformat(rows[1]["last_used_at"]) > previous
+
+
+async def test_expired_token_does_not_record_connection_activity(
+    mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
+) -> None:
+    headers = await browser(async_sessions, diver)
+    tokens = await connected(mcp_http, headers, ["dives:read"])
+    async with async_sessions() as db:
+        await db.execute(
+            update(McpToken)
+            .where(McpToken.secret_hash == oauth.hash_token(tokens["access_token"]))
+            .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        await db.commit()
+    assert (await rpc(mcp_http, tokens["access_token"], "tools/list")).status_code == 401
+    rows = (await mcp_http.get("/api/v1/user/mcp/connections", headers=headers)).json()
+    assert rows[0]["last_used_at"] is None
 
 
 async def test_content_permissions_and_ownership(

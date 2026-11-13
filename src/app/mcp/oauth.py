@@ -20,7 +20,7 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +34,8 @@ from .urls import resource_url, valid_redirect
 
 ACCESS_SECONDS = 900
 REFRESH_SECONDS = 30 * 86400
+# A busy client records activity at most once a minute, including read-only requests.
+LAST_USED_GRANULARITY = timedelta(minutes=1)
 
 
 async def issue_tokens(db: AsyncSession, grant: McpGrant, scopes: list[str]) -> OAuthToken:
@@ -250,12 +252,25 @@ class OpenDivingOAuth(OAuthAuthorizationServerProvider[AuthorizationCode, Refres
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         async with local_session() as db:
+            now = datetime.now(UTC)
             row = await db.get(McpToken, hash_token(token))
-            if row is None or row.kind != "access" or row.expires_at <= datetime.now(UTC):
+            if row is None or row.kind != "access" or row.expires_at <= now:
                 return None
             grant = await live_grant(db, row.grant_id)
             if grant is None:
                 return None
+            cutoff = now - LAST_USED_GRANULARITY
+            if grant.last_used_at is None or grant.last_used_at <= cutoff:
+                await db.execute(
+                    update(McpGrant)
+                    .where(
+                        McpGrant.id == grant.id,
+                        McpGrant.revoked_at.is_(None),
+                        or_(McpGrant.last_used_at.is_(None), McpGrant.last_used_at <= cutoff),
+                    )
+                    .values(last_used_at=now)
+                )
+                await db.commit()
             return AccessToken(
                 token=token,
                 client_id=grant.client_id,
