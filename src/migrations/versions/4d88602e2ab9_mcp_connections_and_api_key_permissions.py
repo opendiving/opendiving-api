@@ -1,9 +1,13 @@
-"""add delegated MCP authorization and file handles
+"""MCP connections, file handles and detailed API-key permissions
 
-Revision ID: d2efc95305b6
-Revises: 04c319ff9731
-Create Date: 2026-11-01 19:01:11.570851
+Revision ID: 4d88602e2ab9
+Revises: 65940d01a99c
+Create Date: 2026-11-13 12:00:00.000000
 
+Delegated MCP authorization (clients, connections with their last use, codes, tokens, tool-call
+audit and expiring file handles) and the `scoped` API-key mode with its permission list. Nothing
+is backfilled: every table is new, and existing keys keep `scope` `read` or `write` with no
+`scopes`.
 """
 
 from collections.abc import Sequence
@@ -13,8 +17,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "d2efc95305b6"
-down_revision: str | None = "04c319ff9731"
+revision: str = "4d88602e2ab9"
+down_revision: str | None = "65940d01a99c"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -35,6 +39,7 @@ def upgrade() -> None:
         sa.Column("scopes", sa.String(length=4096), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("uuid", sa.UUID(), nullable=False),
         sa.ForeignKeyConstraint(["client_id"], ["mcp_client.client_id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["user_id"], ["user.id"], ondelete="CASCADE"),
@@ -103,8 +108,20 @@ def upgrade() -> None:
     op.create_index(op.f("ix_mcp_token_expires_at"), "mcp_token", ["expires_at"], unique=False)
     op.create_index(op.f("ix_mcp_token_grant_id"), "mcp_token", ["grant_id"], unique=False)
 
+    op.add_column("api_key", sa.Column("scopes", sa.ARRAY(sa.String(length=32)), nullable=True))
+    op.create_check_constraint(
+        "api_key_permission_mode",
+        "api_key",
+        "(scope IN ('read', 'write') AND scopes IS NULL) OR "
+        "(scope = 'scoped' AND scopes IS NOT NULL AND cardinality(scopes) > 0)",
+    )
+
 
 def downgrade() -> None:
+    # Older APIs interpret an unknown mode as broad read access, so rollback must revoke scoped keys.
+    op.execute("DELETE FROM api_key WHERE scope = 'scoped'")
+    op.drop_constraint("api_key_permission_mode", "api_key", type_="check")
+    op.drop_column("api_key", "scopes")
     op.drop_index(op.f("ix_mcp_token_grant_id"), table_name="mcp_token")
     op.drop_index(op.f("ix_mcp_token_expires_at"), table_name="mcp_token")
     op.drop_table("mcp_token")
