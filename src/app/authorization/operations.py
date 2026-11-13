@@ -116,7 +116,7 @@ OPERATIONS = (
     Operation("read_own_checkin_details", "GET", "/api/v1/user/checkin-details", ("checkin:read",)),
     Operation("patch_own_checkin_details", "PATCH", "/api/v1/user/checkin-details", ("checkin:write",)),
     Operation("read_species_search", "GET", "/api/v1/species/search", ("dives:read",)),
-    Operation("write_species_resolve", "POST", "/api/v1/species/resolve", ("dives:read",)),
+    Operation("write_species_resolve", "POST", "/api/v1/species/resolve", ("dives:write",)),
     Operation("read_species", "GET", "/api/v1/species/{uuid}", ("dives:read",)),
     Operation("parse_dive", "POST", "/api/v1/dive/parse", ("dives:read", "files:write")),
     Operation("write_dive", "POST", "/api/v1/dive", ("dives:write",)),
