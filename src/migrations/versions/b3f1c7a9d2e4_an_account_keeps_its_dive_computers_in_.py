@@ -1,7 +1,7 @@
 """An account keeps its dive computers in an order
 
 Revision ID: b3f1c7a9d2e4
-Revises: 65940d01a99c
+Revises: e316b5f7b995
 Create Date: 2026-11-13 12:00:00.000000
 
 One JSON column on `user`, the diver's order of their dive computers by serial. Every
@@ -17,7 +17,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "b3f1c7a9d2e4"
-down_revision: str | None = "65940d01a99c"
+down_revision: str | None = "e316b5f7b995"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
