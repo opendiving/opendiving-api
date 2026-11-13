@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import tempfile
 from datetime import UTC, datetime, timedelta
 from typing import IO, Annotated, Any
 from uuid import UUID
@@ -18,6 +19,7 @@ from ..core.db.database import async_get_db
 from ..core.security import bearer_scheme
 from ..core.utils.binary_responses import BINARY_CSP, not_modified
 from ..core.utils.rate_limit import enforce_rate_limit
+from ..core.utils.spooled_response import SpooledResponse
 from ..core.utils.uploads import content_disposition_attachment, read_upload_within_limit, safe_filename
 from ..models.mcp import McpFile, McpGrant
 from ..models.user import User
@@ -142,14 +144,23 @@ async def download_file(
     if "files:read" not in access.scopes:
         raise HTTPException(403, "files:read permission required.")
     row = await owned_file(db, handle, access)
-    data = await blob_store.get(row.storage_key)
-    etag = '"' + hashlib.sha256(data).hexdigest() + '"'
+    # The key ends in the SHA-256 of the bytes as uploaded (`blob_store.new_key`).
+    etag = '"' + row.storage_key.rsplit("_", 1)[-1] + '"'
     if request.headers.get("if-none-match") == etag:
         return not_modified(etag, cache_control="private, no-store")
-    return Response(
-        data,
+    body = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
+    try:
+        await blob_store.get_file(row.storage_key, body)
+    except BaseException:
+        body.close()
+        raise
+    size = body.seek(0, 2)
+    body.seek(0)
+    return SpooledResponse(
+        body,
         media_type=row.content_type,
         headers={
+            "Content-Length": str(size),
             "Content-Disposition": content_disposition_attachment(row.filename),
             "Cache-Control": "private, no-store",
             "ETag": etag,

@@ -391,6 +391,8 @@ async def test_file_handles_are_private_to_connection(
     path = "/api/v1/mcp/files/" + upload.json()["handle"]
     download = await mcp_http.get(path, headers=bearer)
     assert download.content == b"hello diving"
+    assert download.headers["etag"] == '"' + hashlib.sha256(b"hello diving").hexdigest() + '"'
+    assert download.headers["content-length"] == str(len(b"hello diving"))
     cached = await mcp_http.get(path, headers={**bearer, "If-None-Match": download.headers["etag"]})
     assert cached.status_code == 304
     assert cached.content == b""
