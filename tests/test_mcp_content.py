@@ -55,11 +55,20 @@ async def test_expired_files_release_quota_without_waiting_for_worker(
     assert key is not None
     assert not await blob_store.has(key)
     assert (await mcp_http.get("/api/v1/mcp/files/" + first.json()["handle"], headers=headers)).status_code == 404
-    stored = {key for key in blob_store.iter_keys() if key.startswith("mcp-files/")}
+    # The blob store is shared between xdist workers, so track this upload's own key.
+    uploaded: list[str] = []
+    put_file = blob_store.put_file
+
+    async def record_put(key: str, data: Any) -> None:
+        uploaded.append(key)
+        await put_file(key, data)
+
+    monkeypatch.setattr(blob_store, "put_file", record_put)
     over = await mcp_http.post("/api/v1/mcp/files", headers=headers, files={"file": ("over.txt", b"abc")})
     assert over.status_code == 413, over.text
     # Uploaded before the quota check, and removed again when it fails.
-    assert {key for key in blob_store.iter_keys() if key.startswith("mcp-files/")} == stored
+    assert len(uploaded) == 1
+    assert not await blob_store.has(uploaded[0])
 
 
 async def test_expired_handles_can_be_discarded_by_their_owner(
