@@ -301,6 +301,18 @@ async def test_content_permissions_and_ownership(
     assert (await rpc(mcp_http, token, "tools/list")).status_code == 401
 
 
+async def test_enabling_mcp_leaves_rest_routing_untouched(mcp_http: httpx.AsyncClient) -> None:
+    wrong_method = await mcp_http.delete("/api/v1/dives")
+    assert wrong_method.status_code == 405
+    assert wrong_method.json() == {"detail": "Method Not Allowed"}
+    unknown = await mcp_http.get("/api/v1/no-such-route")
+    assert unknown.status_code == 404
+    assert unknown.json() == {"detail": "Not Found"}
+    slash = await mcp_http.get("/api/v1/dives/")
+    assert slash.status_code == 307
+    assert slash.headers["location"].endswith("/api/v1/dives")
+
+
 async def test_catalog_has_no_credentials_or_admin() -> None:
     assert len({op.name for op in OPERATIONS}) == len(OPERATIONS)
     for op in OPERATIONS:

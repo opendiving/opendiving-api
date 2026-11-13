@@ -155,7 +155,9 @@ def install_mcp(app: FastAPI) -> ContentServer:
             Route("/.well-known/oauth-protected-resource/api/v1/mcp", protected_metadata),
         ]
     )
-    app.mount("/", transport)
+    # Only the MCP path: a root mount would answer every unmatched REST request itself, in place of
+    # the API's JSON 404/405 and slash redirects.
+    app.router.routes.append(Route("/api/v1/mcp", transport))
     return server
 
 
