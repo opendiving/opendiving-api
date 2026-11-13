@@ -35,6 +35,23 @@ class TestWhatDiffers:
 
         assert dive_changes(before, after) == [{"member": "recordings/1", "before": None, "after": added}]
 
+    def test_a_recording_added_at_the_front_is_one_entry_and_the_one_it_moved_none(self) -> None:
+        added = _recording(uuid="s", device={"name": "Perdix", "firmware": "2.0"})
+        before = _dive(recordings=[_recording()])
+        after = _dive(recordings=[added, _recording(ordinal=1)])
+
+        assert dive_changes(before, after) == [{"member": "recordings/0", "before": None, "after": added}]
+
+    def test_a_recording_that_moved_still_reports_what_changed_on_it_where_it_now_stands(self) -> None:
+        added = _recording(uuid="s")
+        before = _dive(recordings=[_recording()])
+        after = _dive(recordings=[added, _recording(ordinal=1, device={"name": "Porvoo", "firmware": "1.0"})])
+
+        assert dive_changes(before, after) == [
+            {"member": "recordings/0", "before": None, "after": added},
+            {"member": "recordings/1/device/name", "before": None, "after": "Porvoo"},
+        ]
+
     def test_an_element_removed_is_one_entry_with_nothing_after(self) -> None:
         gone = {"oxygen": 0.32}
 

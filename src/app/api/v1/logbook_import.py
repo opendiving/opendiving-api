@@ -308,10 +308,10 @@ async def create_logbook_import(
     one whose recording the dive shows by default in `GET /dive-computers`, it is shown by
     default instead, and the import's log says so on the dive. A dive's first file decides its
     positions, which a later one only fills, and the Suunto app's JSON states each satellite
-    fix's error where the same dive's FIT does not. A file that is one dive - one computer's record of it, whatever its format -
-    is kept on the dive it becomes, as the dive form keeps a file it is handed, and a
-    dive-computer file's dive takes its identifier from its bytes: the same whenever the
-    same file comes again, under any name.
+    fix's error where the same dive's FIT does not. A file that is one dive - one computer's
+    record of it, whatever its format - is kept on the dive it becomes, as the dive form keeps a
+    file it is handed, and a dive-computer file's dive takes its identifier from its bytes: the
+    same whenever the same file comes again, under any name.
 
     `dives` has one row per dive the files hold. A `new` row carries the dive as it will be
     written. A `modified` row is a dive you have, carrying the dive as it will be and, in

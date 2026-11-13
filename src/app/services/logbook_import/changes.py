@@ -7,10 +7,11 @@ before the first file writes to it and after the last, and the changes are the m
 documents disagree on - a fact about the write rather than a forecast of it. A pure function of
 the two.
 
-Lists are compared by index, but for a dive's recordings, which are compared by `uuid`: a write
-can move a recording it adds to the front, and by index that would read as every member of both
-recordings changing. Each entry still names the index the recording stands at after the write,
-which is where the review and the apply look its values up.
+Lists are compared by index, but for a dive's recordings, which are compared by `uuid` where every
+one read before is still there after: a write can move a recording it adds to the front, and by
+index that would read as every member of both recordings changing. Each entry still names the
+index the recording stands at after the write, which is where the review and the apply look its
+values up.
 """
 
 from typing import Any
@@ -58,17 +59,21 @@ def _walk(member: str, before: Any, after: Any, entries: list[dict[str, Any]]) -
 
 
 def _keyed(member: str, before: list[Any], after: list[Any]) -> bool:
+    """Whether a list is paired by identity: every element carries it, and every element before
+    the write is still there after it - an import adds recordings and removes none, and two
+    reads whose identities all differ are two passes' mints, which the index pairs."""
     key = _KEYED.get(member)
-    return key is not None and all(isinstance(one, dict) and key[0] in one for one in (*before, *after))
+    if key is None or not all(isinstance(one, dict) and key[0] in one for one in (*before, *after)):
+        return False
+    later = {one[key[0]] for one in after}
+    return all(one[key[0]] in later for one in before)
 
 
 def _walk_keyed(member: str, before: list[Any], after: list[Any], entries: list[dict[str, Any]]) -> None:
-    """Elements paired by identity: one entry for each added, at its index after, and one for
-    each removed, at its index before; a pair's members compared at the index after, its place
-    in the list aside."""
+    """Elements paired by identity: one entry for each added, at its index after, and a pair's
+    members compared at the index after, its place in the list aside."""
     key, place = _KEYED[member]
     earlier = {one[key]: one for one in before}
-    later = {one[key] for one in after}
     for index, one in enumerate(after):
         path = f"{member}/{index}"
         paired = earlier.get(one[key])
@@ -76,9 +81,6 @@ def _walk_keyed(member: str, before: list[Any], after: list[Any], entries: list[
             entries.append(_entry(path, None, one))
         else:
             _walk(path, _without(paired, place), _without(one, place), entries)
-    for index, one in enumerate(before):
-        if one[key] not in later:
-            entries.append(_entry(f"{member}/{index}", one, None))
 
 
 def _without(element: dict[str, Any], member: str) -> dict[str, Any]:
