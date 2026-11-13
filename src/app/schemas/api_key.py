@@ -1,4 +1,4 @@
-"""Schemas for the `api_key` table and the three routes over it.
+"""Schemas for the `api_key` table and its management routes.
 
 The `webauthn_credential` split: `ApiKeyReadInternal` carries the integer keys for
 server-side lookups, `ApiKeyRead` is what a diver sees, and neither carries the hash. The
@@ -9,22 +9,19 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..authorization.scopes import validate_scopes
 from ..core.schemas import PublicUUIDSchema
 from .webauthn_credential import NAME_MAX_LENGTH
 
 
 class ApiKeyScope(StrEnum):
-    """What a key may do, enforced by HTTP method in `get_current_user`.
-
-    A read key may use the safe methods and nothing else; a write key may do what a signed-in
-    browser can, minus the routes `refuse_api_keys` guards. Backed by a plain `VARCHAR`, like
-    `IdleTimeout`: the enum is the enforcement.
-    """
+    """Scoped content access, or a legacy read/write key's unchanged access mode."""
 
     READ = "read"
     WRITE = "write"
+    SCOPED = "scoped"
 
 
 class ApiKeyLifetime(StrEnum):
@@ -57,12 +54,21 @@ class ApiKeyCreate(BaseModel):
     ]
     scope: Annotated[
         ApiKeyScope,
-        Field(
-            description="read allows safe methods only; write allows what a signed-in browser can do, "
-            "minus credential routes"
-        ),
+        Field(description="scoped grants only the listed permissions; read and write preserve legacy access"),
     ]
     lifetime: Annotated[ApiKeyLifetime, Field(description="How long the key stays valid: 30d, 90d, 1y or never")]
+    scopes: list[str] | None = Field(
+        default=None, description="Explicit permissions for a scoped key; omitted for legacy read/write keys"
+    )
+
+    @model_validator(mode="after")
+    def check_permissions(self) -> ApiKeyCreate:
+        if self.scope == ApiKeyScope.SCOPED:
+            if self.scopes is None or not validate_scopes(self.scopes):
+                raise ValueError("Choose at least one supported permission, without duplicates.")
+        elif self.scopes is not None:
+            raise ValueError("Detailed permissions require scope=scoped.")
+        return self
 
 
 class ApiKeyCreateInternal(BaseModel):
@@ -76,6 +82,7 @@ class ApiKeyCreateInternal(BaseModel):
     prefix: str
     token_hash: str
     scope: ApiKeyScope
+    scopes: list[str] | None = None
     expires_at: datetime | None
 
 
@@ -88,6 +95,7 @@ class ApiKeyReadInternal(PublicUUIDSchema):
     name: str
     prefix: str
     scope: ApiKeyScope
+    scopes: list[str] | None = None
     created_at: datetime
     last_used_at: datetime | None
     expires_at: datetime | None
@@ -104,6 +112,7 @@ class ApiKeyRead(PublicUUIDSchema):
     name: str
     prefix: str
     scope: ApiKeyScope
+    scopes: list[str] | None = None
     created_at: datetime
     last_used_at: datetime | None
     expires_at: datetime | None

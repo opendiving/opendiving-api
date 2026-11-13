@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from .catalog import Operation
+from ..authorization.operations import Operation
 
 
 def argument_schema(operation: Operation, document: dict[str, Any]) -> dict[str, Any]:

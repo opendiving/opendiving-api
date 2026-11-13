@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from ..authorization.scopes import SCOPES
 from ..core.config import settings, split_csv
 from ..core.exceptions.http_exceptions import RateLimitException
 from ..core.utils.client_ip import client_ip_bucket
@@ -24,7 +25,6 @@ from .cors import McpCorsMiddleware
 from .dispatch import ContentServer
 from .files import router as files_router
 from .oauth import provider
-from .permissions import SCOPES
 from .resources import register_resources
 from .urls import issuer_url, resource_url, validate_configuration
 

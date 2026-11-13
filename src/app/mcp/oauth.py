@@ -24,12 +24,12 @@ from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..authorization.scopes import DEFAULT_SCOPES, SCOPES, validate_scopes
 from ..core.db.database import local_session
 from ..core.security import generate_secure_token, hash_token
 from ..crud.crud_users import read_account
 from ..models.mcp import McpAuthorization, McpClient, McpGrant, McpToken
 from ..models.user import User
-from .permissions import DEFAULT_SCOPES, SCOPES, validate_scopes
 from .urls import resource_url, valid_redirect
 
 ACCESS_SECONDS = 900

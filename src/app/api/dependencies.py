@@ -7,6 +7,8 @@ from fastapi import Depends, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..authorization.policy import authorize_content
+from ..authorization.scopes import validate_scopes
 from ..core.db.database import async_get_db
 from ..core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnauthorizedException
 from ..core.security import (
@@ -70,11 +72,12 @@ async def get_current_user(
     The branch on the API-key prefix comes before `verify_token`, so a key never reaches the
     blacklist or the JWT decoder, and every other string takes the path above unchanged.
     """
-    from ..mcp.actor import internal_account
+    from ..mcp.actor import internal_actor
 
-    delegated = internal_account(request)
+    delegated = internal_actor(request)
     if delegated is not None:
-        return delegated
+        await authorize_content(request, delegated.scopes)
+        return delegated.account
 
     if is_api_key(token):
         return await _account_for_api_key(request, token, db)
@@ -114,8 +117,15 @@ async def _account_for_api_key(request: Request, secret: str, db: AsyncSession) 
     if key is None:
         raise UnauthorizedException("User not authenticated.")
 
-    if key.scope != ApiKeyScope.WRITE and request.method not in SAFE_METHODS:
-        raise ForbiddenException("This API key is read-only.")
+    if key.scope == ApiKeyScope.SCOPED:
+        if key.scopes is None or not validate_scopes(list(key.scopes)):
+            raise ForbiddenException("Invalid API-key permissions.")
+        await authorize_content(request, frozenset(key.scopes))
+    elif key.scope == ApiKeyScope.READ:
+        if request.method not in SAFE_METHODS:
+            raise ForbiddenException("This API key is read-only.")
+    elif key.scope != ApiKeyScope.WRITE:
+        raise ForbiddenException("Invalid API-key access mode.")
 
     user = await read_account(db, uuid=key.owner_uuid)
     if not user:
@@ -131,13 +141,23 @@ async def refuse_api_keys(token: Annotated[str, Depends(bearer_scheme)]) -> None
 
     A sibling of `get_current_user` rather than a change to it, as `current_session_uuid` is,
     declared on every route under the `/user/api-key`, `/user/passkey`, `/user/session`,
-    `/user/checkin-link`, `/user/invite-link`, `/user/email-change` and `/user/download-ticket`
+    `/user/invite-link`, `/user/email-change` and `/user/download-ticket`
     prefixes that takes a session, and on `DELETE /user` - `tests/test_api_keys.py` holds the
     set to that rule. It
     decides on the prefix alone, without verifying the key: it can only ever refuse more, and
     `get_current_user` still authenticates everything it lets through.
     """
     if is_api_key(token):
+        raise ForbiddenException("This needs a signed-in browser or app, not an API key.")
+
+
+async def refuse_unscoped_api_keys(
+    request: Request,
+    token: Annotated[str, Depends(bearer_scheme)],
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> None:
+    """Only explicitly scoped keys may manage public check-in sharing links."""
+    if is_api_key(token) and getattr(request.state, "content_scopes", None) is None:
         raise ForbiddenException("This needs a signed-in browser or app, not an API key.")
 
 

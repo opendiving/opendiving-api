@@ -210,8 +210,8 @@ class TestCredentials:
         ("method", "path", "expected"),
         [
             ("get", "/api/v1/health", list(CREDENTIALS)),
-            ("get", "/api/v1/user", ["session", "superuser", "api-key-read", "api-key-write"]),
-            ("patch", "/api/v1/user", ["session", "superuser", "api-key-write"]),
+            ("get", "/api/v1/user", ["session", "superuser", "api-key-read", "api-key-write", "api-key-scoped"]),
+            ("patch", "/api/v1/user", ["session", "superuser", "api-key-write", "api-key-scoped"]),
             # `refuse_api_keys`: a key cannot delete its own account or mint its successor.
             ("delete", "/api/v1/user", ["session", "superuser"]),
             ("get", "/api/v1/user/api-keys", ["session", "superuser"]),
@@ -238,3 +238,18 @@ class TestCredentials:
             if method in _METHODS and bool(operation.get("security")) == ("anonymous" in operation[EXTENSION])
         ]
         assert not contradicting
+
+
+class TestScopedKeyDocumentation:
+    def test_sharing_requires_explicit_scope_and_bans_legacy_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        paths = _document(monkeypatch)["paths"]
+        for method in ("get", "post", "delete"):
+            operation = paths["/api/v1/user/checkin-link"][method]
+            assert operation[EXTENSION] == ["session", "superuser", "api-key-scoped"]
+            assert operation["x-opendiving-permissions"] == {"anyOf": [["checkin:share"]]}
+        assert paths["/api/v1/certification/{uuid}/file/{side}"]["get"]["x-opendiving-permissions"] == {
+            "anyOf": [["certifications:read", "files:read"]]
+        }
+        assert paths["/api/v1/user"]["get"]["x-opendiving-permissions"] == {
+            "anyOf": [["profile:read"], ["preferences:read"]]
+        }

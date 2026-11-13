@@ -16,11 +16,12 @@ SCOPE_KEY = "opendiving.mcp.actor"
 @dataclass(frozen=True)
 class DelegatedActor:
     account: dict[str, Any]
+    scopes: frozenset[str]
     capability: object = _CAPABILITY
 
 
-def internal_account(request: Request) -> dict[str, Any] | None:
+def internal_actor(request: Request) -> DelegatedActor | None:
     actor = request.scope.get(SCOPE_KEY)
     if isinstance(actor, DelegatedActor) and actor.capability is _CAPABILITY:
-        return actor.account
+        return actor
     return None

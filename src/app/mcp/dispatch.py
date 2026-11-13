@@ -20,11 +20,11 @@ from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, InputRequiredResult, TextContent, Tool, ToolAnnotations
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ..authorization.operations import OPERATIONS, Operation
 from ..core.db.database import local_session
 from ..models.mcp import McpAudit
 from ..services import blob_store
 from .actor import SCOPE_KEY, DelegatedActor
-from .catalog import OPERATIONS, Operation
 from .downloads import DownloadCapture, DownloadTooLarge
 from .files import MAX_STAGED_BYTES, owned_file, store_file
 from .oauth import provider
@@ -170,7 +170,9 @@ class ContentServer(MCPServer[None]):
                 for handle in arguments["files"]:
                     row = await owned_file(db, UUID(handle), access)
                     files.append(("file", (row.filename, await blob_store.get(row.storage_key), row.content_type)))
-        application: ASGIApp = ActorApplication(self.app, DelegatedActor(account))
+        application: ASGIApp = ActorApplication(
+            self.app, DelegatedActor(account, frozenset(access.scopes) if access else frozenset())
+        )
         if op.result_kind == "file":
             application = DownloadCapture(application, download, MAX_STAGED_BYTES)
         async with httpx.AsyncClient(

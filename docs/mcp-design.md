@@ -79,6 +79,12 @@ subsets of the existing update schema, and reads apply their view's allowlist. O
 multiple capabilities list each scope, such as merging dives, attaching files and publishing drafts.
 The catalog's schema tests hold these operations to the live API contract.
 
+The shared `authorization` package owns this reviewed operation catalog, scope validation and
+account field policies for MCP and scoped API keys. The normal REST authentication boundary checks
+the same policy before handlers or cached reads run, including internal requests carrying an MCP
+actor's scopes. API-key secrets, expiry and revocation remain separate from OAuth consent, codes and
+token rotation. Legacy API keys keep their existing read/write behavior.
+
 ## Files and operation records
 
 Uploads use expiring handles private to the account and connection. The HTTP staging endpoint

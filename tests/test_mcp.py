@@ -18,13 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from uuid6 import uuid7
 
 from src.app.api import router
+from src.app.authorization.operations import OPERATIONS
+from src.app.authorization.scopes import SCOPES
 from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.core.setup import create_application
 from src.app.core.utils.request_context import RequestContext
 from src.app.mcp import dispatch, oauth, resources
-from src.app.mcp.catalog import OPERATIONS
-from src.app.mcp.permissions import SCOPES
 from src.app.mcp.transport import install_mcp
 from src.app.mcp.urls import issuer_url, resource_url
 from src.app.models.mcp import McpAuthorization, McpGrant, McpToken
@@ -455,3 +455,214 @@ async def test_oauth_request_bodies_are_bounded(mcp_http: httpx.AsyncClient) -> 
         "/api/v1/mcp/oauth/register", content=b"x" * (64 * 1024 + 1), headers={"Content-Type": "application/json"}
     )
     assert response.status_code == 413
+
+
+async def scoped_key(client: httpx.AsyncClient, headers: dict[str, str], scopes: list[str]) -> dict[str, str]:
+    response = await client.post(
+        "/api/v1/user/api-keys",
+        json={"name": "Scoped integration key", "scope": "scoped", "scopes": scopes, "lifetime": "30d"},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["scopes"] == scopes
+    assert response.json()["scope"] == "scoped"
+    return {"Authorization": "Bearer " + response.json()["secret"]}
+
+
+async def test_scoped_api_key_reads_only_selected_content_before_cache(
+    mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
+) -> None:
+    headers = await browser(async_sessions, diver)
+    key = await scoped_key(mcp_http, headers, ["sites:read"])
+    # Warm the same account's cache with its unrestricted browser session.
+    assert (await mcp_http.get("/api/v1/dives", headers=headers)).status_code == 200
+    assert (await mcp_http.get("/api/v1/dive-sites", headers=key)).status_code == 200
+    for method, path, body in [
+        ("GET", "/api/v1/dives", None),
+        ("GET", "/api/v1/user", None),
+        ("POST", "/api/v1/dive-site", {"name": "Refused"}),
+        ("DELETE", f"/api/v1/dive-site/{uuid7()}", None),
+    ]:
+        response = await mcp_http.request(method, path, json=body, headers=key)
+        assert response.status_code == 403, response.text
+
+
+async def test_scoped_api_key_write_does_not_grant_read_delete_or_other_content(
+    mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
+) -> None:
+    headers = await browser(async_sessions, diver)
+    key = await scoped_key(mcp_http, headers, ["sites:write"])
+    created = await mcp_http.post("/api/v1/dive-site", json={"name": "Scoped site"}, headers=key)
+    assert created.status_code == 201, created.text
+    path = "/api/v1/dive-site/" + created.json()["uuid"]
+    assert (await mcp_http.patch(path, json={"name": "Updated"}, headers=key)).status_code == 200
+    assert (await mcp_http.get(path, headers=key)).status_code == 403
+    assert (await mcp_http.delete(path, headers=key)).status_code == 403
+    assert (await mcp_http.get("/api/v1/dives", headers=key)).status_code == 403
+    deleting = await scoped_key(mcp_http, headers, ["sites:delete"])
+    assert (await mcp_http.delete(path, headers=deleting)).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("scopes", "path"),
+    [
+        (["trips:read"], f"/api/v1/trip/{uuid7()}/dives"),
+        (["dives:read"], f"/api/v1/trip/{uuid7()}/dives"),
+        (["certifications:read"], f"/api/v1/certification/{uuid7()}/file/front"),
+        (["files:read"], f"/api/v1/certification/{uuid7()}/file/front"),
+        (["export:read"], "/api/v1/export/divejson"),
+    ],
+)
+async def test_scoped_key_requires_every_permission_for_combined_operations(
+    mcp_http: httpx.AsyncClient,
+    async_sessions: async_sessionmaker[AsyncSession],
+    diver: User,
+    scopes: list[str],
+    path: str,
+) -> None:
+    key = await scoped_key(mcp_http, await browser(async_sessions, diver), scopes)
+    response = await mcp_http.get(path, headers=key)
+    assert response.status_code == 403, response.text
+
+
+@pytest.mark.parametrize("domain", ["profile", "preferences"])
+async def test_api_and_mcp_account_views_expose_only_permitted_fields(
+    mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User, domain: str
+) -> None:
+    from src.app.authorization.account_views import PREFERENCES, PROFILE
+
+    headers = await browser(async_sessions, diver)
+    key = await scoped_key(mcp_http, headers, [f"{domain}:read"])
+    response = await mcp_http.get("/api/v1/user", headers=key)
+    assert response.status_code == 200, response.text
+    assert set(response.json()) == (PROFILE if domain == "profile" else PREFERENCES).read_fields
+    tokens = await connected(mcp_http, headers, [f"{domain}:read"])
+    called = await rpc(
+        mcp_http,
+        tokens["access_token"],
+        "tools/call",
+        {
+            "name": "read_current_user" if domain == "profile" else "read_preferences",
+            "arguments": {},
+        },
+    )
+    data = json.loads(called.json()["result"]["content"][0]["text"])
+    assert data["data"] == response.json()
+
+
+async def test_scoped_key_account_writes_require_all_provided_fields(
+    mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
+) -> None:
+    headers = await browser(async_sessions, diver)
+    key = await scoped_key(mcp_http, headers, ["profile:write"])
+    for body in [{"units": "imperial"}, {"name": "Allowed", "units": "imperial"}, {"is_superuser": True}]:
+        response = await mcp_http.patch("/api/v1/user", json=body, headers=key)
+        assert response.status_code == 403, response.text
+    assert (await mcp_http.patch("/api/v1/user", json={"name": "Allowed"}, headers=key)).status_code == 200
+    preferences = await scoped_key(mcp_http, headers, ["preferences:write"])
+    assert (await mcp_http.patch("/api/v1/user", json={"name": "Forbidden"}, headers=preferences)).status_code == 403
+    both = await scoped_key(mcp_http, headers, ["profile:write", "preferences:write"])
+    assert (
+        await mcp_http.patch("/api/v1/user", json={"name": "Both", "units": "imperial"}, headers=both)
+    ).status_code == 200
+
+
+async def test_scoped_key_sharing_is_explicit_and_credentials_stay_session_only(
+    mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
+) -> None:
+    headers = await browser(async_sessions, diver)
+    key = await scoped_key(mcp_http, headers, ["checkin:share"])
+    minted = await mcp_http.post(
+        "/api/v1/user/checkin-link",
+        headers=key,
+        json={
+            "total_dives": None,
+            "max_depth": None,
+            "last_dive_on": None,
+        },
+    )
+    assert minted.status_code == 201, minted.text
+    assert (await mcp_http.get("/api/v1/user/checkin-link", headers=key)).status_code == 200
+    assert (await mcp_http.delete("/api/v1/user/checkin-link", headers=key)).status_code == 200
+    content = await scoped_key(mcp_http, headers, ["checkin:read", "checkin:write"])
+    assert (await mcp_http.get("/api/v1/user/checkin-link", headers=content)).status_code == 403
+    all_permissions = await scoped_key(mcp_http, headers, sorted(SCOPES))
+    for method, path in [
+        ("GET", "/api/v1/user/api-keys"),
+        ("GET", "/api/v1/user/api-key-permissions"),
+        ("GET", "/api/v1/user/sessions"),
+        ("GET", "/api/v1/user/passkeys"),
+        ("DELETE", "/api/v1/user"),
+        ("GET", "/api/v1/admin/stats"),
+    ]:
+        assert (await mcp_http.request(method, path, headers=all_permissions)).status_code == 403
+    # Legacy keys retain the earlier categorical sharing restriction.
+    legacy = await mcp_http.post(
+        "/api/v1/user/api-keys", json={"name": "Legacy", "scope": "write", "lifetime": "30d"}, headers=headers
+    )
+    assert legacy.status_code == 201
+    assert (
+        await mcp_http.get("/api/v1/user/checkin-link", headers={"Authorization": "Bearer " + legacy.json()["secret"]})
+    ).status_code == 403
+
+
+@pytest.mark.parametrize("permissions", [None, [], ["unknown:read"], ["dives:read", "dives:read"]])
+async def test_scoped_key_creation_refuses_invalid_permissions(
+    mcp_http: httpx.AsyncClient,
+    async_sessions: async_sessionmaker[AsyncSession],
+    diver: User,
+    permissions: list[str] | None,
+) -> None:
+    headers = await browser(async_sessions, diver)
+    response = await mcp_http.post(
+        "/api/v1/user/api-keys",
+        json={
+            "name": "Invalid",
+            "scope": "scoped",
+            "scopes": permissions,
+            "lifetime": "30d",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 422, response.text
+    ambiguous = await mcp_http.post(
+        "/api/v1/user/api-keys",
+        json={
+            "name": "Invalid",
+            "scope": "write",
+            "scopes": ["dives:read"],
+            "lifetime": "30d",
+        },
+        headers=headers,
+    )
+    assert ambiguous.status_code == 422, ambiguous.text
+
+
+async def test_scoped_key_ownership_revocation_and_expiry(
+    mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User, other_diver: User
+) -> None:
+    from src.app.core.security import hash_token
+    from src.app.models.api_key import ApiKey
+
+    headers = await browser(async_sessions, diver)
+    key = await scoped_key(mcp_http, headers, ["sites:read"])
+    created = await mcp_http.post("/api/v1/dive-site", json={"name": "Private site"}, headers=headers)
+    path = "/api/v1/dive-site/" + created.json()["uuid"]
+    assert (await mcp_http.get(path, headers=key)).status_code == 200
+    other_key = await scoped_key(mcp_http, await browser(async_sessions, other_diver), ["sites:read"])
+    assert (await mcp_http.get(path, headers=other_key)).status_code == 404
+    listed = await mcp_http.get("/api/v1/user/api-keys", headers=headers)
+    row = listed.json()[0]
+    assert row["last_used_at"] is not None
+    assert row["scopes"] == ["sites:read"]
+    assert (await mcp_http.delete("/api/v1/user/api-key/" + row["uuid"], headers=headers)).status_code == 200
+    assert (await mcp_http.get(path, headers=key)).status_code == 401
+    expiring = await scoped_key(mcp_http, headers, ["sites:read"])
+    async with async_sessions() as db:
+        await db.execute(
+            update(ApiKey)
+            .where(ApiKey.token_hash == hash_token(expiring["Authorization"].removeprefix("Bearer ")))
+            .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        await db.commit()
+    assert (await mcp_http.get(path, headers=expiring)).status_code == 401

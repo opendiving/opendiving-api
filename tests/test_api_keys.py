@@ -63,7 +63,6 @@ REFUSING_PREFIXES = (
     "/api/v1/user/mcp",
     "/api/v1/user/passkey",
     "/api/v1/user/session",
-    "/api/v1/user/checkin-link",
     "/api/v1/user/invite-link",
     "/api/v1/user/email-change",
     "/api/v1/user/download-ticket",
@@ -483,7 +482,17 @@ class TestCreatingAKey:
 
         assert response.status_code == 201, response.text
         body = response.json()
-        assert set(body) == {"uuid", "name", "prefix", "scope", "created_at", "last_used_at", "expires_at", "secret"}
+        assert set(body) == {
+            "uuid",
+            "name",
+            "prefix",
+            "scope",
+            "scopes",
+            "created_at",
+            "last_used_at",
+            "expires_at",
+            "secret",
+        }
         secret = body["secret"]
         assert secret.startswith(API_KEY_PREFIX) and len(secret) == 47
         assert body["prefix"] == secret[:API_KEY_SHOWN_LENGTH]
@@ -496,7 +505,7 @@ class TestCreatingAKey:
 
         row = db.execute(select(ApiKey).where(ApiKey.user_id == diver.id)).scalar_one()
         assert row.token_hash == hashlib.sha256(secret.encode()).hexdigest()
-        assert secret not in {getattr(row, column) for column in ApiKey.__table__.columns.keys()}
+        assert all(secret != getattr(row, column) for column in ApiKey.__table__.columns.keys())
 
         sent = awaited_kwargs(notice)
         assert sent == {
@@ -594,7 +603,8 @@ class TestListingKeys:
         rows = response.json()
         assert [row["uuid"] for row in rows] == [str(first.uuid), str(second.uuid)]
         assert all(
-            set(row) == {"uuid", "name", "prefix", "scope", "created_at", "last_used_at", "expires_at"} for row in rows
+            set(row) == {"uuid", "name", "prefix", "scope", "scopes", "created_at", "last_used_at", "expires_at"}
+            for row in rows
         )
         assert first_secret not in response.text and second_secret not in response.text
         assert first.token_hash not in response.text

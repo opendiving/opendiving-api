@@ -1,4 +1,4 @@
-"""One permission vocabulary for OAuth, tool execution and browser consent."""
+"""One permission vocabulary for API keys, OAuth and delegated content operations."""
 
 DOMAINS = (
     "dives",
