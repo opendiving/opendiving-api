@@ -66,7 +66,10 @@ EXCLUDED: dict[str, str] = {
     "/api/v1/user/passkey/verify": "Completes a single-use ceremony, whose challenge a repeat cannot reuse.",
     "/api/v1/dive-site/{uuid}/proposals": "One waits per account and site, so a retry replaces what the first wrote.",
     "/api/v1/dive/{uuid}/recordings": "Idempotent by its bytes: a repeat upload finds the file it stored.",
-    "/api/v1/imports": "One waits per account, so a repeat is a 409 naming the import the first made.",
+    "/api/v1/imports": (
+        "A review waits per account, so a repeat is a 409 naming the first; `apply=true` keeps its holds by hand, "
+        "since it reads its body after releasing the transaction."
+    ),
 }
 
 
