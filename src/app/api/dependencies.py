@@ -7,6 +7,8 @@ from fastapi import Depends, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..authorization.policy import authorize_content
+from ..authorization.scopes import validate_scopes
 from ..core.db.database import async_get_db
 from ..core.exceptions.http_exceptions import ForbiddenException, NotFoundException, UnauthorizedException
 from ..core.security import (
@@ -70,6 +72,13 @@ async def get_current_user(
     The branch on the API-key prefix comes before `verify_token`, so a key never reaches the
     blacklist or the JWT decoder, and every other string takes the path above unchanged.
     """
+    from ..mcp.actor import internal_actor
+
+    delegated = internal_actor(request)
+    if delegated is not None:
+        await authorize_content(request, delegated.scopes)
+        return delegated.account
+
     if is_api_key(token):
         return await _account_for_api_key(request, token, db)
 
@@ -108,8 +117,15 @@ async def _account_for_api_key(request: Request, secret: str, db: AsyncSession) 
     if key is None:
         raise UnauthorizedException("User not authenticated.")
 
-    if key.scope != ApiKeyScope.WRITE and request.method not in SAFE_METHODS:
-        raise ForbiddenException("This API key is read-only.")
+    if key.scope == ApiKeyScope.SCOPED:
+        if key.scopes is None or not validate_scopes(list(key.scopes)):
+            raise ForbiddenException("Invalid API-key permissions.")
+        await authorize_content(request, frozenset(key.scopes))
+    elif key.scope == ApiKeyScope.READ:
+        if request.method not in SAFE_METHODS:
+            raise ForbiddenException("This API key is read-only.")
+    elif key.scope != ApiKeyScope.WRITE:
+        raise ForbiddenException("Invalid API-key access mode.")
 
     user = await read_account(db, uuid=key.owner_uuid)
     if not user:

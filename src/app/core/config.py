@@ -49,6 +49,12 @@ def _installed_version() -> str | None:
         return None
 
 
+class McpSettings(BaseSettings):
+    MCP_ENABLED: bool = config("MCP_ENABLED", default=False)
+    MCP_ALLOWED_HOSTS: str = config("MCP_ALLOWED_HOSTS", default="api:8000,localhost:8000,127.0.0.1:8000")
+    MCP_ALLOWED_ORIGINS: str | None = config("MCP_ALLOWED_ORIGINS", default=None)
+
+
 class AppSettings(BaseSettings):
     APP_NAME: str = config("APP_NAME", default="OpenDiving")
     APP_DESCRIPTION: str | None = config("APP_DESCRIPTION", default=None)
@@ -1277,6 +1283,7 @@ def configure_logging(level: str) -> None:
 
 
 class Settings(
+    McpSettings,
     AppSettings,
     PostgresSettings,
     CryptSettings,

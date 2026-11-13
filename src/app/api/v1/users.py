@@ -7,6 +7,7 @@ from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Cookie, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from pydantic import ValidationError
 from sqlalchemy import select, update
@@ -14,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...api.dependencies import current_session_uuid, get_current_user, refuse_api_keys
+from ...authorization.policy import account_fields
 from ...core.config import settings
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import (
@@ -125,12 +127,21 @@ def _replay_result_or_reject(*, current_email: str, new_email: str) -> EmailChan
 
 
 @router.get("/user", response_model=UserRead)
-async def read_current_user(request: Request, current_user: Annotated[dict, Depends(get_current_user)]) -> dict:
+async def read_current_user(
+    request: Request, current_user: Annotated[dict, Depends(get_current_user)]
+) -> dict | JSONResponse:
     """The caller's own profile.
 
-    No operation reads another account's profile.
+    No operation reads another account's profile. With a scoped credential, the
+    response contains only the profile or preference fields its permissions allow.
     """
-    # The token-resolved user as is, so it costs no query of its own.
+    scopes = getattr(request.state, "content_scopes", None)
+    if scopes is not None:
+        # A Response bypasses UserRead's defaults, which would reintroduce withheld fields.
+        data = UserRead.model_validate(current_user).model_dump(
+            mode="json", include=set(account_fields(scopes, "read"))
+        )
+        return JSONResponse(data)
     return current_user
 
 
@@ -156,7 +167,9 @@ async def patch_user(
     `PATCH /user/checkin-details`. A `username` another account holds is a 422, and a
     username change is rate limited per account; the rest of the profile is not.
     `dive_form_preset_uuid` names one of the caller's own presets or is `null`; anything
-    else is a 422.
+    else is a 422. Scoped credentials need profile:write for name and username,
+    and preferences:write for preference fields. A mixed update needs both;
+    any unpermitted field rejects the entire request with 403.
     """
     # `email` is not in `UserUpdate` at all; the change goes through the verified round-trip.
     # The username change is rate limited for the reason `POST /auth/complete` is per-IP: the

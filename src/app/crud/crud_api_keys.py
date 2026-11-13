@@ -35,6 +35,7 @@ class LiveApiKey:
     scope: str
     owner_uuid: uuid_pkg.UUID
     last_used_at: datetime | None
+    scopes: tuple[str, ...] | None = None
 
 
 async def live_api_key(db: AsyncSession, *, secret: str, now: datetime) -> LiveApiKey | None:
@@ -47,7 +48,7 @@ async def live_api_key(db: AsyncSession, *, secret: str, now: datetime) -> LiveA
     """
     row = (
         await db.execute(
-            select(ApiKey.id, ApiKey.scope, ApiKey.last_used_at, User.uuid)
+            select(ApiKey.id, ApiKey.scope, ApiKey.scopes, ApiKey.last_used_at, User.uuid)
             .join(User, User.id == ApiKey.user_id)
             .where(
                 ApiKey.token_hash == hash_token(secret),
@@ -58,7 +59,13 @@ async def live_api_key(db: AsyncSession, *, secret: str, now: datetime) -> LiveA
     ).one_or_none()
     if row is None:
         return None
-    return LiveApiKey(id=row.id, scope=row.scope, owner_uuid=row.uuid, last_used_at=row.last_used_at)
+    return LiveApiKey(
+        id=row.id,
+        scope=row.scope,
+        scopes=tuple(row.scopes) if row.scopes is not None else None,
+        owner_uuid=row.uuid,
+        last_used_at=row.last_used_at,
+    )
 
 
 async def stamp_api_key_used(db: AsyncSession, *, key: LiveApiKey, now: datetime) -> None:

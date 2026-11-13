@@ -54,4 +54,5 @@ async def read_instance_config() -> InstanceConfigRead:
         map_tiles=settings.map_tiles,
         map_attribution=map_renderer.current_attribution() if settings.map_tiles else None,
         dive_conditions=settings.dive_conditions,
+        mcp_enabled=settings.MCP_ENABLED,
     )

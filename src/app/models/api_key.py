@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import ARRAY, CheckConstraint, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -18,6 +18,13 @@ class ApiKey(Base, PublicUUIDMixin):
     """
 
     __tablename__ = "api_key"
+    __table_args__ = (
+        CheckConstraint(
+            "(scope IN ('read', 'write') AND scopes IS NULL) OR "
+            "(scope = 'scoped' AND scopes IS NOT NULL AND cardinality(scopes) > 0)",
+            name="api_key_permission_mode",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
@@ -37,3 +44,4 @@ class ApiKey(Base, PublicUUIDMixin):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default_factory=lambda: datetime.now(UTC))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    scopes: Mapped[list[str] | None] = mapped_column(ARRAY(String(32)), default=None)

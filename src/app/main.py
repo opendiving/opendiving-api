@@ -20,3 +20,10 @@ app = create_application(router=router, settings=settings, lifespan=lifespan_fac
 # Mount admin interface if enabled
 if admin:
     app.mount(settings.CRUD_ADMIN_MOUNT_PATH, admin.app)
+
+
+if settings.MCP_ENABLED:
+    from .mcp.transport import install_mcp, mcp_lifespan
+
+    mcp_server = install_mcp(app)
+    mcp_lifespan(app, mcp_server)

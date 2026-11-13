@@ -54,3 +54,6 @@ class InstanceConfigRead(BaseModel):
     # Whether this instance asks a weather provider about its dives (`DIVE_CONDITIONS_PROVIDER`),
     # so the privacy page discloses the provider only where it is in use.
     dive_conditions: bool
+    # Whether this instance runs the MCP server (`MCP_ENABLED`), so the web shows connected-app
+    # settings only where an app can connect.
+    mcp_enabled: bool

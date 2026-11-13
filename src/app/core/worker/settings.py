@@ -2,6 +2,7 @@ from arq.connections import RedisSettings
 from arq.cron import cron
 
 from ...core.config import settings
+from ...mcp.maintenance import purge_expired_mcp_data
 from .functions import (
     fetch_dive_conditions,
     purge_deleted_accounts,
@@ -31,6 +32,7 @@ REDIS_QUEUE_PORT = settings.REDIS_QUEUE_PORT
 class WorkerSettings:
     functions: list = []
     cron_jobs = [
+        cron(purge_expired_mcp_data, minute=0, run_at_startup=True),
         cron(purge_expired_tokens, minute=0, run_at_startup=True),
         # Same shape as the sweep above, and for the same reason: both are idempotent
         # housekeeping that deletes only rows already past their own expiry, so a

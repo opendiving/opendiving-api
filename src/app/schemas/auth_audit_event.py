@@ -81,6 +81,14 @@ class AuthEventType(StrEnum):
     PASSKEY_COUNTER_REGRESSED = "passkey_counter_regressed"
     API_KEY_CREATED = "api_key_created"
     API_KEY_REVOKED = "api_key_revoked"
+    # Criterion (a): consent commits the MCP connection its tokens hang off. Issuing and
+    # rotating those tokens is excluded on the same ground as ordinary refresh rotations.
+    MCP_CONNECTION_CREATED = "mcp_connection_created"
+    # Criterion (c): the owner in Settings, or the connected app through OAuth revocation.
+    MCP_CONNECTION_REVOKED = "mcp_connection_revoked"
+    # A spent refresh token presented again revokes the whole connection, so unlike a
+    # session replay there is no grace window that a benign retry could fall into.
+    MCP_REFRESH_REPLAY_DETECTED = "mcp_refresh_replay_detected"
     EMAIL_CHANGE_REQUESTED = "email_change_requested"
     EMAIL_CHANGE_COMPLETED = "email_change_completed"
     ACCOUNT_DELETION_REQUESTED = "account_deletion_requested"

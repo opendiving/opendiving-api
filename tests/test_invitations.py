@@ -847,6 +847,12 @@ class TestTheConfigRoute:
             assert (await read_instance_config()).map_attribution == expected
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("enabled", [False, True])
+    async def test_it_reports_whether_the_mcp_server_runs(self, enabled: bool) -> None:
+        with patch.object(settings, "MCP_ENABLED", enabled):
+            assert (await read_instance_config()).mcp_enabled is enabled
+
+    @pytest.mark.asyncio
     async def test_it_carries_nothing_else(self) -> None:
         """Adding a field is a decision rather than a convenience: this endpoint is anonymous,
         so everything on it is public. Dumped in JSON mode because this is the wire shape the
@@ -857,6 +863,7 @@ class TestTheConfigRoute:
             patch.object(settings, "JOIN_CHANNELS", None),
             patch.object(settings, "MAP_RENDERER_URL", ""),
             patch.object(settings, "DIVE_CONDITIONS_PROVIDER", ""),
+            patch.object(settings, "MCP_ENABLED", False),
         ):
             assert (await read_instance_config()).model_dump(mode="json") == {
                 "registration_mode": "invite",
@@ -866,6 +873,7 @@ class TestTheConfigRoute:
                 "map_tiles": False,
                 "map_attribution": None,
                 "dive_conditions": False,
+                "mcp_enabled": False,
             }
 
 

@@ -21,9 +21,11 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
@@ -39,6 +41,7 @@ from src.app.core.worker.functions import (
     purge_expired_user_sessions,
 )
 from src.app.crud.crud_auth_audit_events import record_auth_event
+from src.app.mcp.urls import resource_url
 from src.app.models.auth_audit_event import AuthAuditEvent
 from src.app.models.user import User
 from src.app.models.user_session import UserSession
@@ -46,6 +49,8 @@ from src.app.schemas.auth_audit_event import AuthEventType
 from src.app.services.auth_service import IssuedTokens
 from tests.conftest import db_available, unique_email
 from tests.helpers.mocks import awaited_kwargs, email_lookups_on
+from tests.test_mcp import browser, connected
+from tests.test_mcp import mcp_http as mcp_http
 
 CONTEXT = RequestContext(ip="203.0.113.7", user_agent="Mozilla/5.0 (X11; Linux x86_64) TestAgent/1.0")
 
@@ -1109,3 +1114,77 @@ class TestTheWriterAgainstPostgres:
 
         assert stored is not None
         assert len(stored.user_agent) == MAX_USER_AGENT_LENGTH
+
+
+@needs_a_database
+class TestMcpConnectionEvents:
+    """The MCP connection lifecycle through the real OAuth handlers: a connection made, revoked by
+    its owner or its app, and a refresh replay each write one row; an ordinary rotation writes none."""
+
+    @staticmethod
+    async def _events(sessions: async_sessionmaker[AsyncSession], diver: User) -> list[str]:
+        async with sessions() as db:
+            rows = await db.scalars(
+                select(AuthAuditEvent)
+                .where(AuthAuditEvent.user_id == diver.id, AuthAuditEvent.provider == "mcp")
+                .order_by(AuthAuditEvent.id)
+            )
+            return [row.event_type for row in rows]
+
+    @staticmethod
+    async def _refresh_form(client: httpx.AsyncClient, headers: dict[str, str], token: str) -> dict[str, str]:
+        client_id = (await client.get("/api/v1/user/mcp/connections", headers=headers)).json()[0]["client_id"]
+        return {
+            "grant_type": "refresh_token",
+            "refresh_token": token,
+            "client_id": client_id,
+            "resource": resource_url(),
+        }
+
+    @pytest.mark.asyncio
+    async def test_consent_and_settings_revocation_each_write_one(
+        self, mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
+    ) -> None:
+        headers = await browser(async_sessions, diver)
+        await connected(mcp_http, headers, ["dives:read"])
+        assert await self._events(async_sessions, diver) == [AuthEventType.MCP_CONNECTION_CREATED]
+
+        uuid = (await mcp_http.get("/api/v1/user/mcp/connections", headers=headers)).json()[0]["uuid"]
+        assert (await mcp_http.delete("/api/v1/user/mcp/connection/" + uuid, headers=headers)).status_code == 200
+        assert await self._events(async_sessions, diver) == [
+            AuthEventType.MCP_CONNECTION_CREATED,
+            AuthEventType.MCP_CONNECTION_REVOKED,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_rotation_is_silent_and_a_replay_writes_one(
+        self, mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
+    ) -> None:
+        headers = await browser(async_sessions, diver)
+        tokens = await connected(mcp_http, headers, ["dives:read"])
+        form = await self._refresh_form(mcp_http, headers, tokens["refresh_token"])
+        assert (await mcp_http.post("/api/v1/mcp/oauth/token", data=form)).status_code == 200
+        assert await self._events(async_sessions, diver) == [AuthEventType.MCP_CONNECTION_CREATED]
+
+        assert (await mcp_http.post("/api/v1/mcp/oauth/token", data=form)).status_code == 400
+        assert await self._events(async_sessions, diver) == [
+            AuthEventType.MCP_CONNECTION_CREATED,
+            AuthEventType.MCP_REFRESH_REPLAY_DETECTED,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_app_revoking_its_token_writes_one(
+        self, mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
+    ) -> None:
+        headers = await browser(async_sessions, diver)
+        tokens = await connected(mcp_http, headers, ["dives:read"])
+        form = await self._refresh_form(mcp_http, headers, tokens["refresh_token"])
+        revoked = await mcp_http.post(
+            "/api/v1/mcp/oauth/revoke",
+            data={"token": tokens["access_token"], "client_id": form["client_id"], "client_secret": ""},
+        )
+        assert revoked.status_code == 200, revoked.text
+        assert await self._events(async_sessions, diver) == [
+            AuthEventType.MCP_CONNECTION_CREATED,
+            AuthEventType.MCP_CONNECTION_REVOKED,
+        ]
