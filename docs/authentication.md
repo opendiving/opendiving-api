@@ -599,7 +599,8 @@ What a key is refused:
   cannot lock its owner out or mint itself a successor.
 - **A key's principal is never a superuser.** The account dict it resolves to carries `is_superuser`
   false whatever the column says, so the operator's routes answer the superuser gate's own 403 and
-  `GET /user` reports `false`.
+  `GET /user` reports `false`. A `write` key may propose a species photo, and only the operator's
+  signed-in session accepts or declines one.
 
 An unknown, expired or revoked key, and one whose owner has asked for deletion, gets the same 401 as
 every other credential failure. During the deletion grace period every key is dark, a restore brings
