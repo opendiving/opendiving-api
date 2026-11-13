@@ -104,6 +104,8 @@ class OwnedResourceCache[InternalT, PublicT]:
     - `dive_site_proposals.py` - uncached for `invitations.py`'s reason: a reviewer's decision is
       a write the proposer's own requests never make, and nothing embeds the list, which is
       read when a diver goes looking for an outcome.
+    - `species_photo_proposals.py` - uncached for the same reason: the operator's decision, or a
+      pin or hide that closes a proposal, is a write no key of the proposer's sees.
     - `logbook_import.py` - uncached: another device's apply or discard must read as gone at once,
       or a review would offer an import already finished, and nothing embeds one.
 
