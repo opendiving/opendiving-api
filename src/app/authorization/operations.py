@@ -1,4 +1,8 @@
-"""Reviewed content operations. New REST routes are never automatically exposed."""
+"""Reviewed content operations. New REST routes are never automatically exposed.
+
+`tests/test_authorization_operations.py` fails until every authenticated route is listed here or
+excluded there with a reason.
+"""
 
 from dataclasses import dataclass
 from typing import Literal
@@ -64,6 +68,18 @@ OPERATIONS = (
     Operation("read_dive_site", "GET", "/api/v1/dive-site/{uuid}", ("sites:read",)),
     Operation("patch_dive_site", "PATCH", "/api/v1/dive-site/{uuid}", ("sites:write",)),
     Operation("erase_dive_site", "DELETE", "/api/v1/dive-site/{uuid}", ("sites:delete",)),
+    Operation("read_dive_site_search", "GET", "/api/v1/dive-sites/search", ("sites:read",)),
+    Operation("read_dive_site_points", "GET", "/api/v1/dive-sites/points", ("sites:read",)),
+    Operation("read_dive_site_commons_matches", "GET", "/api/v1/dive-site/{uuid}/commons-matches", ("sites:read",)),
+    Operation(
+        "replace_dive_site",
+        "POST",
+        "/api/v1/dive-site/{uuid}/replace",
+        ("sites:write", "sites:delete", "dives:write"),
+    ),
+    Operation("write_dive_site_saved", "PUT", "/api/v1/dive-site/{uuid}/saved", ("sites:write",)),
+    Operation("read_dive_site_proposals", "GET", "/api/v1/dive-site-proposals", ("sites:read",)),
+    Operation("erase_dive_site_proposal", "DELETE", "/api/v1/dive-site-proposal/{uuid}", ("sites:delete",)),
     Operation("read_reverse_geocode", "GET", "/api/v1/geocode/reverse", ("sites:read",)),
     Operation("read_geocode_search", "GET", "/api/v1/geocode/search", ("sites:read",)),
     Operation("write_gear_item", "POST", "/api/v1/gear-item", ("gear:write",)),
@@ -145,6 +161,7 @@ OPERATIONS = (
     Operation("patch_dive_draft", "PATCH", "/api/v1/dive-draft/{uuid}", ("drafts:write",)),
     Operation("erase_dive_draft", "DELETE", "/api/v1/dive-draft/{uuid}", ("drafts:delete",)),
     Operation("read_dive_conditions_lookup", "GET", "/api/v1/dive-conditions/lookup", ("sites:read",)),
+    Operation("read_dive_conditions_current", "GET", "/api/v1/dive-conditions/current", ("sites:read",)),
     Operation("write_dive_form_preset", "POST", "/api/v1/dive-form-preset", ("presets:write",)),
     Operation("read_dive_form_presets", "GET", "/api/v1/dive-form-presets", ("presets:read",)),
     Operation("read_dive_form_preset", "GET", "/api/v1/dive-form-preset/{uuid}", ("presets:read",)),
@@ -155,8 +172,11 @@ OPERATIONS = (
     Operation("export_uddf", "GET", "/api/v1/export/uddf", ("export:read", "files:read"), result_kind="file"),
     Operation("export_csv", "GET", "/api/v1/export/csv", ("export:read", "files:read"), result_kind="file"),
     Operation("export_archive", "GET", "/api/v1/export/archive", ("export:read", "files:read"), result_kind="file"),
+    Operation("read_logbook_imports", "GET", "/api/v1/imports", ("import:write",)),
+    Operation("read_pending_logbook_imports", "GET", "/api/v1/imports/pending", ("import:write",)),
     Operation("create_logbook_import", "POST", "/api/v1/imports", ("import:write", "files:write")),
     Operation("read_logbook_import", "GET", "/api/v1/import/{uuid}", ("import:write",)),
+    Operation("read_logbook_import_notes", "GET", "/api/v1/import/{uuid}/notes", ("import:write",)),
     Operation("apply_logbook_import", "POST", "/api/v1/import/{uuid}/apply", ("import:write", "files:write")),
     Operation("discard_logbook_import", "DELETE", "/api/v1/import/{uuid}", ("import:write",)),
     Operation("write_user_avatar", "PUT", "/api/v1/user/avatar", ("profile:write", "files:write")),
