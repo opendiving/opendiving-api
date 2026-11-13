@@ -392,9 +392,9 @@ async def test_all_catalog_schemas_are_resolvable(
     assert response.status_code == 200, response.text
     tools = response.json()["result"]["tools"]
     assert len(tools) == len(OPERATIONS)
-    apply = next(tool for tool in tools if tool["name"] == "apply_logbook_import")
-    assert "token" in apply["inputSchema"]["properties"]["body"]["required"]
-    assert "file" not in apply["inputSchema"]["properties"]["body"]["properties"]
+    by_name = {tool["name"]: tool for tool in tools}
+    assert "files" in by_name["create_logbook_import"]["inputSchema"]["required"]
+    assert "files" not in by_name["apply_logbook_import"]["inputSchema"]["properties"]
     from jsonschema import Draft202012Validator
 
     for tool in tools:
@@ -510,10 +510,10 @@ async def test_scoped_api_key_write_does_not_grant_read_delete_or_other_content(
 @pytest.mark.parametrize(
     ("scopes", "path"),
     [
-        (["trips:read"], f"/api/v1/trip/{uuid7()}/dives"),
-        (["dives:read"], f"/api/v1/trip/{uuid7()}/dives"),
-        (["certifications:read"], f"/api/v1/certification/{uuid7()}/file/front"),
-        (["files:read"], f"/api/v1/certification/{uuid7()}/file/front"),
+        (["trips:read"], "/api/v1/trip/01900000-0000-7000-8000-000000000000/dives"),
+        (["dives:read"], "/api/v1/trip/01900000-0000-7000-8000-000000000000/dives"),
+        (["certifications:read"], "/api/v1/certification/01900000-0000-7000-8000-000000000000/file/front"),
+        (["files:read"], "/api/v1/certification/01900000-0000-7000-8000-000000000000/file/front"),
         (["export:read"], "/api/v1/export/divejson"),
     ],
 )

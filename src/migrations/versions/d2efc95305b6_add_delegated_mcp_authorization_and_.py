@@ -1,7 +1,7 @@
 """add delegated MCP authorization and file handles
 
 Revision ID: d2efc95305b6
-Revises: 417c0a090fd8
+Revises: 04c319ff9731
 Create Date: 2026-11-01 19:01:11.570851
 
 """
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "d2efc95305b6"
-down_revision: str | None = "417c0a090fd8"
+down_revision: str | None = "04c319ff9731"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

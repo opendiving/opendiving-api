@@ -80,7 +80,7 @@ class ContentServer(MCPServer[None]):
                     destructive_hint=op.method == "DELETE" or "dives:delete" in op.scopes,
                     idempotent_hint=op.method in {"GET", "PUT"},
                     open_world_hint=any(
-                        part in op.path for part in ("/species", "/geocode", "/dive-conditions", "/import/")
+                        part in op.path for part in ("/species", "/geocode", "/dive-conditions", "/import")
                     ),
                 ),
             )

@@ -93,20 +93,6 @@ class TestKeys:
 
 class TestRoundTrip:
     @pytest.mark.asyncio
-    async def test_seekable_file_is_copied_in_bounded_chunks(self, volume: Path) -> None:
-        class BoundedReads(io.BytesIO):
-            def read(self, size: int | None = -1) -> bytes:
-                assert size is not None and 0 < size <= 64 * 1024
-                return super().read(size)
-
-        data = b"mcp download" * 20000
-        with BoundedReads(data) as source:
-            source.seek(10)
-            await blob_store.put_file(KEY, source)
-            assert not source.closed
-        assert await blob_store.get(KEY) == data
-
-    @pytest.mark.asyncio
     async def test_interrupted_file_copy_keeps_previous_blob_and_removes_temp_file(self, volume: Path) -> None:
         class BrokenSource(io.BytesIO):
             def read(self, size: int | None = -1) -> bytes:

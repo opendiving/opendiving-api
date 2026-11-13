@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
+from starlette.requests import Request
 from uuid6 import uuid7
 
 from src.app.api.v1.users import patch_user, read_current_user
@@ -28,7 +29,7 @@ class TestReadCurrentUser:
     @pytest.mark.asyncio
     async def test_read_current_user_success(self, current_user_dict):
         """`GET /user` just returns whatever `get_current_user` resolved from the token."""
-        result = await read_current_user(Mock(), current_user_dict)
+        result = await read_current_user(Request({"type": "http"}), current_user_dict)
 
         assert result == current_user_dict
 

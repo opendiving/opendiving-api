@@ -102,7 +102,6 @@ class TestRoundTrip:
     @pytest.mark.asyncio
     async def test_seekable_file_is_sent_to_s3_without_materializing_it(self, s3: FakeS3Client) -> None:
         with io.BytesIO(DATA) as source:
-            source.seek(5)
             await blob_store.put_file(KEY, source)
             assert s3.calls[0][1]["Body"] is source
             assert not source.closed

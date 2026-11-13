@@ -89,6 +89,7 @@ async def store_file(
     if (used or 0) + size > MAX_STAGED_BYTES:
         raise HTTPException(413, "Temporary file quota exceeded. Delete unused handles.")
     key = blob_store.new_key("mcp-files", sha256=digest)
+    data.seek(0)  # `file_digest` read it to the end; `put_file` writes from where it stands.
     await blob_store.put_file(key, data)
     row = McpFile(
         user_id=int(access.subject or "0"),
