@@ -10,6 +10,7 @@ from .commons_export import router as commons_router
 from .config import router as config_router
 from .contacts import router as contacts_router
 from .courses import router as courses_router
+from .dive_computers import router as dive_computers_router
 from .dive_conditions import router as dive_conditions_router
 from .dive_drafts import router as dive_drafts_router
 from .dive_form_presets import router as dive_form_presets_router
@@ -71,6 +72,7 @@ router.include_router(species_photo_proposals_router)
 router.include_router(dives_router)
 router.include_router(dive_drafts_router)
 router.include_router(dive_conditions_router)
+router.include_router(dive_computers_router)
 router.include_router(map_tiles_router)
 router.include_router(dive_form_presets_router)
 router.include_router(support_router)

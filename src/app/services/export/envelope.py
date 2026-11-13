@@ -443,6 +443,9 @@ def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
                     {"name": preset.name, "hidden_fields": list(preset.hidden_fields)}
                     for preset in bundle.dive_form_presets
                 ],
+                # The diver's order of their dive computers, by serial: what they placed, and not
+                # the computers placed after them, which an importing account's own recordings say.
+                "dive_computer_order": list(user.dive_computer_order),
                 # Every tag by name, so one on no live dive is in the document too - it is in
                 # the account, and the Tags card lists it.
                 "tags": [tag.name for tag in bundle.tags],

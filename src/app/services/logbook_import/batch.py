@@ -85,6 +85,10 @@ from .writer import WrittenImport, write_import
 # files' documents can give one uuid to two dives, and a stored dive's uuid can be neither.
 type _Source = tuple[int, uuid_pkg.UUID]
 
+SHOWN_BY_DEFAULT = (
+    "The new recording is now shown by default. Its dive computer is higher in your list of dive computers."
+)
+
 
 @dataclass(slots=True)
 class _DiveRow:
@@ -99,6 +103,9 @@ class _DiveRow:
     # Every document dive that reached this row. A dive whose recordings partly matched dives
     # the caller has reaches several, and its notes go on the first alone.
     reached_by: list[_Source] = field(default_factory=list)
+    # The notes that a recording added to this dive became the one shown by default, each
+    # beside the document dive it came from: on this row whichever row that dive's others are on.
+    shown_by_default: list[tuple[_Source, ImportNote]] = field(default_factory=list)
 
 
 def _reason(plan: ImportPlan, source_uuid: Any) -> str | None:
@@ -205,6 +212,8 @@ class _Dives:
 
     def add(self, member: int, loaded: LoadedImport, plan: ImportPlan, written: WrittenImport) -> None:
         """What one file's plan and write did to dives, in the document's order."""
+        for shown in written.shown_by_default:
+            self._moved_to_front(shown.dive_id, shown.ordinal)
         found = findings(loaded.document, loaded.conversion)
         notes_about: dict[uuid_pkg.UUID, list[ImportNote]] = defaultdict(list)
         for note in plan.notes:
@@ -252,6 +261,28 @@ class _Dives:
                 self._claim(row, source)
         for match in plan.recording_matches:
             self._touch(match.dive_id, (member, match.source_uuid))
+        for shown in written.shown_by_default:
+            row = self._by_dive[shown.dive_id]
+            # A dive this batch created is new, and which of its recordings it shows is part of it.
+            if not row.created:
+                note = ImportNote(
+                    code=ImportNoteCode.RECORDING_SHOWN_BY_DEFAULT,
+                    collection="dives",
+                    uuid=shown.source_uuid,
+                    message=SHOWN_BY_DEFAULT,
+                )
+                plan.notes.append(note)
+                row.shown_by_default.append(((member, shown.source_uuid), note))
+
+    def _moved_to_front(self, dive_id: int, ordinal: int) -> None:
+        """Follow a recording an earlier file's notes do not name moving from `ordinal` to the
+        front of its dive: each that stood ahead of it is one place on, so a note about a member
+        of a recording still names the recording it was written about."""
+        for file in self._files.values():
+            for placed in file.recordings.values():
+                for index, (on, at) in placed.items():
+                    if on == dive_id and at < ordinal:
+                        placed[index] = (on, at + 1)
 
     def _own_notes(self, source: _Source) -> list[ImportNote]:
         """The import's own notes about one document dive, in its plan's order."""
@@ -297,6 +328,8 @@ class _Dives:
         for source in row.sources:
             for note in self._own_notes(source):
                 say(source, note, import_note(note))
+        for source, note in row.shown_by_default:
+            say(source, note, import_note(note))
         sources = {source: self._dive_source(source) for source in row.sources}
         for source in row.sources:
             dive = sources[source]

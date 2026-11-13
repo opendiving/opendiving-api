@@ -7457,3 +7457,15 @@ lock is transaction-scoped, so it is never held across a body read or the held f
 applied at once under an `Idempotency-Key` looks for its hold again under the lock and writes it
 beside the import: the lock, not the hold's index, serialises its repeats. Rejected: a row lock on
 the user, which every profile write would then wait behind; and the unique indexes alone.
+
+## The order of an account's dive computers includes the ones the diver never placed
+
+`user.dive_computer_order` holds the serials the diver placed; which computers exist is what the
+recordings name. The order in force, and what `GET /dive-computers` answers, is the placed serials
+then every other in the order the account first received a recording from each, by the recording's
+`created_at` then `id`. An attach consults that whole order, so a client showing the list shows what
+decides before the diver has set it. A placed serial with no recording is kept, so the phone can
+place a computer before its first upload. Rejected: an order that applies only once set, under which
+the list and its footer would be untrue; ordering the unplaced by their earliest dive, under which a
+new computer with older dives moves ahead partway through its first download; a table of computers,
+owing a row on every path that creates a recording.

@@ -73,6 +73,12 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # adding this NOT NULL column a value for the rows already in the table.
     dive_form_hidden_fields: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
 
+    # The diver's order of their dive computers, as folded serials, first to last
+    # (`services/dive_computers.py`). Which computers the account has is what its recordings
+    # name, so this holds the diver's choice alone, and may name a computer no recording does
+    # yet. On neither `UserRead` nor `UserUpdate`: `PUT /dive-computers/order` writes it.
+    dive_computer_order: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
+
     # The preset the diver last applied, so every device names the one they picked rather
     # than the first whose set matches - two presets may hold the same set. A pointer, not a
     # binding: toggling a field leaves it alone, and a client names it only while its set still

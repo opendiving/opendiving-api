@@ -109,7 +109,9 @@ def _with_id[T](row: T, row_id: int) -> T:
 
 
 def make_user(
-    dive_form_hidden_fields: list[str] | None = None, dive_form_preset_uuid: uuid_pkg.UUID | None = None
+    dive_form_hidden_fields: list[str] | None = None,
+    dive_form_preset_uuid: uuid_pkg.UUID | None = None,
+    dive_computer_order: list[str] | None = None,
 ) -> User:
     """The account every bundle here belongs to."""
     return _with_id(
@@ -121,6 +123,7 @@ def make_user(
             created_at=CREATED_AT,
             dive_form_hidden_fields=dive_form_hidden_fields or [],
             dive_form_preset_uuid=dive_form_preset_uuid,
+            dive_computer_order=dive_computer_order or [],
         ),
         1,
     )
@@ -232,6 +235,7 @@ def build_bundle(
     dive_form_presets: list[DiveFormPreset] | None = None,
     dive_form_hidden_fields: list[str] | None = None,
     dive_form_preset_uuid: uuid_pkg.UUID | None = None,
+    dive_computer_order: list[str] | None = None,
     schedules: list[GearServiceSchedule] | None = None,
     service_records: list[GearServiceRecord] | None = None,
     certifications: list[Certification] | None = None,
@@ -275,7 +279,7 @@ def build_bundle(
             (cert_id, info.side.value): "0" * 64 for cert_id, infos in certificate_files.items() for info in infos
         }
     return ExportBundle(
-        user=make_user(dive_form_hidden_fields, dive_form_preset_uuid),
+        user=make_user(dive_form_hidden_fields, dive_form_preset_uuid, dive_computer_order),
         # Empty by default, because an account that never entered any is the ordinary one.
         checkin_details=checkin_details or CheckinDetailsRead(),
         dives=dives,
@@ -774,6 +778,7 @@ def full_bundle() -> ExportBundle:
             make_dive_form_preset(1, "Recreational", ["altitude", "mixture.po2_limit"]),
             make_dive_form_preset(2, "Everything", []),
         ],
+        dive_computer_order=["d9772626", "253810000400"],
         contacts=[school, resort, shop],
         people=[jae, lina, sam],
         linked_uuid_by_person={1: UUIDS["linked-account"]},

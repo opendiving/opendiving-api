@@ -58,6 +58,7 @@ from ..schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, as_create
 from ..schemas.dive_profile import MILLISECONDS_PER_SECOND
 from ..schemas.parsed_dive import DiveMixtureSchema, ParsedDecoModel, ParsedDevice, ParsedDiveSchema
 from . import blob_store, dive_recordings
+from .dive_computers import show_first_by_default
 from .dive_profiles import (
     ExistingProfileRow,
     NormalizedProfile,
@@ -1076,7 +1077,9 @@ async def store_recording_file(
     **Where the file lands is the same-recording test's answer**, applied within this dive
     only - the caller has already said which dive these bytes belong to, so the question left
     is which of *its* records they are a second reading of. A match fills that recording's
-    blanks and never overwrites them; no match appends a new recording after the last.
+    blanks and never overwrites them; no match appends a new recording after the last, which
+    then moves to the front where its computer stands before the primary's in the account's
+    order of dive computers (`show_first_by_default`).
     """
     data = await read_upload_within_limit(upload, MAX_DIVE_FILE_SIZE)
     digest = hashlib.sha256(data).hexdigest()
@@ -1227,6 +1230,8 @@ async def store_recording_file(
             files=files,
             extraction=recording_extraction,
         )
+        if matched is None:
+            await show_first_by_default(db, user_id=user_id, dive_id=dive_id, recording_id=recording_id)
         await derive_dive_fixes(db, dive_id=dive_id, clear=True)
         await db.commit()
     except IntegrityError as exc:

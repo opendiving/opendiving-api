@@ -1528,8 +1528,11 @@ async def write_dive_recording(
     and start match one of this dive's existing recordings is a second export of that same
     record (the same computer's JSON and FIT, say) and fills its blanks without overwriting
     anything; anything else is a second computer and gets a recording of its own, appended
-    after the last. Either way the recording's cylinders may fill blank members of the dive's
-    cylinders they pair with, and never overwrite one. The file that creates the dive's first
+    after the last - or, where both computers name a serial and the new one comes before the
+    primary recording's in `GET /dive-computers`, made the primary, as
+    `PATCH /dive/{uuid}/recording/{rid}` with `{"primary": true}` makes it. Either way the
+    recording's cylinders may fill blank members of the dive's cylinders they pair with, and
+    never overwrite one. The file that creates the dive's first
     recording fills none: the form has already saved its cylinders. The dive's entry and exit
     fixes are derived again from all its files, each the first of them that has one.
 

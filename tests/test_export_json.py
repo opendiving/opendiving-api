@@ -433,6 +433,8 @@ class TestWhatUddfCannotHold:
                     # one that failed to export.
                     {"name": "Everything", "hidden_fields": []},
                 ],
+                # The diver's order of their dive computers, by serial as it is stored.
+                "dive_computer_order": ["d9772626", "253810000400"],
                 # Every tag, `drift` on no dive among them: a tag is in the account until the
                 # diver deletes it, whether or not a dive still carries it.
                 "tags": ["drift", "night", "wreck"],

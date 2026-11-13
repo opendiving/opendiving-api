@@ -767,6 +767,9 @@ class ImportNoteCode(StrEnum):
     # A recording matched one the caller already has - the same device, the same start -
     # so it filled that recording's blanks rather than being added beside it.
     RECORDING_FILLED = "recording_filled"
+    # A recording added to a dive the caller already has became the one shown by default, its
+    # computer standing before the shown one's in the account's list of dive computers.
+    RECORDING_SHOWN_BY_DEFAULT = "recording_shown_by_default"
     # The `diver` member's identity and settings were read and deliberately not applied.
     DIVER_NOT_APPLIED = "diver_not_applied"
     # A check-in detail in the document is not offered: an emergency contact that names

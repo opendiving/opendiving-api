@@ -212,11 +212,12 @@ class ExportDiver(PublicUUIDSchema):
     import into this app keeps it. The avatar has no member.
 
     `units`, the email opt-outs (`gear_service_emails`, `renewal_reminder_emails`,
-    `year_in_review_emails`) and the dive form's hidden fields and presets are
-    application preferences rather than logbook data, so the format gives them no core
-    member and they travel under this producer's key (spec §6.1). They are here at all
-    because `/export/archive` promises nothing in the account is reachable only through the
-    app - which is the whole reason the presets ride along too, UI configuration or not.
+    `year_in_review_emails`), the dive form's hidden fields and presets, and the order of the
+    diver's dive computers are application preferences rather than logbook data, so the format
+    gives them no core member and they travel under this producer's key (spec §6.1). They are
+    here at all because `/export/archive` promises nothing in the account is reachable only
+    through the app - which is the whole reason the presets ride along too, UI configuration or
+    not.
     The diver's `tags` ride there for the same promise: a tag on no live dive is on no
     dive's `tags`, and still in the account.
     """

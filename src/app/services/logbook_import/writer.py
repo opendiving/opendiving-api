@@ -83,6 +83,7 @@ from ..certification_files import (
     sniff_content_type,
     strip_card_image,
 )
+from ..dive_computers import show_first_by_default
 from ..dive_conditions import restore_conditions
 from ..dive_files import KEY_KIND as DIVE_FILE_KEY_KIND
 from ..dive_files import (
@@ -160,15 +161,27 @@ class _StoredBlob:
 
 
 @dataclass(frozen=True, slots=True)
+class ShownByDefault:
+    """An attach that moved its recording to the front of a dive: the dive, the ordinal the
+    recording was written at, and the document dive it came from."""
+
+    dive_id: int
+    ordinal: int
+    source_uuid: uuid_pkg.UUID
+
+
+@dataclass(frozen=True, slots=True)
 class WrittenImport:
     """What one file's write did that its plan could not say: the row each dive it created
     went into, by the document's uuid, and how many files each recording match
-    stored and the ordinal its recording holds on its dive - both aligned with
-    `ImportPlan.recording_matches`, an attach's slot being assigned only as it is written."""
+    stored and the ordinal its recording holds on its dive once the file is written - both
+    aligned with `ImportPlan.recording_matches`, an attach's slot being assigned only as it is
+    written - and the attaches whose recording became the one shown by default, in order."""
 
     dive_ids: dict[uuid_pkg.UUID, int]
     match_files: list[int]
     match_ordinals: list[int]
+    shown_by_default: list[ShownByDefault]
 
 
 class _Writer:
@@ -182,6 +195,7 @@ class _Writer:
         self._staged = staged
         self._match_files: list[int] = []
         self.match_ordinals: list[int] = []
+        self.shown_by_default: list[ShownByDefault] = []
         self._now = datetime.now(UTC)
         # Document uuid -> row id, per collection. Seeded with everything the plan already
         # resolved (a link names a row) and filled in as rows are created.
@@ -826,16 +840,31 @@ class _Writer:
         cylinder labels onto the dive's own list, because `gas_number` is dive-scoped and a
         second computer numbers its tanks its own way, filling the blanks of the rows it pairs
         with: the cylinders are the dive's, not the primary recording's.
+
+        **Once every match is written**, an attached recording whose computer stands before the
+        primary's in the account's order of dive computers moves to the front, as *Show by
+        default* would move it after the file (`show_first_by_default`).
         """
-        for match in self._plan.recording_matches:
+        attached: list[tuple[int, int]] = []
+        for index, match in enumerate(self._plan.recording_matches):
             if match.kind == "attach":
-                self._match_files.append(await self._attach_recording(match))
+                files, recording_id = await self._attach_recording(match)
+                self._match_files.append(files)
+                attached.append((index, recording_id))
             else:
                 self.match_ordinals.append(match.ordinal or 0)
                 self._match_files.append(await self._fill_recording(match))
+        for index, recording_id in attached:
+            match = self._plan.recording_matches[index]
+            moved = await show_first_by_default(
+                self._db, user_id=self._user_id, dive_id=match.dive_id, recording_id=recording_id
+            )
+            if moved is not None:
+                self._shown_first(index, moved)
 
-    async def _attach_recording(self, match: PlannedRecordingMatch) -> int:
-        """Append the match's recording to its dive. Returns how many files it stored.
+    async def _attach_recording(self, match: PlannedRecordingMatch) -> tuple[int, int]:
+        """Append the match's recording to its dive. Returns how many files it stored, and the
+        recording's row id.
 
         An arrival, so the dive's blank cylinders fill from the ones it pairs with. A
         recording holding the imported file is labelled and filled by the re-derivation, as
@@ -872,7 +901,23 @@ class _Writer:
                 )
         record = PlannedRecord(action=Action.CREATE, source_uuid=match.source_uuid, uuid=match.source_uuid)
         recording_id = await self._write_recording(record, match.dive_id, planned, ordinal=ordinal)
-        return await self._files_on(recording_id)
+        return await self._files_on(recording_id), recording_id
+
+    def _shown_first(self, moved_index: int, moved: int) -> None:
+        """Follow the attach at `moved_index` moving its recording from `moved` to the front:
+        every match of this file on that dive whose recording stood ahead of it is one place on."""
+        match = self._plan.recording_matches[moved_index]
+        for index, ordinal in enumerate(self.match_ordinals):
+            if (
+                index != moved_index
+                and self._plan.recording_matches[index].dive_id == match.dive_id
+                and ordinal < moved
+            ):
+                self.match_ordinals[index] = ordinal + 1
+        self.match_ordinals[moved_index] = 0
+        self.shown_by_default.append(
+            ShownByDefault(dive_id=match.dive_id, ordinal=moved, source_uuid=match.source_uuid)
+        )
 
     async def _stored_uuids(self, sources: list[uuid_pkg.UUID | None]) -> dict[uuid_pkg.UUID | None, uuid_pkg.UUID]:
         """The public uuid of the gear row each source uuid was written or matched to."""
@@ -1075,4 +1120,5 @@ async def write_import(
         dive_ids={record.source_uuid: writer.dive_id(record.source_uuid) for record in plan.writable("dives")},
         match_files=writer.match_files,
         match_ordinals=writer.match_ordinals,
+        shown_by_default=writer.shown_by_default,
     )

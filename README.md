@@ -48,9 +48,11 @@ else; what is here is the source, and the notes for working on it.
   brand, model, serial, firmware, its own name and its own dive counter — is kept beside the
   samples, along with **the mode, salinity and decompression model that computer ran with, and its
   CNS, OTU and surface-pressure readouts**, all of which two computers on one dive legitimately
-  disagree about. A computer that shut down mid-water logs the dive twice, so two dives can be
-  **merged** into one: the two records land on a single axis with the stretch the computer was off
-  left empty, and nothing is invented to bridge it.
+  disagree about. The account keeps its dive computers in an order, and where a second computer's
+  recording joins a dive, the one higher in it is shown by default. A computer that shut down
+  mid-water logs the dive twice, so two dives can be **merged** into one: the two records land on a
+  single axis with the stretch the computer was off left empty, and nothing is invented to bridge
+  it.
 - **Air consumption** — SAC and RMV derived automatically, per tank on multi-tank dives, plus a
   gas-use history endpoint powering the dashboard trend chart.
 - **Species log** — record what you saw on a dive, and for each species how many you counted or a

@@ -152,6 +152,11 @@ def _folded(value: str | None) -> str | None:
     return value.strip().casefold() or None
 
 
+def folded_serial(serial: str | None) -> str | None:
+    """A serial as the gates compare it, and so the one computer it names."""
+    return _folded(serial)
+
+
 def device_of(source: ParsedDevice | None) -> DeviceIdentity:
     """A parse's device as an identity. An absent device is an empty identity, not `None`,
     so every caller compares the same shape."""
