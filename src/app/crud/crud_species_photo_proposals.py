@@ -97,12 +97,16 @@ async def write_waiting_proposal(
     db: AsyncSession, *, user_id: int, species_id: int, file: str, note: str, now: datetime
 ) -> tuple[uuid_pkg.UUID, datetime]:
     """Write this account's waiting proposal for the species, replacing the one that waits if
-    there is one, which keeps its uuid and its place in the review. Two at once leave one row.
-    Does not commit."""
-    replaced = {"file": file, "note": note}
+    there is one. Two at once leave one row. Does not commit.
+
+    A replacement is a new proposal, under a new uuid and at the back of the review: accepting
+    names a uuid and pins the file its row holds, so a uuid the operator was shown must never
+    come to name a file they were not.
+    """
+    replaced = {"file": file, "note": note, "uuid": uuid7(), "created_at": now}
     statement = (
         insert(SpeciesPhotoProposal)
-        .values(user_id=user_id, species_id=species_id, status=_WAITING, uuid=uuid7(), created_at=now, **replaced)
+        .values(user_id=user_id, species_id=species_id, status=_WAITING, **replaced)
         .on_conflict_do_update(
             index_elements=["user_id", "species_id"],
             index_where=SpeciesPhotoProposal.status == _WAITING,

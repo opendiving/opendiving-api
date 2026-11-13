@@ -215,7 +215,7 @@ class TestProposing:
             "scientific_name": species.scientific_name,
             "common_name": species.common_name,
         }
-        assert second["uuid"] == first["uuid"]
+        assert second["uuid"] != first["uuid"]
         assert _statuses(db, species) == [("Pterois miles 2.jpg", "waiting")]
         listed = (await http.get("/species-photo-proposals", params={"status": "waiting"})).json()["data"]
         assert [(row["species"]["uuid"], row["file"]) for row in listed] == [(str(species.uuid), "Pterois miles 2.jpg")]
@@ -298,6 +298,50 @@ class TestProposing:
     def test_the_daily_limit_defaults_to_a_hundred(self) -> None:
         assert settings.SPECIES_PHOTO_PROPOSAL_RATE_LIMIT_PER_USER == 100
         assert settings.SPECIES_PHOTO_PROPOSAL_RATE_LIMIT_WINDOW_SECONDS == 86400
+
+
+class TestAReplacedProposal:
+    @pytest.mark.asyncio
+    async def test_the_uuid_the_operator_was_shown_never_pins_the_file_that_replaced_it(
+        self, http: httpx.AsyncClient, db: Session, signed: Sign, diver: User, operator: User, volume: Path
+    ) -> None:
+        species = _species(db)
+        shown = await _propose(http, species, "A.jpg")
+        signed.as_(operator)
+        with patch.object(species_service, "proposed_files", AsyncMock(return_value={})):
+            review = (await http.get(f"/admin/species/{species.uuid}/photo-proposals")).json()
+        signed.as_(diver)
+        replacement = await _propose(http, species, "B.jpg")
+        signed.as_(operator)
+        fetch = _found("B.jpg")
+
+        with patch.object(species_service, "fetch_pinned_photo", fetch):
+            stale = await http.post(f"/admin/species-photo-proposal/{shown['uuid']}/accept")
+            stale_decline = await http.post(f"/admin/species-photo-proposal/{shown['uuid']}/decline")
+
+        assert [row["uuid"] for row in review] == [shown["uuid"]]
+        assert (stale.status_code, stale_decline.status_code) == (404, 404)
+        fetch.assert_not_awaited()
+        assert _row(db, replacement["uuid"]).status == "waiting"
+        db.refresh(species)
+        assert species.photo_curation is None
+
+    @pytest.mark.asyncio
+    async def test_it_goes_to_the_back_of_the_review(
+        self, http: httpx.AsyncClient, db: Session, signed: Sign, diver: User, other_diver: User, operator: User
+    ) -> None:
+        species = _species(db)
+        await _propose(http, species, "A.jpg")
+        signed.as_(other_diver)
+        theirs = await _propose(http, species, "B.jpg")
+        signed.as_(diver)
+        replacement = await _propose(http, species, "C.jpg")
+        signed.as_(operator)
+
+        with patch.object(species_service, "proposed_files", AsyncMock(return_value={})):
+            review = (await http.get(f"/admin/species/{species.uuid}/photo-proposals")).json()
+
+        assert [row["uuid"] for row in review] == [theirs["uuid"], replacement["uuid"]]
 
 
 class TestADeclinedFile:

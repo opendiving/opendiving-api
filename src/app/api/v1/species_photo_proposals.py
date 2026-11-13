@@ -43,10 +43,13 @@ async def propose_species_photo(
     `commons.wikimedia.org/wiki/File:` page URL. It is checked for shape only: Wikimedia is asked
     nothing until the proposal is reviewed, and a title that names no raster file is a 422.
 
-    One proposal per account and species waits at a time, and proposing again replaces it, keeping
-    its place. 409 when the species' photo was already chosen by hand - `accepts_photo_proposals`
-    on the species reads `false` - when the file is the species' photo already, and when the file
-    was declined for this species before, whoever proposed it. Proposals are limited per account
+    One proposal per account and species waits at a time, and proposing again replaces it with a
+    new proposal under a new `uuid`, behind the others waiting for review; the one it replaced is
+    gone, and its `uuid` is a 404 from then on.
+
+    409 when the species' photo was already chosen by hand - `accepts_photo_proposals` on the
+    species reads `false` - when the file is the species' photo already, and when the file was
+    declined for this species before, whoever proposed it. Proposals are limited per account
     per day: 429 past it. 404 for an unknown species.
     """
     return await species_photo_proposals.propose(db, species_uuid=uuid, user_id=current_user["id"], values=values)
