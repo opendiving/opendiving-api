@@ -52,7 +52,11 @@ async def mcp_http(
 
     app.dependency_overrides[async_get_db] = database
     from src.app.core.setup import close_redis_cache_pool, create_redis_cache_pool
+    from src.app.core.utils import cache
 
+    # Restore process globals so later tests never inherit clients bound to this test's loop.
+    monkeypatch.setattr(cache, "client", None)
+    monkeypatch.setattr(cache, "pool", None)
     await create_redis_cache_pool()
     ready, stop = asyncio.Event(), asyncio.Event()
 
