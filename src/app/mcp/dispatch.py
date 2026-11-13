@@ -6,7 +6,9 @@ REST, and neither an arbitrary URL nor arbitrary headers can be supplied by a cl
 """
 
 import json
-from typing import Any
+import tempfile
+from email.message import Message
+from typing import IO, Any
 from urllib.parse import quote
 from uuid import UUID
 
@@ -16,14 +18,15 @@ from mcp.server import MCPServer
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, InputRequiredResult, TextContent, Tool, ToolAnnotations
-from starlette.types import Receive, Scope, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..core.db.database import local_session
 from ..models.mcp import McpAudit
 from ..services import blob_store
 from .actor import SCOPE_KEY, DelegatedActor
 from .catalog import OPERATIONS, Operation
-from .files import owned_file, store_file
+from .downloads import DownloadCapture, DownloadTooLarge
+from .files import MAX_STAGED_BYTES, owned_file, store_file
 from .oauth import provider
 from .profiles import sampled_profile
 from .schemas import argument_schema
@@ -98,26 +101,33 @@ class ContentServer(MCPServer[None]):
         if fresh is None or account is None:
             return result({"detail": "Connection expired or revoked."}, error=True)
         download = None
-        try:
-            response = await self.execute(op, arguments, account)
-            if response.is_success and "application/json" not in response.headers.get("content-type", ""):
-                async with local_session() as db:
-                    row = await store_file(
-                        db,
-                        fresh,
-                        response.content,
-                        "opendiving-export",
-                        response.headers.get("content-type", "application/octet-stream"),
-                    )
-                    download = {
-                        "handle": str(row.uuid),
-                        "download_url": "/api/v1/mcp/files/" + str(row.uuid),
-                        "byte_size": row.byte_size,
-                        "expires_at": row.expires_at,
-                        "instructions": "Download with this connection's MCP access token in Authorization: Bearer.",
-                    }
-        except HTTPException as exc:
-            response = httpx.Response(exc.status_code, json={"detail": exc.detail})
+        with tempfile.SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b") as spool:
+            try:
+                response = await self.execute(op, arguments, account, download=spool)
+                if response.is_success and op.result_kind == "file":
+                    disposition = Message()
+                    disposition["Content-Disposition"] = response.headers.get("content-disposition", "")
+                    async with local_session() as db:
+                        row = await store_file(
+                            db,
+                            fresh,
+                            spool,
+                            disposition.get_filename() or "opendiving-download",
+                            response.headers.get("content-type", "application/octet-stream"),
+                        )
+                        download = {
+                            "handle": str(row.uuid),
+                            "filename": row.filename,
+                            "content_type": row.content_type,
+                            "download_url": "/api/v1/mcp/files/" + str(row.uuid),
+                            "byte_size": row.byte_size,
+                            "expires_at": row.expires_at,
+                            "instructions": (
+                                "Download with this connection's MCP access token in Authorization: Bearer."
+                            ),
+                        }
+            except HTTPException as exc:
+                response = httpx.Response(exc.status_code, json={"detail": exc.detail})
         async with local_session() as db:
             db.add(McpAudit(grant_id=(fresh.claims or {})["grant_id"], tool=name, status=response.status_code))
             await db.commit()
@@ -129,21 +139,13 @@ class ContentServer(MCPServer[None]):
             return result({"detail": "Binary result requires a download resource."}, error=True)
         if op.name == "read_dive_profile" and response.is_success:
             data = sampled_profile(data, arguments.get("max_profile_points", 500))
-        if op.name in {"read_current_user", "read_preferences"} and response.is_success:
-            preferences = {
-                "gear_service_emails",
-                "renewal_reminder_emails",
-                "year_in_review_emails",
-                "units",
-                "dive_form_hidden_fields",
-                "dive_form_preset_uuid",
-            }
-            data = {
-                key: value for key, value in data.items() if (key in preferences) == (op.name == "read_preferences")
-            }
+        if op.account_view is not None and op.method == "GET" and response.is_success:
+            data = {key: value for key, value in data.items() if key in op.account_view.read_fields}
         return result({"status": response.status_code, "data": data}, error=response.is_error)
 
-    async def execute(self, op: Operation, arguments: dict[str, Any], account: dict[str, Any]) -> httpx.Response:
+    async def execute(
+        self, op: Operation, arguments: dict[str, Any], account: dict[str, Any], *, download: IO[bytes]
+    ) -> httpx.Response:
         from jsonschema import Draft202012Validator
         from jsonschema.exceptions import ValidationError
 
@@ -168,9 +170,11 @@ class ContentServer(MCPServer[None]):
                 for handle in arguments["files"]:
                     row = await owned_file(db, UUID(handle), access)
                     files.append(("file", (row.filename, await blob_store.get(row.storage_key), row.content_type)))
+        application: ASGIApp = ActorApplication(self.app, DelegatedActor(account))
+        if op.result_kind == "file":
+            application = DownloadCapture(application, download, MAX_STAGED_BYTES)
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=ActorApplication(self.app, DelegatedActor(account))),
-            base_url="http://mcp-internal",
+            transport=httpx.ASGITransport(app=application), base_url="http://mcp-internal"
         ) as client:
             if files:
                 form = {
@@ -178,9 +182,14 @@ class ContentServer(MCPServer[None]):
                     for key, value in arguments.get("body", {}).items()
                     if value is not None
                 }
-                return await client.request(
+                request = client.build_request(
                     op.method, path, params=arguments.get("query"), data=form, files=files, headers=headers
                 )
-            return await client.request(
-                op.method, path, params=arguments.get("query"), json=arguments.get("body"), headers=headers
-            )
+            else:
+                request = client.build_request(
+                    op.method, path, params=arguments.get("query"), json=arguments.get("body"), headers=headers
+                )
+            try:
+                return await client.send(request)
+            except DownloadTooLarge:
+                return httpx.Response(413, json={"detail": "Download exceeds the 50 MiB temporary file limit."})

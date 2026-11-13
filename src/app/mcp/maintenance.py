@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 from ..core.db.database import local_session
 from ..models.mcp import McpAudit, McpAuthorization, McpClient, McpFile, McpGrant, McpToken
 from ..services.blob_store import delete_after_commit
+from .files import stale_files
 
 
 async def purge_expired_mcp_data(ctx: dict[str, Any]) -> None:
@@ -18,9 +19,7 @@ async def purge_expired_mcp_data(ctx: dict[str, Any]) -> None:
         await db.execute(delete(McpAuthorization).where(McpAuthorization.expires_at < now))
         await db.execute(delete(McpAudit).where(McpAudit.created_at < now - timedelta(days=90)))
         rows = (
-            await db.scalars(
-                select(McpFile).where(McpFile.expires_at < now).with_for_update(skip_locked=True).limit(1000)
-            )
+            await db.scalars(select(McpFile).where(stale_files(now)).with_for_update(skip_locked=True).limit(1000))
         ).all()
         for row in rows:
             delete_after_commit(db, row.storage_key)

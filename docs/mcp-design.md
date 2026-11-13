@@ -62,6 +62,10 @@ route never exposes it through MCP automatically. Credential management, sign-in
 account deletion and administration are absent. Scope filtering affects both tool listing and
 execution.
 
+The catalog explicitly distinguishes JSON results from file downloads. File cardinality and
+retry-key support come from each route's OpenAPI contract. A single-file operation accepts one
+handle; logbook imports accept multiple. Only routes declaring `Idempotency-Key` expose a retry key.
+
 The dispatcher makes an in-process ASGI request to the selected existing content operation. This
 retains ownership checks before cache reads, cache invalidation, quotas, import validation,
 idempotency dependencies and response serialization. It avoids duplicating the route-heavy
@@ -70,22 +74,26 @@ delegated actor. It is never an HTTP header, never a browser credential, and nev
 dependency override. Clients cannot choose URLs, methods or arbitrary headers. Download-ticket query
 parameters are excluded.
 
-Profile and preference updates expose disjoint subsets of the existing update schema. Their reads
-filter the same fields. Operations requiring multiple capabilities list each scope, such as merging
-dives, attaching files and publishing drafts. The catalog's schema tests hold these operations to
-the live API contract.
+Profile and preference views share explicit read and write field policies. Updates expose disjoint
+subsets of the existing update schema, and reads apply their view's allowlist. Operations requiring
+multiple capabilities list each scope, such as merging dives, attaching files and publishing drafts.
+The catalog's schema tests hold these operations to the live API contract.
 
 ## Files and operation records
 
 Uploads use expiring handles private to the account and connection. The HTTP staging endpoint
 accepts multipart uploads of at most 10 MiB, with an account-wide 50 MiB temporary quota enforced
 under an account lock. Files live in the existing blob store. The blob-key inventory includes the
-temporary-file table so account purge and orphan sweeping recognize them.
+temporary-file table so account purge and orphan sweeping recognize them. Staging reclaims expired
+and revoked connections' files under the same account lock, so their quota is available immediately.
 
 Upload tools accept staged handles and retain existing preview/apply import behavior. Binary results
 become private download handles. The `opendiving://file/{handle}` resource describes a download
 without embedding large binary data in model context. Download requests use the connection's bearer
-token. JSON tool results are capped at 512 KiB.
+token. Downloads preserve the attachment filename and media type. They spill to disk after 1 MiB,
+stop at the 50 MiB temporary-file limit, and copy into either blob backend without materializing the
+spool. A known oversized content length is refused before capturing body chunks. JSON tool results
+are capped at 512 KiB.
 
 The connection activity endpoint records tool names, status codes and timestamps, without arguments
 or content. An hourly worker task removes expired credentials and temporary files, unreferenced

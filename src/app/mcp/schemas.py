@@ -27,18 +27,19 @@ def argument_schema(operation: Operation, document: dict[str, Any]) -> dict[str,
         properties["body"] = content["application/json"]["schema"]
         if route["requestBody"].get("required"):
             required.append("body")
-    if "multipart/form-data" in content or operation.path.startswith("/api/v1/import/"):
+    if "multipart/form-data" in content:
+        multipart = content["multipart/form-data"]["schema"]
+        if "$ref" in multipart:
+            multipart = document["components"]["schemas"][multipart["$ref"].rsplit("/", 1)[-1]]
+        file_schema = multipart["properties"]["file"]
         properties["files"] = {
             "type": "array",
             "minItems": 1,
-            "maxItems": 20,
+            "maxItems": min(file_schema.get("maxItems", 20), 20) if file_schema.get("type") == "array" else 1,
             "items": {"type": "string", "format": "uuid"},
             "description": "Handles from POST /api/v1/mcp/files using this app's MCP token.",
         }
         required.append("files")
-        multipart = content.get("multipart/form-data", {}).get("schema", {})
-        if "$ref" in multipart:
-            multipart = document["components"]["schemas"][multipart["$ref"].rsplit("/", 1)[-1]]
         fields = {key: value for key, value in multipart.get("properties", {}).items() if key != "file"}
         mandatory = [key for key in multipart.get("required", []) if key in fields]
         properties["body"] = {
@@ -50,11 +51,16 @@ def argument_schema(operation: Operation, document: dict[str, Any]) -> dict[str,
         }
         if mandatory:
             required.append("body")
-    if operation.method == "POST":
+    idempotency = next(
+        (p for p in route.get("parameters", []) if p["in"] == "header" and p["name"].lower() == "idempotency-key"),
+        None,
+    )
+    if idempotency is not None:
+        header = idempotency["schema"]
+        if "anyOf" in header:
+            header = next(branch for branch in header["anyOf"] if branch.get("type") == "string")
         properties["idempotency_key"] = {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
+            **{key: value for key, value in header.items() if key != "default"},
             "description": "Reuse the same key when retrying a create request.",
         }
     if operation.name == "read_dive_profile":
@@ -89,19 +95,8 @@ def argument_schema(operation: Operation, document: dict[str, Any]) -> dict[str,
     collect(schema)
     if selected:
         schema["$defs"] = selected
-    if operation.name in {"patch_user", "patch_preferences"}:
-        allowed = (
-            {"name", "username"}
-            if operation.name == "patch_user"
-            else {
-                "gear_service_emails",
-                "renewal_reminder_emails",
-                "year_in_review_emails",
-                "units",
-                "dive_form_hidden_fields",
-                "dive_form_preset_uuid",
-            }
-        )
+    if operation.account_view is not None and operation.method == "PATCH":
+        allowed = operation.account_view.write_fields
         user = schema["$defs"]["UserUpdate"]
         user["properties"] = {key: value for key, value in user["properties"].items() if key in allowed}
         user["additionalProperties"] = False

@@ -1,21 +1,26 @@
 """Reviewed content operations. New REST routes are never automatically exposed."""
 
 from dataclasses import dataclass
+from typing import Literal
+
+from .account_views import PREFERENCES, PROFILE, AccountView
 
 
 @dataclass(frozen=True)
 class Operation:
     name: str
-    method: str
+    method: Literal["GET", "POST", "PATCH", "PUT", "DELETE"]
     path: str
     scopes: tuple[str, ...]
+    result_kind: Literal["json", "file"] = "json"
+    account_view: AccountView | None = None
 
 
 OPERATIONS = (
-    Operation("read_current_user", "GET", "/api/v1/user", ("profile:read",)),
-    Operation("patch_user", "PATCH", "/api/v1/user", ("profile:write",)),
-    Operation("read_preferences", "GET", "/api/v1/user", ("preferences:read",)),
-    Operation("patch_preferences", "PATCH", "/api/v1/user", ("preferences:write",)),
+    Operation("read_current_user", "GET", "/api/v1/user", ("profile:read",), account_view=PROFILE),
+    Operation("patch_user", "PATCH", "/api/v1/user", ("profile:write",), account_view=PROFILE),
+    Operation("read_preferences", "GET", "/api/v1/user", ("preferences:read",), account_view=PREFERENCES),
+    Operation("patch_preferences", "PATCH", "/api/v1/user", ("preferences:write",), account_view=PREFERENCES),
     Operation("read_dive_stats", "GET", "/api/v1/user/dive-stats", ("dives:read",)),
     Operation("read_storage_usage", "GET", "/api/v1/user/storage", ("files:read",)),
     Operation("read_gas_use_history", "GET", "/api/v1/user/gas-use-history", ("dives:read",)),
@@ -100,6 +105,7 @@ OPERATIONS = (
         "GET",
         "/api/v1/certification/{uuid}/file/{side}",
         ("certifications:read", "files:read"),
+        result_kind="file",
     ),
     Operation(
         "erase_certification_file",
@@ -127,7 +133,9 @@ OPERATIONS = (
     Operation("read_dive_neighbors", "GET", "/api/v1/dive/{uuid}/neighbors", ("dives:read",)),
     Operation("merge_two_dives", "POST", "/api/v1/dives/merge", ("dives:write", "dives:delete")),
     Operation("write_dive_recording", "POST", "/api/v1/dive/{uuid}/recordings", ("dives:write", "files:write")),
-    Operation("read_dive_file", "GET", "/api/v1/dive/{uuid}/file/{fid}", ("dives:read", "files:read")),
+    Operation(
+        "read_dive_file", "GET", "/api/v1/dive/{uuid}/file/{fid}", ("dives:read", "files:read"), result_kind="file"
+    ),
     Operation("erase_dive_file", "DELETE", "/api/v1/dive/{uuid}/file/{fid}", ("dives:delete", "files:write")),
     Operation("read_dive_profile", "GET", "/api/v1/dive/{uuid}/recording/{rid}/profile", ("dives:read",)),
     Operation("erase_dive_recording", "DELETE", "/api/v1/dive/{uuid}/recording/{rid}", ("dives:delete",)),
@@ -144,23 +152,35 @@ OPERATIONS = (
     Operation("patch_dive_form_preset", "PATCH", "/api/v1/dive-form-preset/{uuid}", ("presets:write",)),
     Operation("erase_dive_form_preset", "DELETE", "/api/v1/dive-form-preset/{uuid}", ("presets:delete",)),
     Operation("restore_default_dive_form_presets", "POST", "/api/v1/dive-form-presets/defaults", ("presets:write",)),
-    Operation("export_divejson", "GET", "/api/v1/export/divejson", ("export:read", "files:read")),
-    Operation("export_uddf", "GET", "/api/v1/export/uddf", ("export:read", "files:read")),
-    Operation("export_csv", "GET", "/api/v1/export/csv", ("export:read", "files:read")),
-    Operation("export_archive", "GET", "/api/v1/export/archive", ("export:read", "files:read")),
+    Operation("export_divejson", "GET", "/api/v1/export/divejson", ("export:read", "files:read"), result_kind="file"),
+    Operation("export_uddf", "GET", "/api/v1/export/uddf", ("export:read", "files:read"), result_kind="file"),
+    Operation("export_csv", "GET", "/api/v1/export/csv", ("export:read", "files:read"), result_kind="file"),
+    Operation("export_archive", "GET", "/api/v1/export/archive", ("export:read", "files:read"), result_kind="file"),
     Operation("preview_logbook_import", "POST", "/api/v1/import/logbook/preview", ("import:write", "files:write")),
     Operation("apply_logbook_import", "POST", "/api/v1/import/logbook", ("import:write", "files:write")),
     Operation("write_user_avatar", "PUT", "/api/v1/user/avatar", ("profile:write", "files:write")),
     Operation("adjust_user_avatar", "PATCH", "/api/v1/user/avatar", ("profile:write",)),
-    Operation("read_user_avatar", "GET", "/api/v1/user/avatar", ("profile:read", "files:read")),
+    Operation("read_user_avatar", "GET", "/api/v1/user/avatar", ("profile:read", "files:read"), result_kind="file"),
     Operation("erase_user_avatar", "DELETE", "/api/v1/user/avatar", ("profile:write",)),
-    Operation("read_user_avatar_original", "GET", "/api/v1/user/avatar/original", ("profile:read", "files:read")),
+    Operation(
+        "read_user_avatar_original",
+        "GET",
+        "/api/v1/user/avatar/original",
+        ("profile:read", "files:read"),
+        result_kind="file",
+    ),
     Operation("write_user_portrait", "PUT", "/api/v1/user/portrait", ("profile:write", "files:write")),
     Operation("adjust_user_portrait", "PATCH", "/api/v1/user/portrait", ("profile:write",)),
-    Operation("read_user_portrait", "GET", "/api/v1/user/portrait", ("profile:read", "files:read")),
+    Operation("read_user_portrait", "GET", "/api/v1/user/portrait", ("profile:read", "files:read"), result_kind="file"),
     Operation("erase_user_portrait", "DELETE", "/api/v1/user/portrait", ("profile:write",)),
     Operation("copy_user_avatar_to_portrait", "POST", "/api/v1/user/portrait/from-avatar", ("profile:write",)),
-    Operation("read_user_portrait_original", "GET", "/api/v1/user/portrait/original", ("profile:read", "files:read")),
+    Operation(
+        "read_user_portrait_original",
+        "GET",
+        "/api/v1/user/portrait/original",
+        ("profile:read", "files:read"),
+        result_kind="file",
+    ),
     Operation("read_checkin_link", "GET", "/api/v1/user/checkin-link", ("checkin:share",)),
     Operation("write_checkin_link", "POST", "/api/v1/user/checkin-link", ("checkin:share",)),
     Operation("erase_checkin_link", "DELETE", "/api/v1/user/checkin-link", ("checkin:share",)),

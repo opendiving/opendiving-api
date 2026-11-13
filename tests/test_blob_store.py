@@ -93,6 +93,41 @@ class TestKeys:
 
 class TestRoundTrip:
     @pytest.mark.asyncio
+    async def test_seekable_file_is_copied_in_bounded_chunks(self, volume: Path) -> None:
+        class BoundedReads(io.BytesIO):
+            def read(self, size: int | None = -1) -> bytes:
+                assert size is not None and 0 < size <= 64 * 1024
+                return super().read(size)
+
+        data = b"mcp download" * 20000
+        with BoundedReads(data) as source:
+            source.seek(10)
+            await blob_store.put_file(KEY, source)
+            assert not source.closed
+        assert await blob_store.get(KEY) == data
+
+    @pytest.mark.asyncio
+    async def test_interrupted_file_copy_keeps_previous_blob_and_removes_temp_file(self, volume: Path) -> None:
+        class BrokenSource(io.BytesIO):
+            def read(self, size: int | None = -1) -> bytes:
+                if self.tell() > 0:
+                    raise OSError("read interrupted")
+                return super().read(size)
+
+        await blob_store.put(KEY, DATA)
+        with BrokenSource(b"x" * (128 * 1024)) as source:
+            with pytest.raises(OSError, match="read interrupted"):
+                await blob_store.put_file(KEY, source)
+        assert await blob_store.get(KEY) == DATA
+        assert list((volume / blob_store.TMP_DIRNAME).iterdir()) == []
+
+    @pytest.mark.asyncio
+    async def test_streaming_cannot_bypass_the_compressed_key_encoding(self, volume: Path) -> None:
+        with io.BytesIO(DATA) as source:
+            with pytest.raises(ValueError, match="compressed"):
+                await blob_store.put_file(KEY + ".zst", source)
+
+    @pytest.mark.asyncio
     async def test_what_goes_in_comes_back_out(self, volume: Path) -> None:
         await blob_store.put(KEY, DATA)
         assert await blob_store.get(KEY) == DATA
