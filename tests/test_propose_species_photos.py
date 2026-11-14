@@ -8,12 +8,15 @@ first two and a stand-in client for the third, so the run needs no key and no ne
 import importlib.util
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+import anthropic
 import httpx
+import httpx2
 import pytest
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "propose_species_photos.py"
@@ -156,22 +159,31 @@ class FakeWikimedia:
         )
 
 
-def _message(answer: Any, *, stop_reason: str = "end_turn") -> SimpleNamespace:
+def _message(
+    answer: Any, *, stop_reason: str = "end_turn", input_tokens: int = 2000, output_tokens: int = 300
+) -> SimpleNamespace:
     text = answer if isinstance(answer, str) else json.dumps(answer)
-    return SimpleNamespace(stop_reason=stop_reason, content=[SimpleNamespace(type="text", text=text)])
+    return SimpleNamespace(
+        stop_reason=stop_reason,
+        content=[SimpleNamespace(type="text", text=text)],
+        usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
+    )
 
 
 class FakeModel:
     """A stand-in for the SDK client: records each request and answers from a queue."""
 
-    def __init__(self, *answers: SimpleNamespace) -> None:
+    def __init__(self, *answers: SimpleNamespace | Exception) -> None:
         self.answers = list(answers)
         self.requests: list[dict[str, Any]] = []
         self.messages = SimpleNamespace(create=self._create)
 
     def _create(self, **request: Any) -> SimpleNamespace:
         self.requests.append(request)
-        return self.answers.pop(0)
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
 
 def _run(instance: FakeInstance, wikimedia: FakeWikimedia, model: FakeModel, **options: Any) -> tuple[Any, list[str]]:
@@ -179,12 +191,17 @@ def _run(instance: FakeInstance, wikimedia: FakeWikimedia, model: FakeModel, **o
     tally = rater.run(
         instance.client(),
         wikimedia.client(),
-        lambda species, pool: rater.judge(model, rater.DEFAULT_MODEL, species, pool),
+        lambda species, pool: rater.judge(model, rater.DEFAULT_MODEL, options.get("effort", "low"), species, pool),
         dry_run=options.get("dry_run", False),
         limit=options.get("limit"),
         out=printed.append,
     )
     return tally, printed
+
+
+def _line(tally: Any, *, dry_run: bool = False) -> str:
+    line: str = tally.line(dry_run=dry_run, model=rater.DEFAULT_MODEL, effort="low")
+    return line
 
 
 _ITEM = {"images": ["Stored.jpg"], "category": "Species 1", "files": ["Better_one.jpg", "Map.svg", "Other.png"]}
@@ -238,7 +255,7 @@ class TestRun:
         tally, printed = _run(instance, FakeWikimedia({"Q1": _ITEM}), model)
         assert instance.posted == [("1", {"file": "Better one.jpg", "note": "Whole animal, in the water."})]
         assert tally.proposed == 1
-        assert tally.line(dry_run=False).startswith("Species read: 1;")
+        assert _line(tally).startswith("Species read: 1;")
 
     def test_sends_names_titles_sizes_and_the_stored_mark_with_each_image_as_bytes(self):
         instance = FakeInstance([_species("1")])
@@ -334,7 +351,7 @@ class TestRun:
         tally, printed = _run(instance, FakeWikimedia({"Q1": _ITEM}), model, dry_run=True)
         assert instance.posted == []
         assert printed == ["Species 1: would propose Better one.jpg - Clearer."]
-        assert "would propose: 1" in tally.line(dry_run=True)
+        assert "would propose: 1" in _line(tally, dry_run=True)
 
     def test_the_limit_caps_the_species_rated(self):
         instance = FakeInstance([_species(n) for n in "123"])
@@ -373,6 +390,29 @@ class TestRun:
         instance = FakeInstance([_species(n, accepts_photo_proposals=False) for n in "12345"])
         tally, _ = _run(instance, FakeWikimedia({}), FakeModel())
         assert tally.read == 5
+
+    def test_sends_the_effort_with_the_answer_format(self):
+        instance = FakeInstance([_species("1")])
+        model = FakeModel(_message({"choice": "none", "reason": "-"}))
+        _run(instance, FakeWikimedia({"Q1": _ITEM}), model, effort="medium")
+        output_config = model.requests[0]["output_config"]
+        assert output_config["effort"] == "medium"
+        assert output_config["format"]["type"] == "json_schema"
+
+    def test_the_summary_counts_the_species_rated_and_sums_every_response_usage(self):
+        species = [_species("1"), _species("2", accepts_photo_proposals=False), _species("3"), _species("4")]
+        items = {f"Q{n}": {**_ITEM, "category": f"C{n}"} for n in "134"}
+        model = FakeModel(
+            _message({"choice": "none", "reason": "-"}, input_tokens=1000, output_tokens=40),
+            _message("not json", input_tokens=1500, output_tokens=700),
+            _message({"choice": "Other.png", "reason": "ok"}, input_tokens=2500, output_tokens=60),
+        )
+        tally, _ = _run(FakeInstance(species), FakeWikimedia(items), model, dry_run=True)
+        assert (tally.read, tally.rated) == (4, 3)
+        assert (tally.input_tokens, tally.output_tokens) == (5000, 800)
+        line = _line(tally, dry_run=True)
+        assert "rated: 3;" in line
+        assert line.endswith("claude-opus-5-5 at low effort: 5000 input tokens, 800 output tokens.")
 
 
 class TestMain:
@@ -417,3 +457,58 @@ class TestMain:
         out = capsys.readouterr()
         assert "answered 401" in out.err
         assert out.out.startswith("Species read: 0;")
+
+    def _main(
+        self, monkeypatch: pytest.MonkeyPatch, instance: FakeInstance, wikimedia: FakeWikimedia, model: FakeModel
+    ) -> Callable[..., int]:
+        real_client = httpx.Client
+
+        def client(**options: Any) -> httpx.Client:
+            handler = instance.handle if options.get("base_url") else wikimedia.handle
+            return real_client(**options, transport=httpx.MockTransport(handler))
+
+        monkeypatch.setenv("OPENDIVING_API_KEY", _KEY)
+        monkeypatch.setattr(rater.httpx, "Client", client)
+        monkeypatch.setattr(rater.anthropic, "Anthropic", lambda: model)
+        return lambda *extra: rater.main(
+            ["--instance", "http://instance.test", "--contact", "ops@example.org", "--dry-run", *extra]
+        )
+
+    @pytest.mark.parametrize("extra,effort", [((), "low"), (("--effort", "high"), "high")])
+    def test_the_effort_defaults_to_low_and_is_named_in_the_summary(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        extra: tuple[str, ...],
+        effort: str,
+    ):
+        model = FakeModel(_message({"choice": "none", "reason": "-"}))
+        main = self._main(monkeypatch, FakeInstance([_species("1")]), FakeWikimedia({"Q1": _ITEM}), model)
+        assert main(*extra) == 0
+        assert model.requests[0]["output_config"]["effort"] == effort
+        assert f"claude-opus-5-5 at {effort} effort: 2000 input tokens, 300 output tokens." in capsys.readouterr().out
+
+    @pytest.mark.parametrize("effort", ["xhigh", "max"])
+    def test_offers_no_effort_beyond_high(self, effort: str):
+        with pytest.raises(SystemExit):
+            rater.main(["--instance", "http://instance.test", "--contact", "ops@example.org", "--effort", effort])
+
+    def test_a_model_failure_partway_still_prints_what_the_run_reached(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ):
+        items = {f"Q{n}": {**_ITEM, "category": f"C{n}"} for n in "123"}
+        # The SDK's exceptions carry its own HTTP client's request type, not this suite's httpx.
+        failure = anthropic.APIConnectionError(request=httpx2.Request("POST", "https://api.anthropic.test/v1/messages"))
+        model = FakeModel(
+            _message({"choice": "none", "reason": "-"}, input_tokens=1200, output_tokens=90),
+            _message({"choice": "Other.png", "reason": "ok"}, input_tokens=1800, output_tokens=110),
+            failure,
+        )
+        instance = FakeInstance([_species(n) for n in "123"])
+        main = self._main(monkeypatch, instance, FakeWikimedia(items), model)
+        assert main() == 1
+        out = capsys.readouterr()
+        assert "the model request failed" in out.err
+        line = out.out.splitlines()[-1]
+        assert "rated: 2;" in line and "would propose: 1;" in line
+        assert line.endswith("at low effort: 3000 input tokens, 200 output tokens.")

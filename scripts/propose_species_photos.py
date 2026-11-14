@@ -4,8 +4,10 @@ Run by hand, from a checkout, with a write API key for the instance and a key fo
 
     export OPENDIVING_API_KEY=odk_...    # Settings > API keys, with write access
     export ANTHROPIC_API_KEY=sk-ant-...  # or any credential the Anthropic SDK resolves
-    uv run python scripts/propose_species_photos.py --instance https://dives.example.com \\
+    uv run --extra dev python scripts/propose_species_photos.py --instance https://dives.example.com \\
         --contact you@example.com --dry-run --limit 5
+
+The model's SDK is in the `dev` extra, which a bare `uv run` does not install.
 
 For each species the account has logged and not yet proposed a photo for, it gathers the
 species' photographs from Wikidata and Wikimedia Commons, shows them to the model with the one
@@ -17,7 +19,9 @@ Wikimedia is asked from this machine, one request at a time, under a User-Agent 
 species' names and the pool's 250 px thumbnails as bytes, never a URL for it to fetch.
 
 A run can stop at any point and be run again: a species the account has a waiting, accepted
-or declined proposal for is never rated again by that account.
+or declined proposal for is never rated again by that account. The summary line it ends on,
+however it stopped, gives the input and output tokens the model was billed for; output tokens
+include the model's thinking, which `--effort` is the control for.
 """
 
 import argparse
@@ -27,7 +31,7 @@ import os
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import anthropic
@@ -35,6 +39,12 @@ import httpx
 from anthropic.types import ImageBlockParam, TextBlockParam
 
 DEFAULT_MODEL = "claude-opus-5-5"
+
+# The SDK also takes xhigh and max, which want a far larger `max_tokens` than `_MAX_TOKENS`.
+type Effort = Literal["low", "medium", "high"]
+EFFORTS: tuple[Effort, ...] = ("low", "medium", "high")
+DEFAULT_EFFORT: Effort = "low"
+_MAX_TOKENS = 16000
 
 _WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
 _COMMONS_API_URL = "https://commons.wikimedia.org/w/api.php"
@@ -119,6 +129,8 @@ class Verdict:
     title: str | None
     reason: str
     problem: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 def normalize_title(raw: str) -> str | None:
@@ -400,31 +412,41 @@ def read_verdict(message: Any, pool: list[PoolFile]) -> Verdict:
     return Verdict(choice, reason)
 
 
-def judge(model_client: anthropic.Anthropic, model: str, species: dict[str, Any], pool: list[PoolFile]) -> Verdict:
+def judge(
+    model_client: anthropic.Anthropic, model: str, effort: Effort, species: dict[str, Any], pool: list[PoolFile]
+) -> Verdict:
     content, schema = build_request(species, pool)
     message = model_client.messages.create(
         model=model,
-        max_tokens=16000,
+        max_tokens=_MAX_TOKENS,
         messages=[{"role": "user", "content": content}],
-        output_config={"format": {"type": "json_schema", "schema": schema}},
+        output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
     )
-    return read_verdict(message, pool)
+    return replace(
+        read_verdict(message, pool),
+        input_tokens=message.usage.input_tokens,
+        output_tokens=message.usage.output_tokens,
+    )
 
 
 @dataclass(slots=True)
 class Tally:
     read: int = 0
+    rated: int = 0
     proposed: int = 0
     refused: int = 0
     answered_none: int = 0
     skipped: Counter[str] = field(default_factory=Counter)
+    input_tokens: int = 0
+    output_tokens: int = 0
 
-    def line(self, *, dry_run: bool) -> str:
+    def line(self, *, dry_run: bool, model: str, effort: Effort) -> str:
         skipped = ", ".join(f"{count} {reason}" for reason, count in sorted(self.skipped.items())) or "none"
         proposed = "would propose" if dry_run else "proposed"
         return (
-            f"Species read: {self.read}; skipped: {skipped}; {proposed}: {self.proposed}; "
-            f"refused: {self.refused}; answered none: {self.answered_none}."
+            f"Species read: {self.read}; skipped: {skipped}; rated: {self.rated}; {proposed}: {self.proposed}; "
+            f"refused: {self.refused}; answered none: {self.answered_none}; "
+            f"{model} at {effort} effort: {self.input_tokens} input tokens, {self.output_tokens} output tokens."
         )
 
 
@@ -435,15 +457,18 @@ def run(
     *,
     dry_run: bool,
     limit: int | None,
+    tally: Tally | None = None,
     out: Callable[[str], None] = print,
 ) -> Tally:
     """Rate the account's open species one at a time, in life-list order, proposing what the
-    model chose. Stops early at `limit` species rated, and on the instance's daily limit."""
-    tally = Tally()
+    model chose. Stops early at `limit` species rated, and on the instance's daily limit.
+
+    Counts into `tally` as it goes, so a caller holding it still has what a run reached when
+    the instance or the model stops it with an exception."""
+    tally = Tally() if tally is None else tally
     settled = instance.proposed_species()
-    rated = 0
     for entry in instance.life_list():
-        if limit is not None and rated >= limit:
+        if limit is not None and tally.rated >= limit:
             break
         tally.read += 1
         name = entry["scientific_name"]
@@ -467,8 +492,10 @@ def run(
             tally.skipped[_SKIP_NO_ALTERNATIVE] += 1
             continue
 
-        rated += 1
         verdict = rate(species, pool)
+        tally.rated += 1
+        tally.input_tokens += verdict.input_tokens
+        tally.output_tokens += verdict.output_tokens
         if verdict.problem is not None:
             tally.skipped[_SKIP_NO_USABLE_ANSWER] += 1
             out(f"{name}: nothing proposed, {verdict.problem}")
@@ -508,6 +535,12 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--model", default=DEFAULT_MODEL, help=f"the model that judges the photos (default {DEFAULT_MODEL})"
     )
+    parser.add_argument(
+        "--effort",
+        choices=EFFORTS,
+        default=DEFAULT_EFFORT,
+        help=f"how much the model thinks before it answers, billed as output tokens (default {DEFAULT_EFFORT})",
+    )
     parser.add_argument("--dry-run", action="store_true", help="rate and print, proposing nothing")
     parser.add_argument("--limit", type=int, help="rate at most this many species")
     return parser.parse_args(argv)
@@ -532,12 +565,13 @@ def main(argv: list[str] | None = None) -> int:
         ) as wiki,
     ):
         try:
-            tally = run(
+            run(
                 Instance(api),
                 Wikimedia(wiki),
-                lambda species, pool: judge(model_client, args.model, species, pool),
+                lambda species, pool: judge(model_client, args.model, args.effort, species, pool),
                 dry_run=args.dry_run,
                 limit=args.limit,
+                tally=tally,
             )
         except InstanceError as error:
             print(f"Stopped: {error}", file=sys.stderr)
@@ -548,7 +582,7 @@ def main(argv: list[str] | None = None) -> int:
         except anthropic.APIError as error:
             print(f"Stopped: the model request failed ({type(error).__name__})", file=sys.stderr)
             status = 1
-    print(tally.line(dry_run=args.dry_run))
+    print(tally.line(dry_run=args.dry_run, model=args.model, effort=args.effort))
     return status
 
 
