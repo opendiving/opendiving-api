@@ -7093,15 +7093,15 @@ row is swept a week after it expires.
 
 ## A daily total is never lowered, and the active count is taken inside the session sweep
 
-`daily_total` holds one anonymous count per UTC day, metric and key; every write is an upsert on
-that identity, and recomputed metrics are written as `GREATEST(stored, computed)` because their
-inputs erode - audit rows at 90 days or with an account, session rows once dead - and a recount
-would zero a real day. `purge_expired_user_sessions` snapshots `active_accounts` before its
-`DELETE`, in one transaction, and keeps a revoked row until the UTC day of its last use has closed,
-so each hourly snapshot sees the whole day. Rejected: a rollup job at the same minute (arq gives
-concurrent crons no order, so it races the sweep); snapshots over a sweep deleting sign-outs within
-the hour (the busiest hour, not the day); a per-account last-seen date or per-day id set (a
-per-person usage record).
+`daily_total` holds one anonymous count per UTC day, metric and key, upserted on that identity;
+recomputed metrics are written as `GREATEST(stored, computed)` because their inputs erode - audit
+rows at 90 days, session rows once dead. `purge_expired_user_sessions` counts before its `DELETE`,
+in one transaction, and keeps a revoked row until its day has closed, so each snapshot sees the
+whole day. A month's distinct count needs ids: `monthly_active_account` holds the current month's,
+and the next month's first sweep folds them into one `monthly_active_accounts` row and deletes them.
+Rejected: a rollup cron at the same minute (arq orders none); deleting sign-outs at once (the
+busiest hour, not the day); a per-account last-seen date (a usage record kept indefinitely); a
+HyperLogLog sketch (approximate at this size, yet still a membership test for a known id).
 
 ## Two readers, and a profile names every reader that fed it
 

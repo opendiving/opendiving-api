@@ -11,7 +11,7 @@ from sqlalchemy import CursorResult, Delete, and_, delete, func, or_, select, up
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_auth_audit_events import expired_event_predicate
-from ...crud.crud_daily_totals import record_sign_ins, snapshot_active_accounts
+from ...crud.crud_daily_totals import record_monthly_active_accounts, record_sign_ins, snapshot_active_accounts
 from ...crud.crud_user_sessions import swept_session_predicate
 from ...models.auth_audit_event import AuthAuditEvent
 from ...models.authentication_request import AuthenticationRequest
@@ -259,18 +259,20 @@ async def purge_expired_invite_requests(ctx: dict[Any, Any]) -> str:
 
 
 async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
-    """Count today's and yesterday's active accounts, then delete the `user_session` rows
-    that can no longer authenticate anything and are no longer needed for that count.
+    """Count today's, yesterday's and this month's active accounts, then delete the
+    `user_session` rows that can no longer authenticate anything and are no longer needed
+    for those counts.
 
-    **The count comes first, in the same transaction, and that order is the design.** A
+    **The counts come first, in the same transaction, and that order is the design.** A
     session row is the only record that an account was active on a day, and a row gone is
-    a row no snapshot sees - so the count is taken from the table this sweep is about to
-    thin, before it thins it (`crud_daily_totals.snapshot_active_accounts`). For that
-    snapshot to be the day's count rather than the busiest hour's, a revoked row is kept
-    until the UTC day of its last use has closed, and the first run after midnight counts
-    it into yesterday before deleting it. A row past its `expires_at` goes at the next
-    sweep: it was last used a whole idle window ago, never today. `swept_session_predicate` holds both
-    arms beside `_live`, which refuses every kept row either way.
+    a row no snapshot sees - so the counts are taken from the table this sweep is about to
+    thin, before it thins it (`crud_daily_totals.snapshot_active_accounts` and
+    `record_monthly_active_accounts`). For the daily snapshot to be the day's count rather
+    than the busiest hour's, a revoked row is kept until the UTC day of its last use has
+    closed, and the first run after midnight counts it into yesterday before deleting it. A
+    row past its `expires_at` goes at the next sweep: it was last used a whole idle window
+    ago, never today. `swept_session_predicate` holds both arms beside `_live`, which
+    refuses every kept row either way.
 
     The kept revoked row is read by nothing that authenticates. `DELETE /user/session/
     {uuid}` loads a row without a liveness filter, so a second revoke of one still waiting
@@ -281,11 +283,12 @@ async def purge_expired_user_sessions(ctx: dict[Any, Any]) -> str:
     `purge_expired_tokens` spells out.
     """
     now = datetime.now(UTC)
-    return await _purge(
-        delete(UserSession).where(swept_session_predicate(now)),
-        "dead session",
-        before=lambda db: snapshot_active_accounts(db, now=now),
-    )
+
+    async def count_active(db: AsyncSession) -> None:
+        await snapshot_active_accounts(db, now=now)
+        await record_monthly_active_accounts(db, now=now)
+
+    return await _purge(delete(UserSession).where(swept_session_predicate(now)), "dead session", before=count_active)
 
 
 async def purge_expired_idempotency_holds(ctx: dict[Any, Any]) -> str:

@@ -1,4 +1,4 @@
-"""The daily totals: the counter's upserts, the two hourly writers, and `GET /admin/stats`.
+"""The daily totals: the counter's upserts, the hourly writers, and `GET /admin/stats`.
 
 The writers run against Postgres on a **pinned clock in 2020**, for two reasons. The session
 sweep and its snapshot are defined by the day of the clock, and "two sign-outs in different
@@ -38,6 +38,7 @@ from src.app.crud.crud_daily_totals import count_account_created, record_sign_in
 from src.app.crud.crud_user_sessions import live_sessions_for_user
 from src.app.models.auth_audit_event import AuthAuditEvent
 from src.app.models.daily_total import DailyTotal
+from src.app.models.monthly_active_account import MonthlyActiveAccount
 from src.app.models.user import User
 from src.app.models.user_session import UserSession
 from src.app.schemas.auth_audit_event import AuthEventType
@@ -48,7 +49,9 @@ from tests.helpers.generators import create_user
 needs_a_database = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 DAY = date(2020, 1, 15)
-_FIRST, _LAST = DAY - timedelta(days=2), DAY + timedelta(days=2)
+JANUARY, FEBRUARY = date(2020, 1, 1), date(2020, 2, 1)
+# The window the tests write to: a month either side of `DAY`, for the month's own tests.
+_FIRST, _LAST = date(2019, 12, 1), date(2020, 2, 29)
 
 
 def at(day: date, hour: int, minute: int = 0) -> datetime:
@@ -91,12 +94,17 @@ def _exists(db: Session, session_id: int) -> bool:
 
 @pytest.fixture
 def pinned_days(db: Session) -> Generator[None]:
-    """Clears the 2020 window before and after: its counts, and the sessions and audit rows
-    these tests seeded there."""
+    """Clears the 2020 window before and after: its counts, its months' id sets, and the
+    sessions and audit rows these tests seeded there."""
 
     def clear() -> None:
         since, until = at(_FIRST, 0), at(_LAST + timedelta(days=1), 0)
         db.execute(delete(DailyTotal).where(DailyTotal.day >= _FIRST, DailyTotal.day <= _LAST))
+        db.execute(
+            delete(MonthlyActiveAccount).where(
+                MonthlyActiveAccount.month >= _FIRST, MonthlyActiveAccount.month <= _LAST
+            )
+        )
         db.execute(delete(UserSession).where(UserSession.last_used_at >= since, UserSession.last_used_at < until))
         db.execute(delete(AuthAuditEvent).where(AuthAuditEvent.created_at >= since, AuthAuditEvent.created_at < until))
         db.commit()
@@ -277,6 +285,83 @@ class TestActiveAccounts:
         assert kept not in listed
 
 
+def _month_ids(db: Session, month: date) -> set[int]:
+    db.expire_all()
+    return set(db.scalars(select(MonthlyActiveAccount.user_id).where(MonthlyActiveAccount.month == month)))
+
+
+@needs_a_database
+@pytest.mark.usefixtures("pinned_days")
+class TestMonthlyActiveAccounts:
+    """The month's id set the session sweep keeps, and the one count it folds into."""
+
+    @pytest.mark.asyncio
+    async def test_an_account_active_on_two_days_is_one(self, db: Session) -> None:
+        """The case summing the daily counts got wrong: three account-days, two accounts."""
+        first, second = create_user(db), create_user(db)
+        _session(db, first, last_used_at=at(DAY, 9), revoked_at=at(DAY, 9, 30))
+        with clock(at(DAY + timedelta(days=1), 1)):
+            await purge_expired_user_sessions({})
+
+        _session(db, first, last_used_at=at(DAY + timedelta(days=1), 10))
+        _session(db, second, last_used_at=at(DAY + timedelta(days=1), 11))
+        with clock(at(DAY + timedelta(days=1), 12)):
+            await purge_expired_user_sessions({})
+
+        assert _stored(db, DAY, DailyMetric.ACTIVE_ACCOUNTS) == 1
+        assert _stored(db, DAY + timedelta(days=1), DailyMetric.ACTIVE_ACCOUNTS) == 2
+        assert _stored(db, JANUARY, DailyMetric.MONTHLY_ACTIVE_ACCOUNTS) == 2
+        assert _month_ids(db, JANUARY) == {first.id, second.id}
+
+    @pytest.mark.asyncio
+    async def test_a_session_last_used_last_month_counts_for_that_month_alone(self, db: Session) -> None:
+        """A live session still stored from December says nothing about January."""
+        _session(db, create_user(db), last_used_at=at(date(2019, 12, 20), 10))
+
+        with clock(at(DAY, 10)):
+            await purge_expired_user_sessions({})
+
+        assert _stored(db, JANUARY, DailyMetric.MONTHLY_ACTIVE_ACCOUNTS) == 0
+        assert _month_ids(db, JANUARY) == set()
+
+    @pytest.mark.asyncio
+    async def test_the_first_sweep_of_a_month_folds_the_last_into_its_count(self, db: Session) -> None:
+        """A sign-out late on the month's last day is counted into that month at midnight,
+        and the month's ids go in the same run."""
+        last_day = date(2020, 1, 31)
+        with clock(at(last_day, 23)):
+            await purge_expired_user_sessions({})
+        assert _stored(db, JANUARY, DailyMetric.MONTHLY_ACTIVE_ACCOUNTS) == 0
+
+        signed_out = _session(db, create_user(db), last_used_at=at(last_day, 23, 10), revoked_at=at(last_day, 23, 20))
+        with clock(at(FEBRUARY, 0)):
+            await purge_expired_user_sessions({})
+
+        assert not _exists(db, signed_out)
+        assert _stored(db, JANUARY, DailyMetric.MONTHLY_ACTIVE_ACCOUNTS) == 1
+        assert _month_ids(db, JANUARY) == set()
+        assert _stored(db, FEBRUARY, DailyMetric.MONTHLY_ACTIVE_ACCOUNTS) == 0
+
+        with clock(at(FEBRUARY, 1)):
+            await purge_expired_user_sessions({})
+        assert _stored(db, JANUARY, DailyMetric.MONTHLY_ACTIVE_ACCOUNTS) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_account_leaves_no_id_and_stays_counted(self, db: Session) -> None:
+        diver = create_user(db)
+        _session(db, diver, last_used_at=at(DAY, 10))
+        with clock(at(DAY, 11)):
+            await purge_expired_user_sessions({})
+
+        db.execute(delete(User).where(User.id == diver.id))
+        db.commit()
+        with clock(at(DAY, 12)):
+            await purge_expired_user_sessions({})
+
+        assert _month_ids(db, JANUARY) == set()
+        assert _stored(db, JANUARY, DailyMetric.MONTHLY_ACTIVE_ACCOUNTS) == 1
+
+
 def _row(day: date, metric: DailyMetric, count: int, key: str = NO_KEY) -> DailyTotal:
     return DailyTotal(day=day, metric=metric.value, key=key, count=count)
 
@@ -318,8 +403,31 @@ class TestTheStatsRoute:
             },
             {"day": "2020-01-16", "accounts_created": {"retired-forum": 2}, "sign_ins": 0, "active_accounts": 0},
         ]
+        assert body["months"] == [{"month": "2020-01-01", "active_accounts": None}]
         assert body["totals"]["accounts"] == accounts
         assert set(body["totals"]) == {"accounts", "active_now"}
+
+    @pytest.mark.asyncio
+    async def test_every_month_the_range_touches_is_answered_whole(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """A range from a month's last days into the next answers both months, each with its
+        own count or none, whichever day the range starts on."""
+        db.add_all(
+            [
+                _row(JANUARY, DailyMetric.MONTHLY_ACTIVE_ACCOUNTS, 7),
+                _row(date(2019, 12, 1), DailyMetric.MONTHLY_ACTIVE_ACCOUNTS, 99),
+            ]
+        )
+        db.commit()
+
+        async with async_sessions() as session:
+            stats = await read_daily_stats(session, first=date(2020, 1, 30), last=date(2020, 2, 2))
+
+        assert stats.model_dump(mode="json")["months"] == [
+            {"month": "2020-01-01", "active_accounts": 7},
+            {"month": "2020-02-01", "active_accounts": None},
+        ]
 
     @pytest.mark.asyncio
     async def test_active_now_counts_accounts_not_sessions(
@@ -349,11 +457,13 @@ class TestTheRange:
         first = date(2026, 7, 1)
         with (
             patch("src.app.api.v1.admin.daily_totals_between", new_callable=AsyncMock, return_value=[]),
+            patch("src.app.api.v1.admin.monthly_active_accounts_between", new_callable=AsyncMock, return_value={}),
             patch("src.app.api.v1.admin.accounts_with_a_live_session", new_callable=AsyncMock, return_value=0),
         ):
             stats = await read_daily_stats(mock_db, first=first, last=first + timedelta(days=MAX_STATS_DAYS - 1))
 
         assert len(stats.days) == MAX_STATS_DAYS == 92
+        assert [month.month for month in stats.months] == [date(2026, 7, 1), date(2026, 8, 1), date(2026, 9, 1)]
 
     @pytest.mark.asyncio
     async def test_one_day_more_is_a_422(self, mock_db) -> None:
@@ -401,6 +511,7 @@ class TestTheGateOverTheWire:
         try:
             with (
                 patch("src.app.api.v1.admin.daily_totals_between", new_callable=AsyncMock, return_value=[]),
+                patch("src.app.api.v1.admin.monthly_active_accounts_between", new_callable=AsyncMock, return_value={}),
                 patch("src.app.api.v1.admin.accounts_with_a_live_session", new_callable=AsyncMock, return_value=0),
                 TestClient(stats_app) as client,
             ):
@@ -411,3 +522,4 @@ class TestTheGateOverTheWire:
         assert response.status_code == 200
         body = response.json()
         assert (body["from"], body["to"], len(body["days"])) == ("2026-09-01", "2026-09-30", 30)
+        assert body["months"] == [{"month": "2026-09-01", "active_accounts": None}]

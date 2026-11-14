@@ -38,6 +38,7 @@ from .invite_link import InviteLink
 from .invite_request import InviteRequest
 from .logbook_import import LogbookImport, LogbookImportFile
 from .map_tile import MapTile
+from .monthly_active_account import MonthlyActiveAccount
 from .person import Person
 from .saved_site import SavedSite
 from .species import Species

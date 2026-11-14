@@ -9,8 +9,8 @@ from .join_channel import JoinChannelRead
 
 
 class DailyMetric(StrEnum):
-    """What a `daily_total` row counts. The values are wire vocabulary: the stats route
-    returns them as field names, and the web's chart is written against them."""
+    """What a `daily_total` row counts. The daily values are wire vocabulary: the stats
+    route returns them as field names, and the web's chart is written against them."""
 
     # Accounts created that day, keyed by the door: a join-channel slug or one of
     # `core.config.AccountSource`. Bumped inside `POST /auth/complete`'s transaction.
@@ -21,6 +21,10 @@ class DailyMetric(StrEnum):
     # Distinct accounts with a session used that day, snapshotted by the hourly session
     # sweep before it deletes anything.
     ACTIVE_ACCOUNTS = "active_accounts"
+    # Distinct accounts with a session used in the UTC calendar month, stored on its first
+    # day: raised hourly by the session sweep from the month's id set, final once the month
+    # has closed.
+    MONTHLY_ACTIVE_ACCOUNTS = "monthly_active_accounts"
 
 
 # The key a metric that does not split is stored under. The empty string rather than `NULL`
@@ -34,6 +38,14 @@ class DailyStatsDay(BaseModel):
     accounts_created: dict[str, int]
     sign_ins: int
     active_accounts: int
+
+
+class MonthlyStats(BaseModel):
+    # The month's first day.
+    month: date
+    # Distinct accounts active in the month so far, or `None` for a month this instance
+    # holds no count of.
+    active_accounts: int | None
 
 
 class DailyStatsTotals(BaseModel):
@@ -57,4 +69,7 @@ class DailyStatsRead(BaseModel):
     to: date
     channels: list[JoinChannelRead]
     days: list[DailyStatsDay]
+    # Every calendar month the range touches, the whole month's count whatever day the
+    # range starts or ends on.
+    months: list[MonthlyStats]
     totals: DailyStatsTotals

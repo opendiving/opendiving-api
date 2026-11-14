@@ -21,7 +21,7 @@ Skipped when no database is reachable. On a developer's machine that means
 resolve on the host); CI sets it and fails the job if anything skips. See CONTRIBUTING.md.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -54,6 +54,7 @@ from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
 from src.app.models.invite_link import InviteLink
 from src.app.models.logbook_import import LogbookImport, LogbookImportFile
+from src.app.models.monthly_active_account import MonthlyActiveAccount
 from src.app.models.person import Person
 from src.app.models.saved_site import SavedSite
 from src.app.models.species_photo_proposal import SpeciesPhotoProposal
@@ -117,7 +118,7 @@ class TestDeletingAUserTakesEverythingWithIt:
 
     Most of them are the ten `48781087b2b3` had to redeclare. The rest are tables added
     since - `course`, then `user_session`, `auth_audit_event`, `contact`, `checkin_link`,
-    `person`, `invite_link` and `api_key` - each of which declared `ON DELETE CASCADE` from
+    `person`, `invite_link`, `api_key` and `monthly_active_account` - each of which declared `ON DELETE CASCADE` from
     the outset, which is exactly the case the metadata sweep above cannot distinguish from a
     table that got it right by accident, so they are seeded here too. (No count in this
     sentence on purpose: the previous one said "eleven" and was one model away from being
@@ -185,6 +186,7 @@ class TestDeletingAUserTakesEverythingWithIt:
                     last_dive_on=None,
                 ),
                 InviteLink(user_id=diver.id, token=uuid7().hex),
+                MonthlyActiveAccount(month=date(2026, 11, 1), user_id=diver.id),
                 # Declined, the status that bars its file for everyone until the purge takes it.
                 SpeciesPhotoProposal(
                     user_id=diver.id, species_id=create_species(db).id, file="Fish.jpg", status="declined"
@@ -269,6 +271,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             GearSet,
             InviteLink,
             LogbookImport,
+            MonthlyActiveAccount,
             Person,
             SavedSite,
             SpeciesPhotoProposal,

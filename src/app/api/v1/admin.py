@@ -39,7 +39,7 @@ from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableE
 from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.request_context import RequestContext
 from ...crud.crud_auth_audit_events import record_auth_event
-from ...crud.crud_daily_totals import daily_totals_between
+from ...crud.crud_daily_totals import daily_totals_between, month_start, monthly_active_accounts_between
 from ...crud.crud_invitations import account_exists_for, crud_invitations, live_invitation_from
 from ...crud.crud_invite_requests import delete_invite_requests
 from ...crud.crud_species_photo_proposals import has_reviewable_proposal, reviewable_counts, reviewable_proposals
@@ -48,7 +48,7 @@ from ...models.invite_request import InviteRequest
 from ...models.species import Species
 from ...models.user import User
 from ...schemas.auth_audit_event import AuthEventType
-from ...schemas.daily_total import DailyMetric, DailyStatsDay, DailyStatsRead, DailyStatsTotals
+from ...schemas.daily_total import DailyMetric, DailyStatsDay, DailyStatsRead, DailyStatsTotals, MonthlyStats
 from ...schemas.invitation import (
     AdminInvitationBatchRequest,
     AdminInvitationBatchResponse,
@@ -231,19 +231,24 @@ async def read_daily_stats(
     first: Annotated[date, Query(alias="from", description="First UTC day of the range, as YYYY-MM-DD")],
     last: Annotated[date, Query(alias="to", description="Last UTC day of the range, inclusive")],
 ) -> DailyStatsRead:
-    """The daily totals for every UTC day from `from` to `to` inclusive, zero-filled, with
-    the instance's join channels and two figures as of now. Superuser only.
+    """The daily totals for every UTC day from `from` to `to` inclusive, zero-filled, the
+    distinct active accounts of every calendar month the range touches, with the instance's
+    join channels and two figures as of now. Superuser only.
 
     Every number is a count that names no account: accounts created per day and per door,
     distinct accounts that signed in, distinct accounts with a session used that day.
-    `totals.accounts` counts every account, one inside its deletion grace period included,
-    and `totals.active_now` the accounts holding a session that can still authenticate.
+    `months` holds one entry per UTC calendar month from the one holding `from` to the one
+    holding `to`, each counting the distinct accounts with a session used at any time in that
+    whole month - so far, for the current one, and up to an hour behind. A month's
+    `active_accounts` is `null` when the instance holds no count of it, which is every month
+    before it began counting. `totals.accounts` counts every account, one inside its deletion
+    grace period included, and `totals.active_now` the accounts holding a session that can
+    still authenticate.
 
     422 for a range running backwards or longer than 92 days.
     """
-    # No "active in the last 30 days" figure, because nothing records one: the sessions that
-    # would say so are deleted once dead, and a per-account last-seen date is a record this
-    # app does not keep.
+    # Calendar months rather than a rolling thirty days: a month's id set is discarded once
+    # the month has closed, and a rolling window would need the ids kept past that.
     if last < first:
         raise UnprocessableEntityException("`to` is before `from`.")
     span = (last - first).days + 1
@@ -259,6 +264,8 @@ async def read_daily_stats(
             counted[(row.day, row.metric)] = row.count
 
     days = [first + timedelta(days=offset) for offset in range(span)]
+    monthly = await monthly_active_accounts_between(db, first=first, last=last)
+    months = sorted({month_start(day) for day in days})
     return DailyStatsRead(
         from_=first,
         to=last,
@@ -272,6 +279,7 @@ async def read_daily_stats(
             )
             for day in days
         ],
+        months=[MonthlyStats(month=month, active_accounts=monthly.get(month)) for month in months],
         totals=DailyStatsTotals(
             accounts=int(await db.scalar(select(func.count()).select_from(User)) or 0),
             active_now=await accounts_with_a_live_session(db),

@@ -14,7 +14,7 @@ and every reader.
 
 from datetime import UTC, date, datetime, time, timedelta
 
-from sqlalchemy import Date, Select, cast, func, literal, select
+from sqlalchemy import Date, Select, cast, delete, func, literal, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
@@ -22,6 +22,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from ..models.auth_audit_event import AuthAuditEvent
 from ..models.daily_total import DailyTotal
+from ..models.monthly_active_account import MonthlyActiveAccount
 from ..models.user_session import UserSession
 from ..schemas.auth_audit_event import AuthEventType
 from ..schemas.daily_total import NO_KEY, DailyMetric
@@ -102,6 +103,62 @@ async def snapshot_active_accounts(db: AsyncSession, *, now: datetime) -> None:
         .where(UserSession.last_used_at >= since, UserSession.last_used_at < until)
         .group_by(day),
     )
+
+
+def month_start(day: date) -> date:
+    return day.replace(day=1)
+
+
+async def record_monthly_active_accounts(db: AsyncSession, *, now: datetime) -> None:
+    """Add this month's active accounts to the month's id set, raise the month's
+    `monthly_active_accounts` to the set's size, and fold every earlier month into its count.
+
+    Runs beside `snapshot_active_accounts`, before the sweep's `DELETE`, for its reason. It
+    reads every session used since the month began, and since yesterday on the 1st, when
+    yesterday's revoked rows are still waiting to be counted into the month before. The
+    current month is always written, as zero when nobody was active, so a month with no row
+    is one this instance never counted. Commits nothing.
+    """
+    today = utc_today(now)
+    current = month_start(today)
+    since = datetime.combine(min(current, today - timedelta(days=1)), time.min, tzinfo=UTC)
+    until = datetime.combine(today + timedelta(days=1), time.min, tzinfo=UTC)
+    month = cast(func.date_trunc("month", func.timezone("UTC", UserSession.last_used_at)), Date)
+    added = insert(MonthlyActiveAccount).from_select(
+        ["month", "user_id"],
+        select(month, UserSession.user_id)
+        .where(UserSession.last_used_at >= since, UserSession.last_used_at < until)
+        .distinct(),
+    )
+    await db.execute(added.on_conflict_do_nothing())
+
+    metric = literal(DailyMetric.MONTHLY_ACTIVE_ACCOUNTS.value)
+    await _raise_to(
+        db,
+        select(MonthlyActiveAccount.month, metric, literal(NO_KEY), func.count())
+        .where(MonthlyActiveAccount.month < current)
+        .group_by(MonthlyActiveAccount.month),
+    )
+    await _raise_to(
+        db,
+        select(literal(current, Date), metric, literal(NO_KEY), func.count())
+        .select_from(MonthlyActiveAccount)
+        .where(MonthlyActiveAccount.month == current),
+    )
+    await db.execute(delete(MonthlyActiveAccount).where(MonthlyActiveAccount.month < current))
+
+
+async def monthly_active_accounts_between(db: AsyncSession, *, first: date, last: date) -> dict[date, int]:
+    """The stored count of every month from `first`'s to `last`'s, keyed by its first day."""
+    rows = await db.execute(
+        select(DailyTotal.day, DailyTotal.count).where(
+            DailyTotal.metric == DailyMetric.MONTHLY_ACTIVE_ACCOUNTS,
+            DailyTotal.key == NO_KEY,
+            DailyTotal.day >= month_start(first),
+            DailyTotal.day <= last,
+        )
+    )
+    return dict(rows.all())
 
 
 async def daily_totals_between(db: AsyncSession, *, first: date, last: date) -> list[DailyTotal]:
