@@ -20,8 +20,9 @@ species' names and the pool's 250 px thumbnails as bytes, never a URL for it to 
 
 A run can stop at any point and be run again: a species the account has a waiting, accepted
 or declined proposal for is never rated again by that account. The summary line it ends on,
-however it stopped, gives the input and output tokens the model was billed for; output tokens
-include the model's thinking, which `--effort` is the control for.
+printed too when the instance or the model stops it partway, gives the input and output tokens
+the model was billed for; output tokens include the model's thinking, which `--effort` is the
+control for.
 """
 
 import argparse
