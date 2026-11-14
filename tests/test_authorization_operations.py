@@ -68,5 +68,12 @@ def test_every_operation_names_a_route_scoped_keys_can_reach() -> None:
         assert not _withheld_by_rule(routes[(op.method, op.path)]), op.name
 
 
-def test_species_resolve_needs_write_because_it_adds_to_the_shared_catalog() -> None:
-    assert permission_requirements("POST", "/api/v1/species/resolve") == [("dives:write",)]
+def test_species_writes_need_their_own_permission_because_they_reach_past_the_account() -> None:
+    for method, path in [
+        ("POST", "/api/v1/species/resolve"),
+        ("POST", "/api/v1/species/{uuid}/photo-proposals"),
+        ("DELETE", "/api/v1/species-photo-proposal/{uuid}"),
+    ]:
+        assert permission_requirements(method, path) == [("species:write",)], path
+    for path in ["/api/v1/species/search", "/api/v1/species/{uuid}", "/api/v1/species-photo-proposals"]:
+        assert permission_requirements("GET", path) == [("dives:read",)], path

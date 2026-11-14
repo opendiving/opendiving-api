@@ -4705,13 +4705,13 @@ counter slot, or one dialog would starve a diver's resolve, and share a per-proc
 ## Species photos: any account proposes, only the operator's session decides
 
 A tool judges photographs off the server, so the instance takes proposals and the operator's answer
-and runs no model. Any account proposes, a write key included; accepting, declining and the review
-sit under the `/admin` gate, which no key passes, since a key's principal is never a superuser.
-Proposing checks the title's shape and asks Wikimedia nothing, so a tool cannot spend the Commons
-counter divers' lookups share; the review's previews are uncharged on the picker's premise, capped
-at its two dozen. A pin or a hide settles what waits: the pinned file's proposals are accepted, the
-rest `closed`, not declined, because a decline bars its file for the species for good and the
-operator never ruled on those files.
+and runs no model. Any account proposes, a legacy write key or a key holding `species:write`
+included; accepting, declining and the review sit under the `/admin` gate, which no key passes,
+since a key's principal is never a superuser. Proposing checks the title's shape and asks Wikimedia
+nothing, so a tool cannot spend the Commons counter divers' lookups share; the review's previews are
+uncharged on the picker's premise, capped at its two dozen. A pin or a hide settles what waits: the
+pinned file's proposals are accepted, the rest `closed`, not declined, because a decline bars its
+file for the species for good and the operator never ruled on those files.
 
 ## The sweeper has to learn every new blob kind, and forgetting is destructive
 

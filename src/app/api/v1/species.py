@@ -84,7 +84,8 @@ async def read_species_search(
     Searches this instance's catalog together with the World Register of Marine Species and
     Wikidata, merged into one ranked list. A result carrying a `uuid` is already in the
     catalog and can be attached to a dive immediately; one without is a live hit that has to
-    be resolved (`POST /species/resolve`) first.
+    be resolved (`POST /species/resolve`) first, which a scoped key or connection needs
+    `species:write` for.
 
     An empty list, never an error, both when nothing matched and when the registers are
     unavailable: a diver can log the dive and add the sighting later. `has_more` means the

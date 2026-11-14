@@ -548,6 +548,37 @@ async def test_scoped_api_key_write_does_not_grant_read_delete_or_other_content(
     assert (await mcp_http.delete(path, headers=deleting)).status_code == 200
 
 
+async def test_species_writes_need_species_write_not_dives_write(
+    mcp_http: httpx.AsyncClient, async_sessions: async_sessionmaker[AsyncSession], diver: User
+) -> None:
+    headers = await browser(async_sessions, diver)
+    species_writes = {"write_species_resolve", "write_species_photo_proposal", "withdraw_species_photo_proposal"}
+
+    async def listed(scopes: list[str]) -> set[str]:
+        tokens = await connected(mcp_http, headers, scopes)
+        response = await rpc(mcp_http, tokens["access_token"], "tools/list")
+        assert response.status_code == 200, response.text
+        return {tool["name"] for tool in response.json()["result"]["tools"]}
+
+    logging = await listed(["dives:read", "dives:write"])
+    assert "write_dive" in logging
+    assert not logging & species_writes
+    assert await listed(["species:write"]) == species_writes
+
+    # An unknown species is a 404 only once the permission check has let the request through.
+    proposal = {"file": "File:Pterois miles.jpg"}
+    propose_path = f"/api/v1/species/{uuid7()}/photo-proposals"
+    withdraw_path = f"/api/v1/species-photo-proposal/{uuid7()}"
+    dives_key = await scoped_key(mcp_http, headers, ["dives:read", "dives:write"])
+    assert (await mcp_http.post(propose_path, json=proposal, headers=dives_key)).status_code == 403
+    assert (await mcp_http.delete(withdraw_path, headers=dives_key)).status_code == 403
+    assert (await mcp_http.post("/api/v1/species/resolve", json={"aphia_id": 1}, headers=dives_key)).status_code == 403
+    species_key = await scoped_key(mcp_http, headers, ["species:write"])
+    assert (await mcp_http.post(propose_path, json=proposal, headers=species_key)).status_code == 404
+    assert (await mcp_http.delete(withdraw_path, headers=species_key)).status_code == 404
+    assert (await mcp_http.get("/api/v1/species-photo-proposals", headers=species_key)).status_code == 403
+
+
 @pytest.mark.parametrize(
     ("scopes", "path"),
     [

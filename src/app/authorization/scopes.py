@@ -23,6 +23,9 @@ SCOPES = frozenset(f"{domain}:{action}" for domain in DOMAINS for action in ("re
     "files:write",
     "export:read",
     "import:write",
+    # Species writes reach past the account: a resolved species joins the catalog every account
+    # shares, and a photo proposal shows the operator the proposer's name and note.
+    "species:write",
 }
 DEFAULT_SCOPES = ["dives:read"]
 

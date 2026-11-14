@@ -36,7 +36,10 @@ Each browser approval creates a connection owned by one account and one OAuth cl
 selects requested permissions, with reads other than check-in selected initially. Write and delete
 permissions are separate for each content domain. Profile and preference permissions are
 independent. Check-in links stay browser-only, like credential management. Import permission
-authorizes restoring content across logbook domains.
+authorizes restoring content across logbook domains. Species permission is a write with no read
+beside it: resolving a species adds it to the catalog every account shares, and proposing a photo
+shows the operator the proposer's name and note, so neither rides on a logbook domain's write.
+Species reads stay with dive reads, and an import still resolves the species a logbook names.
 
 Codes expire after two minutes and are consumed under a database lock. They bind the user, client,
 resource, PKCE challenge and redirect. Pending consent expires after ten minutes and is single-use.

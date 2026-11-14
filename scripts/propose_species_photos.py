@@ -1,8 +1,8 @@
 """Propose better photos for the species on your life list, judged by a model, through the API.
 
-Run by hand, from a checkout, with a write API key for the instance and a key for the model:
+Run by hand, from a checkout, with an API key for the instance and a key for the model:
 
-    export OPENDIVING_API_KEY=odk_...    # Settings > API keys, with write access
+    export OPENDIVING_API_KEY=odk_...    # Settings > API keys, with dives:read and species:write
     export ANTHROPIC_API_KEY=sk-ant-...  # or any credential the Anthropic SDK resolves
     uv run --extra dev python scripts/propose_species_photos.py --instance https://dives.example.com \\
         --contact you@example.com --dry-run --limit 5
@@ -551,7 +551,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
     key = os.environ.get("OPENDIVING_API_KEY")
     if not key:
-        print("OPENDIVING_API_KEY is not set: create a write API key in the instance's Settings.", file=sys.stderr)
+        print(
+            "OPENDIVING_API_KEY is not set: create an API key with dives:read and species:write in the"
+            " instance's Settings.",
+            file=sys.stderr,
+        )
         return 2
 
     api_url = f"{args.instance.rstrip('/')}/api/v1"
