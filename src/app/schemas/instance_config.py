@@ -57,3 +57,13 @@ class InstanceConfigRead(BaseModel):
     # Whether this instance runs the MCP server (`MCP_ENABLED`), so the web shows connected-app
     # settings only where an app can connect.
     mcp_enabled: bool
+    # The entries of `EXPERIMENTAL_FEATURES`, so a client shows a gated surface only where the
+    # instance serves it. Present on every response and never null: the iOS app refuses a server
+    # whose config carries a member of the wrong type.
+    experimental_features: list[str] = Field(
+        description=(
+            "The experimental features this instance switches on, each once and sorted. `all` "
+            "switches on every one. Empty when none is on; a client shows an experimental feature "
+            "only when its name or `all` is listed."
+        )
+    )

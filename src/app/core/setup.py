@@ -4,6 +4,7 @@ import math
 import operator
 from collections.abc import AsyncGenerator, Callable
 from contextlib import _AsyncGeneratorContextManager, asynccontextmanager
+from contextvars import ContextVar
 from functools import reduce
 from typing import Any
 
@@ -17,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from scalar_fastapi import AgentScalarConfig, get_scalar_api_reference
 from sqlalchemy import func, select, text
+from starlette.routing import BaseRoute
 
 from ..api.dependencies import get_current_superuser
 from ..api.idempotency import IdempotentReplay, answer_replay
@@ -41,6 +43,7 @@ from .config import (
 )
 from .db.database import async_engine as engine
 from .db.migrations import upgrade_to_head
+from .experimental import documented_routes
 from .openapi_access import annotate_credentials
 from .utils import cache
 
@@ -61,6 +64,35 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 OPENAPI_URL = "/api/v1/openapi.json"
+
+_DOCUMENTING: ContextVar[bool] = ContextVar("documenting", default=False)
+
+
+class Application(FastAPI):
+    """FastAPI, with a document that lists only what this instance offers.
+
+    `openapi()` is FastAPI's own, built from the route table less what an experimental feature
+    that is off gates, so the document is the one this application would build without those
+    routes, components only they reach included. Every other reader of `routes` - routing, the
+    permission policy, the walks in the tests - still sees every route. FastAPI caches the
+    document until the route set changes, which is enough: settings are fixed for a process's life.
+    """
+
+    @property
+    def routes(self) -> list[BaseRoute]:
+        if not _DOCUMENTING.get():
+            return super().routes
+        # `RouteContext`s, not routes: `get_openapi` reads either, and nothing else reads this
+        # while the document is built.
+        return documented_routes(super().routes)  # type: ignore[return-value]
+
+    def openapi(self) -> dict[str, Any]:
+        token = _DOCUMENTING.set(True)
+        try:
+            return super().openapi()
+        finally:
+            _DOCUMENTING.reset(token)
+
 
 # -------------- database --------------
 # Arbitrary constant; the only thing that matters is that every process running
@@ -375,7 +407,7 @@ def create_application(
     if lifespan is None:
         lifespan = lifespan_factory(settings, apply_migrations_on_start=apply_migrations_on_start)
 
-    application = FastAPI(lifespan=lifespan, **kwargs)
+    application = Application(lifespan=lifespan, **kwargs)
     application.include_router(router)
     application.add_exception_handler(RequestValidationError, request_validation_error)  # type: ignore[arg-type]
     application.add_exception_handler(IdempotentReplay, answer_replay)  # type: ignore[arg-type]

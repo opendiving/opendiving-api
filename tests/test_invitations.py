@@ -853,6 +853,23 @@ class TestTheConfigRoute:
             assert (await read_instance_config()).mcp_enabled is enabled
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("features", "expected"),
+        [
+            (None, []),
+            ("", []),
+            ("all", ["all"]),
+            ("trips-v2, all,dive-planner,trips-v2", ["all", "dive-planner", "trips-v2"]),
+        ],
+    )
+    async def test_it_reports_the_experimental_features(self, features: str | None, expected: list[str]) -> None:
+        """Repeated as the setting holds them, each once and sorted: no registry of names exists
+        to expand `all` from, and an empty list rather than a missing member is what a client
+        reads as none."""
+        with patch.object(settings, "EXPERIMENTAL_FEATURES", features):
+            assert (await read_instance_config()).experimental_features == expected
+
+    @pytest.mark.asyncio
     async def test_it_carries_nothing_else(self) -> None:
         """Adding a field is a decision rather than a convenience: this endpoint is anonymous,
         so everything on it is public. Dumped in JSON mode because this is the wire shape the
@@ -860,10 +877,12 @@ class TestTheConfigRoute:
         with (
             _mode(RegistrationMode.INVITE),
             _operated(False),
+            patch.object(settings, "COMMONS_PRIMARY", False),
             patch.object(settings, "JOIN_CHANNELS", None),
             patch.object(settings, "MAP_RENDERER_URL", ""),
             patch.object(settings, "DIVE_CONDITIONS_PROVIDER", ""),
             patch.object(settings, "MCP_ENABLED", False),
+            patch.object(settings, "EXPERIMENTAL_FEATURES", None),
         ):
             assert (await read_instance_config()).model_dump(mode="json") == {
                 "registration_mode": "invite",
@@ -874,6 +893,7 @@ class TestTheConfigRoute:
                 "map_attribution": None,
                 "dive_conditions": False,
                 "mcp_enabled": False,
+                "experimental_features": [],
             }
 
 

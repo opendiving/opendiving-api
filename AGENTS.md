@@ -134,6 +134,25 @@ something to look up, not to restate it.
   *then* delete the blob after the commit (`delete_after_commit`). → *"File payloads live on the
   files volume, not in Postgres"* and *"A second backend, because the hosted disk is not shared"*
 
+## Experimental features
+
+A feature that is not ready merges behind a gate and is off unless `EXPERIMENTAL_FEATURES` names it
+or says `all`. The helpers are in `core/experimental.py`.
+
+- **Gate every entry point the feature adds.** A router or a route takes
+  `Depends(require_experimental_feature("<name>"))`, first in its `dependencies`, so it answers 404
+  before anything signs the caller in — on the router, not the route, where the router signs callers
+  in, since a router's dependencies run first. A cron, a lifespan hook or a sender asks
+  `experimental_feature_on("<name>")`.
+- **A gated route goes in `EXCLUDED`** in `tests/test_authorization_operations.py`, its reason
+  naming the feature, never in `OPERATIONS`, for as long as its gate stands.
+- **The feature's tests set `EXPERIMENTAL_FEATURES` themselves** — on for the feature, off for the
+  one test per gate that asserts the 404. A developer's `src/.env` may say `all`; CI has none.
+- **A migration is never gated.** It runs on every instance whatever the setting says.
+
+An off feature's operations are absent from the API document; a test walking the document's
+operations reads it through `tests/helpers/openapi.py`, which switches every feature on.
+
 ## Code Style — Python
 
 - **Python 3.15** (`requires-python = "~=3.15.0"`, ruff `target-version = "py315"`). `except A, B:`

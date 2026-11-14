@@ -845,6 +845,45 @@ class DiveConditionsSettings(BaseSettings):
         return bool(self.DIVE_CONDITIONS_PROVIDER)
 
 
+# The word that switches on every experimental feature, and so the one name no feature may have.
+EVERY_EXPERIMENTAL_FEATURE = "all"
+EXPERIMENTAL_FEATURE_PATTERN = r"^[a-z0-9-]+$"
+
+
+def parse_experimental_features(raw: str | None) -> list[str]:
+    """`EXPERIMENTAL_FEATURES` as its entries, each once and sorted, refusing a malformed one.
+
+    Only the form is checked, never whether a gate asks for the name: a feature's name stops
+    being asked for on the deploy that removes its gate, and an environment still naming it
+    must boot.
+    """
+    entries = split_csv(raw)
+    for entry in entries:
+        if entry != EVERY_EXPERIMENTAL_FEATURE and not re.fullmatch(EXPERIMENTAL_FEATURE_PATTERN, entry):
+            raise ValueError(
+                f"EXPERIMENTAL_FEATURES entry {entry!r}: an entry is {EVERY_EXPERIMENTAL_FEATURE!r} or a "
+                "feature's name, lowercase letters, digits and hyphens."
+            )
+    return sorted(set(entries))
+
+
+class ExperimentalFeatureSettings(BaseSettings):
+    # The experimental features this instance switches on, comma-separated, or `all`. Unset, the
+    # default, switches none on. Read through `experimental_features` at each decision and never
+    # copied, so a test that patches the field changes every gate and `GET /config` with it.
+    EXPERIMENTAL_FEATURES: str | None = config("EXPERIMENTAL_FEATURES", default=None)
+
+    @field_validator("EXPERIMENTAL_FEATURES")
+    @classmethod
+    def _parseable_experimental_features(cls, value: str | None) -> str | None:
+        parse_experimental_features(value)
+        return value
+
+    @property
+    def experimental_features(self) -> list[str]:
+        return parse_experimental_features(self.EXPERIMENTAL_FEATURES)
+
+
 class ExportSettings(BaseSettings):
     # Fixed-window rate limit (see `core.utils.rate_limit`) on the four `/export/*`
     # endpoints, keyed per user and shared between them - the budget bounds total export
@@ -1308,6 +1347,7 @@ class Settings(
     MapRendererSettings,
     SpeciesSettings,
     DiveConditionsSettings,
+    ExperimentalFeatureSettings,
     ExportSettings,
     LogbookImportSettings,
     FileStorageSettings,

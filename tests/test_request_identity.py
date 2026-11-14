@@ -44,6 +44,7 @@ from src.app.schemas.dive_site import DiveSiteReadInternal
 from src.app.schemas.gear_item import GearItemReadInternal
 from src.app.schemas.gear_set import GearSetReadInternal
 from src.app.schemas.trip import TripReadInternal
+from tests.helpers.openapi import document_with_every_feature_on
 from tests.helpers.routes import iter_api_routes
 
 CALLER_ID = 7
@@ -179,7 +180,7 @@ class TestTheServedDocumentDeclaresNoOwner:
     """
 
     def test_no_request_body_publishes_it(self) -> None:
-        document = real_app.openapi()
+        document = document_with_every_feature_on(real_app)
         components = document.get("components", {}).get("schemas", {})
         offenders = sorted(
             name
@@ -194,7 +195,7 @@ class TestTheServedDocumentDeclaresNoOwner:
         )
 
     def test_no_operation_declares_it_as_a_parameter(self) -> None:
-        document = real_app.openapi()
+        document = document_with_every_feature_on(real_app)
         offenders = sorted(
             name
             for name, operation in _operations(document)
@@ -209,7 +210,7 @@ class TestTheServedDocumentDeclaresNoOwner:
         """Without this the sweep above passes for a walk that resolved nothing - every
         request body being a bare `$ref`, an unresolved one has no properties and no
         operation ever offends."""
-        document = real_app.openapi()
+        document = document_with_every_feature_on(real_app)
         components = document.get("components", {}).get("schemas", {})
         create_trip = next(operation for name, operation in _operations(document) if name.endswith("/api/v1/trip"))
 

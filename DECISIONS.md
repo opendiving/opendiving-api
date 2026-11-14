@@ -7469,3 +7469,14 @@ place a computer before its first upload. Rejected: an order that applies only o
 the list and its footer would be untrue; ordering the unplaced by their earliest dive, under which a
 new computer with older dives moves ahead partway through its first download; a table of computers,
 owing a row on every path that creates a recording.
+
+## An experimental feature's name is checked for its form, never against a list
+
+`EXPERIMENTAL_FEATURES` refuses at startup an entry that is neither `all` nor a slug, and accepts
+any slug. A name no gate asks for is inert. Rejected: a registry of known names refusing an unknown
+one, the `JOIN_CHANNELS` shape — a name leaves the registry on the deploy that removes its gate, and
+an environment still naming it would then refuse to boot. The same registry warning instead protects
+nobody: the local stack says `all`, and whoever names a feature on an instance looks for it there,
+which a mistyped name leaves dark. `GET /config` repeats the entries, `all` included, since
+expanding it needs that registry. An off feature's routes leave the API document through
+`Application.routes`, read only while `openapi()` builds, so the document stays FastAPI's own.

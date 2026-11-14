@@ -22,6 +22,7 @@ from typing import Any
 from unittest.mock import ANY
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx2 import Response
 
@@ -29,6 +30,7 @@ from src.app.api import router
 from src.app.core.config import EnvironmentOption, settings
 from src.app.core.openapi_access import CREDENTIALS, EXTENSION
 from src.app.core.setup import OPENAPI_URL, create_application
+from tests.helpers.openapi import served_document_with_every_feature_on
 
 #: What `application.version` falls back to when nothing sets it, and so what this
 #: document reported at every release until `version` was configured. It is a real
@@ -37,13 +39,17 @@ from src.app.core.setup import OPENAPI_URL, create_application
 _FASTAPI_DEFAULT_VERSION = "0.1.0"
 
 
-def _get(monkeypatch: pytest.MonkeyPatch, path: str, **overrides: Any) -> Response:
-    """Read `path` with no credential from an app built against `settings` plus `overrides`."""
+def _app(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> FastAPI:
+    """An app built against `settings` plus `overrides`."""
     for name, value in overrides.items():
         monkeypatch.setattr(settings, name, value)
 
-    app = create_application(router=router, settings=settings, apply_migrations_on_start=False)
-    response: Response = TestClient(app).get(path)
+    return create_application(router=router, settings=settings, apply_migrations_on_start=False)
+
+
+def _get(monkeypatch: pytest.MonkeyPatch, path: str, **overrides: Any) -> Response:
+    """Read `path` with no credential from an app built against `settings` plus `overrides`."""
+    response: Response = TestClient(_app(monkeypatch, **overrides)).get(path)
     return response
 
 
@@ -196,7 +202,7 @@ class TestCredentials:
     def test_every_operation_names_its_credentials(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A docs page filtering on the list drops an operation that lacks one, so a gap here is
         a route that silently disappears from the reference."""
-        paths = _document(monkeypatch)["paths"]
+        paths = served_document_with_every_feature_on(_app(monkeypatch))["paths"]
 
         unnamed = [
             f"{method.upper()} {path}"
@@ -229,7 +235,7 @@ class TestCredentials:
         assert operation[EXTENSION] == expected
 
     def test_a_secured_operation_never_lists_anonymous(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        paths = _document(monkeypatch)["paths"]
+        paths = served_document_with_every_feature_on(_app(monkeypatch))["paths"]
 
         contradicting = [
             f"{method.upper()} {path}"

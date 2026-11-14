@@ -13,11 +13,14 @@ from src.app.api.dependencies import (
 )
 from src.app.authorization.operations import OPERATIONS
 from src.app.authorization.policy import permission_requirements
+from src.app.core.experimental import gating_features
 from src.app.main import app
 from tests.helpers.routes import dependency_calls, iter_api_routes
 
 # Withheld from scoped keys and MCP on purpose. Routes declaring `refuse_api_keys` (credentials,
 # sign-in identity, account deletion, check-in links) and superuser routes are withheld by rule.
+# A route an experimental feature gates is listed here, its reason naming the feature, until the
+# gate comes out.
 EXCLUDED: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/user/invitations"): "account management: who the diver invited to the instance",
     ("POST", "/api/v1/user/invitations"): "account management: invites a person and emails them",
@@ -66,6 +69,29 @@ def test_every_operation_names_a_route_scoped_keys_can_reach() -> None:
     for op in OPERATIONS:
         assert (op.method, op.path) in routes, op.name
         assert not _withheld_by_rule(routes[(op.method, op.path)]), op.name
+
+
+def test_no_operation_sits_behind_an_experimental_gate() -> None:
+    """The MCP server builds a tool from the document's entry for each operation, and the
+    document leaves out what an off feature gates: a gated operation would fail a connection's
+    tool list there, or offer a tool that answers 404."""
+    routes = {route.key: route for route in iter_api_routes(app)}
+    gated = sorted(
+        f"{op.method} {op.path}: {', '.join(sorted(features))}"
+        for op in OPERATIONS
+        if (features := gating_features(routes[(op.method, op.path)].dependant))
+    )
+    assert not gated, "move these to EXCLUDED, naming the feature, while its gate stands:\n" + "\n".join(gated)
+
+
+def test_an_exclusion_for_a_gated_route_names_its_feature() -> None:
+    routes = {route.key: route for route in iter_api_routes(app)}
+    unnamed = sorted(
+        f"{method} {path}"
+        for (method, path), reason in EXCLUDED.items()
+        if not all(feature in reason for feature in gating_features(routes[(method, path)].dependant))
+    )
+    assert not unnamed
 
 
 def test_species_writes_need_their_own_permission_because_they_reach_past_the_account() -> None:

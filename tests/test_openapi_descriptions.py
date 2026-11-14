@@ -18,6 +18,7 @@ import pytest
 
 from src.app.core.config import settings
 from src.app.main import app
+from tests.helpers.openapi import document_with_every_feature_on
 
 APP_ROOT = Path(__file__).resolve().parent.parent / "src" / "app"
 
@@ -82,7 +83,7 @@ def _internal_mentions(description: str, internal: set[str]) -> set[str]:
 
 @pytest.fixture(scope="module")
 def document() -> dict[str, Any]:
-    return app.openapi()
+    return document_with_every_feature_on(app)
 
 
 @pytest.fixture(scope="module")

@@ -266,8 +266,9 @@ themselves, the two health checks — `/health` says the process is up, `/health
 and Redis answered, and 503s when they didn't — `POST /invite-requests`, which is how somebody with
 no account asks a closed instance for an invitation, `GET /config`, which tells the web app whether
 registration is open - whether the project itself operates the instance, whether any join link
-exists (`join_links`), and whether a map renderer draws the map tiles (`map_tiles`) and the credit
-they owe (`map_attribution`) - before anyone has signed in, `GET /join-channel/{slug}`, which says
+exists (`join_links`), whether a map renderer draws the map tiles (`map_tiles`) and the credit they
+owe (`map_attribution`), and which experimental features the instance switches on
+(`experimental_features`) - before anyone has signed in, `GET /join-channel/{slug}`, which says
 whether one join link is live, `GET /invite-link/{token}`, which says whose invite link one token
 is, `GET /species/{uuid}/photo`, which serves a public Commons image to an `<img>` tag that has no
 way to send a token, and `GET /checkin/{token}` with its `/portrait` and

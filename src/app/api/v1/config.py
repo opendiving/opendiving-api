@@ -31,8 +31,8 @@ router = APIRouter(tags=["config"])
 @router.get("/config", response_model=InstanceConfigRead)
 async def read_instance_config() -> InstanceConfigRead:
     """This instance's public configuration: its registration mode, whether the OpenDiving
-    project operates it, whether join links exist, which optional services it runs, and the
-    credit its map tiles owe.
+    project operates it, whether join links exist, which optional services it runs, the credit
+    its map tiles owe, and which experimental features it switches on.
 
     Anonymous. Nothing in it is per-caller and the response is publicly cacheable, for the
     time its `Cache-Control` header states. The values change only when the operator
@@ -45,7 +45,9 @@ async def read_instance_config() -> InstanceConfigRead:
     # Anonymous without being a leak: the landing page discloses the mode anyway by which form
     # it shows, the operator by which copy that form carries, and the privacy page whether join
     # links exist and who draws the maps by what it describes, so this only saves a client from
-    # inferring them. Nothing per-caller is what lets `ClientCacheMiddleware` mark it public.
+    # inferring them. The experimental features are slugs the operator typed, and which of them
+    # an instance shows is visible from the instance itself. Nothing per-caller is what lets
+    # `ClientCacheMiddleware` mark it public.
     return InstanceConfigRead(
         registration_mode=settings.REGISTRATION_MODE,
         project_operated=settings.PROJECT_OPERATED,
@@ -55,4 +57,5 @@ async def read_instance_config() -> InstanceConfigRead:
         map_attribution=map_renderer.current_attribution() if settings.map_tiles else None,
         dive_conditions=settings.dive_conditions,
         mcp_enabled=settings.MCP_ENABLED,
+        experimental_features=settings.experimental_features,
     )

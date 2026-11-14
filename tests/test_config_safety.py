@@ -614,6 +614,44 @@ class TestJoinChannels:
         assert _settings(JOIN_CHANNELS=f"{slug}={label}").join_channels == {slug: label}
 
 
+class TestExperimentalFeatures:
+    """`EXPERIMENTAL_FEATURES`: names or `all`, refused at startup only for its form, since a name
+    no gate asks about any more is what an environment holds on the deploy that removes it."""
+
+    def test_an_instance_that_configures_nothing_switches_nothing_on(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("EXPERIMENTAL_FEATURES", raising=False)
+        module = _config_loaded_without_an_env_file(tmp_path, monkeypatch)
+
+        assert module.settings.EXPERIMENTAL_FEATURES is None
+        assert module.settings.experimental_features == []
+
+    @pytest.mark.parametrize("value", ["", " ", ",,"])
+    def test_empty_switches_nothing_on(self, value: str):
+        assert _settings(EXPERIMENTAL_FEATURES=value).experimental_features == []
+
+    def test_entries_come_back_each_once_and_sorted(self):
+        features = _settings(EXPERIMENTAL_FEATURES=" trips-v2 ,all, dive-planner2,trips-v2").experimental_features
+
+        assert features == ["all", "dive-planner2", "trips-v2"]
+
+    def test_a_name_no_gate_asks_about_is_accepted(self):
+        assert _settings(EXPERIMENTAL_FEATURES="long-retired").experimental_features == ["long-retired"]
+
+    @pytest.mark.parametrize("entry", ["Trips", "trips_v2", "trips v2", "trips=on", "ALL", "plongée"])
+    def test_a_malformed_entry_refuses_to_start_and_names_itself(self, entry: str):
+        with pytest.raises(ValueError, match=re.escape(repr(entry))):
+            _settings(EXPERIMENTAL_FEATURES=f"all,{entry}")
+
+    def test_the_template_offers_all_and_says_an_install_never_sets_it(self):
+        lines = (Path(__file__).resolve().parents[1] / "src" / ".env.example").read_text().splitlines()
+        at = lines.index("# EXPERIMENTAL_FEATURES=all")
+        start = max(i for i in range(at) if not lines[i].startswith("#")) + 1
+        comment = " ".join(line.removeprefix("#").strip() for line in lines[start:at])
+
+        assert "a self-hosted install never sets this" in comment
+        assert "may be dropped by any release" in comment
+
+
 class TestTheObjectStoreBackendNeedsItsCredentials:
     """`FILE_STORAGE_BACKEND=s3` with a variable missing is the configuration that starts
     cleanly and then loses a diver's c-card, so it does not start.
