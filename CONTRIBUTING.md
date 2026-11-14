@@ -649,8 +649,11 @@ alerts above. It ignores findings with no fix published, because there is no mov
 `pyproject.toml`, both `Dockerfile` base images, the development compose file's third-party images,
 and every pinned GitHub Action. Routine updates arrive in one batch on Monday morning; a
 vulnerability-driven one ignores the schedule and is titled `fix(deps):`, so it lands in the Fixes
-section of the release notes rather than among the chores. The install bundle's own digests are
-renewed by the product repository's Renovate config, not by this one.
+section of the release notes rather than among the chores. Minor, patch and digest bumps of
+packages past 0.x, three days after their release, join the merge queue on their own once the
+required checks pass — which needs the repository's "Allow auto-merge" setting on; majors and
+vulnerability fixes wait for a person. The install bundle's own digests are renewed by the product
+repository's Renovate config, not by this one.
 
 > **Renovate is running, and getting it there took a one-time step by hand that nothing in this
 > repository could have done.** The Mend-hosted

@@ -46,10 +46,10 @@
   // UTC; no `timezone` is set because nothing here cares which morning it is.
   "schedule": ["before 9am on monday"],
 
-  // Rebase only on a conflict, not every time `main` moves. A Monday batch gets merged one PR
-  // at a time, each rebased by hand just before its merge, so rebasing the rest after every
-  // merge reruns CI across the whole batch for nothing. The rebase checkbox in a PR's body
-  // still asks for one on demand.
+  // Rebase only on a conflict, not every time `main` moves. The merge queue tests each PR
+  // squashed onto `main` as it then stands, so a branch never needs to be current, and
+  // rebasing the batch after every merge reruns CI across it for nothing. The rebase checkbox
+  // in a PR's body still asks for one on demand.
   "rebaseWhen": "conflicted",
 
   // Load-bearing, and the default only by luck. This repository pins in several styles on
@@ -94,6 +94,7 @@
     "schedule": ["at any time"],
     "semanticCommitType": "fix",
     "labels": ["dependencies", "security"],
+    "automerge": false,
   },
 
   // GitHub's own alerts have to be switched on in repository settings to reach Renovate.
@@ -102,6 +103,18 @@
   "osvVulnerabilityAlerts": true,
 
   "packageRules": [
+    {
+      // Routine minor, patch and digest bumps join the merge queue on their own once the
+      // required checks pass. A merge here reaches opendiving.app within minutes, so those
+      // checks are the whole gate: majors, 0.x packages and vulnerability fixes still wait
+      // for a person, and nothing is offered for automerge until it has been public for three
+      // days - the window in which a hijacked release is usually pulled. First, so a later
+      // rule that holds something back overrides it.
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "matchCurrentVersion": "!/^0/",
+      "minimumReleaseAge": "3 days",
+      "automerge": true,
+    },
     {
       // A Python version is a coordinated change across four files, and only two of them are
       // reachable by any bot: `.python-version` (pyenv manager) and the two `Dockerfile`
@@ -119,6 +132,7 @@
       "matchPackageNames": ["python", "ghcr.io/astral-sh/uv"],
       "groupName": "Python runtime",
       "dependencyDashboardApproval": true,
+      "automerge": false,
     },
   ],
 }
