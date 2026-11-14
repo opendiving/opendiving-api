@@ -118,12 +118,16 @@ class TestThePredicate:
         with patch.object(settings, "EXPERIMENTAL_FEATURES", setting):
             assert experimental_feature_on("trial") is expected
 
+    @pytest.mark.parametrize("setting", [None, "trial", "all"])
     @pytest.mark.parametrize("name", ["all", "Trial", "trial_v2", ""])
-    def test_a_gate_cannot_name_what_no_feature_is_called(self, name: str) -> None:
-        with pytest.raises(ValueError, match=re.escape(repr(name))):
-            require_experimental_feature(name)
-        with pytest.raises(ValueError, match=re.escape(repr(name))):
-            experimental_feature_on(name)
+    def test_a_gate_cannot_name_what_no_feature_is_called(self, name: str, setting: str | None) -> None:
+        """Whatever the setting says, so a mistyped name fails on the stack that says `all` as it
+        would where none is on."""
+        with patch.object(settings, "EXPERIMENTAL_FEATURES", setting):
+            with pytest.raises(ValueError, match=re.escape(repr(name))):
+                require_experimental_feature(name)
+            with pytest.raises(ValueError, match=re.escape(repr(name))):
+                experimental_feature_on(name)
 
     def test_the_gate_is_found_again_in_the_routes_dependencies(self) -> None:
         features = {route.key: gating_features(route.dependant) for route in iter_api_routes(_app())}

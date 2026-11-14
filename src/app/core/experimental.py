@@ -34,8 +34,9 @@ def _feature_name(name: str) -> str:
 def experimental_feature_on(name: str) -> bool:
     """Whether this instance switches the feature on, for what is not a route: a cron, a
     lifespan hook, a sender."""
+    feature = _feature_name(name)
     features = settings.experimental_features
-    return EVERY_EXPERIMENTAL_FEATURE in features or _feature_name(name) in features
+    return EVERY_EXPERIMENTAL_FEATURE in features or feature in features
 
 
 @dataclass(frozen=True)
