@@ -79,6 +79,19 @@ class OAuthBoundary:
                 return {"type": "http.request", "body": body, "more_body": False}
 
             receive = replay
+        # The SDK's revocation request declares client_secret without a default, so a public
+        # client's RFC 7009 request fails validation (modelcontextprotocol/python-sdk#3508). Every
+        # client here is public and the authenticator ignores the secret for them, so an empty one
+        # stands in. Remove once the SDK defaults the field.
+        if path.endswith("/revoke") and request.method == "POST":
+            revoke_body = await request.body()
+            if "client_secret" not in await request.form():
+                revoke_body += b"&client_secret=" if revoke_body else b"client_secret="
+
+            async def replay_revoke() -> Message:
+                return {"type": "http.request", "body": revoke_body, "more_body": False}
+
+            receive = replay_revoke
         if path.endswith("/authorize") and request.method == "POST":
             await request.body()
         if path.endswith("/authorize"):

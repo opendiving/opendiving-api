@@ -219,6 +219,34 @@ async def test_refresh_rotation_replay_and_revoke(
     assert (await rpc(mcp_http, rotated.json()["access_token"], "tools/list")).status_code == 401
 
 
+@pytest.mark.parametrize(
+    ("kind", "hint"),
+    [("access_token", None), ("access_token", "access_token"), ("refresh_token", "refresh_token")],
+)
+async def test_public_client_revokes_with_client_id_alone(
+    mcp_http: httpx.AsyncClient,
+    async_sessions: async_sessionmaker[AsyncSession],
+    diver: User,
+    kind: str,
+    hint: str | None,
+) -> None:
+    headers = await browser(async_sessions, diver)
+    tokens = await connected(mcp_http, headers, ["dives:read"])
+    client_id = (await mcp_http.get("/api/v1/user/mcp/connections", headers=headers)).json()[0]["client_id"]
+    form = {"token": tokens[kind], "client_id": client_id, **({"token_type_hint": hint} if hint else {})}
+    response = await mcp_http.post("/api/v1/mcp/oauth/revoke", data=form)
+    assert response.status_code == 200, response.text
+    assert (await rpc(mcp_http, tokens["access_token"], "tools/list")).status_code == 401
+    assert (await mcp_http.get("/api/v1/user/mcp/connections", headers=headers)).json() == []
+    refresh = {
+        "grant_type": "refresh_token",
+        "refresh_token": tokens["refresh_token"],
+        "client_id": client_id,
+        "resource": resource_url(),
+    }
+    assert (await mcp_http.post("/api/v1/mcp/oauth/token", data=refresh)).status_code == 400
+
+
 async def test_maintenance_purges_connections_whose_code_was_never_exchanged(
     mcp_http: httpx.AsyncClient,
     async_sessions: async_sessionmaker[AsyncSession],
