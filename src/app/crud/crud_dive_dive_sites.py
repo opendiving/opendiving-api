@@ -7,19 +7,23 @@ from sqlalchemy.orm import aliased
 from ..models.dive import Dive
 from ..models.dive_dive_site import DiveDiveSite
 from ..models.dive_site import DiveSite
-from ..schemas.dive import DiveSiteInfo
+from ..schemas.dive import SITE_OWNER_ACCOUNT, SITE_OWNER_COMMONS, DiveSiteInfo
 from ..schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS, location_from_row
+from .crud_dive_site_proposals import latest_proposal_status, proposal_status_on_the_site
 
-# The `dive_site` columns making up a `DiveSiteInfo` (the site summary embedded in a dive
-# read), in the order `dive_site_info_from_row` unpacks them. Both loaders below select the
-# same summary - one for a single dive, one batched - so the mapping lives here once
-# instead of once per query. Same shape as `GEAR_ITEM_INFO_COLUMNS` in `crud_gear_items`,
-# which is shared across modules; this pair has no caller outside this one.
+# The columns making up a `DiveSiteInfo` (the site summary embedded in a dive read), in the
+# order `dive_site_info_from_row` unpacks them. Both loaders below select the same summary -
+# one for a single dive, one batched - so the mapping lives here once instead of once per
+# query. Same shape as `GEAR_ITEM_INFO_COLUMNS` in `crud_gear_items`, which is shared across
+# modules; this pair has no caller outside this one. A statement selecting them joins `Dive`,
+# whose owner is the diver the proposal status is read for.
 DIVE_SITE_INFO_COLUMNS = (
     DiveSite.uuid,
     DiveSite.name,
     DiveSite.latitude,
     DiveSite.longitude,
+    DiveSite.user_id.label("site_user_id"),
+    latest_proposal_status(Dive.user_id, DiveSite.id).label("proposal_status"),
     *(getattr(DiveSite, f"{DIVE_SITE_LOCATION_PREFIX}{field}") for field in LOCATION_FIELDS),
 )
 
@@ -39,6 +43,8 @@ def dive_site_info_from_row(row: Any) -> DiveSiteInfo:
         location=location_from_row(row, DIVE_SITE_LOCATION_PREFIX),
         latitude=row.latitude,
         longitude=row.longitude,
+        owner=SITE_OWNER_COMMONS if row.site_user_id is None else SITE_OWNER_ACCOUNT,
+        proposal_status=proposal_status_on_the_site(row.proposal_status),
     )
 
 
@@ -67,6 +73,7 @@ async def get_dive_sites_for_dive(db: AsyncSession, dive_id: int) -> list[DiveSi
     result = await db.execute(
         select(*DIVE_SITE_INFO_COLUMNS)
         .join(DiveDiveSite, DiveDiveSite.dive_site_id == DiveSite.id)
+        .join(Dive, Dive.id == DiveDiveSite.dive_id)
         .where(DiveDiveSite.dive_id == dive_id)
         .order_by(DiveDiveSite.position)
     )
@@ -86,6 +93,7 @@ async def get_dive_sites_for_dives(db: AsyncSession, dive_ids: list[int]) -> dic
     result = await db.execute(
         select(DiveDiveSite.dive_id, *DIVE_SITE_INFO_COLUMNS)
         .join(DiveSite, DiveSite.id == DiveDiveSite.dive_site_id)
+        .join(Dive, Dive.id == DiveDiveSite.dive_id)
         .where(DiveDiveSite.dive_id.in_(dive_ids))
         .order_by(DiveDiveSite.dive_id, DiveDiveSite.position)
     )

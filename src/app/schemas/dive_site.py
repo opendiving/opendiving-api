@@ -3,7 +3,7 @@ import uuid as uuid_pkg
 from collections.abc import Iterable
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Annotated, ClassVar, Literal, Self
+from typing import Annotated, ClassVar, Self
 
 from divejson.validate import folded
 from pydantic import (
@@ -25,7 +25,7 @@ from ..core.schemas import (
     StoredVocabulary,
     Trimmed,
 )
-from .dive import EntryType, WaterType
+from .dive import DiveSiteOwner, EntryType, WaterType
 from .location import (
     LOCATION_NAME_MAX,
     Latitude,
@@ -269,13 +269,6 @@ class DiveSiteSummary(BaseModel):
     max_dive_depth: Annotated[float | None, Field(description="The greatest `max_depth` among them, in metres")] = None
     species_count: Annotated[int, Field(description="Distinct species sighted on them")] = 0
     average_rating: Annotated[float | None, Field(description="The mean rating of the rated ones")] = None
-
-
-# Who a site belongs to. A later kind of owner is a further value here, which is why this is
-# not a boolean.
-SITE_OWNER_ACCOUNT = "account"
-SITE_OWNER_COMMONS = "opendivingcommons"
-DiveSiteOwner = Literal["account", "opendivingcommons"]
 
 
 class _DiveSiteRelation(BaseModel):

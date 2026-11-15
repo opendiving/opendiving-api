@@ -59,10 +59,9 @@ from ...crud.unique_keys import write_or_duplicate
 from ...models.dive_dive_site import DiveDiveSite
 from ...models.dive_site import DiveSite
 from ...models.saved_site import SavedSite
+from ...schemas.dive import SITE_OWNER_ACCOUNT, SITE_OWNER_COMMONS
 from ...schemas.dive_site import (
     DEPTH_RANGE_MESSAGE,
-    SITE_OWNER_ACCOUNT,
-    SITE_OWNER_COMMONS,
     DiveSiteCommonsMatch,
     DiveSiteCommonsMatchRead,
     DiveSiteCreate,

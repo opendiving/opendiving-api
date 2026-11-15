@@ -3,10 +3,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import ScalarSelect, func, select
 from sqlalchemy.dialects.postgresql import distinct_on, insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import InstrumentedAttribute, aliased
 from uuid6 import uuid7
 
 from ..models.dive_site import DiveSite
@@ -18,6 +18,27 @@ from ..services.commons_records import SHARED_MEMBER_COLUMNS
 
 _WAITING = DiveSiteProposalStatus.WAITING.value
 _READ_ON_THE_SITE = (DiveSiteProposalStatus.WAITING.value, DiveSiteProposalStatus.DECLINED.value)
+
+
+def latest_proposal_status(
+    user_id: InstrumentedAttribute[int], dive_site_id: InstrumentedAttribute[int]
+) -> ScalarSelect[str]:
+    """The status of the diver's latest proposal on the site, correlated to the two columns of an
+    outer statement, so a read listing many sites asks it in the same query. Read it back through
+    `proposal_status_on_the_site`."""
+    return (
+        select(DiveSiteProposal.status)
+        .where(DiveSiteProposal.user_id == user_id, DiveSiteProposal.dive_site_id == dive_site_id)
+        .order_by(DiveSiteProposal.id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
+def proposal_status_on_the_site(status: str | None) -> str | None:
+    """What a latest proposal's status says on the site, by the rule `get_latest_proposals_for_sites`
+    states."""
+    return status if status in _READ_ON_THE_SITE else None
 
 
 async def get_latest_proposals_for_sites(

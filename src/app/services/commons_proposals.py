@@ -162,6 +162,12 @@ def _members_of_a_change(site: Mapping[str, Any], values: DiveSiteProposalCreate
     return changed
 
 
+async def _invalidate_proposer_caches(user_id: int) -> None:
+    """A proposal's status shows on the proposer's read of the site and on their dives at it."""
+    await invalidate_dive_site_caches(user_id)
+    await invalidate_dive_caches(user_id)
+
+
 async def propose(
     db: AsyncSession, *, site_id: int, user_id: int, values: DiveSiteProposalCreate
 ) -> DiveSiteProposalRead:
@@ -195,7 +201,7 @@ async def propose(
         now=datetime.now(UTC),
     )
     await db.commit()
-    await invalidate_dive_site_caches(user_id)
+    await _invalidate_proposer_caches(user_id)
     return _proposal_read(
         {
             "uuid": uuid,
@@ -292,7 +298,7 @@ async def withdraw(db: AsyncSession, *, uuid: uuid_pkg.UUID, user_id: int) -> No
     proposal = await _waiting_proposal(db, uuid=uuid, user_id=user_id)
     await _decide(db, proposal, DiveSiteProposalStatus.WITHDRAWN)
     await db.commit()
-    await invalidate_dive_site_caches(user_id)
+    await _invalidate_proposer_caches(user_id)
 
 
 async def decline(db: AsyncSession, *, uuid: uuid_pkg.UUID, reason: str) -> DiveSiteProposalRead:
@@ -302,7 +308,7 @@ async def decline(db: AsyncSession, *, uuid: uuid_pkg.UUID, reason: str) -> Dive
     read = await _read_decided(db, proposal)
     await db.commit()
     # The proposer's, not the reviewer's: their read of the site carries the reason, for an hour.
-    await invalidate_dive_site_caches(proposer_id)
+    await _invalidate_proposer_caches(proposer_id)
     return read
 
 
@@ -502,9 +508,8 @@ async def accept(db: AsyncSession, *, uuid: uuid_pkg.UUID, values: DiveSitePropo
     await db.commit()
 
     await invalidate_commons_record_caches(record_uuid, saver_ids=saver_ids)
+    await _invalidate_proposer_caches(proposer_id)
     if folding:
-        await invalidate_dive_site_caches(proposer_id)
-        await invalidate_dive_caches(proposer_id)
         await invalidate_trip_caches(proposer_id)
     return read
 

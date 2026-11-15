@@ -1134,7 +1134,19 @@ class TestNamingARecordOnADive:
         )
 
         dive = (await http.get(f"/dive/{created.json()['uuid']}")).json()
-        assert set(dive["dive_sites"][0]) == {"uuid", "name", "location", "latitude", "longitude"}
+        assert set(dive["dive_sites"][0]) == {
+            "uuid",
+            "name",
+            "location",
+            "latitude",
+            "longitude",
+            "owner",
+            "proposal_status",
+        }
+        assert (dive["dive_sites"][0]["owner"], dive["dive_sites"][0]["proposal_status"]) == (
+            "opendivingcommons",
+            None,
+        )
 
     @pytest.mark.asyncio
     async def test_a_patch_saves_it_too_and_the_site_lists_at_once(

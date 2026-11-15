@@ -411,6 +411,13 @@ class DiveTechScalars(BaseModel):
     ]
 
 
+# Who a site belongs to. A later kind of owner is a further value here, which is why this is
+# not a boolean.
+SITE_OWNER_ACCOUNT = "account"
+SITE_OWNER_COMMONS = "opendivingcommons"
+DiveSiteOwner = Literal["account", "opendivingcommons"]
+
+
 class DiveSiteInfo(PublicUUIDSchema):
     """Summary of a dive site visited during a dive, keyed by its public `uuid`, and
     enough of the site to place it on a map without a second request per site.
@@ -427,6 +434,18 @@ class DiveSiteInfo(PublicUUIDSchema):
     location: LocationRead | None = None
     latitude: Latitude
     longitude: Longitude
+    owner: Annotated[
+        DiveSiteOwner,
+        Field(description="`account`, the diver's own site, or `opendivingcommons`, a record every account shares"),
+    ]
+    proposal_status: Annotated[
+        StoredVocabulary | None,
+        Field(
+            default=None,
+            description="The status of the diver's latest proposal on the site while it waits or once declined "
+            "(`waiting` or `declined`), and null otherwise",
+        ),
+    ]
 
 
 class SpeciesInfo(PublicUUIDSchema):

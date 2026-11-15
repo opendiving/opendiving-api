@@ -6,7 +6,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from .dive_site import DiveSiteLookupItem, DiveSiteOwner, DiveSiteProposalState, DiveSiteSummary
+from .dive import DiveSiteOwner
+from .dive_site import DiveSiteLookupItem, DiveSiteProposalState, DiveSiteSummary
 from .geocoding import GeocodeResult
 
 

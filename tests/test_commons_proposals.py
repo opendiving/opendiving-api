@@ -1904,6 +1904,93 @@ class TestThePointsCarryTheProposal:
         assert await _point_proposal(http, record) == ("opendivingcommons", None)
 
 
+async def _dive_mark(http: httpx.AsyncClient, dive: Dive) -> tuple[str, str | None]:
+    """The site's owner and proposal status as the dive's read and the diver's dive list both carry them."""
+    read = await http.get(f"/dive/{dive.uuid}")
+    assert read.status_code == 200, read.text
+    listed = await http.get("/dives")
+    assert listed.status_code == 200, listed.text
+    row = next(row for row in listed.json()["data"] if row["uuid"] == str(dive.uuid))
+    marks = {(site["owner"], site["proposal_status"]) for site in (read.json()["dive_sites"][0], row["dive_sites"][0])}
+    assert len(marks) == 1, marks
+    return marks.pop()
+
+
+class TestTheDiveCarriesTheProposal:
+    """As the points do, and for the same reason each read comes before the write it follows."""
+
+    @pytest.mark.asyncio
+    async def test_proposing_declining_and_withdrawing_each_reach_the_dive(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        site = _own_site(db, diver)
+        dive = create_dive(db, diver)
+        _on_a_dive(db, dive, site)
+        assert await _dive_mark(http, dive) == ("account", None)
+
+        proposal = await _propose_site(http, site)
+        assert await _dive_mark(http, dive) == ("account", "waiting")
+
+        signed.as_(reviewer)
+        declined = await http.post(f"/admin/dive-site-proposal/{proposal['uuid']}/decline", json={"reason": "No"})
+        assert declined.status_code == 200, declined.text
+        signed.as_(diver)
+        assert await _dive_mark(http, dive) == ("account", "declined")
+
+        again = await _propose_site(http, site)
+        assert await _dive_mark(http, dive) == ("account", "waiting")
+
+        assert (await http.delete(f"/dive-site-proposal/{again['uuid']}")).status_code == 200
+        assert await _dive_mark(http, dive) == ("account", None)
+
+    @pytest.mark.asyncio
+    async def test_an_accepted_proposal_leaves_a_commons_site_with_none(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        site = _own_site(db, diver)
+        dive = create_dive(db, diver)
+        _on_a_dive(db, dive, site)
+        proposal = await _propose_site(http, site)
+        assert await _dive_mark(http, dive) == ("account", "waiting")
+
+        signed.as_(reviewer)
+        await _accepted(http, proposal, members=_members())
+        signed.as_(diver)
+
+        assert await _dive_mark(http, dive) == ("opendivingcommons", None)
+
+    @pytest.mark.asyncio
+    async def test_an_accepted_change_reaches_a_proposer_who_never_saved_the_record(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db)
+        dive = create_dive(db, diver)
+        _on_a_dive(db, dive, record)
+        proposal = await _propose_change(http, record, depth_to=12.0)
+        assert await _dive_mark(http, dive) == ("opendivingcommons", "waiting")
+
+        signed.as_(reviewer)
+        await _accepted(http, proposal, members=_members(depth_to=12.0, external_ids=record.external_ids))
+        signed.as_(diver)
+
+        assert await _dive_mark(http, dive) == ("opendivingcommons", None)
+
+    @pytest.mark.asyncio
+    async def test_another_account_s_proposal_is_not_the_diver_s(
+        self, http: httpx.AsyncClient, db: Session, diver: User, other_diver: User, signed: Sign
+    ) -> None:
+        record = _record(db)
+        saved_row(db, record, user=diver)
+        saved_row(db, record, user=other_diver)
+        dive = create_dive(db, diver)
+        _on_a_dive(db, dive, record)
+        signed.as_(other_diver)
+        await _propose_change(http, record, depth_to=12.0)
+        signed.as_(diver)
+
+        assert await _dive_mark(http, dive) == ("opendivingcommons", None)
+
+
 class TestDeclining:
     @pytest.mark.asyncio
     async def test_the_proposer_reads_the_reason_until_they_propose_again(

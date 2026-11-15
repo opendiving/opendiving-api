@@ -287,12 +287,13 @@ class TestTheEmbeddedSiteSummary:
             location=LocationRead(name="Dahab, Egypt"),
             latitude=BLUE_HOLE[0],
             longitude=BLUE_HOLE[1],
+            owner="account",
         )
 
         assert (site.model_dump()["latitude"], site.model_dump()["longitude"]) == BLUE_HOLE
 
     def test_a_site_without_a_position_serializes_explicit_nulls(self) -> None:
-        dumped = DiveSiteInfo(uuid=uuid7(), name="Blue Hole").model_dump()
+        dumped = DiveSiteInfo(uuid=uuid7(), name="Blue Hole", owner="account").model_dump()
 
         assert dumped["latitude"] is None
         assert dumped["longitude"] is None
@@ -301,7 +302,7 @@ class TestTheEmbeddedSiteSummary:
         """The read schema shares `Latitude`/`Longitude` with the write ones, so the range
         check comes along - a row that could only exist via raw SQL fails loudly here."""
         with pytest.raises(ValidationError):
-            DiveSiteInfo(uuid=uuid7(), name="Null Island Adjacent", latitude=91.0, longitude=0.0)
+            DiveSiteInfo(uuid=uuid7(), name="Null Island Adjacent", latitude=91.0, longitude=0.0, owner="account")
 
 
 def _expected_locality() -> LocationRead:
@@ -356,6 +357,8 @@ class TestTheSummaryLoaders:
             "location_bbox_north": 28.6,
             "location_bbox_west": 34.4,
             "location_bbox_east": 34.6,
+            "site_user_id": 3,
+            "proposal_status": "waiting",
         }
         return SimpleNamespace(**(columns | overrides))
 
@@ -395,11 +398,14 @@ class TestTheSummaryLoaders:
 
         The locality is one field over several columns, so the two sets are compared with it
         expanded - which is also what catches a column of the place going missing from the
-        tuple while the schema goes on promising the whole object.
+        tuple while the schema goes on promising the whole object. `owner` is read off the
+        site's `user_id`, so it is compared as that column.
         """
-        expected = (set(DiveSiteInfo.model_fields) - {"location"}) | {
-            f"{DIVE_SITE_LOCATION_PREFIX}{field}" for field in LOCATION_FIELDS
-        }
+        expected = (
+            (set(DiveSiteInfo.model_fields) - {"location", "owner"})
+            | {f"{DIVE_SITE_LOCATION_PREFIX}{field}" for field in LOCATION_FIELDS}
+            | {"site_user_id"}
+        )
 
         assert {column.key for column in DIVE_SITE_INFO_COLUMNS} == expected
 
@@ -413,6 +419,7 @@ class TestTheSummaryLoaders:
         included, which is the pair most easily crossed with the site's own.
         """
         row = self._row()
+        columns = [column for column in DIVE_SITE_INFO_COLUMNS if column.key != "site_user_id"]
 
         info = dive_site_info_from_row(row)
 
@@ -422,7 +429,24 @@ class TestTheSummaryLoaders:
                 if column.key.startswith(DIVE_SITE_LOCATION_PREFIX)
                 else getattr(info, column.key)
             )
-            for column in DIVE_SITE_INFO_COLUMNS
+            for column in columns
         }
 
-        assert read == {column.key: getattr(row, column.key) for column in DIVE_SITE_INFO_COLUMNS}
+        assert read == {column.key: getattr(row, column.key) for column in columns}
+        assert info.owner == "account"
+
+    @pytest.mark.parametrize(
+        ("site_user_id", "status", "expected"),
+        [
+            (None, None, ("opendivingcommons", None)),
+            (3, "declined", ("account", "declined")),
+            (3, "accepted", ("account", None)),
+            (3, "withdrawn", ("account", None)),
+        ],
+    )
+    def test_owner_and_proposal_status_read_as_the_points_do(
+        self, site_user_id: int | None, status: str | None, expected: tuple[str, str | None]
+    ) -> None:
+        info = dive_site_info_from_row(self._row(site_user_id=site_user_id, proposal_status=status))
+
+        assert (info.owner, info.proposal_status) == expected
