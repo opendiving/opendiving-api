@@ -128,6 +128,7 @@ async def species_life_list(
     limit: int,
     search: str | None = None,
     dive_site_id: int | None = None,
+    trip_id: int | None = None,
 ) -> dict[str, Any]:
     """One page of the diver's life list, plus the total, in `get_multi`'s shape.
 
@@ -150,6 +151,8 @@ async def species_life_list(
         # A dive naming the site at any position, as the site's summary counts it - so a
         # site page's species list is as long as its species count.
         conditions.append(at_dive_site(dive_site_id))
+    if trip_id is not None:
+        conditions.append(Dive.trip_id == trip_id)
 
     total_count = await db.scalar(
         _sighting_join(select(func.count(func.distinct(Species.id))), user_id=user_id).where(*conditions)

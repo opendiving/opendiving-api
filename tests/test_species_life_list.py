@@ -37,6 +37,7 @@ from src.app.api.v1.users import SPECIES_LIFE_LIST_CACHE_KEY_PREFIX, SPECIES_LIF
 from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
 from src.app.core.setup import create_application
+from src.app.crud.crud_trips import resolve_trip_id_for_user
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_species import DiveSpecies
 from src.app.schemas.species import SpeciesLifeListEntry
@@ -44,7 +45,7 @@ from src.app.services.dive_stats import recalculate_dive_stats
 from src.app.services.species_life_list import species_life_list, species_life_list_detail
 from tests.conftest import db_available
 from tests.helpers.fake_redis import FakeRedis
-from tests.helpers.generators import create_dive, create_dive_site, create_species, create_user
+from tests.helpers.generators import create_dive, create_dive_site, create_species, create_trip, create_user
 from tests.helpers.routes import iter_api_routes
 
 CURRENT_USER = {"id": 7, "uuid": uuid7(), "username": "ada", "is_superuser": False}
@@ -101,6 +102,7 @@ def _service_answering(by_call: dict[tuple[int, str | None], str]) -> Any:
         limit: int,
         search: str | None = None,
         dive_site_id: int | None = None,
+        trip_id: int | None = None,
     ) -> dict[str, Any]:
         return {"data": [_row(by_call[(offset, search)])], "total_count": 1}
 
@@ -168,6 +170,40 @@ class TestTheCacheKeyCarriesTheWholeQuery:
 
         assert len(redis.store) == 4
 
+    def test_the_site_and_trip_filters_each_get_their_own_entry(self, client: TestClient, redis: FakeRedis) -> None:
+        """A trip's page never reads the unfiltered entry or a site's, and both together read
+        neither of theirs."""
+        site_uuid, trip_uuid = uuid7(), uuid7()
+        answers = {(None, None): "Everything", (11, None): "At the site", (None, 22): "On the trip", (11, 22): "Both"}
+
+        async def service(
+            *,
+            db: Any,
+            user_id: int,
+            offset: int,
+            limit: int,
+            search: str | None = None,
+            dive_site_id: int | None = None,
+            trip_id: int | None = None,
+        ) -> dict[str, Any]:
+            return {"data": [_row(answers[(dive_site_id, trip_id)])], "total_count": 1}
+
+        queries: list[dict[str, str]] = [
+            {},
+            {"dive_site_uuid": str(site_uuid)},
+            {"trip_uuid": str(trip_uuid)},
+            {"dive_site_uuid": str(site_uuid), "trip_uuid": str(trip_uuid)},
+        ]
+        with (
+            patch.object(users_module, "species_life_list", service),
+            patch.object(users_module, "resolve_dive_site_ids_for_user", AsyncMock(return_value={site_uuid: 11})),
+            patch.object(users_module, "resolve_trip_id_for_user", AsyncMock(return_value=22)),
+        ):
+            names = [client.get(LIFE_LIST_PATH, params=query).json()["data"][0]["scientific_name"] for query in queries]
+
+        assert names == ["Everything", "At the site", "On the trip", "Both"]
+        assert len(redis.store) == 4
+
     def test_it_hangs_under_the_prefix_the_dive_invalidator_already_sweeps(self) -> None:
         """`invalidate_dive_caches()` deletes exactly `user_{id}_dives:*` and `user_{id}_dive:*`
         and deliberately not a wider pattern, so a namespace of its own would be a third
@@ -187,7 +223,7 @@ class TestTheCacheKeyCarriesTheWholeQuery:
         # helper's - which is exactly the one whose keyword arguments the key is filled from.
         parameters = set(inspect.signature(users_module._cached_species_life_list).parameters)
 
-        for placeholder in ("user_id", "page", "items_per_page", "search", "dive_site_id"):
+        for placeholder in ("user_id", "page", "items_per_page", "search", "dive_site_id", "trip_id"):
             assert placeholder in parameters
             assert f"{{{placeholder}}}" in SPECIES_LIFE_LIST_CACHE_KEY_PREFIX
 
@@ -219,6 +255,21 @@ class TestTheRoute:
             client.get(LIFE_LIST_PATH, params={"search": "  giant   moray "})
 
         assert service.await_args.kwargs["search"] == "giant moray"
+
+    def test_a_trip_that_is_not_the_callers_is_an_empty_page(self, client: TestClient) -> None:
+        """The resolver answers `None` for someone else's trip and for none at all alike, and
+        the route turns both into the -1 no dive carries rather than a 404 that would tell the
+        two apart."""
+        trip_uuid = uuid7()
+        resolve = AsyncMock(return_value=None)
+        with _stub_service() as service, patch.object(users_module, "resolve_trip_id_for_user", resolve):
+            response = client.get(LIFE_LIST_PATH, params={"trip_uuid": str(trip_uuid)})
+
+        assert response.status_code == 200
+        assert response.json()["data"] == []
+        assert service.await_args.kwargs["trip_id"] == -1
+        assert resolve.await_args is not None
+        assert resolve.await_args.kwargs == {"db": ANY, "trip_uuid": trip_uuid, "user_id": CURRENT_USER["id"]}
 
     def test_it_answers_the_paginated_envelope(self, client: TestClient) -> None:
         row = {
@@ -525,6 +576,95 @@ def _stats_for(user_id: int) -> Any:
 # -------------- the dive filter --------------
 
 
+@pytest.mark.skipif(not db_available(), reason="requires a database")
+class TestTheTripFilter:
+    def _log(
+        self, db: Session, diver: Any, species: Any, day: int, *sites: Any, trip: Any = None, is_deleted: bool = False
+    ) -> None:
+        dive = create_dive(db, diver, trip=trip, is_deleted=is_deleted)
+        dive.start_time = datetime(2026, 6, day, 9, 0, tzinfo=UTC)
+        db.add(DiveSpecies(dive_id=dive.id, species_id=species.id, position=0))
+        for position, site in enumerate(sites):
+            db.add(DiveDiveSite(dive_id=dive.id, dive_site_id=site.id, position=position))
+        db.commit()
+
+    @pytest.mark.asyncio
+    async def test_it_keeps_the_trips_species_with_figures_over_its_dives_alone(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        """The dives before and after the trip, and those on another trip, move neither the
+        species kept nor any of its four figures."""
+        diver = create_user(db)
+        trip, other_trip = create_trip(db, diver), create_trip(db, diver)
+        seen_on_trip, seen_elsewhere, seen_on_other_trip = create_species(db), create_species(db), create_species(db)
+        north, south, home = (create_dive_site(db, diver) for _ in range(3))
+        self._log(db, diver, seen_on_trip, 1, home)
+        self._log(db, diver, seen_on_trip, 3, north, trip=trip)
+        self._log(db, diver, seen_on_trip, 5, south, trip=trip)
+        self._log(db, diver, seen_on_trip, 9, home, trip=other_trip)
+        self._log(db, diver, seen_elsewhere, 4, home)
+        self._log(db, diver, seen_on_other_trip, 8, trip=other_trip)
+
+        page = await species_life_list(async_db, user_id=diver.id, offset=0, limit=10, trip_id=trip.id)
+
+        assert page["total_count"] == 1
+        [row] = page["data"]
+        assert row["uuid"] == seen_on_trip.uuid
+        assert (row["dive_count"], row["dive_site_count"]) == (2, 2)
+        assert row["first_seen"] == datetime(2026, 6, 3, 9, 0, tzinfo=UTC)
+        assert row["last_seen"] == datetime(2026, 6, 5, 9, 0, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_another_divers_trip_is_an_empty_page(self, db: Session, async_db: AsyncSession) -> None:
+        """Resolved for the caller it is the -1 sentinel, and that matches nothing."""
+        diver, someone_else = create_user(db), create_user(db)
+        theirs = create_trip(db, someone_else)
+        self._log(db, someone_else, create_species(db), 2, trip=theirs)
+        self._log(db, diver, create_species(db), 3, trip=create_trip(db, diver))
+
+        trip_id = await resolve_trip_id_for_user(db=async_db, trip_uuid=theirs.uuid, user_id=diver.id) or -1
+        page = await species_life_list(async_db, user_id=diver.id, offset=0, limit=10, trip_id=trip_id)
+
+        assert trip_id == -1
+        assert (page["data"], page["total_count"]) == ([], 0)
+
+    @pytest.mark.asyncio
+    async def test_a_soft_deleted_dive_on_the_trip_drops_out(self, db: Session, async_db: AsyncSession) -> None:
+        """Its species leaves the page when that was the trip's only sighting, and stops
+        counting towards one the trip saw again."""
+        diver = create_user(db)
+        trip = create_trip(db, diver)
+        kept, gone = create_species(db), create_species(db)
+        self._log(db, diver, kept, 2, trip=trip)
+        self._log(db, diver, kept, 6, trip=trip, is_deleted=True)
+        self._log(db, diver, gone, 4, trip=trip, is_deleted=True)
+
+        page = await species_life_list(async_db, user_id=diver.id, offset=0, limit=10, trip_id=trip.id)
+
+        assert page["total_count"] == 1
+        [row] = page["data"]
+        assert (row["uuid"], row["dive_count"]) == (kept.uuid, 1)
+        assert row["last_seen"] == datetime(2026, 6, 2, 9, 0, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_with_the_site_filter_it_narrows_by_both(self, db: Session, async_db: AsyncSession) -> None:
+        diver = create_user(db)
+        trip = create_trip(db, diver)
+        north, south = create_dive_site(db, diver), create_dive_site(db, diver)
+        both, trip_only, site_only = create_species(db), create_species(db), create_species(db)
+        self._log(db, diver, both, 2, north, trip=trip)
+        self._log(db, diver, both, 7, north)
+        self._log(db, diver, trip_only, 3, south, trip=trip)
+        self._log(db, diver, site_only, 4, north)
+
+        page = await species_life_list(
+            async_db, user_id=diver.id, offset=0, limit=10, dive_site_id=north.id, trip_id=trip.id
+        )
+
+        assert page["total_count"] == 1
+        assert [(row["uuid"], row["dive_count"]) for row in page["data"]] == [(both.uuid, 1)]
+
+
 class TestTheDiveFilter:
     """`GET /dives?species_uuid=`, the third `custom_filter` on that route."""
 
@@ -615,7 +755,6 @@ class TestTheDiveFilterAgainstPostgres:
         species filter narrowing an already-narrowed page must not widen it back."""
         from src.app.crud.crud_dives import get_dives_page, showing_species
         from src.app.models.dive import Dive
-        from tests.helpers.generators import create_trip
 
         diver = create_user(db)
         trip = create_trip(db, diver)
