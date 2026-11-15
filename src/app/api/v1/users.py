@@ -924,7 +924,10 @@ async def read_trip_places(
 # extra line here and nowhere else in this file: this is the key whose omissions produce a
 # wrong answer rather than a slow one, and every other way of checking it either reads this
 # file's source text or passes whenever it happens to run outside the 60 s TTL.
-SPECIES_LIFE_LIST_CACHE_KEY_PREFIX = "user_{user_id}_dives:species:page_{page}:items_per_page:{items_per_page}:search:{search}:site_{dive_site_id}:trip_{trip_id}"
+SPECIES_LIFE_LIST_CACHE_KEY_PREFIX = (
+    "user_{user_id}_dives:species:page_{page}:items_per_page:{items_per_page}:search:{search}"
+    ":site_{dive_site_id}:trip_{trip_id}"
+)
 
 
 @cache(key_prefix=SPECIES_LIFE_LIST_CACHE_KEY_PREFIX, resource_id_name="user_id", expiration=60)
