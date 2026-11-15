@@ -368,6 +368,7 @@ FETCH_OWNED_ROUTES = [
         for method, extra in _CRUD_METHODS
     ),
     OwnedRoute("GET", "/api/v1/trip/{uuid}/dives", "src.app.api.v1.trips:crud_trips", "Trip not found"),
+    OwnedRoute("GET", "/api/v1/trip/{uuid}/species", "src.app.api.v1.trips:crud_trips", "Trip not found"),
     OwnedRoute("POST", "/api/v1/trip/{uuid}/dives", "src.app.api.v1.trips:crud_trips", "Trip not found", {"json": {}}),
     *(
         OwnedRoute(method, "/api/v1/course/{uuid}", "src.app.api.v1.courses:crud_courses", "Course not found", extra)

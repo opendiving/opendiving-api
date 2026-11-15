@@ -51,6 +51,7 @@ from ...models.trip import Trip
 from ...schemas.dive import DiveListItem
 from ...schemas.lookup import LookupUntil, LookupUuids
 from ...schemas.person import PersonReferenceRead
+from ...schemas.species import SpeciesLifeListEntry
 from ...schemas.trip import (
     TripCreate,
     TripCreateInternal,
@@ -72,6 +73,7 @@ from ...services.cache_invalidation import (
 )
 from ...services.dive_list_items import to_dive_list_items
 from ...services.person_links import resolve_people_references
+from ...services.species_life_list import species_life_list
 from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["trips"])
@@ -545,6 +547,69 @@ async def read_trip_dives(
         request,
         user_id=current_user["id"],
         user_uuid=current_user["uuid"],
+        db=db,
+        trip_id=db_trip.id,
+        page=page,
+        items_per_page=items_per_page,
+    )
+
+
+# Under the dives prefix beside the trip's dive list, so the dive writes, dive moves and trip
+# deletes that change which dives are on the trip sweep this page with it.
+@cache(
+    key_prefix="user_{user_id}_dives:trip_{trip_id}:species:page_{page}:items_per_page:{items_per_page}",
+    resource_id_name="user_id",
+    expiration=60,
+)
+async def _cached_read_trip_species(
+    request: Request,
+    user_id: int,
+    db: AsyncSession,
+    trip_id: int,
+    page: int,
+    items_per_page: int,
+) -> dict:
+    """A page of the species on the trip's dives. Only ever called after `read_trip_species`
+    has authorized the caller: a hit skips this body."""
+    data = await species_life_list(
+        db,
+        user_id=user_id,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
+        trip_id=trip_id,
+    )
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
+@router.get("/trip/{uuid}/species", response_model=PaginatedListResponse[SpeciesLifeListEntry])
+async def read_trip_species(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
+) -> dict:
+    """Every species sighted on the trip, most recently seen first, as `GET /user/species`
+    shapes its rows.
+
+    Counts the trip's live dives, the same dives as the trip's `species_count`, and not its
+    candidates until they are added to it. Each row's `dive_count`, `dive_site_count`,
+    `first_seen` and `last_seen` are over those dives alone, so a species seen before or
+    after the trip shows only what the trip saw of it.
+
+    404 for a trip that is not the caller's, as every `/trip/{uuid}` route answers.
+    Out-of-range pagination is clamped.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+
+    # Authorize before the cached read: `@cache` replays a hit without re-checking.
+    db_trip = await _get_owned_trip(db, uuid, current_user)
+
+    return await _cached_read_trip_species(
+        request,
+        user_id=current_user["id"],
         db=db,
         trip_id=db_trip.id,
         page=page,

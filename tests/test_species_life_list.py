@@ -21,6 +21,7 @@ in the SQL: a `GROUP BY` leaning on functional-dependency inference, three aggre
 
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
+from fnmatch import fnmatch
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -32,11 +33,15 @@ from uuid6 import uuid7
 
 from src.app.api import router as api_router
 from src.app.api.dependencies import get_current_user
+from src.app.api.v1 import trips as trips_module
 from src.app.api.v1 import users as users_module
 from src.app.api.v1.users import SPECIES_LIFE_LIST_CACHE_KEY_PREFIX, SPECIES_LIFE_LIST_DETAIL_CACHE_KEY_PREFIX
 from src.app.core.config import settings
 from src.app.core.db.database import async_get_db
+from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.core.setup import create_application
+from src.app.core.utils import cache as cache_module
+from src.app.core.utils.cache import across_builds, namespaced
 from src.app.crud.crud_trips import resolve_trip_id_for_user
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_species import DiveSpecies
@@ -660,6 +665,125 @@ class TestTheTripFilter:
 
         assert page["total_count"] == 1
         assert [(row["uuid"], row["dive_count"]) for row in page["data"]] == [(both.uuid, 1)]
+
+
+def _get_request() -> MagicMock:
+    request = MagicMock()
+    request.method = "GET"
+    return request
+
+
+class TestTheTripsSpeciesKey:
+    @pytest.mark.asyncio
+    async def test_it_is_under_the_dives_sweep_and_apart_from_the_trips_dive_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dive write, a dive move or a trip delete sweeps `user_{id}_dives:*`, which is what
+        drops this page when a dive joins or leaves the trip; and the dive list's own key,
+        `...:trip_{id}:page_...`, never names this one's entry."""
+        monkeypatch.setattr(trips_module, "species_life_list", AsyncMock(return_value={"data": [], "total_count": 0}))
+        redis = FakeRedis()
+        monkeypatch.setattr(cache_module, "client", redis)
+
+        await trips_module._cached_read_trip_species(
+            _get_request(), user_id=7, db=MagicMock(), trip_id=11, page=2, items_per_page=25
+        )
+
+        (key,) = redis.store
+        assert key == namespaced("user_7_dives:trip_11:species:page_2:items_per_page:25:7")
+        assert fnmatch(key, across_builds("user_7_dives:*"))
+
+
+@pytest.mark.skipif(not db_available(), reason="requires a database")
+class TestTheTripsSpecies:
+    """`GET /trip/{uuid}/species`. `create_trip`'s one part starts on 1 June with no end, so
+    every dive on no trip from that day on is one of its candidates - which the list leaves
+    out, as the trip's `species_count` does."""
+
+    @pytest.fixture(autouse=True)
+    def _serving_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(cache_module, "client", FakeRedis())
+
+    def _log(
+        self,
+        db: Session,
+        diver: Any,
+        species: Any,
+        day: datetime,
+        *sites: Any,
+        trip: Any = None,
+        is_deleted: bool = False,
+    ) -> None:
+        dive = create_dive(db, diver, trip=trip, is_deleted=is_deleted)
+        dive.start_time = day
+        db.add(DiveSpecies(dive_id=dive.id, species_id=species.id, position=0))
+        for position, site in enumerate(sites):
+            db.add(DiveDiveSite(dive_id=dive.id, dive_site_id=site.id, position=position))
+        db.commit()
+
+    async def _read(self, async_db: AsyncSession, diver: Any, trip: Any) -> dict[str, Any]:
+        result: dict[str, Any] = await trips_module.read_trip_species(
+            request=_get_request(),
+            uuid=trip.uuid,
+            current_user={"id": diver.id, "uuid": diver.uuid},
+            db=async_db,
+            page=1,
+            items_per_page=50,
+        )
+        return result
+
+    @pytest.mark.asyncio
+    async def test_it_counts_the_trips_own_dives_alone(self, db: Session, async_db: AsyncSession) -> None:
+        """A dive before the trip, a candidate and a dive on another trip move neither the
+        species kept nor its figures, and a species seen only on a candidate is not kept."""
+        diver = create_user(db)
+        trip, other_trip = create_trip(db, diver), create_trip(db, diver)
+        seen, seen_on_candidate_only = create_species(db), create_species(db)
+        north, south, home = (create_dive_site(db, diver) for _ in range(3))
+        self._log(db, diver, seen, datetime(2026, 5, 20, 9, tzinfo=UTC), home)
+        self._log(db, diver, seen, datetime(2026, 6, 3, 9, tzinfo=UTC), north, trip=trip)
+        self._log(db, diver, seen, datetime(2026, 6, 4, 9, tzinfo=UTC), home)
+        self._log(db, diver, seen, datetime(2026, 6, 5, 9, tzinfo=UTC), south, trip=trip)
+        self._log(db, diver, seen, datetime(2026, 6, 9, 9, tzinfo=UTC), home, trip=other_trip)
+        self._log(db, diver, seen_on_candidate_only, datetime(2026, 6, 6, 9, tzinfo=UTC))
+
+        page = await self._read(async_db, diver, trip)
+
+        assert page["total_count"] == 1
+        [row] = [SpeciesLifeListEntry(**entry) for entry in page["data"]]
+        assert row.uuid == seen.uuid
+        assert (row.dive_count, row.dive_site_count) == (2, 2)
+        assert (row.first_seen, row.last_seen) == (
+            datetime(2026, 6, 3, 9, tzinfo=UTC),
+            datetime(2026, 6, 5, 9, tzinfo=UTC),
+        )
+
+    @pytest.mark.asyncio
+    async def test_another_divers_trip_is_a_404(self, db: Session, async_db: AsyncSession) -> None:
+        diver, someone_else = create_user(db), create_user(db)
+        theirs = create_trip(db, someone_else)
+        self._log(db, someone_else, create_species(db), datetime(2026, 6, 2, 9, tzinfo=UTC), trip=theirs)
+
+        with pytest.raises(NotFoundException):
+            await self._read(async_db, diver, theirs)
+
+    @pytest.mark.asyncio
+    async def test_a_soft_deleted_dive_drops_out(self, db: Session, async_db: AsyncSession) -> None:
+        """Its species leaves the page when that was the trip's only sighting, and stops
+        counting towards one the trip saw again."""
+        diver = create_user(db)
+        trip = create_trip(db, diver)
+        kept, gone = create_species(db), create_species(db)
+        self._log(db, diver, kept, datetime(2026, 6, 2, 9, tzinfo=UTC), trip=trip)
+        self._log(db, diver, kept, datetime(2026, 6, 6, 9, tzinfo=UTC), trip=trip, is_deleted=True)
+        self._log(db, diver, gone, datetime(2026, 6, 4, 9, tzinfo=UTC), trip=trip, is_deleted=True)
+
+        page = await self._read(async_db, diver, trip)
+
+        assert page["total_count"] == 1
+        [row] = [SpeciesLifeListEntry(**entry) for entry in page["data"]]
+        assert (row.uuid, row.dive_count) == (kept.uuid, 1)
+        assert row.last_seen == datetime(2026, 6, 2, 9, tzinfo=UTC)
 
 
 # -------------- the dive filter --------------

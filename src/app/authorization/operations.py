@@ -40,6 +40,7 @@ OPERATIONS = (
     Operation("patch_trip", "PATCH", "/api/v1/trip/{uuid}", ("trips:write",)),
     Operation("erase_trip", "DELETE", "/api/v1/trip/{uuid}", ("trips:delete",)),
     Operation("read_trip_dives", "GET", "/api/v1/trip/{uuid}/dives", ("trips:read", "dives:read")),
+    Operation("read_trip_species", "GET", "/api/v1/trip/{uuid}/species", ("trips:read", "dives:read")),
     Operation("add_trip_dives", "POST", "/api/v1/trip/{uuid}/dives", ("trips:write", "dives:write")),
     Operation("write_course", "POST", "/api/v1/course", ("courses:write",)),
     Operation("read_courses", "GET", "/api/v1/courses", ("courses:read",)),
