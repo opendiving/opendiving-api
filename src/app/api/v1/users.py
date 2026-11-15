@@ -43,7 +43,6 @@ from ...crud.crud_dive_form_presets import crud_dive_form_presets
 from ...crud.crud_dive_sites import aliased_records, readable_by, resolve_dive_site_ids_for_user
 from ...crud.crud_invitations import account_exists_for
 from ...crud.crud_trip_parts import get_places_for_user
-from ...crud.crud_trips import resolve_trip_id_for_user
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_user_sessions import revoke_session
 from ...crud.crud_users import crud_users
@@ -925,8 +924,7 @@ async def read_trip_places(
 # wrong answer rather than a slow one, and every other way of checking it either reads this
 # file's source text or passes whenever it happens to run outside the 60 s TTL.
 SPECIES_LIFE_LIST_CACHE_KEY_PREFIX = (
-    "user_{user_id}_dives:species:page_{page}:items_per_page:{items_per_page}:search:{search}"
-    ":site_{dive_site_id}:trip_{trip_id}"
+    "user_{user_id}_dives:species:page_{page}:items_per_page:{items_per_page}:search:{search}:site_{dive_site_id}"
 )
 
 
@@ -939,7 +937,6 @@ async def _cached_species_life_list(
     items_per_page: int,
     search: str | None,
     dive_site_id: int | None,
-    trip_id: int | None,
 ) -> dict:
     """Fetches (and caches) a page of the caller's life list. Authorization happens in the
     route before this is reached.
@@ -951,7 +948,6 @@ async def _cached_species_life_list(
         limit=items_per_page,
         search=search,
         dive_site_id=dive_site_id,
-        trip_id=trip_id,
     )
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
     return response
@@ -971,9 +967,6 @@ async def read_species_life_list(
     dive_site_uuid: Annotated[
         uuid_pkg.UUID | None, Query(description="Only the species sighted on dives naming this site")
     ] = None,
-    trip_uuid: Annotated[
-        uuid_pkg.UUID | None, Query(description="Only the species sighted on dives on this trip")
-    ] = None,
 ) -> dict:
     """Every species the caller has ever logged, most recently seen first.
 
@@ -988,10 +981,6 @@ async def read_species_life_list(
     `dive_site_uuid` keeps the species sighted on dives naming that site at any position, as
     the site's summary counts them, with each one's figures over those dives alone. A uuid that
     is not one of the caller's sites returns an empty page rather than an error.
-
-    `trip_uuid` keeps the species sighted on that trip's dives, with each one's figures over
-    those dives alone, and a uuid that is not one of the caller's trips returns an empty page
-    the same way. Given both, a species counts only the dives on that trip naming that site.
 
     Out-of-range pagination is clamped, not rejected.
     """
@@ -1008,9 +997,6 @@ async def read_species_life_list(
             db=db, dive_site_uuids=[dive_site_uuid], user_id=current_user["id"]
         )
         dive_site_id = (site_map or {}).get(dive_site_uuid, -1)
-    trip_id: int | None = None
-    if trip_uuid is not None:
-        trip_id = await resolve_trip_id_for_user(db=db, trip_uuid=trip_uuid, user_id=current_user["id"]) or -1
     return await _cached_species_life_list(
         request,
         user_id=current_user["id"],
@@ -1019,7 +1005,6 @@ async def read_species_life_list(
         items_per_page=items_per_page,
         search=normalized or None,
         dive_site_id=dive_site_id,
-        trip_id=trip_id,
     )
 
 
