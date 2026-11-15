@@ -573,9 +573,6 @@ def _stats_for(user_id: int) -> Any:
     return select(UserDiveStats).where(UserDiveStats.user_id == user_id)
 
 
-# -------------- the dive filter --------------
-
-
 @pytest.mark.skipif(not db_available(), reason="requires a database")
 class TestTheTripFilter:
     def _log(
@@ -663,6 +660,9 @@ class TestTheTripFilter:
 
         assert page["total_count"] == 1
         assert [(row["uuid"], row["dive_count"]) for row in page["data"]] == [(both.uuid, 1)]
+
+
+# -------------- the dive filter --------------
 
 
 class TestTheDiveFilter:
