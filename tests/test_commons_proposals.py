@@ -1181,6 +1181,70 @@ class TestTheCallersProposals:
         assert [row["uuid"] for row in body["data"]] == [second["uuid"], first["uuid"]]
         assert body["total_count"] == 2
 
+    async def _one_in_each_status_and_two_waiting(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> dict[str, list[str]]:
+        withdrawn, declined, accepted, older, newer = [
+            (await _propose_site(http, _own_site(db, diver)))["uuid"] for _ in range(5)
+        ]
+        assert (await http.delete(f"/dive-site-proposal/{withdrawn}")).status_code == 200
+        signed.as_(reviewer)
+        response = await http.post(f"/admin/dive-site-proposal/{declined}/decline", json={"reason": "No"})
+        assert response.status_code == 200, response.text
+        await _accepted(http, {"uuid": accepted}, members=_members())
+        signed.as_(diver)
+        return {
+            "waiting": [newer, older],
+            "accepted": [accepted],
+            "declined": [declined],
+            "withdrawn": [withdrawn],
+            "all": [newer, older, accepted, declined, withdrawn],
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_status_lists_only_the_proposals_in_it_newest_first(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        uuids = await self._one_in_each_status_and_two_waiting(http, db, diver, reviewer, signed)
+
+        for status in ("waiting", "accepted", "declined", "withdrawn"):
+            body = (await http.get("/dive-site-proposals", params={"status": status})).json()
+
+            assert [row["uuid"] for row in body["data"]] == uuids[status], status
+            assert {row["status"] for row in body["data"]} == {status}
+            assert (body["total_count"], body["has_more"]) == (len(uuids[status]), False)
+
+    @pytest.mark.asyncio
+    async def test_the_counts_follow_the_status_page_by_page(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        uuids = await self._one_in_each_status_and_two_waiting(http, db, diver, reviewer, signed)
+
+        waiting = {"status": "waiting", "items_per_page": 1}
+        pages = [(await http.get("/dive-site-proposals", params={**waiting, "page": n})).json() for n in (1, 2)]
+
+        assert [page["data"][0]["uuid"] for page in pages] == uuids["waiting"]
+        assert [(page["total_count"], page["has_more"]) for page in pages] == [(2, True), (2, False)]
+
+    @pytest.mark.asyncio
+    async def test_without_a_status_every_proposal_is_listed_withdrawn_included(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        uuids = await self._one_in_each_status_and_two_waiting(http, db, diver, reviewer, signed)
+
+        body = (await http.get("/dive-site-proposals", params={"items_per_page": 100})).json()
+        first = (await http.get("/dive-site-proposals", params={"items_per_page": 1})).json()
+
+        assert [row["uuid"] for row in body["data"]] == uuids["all"]
+        assert (first["total_count"], first["has_more"]) == (5, True)
+
+    @pytest.mark.asyncio
+    async def test_any_other_status_is_a_422(self, http: httpx.AsyncClient) -> None:
+        for status in ("pending", "WAITING", ""):
+            response = await http.get("/dive-site-proposals", params={"status": status})
+
+            assert response.status_code == 422, status
+
     @pytest.mark.asyncio
     async def test_withdrawing_stops_it_waiting_and_keeps_it_on_the_list(
         self, http: httpx.AsyncClient, db: Session, diver: User

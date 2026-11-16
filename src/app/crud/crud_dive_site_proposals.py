@@ -114,11 +114,15 @@ async def write_waiting_proposal(
     return row.uuid, row.created_at
 
 
-async def get_proposals_page(db: AsyncSession, *, user_id: int, offset: int, limit: int) -> dict[str, Any]:
-    """One page of a diver's own proposals, newest first, in `get_multi`'s shape."""
-    total_count = await db.scalar(
-        select(func.count()).select_from(DiveSiteProposal).where(DiveSiteProposal.user_id == user_id)
-    )
+async def get_proposals_page(
+    db: AsyncSession, *, user_id: int, status: DiveSiteProposalStatus | None = None, offset: int, limit: int
+) -> dict[str, Any]:
+    """One page of a diver's own proposals, newest first, in `get_multi`'s shape, only those in
+    `status` when it is given."""
+    theirs = [DiveSiteProposal.user_id == user_id]
+    if status is not None:
+        theirs.append(DiveSiteProposal.status == status.value)
+    total_count = await db.scalar(select(func.count()).select_from(DiveSiteProposal).where(*theirs))
     rows = await db.execute(
         select(
             DiveSiteProposal.uuid,
@@ -132,7 +136,7 @@ async def get_proposals_page(db: AsyncSession, *, user_id: int, offset: int, lim
             DiveSite.name.label("site_name"),
         )
         .join(DiveSite, DiveSite.id == DiveSiteProposal.dive_site_id)
-        .where(DiveSiteProposal.user_id == user_id)
+        .where(*theirs)
         .order_by(DiveSiteProposal.created_at.desc(), DiveSiteProposal.id.desc())
         .offset(offset)
         .limit(limit)

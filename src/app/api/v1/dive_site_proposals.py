@@ -8,7 +8,7 @@ the superuser's, on its router for the same reason, as `admin.py` does it.
 import uuid as uuid_pkg
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +21,7 @@ from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_paginat
 from ...crud.crud_dive_site_proposals import get_proposals_page
 from ...crud.crud_dive_sites import crud_dive_sites
 from ...models.dive_site import DiveSite
-from ...schemas.dive_site import DiveSiteReadInternal
+from ...schemas.dive_site import DiveSiteProposalStatus, DiveSiteReadInternal
 from ...schemas.dive_site_history import AdminDiveSiteHistoryEntryRead
 from ...schemas.dive_site_proposal import (
     AdminDiveSiteProposalRead,
@@ -96,14 +96,22 @@ async def read_dive_site_proposals(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     page: PageQuery = 1,
     items_per_page: ItemsPerPageQuery = 10,
+    status: Annotated[DiveSiteProposalStatus | None, Query(description="Only the proposals in this status")] = None,
 ) -> dict:
     """The caller's own proposals, newest first, each with its status, any reason it was declined
     and the site it is on: for an accepted one, the Commons record it became or joined.
-    Out-of-range pagination is clamped. 404 on an instance that does not edit the Commons.
+
+    Every one of them, withdrawn included, unless `status` names one, when the list, `total_count`
+    and `has_more` hold only the proposals in that status; any other value is a 422. Out-of-range
+    pagination is clamped. 404 on an instance that does not edit the Commons.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
     data = await get_proposals_page(
-        db, user_id=current_user["id"], offset=compute_offset(page, items_per_page), limit=items_per_page
+        db,
+        user_id=current_user["id"],
+        status=status,
+        offset=compute_offset(page, items_per_page),
+        limit=items_per_page,
     )
     response: dict = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
     return response
