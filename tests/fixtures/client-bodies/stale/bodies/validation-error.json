@@ -1,0 +1,1 @@
+{"detail": [{"loc": ["body"], "msg": "Field required", "type": "missing", "hint": "a member the API does not send"}]}

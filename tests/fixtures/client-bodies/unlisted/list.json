@@ -1,0 +1,4 @@
+{
+  "directory": "bodies",
+  "bodies": [{"file": "health.json", "is": [{"response": "GET /api/v1/health 200"}]}]
+}

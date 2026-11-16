@@ -1,0 +1,4 @@
+{
+  "directory": "bodies",
+  "bodies": [{"file": "validation-error.json", "is": [{"schema": "HTTPValidationError"}]}]
+}

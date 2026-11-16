@@ -7506,3 +7506,14 @@ carry the breaks and the markers of those ahead. Both rest on the queue's `SQUAS
 title. The released surface leaves gated operations out, since an off feature has no client to
 break. Rejected: oasdiff's GitHub Action, a Docker action on a moving tag whose default uploads the
 comparison.
+
+## A client's bodies are judged on what they hold, against `main`, enforced only in the queue
+
+`scripts/client_bodies.py` closes every response object schema that declares members and drops
+`required`, so a member a body carries must be the schema's and one it lacks is no finding: a client
+may trail the API, and `required` follows defaults, not the wire. It refuses a document that
+composes with `allOf`, whose parts would each refuse the others' members. A request is judged as
+published. A finding that depends on the document warns on a pull request and fails in the queue,
+because a client's pull request may be built on an API one that has not merged. The step clones
+`main` at run time. Rejected: the `:edge` image's document, which trails a merge by its build, and
+the hosted instance's, which leaves gated operations out.

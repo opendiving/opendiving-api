@@ -469,6 +469,69 @@ not what `!` means here. It is recorded on the pull request in
 [opendiving/opendiving](https://github.com/opendiving/opendiving) that changes the bundle or the
 upgrade notes, and in the product release's hand-written Breaking section.
 
+### A client's bodies
+
+A client that records request and response bodies for its tests holds them to the contract document
+with `scripts/client_bodies.py`, run by the step in `.github/actions/client-bodies`. The client
+keeps one JSON list beside its bodies; every `.json` file under the list's `directory` needs an
+entry saying what it is:
+
+```json
+{
+  "directory": "Fixtures",
+  "bodies": [
+    { "file": "dive.json", "is": [{ "response": "GET /api/v1/dive/{uuid} 200" }] },
+    { "file": "request-dive.json", "is": [{ "request": "POST /api/v1/dive" }] },
+    { "file": "error-validation.json", "is": [{ "schema": "HTTPValidationError" }] },
+    {
+      "file": "dive-site-search.json",
+      "is": [{ "response": "GET /api/v1/dive-sites/search 200" }],
+      "exempt": [{ "at": "/rows/3", "reason": "a row kind the API does not have, on purpose" }]
+    }
+  ]
+}
+```
+
+An entry names an operation's response by method, path as the document spells it and status, an
+operation's request body, or a component schema, for a part of a body or an error body; a body
+served for several operations names each. An exemption is a JSON pointer into the body and a reason,
+and silences what is found there and below, nothing else.
+
+A response is judged on what it holds: every member must be one its schema has, with a value the
+schema allows, and a member it lacks is no finding, so a client may trail the API by a member. A
+request is judged by its schema as published, which refuses an unknown member and demands a required
+one. A finding about the list and the files — a body with no entry, an entry with no body, an
+exemption at a place its body does not hold — fails everywhere. One that depends on the document — a
+body it does not allow, an entry naming an operation, status or schema it does not hold, an
+exemption it no longer needs — is a warning on a pull request and fails in the merge queue.
+
+The client's workflow is a job named `api-contract` that runs on `pull_request` and `merge_group`:
+
+```yaml
+jobs:
+  api-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: opendiving/opendiving-api/.github/actions/client-bodies@main
+        with:
+          list: path/to/api-bodies.json
+```
+
+The step clones this repository's `main` at the time of the run, whatever ref the action is pinned
+at, builds the contract document and runs the checker of that tree. Locally, from a checkout of this
+repository, against this checkout, one of its refs, or another API tree:
+
+```bash
+uv run python scripts/client_bodies.py --list ../client/api-bodies.json
+uv run python scripts/client_bodies.py --list ../client/api-bodies.json --ref origin/claude/the-api-half
+uv run python scripts/client_bodies.py --list ../client/api-bodies.json --tree ../other-api --mode enforce
+```
+
+`--ref` builds the committed tree of that ref, so a client half whose API half is an open branch is
+judged against that branch. The check's job here runs the step over the lists under
+`tests/fixtures/client-bodies` in both modes.
+
 ## What to expect
 
 One maintainer, on this in their spare time. It is the same caveat [SECURITY.md](SECURITY.md) makes

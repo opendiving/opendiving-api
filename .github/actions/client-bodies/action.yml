@@ -1,0 +1,79 @@
+name: A client's bodies against the API's document
+description: >-
+  Builds the API's contract document from opendiving/opendiving-api's main branch and judges every
+  body a client's list names against it. Reports on a pull request and enforces in the merge queue;
+  a finding about the list itself fails either way. CONTRIBUTING.md, "A client's bodies", says how a
+  client adopts it.
+
+inputs:
+  list:
+    description: The client's list of bodies, relative to its checkout.
+    required: true
+  mode:
+    description: >-
+      `report` or `enforce`. Left empty, a merge-queue run enforces and every other run reports.
+    required: false
+    default: ""
+  api-tree:
+    description: >-
+      An API checkout to build the document from and run the checker of. Left empty, the API's
+      main branch is cloned at the time of the run.
+    required: false
+    default: ""
+  annotate:
+    description: Whether findings are also written as annotations on the run.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Say what this run does
+      id: mode
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        EVENT: ${{ github.event_name }}
+      run: |
+        mode="$MODE"
+        if [ -z "$mode" ]; then
+          if [ "$EVENT" = merge_group ]; then mode=enforce; else mode=report; fi
+        fi
+        case "$mode" in
+          enforce) echo "Enforcing: a body the API's document does not allow fails this check." ;;
+          report) echo "Reporting: a body the API's document does not allow is a warning here, and fails in the merge queue." ;;
+          *) echo "::error title=api-contract::mode is report or enforce, not '$mode'"; exit 1 ;;
+        esac
+        echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+    # Cloned rather than checked out by an action, so the document is `main` at the time of the
+    # run whichever ref, tag or digest the caller pins this action at.
+    - name: Fetch the API's main branch
+      id: api
+      shell: bash
+      env:
+        TREE: ${{ inputs.api-tree }}
+      run: |
+        if [ -z "$TREE" ]; then
+          TREE="$RUNNER_TEMP/opendiving-api"
+          git clone --quiet --depth 1 --branch main https://github.com/opendiving/opendiving-api.git "$TREE"
+        fi
+        echo "tree=$TREE" >> "$GITHUB_OUTPUT"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+    # The checker runs in the API's own locked environment, which building the document needs
+    # anyway, so it brings no pin of its own into the client.
+    - name: Judge the client's bodies
+      shell: bash
+      env:
+        LIST: ${{ inputs.list }}
+        TREE: ${{ steps.api.outputs.tree }}
+        MODE: ${{ steps.mode.outputs.mode }}
+        ANNOTATE: ${{ inputs.annotate }}
+      run: |
+        flags=()
+        if [ "$ANNOTATE" = true ]; then flags+=(--annotate); fi
+        uv run --project "$TREE" --locked --quiet python "$TREE/scripts/client_bodies.py" \
+          --list "$LIST" --tree "$TREE" --mode "$MODE" "${flags[@]}"

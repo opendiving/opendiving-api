@@ -1,0 +1,12 @@
+{
+  "directory": "bodies",
+  "bodies": [
+    {"file": "health.json", "is": [{"response": "GET /api/v1/health 200"}]},
+    {"file": "request-email-sign-in.json", "is": [{"request": "POST /api/v1/auth/email/request"}]},
+    {
+      "file": "validation-error.json",
+      "is": [{"schema": "HTTPValidationError"}],
+      "exempt": [{"at": "/detail/0/hint", "reason": "a member the API does not send, kept to prove an exemption holds"}]
+    }
+  ]
+}

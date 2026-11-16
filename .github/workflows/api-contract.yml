@@ -57,3 +57,53 @@ jobs:
       - name: Prove the table
         if: ${{ !cancelled() }}
         run: uv run --no-project python scripts/api_contract_proof.py
+
+      # The step a client's workflow calls, on bodies kept for it here, in both modes, against the
+      # document this tree builds: a defect in it fails here before any client meets it.
+      - name: A client's bodies that hold, enforced
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/client-bodies
+        with:
+          list: tests/fixtures/client-bodies/holds/list.json
+          api-tree: .
+          mode: enforce
+
+      - name: A stale body, reported
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/client-bodies
+        with:
+          list: tests/fixtures/client-bodies/stale/list.json
+          api-tree: .
+          mode: report
+          annotate: false
+
+      - name: A stale body, enforced
+        id: stale-enforced
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: ./.github/actions/client-bodies
+        with:
+          list: tests/fixtures/client-bodies/stale/list.json
+          api-tree: .
+          mode: enforce
+          annotate: false
+
+      - name: An unlisted body, reported
+        id: unlisted-reported
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: ./.github/actions/client-bodies
+        with:
+          list: tests/fixtures/client-bodies/unlisted/list.json
+          api-tree: .
+          mode: report
+          annotate: false
+
+      - name: The two that must fail failed
+        if: ${{ !cancelled() }}
+        env:
+          STALE: ${{ steps.stale-enforced.outcome }}
+          UNLISTED: ${{ steps.unlisted-reported.outcome }}
+        run: |
+          echo "A stale body, enforced: $STALE. An unlisted body, reported: $UNLISTED."
+          test "$STALE" = failure && test "$UNLISTED" = failure
