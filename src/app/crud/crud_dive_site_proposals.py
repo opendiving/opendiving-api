@@ -80,11 +80,18 @@ async def write_waiting_proposal(
     members: dict[str, Any],
     attestation: str,
     message: str,
+    show_proposer: bool,
     now: datetime,
 ) -> tuple[uuid_pkg.UUID, datetime]:
     """Write this diver's waiting proposal on the site, replacing the one that waits if there is
     one, which keeps its place in the queue. Two at once leave one row. Does not commit."""
-    replaced = {"members": members, "attestation": attestation, "attested_at": now, "message": message}
+    replaced = {
+        "members": members,
+        "attestation": attestation,
+        "attested_at": now,
+        "message": message,
+        "show_proposer": show_proposer,
+    }
     statement = (
         insert(DiveSiteProposal)
         .values(
@@ -120,6 +127,7 @@ async def get_proposals_page(db: AsyncSession, *, user_id: int, offset: int, lim
             DiveSiteProposal.reason,
             DiveSiteProposal.created_at,
             DiveSiteProposal.decided_at,
+            DiveSiteProposal.show_proposer,
             DiveSite.uuid.label("site_uuid"),
             DiveSite.name.label("site_name"),
         )
@@ -138,6 +146,7 @@ async def get_proposals_page(db: AsyncSession, *, user_id: int, offset: int, lim
             site=DiveSiteProposalSite(uuid=row.site_uuid, name=row.site_name),
             created_at=row.created_at,
             decided_at=row.decided_at,
+            show_proposer=row.show_proposer,
         ).model_dump()
         for row in rows
     ]

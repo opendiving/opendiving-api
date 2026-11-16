@@ -10,11 +10,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
-from src.app.models.dive_site_proposal import DiveSiteProposal
 from src.app.models.logbook_import import LogbookImport
 from tests.conftest import db_available
 from tests.helpers.generators import create_commons_site, create_dive_site, create_user
@@ -42,17 +41,21 @@ def scratch(below: str) -> Iterator[tuple[str, Engine]]:
 
 
 def _propose(db: Session, user_id: int, site_id: int, status: str) -> None:
-    db.add(
-        DiveSiteProposal(
-            user_id=user_id,
-            dive_site_id=site_id,
-            kind="new_site",
-            members={},
-            attestation="I made it",
-            attested_at=datetime.now(UTC),
-            status=status,
-            reason="No" if status == "declined" else None,
-        )
+    # In SQL: the model carries columns later revisions add, which this database is below.
+    db.execute(
+        text(
+            "INSERT INTO dive_site_proposal (uuid, created_at, user_id, dive_site_id, kind, members, attestation, "
+            "attested_at, status, message, reason) VALUES (:uuid, :now, :user_id, :site_id, 'new_site', '{}', "
+            "'I made it', :now, :status, '', :reason)"
+        ),
+        {
+            "uuid": uuid7(),
+            "now": datetime.now(UTC),
+            "user_id": user_id,
+            "site_id": site_id,
+            "status": status,
+            "reason": "No" if status == "declined" else None,
+        },
     )
     db.commit()
 

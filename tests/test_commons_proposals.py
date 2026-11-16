@@ -38,6 +38,7 @@ from src.app.crud.crud_users import read_account
 from src.app.models.dive import Dive
 from src.app.models.dive_dive_site import DiveDiveSite
 from src.app.models.dive_site import DiveSite
+from src.app.models.dive_site_history import DiveSiteHistory
 from src.app.models.dive_site_proposal import DiveSiteProposal
 from src.app.models.dive_site_tag import DiveSiteTag
 from src.app.models.dive_species import DiveSpecies
@@ -46,7 +47,7 @@ from src.app.models.tag import Tag
 from src.app.models.user import User
 from src.app.schemas.dive_site import DiveSiteProposalKind, DiveSiteReadInternal
 from src.app.schemas.dive_site_proposal import ATTESTATIONS
-from src.app.services import commons_proposals, commons_records
+from src.app.services import commons_history, commons_proposals, commons_records
 from src.app.services.commons_records import CURATED_SOURCES, CommonsBundle, sync_commons
 from tests.conftest import db_available
 from tests.helpers.fake_redis import FakeRedis
@@ -239,8 +240,13 @@ async def _propose_site(http: httpx.AsyncClient, site: DiveSite, **body: Any) ->
     return proposal
 
 
-async def _propose_change(http: httpx.AsyncClient, site: DiveSite, **members: Any) -> dict[str, Any]:
-    response = await http.post(f"/dive-site/{site.uuid}/proposals", json={"attestation": CHANGE, "members": members})
+async def _propose_change(
+    http: httpx.AsyncClient, site: DiveSite, *, show_proposer: bool | None = None, **members: Any
+) -> dict[str, Any]:
+    body: dict[str, Any] = {"attestation": CHANGE, "members": members}
+    if show_proposer is not None:
+        body["show_proposer"] = show_proposer
+    response = await http.post(f"/dive-site/{site.uuid}/proposals", json=body)
     assert response.status_code == 201, response.text
     proposal: dict[str, Any] = response.json()
     return proposal
@@ -2134,6 +2140,7 @@ class TestTheSyncGuard:
 
         row = _row(db, record.uuid)
         assert row is not None and row.name == "What the bundle says"
+        assert db.scalar(select(DiveSiteHistory.id).where(DiveSiteHistory.dive_site_id == record.id)) is None
 
     @pytest.mark.asyncio
     async def test_the_mark_is_on_no_read_and_in_no_export(
@@ -2163,3 +2170,511 @@ class TestTheTable:
         with pytest.raises(IntegrityError, match="ux_dive_site_proposal_one_waiting"):
             db.execute(insert, {"user": diver.id, "site": site.id, "status": "waiting"})
         db.rollback()
+
+
+def _members_of(row: DiveSite, **changes: Any) -> dict[str, Any]:
+    """A record's shared members as a review sends them, with `changes`."""
+    return {column: getattr(row, column) for column in commons_records.SHARED_MEMBER_COLUMNS} | changes
+
+
+async def _history(http: httpx.AsyncClient, uuid: Any, *, admin: bool = False) -> list[dict[str, Any]]:
+    response = await http.get(f"{'/admin' if admin else ''}/dive-site/{uuid}/history", params={"items_per_page": 100})
+    assert response.status_code == 200, response.text
+    entries: list[dict[str, Any]] = response.json()["data"]
+    return entries
+
+
+def _said(entries: list[dict[str, Any]]) -> list[tuple[str, str | None, list[str]]]:
+    return [(entry["kind"], entry["made_by"], [detail["field"] for detail in entry["details"]]) for entry in entries]
+
+
+def _reviewed(entries: list[dict[str, Any]]) -> list[tuple[bool | None, str | None, bool | None]]:
+    return [(entry["show_proposer"], entry["reviewed_by"], entry["corrected"]) for entry in entries]
+
+
+def _named(db: Session, user: User, **values: Any) -> None:
+    db.execute(update(User).where(User.id == user.id).values(**values))
+    db.commit()
+
+
+class TestWhatAnEntrySays:
+    """`details` is the difference, and only that."""
+
+    def test_each_member_type_carries_its_old_and_new_value(self) -> None:
+        before = _members(
+            name="Before",
+            other_names=["A"],
+            external_ids=[{"registry": "openstreetmap", "identifier": "node/1"}],
+            depth_from=5,
+            depth_to=None,
+            water_type="salt",
+            altitude=None,
+            entry_types=["shore"],
+            location_name="Dahab",
+        )
+        after = {
+            **before,
+            "name": "After",
+            "other_names": ["A", "B"],
+            "external_ids": [],
+            "depth_from": 6.5,
+            "depth_to": 30,
+            "water_type": "fresh",
+            "altitude": 200,
+            "entry_types": ["boat", "shore"],
+            "location_name": None,
+        }
+
+        details = commons_history.differences(before, after)
+
+        assert details == [
+            {"field": "name", "old": "Before", "new": "After"},
+            {"field": "other_names", "old": ["A"], "new": ["A", "B"]},
+            {"field": "location_name", "old": "Dahab", "new": None},
+            {"field": "external_ids", "old": [{"registry": "openstreetmap", "identifier": "node/1"}], "new": []},
+            {"field": "depth_from", "old": 5.0, "new": 6.5},
+            {"field": "depth_to", "old": None, "new": 30.0},
+            {"field": "water_type", "old": "salt", "new": "fresh"},
+            {"field": "altitude", "old": None, "new": 200},
+            {"field": "entry_types", "old": ["shore"], "new": ["boat", "shore"]},
+        ]
+
+    def test_a_pin_moving_on_one_coordinate_names_both(self) -> None:
+        before = _members(latitude=10.0, longitude=20.0)
+
+        details = commons_history.differences(before, {**before, "longitude": 20.001})
+
+        assert details == [
+            {"field": "latitude", "old": 10.0, "new": 10.0},
+            {"field": "longitude", "old": 20.0, "new": 20.001},
+        ]
+
+    def test_a_pin_differing_only_by_the_rounding_is_no_difference(self) -> None:
+        before = _members(latitude=10.12345678, longitude=20.0)
+
+        assert commons_history.differences(before, {**before, "latitude": 10.123457}) == []
+
+    def test_the_same_values_differ_in_nothing(self) -> None:
+        before = _members(depth_from=5)
+
+        assert commons_history.differences(before, {**before, "depth_from": 5.0}) == []
+
+
+class TestAChangeLeavesItsHistory:
+    @pytest.mark.asyncio
+    async def test_accepted_as_asked_it_is_one_entry_of_the_divers(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db, depth_to=20.0)
+        proposal = await _propose_change(http, record, depth_to=24.0)
+        signed.as_(reviewer)
+
+        await _accepted(http, proposal, members=_members_of(record, depth_to=24.0))
+
+        (entry,) = await _history(http, record.uuid)
+        assert (entry["kind"], entry["made_by"], entry["details"]) == (
+            "changed",
+            None,
+            [{"field": "depth_to", "old": 20.0, "new": 24.0}],
+        )
+        (admin,) = await _history(http, record.uuid, admin=True)
+        assert (admin["made_by"], *_reviewed([admin])[0]) == (diver.name, False, reviewer.name, False)
+
+    @pytest.mark.asyncio
+    async def test_accepted_corrected_the_correction_is_the_reviewers_own_entry_above_it(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db, depth_to=20.0)
+        proposal = await _propose_change(http, record, depth_to=24.0, show_proposer=True)
+        signed.as_(reviewer)
+
+        await _accepted(http, proposal, members=_members_of(record, depth_to=24.0, name="Corrected"))
+
+        entries = await _history(http, record.uuid)
+        assert _said(entries) == [
+            ("changed", reviewer.name, ["name"]),
+            ("changed", diver.name, ["depth_to"]),
+        ]
+        assert entries[0]["details"] == [{"field": "name", "old": record.name, "new": "Corrected"}]
+        assert entries[0]["created_at"] == entries[1]["created_at"]
+        admin = await _history(http, record.uuid, admin=True)
+        assert [entry["made_by"] for entry in admin] == [reviewer.name, diver.name]
+        assert _reviewed(admin) == [(None, None, None), (True, reviewer.name, True)]
+
+    @pytest.mark.asyncio
+    async def test_a_correction_undoing_the_divers_change_lists_it_back(
+        self, http: httpx.AsyncClient, db: Session, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db, depth_to=20.0)
+        proposal = await _propose_change(http, record, depth_to=24.0)
+        signed.as_(reviewer)
+
+        await _accepted(http, proposal, members=_members_of(record))
+
+        entries = await _history(http, record.uuid)
+        assert [entry["details"] for entry in entries] == [
+            [{"field": "depth_to", "old": 24.0, "new": 20.0}],
+            [{"field": "depth_to", "old": 20.0, "new": 24.0}],
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_moved_pin_is_one_detail_naming_both_and_rounded_as_written(
+        self, http: httpx.AsyncClient, db: Session, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db, latitude=10.0, longitude=20.0)
+        proposal = await _propose_change(http, record, latitude=10.12345678, longitude=20.0)
+        signed.as_(reviewer)
+
+        await _accepted(http, proposal, members=_members_of(record, latitude=10.12345678))
+
+        (entry,) = await _history(http, record.uuid)
+        assert entry["details"] == [
+            {"field": "latitude", "old": 10.0, "new": 10.123457},
+            {"field": "longitude", "old": 20.0, "new": 20.0},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_decline_and_a_withdrawal_write_nothing(
+        self, http: httpx.AsyncClient, db: Session, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db)
+        withdrawn = await _propose_change(http, record, depth_to=24.0)
+        assert (await http.delete(f"/dive-site-proposal/{withdrawn['uuid']}")).status_code == 200
+        declined = await _propose_change(http, record, depth_to=25.0)
+        signed.as_(reviewer)
+
+        response = await http.post(f"/admin/dive-site-proposal/{declined['uuid']}/decline", json={"reason": "No"})
+
+        assert response.status_code == 200, response.text
+        assert await _history(http, record.uuid, admin=True) == []
+
+
+class TestANewSiteLeavesItsHistory:
+    @pytest.mark.asyncio
+    async def test_accepted_as_written_it_is_added_with_no_details(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        site = _own_site(db, diver)
+        proposal = await _propose_site(http, site, show_proposer=True)
+        signed.as_(reviewer)
+
+        await _accepted(http, proposal, members=_members_of(site))
+
+        assert _said(await _history(http, site.uuid)) == [("added", diver.name, [])]
+        assert _reviewed(await _history(http, site.uuid, admin=True)) == [(True, reviewer.name, False)]
+
+    @pytest.mark.asyncio
+    async def test_accepted_corrected_the_correction_runs_from_the_site_as_proposed(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        site = _own_site(db, diver, depth_to=18.0)
+        proposal = await _propose_site(http, site)
+        signed.as_(reviewer)
+
+        await _accepted(http, proposal, members=_members_of(site, depth_to=19.0))
+
+        entries = await _history(http, site.uuid)
+        assert _said(entries) == [("changed", reviewer.name, ["depth_to"]), ("added", None, [])]
+        assert entries[0]["details"] == [{"field": "depth_to", "old": 18.0, "new": 19.0}]
+        assert _reviewed(await _history(http, site.uuid, admin=True)) == [
+            (None, None, None),
+            (False, reviewer.name, True),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_folded_into_a_record_with_no_members_it_writes_nothing(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db)
+        proposal = await _propose_site(http, _own_site(db, diver), show_proposer=True)
+        signed.as_(reviewer)
+
+        await _accepted(http, proposal, into=str(record.uuid))
+
+        assert await _history(http, record.uuid, admin=True) == []
+
+    @pytest.mark.asyncio
+    async def test_folded_with_members_only_the_reviewers_change_is_written(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db, depth_to=20.0)
+        proposal = await _propose_site(http, _own_site(db, diver), show_proposer=True)
+        signed.as_(reviewer)
+
+        await _accepted(http, proposal, into=str(record.uuid), members=_members_of(record, depth_to=21.0))
+
+        entries = await _history(http, record.uuid, admin=True)
+        assert _said(entries) == [("changed", reviewer.name, ["depth_to"])]
+        assert _reviewed(entries) == [(None, None, None)]
+
+
+class TestTheProposersName:
+    """Read on every request, never stored: it follows the choice, a rename and the account."""
+
+    @pytest.mark.asyncio
+    async def test_it_follows_the_switch_a_rename_a_deletion_request_and_a_restore(
+        self, http: httpx.AsyncClient, db: Session, diver: User, other_diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db, depth_to=20.0)
+        proposal = await _propose_change(http, record, depth_to=24.0)
+        signed.as_(reviewer)
+        await _accepted(http, proposal, members=_members_of(record, depth_to=24.0))
+
+        async def shown() -> str | None:
+            signed.as_(other_diver)
+            (entry,) = await _history(http, record.uuid)
+            signed.as_(diver)
+            return cast(str | None, entry["made_by"])
+
+        assert await shown() is None
+        signed.as_(diver)
+        switched = await http.patch(f"/dive-site-proposal/{proposal['uuid']}", json={"show_proposer": True})
+        assert (switched.status_code, switched.json()["show_proposer"]) == (200, True)
+        assert await shown() == diver.name
+        _named(db, diver, name="Renamed")
+        assert await shown() == "Renamed"
+        _named(db, diver, is_deleted=True)
+        assert await shown() is None
+        _named(db, diver, is_deleted=False)
+        assert await shown() == "Renamed"
+        await http.patch(f"/dive-site-proposal/{proposal['uuid']}", json={"show_proposer": False})
+        assert await shown() is None
+
+    @pytest.mark.asyncio
+    async def test_a_reviewer_reads_it_whatever_the_choice_but_not_once_the_account_goes_dark(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db, depth_to=20.0)
+        proposal = await _propose_change(http, record, depth_to=24.0)
+        signed.as_(reviewer)
+        await _accepted(http, proposal, members=_members_of(record, depth_to=24.0, name="Corrected"))
+
+        assert [entry["made_by"] for entry in await _history(http, record.uuid, admin=True)] == [
+            reviewer.name,
+            diver.name,
+        ]
+        _named(db, diver, is_deleted=True)
+        assert [entry["made_by"] for entry in await _history(http, record.uuid, admin=True)] == [reviewer.name, None]
+        _named(db, reviewer, name="Renamed reviewer")
+        admin = await _history(http, record.uuid, admin=True)
+        assert (admin[0]["made_by"], admin[1]["reviewed_by"]) == ("Renamed reviewer", "Renamed reviewer")
+
+    @pytest.mark.asyncio
+    async def test_the_entries_outlive_both_accounts_and_then_name_nobody(
+        self,
+        http: httpx.AsyncClient,
+        db: Session,
+        async_sessions: async_sessionmaker[AsyncSession],
+        diver: User,
+        reviewer: User,
+        signed: Sign,
+    ) -> None:
+        other_reviewer = create_user(db, is_super_user=True)
+        async with async_sessions() as session:
+            signed.accounts[other_reviewer.id] = cast(
+                dict[str, Any], await read_account(session, uuid=other_reviewer.uuid)
+            )
+        record = _record(db, depth_to=20.0)
+        proposal = await _propose_change(http, record, depth_to=24.0, show_proposer=True)
+        signed.as_(reviewer)
+        await _accepted(http, proposal, members=_members_of(record, depth_to=24.0, name="Corrected"))
+        before = await _history(http, record.uuid)
+
+        db.execute(
+            text('DELETE FROM "user" WHERE id IN (:diver, :reviewer)'), {"diver": diver.id, "reviewer": reviewer.id}
+        )
+        db.commit()
+
+        signed.as_(other_reviewer)
+        after = await _history(http, record.uuid)
+        assert [(entry["uuid"], entry["created_at"], entry["details"]) for entry in after] == [
+            (entry["uuid"], entry["created_at"], entry["details"]) for entry in before
+        ]
+        assert [entry["made_by"] for entry in after] == [None, None]
+        assert _reviewed(await _history(http, record.uuid, admin=True)) == [(None, None, None), (None, None, True)]
+        rows = db.execute(
+            select(DiveSiteHistory.proposal_id, DiveSiteHistory.reviewer_id).where(
+                DiveSiteHistory.dive_site_id == record.id
+            )
+        ).all()
+        assert [tuple(row) for row in rows] == [(None, None), (None, None)]
+
+
+class TestTheChoice:
+    @pytest.mark.asyncio
+    async def test_it_is_false_unless_sent_and_proposing_again_replaces_it(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        record = _record(db)
+
+        first = await _propose_change(http, record, depth_to=24.0)
+        again = await http.post(
+            f"/dive-site/{record.uuid}/proposals",
+            json={"attestation": CHANGE, "members": {"depth_to": 25.0}, "show_proposer": True},
+        )
+        third = await _propose_change(http, record, depth_to=26.0)
+
+        assert first["show_proposer"] is False
+        assert (again.json()["uuid"], again.json()["show_proposer"]) == (first["uuid"], True)
+        assert (third["uuid"], third["show_proposer"]) == (first["uuid"], False)
+        (listed,) = (await http.get("/dive-site-proposals")).json()["data"]
+        assert listed["show_proposer"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_waiting_proposal_following_its_site_keeps_it(
+        self, http: httpx.AsyncClient, db: Session, diver: User
+    ) -> None:
+        site = _own_site(db, diver)
+        proposal = await _propose_site(http, site, show_proposer=True)
+
+        assert (await http.patch(f"/dive-site/{site.uuid}", json={"depth_to": 30.0})).status_code == 200
+
+        assert _proposal(db, proposal["uuid"]).show_proposer is True
+
+    @pytest.mark.asyncio
+    async def test_the_accept_and_decline_answers_carry_it(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db)
+        shown = await _propose_change(http, record, depth_to=24.0, show_proposer=True)
+        hidden = await _propose_site(http, _own_site(db, diver))
+        signed.as_(reviewer)
+
+        accepted = await _accepted(http, shown, members=_members_of(record, depth_to=24.0))
+        declined = await http.post(f"/admin/dive-site-proposal/{hidden['uuid']}/decline", json={"reason": "No"})
+
+        assert (accepted["show_proposer"], declined.json()["show_proposer"]) == (True, False)
+
+    @pytest.mark.asyncio
+    async def test_the_switch_takes_a_waiting_or_accepted_proposal_and_refuses_the_rest(
+        self, http: httpx.AsyncClient, db: Session, diver: User, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db)
+        waiting = await _propose_change(http, record, depth_to=24.0)
+        accepted = await _propose_site(http, _own_site(db, diver))
+        declined = await _propose_site(http, _own_site(db, diver))
+        withdrawn = await _propose_site(http, _own_site(db, diver))
+        await http.delete(f"/dive-site-proposal/{withdrawn['uuid']}")
+        signed.as_(reviewer)
+        await _accepted(http, accepted, members=_members_of(_row(db, accepted["site"]["uuid"]) or record))
+        await http.post(f"/admin/dive-site-proposal/{declined['uuid']}/decline", json={"reason": "No"})
+        signed.as_(diver)
+
+        answers = [
+            await http.patch(f"/dive-site-proposal/{proposal['uuid']}", json={"show_proposer": True})
+            for proposal in (waiting, accepted, declined, withdrawn)
+        ]
+
+        assert [answer.status_code for answer in answers] == [200, 200, 409, 409]
+        assert [_proposal(db, proposal["uuid"]).show_proposer for proposal in (waiting, accepted, declined)] == [
+            True,
+            True,
+            False,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_switch_refuses_a_null_and_another_accounts_proposal(
+        self, http: httpx.AsyncClient, db: Session, diver: User, other_diver: User, signed: Sign
+    ) -> None:
+        proposal = await _propose_change(http, _record(db), depth_to=24.0)
+
+        nulled = await http.patch(f"/dive-site-proposal/{proposal['uuid']}", json={"show_proposer": None})
+        signed.as_(other_diver)
+        theirs = await http.patch(f"/dive-site-proposal/{proposal['uuid']}", json={"show_proposer": True})
+        missing = await http.patch(f"/dive-site-proposal/{uuid_pkg.uuid4()}", json={"show_proposer": True})
+
+        assert nulled.status_code == 422
+        assert (theirs.status_code, theirs.json()) == (missing.status_code, missing.json())
+        assert theirs.status_code == 404
+        assert _proposal(db, proposal["uuid"]).show_proposer is False
+
+    def test_a_proposal_written_without_it_is_false(self, db: Session, diver: User) -> None:
+        site = _own_site(db, diver)
+        uuid = uuid_pkg.uuid4()
+        db.execute(
+            text(
+                "INSERT INTO dive_site_proposal (user_id, dive_site_id, kind, members, attestation, attested_at, "
+                "status, message, uuid, created_at) VALUES (:user, :site, 'new_site', '{}', 'x', now(), 'waiting', "
+                "'', :uuid, now())"
+            ),
+            {"user": diver.id, "site": site.id, "uuid": uuid},
+        )
+        db.commit()
+
+        assert _proposal(db, uuid).show_proposer is False
+
+
+class TestReadingTheHistory:
+    @pytest.mark.asyncio
+    async def test_a_divers_own_site_reads_empty_and_another_divers_is_a_404(
+        self, http: httpx.AsyncClient, db: Session, diver: User, other_diver: User, signed: Sign
+    ) -> None:
+        site = _own_site(db, diver)
+
+        mine = await http.get(f"/dive-site/{site.uuid}/history")
+        signed.as_(other_diver)
+        theirs = await http.get(f"/dive-site/{site.uuid}/history")
+        missing = await http.get(f"/dive-site/{uuid_pkg.uuid4()}/history")
+
+        assert (mine.status_code, mine.json()["data"], mine.json()["total_count"]) == (200, [], 0)
+        assert (theirs.status_code, theirs.json()) == (missing.status_code, missing.json())
+        assert theirs.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_it_pages_newest_first(
+        self, http: httpx.AsyncClient, db: Session, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db, depth_to=20.0)
+        signed.as_(reviewer)
+        for depth in (21.0, 22.0, 23.0):
+            proposal = await _propose_change(http, record, depth_to=depth)
+            db.expire_all()
+            row = _row(db, record.uuid)
+            assert row is not None
+            await _accepted(http, proposal, members=_members_of(row, depth_to=depth))
+
+        response = await http.get(f"/dive-site/{record.uuid}/history", params={"items_per_page": 2})
+
+        body = response.json()
+        assert [entry["details"][0]["new"] for entry in body["data"]] == [23.0, 22.0]
+        assert (body["total_count"], body["has_more"]) == (3, True)
+
+    @pytest.mark.asyncio
+    async def test_the_reviewers_read_is_a_superusers(
+        self, http: httpx.AsyncClient, db: Session, reviewer: User, signed: Sign
+    ) -> None:
+        record = _record(db)
+
+        refused = await http.get(f"/admin/dive-site/{record.uuid}/history")
+        signed.as_(reviewer)
+        missing = await http.get(f"/admin/dive-site/{uuid_pkg.uuid4()}/history")
+
+        assert (refused.status_code, missing.status_code) == (403, 404)
+
+    @pytest.mark.asyncio
+    async def test_elsewhere_both_reads_and_the_switch_are_a_404(
+        self, http: httpx.AsyncClient, db: Session, reviewer: User, signed: Sign, monkeypatch: Any
+    ) -> None:
+        record = _record(db)
+        proposal = await _propose_change(http, record, depth_to=24.0)
+        monkeypatch.setattr(settings, "COMMONS_PRIMARY", False)
+
+        answers = [
+            await http.get(f"/dive-site/{record.uuid}/history"),
+            await http.patch(f"/dive-site-proposal/{proposal['uuid']}", json={"show_proposer": True}),
+        ]
+        signed.as_(reviewer)
+        answers.append(await http.get(f"/admin/dive-site/{record.uuid}/history"))
+
+        assert [answer.status_code for answer in answers] == [404] * 3
+
+    def test_no_route_rewrites_an_entry(self) -> None:
+        writes = [
+            (method, path)
+            for route in router.routes
+            if "history" in (path := getattr(route, "path", ""))
+            for method in getattr(route, "methods", set())
+            if method != "GET"
+        ]
+
+        assert writes == []

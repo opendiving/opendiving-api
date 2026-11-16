@@ -4,7 +4,7 @@ from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from ..core.schemas import PublicUUIDSchema, StoredName, StoredVocabulary, Trimmed
+from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls, StoredName, StoredVocabulary, Trimmed
 from .dive_site import (
     DiveSiteCommonsMatchRead,
     DiveSiteMembers,
@@ -54,6 +54,14 @@ class DiveSiteProposalCreate(BaseModel):
             "not sent for their own site, which is proposed as it stands",
         ),
     ]
+    show_proposer: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Show the diver's name to other divers beside what this proposal changes in the "
+            "site's history, once accepted. Proposing again replaces it",
+        ),
+    ]
 
 
 class DiveSiteProposalSite(PublicUUIDSchema):
@@ -71,6 +79,25 @@ class DiveSiteProposalRead(PublicUUIDSchema):
     site: DiveSiteProposalSite
     created_at: datetime
     decided_at: datetime | None = None
+    show_proposer: Annotated[
+        bool, Field(description="Whether other divers read the proposer's name beside it in the site's history")
+    ]
+
+
+class DiveSiteProposalUpdate(RejectsExplicitNulls):
+    """Request body for `PATCH /dive-site-proposal/{uuid}`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    NON_NULLABLE_FIELDS = ("show_proposer",)
+
+    show_proposer: Annotated[
+        bool | None,
+        Field(
+            default=None,
+            description="Show the diver's name to other divers beside what this proposal changed in the site's history",
+        ),
+    ]
 
 
 class DiveSiteProposer(BaseModel):

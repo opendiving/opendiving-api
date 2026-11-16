@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
@@ -11,10 +11,11 @@ from ..core.db.models import PublicUUIDMixin, TimestampMixin
 class DiveSiteProposal(Base, PublicUUIDMixin, TimestampMixin):
     """One account asking for a change to OpenDiving Commons, and what became of it.
 
-    Private to the account and the reviewer, and tied to the account: both keys cascade, so
-    deleting the account deletes its proposals whatever their status, and deleting a private
-    site deletes those on it. A record that was accepted stays, since it is a `dive_site` row
-    this table only pointed at.
+    Read by the account and the reviewer alone, but for the proposer's name, which the record's
+    history shows other accounts where `show_proposer` says so. Tied to the account: both keys
+    cascade, so deleting the account deletes its proposals whatever their status, and deleting a
+    private site deletes those on it. A record that was accepted stays, since it is a `dive_site`
+    row this table only pointed at, and so does its history, which then names nobody.
     """
 
     __tablename__ = "dive_site_proposal"
@@ -36,6 +37,9 @@ class DiveSiteProposal(Base, PublicUUIDMixin, TimestampMixin):
     message: Mapped[str] = mapped_column(Text, default="")
     reason: Mapped[str | None] = mapped_column(Text, default=None)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    # Whether other accounts read the proposer's name beside the history entry this proposal
+    # makes. The server default is what a proposal written with Core and no value gets.
+    show_proposer: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     __table_args__ = (
         # One waits per account and site, which is what proposing again replaces.

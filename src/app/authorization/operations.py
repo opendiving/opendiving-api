@@ -72,6 +72,7 @@ OPERATIONS = (
     Operation("read_dive_site_search", "GET", "/api/v1/dive-sites/search", ("sites:read",)),
     Operation("read_dive_site_points", "GET", "/api/v1/dive-sites/points", ("sites:read",)),
     Operation("read_dive_site_commons_matches", "GET", "/api/v1/dive-site/{uuid}/commons-matches", ("sites:read",)),
+    Operation("read_dive_site_history", "GET", "/api/v1/dive-site/{uuid}/history", ("sites:read",)),
     Operation(
         "replace_dive_site",
         "POST",

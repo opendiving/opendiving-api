@@ -77,6 +77,7 @@ from ...schemas.dive_site import (
     DiveSiteUpdateRequest,
     canonical_other_names,
 )
+from ...schemas.dive_site_history import DiveSiteHistoryEntryRead
 from ...schemas.dive_site_search import DiveSitePoints, DiveSiteSearchItem, DiveSiteSearchPage, PlaceSearchItem
 from ...schemas.location import (
     DIVE_SITE_LOCATION_PREFIX,
@@ -87,11 +88,13 @@ from ...schemas.location import (
 from ...schemas.lookup import LookupUntil, LookupUuids, lookup_bound
 from ...schemas.tag import TAG_NOT_FOUND
 from ...services.cache_invalidation import invalidate_dive_caches, invalidate_dive_site_caches, invalidate_trip_caches
+from ...services.commons_history import read_history
 from ...services.commons_matches import find_commons_matches
 from ...services.commons_proposals import follow_the_edit, proposal_following_an_edit
 from ...services.commons_records import attribution_for
 from ...services.dive_site_search import SiteSearch, SiteSearchResult, search_dive_sites
 from ..idempotency import IdempotentCreate
+from .dive_site_proposals import require_commons_primary
 
 router = APIRouter(tags=["dive-sites"])
 
@@ -877,6 +880,46 @@ async def read_dive_site_commons_matches(
     """
     site = await _get_own_dive_site(db, uuid, current_user)
     return await find_commons_matches(db, site.model_dump())
+
+
+@router.get(
+    "/dive-site/{uuid}/history",
+    response_model=PaginatedListResponse[DiveSiteHistoryEntryRead],
+    dependencies=[Depends(require_commons_primary)],
+)
+async def read_dive_site_history(
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
+) -> dict:
+    """A Commons record's history, newest first: each accepted proposal that added the record or
+    changed it, as `added` or `changed`, with the date and, for a change, each shared member's old
+    and new value. A pin that moved names both `latitude` and `longitude`.
+
+    Where a reviewer accepted a change with members other than the diver asked for, the diver's
+    change as they asked it is one entry and the reviewer's correction another, above it.
+    `made_by` is the display name of who made the change: on a diver's entry the proposer's, only
+    where they chose to be shown; on a correction the reviewer's. It is null otherwise, and once
+    the account is deleted or asked to be, and it follows a rename on the next read: the history
+    is not cached.
+
+    Empty for the caller's own site. Out-of-range pagination is clamped. 404 when no such site
+    exists, the same 404 on another user's private site, and on an instance that does not edit
+    the Commons.
+    """
+    site = await _get_readable_dive_site(db, uuid, current_user)
+    page, items_per_page = clamp_pagination(page, items_per_page)
+    data = (
+        {"data": [], "total_count": 0}
+        if site.user_id is not None
+        else await read_history(
+            db, site_id=site.id, offset=compute_offset(page, items_per_page), limit=items_per_page, as_reviewer=False
+        )
+    )
+    response: dict = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
 
 
 @router.post("/dive-site/{uuid}/replace", response_model=DiveSiteRead)

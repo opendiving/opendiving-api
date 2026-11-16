@@ -43,6 +43,7 @@ from src.app.models.dive import Dive
 from src.app.models.dive_draft import DiveDraft
 from src.app.models.dive_form_preset import DiveFormPreset
 from src.app.models.dive_site import DiveSite
+from src.app.models.dive_site_proposal import DiveSiteProposal
 from src.app.models.gear_item import GearItem
 from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
@@ -60,6 +61,7 @@ from src.app.schemas.dive import DiveUpdate
 from src.app.schemas.dive_draft import DiveDraftUpdate
 from src.app.schemas.dive_form_preset import DiveFormPresetUpdate
 from src.app.schemas.dive_site import DiveSiteUpdate, DiveSiteUpdateRequest
+from src.app.schemas.dive_site_proposal import DiveSiteProposalUpdate
 from src.app.schemas.gear_item import GearItemUpdate
 from src.app.schemas.gear_service import GearServiceRecordUpdate, GearServiceScheduleUpdate
 from src.app.schemas.gear_set import GearSetUpdate
@@ -78,6 +80,7 @@ from src.app.schemas.webauthn_credential import WebauthnCredentialUpdate
 SCHEMAS_AND_TABLES: list[tuple[type[RejectsExplicitNulls], Any]] = [
     (DiveUpdate, Dive),
     (DiveSiteUpdate, DiveSite),
+    (DiveSiteProposalUpdate, DiveSiteProposal),
     (TripUpdate, Trip),
     (GearItemUpdate, GearItem),
     (GearSetUpdate, GearSet),

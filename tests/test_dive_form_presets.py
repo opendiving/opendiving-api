@@ -777,7 +777,7 @@ class TestTheSeedAgainstPostgres:
     @pytest.mark.asyncio
     async def test_a_seeded_account_can_be_deleted(self, db: Session, async_db: AsyncSession) -> None:
         """The FK carries `ondelete="CASCADE"`, which `test_user_cascade.py` asserts
-        structurally for every FK into `user`. This is the behavioural half for these rows:
+        structurally for every FK into `user` but the two it names. This is the behavioural half for these rows:
         an account with presets is still deletable, which it would not be if the cascade were
         missing.
         """

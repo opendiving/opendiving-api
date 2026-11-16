@@ -117,6 +117,11 @@ NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
         "row goes with its account or its private site, through the cascades. A panel form that wrote "
         "one could accept a proposal around the record rules, so it is not registered there either."
     ),
+    "DiveSiteHistory": (
+        "An entry in a Commons record's history, which nothing rewrites: no route updates or deletes one, "
+        "and it goes only with its record. Not registered in the panel, where a form could rewrite what a "
+        "record's readers are told happened to it."
+    ),
     "DiveFile": (
         "One of a recording's stored exports, reached through the dive: "
         "`DELETE /dive/{uuid}/file/{fid}` owns its lifecycle, along with the blob it writes to "

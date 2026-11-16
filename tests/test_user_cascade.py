@@ -95,8 +95,10 @@ class TestEveryForeignKeyIntoUserCascades:
     the bug this change fixes, and would fail nothing else - the purge would raise on the
     first account that owned one of its rows, in a cron job, in production.
 
-    One key is allowed another rule, by name: `person.linked_user_id` names *another*
-    account, whose purge unlinks this diver's person rather than deleting it.
+    Two keys are allowed another rule, by name: `person.linked_user_id` names *another*
+    account, whose purge unlinks this diver's person rather than deleting it; and
+    `dive_site_history.reviewer_id` names the reviewer who accepted a change to a Commons
+    record, whose purge leaves the entry naming nobody.
     """
 
     def test_no_foreign_key_into_user_is_left_without_a_delete_rule(self):
@@ -108,7 +110,7 @@ class TestEveryForeignKeyIntoUserCascades:
             if fk.column.table.name == "user" and fk.ondelete != "CASCADE"
         }
 
-        assert without_cascade == {"person.linked_user_id": "SET NULL"}
+        assert without_cascade == {"person.linked_user_id": "SET NULL", "dive_site_history.reviewer_id": "SET NULL"}
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
@@ -310,7 +312,7 @@ class TestDeletingAUserTakesEverythingWithIt:
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestAPersonLinkedToAPurgedAccountStays:
-    """The one foreign key into `user.id` that is not a cascade. A person names *another*
+    """One of the two foreign keys into `user.id` that are not a cascade. A person names *another*
     account; that account's purge unlinks the person and leaves the diver's record."""
 
     def test_the_person_stays_unlinked(self, db: Session) -> None:

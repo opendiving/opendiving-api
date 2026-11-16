@@ -50,6 +50,7 @@ from ..schemas.dive_site_proposal import (
     DiveSiteProposalCreate,
     DiveSiteProposalRead,
     DiveSiteProposalSite,
+    DiveSiteProposalUpdate,
     DiveSiteProposer,
 )
 from ..schemas.location import DIVE_SITE_LOCATION_PREFIX, LOCATION_FIELDS
@@ -59,6 +60,7 @@ from .cache_invalidation import (
     invalidate_dive_site_caches,
     invalidate_trip_caches,
 )
+from .commons_history import PIN_DECIMALS, DiveSiteHistoryKind, record_acceptance, with_rounded_pin
 from .commons_matches import find_commons_matches
 from .commons_records import COMMONS_REGISTRY, CURATED_SOURCES, SHARED_MEMBER_COLUMNS, feature_of
 
@@ -66,7 +68,6 @@ CONTRIBUTION_SOURCE = "contribution"
 CONTRIBUTION_LICENSE = "CC0-1.0"
 
 _NOT_FOUND = "Proposal not found"
-_PIN_DECIMALS = 6
 _PIN_REQUIRED = "a Commons record keeps its pin"
 _NEW_SITE_PIN_REQUIRED = "A site needs a pin to be proposed for the Commons"
 
@@ -122,6 +123,7 @@ def _proposal_read(row: Mapping[str, Any], site: Mapping[str, Any]) -> DiveSiteP
         site=DiveSiteProposalSite(uuid=site["uuid"], name=site["name"]),
         created_at=row["created_at"],
         decided_at=row["decided_at"],
+        show_proposer=row["show_proposer"],
     )
 
 
@@ -198,6 +200,7 @@ async def propose(
         members=members,
         attestation=ATTESTATIONS[kind],
         message=values.message,
+        show_proposer=values.show_proposer,
         now=datetime.now(UTC),
     )
     await db.commit()
@@ -210,6 +213,7 @@ async def propose(
             "reason": None,
             "created_at": created_at,
             "decided_at": None,
+            "show_proposer": values.show_proposer,
         },
         site,
     )
@@ -301,6 +305,25 @@ async def withdraw(db: AsyncSession, *, uuid: uuid_pkg.UUID, user_id: int) -> No
     await _invalidate_proposer_caches(user_id)
 
 
+async def choose(
+    db: AsyncSession, *, uuid: uuid_pkg.UUID, user_id: int, values: DiveSiteProposalUpdate
+) -> DiveSiteProposalRead:
+    """Set whether other divers read the proposer's name beside what the proposal changes. Only
+    a waiting or an accepted proposal makes an entry, so only those take the choice."""
+    proposal = await locked_proposal(db, uuid=uuid, user_id=user_id)
+    if proposal is None:
+        raise NotFoundException(_NOT_FOUND)
+    if proposal.status not in (DiveSiteProposalStatus.WAITING.value, DiveSiteProposalStatus.ACCEPTED.value):
+        raise HTTPException(status_code=409, detail="A declined or withdrawn proposal makes no history entry")
+    if values.show_proposer is not None:
+        proposal.show_proposer = values.show_proposer
+        proposal.updated_at = datetime.now(UTC)
+        await db.flush()
+    read = await _read_decided(db, proposal)
+    await db.commit()
+    return read
+
+
 async def decline(db: AsyncSession, *, uuid: uuid_pkg.UUID, reason: str) -> DiveSiteProposalRead:
     proposal = await _waiting_proposal(db, uuid=uuid)
     proposer_id = proposal.user_id
@@ -340,6 +363,7 @@ async def _read_decided(db: AsyncSession, proposal: DiveSiteProposal) -> DiveSit
             "reason": proposal.reason,
             "created_at": proposal.created_at,
             "decided_at": proposal.decided_at,
+            "show_proposer": proposal.show_proposer,
         },
         site,
     )
@@ -349,8 +373,8 @@ def _as_columns(members: DiveSiteMembers) -> dict[str, Any]:
     """The body as what is written, the pin rounded to the decimals the record rules allow."""
     columns = members.model_dump(mode="json")
     if columns["latitude"] is not None and columns["longitude"] is not None:
-        columns["latitude"] = round(columns["latitude"], _PIN_DECIMALS)
-        columns["longitude"] = round(columns["longitude"], _PIN_DECIMALS)
+        columns["latitude"] = round(columns["latitude"], PIN_DECIMALS)
+        columns["longitude"] = round(columns["longitude"], PIN_DECIMALS)
     return columns
 
 
@@ -437,8 +461,9 @@ _CONTRIBUTION_PROVENANCE = {
 
 async def _write_reviewed(
     db: AsyncSession, members: DiveSiteMembers, *, site: Mapping[str, Any], provenance: Mapping[str, Any], **also: Any
-) -> None:
-    """Write what the reviewer sent onto the row, or refuse it by naming the rule it breaks."""
+) -> dict[str, Any]:
+    """Write what the reviewer sent onto the row, or refuse it by naming the rule it breaks.
+    Answers the shared members as written."""
     columns = _as_columns(members)
     refusals = await _record_rule_refusals(db, columns, site=site, provenance=provenance)
     if refusals:
@@ -449,10 +474,11 @@ async def _write_reviewed(
         .where(DiveSite.id == site["id"])
         .values(**columns, **_NO_GEOCODED_LOCALITY, commons_reviewed_at=now, updated_at=now, **also)
     )
+    return columns
 
 
 async def _accept_into(
-    db: AsyncSession, proposal: DiveSiteProposal, values: DiveSiteProposalAccept
+    db: AsyncSession, proposal: DiveSiteProposal, values: DiveSiteProposalAccept, *, reviewer_id: int
 ) -> tuple[uuid_pkg.UUID, int]:
     """Fold the proposer's site into a record it duplicates: the row goes, the proposal does not."""
     if proposal.kind != DiveSiteProposalKind.NEW_SITE.value:
@@ -464,7 +490,11 @@ async def _accept_into(
         raise UnprocessableEntityException("That Commons site does not exist")
     record = await _site(db, record_id)
     if values.members is not None:
-        await _write_reviewed(db, values.members, site=record, provenance=_provenance_of(record))
+        written = await _write_reviewed(db, values.members, site=record, provenance=_provenance_of(record))
+        # The diver proposed nothing on the record, so whatever changes on it is the reviewer's.
+        await record_acceptance(
+            db, site_id=record_id, reviewer_id=reviewer_id, now=datetime.now(UTC), asked=record, written=written
+        )
 
     site_id = proposal.dive_site_id
     # First: the proposal cascades with the row it points at.
@@ -474,13 +504,19 @@ async def _accept_into(
 
 
 async def _accept_as_written(
-    db: AsyncSession, proposal: DiveSiteProposal, members: DiveSiteMembers
+    db: AsyncSession, proposal: DiveSiteProposal, members: DiveSiteMembers, *, reviewer_id: int
 ) -> tuple[uuid_pkg.UUID, int]:
     site = await _site(db, proposal.dive_site_id, for_update=True)
+    record = _shared_members(site)
     if proposal.kind == DiveSiteProposalKind.CHANGE.value:
-        await _write_reviewed(db, members, site=site, provenance=_provenance_of(site))
+        # What the diver asked for, built as the queue's `proposed` is.
+        asked = with_rounded_pin({**record, **proposal.members})
+        proposer_kind = DiveSiteHistoryKind.CHANGED
+        written = await _write_reviewed(db, members, site=site, provenance=_provenance_of(site))
     else:
-        await _write_reviewed(
+        asked = with_rounded_pin(record)
+        proposer_kind = DiveSiteHistoryKind.ADDED
+        written = await _write_reviewed(
             db,
             members,
             site=site,
@@ -490,19 +526,34 @@ async def _accept_as_written(
             commons_license=CONTRIBUTION_LICENSE,
             created_at=datetime.now(UTC),
         )
+    await record_acceptance(
+        db,
+        site_id=site["id"],
+        reviewer_id=reviewer_id,
+        now=datetime.now(UTC),
+        asked=asked,
+        written=written,
+        proposal_id=proposal.id,
+        proposer_kind=proposer_kind,
+        before=record,
+    )
     await _decide(db, proposal, DiveSiteProposalStatus.ACCEPTED)
     return site["uuid"], site["id"]
 
 
-async def accept(db: AsyncSession, *, uuid: uuid_pkg.UUID, values: DiveSiteProposalAccept) -> DiveSiteProposalRead:
+async def accept(
+    db: AsyncSession, *, uuid: uuid_pkg.UUID, values: DiveSiteProposalAccept, reviewer_id: int
+) -> DiveSiteProposalRead:
     proposal = await _waiting_proposal(db, uuid=uuid)
     proposer_id = proposal.user_id
     folding = values.into is not None
     if folding:
-        record_uuid, record_id = await _accept_into(db, proposal, values)
+        record_uuid, record_id = await _accept_into(db, proposal, values, reviewer_id=reviewer_id)
     else:
         # The schema requires one or the other.
-        record_uuid, record_id = await _accept_as_written(db, proposal, cast(DiveSiteMembers, values.members))
+        record_uuid, record_id = await _accept_as_written(
+            db, proposal, cast(DiveSiteMembers, values.members), reviewer_id=reviewer_id
+        )
     read = await _read_decided(db, proposal)
     saver_ids = set(await db.scalars(select(SavedSite.user_id).where(SavedSite.dive_site_id == record_id)))
     await db.commit()

@@ -4226,19 +4226,21 @@ because tuning it tunes that leniency unknowingly. `expires_at` is indexed by a 
 revision. Cost: a link past retention reports "invalid" rather than "expired"; `check_email_link`
 already collapses both to `valid=false`.
 
-## Every foreign key into `user.id` declares `ondelete="CASCADE"` but one
+## Every foreign key into `user.id` declares `ondelete="CASCADE"` but two
 
-Every foreign key into `user.id` declares `ondelete="CASCADE"` but `person.linked_user_id`, which is
-`SET NULL`: it names *another* account, whose purge must unlink this diver's person rather than
-delete it. `DELETE /user` soft-deletes (`SoftDeleteMixin`); the raw `DELETE FROM "user"` is the
-purge's. Two traps in a revision that changes one: autogenerate and `alembic check` do not detect an
-`ondelete` change, so it is hand-written; and Postgres cannot `ALTER` a delete rule, so each is
-`DROP CONSTRAINT` plus `ADD CONSTRAINT` under Postgres's default `<table>_<column>_fkey` name, with
-`downgrade` passing `ondelete=None` (NO ACTION). A cascade on an unindexed or partial-indexed FK
-seq-scans the child; `tests/test_foreign_key_indexes.py` checks every FK.
-`tests/test_user_cascade.py` walks `Base.metadata` for a bare `ForeignKey("user.id")`, naming the
-one exception, and issues the raw `DELETE` on Postgres over one row per table plus second-order rows
-(skipped without `POSTGRES_SERVER=localhost`).
+Every foreign key into `user.id` declares `ondelete="CASCADE"` but two, which are `SET NULL`.
+`person.linked_user_id` names *another* account, whose purge must unlink this diver's person rather
+than delete it. `dive_site_history.reviewer_id` names the reviewer who accepted a change to a
+Commons record, whose purge must leave the entry naming nobody rather than delete it. `DELETE /user`
+soft-deletes (`SoftDeleteMixin`); the raw `DELETE FROM "user"` is the purge's. Two traps in a
+revision that changes one: autogenerate and `alembic check` do not detect an `ondelete` change, so
+it is hand-written; and Postgres cannot `ALTER` a delete rule, so each is `DROP CONSTRAINT` plus
+`ADD CONSTRAINT` under Postgres's default `<table>_<column>_fkey` name, with `downgrade` passing
+`ondelete=None` (NO ACTION). A cascade on an unindexed or partial-indexed FK seq-scans the child;
+`tests/test_foreign_key_indexes.py` checks every FK. `tests/test_user_cascade.py` walks
+`Base.metadata` for a bare `ForeignKey("user.id")`, naming the two exceptions, and issues the raw
+`DELETE` on Postgres over one row per table plus second-order rows (skipped without
+`POSTGRES_SERVER=localhost`).
 
 ## Deleting an account is two changes with a fortnight between them
 
@@ -5342,8 +5344,9 @@ address that never became an account, and the one row satisfying neither arm —
 an account already purged.
 
 *Rejected:* an operator security log that survives deletion. It needs a user reference without a FK
-(the cascade suite fails any FK into `user.id` that is not `CASCADE`) plus registry exemptions, and
-the operator already keeps `admin_event_log`/`admin_audit_log`, which survive purges by design.
+(the cascade suite fails any FK into `user.id` that is not `CASCADE` but the two it names) plus
+registry exemptions, and the operator already keeps `admin_event_log`/`admin_audit_log`, which
+survive purges by design.
 
 ## Auth audit: Failures propagate, and a write on an error path commits first
 
@@ -5492,6 +5495,17 @@ cleared pin, or an entry the body adds that a Commons record carries. Only what 
 tested, since a record may come to carry an entry after the site was proposed. The proposal is
 locked before the row, the order *Accept* takes. Rejected: clients sending the proposal again, which
 re-sends the attestation without a tick and counts against the daily limit.
+
+## A record's history outlives its accounts and names nobody itself
+
+`dive_site_history` holds what each accepted proposal changed and when, and no name. A diver's entry
+reaches its proposer through `proposal_id`, so the name follows a rename, the proposal's
+`show_proposer` and a deletion request on the next read, and the proposal going with its account
+empties the link. `reviewer_id` is `SET NULL` for the same reason. `corrected` stays, so a diver's
+entry is told from a correction after both purges. Rejected: a stored name, which a withdrawal or a
+deletion would have to clear by hand; a proposer column, a second key into `user` to except from the
+cascade. Only an acceptance writes an entry: a record edited through the CRUDAdmin panel leaves
+none, and the flagship does not run the panel.
 
 ## A replaced site leaves an alias
 
@@ -6583,8 +6597,8 @@ commit as the `APP_COMMIT` build arg, the `Dockerfile`'s runtime stage exports i
 
 Postgres never indexes a foreign key's referencing side, so a child `parent_id` without one is
 scanned whole on every cascade, every `DELETE` proving nothing references it, and every by-parent
-read; every key into `user.id` cascades, so an account purge is that scan per table. Nothing else
-notices a `ForeignKey(...)` lacking `index=True`: autogenerate and `alembic check` pass.
+read; every key into `user.id` but two cascades, so an account purge is that scan per table. Nothing
+else notices a `ForeignKey(...)` lacking `index=True`: autogenerate and `alembic check` pass.
 
 `tests/test_foreign_key_indexes.py` walks `Base.metadata` without a database. Coverage means:
 

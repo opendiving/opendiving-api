@@ -26,6 +26,7 @@ EXCLUDED: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/user/invitations"): "account management: invites a person and emails them",
     ("DELETE", "/api/v1/user/invitation/{uuid}"): "account management: withdraws an invitation",
     ("POST", "/api/v1/dive-site/{uuid}/proposals"): "carries the diver's own attestation to publish a site",
+    ("PATCH", "/api/v1/dive-site-proposal/{uuid}"): "shows the diver's name to every other account",
     ("GET", "/api/v1/commons/dive-sites/points"): "an instance-wide map feed, not the diver's content",
     ("GET", "/api/v1/map-tiles/{theme}/{z}/{x}/{y}"): "map rendering assets, not the diver's content",
     ("GET", "/api/v1/map-style/{theme}"): "map rendering assets, not the diver's content",

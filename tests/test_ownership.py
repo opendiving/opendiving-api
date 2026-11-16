@@ -350,6 +350,12 @@ FETCH_OWNED_ROUTES = [
         "Dive site not found",
     ),
     OwnedRoute(
+        "GET",
+        "/api/v1/dive-site/{uuid}/history",
+        "src.app.api.v1.dive_sites:crud_dive_sites",
+        "Dive site not found",
+    ),
+    OwnedRoute(
         "POST",
         "/api/v1/dive-site/{uuid}/replace",
         "src.app.api.v1.dive_sites:crud_dive_sites",
@@ -542,11 +548,15 @@ RESOLVER_OWNED_ROUTES = [
         )
         for method, extra in _CRUD_METHODS
     ),
-    OwnedRoute(
-        "DELETE",
-        "/api/v1/dive-site-proposal/{uuid}",
-        "src.app.services.commons_proposals:locked_proposal",
-        "Proposal not found",
+    *(
+        OwnedRoute(
+            method,
+            "/api/v1/dive-site-proposal/{uuid}",
+            "src.app.services.commons_proposals:locked_proposal",
+            "Proposal not found",
+            extra,
+        )
+        for method, extra in (("PATCH", {"json": {"show_proposer": True}}), ("DELETE", {}))
     ),
     OwnedRoute(
         "DELETE",
@@ -595,6 +605,10 @@ UNOWNED_ROUTES: dict[tuple[str, str], str] = {
         ),
         "A reviewer decides any account's proposal: gated on the superuser by the `/admin` router, "
         "with no owner to compare the caller against.",
+    ),
+    ("GET", "/api/v1/admin/dive-site/{uuid}/history"): (
+        "A reviewer reads any record's history: gated on the superuser by the `/admin` router, with no "
+        "owner to compare the caller against."
     ),
     ("GET", "/api/v1/user/species/{uuid}"): (
         "The uuid is the global catalog's; the caller's own dives scope the query, and a species "

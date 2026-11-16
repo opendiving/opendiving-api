@@ -4,8 +4,8 @@ Postgres indexes the *referenced* side of a foreign key for you - it has to, the
 primary key or a unique constraint - and indexes the referencing side never. So a child table
 whose `parent_id` carries no index is scanned in full every time something touches the parent
 row: `ON DELETE CASCADE` has to find the rows to delete, a plain `DELETE` has to prove there
-are none, and the app's own "everything belonging to this parent" reads go the same way. Every
-foreign key into `user.id` is `CASCADE` (see `test_user_cascade.py`), so the account purge is
+are none, and the app's own "everything belonging to this parent" reads go the same way. All but two
+foreign keys into `user.id` are `CASCADE` (see `test_user_cascade.py`), so the account purge is
 precisely that scan, once per table, per account.
 
 **Leading**, not merely present. A composite index serves a lookup on its first column and not

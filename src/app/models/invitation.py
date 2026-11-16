@@ -56,7 +56,7 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     # gate reads by it on every account creation, and the account purge deletes by it.
     email: Mapped[str] = mapped_column(String(EMAIL_MAX_LENGTH), index=True)
 
-    # The inviter. `CASCADE` for the reason every other FK into `user.id` carries it: the
+    # The inviter. `CASCADE` for the reason all but two FKs into `user.id` carry it: the
     # account purge is a `DELETE FROM "user"`, and this row naming an account that no
     # longer exists would be an allow-list entry nobody can see or revoke. An invitee who
     # had not signed up yet loses the invitation with their inviter - acceptable, and said
