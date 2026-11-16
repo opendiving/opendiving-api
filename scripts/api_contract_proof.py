@@ -235,6 +235,7 @@ def enum(doc: Document, body: str, spelled_null: bool) -> str:
                 walk(value, in_null_union)
 
     walk(doc, False)
+    name: str
     for name, schema in sorted(doc["components"]["schemas"].items()):
         if "enum" in schema and reached[name] == {body} and spellings[name] == {spelled_null}:
             return name
@@ -336,6 +337,7 @@ def _parameter_required(p: Parameter) -> Callable[[Document], None]:
 
 
 def _parameter_enum(doc: Document) -> str:
+    name: str
     for name in sorted(doc["components"]["schemas"]):
         if "enum" in doc["components"]["schemas"][name] and contexts(doc)[name] == {"parameter"}:
             return name
@@ -444,7 +446,11 @@ def mutations(doc: Document) -> Iterator[tuple[Row, str, Callable[[Document], No
     yield row, "an operation is added", _add_operation
     m = _response(doc, plain_string, "a plain string")
     yield row, f"a member joins {m.component}", _add_member(m.component, {"type": "string"}, False)
-    yield row, f"a null-union member joins {m.component}", _add_member(m.component, wrap_in_null({"type": "string"}), False)
+    yield (
+        row,
+        f"a null-union member joins {m.component}",
+        _add_member(m.component, wrap_in_null({"type": "string"}), False),
+    )
     m = _request(doc, plain_string, "a plain string")
     yield row, f"an optional member joins {m.component}", _add_member(m.component, {"type": "string"}, False)
     yield (
@@ -505,14 +511,18 @@ def prove(doc: Document) -> list[str]:
         lines.append(f"{'ok  ' if held else 'FAIL'} {said}: {verdict}, as the row says" if held else f"FAIL {said}")
         if not held:
             lines.append(f"     row: {row.change} ({'fails' if row.fails else 'passes'})")
-            lines += [f"     {finding.level} {finding.rule}: {finding.operation} {finding.text}" for finding in findings]
+            lines += [
+                f"     {finding.level} {finding.rule}: {finding.operation} {finding.text}" for finding in findings
+            ]
     lines.append(f"{failures} mutation(s) did not hold." if failures else "Every row holds.")
     return lines
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--document", type=Path, help="a released surface already built (default: build this checkout's)")
+    parser.add_argument(
+        "--document", type=Path, help="a released surface already built (default: build this checkout's)"
+    )
     args = parser.parse_args()
     doc: Document = json.loads(args.document.read_text()) if args.document else build(ROOT, released=True)
     try:

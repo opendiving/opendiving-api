@@ -102,6 +102,19 @@
   // this file rather than from whenever someone remembers the settings page.
   "osvVulnerabilityAlerts": true,
 
+  // The contract check downloads `oasdiff` at the release `scripts/api_contract.py` names, which
+  // no built-in manager reads. A bump is proven by that check's own job, which runs every row of
+  // its table against the new release, so it automerges like any other minor once that is green.
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^scripts/api_contract\\.py$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nOASDIFF_VERSION = \"(?<currentValue>[^\"]+)\"",
+      ],
+    },
+  ],
+
   "packageRules": [
     {
       // Routine minor, patch and digest bumps join the merge queue on their own once the

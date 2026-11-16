@@ -1,0 +1,59 @@
+name: API contract
+
+on:
+  pull_request:
+    # `edited` is what judges a retitled pull request again with nothing pushed: adding `!` turns
+    # a failure green, and taking it off a breaking change turns a pass red. `synchronize` judges
+    # each new head.
+    types: [opened, edited, reopened, synchronize]
+  # The merge queue tests each entry squashed onto `main` under this event, and a required check
+  # that never reports there holds the entry until the queue times it out.
+  merge_group:
+
+# Builds both trees and runs the pinned differ over local files: nothing is written anywhere and no
+# secret is read, so a pull request from a fork gets the same verdict as one from a branch here.
+permissions:
+  contents: read
+
+concurrency:
+  group: api-contract-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  api-contract:
+    runs-on: ubuntu-latest
+
+    steps:
+      # The default ref: the pull request's merge commit, whose second parent is its head, or the
+      # queue entry's squash commit. Full history, because the base is found in it.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      # The title through `env`, never interpolated into the script, where a backtick in it would
+      # run as shell.
+      - name: Judge the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          uv run --no-project python scripts/api_contract.py pull-request \
+            --base-branch "origin/$BASE_REF" --head "$HEAD_SHA" --title "$TITLE"
+
+      - name: Judge the queue entry
+        if: github.event_name == 'merge_group'
+        env:
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: uv run --no-project python scripts/api_contract.py merge-group --head "$HEAD_SHA"
+
+      # Every row of the table, as a mutation of this tree's document, against the pinned differ:
+      # a differ upgrade that moves a verdict fails the pull request that makes it.
+      - name: Prove the table
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/api_contract_proof.py

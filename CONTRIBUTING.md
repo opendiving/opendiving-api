@@ -38,7 +38,7 @@ uv sync --extra dev
 
 ## Before you open a PR
 
-Three workflows run on every pull request, and all must be green. Run them locally first:
+Every workflow that runs on a pull request must be green. Run them locally first:
 
 ```bash
 uv run ruff check src tests scripts
@@ -48,7 +48,11 @@ uv run mypy src --config-file pyproject.toml
 uv run mypy tests --config-file pyproject.toml
 uv run mypy scripts --config-file pyproject.toml
 uv run pytest -n auto --dist loadgroup --cov=src/app --cov-report=term-missing
+uv run python scripts/api_contract.py pull-request --base-branch origin/main --head HEAD --title "<your title>"
 ```
+
+The last is the `api-contract` check, which fails a change that breaks a client unless the title
+says so; *The API contract* below is what it judges and how.
 
 If your PR touches `src/app/models/`, add the migration drift check — CI runs it and the suite does
 not (see *Things that will bite you* below):
@@ -376,17 +380,94 @@ the file is ODbL as a whole and cannot carry them.
   release's notes are generated — so a retitle is all it takes to move it.
 - Say in the description what you changed, why, and anything a reviewer has to do by hand (schema
   SQL, new env vars, a backfill script).
-- If the change affects the API contract, mention whether the web or iOS client needs a matching
-  change — and if you are writing that matching change yourself, see below.
+- If the change breaks the API contract, its title carries `!` (*The API contract*, below), and the
+  description says whether the web or iOS client needs a matching change — and if you are writing
+  that matching change yourself, see below.
 
 **Changes that span both repos.** Open the api pull request first, and link the two to each other so
 whoever lands on one can see the other half. Expect the api side to merge first: a client is written
 against an endpoint that exists, and merging in the other order leaves `main` calling something that
 isn't there yet.
 
-No CI job tests the pair together. Each repo's checks run against its own tree, so a contract that
-drifted between them passes both and breaks only when the two are actually run side by side — which
-makes the linked pull requests the whole safety net, and the linking an ask rather than a courtesy.
+No CI job here runs a client. `api-contract` fails the api half of a pair when it removes, renames
+or reshapes something a client may read or send, so the break is declared where it is made; it
+cannot tell whether a client actually depends on it, nor see a change of meaning inside an unchanged
+shape. The linked pull requests are what carry that, so the linking is an ask rather than a
+courtesy.
+
+## The API contract
+
+The contract is the OpenAPI document the API serves at `/api/v1/openapi.json`. Each client's models
+are written by hand against it, so nothing regenerates when it changes, and a change that breaks a
+client has to be caught on the pull request that makes it. `api-contract` compares the **released
+surface** before and after a change: the document an instance with the MCP routes installed and
+every experimental feature off would serve. A gated feature's operations are left out, since a
+feature that is off has no client to break; once an instance switches one on, its routes are still
+not read here until its gate comes out.
+
+**A wire break** is a change to the released surface that the check fails: one in a row below marked
+as failing, or one in no row that `oasdiff checks` prints at ERR. A change in no row that it prints
+at WARN or INFO passes.
+
+| A change to the released surface                                                                   | Verdict |
+| -------------------------------------------------------------------------------------------------- | ------- |
+| An operation is removed, or loses a success status or its JSON body                                | fails   |
+| A response member is removed or renamed, whether or not its schema lists it as required            | fails   |
+| A response member changes type, or one that was never null may now be                              | fails   |
+| A value joins an enum a response carries                                                           | fails   |
+| A request-body member is removed or renamed                                                        | fails   |
+| A request-body member or a parameter becomes required, or a new required one appears               | fails   |
+| A request-body member or a parameter changes type, stops accepting null, or loses an enum value    | fails   |
+| A parameter is removed                                                                             | fails   |
+| An operation, a response member, an optional request-body member or an optional parameter is added | passes  |
+| A response member stops being listed as required, with nothing else about it changed               | passes  |
+| A value leaves an enum a response carries, or joins an enum a request accepts                      | passes  |
+| A request-body member or a parameter starts accepting null                                         | passes  |
+| A response member that could be null never is                                                      | passes  |
+| A description, a title, an example or the document's version changes                               | passes  |
+
+Where the rows differ from the differ's own defaults, this is why. A removed response member fails
+whether or not it was listed as required, because the list follows whether the model gives a default
+and not whether the server sends the member; for the same reason a member leaving that list is no
+finding. A removed request-body member fails, where the differ only warns, because a write schema
+forbids what it does not declare and a client still sending the member is refused. A removed
+parameter fails because the API ignores a query parameter it does not know, so a client's filter
+stops applying without an error. A value joining a response's enum fails because a client may decode
+that vocabulary strictly. `ROWS` in `scripts/api_contract.py` is this table as the differ's rules,
+and the check's job proves every row on each run by mutating the real document
+(`scripts/api_contract_proof.py`), so a differ upgrade that moves a verdict fails the pull request
+that makes it.
+
+**`!` in a pull request's title marks a wire break**, the meaning Conventional Commits gives it. A
+pull request whose own commits make one fails `api-contract` unless its title carries `!` after the
+type and scope; with the marker it passes and still lists every break, operation, member and row.
+One `!` covers every break in the pull request. The check is one-way: a title may carry `!` with no
+break in the document, for a break the document cannot show — a change of meaning, a narrowed
+pattern, an API key's access withdrawn. Editing the title runs the check again, with nothing to
+push.
+
+On a pull request the head is compared with the commit its branch was cut from on `main`, so a
+change `main` made since counts neither way. In the merge queue an entry is judged on its own squash
+commit against that commit's parent, with that commit's subject as the title. Each side is built
+from its committed tree with its own locked dependencies, so uncommitted edits are not seen. The
+same comparison runs locally between any two refs:
+
+```bash
+uv run python scripts/api_contract.py compare origin/main HEAD --title "feat!: ..."
+uv run python scripts/api_contract_proof.py    # every row of the table, against this checkout
+uv run python scripts/api_document.py --released -o released.json
+```
+
+The first run downloads `oasdiff` at the release `scripts/api_contract.py` pins into
+`~/.cache/opendiving-api`, checked against that release's checksums; `OASDIFF=/path/to/oasdiff` uses
+a copy of your own, which has to be the same release. `scripts/api_document.py` builds either
+document of a tree with no database and no cache, ignoring the tree's `src/.env`; without
+`--released` it is the contract document, every feature on, which is what a client is held to.
+
+A break an *operator* has to act on — an edited `.env`, a new service, a manual upgrade step — is
+not what `!` means here. It is recorded on the pull request in
+[opendiving/opendiving](https://github.com/opendiving/opendiving) that changes the bundle or the
+upgrade notes, and in the product release's hand-written Breaking section.
 
 ## What to expect
 
@@ -512,12 +593,16 @@ repositories.
 | Any user-visible feature                                                                       | minor   | minor      |
 | Fixes and internals only                                                                       | patch   | patch      |
 
-"Breaking" is about the operator's experience, not the code's — which is why a schema change on its
-own is *not* breaking: migrations run themselves on startup, and the upgrade drill is what keeps
-that claim honest. What counts is anything the operator has to do by hand before the new version
-will run: an edited `.env`, a changed config contract, a removed behaviour they depended on.
+"Breaking" in this table is about the operator's experience, not the code's — which is why a schema
+change on its own is *not* breaking: migrations run themselves on startup, and the upgrade drill is
+what keeps that claim honest. What counts is anything the operator has to do by hand before the new
+version will run: an edited `.env`, a changed config contract, a removed behaviour they depended on.
+That is a different thing from a wire break (*The API contract*), and those breaks are recorded in
+the product repository.
 
-Every PR title is a conventional commit subject, so the breaking half of that table has a scanner:
+Every PR title is a conventional commit subject, so the window's wire breaks have a scanner, the
+titles that carry `!`. They are what this repository's generated notes file under Breaking changes,
+for whoever writes a client; an operator's break is not among them unless it is also one:
 
 ```bash
 git log --format=%s v0.3.0..main | grep -E '^[a-z]+(\([^)]+\))?!:'

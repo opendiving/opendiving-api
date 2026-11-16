@@ -207,4 +207,6 @@ operations reads it through `tests/helpers/openapi.py`, which switches every fea
   Page/size, not limit/offset; clamp the query params with `clamp_pagination` (see
   `core/utils/pagination.py`).
 
-Changing the API contract? Say so in the PR — the web and iOS clients may need a matching change.
+Breaking the API contract? The title carries `!` — the `api-contract` check fails a wire break
+without it, and `CONTRIBUTING.md`, *The API contract*, defines one — and the PR says whether the web
+or iOS client needs a matching change.

@@ -6,7 +6,8 @@
 #
 # Order is load-bearing: a PR lands in the *first* category whose labels it carries, so
 # `breaking` has to come before `feat`, or a `feat!:` change would be filed as a feature
-# and the one section self-hosters read before upgrading would be empty. It is load-bearing
+# and the section listing this API's wire breaks - the `!` the contract check holds titles
+# to, which is what a client's author reads before following a release - would be empty. It is load-bearing
 # in a sharper way since the release stopped being a draft: nobody reads these notes before
 # they go out, so a miscategorised PR is published rather than caught.
 #

@@ -273,7 +273,10 @@ def oasdiff() -> Path:
             asset = _oasdiff_asset()
             base = f"https://github.com/oasdiff/oasdiff/releases/download/{OASDIFF_VERSION}"
             archive = _download(f"{base}/{asset}")
-            sums = dict(reversed(line.split()) for line in _download(f"{base}/checksums.txt").decode().splitlines())
+            sums: dict[str, str] = {}
+            for line in _download(f"{base}/checksums.txt").decode().splitlines():
+                digest, name = line.split()
+                sums[name] = digest
             if hashlib.sha256(archive).hexdigest() != sums.get(asset):
                 raise RuntimeError(f"{asset} does not match the checksum its release publishes")
             with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
@@ -380,7 +383,8 @@ def released_surface(repo: Path, commit: str) -> dict[str, Any]:
         archive = subprocess.run(["git", "-C", str(repo), "archive", commit], capture_output=True, check=True).stdout
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             tar.extractall(tree, filter="data")
-        return build(Path(tree), released=True)
+        document: dict[str, Any] = build(Path(tree), released=True)
+        return document
 
 
 @dataclass(frozen=True)

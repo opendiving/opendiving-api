@@ -7494,3 +7494,15 @@ nobody: the local stack says `all`, and whoever names a feature on an instance l
 which a mistyped name leaves dark. `GET /config` repeats the entries, `all` included, since
 expanding it needs that registry. An off feature's routes leave the API document through
 `Application.routes`, read only while `openapi()` builds, so the document stays FastAPI's own.
+
+## The contract check compares where a change was cut, and a queue entry on its own commit
+
+`api-contract` compares a pull request's head with its merge base on `main`, so a change `main` made
+since is the branch's in neither direction; against `main`'s tip it would be reported as the branch
+undoing it. In the queue an entry is its squash commit on top of the entries ahead of it, so it is
+judged against its parent with that commit's subject as its title: against the group's base it would
+carry the breaks and the markers of those ahead. Both rest on the queue's `SQUASH` merge method, its
+`ALLGREEN` grouping and the `PR_TITLE` squash title; under another, the subject is no longer the
+title. The released surface leaves gated operations out, since an off feature has no client to
+break. Rejected: oasdiff's GitHub Action, a Docker action on a moving tag whose default uploads the
+comparison.
