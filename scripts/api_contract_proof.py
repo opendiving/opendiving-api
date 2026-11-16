@@ -102,14 +102,6 @@ def _is_object_ref(doc: Document, schema: Schema) -> bool:
     return isinstance(ref, str) and doc["components"]["schemas"][ref.rsplit("/", 1)[-1]].get("type") == "object"
 
 
-def _is_enum_ref(doc: Document, schema: Schema, only: set[str]) -> str | None:
-    ref = schema.get("$ref")
-    if not isinstance(ref, str):
-        return None
-    name = ref.rsplit("/", 1)[-1]
-    return name if "enum" in doc["components"]["schemas"][name] and contexts(doc)[name] == only else None
-
-
 # -- what a mutation is aimed at ---------------------------------------------------------------
 
 
