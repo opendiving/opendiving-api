@@ -122,7 +122,9 @@ async def read_dive_conditions_current(
 ) -> DiveConditionsCurrentRead:
     """The surface weather and the sea now at a position, for a map to show at its centre: the
     forecast's hour nearest the request, with wind in metres per second and its direction the one
-    it blows from, and the marine model's sea at that hour.
+    it blows from, and the marine model's sea at that hour. The air temperature is the median of
+    three forecast models at that hour, and the forecast's own where one of them has none or they
+    could not be asked.
 
     The sea is the one a dive's record carries: the sea level above the model's mean, the tide
     `high` or `low` within half an hour of a turn and `rising` or `falling` otherwise, the high or

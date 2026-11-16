@@ -31,8 +31,10 @@ by a cool-down after a 429 or a refused key and by a per-dive strike count that 
 whose own request keeps failing, or that the run cannot handle at all.
 """
 
+import asyncio
 import logging
 import math
+import statistics
 import typing
 from collections import Counter
 from collections.abc import Callable
@@ -1038,6 +1040,29 @@ async def _current_sea(
     return _sea_read(values.get, zone) if values else None
 
 
+async def _current_temperature(latitude: float, longitude: float, now: datetime, hour: datetime) -> float | None:
+    """The median of `open_meteo.TEMPERATURE_MODELS`' air temperatures at the weather's `hour`, or
+    `None` where one of them has none for that hour, the request is refused or it could not be
+    asked: the weather then keeps the forecast's own."""
+    answer = await open_meteo.fetch_current_temperatures(latitude, longitude, now)
+    if isinstance(answer, open_meteo.CouldNotAsk):
+        await _stop_asking(answer)
+        return None
+    if isinstance(answer, open_meteo.Refused):
+        return None
+    times = _times(answer.hourly)
+    at = int(hour.timestamp())
+    if times is None or at not in times:
+        return None
+    index = times.index(at)
+    readings = [
+        reading
+        for model in open_meteo.TEMPERATURE_MODELS
+        if (reading := _number(answer.hourly, f"{open_meteo.TEMPERATURE_VARIABLE}_{model}", index)) is not None
+    ]
+    return statistics.median(readings) if len(readings) == len(open_meteo.TEMPERATURE_MODELS) else None
+
+
 async def current_conditions(
     db: AsyncSession, *, latitude: float, longitude: float, now: datetime
 ) -> DiveConditionsCurrentRead | None:
@@ -1046,8 +1071,9 @@ async def current_conditions(
 
     The position is rounded as a dive's is, and asked about under the same budget and cool-down.
     A request the forecast refuses, an answer with no hours and a zone this server cannot read
-    answer with `at`, `position`, `weather` and `sea` null. The sea is asked only once the weather
-    has answered (`_current_sea`).
+    answer with `at`, `position`, `weather` and `sea` null. The air temperature is the models'
+    median where they answer (`_current_temperature`). They and the sea are asked only once the
+    weather has answered, and together, so the map waits on the slower of the two.
     """
     rounded_latitude, rounded_longitude = (
         await db.execute(select(_rounded(literal(latitude, Float)), _rounded(literal(longitude, Float))))
@@ -1072,10 +1098,15 @@ async def current_conditions(
         return nothing
     values = _weather_values(answer, now)
     hour = datetime.fromtimestamp(nearest[1], UTC)
-    sea = await _current_sea(rounded_latitude, rounded_longitude, now, hour, zone)
+    temperature, sea = await asyncio.gather(
+        _current_temperature(rounded_latitude, rounded_longitude, now, hour),
+        _current_sea(rounded_latitude, rounded_longitude, now, hour, zone),
+    )
+    if temperature is not None:
+        values["air_temperature"] = temperature
     return DiveConditionsCurrentRead(
         provider=open_meteo.PROVIDER,
-        attribution=open_meteo.READINGS_ATTRIBUTION if sea is None else open_meteo.TIDES_ATTRIBUTION,
+        attribution=open_meteo.current_attribution(temperature=temperature is not None, tides=sea is not None),
         # The zone's offset at that hour, not the answer's `utc_offset_seconds`, which is now's.
         at=hour.astimezone(zone),
         position=ConditionsPosition(latitude=rounded_latitude, longitude=rounded_longitude),
