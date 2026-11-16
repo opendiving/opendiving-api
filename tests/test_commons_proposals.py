@@ -1220,7 +1220,7 @@ class TestTheCallersProposals:
     ) -> None:
         uuids = await self._one_in_each_status_and_two_waiting(http, db, diver, reviewer, signed)
 
-        waiting = {"status": "waiting", "items_per_page": 1}
+        waiting: dict[str, str | int] = {"status": "waiting", "items_per_page": 1}
         pages = [(await http.get("/dive-site-proposals", params={**waiting, "page": n})).json() for n in (1, 2)]
 
         assert [page["data"][0]["uuid"] for page in pages] == uuids["waiting"]
