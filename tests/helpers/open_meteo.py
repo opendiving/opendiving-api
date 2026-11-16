@@ -79,7 +79,7 @@ def current_sea_answers(now: datetime) -> Callable[[httpx.Request], httpx.Respon
 
 def temperatures_answers(now: datetime) -> Callable[[httpx.Request], httpx.Response]:
     """The Blue Hole's recorded air temperature from three models, its three hours moved as
-    `forecast_answers` moves the forecast's: 26.8, 24.9 and 25.0 at the middle one."""
+    `forecast_answers` moves the forecast's: 26.5, 24.3 and 24.7 at the middle one."""
 
     def answer(request: httpx.Request) -> httpx.Response:
         body = fixture("dahab-2026-11-16-temperatures.json")

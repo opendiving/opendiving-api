@@ -139,7 +139,7 @@ class TestAnAnswer:
             "position": {"latitude": 28.57, "longitude": 34.54},
             "weather": {
                 "model": "best_match",
-                "air_temperature": 25.0,
+                "air_temperature": 24.7,
                 "relative_humidity": 36.0,
                 "wind_speed": 5.12,
                 "wind_direction": 343.0,
@@ -270,7 +270,7 @@ class TestTheAnswerCache:
         (forecast,) = [key for key in redis.store if key.startswith("conditions:v1:forecast:")]
         assert forecast.startswith("conditions:v1:forecast:28.57:34.54:2026-11-09T17:")
         (temperatures,) = [key for key in redis.store if key.startswith("conditions:v1:temperatures:")]
-        assert temperatures.startswith("conditions:v1:temperatures:28.57:34.54:2026-11-09T17:GMT:")
+        assert temperatures.startswith("conditions:v1:temperatures:28.57:34.54:2026-11-09T17:auto:")
         (sea,) = [key for key in redis.store if key.startswith("conditions:v1:sea:")]
         assert sea.startswith("conditions:v1:sea:28.57:34.54:2026-11-09T17:GMT:")
         assert redis.expiries[forecast] == redis.expiries[temperatures] == redis.expiries[sea] == 3600
@@ -330,24 +330,50 @@ class TestTheAirTemperature:
         assert (params["past_hours"], params["forecast_hours"]) == ("1", "2")
         assert (params["hourly"], params["timeformat"]) == ("temperature_2m", "unixtime")
         assert params["models"].split(",") == list(open_meteo.TEMPERATURE_MODELS)
-        assert "timezone" not in params
+        assert params["timezone"] == "auto"
 
     @pytest.mark.asyncio
     async def test_the_median_is_read_at_the_weathers_hour(self, async_db: AsyncSession) -> None:
-        """Past the half hour the weather reads 18:00 UTC, where the models say 26.5, 24.3 and 24.7."""
+        """Past the half hour the weather reads 18:00 UTC, where the models say 26.1, 23.8 and 24.6."""
         later = NOW.replace(minute=40)
 
         with FakeOpenMeteo(current_answers(later)):
             body = _body(await _current(async_db, later))
 
         assert body["at"] == "2026-11-09T20:00:00+02:00"
-        assert body["weather"]["air_temperature"] == 24.7
+        assert body["weather"]["air_temperature"] == 24.6
+
+    @pytest.mark.asyncio
+    async def test_a_half_hour_zones_hours_are_the_models_too(self, async_db: AsyncSession) -> None:
+        """Colombo is +05:30, and the provider's hours for it are half past UTC's."""
+        now = datetime(2026, 11, 9, 17, 20, tzinfo=UTC)
+        half_past = int(datetime(2026, 11, 9, 17, 30, tzinfo=UTC).timestamp())
+        times = [half_past - 3600, half_past, half_past + 3600]
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            if "marine" in request.url.host:
+                return httpx.Response(400, json={"error": True, "reason": "No data"})
+            if "models" not in request.url.params:
+                return _hours("Asia/Colombo", times)
+            hourly = {
+                "time": times,
+                "temperature_2m_icon_seamless": [25.4, 25.0, 24.7],
+                "temperature_2m_ecmwf_ifs": [25.1, 25.2, 25.7],
+                "temperature_2m_meteofrance_seamless": [28.1, 27.6, 27.1],
+            }
+            return httpx.Response(200, json={"timezone": "Asia/Colombo", "hourly": hourly})
+
+        with FakeOpenMeteo(answer):
+            body = _body(await _current(async_db, now, (6.93, 79.85)))
+
+        assert body["at"] == "2026-11-09T23:00:00+05:30"
+        assert body["weather"]["air_temperature"] == 25.2
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "temperatures",
         [
-            _temperatures(lambda hourly: hourly.update(temperature_2m_ecmwf_ifs=[25.4, None, 24.3])),
+            _temperatures(lambda hourly: hourly.update(temperature_2m_ecmwf_ifs=[24.9, None, 23.8])),
             _temperatures(lambda hourly: hourly.pop("temperature_2m_meteofrance_seamless")),
             _temperatures(lambda hourly: hourly.update(time=[at + 3 * 3600 for at in hourly["time"]])),
             lambda request: httpx.Response(400, json={"error": True, "reason": "Invalid model"}),
@@ -391,7 +417,7 @@ class TestTheAirTemperature:
         with FakeOpenMeteo(lambda request: inland(request) if "marine" in request.url.host else handler(request)):
             body = _body(await _current(async_db))
 
-        assert body["weather"]["air_temperature"] == 25.0
+        assert body["weather"]["air_temperature"] == 24.7
         assert body["sea"] is None
         assert body["attribution"] == (
             "[Weather data by Open-Meteo.com](https://open-meteo.com/) "

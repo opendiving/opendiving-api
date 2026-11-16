@@ -109,9 +109,9 @@ TIMEOUT_SECONDS = 35.0
 DEADLINE_SECONDS = 40.0
 # The dive form's preview (`GET /dive-conditions/lookup`) and the map's weather now
 # (`GET /dive-conditions/current`), which a diver is waiting on: five times the slowest warm
-# answer, and either route's two calls inside about ten seconds. A cold archive call is
-# not waited for - the preview is a 503 the form ignores, and the worker's fetch after the
-# save writes the same values.
+# answer, and either route's calls inside about ten seconds - the map's second and third are
+# asked together. A cold archive call is not waited for - the preview is a 503 the form
+# ignores, and the worker's fetch after the save writes the same values.
 PREVIEW_TIMEOUT_SECONDS = 4.0
 PREVIEW_DEADLINE_SECONDS = 5.0
 # An answer is a few kilobytes: nine variables over two days, five over three.
@@ -363,7 +363,8 @@ async def fetch_current_temperatures(
     deadline: float = PREVIEW_DEADLINE_SECONDS,
 ) -> Outcome:
     """The air temperature over `fetch_current_weather`'s hours as each of `TEMPERATURE_MODELS`
-    has it, cached under the same UTC hour."""
+    has it, cached under the same UTC hour. In the coordinate's zone, as the weather is asked: the
+    provider's hours are the zone's own, which in a half-hour zone are none of UTC's."""
     hour = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
     return await _ask(
         "temperatures",
@@ -373,7 +374,7 @@ async def fetch_current_temperatures(
         window=_CURRENT_WEATHER_WINDOW,
         span=hour.strftime("%Y-%m-%dT%H"),
         extra={},
-        timezone=None,
+        timezone="auto",
         timeout=timeout,
         deadline=deadline,
         models=TEMPERATURE_MODELS,
