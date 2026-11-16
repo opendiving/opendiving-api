@@ -6,7 +6,7 @@ label: `timezone=auto` labels every hour of every date with the zone's offset *a
 time*, so a January day comes back wearing the summer offset. The zone's *name* is the one
 thing read from that answer, and only for a dive whose own offset is unknown. The weather and
 the sea now at a place ask the forecast and the marine model for the hours around the provider's
-current one.
+current one, and the forecast again for the air temperature alone as `TEMPERATURE_MODELS` have it.
 
 What the caller gets back is one of three things, and keeping them apart is this module's
 job. `Answered` is the provider's body - cached, since another dive at the same place and
@@ -47,23 +47,33 @@ READINGS_ATTRIBUTION = (
 # A dive's record, which carries values derived from the readings: the licence asks that a change
 # be indicated.
 ATTRIBUTION = f"{READINGS_ATTRIBUTION}, with weather, waves and tide times derived from it"
-# The map's conditions now with the sea, whose tide state and turns are derived and whose weather
-# and waves are passed on as they came.
-TIDES_ATTRIBUTION = f"{READINGS_ATTRIBUTION}, with tide times derived from it"
+
+
+def current_attribution(*, temperature: bool, tides: bool) -> str:
+    """The credit for the map's conditions now, naming what is derived rather than passed on as it
+    came: the air temperature where it is the models' median, the tide state and turns where there
+    is a sea."""
+    derived = [name for name, is_derived in (("air temperature", temperature), ("tide times", tides)) if is_derived]
+    if not derived:
+        return READINGS_ATTRIBUTION
+    return f"{READINGS_ATTRIBUTION}, with {' and '.join(derived)} derived from it"
+
 
 _FREE_HOSTS = {
     "weather": "https://archive-api.open-meteo.com",
     "sea": "https://marine-api.open-meteo.com",
     "forecast": "https://api.open-meteo.com",
+    "temperatures": "https://api.open-meteo.com",
 }
 _CUSTOMER_HOSTS = {
     "weather": "https://customer-archive-api.open-meteo.com",
     "sea": "https://customer-marine-api.open-meteo.com",
     "forecast": "https://customer-api.open-meteo.com",
+    "temperatures": "https://customer-api.open-meteo.com",
 }
-_PATHS = {"weather": "/v1/archive", "sea": "/v1/marine", "forecast": "/v1/forecast"}
+_PATHS = {"weather": "/v1/archive", "sea": "/v1/marine", "forecast": "/v1/forecast", "temperatures": "/v1/forecast"}
 
-# Nine and five: under the ten variables a call may carry before the provider charges it as
+# Nine and five: under the ten series a call may carry before the provider charges it as
 # several, as the request's two and three days are under its two weeks.
 WEATHER_VARIABLES = (
     "temperature_2m",
@@ -83,6 +93,13 @@ SEA_VARIABLES = (
     "wave_period",
     "swell_wave_height",
 )
+TEMPERATURE_VARIABLE = "temperature_2m"
+# Whose median the map's air temperature now is. `best_match` is one model for a region, and that
+# one can sit degrees off along a coast - ICON reads the Gulf of Aqaba some two degrees warm -
+# where the median of three global models from three centres does not, and is no worse elsewhere.
+# The temperature alone, in a request of its own: a variable counts once per model, so these three
+# series are one call where the nine variables from three models would be charged as 2.7.
+TEMPERATURE_MODELS = ("icon_seamless", "ecmwf_ifs", "meteofrance_seamless")
 
 # Measured against Open-Meteo itself, not copied: a warm archive or marine call answers in
 # 0.3 to 1 s, and a cold archive call for a place and decade nobody had asked about took 31 s
@@ -92,9 +109,9 @@ TIMEOUT_SECONDS = 35.0
 DEADLINE_SECONDS = 40.0
 # The dive form's preview (`GET /dive-conditions/lookup`) and the map's weather now
 # (`GET /dive-conditions/current`), which a diver is waiting on: five times the slowest warm
-# answer, and either route's two calls inside about ten seconds. A cold archive call is
-# not waited for - the preview is a 503 the form ignores, and the worker's fetch after the
-# save writes the same values.
+# answer, and either route's calls inside about ten seconds - the map's second and third are
+# asked together. A cold archive call is not waited for - the preview is a 503 the form
+# ignores, and the worker's fetch after the save writes the same values.
 PREVIEW_TIMEOUT_SECONDS = 4.0
 PREVIEW_DEADLINE_SECONDS = 5.0
 # An answer is a few kilobytes: nine variables over two days, five over three.
@@ -138,12 +155,10 @@ class Refused:
 type Outcome = Answered | Refused | CouldNotAsk
 
 
-def _variables(kind: str) -> tuple[str, ...]:
-    return SEA_VARIABLES if kind == "sea" else WEATHER_VARIABLES
-
-
-def _cache_key(kind: str, latitude: float, longitude: float, span: str, timezone: str | None) -> str:
-    digest = hashlib.sha256(",".join(_variables(kind)).encode()).hexdigest()[:8]
+def _cache_key(
+    kind: str, latitude: float, longitude: float, span: str, timezone: str | None, series: tuple[str, ...]
+) -> str:
+    digest = hashlib.sha256(",".join(series).encode()).hexdigest()[:8]
     return f"conditions:{_CACHE_VERSION}:{kind}:{latitude:.2f}:{longitude:.2f}:{span}:{timezone or 'GMT'}:{digest}"
 
 
@@ -183,15 +198,18 @@ async def _ask(
     latitude: float,
     longitude: float,
     *,
+    variables: tuple[str, ...],
     window: dict[str, str],
     span: str,
     extra: dict[str, Any],
     timezone: str | None,
     timeout: float,
     deadline: float,
+    models: tuple[str, ...] = (),
 ) -> Outcome:
-    """`window` is the request's time parameters and `span` the cache key's spelling of them."""
-    key = _cache_key(kind, latitude, longitude, span, timezone)
+    """`window` is the request's time parameters and `span` the cache key's spelling of them.
+    With `models`, each variable comes back once per model, as `{variable}_{model}`."""
+    key = _cache_key(kind, latitude, longitude, span, timezone, (*variables, *models))
     cached = await read_cached(key, _parse)
     if cached is not None:
         return cached
@@ -207,10 +225,12 @@ async def _ask(
         "latitude": f"{latitude:.2f}",
         "longitude": f"{longitude:.2f}",
         **window,
-        "hourly": ",".join(_variables(kind)),
+        "hourly": ",".join(variables),
         "timeformat": "unixtime",
         **extra,
     }
+    if models:
+        params["models"] = ",".join(models)
     if timezone is not None:
         params["timezone"] = timezone
     api_key = settings.DIVE_CONDITIONS_OPEN_METEO_API_KEY
@@ -270,6 +290,7 @@ async def fetch_weather(
         "weather",
         latitude,
         longitude,
+        variables=WEATHER_VARIABLES,
         **_days(start, end),
         extra={"wind_speed_unit": "ms"},
         timezone="auto" if auto_zone else None,
@@ -290,8 +311,20 @@ async def fetch_sea(
     """The marine model's hourly sea level, sea temperature and waves from `start` to `end`,
     inclusive, in UTC days."""
     return await _ask(
-        "sea", latitude, longitude, **_days(start, end), extra={}, timezone=None, timeout=timeout, deadline=deadline
+        "sea",
+        latitude,
+        longitude,
+        variables=SEA_VARIABLES,
+        **_days(start, end),
+        extra={},
+        timezone=None,
+        timeout=timeout,
+        deadline=deadline,
     )
+
+
+# The hour before the provider's current one to the hour after.
+_CURRENT_WEATHER_WINDOW = {"past_hours": "1", "forecast_hours": "2"}
 
 
 async def fetch_current_weather(
@@ -311,12 +344,40 @@ async def fetch_current_weather(
         "forecast",
         latitude,
         longitude,
-        window={"past_hours": "1", "forecast_hours": "2"},
+        variables=WEATHER_VARIABLES,
+        window=_CURRENT_WEATHER_WINDOW,
         span=hour.strftime("%Y-%m-%dT%H"),
         extra={"wind_speed_unit": "ms"},
         timezone="auto",
         timeout=timeout,
         deadline=deadline,
+    )
+
+
+async def fetch_current_temperatures(
+    latitude: float,
+    longitude: float,
+    now: datetime,
+    *,
+    timeout: float = PREVIEW_TIMEOUT_SECONDS,
+    deadline: float = PREVIEW_DEADLINE_SECONDS,
+) -> Outcome:
+    """The air temperature over `fetch_current_weather`'s hours as each of `TEMPERATURE_MODELS`
+    has it, cached under the same UTC hour. In the coordinate's zone, as the weather is asked: the
+    provider's hours are the zone's own, which in a half-hour zone are none of UTC's."""
+    hour = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+    return await _ask(
+        "temperatures",
+        latitude,
+        longitude,
+        variables=(TEMPERATURE_VARIABLE,),
+        window=_CURRENT_WEATHER_WINDOW,
+        span=hour.strftime("%Y-%m-%dT%H"),
+        extra={},
+        timezone="auto",
+        timeout=timeout,
+        deadline=deadline,
+        models=TEMPERATURE_MODELS,
     )
 
 
@@ -342,6 +403,7 @@ async def fetch_current_sea(
         "sea",
         latitude,
         longitude,
+        variables=SEA_VARIABLES,
         window={"past_hours": str(CURRENT_SEA_HOURS), "forecast_hours": str(CURRENT_SEA_HOURS + 1)},
         span=hour.strftime("%Y-%m-%dT%H"),
         extra={},

@@ -77,10 +77,31 @@ def current_sea_answers(now: datetime) -> Callable[[httpx.Request], httpx.Respon
     return answer
 
 
+def temperatures_answers(now: datetime) -> Callable[[httpx.Request], httpx.Response]:
+    """The Blue Hole's recorded air temperature from three models, its three hours moved as
+    `forecast_answers` moves the forecast's: 26.5, 24.3 and 24.7 at the middle one."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        body = fixture("dahab-2026-11-16-temperatures.json")
+        times = body["hourly"]["time"]
+        hour = int(now.astimezone(UTC).replace(minute=0, second=0, microsecond=0).timestamp())
+        body["hourly"]["time"] = [at + hour - times[1] for at in times]
+        return httpx.Response(200, json=body)
+
+    return answer
+
+
 def current_answers(now: datetime) -> Callable[[httpx.Request], httpx.Response]:
-    """The forecast and the marine model as the map's conditions now ask them."""
-    weather, sea = forecast_answers(now), current_sea_answers(now)
-    return lambda request: sea(request) if "marine" in request.url.host else weather(request)
+    """The forecast, the temperature models and the marine model as the map's conditions now ask
+    them."""
+    weather, temperatures, sea = forecast_answers(now), temperatures_answers(now), current_sea_answers(now)
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if "marine" in request.url.host:
+            return sea(request)
+        return temperatures(request) if "models" in request.url.params else weather(request)
+
+    return answer
 
 
 class FakeOpenMeteo:
@@ -105,7 +126,11 @@ class FakeOpenMeteo:
         self._patcher.stop()
 
     def asked(self, kind: str) -> list[httpx.Request]:
-        if kind == "forecast":
-            return [request for request in self.requests if request.url.path == "/v1/forecast"]
+        if kind in ("forecast", "temperatures"):
+            return [
+                request
+                for request in self.requests
+                if request.url.path == "/v1/forecast" and ("models" in request.url.params) == (kind == "temperatures")
+            ]
         host = "marine" if kind == "sea" else "archive"
         return [request for request in self.requests if host in request.url.host]
