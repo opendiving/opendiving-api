@@ -687,3 +687,25 @@ class TestTheBuffer:
         (second,) = await external_requests.take_buffered()
 
         assert (first.count, first.duration_ms_total, second.count, second.duration_ms_total) == (1, 10, 1, 20)
+
+    @pytest.mark.asyncio
+    async def test_a_key_scan_returns_twice_is_taken_once(self, redis: FakeRedis) -> None:
+        """Redis's `SCAN` may repeat a key. Taken twice, with a count landing between, it would
+        give the upsert two rows of one identity, which Postgres refuses for the whole batch."""
+        await _count(_SEA, Outcome.OK, 10)
+        (key,) = redis.counters
+        getdel = redis.getdel
+
+        async def repeated(cursor: int = 0, match: str = "*", count: int | None = None) -> tuple[int, list[str]]:
+            return 0, [key, key]
+
+        async def counted_meanwhile(taken_key: str) -> bytes | None:
+            taken = await getdel(taken_key)
+            await _count(_SEA, Outcome.OK, 20)
+            return taken
+
+        with patch.object(redis, "scan", repeated), patch.object(redis, "getdel", counted_meanwhile):
+            rows = await external_requests.take_buffered()
+
+        assert [(row.count, row.duration_ms_total) for row in rows] == [(1, 10)]
+        assert _buffered(redis) == {("open-meteo", "sea", "ok"): (1, 20, 20)}

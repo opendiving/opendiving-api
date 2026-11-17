@@ -209,11 +209,13 @@ async def take_buffered() -> list[Buffered]:
         return []
     taken: list[Buffered] = []
     try:
-        keys: list[str] = []
+        # A dict, as an ordered set: `SCAN` may return a key twice, and a second `GETDEL` could
+        # take a count made since the first, a second row of one identity for the upsert.
+        keys: dict[str, None] = {}
         cursor = 0
         while True:
             cursor, batch = await client.scan(cursor, match=f"{_KEY_PREFIX}:*", count=100)
-            keys.extend(key.decode() if isinstance(key, bytes) else key for key in batch)
+            keys.update(dict.fromkeys(key.decode() if isinstance(key, bytes) else key for key in batch))
             if not cursor:
                 break
         for key in keys:
