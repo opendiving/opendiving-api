@@ -13,8 +13,10 @@ the two documents are compared by `oasdiff` at the release pinned below, which i
 first use and run on local files only.
 
 What fails is the table in `ROWS`, and a change no row covers when the differ rates it ERR. The
-rows are the contributor guide's definition of a wire break; `api_contract_proof.py` proves each
-one against the real document.
+rows are the contributor guide's definition of a wire break, but for its row for a renamed
+component, which no rule of the differ's carries: that one holds because each side is rewritten
+first so a union's branches are compared by what they hold (`union_branches_inlined`).
+`api_contract_proof.py` proves every row, that one included, against the real document.
 """
 
 import argparse
@@ -318,13 +320,68 @@ def null_unions_as_one_of(node: Any) -> Any:
     return out
 
 
+_COMPONENT = "#/components/schemas/"
+
+
+def union_branches_inlined(document: dict[str, Any]) -> dict[str, Any]:
+    """`document` with each bare-`$ref` branch of a null union or a discriminated union replaced by
+    the component it names.
+
+    The differ pairs `$ref` branches by component name, so a renamed branch reads as one branch
+    removed and another added, ERR in a response, where nothing changed on the wire. Inlined, a branch
+    is compared by what it holds, and a change inside it is reported as that member. The differ pairs
+    inline branches by `title`, which FastAPI fills with the class name, so an inlined branch drops
+    it: a null union's other branch is null, and the differ pairs one untitled branch removed with one
+    added. A discriminated union's branch is titled with its mapping value, its name on the wire, so
+    each keeps its counterpart however many change at once; one with no mapping value is named on the
+    wire by its component, and stays a reference. A union of several `$ref` branches with no
+    discriminator has no name for a branch but its component's, and is left as it is. A component
+    stays a reference inside its own inlined copy, so one that refers to itself terminates."""
+    schemas: dict[str, Any] = document.get("components", {}).get("schemas", {})
+
+    def branch(node: Any, wire_names: dict[str, str] | None, inlining: frozenset[str]) -> Any:
+        ref = node.get("$ref") if isinstance(node, dict) and len(node) == 1 else None
+        if not isinstance(ref, str) or not ref.startswith(_COMPONENT):
+            return walk(node, inlining)
+        name = ref.removeprefix(_COMPONENT)
+        if name not in schemas or name in inlining or (wire_names is not None and ref not in wire_names):
+            return node
+        inlined = walk(schemas[name], inlining | {name})
+        inlined.pop("title", None)
+        if wire_names is not None:
+            inlined["title"] = wire_names[ref]
+        return inlined
+
+    def walk(node: Any, inlining: frozenset[str]) -> Any:
+        if isinstance(node, list):
+            return [walk(value, inlining) for value in node]
+        if not isinstance(node, dict):
+            return node
+        mapping = node.get("discriminator", {}).get("mapping") if isinstance(node.get("discriminator"), dict) else None
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key in ("anyOf", "oneOf") and isinstance(value, list):
+                if isinstance(mapping, dict):
+                    wire_names = {target: wire for wire, target in mapping.items()}
+                    out[key] = [branch(each, wire_names, inlining) for each in value]
+                    continue
+                if len(value) == 2 and {"type": "null"} in value:
+                    out[key] = [branch(each, None, inlining) for each in value]
+                    continue
+            out[key] = walk(value, inlining)
+        return out
+
+    rewritten: dict[str, Any] = walk(document, frozenset())
+    return rewritten
+
+
 def diff(base: dict[str, Any], revision: dict[str, Any]) -> list[Finding]:
     """What changed from `base` to `revision`, each change at the level the table gives it."""
     binary = oasdiff()
     with tempfile.TemporaryDirectory(prefix="api-contract-") as scratch:
         work = Path(scratch)
-        (work / "base.json").write_text(json.dumps(null_unions_as_one_of(base)))
-        (work / "revision.json").write_text(json.dumps(null_unions_as_one_of(revision)))
+        for name, document in (("base.json", base), ("revision.json", revision)):
+            (work / name).write_text(json.dumps(null_unions_as_one_of(union_branches_inlined(document))))
         (work / "levels.txt").write_text(severity_levels())
         # Run where no `.oasdiff.*` file can be picked up, with no configuration from the environment.
         env = {name: value for name, value in os.environ.items() if name != "OASDIFF_CONFIG"}

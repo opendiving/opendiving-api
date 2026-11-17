@@ -409,22 +409,31 @@ not read here until its gate comes out.
 as failing, or one in no row that `oasdiff checks` prints at ERR. A change in no row that it prints
 at WARN or INFO passes.
 
-| A change to the released surface                                                                   | Verdict |
-| -------------------------------------------------------------------------------------------------- | ------- |
-| An operation is removed, or loses a success status or its JSON body                                | fails   |
-| A response member is removed or renamed, whether or not its schema lists it as required            | fails   |
-| A response member changes type, or one that was never null may now be                              | fails   |
-| A value joins an enum a response carries                                                           | fails   |
-| A request-body member is removed or renamed                                                        | fails   |
-| A request-body member or a parameter becomes required, or a new required one appears               | fails   |
-| A request-body member or a parameter changes type, stops accepting null, or loses an enum value    | fails   |
-| A parameter is removed                                                                             | fails   |
-| An operation, a response member, an optional request-body member or an optional parameter is added | passes  |
-| A response member stops being listed as required, with nothing else about it changed               | passes  |
-| A value leaves an enum a response carries, or joins an enum a request accepts                      | passes  |
-| A request-body member or a parameter starts accepting null                                         | passes  |
-| A response member that could be null never is                                                      | passes  |
-| A description, a title, an example or the document's version changes                               | passes  |
+Renaming a component schema is not a wire break: a client meets the members, never the name. The
+check compares a branch of a null union or a discriminated union by what it holds, so a renamed
+branch passes and a change inside one is reported at its member's row. A union of several `$ref`
+branches with no discriminator, which the document does not hold today, is the exception: its
+branches are known only by their components' names, so a rename there reads as a branch added and
+fails. A client whose list of bodies names the component (*A client's bodies* below) still fails its
+own check until that list is renamed with it.
+
+| A change to the released surface                                                                                                                     | Verdict |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| An operation is removed, or loses a success status or its JSON body                                                                                  | fails   |
+| A response member is removed or renamed, whether or not its schema lists it as required                                                              | fails   |
+| A response member changes type, or one that was never null may now be                                                                                | fails   |
+| A value joins an enum a response carries                                                                                                             | fails   |
+| A request-body member is removed or renamed                                                                                                          | fails   |
+| A request-body member or a parameter becomes required, or a new required one appears                                                                 | fails   |
+| A request-body member or a parameter changes type, stops accepting null, or loses an enum value                                                      | fails   |
+| A parameter is removed                                                                                                                               | fails   |
+| An operation, a response member, an optional request-body member or an optional parameter is added                                                   | passes  |
+| A response member stops being listed as required, with nothing else about it changed                                                                 | passes  |
+| A value leaves an enum a response carries, or joins an enum a request accepts                                                                        | passes  |
+| A request-body member or a parameter starts accepting null                                                                                           | passes  |
+| A response member that could be null never is                                                                                                        | passes  |
+| A description, a title, an example or the document's version changes                                                                                 | passes  |
+| A component schema is renamed, with nothing else about it changed, unless it is a branch of a union of several `$ref` branches with no discriminator | passes  |
 
 Where the rows differ from the differ's own defaults, this is why. A removed response member fails
 whether or not it was listed as required, because the list follows whether the model gives a default
@@ -434,9 +443,11 @@ forbids what it does not declare and a client still sending the member is refuse
 parameter fails because the API ignores a query parameter it does not know, so a client's filter
 stops applying without an error. A value joining a response's enum fails because a client may decode
 that vocabulary strictly. `ROWS` in `scripts/api_contract.py` is this table as the differ's rules,
-and the check's job proves every row on each run by mutating the real document
-(`scripts/api_contract_proof.py`), so a differ upgrade that moves a verdict fails the pull request
-that makes it.
+but for the renamed component, which no rule of the differ's carries: that row holds because each
+side's union branches are inlined before the differ runs. The check's job proves every row on each
+run by mutating the real document (`scripts/api_contract_proof.py`), the rename row by renaming
+union branches and changing what is inside them, so a differ upgrade that moves a verdict fails the
+pull request that makes it.
 
 **`!` in a pull request's title marks a wire break**, the meaning Conventional Commits gives it. A
 pull request whose own commits make one fails `api-contract` unless its title carries `!` after the

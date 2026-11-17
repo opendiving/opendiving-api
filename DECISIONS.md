@@ -7529,3 +7529,14 @@ everything else here treats as a cache that may come back empty. Each row is one
 count and both durations, so an eviction drops them together. A move takes each key with `GETDEL`
 before it commits, so one that dies in between loses what it took and never counts it twice.
 Rejected: committing first and clearing after, which doubles a batch.
+
+## The contract check compares a union's branches by what they hold
+
+The differ pairs a union's `$ref` branches by component name, so renaming one reads as a branch
+removed and another added, a failure where nothing changed on the wire. Before diffing, each `$ref`
+branch of a null union or a discriminated union is inlined (`union_branches_inlined`). The differ
+pairs inline branches by title, so an inlined branch drops the class name FastAPI writes there, and
+a discriminated union's branch takes its mapping value, its name on the wire: untitled, two branches
+changed at once read as branches added, with no member named. A union of several `$ref` branches
+with no discriminator keeps the raw comparison, its branches having no other name. Rejected: `!` on
+every such rename, documented as a known false positive.

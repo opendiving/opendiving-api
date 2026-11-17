@@ -6,8 +6,9 @@
 Each row is a mutation of the released surface with its verdict asserted, and the rows that name a
 member are tried on a member spelled as a null union (`anyOf: [X, {"type": "null"}]`, the spelling
 this document uses for an optional value) as well as on one that is not; the null rows on a scalar
-and on an object. A differ upgrade that changes a verdict fails here, on the pull request that
-makes it.
+and on an object. The row for a renamed component, which `ROWS` does not carry, is proven by
+renaming union branches and changing what is inside them (`branch_mutations`). A differ upgrade
+that changes a verdict fails here, on the pull request that makes it.
 
 Every target is found in the document rather than named, so a schema renamed or removed elsewhere
 never fails this; a document that holds no member of a shape a row needs fails with that shape
@@ -20,12 +21,12 @@ import copy
 import json
 import sys
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from api_contract import ROWS, Row, diff
+from api_contract import ROWS, Finding, Row, diff
 from api_document import ROOT, build
 
 Document = dict[str, Any]
@@ -485,24 +486,312 @@ def mutations(doc: Document) -> Iterator[tuple[Row, str, Callable[[Document], No
     yield row, "the document's version changes", _bump_version
 
 
+# -- a union's branches, compared by content ---------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What a mutation must come to: a pass; a fail at `row`, with each of `members` named by a
+    break there; or, with no row, a fail at a rule of the differ's that no row covers."""
+
+    fails: bool
+    row: Row | None = None
+    members: tuple[str, ...] = ()
+
+    def holds(self, breaks: list[Finding]) -> bool:
+        if not self.fails:
+            return not breaks
+        if self.row is None:
+            return bool(breaks) and all(finding.row is None for finding in breaks)
+        at_row = [finding for finding in breaks if finding.row is self.row]
+        return bool(at_row) and all(any(f"/{name}`" in f.text for f in at_row) for name in self.members)
+
+    def __str__(self) -> str:
+        if not self.fails:
+            return "passes"
+        if self.row is None:
+            return "fails, at a rule of the differ's that no row covers"
+        named = f", naming {' and '.join(self.members)}" if self.members else ""
+        return f"fails at the row: {self.row.change}{named}"
+
+
+Mutation = Callable[[Document], None]
+
+_ROW_OF = {rule: row for row in ROWS for rule in row.rules}
+
+
+@dataclass(frozen=True)
+class UnionOf:
+    """A union whose branches name components, where it sits in the document, and whether a
+    discriminator names its branches on the wire."""
+
+    at: tuple[str | int, ...]
+    components: tuple[str, ...]
+    discriminated: bool
+
+    def node(self, doc: Document) -> Schema:
+        node: Any = doc
+        for key in self.at:
+            node = node[key]
+        found: Schema = node
+        return found
+
+
+def _branch_name(node: Any) -> str | None:
+    if isinstance(node, dict) and len(node) == 1 and isinstance(ref := node.get("$ref"), str):
+        return ref.rsplit("/", 1)[-1]
+    return None
+
+
+def unions(doc: Document) -> list[UnionOf]:
+    """Every null union with a `$ref` branch, and every discriminated union of `$ref` branches, in
+    the order a sorted walk of `doc` meets them."""
+    found: list[UnionOf] = []
+
+    def walk(node: Any, at: tuple[str | int, ...]) -> None:
+        if isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, (*at, index))
+            return
+        if not isinstance(node, dict):
+            return
+        for key in ("anyOf", "oneOf"):
+            branches = node.get(key)
+            if not isinstance(branches, list):
+                continue
+            names = tuple(name for branch in branches if (name := _branch_name(branch)))
+            if isinstance(node.get("discriminator"), dict) and len(names) == len(branches):
+                found.append(UnionOf(at, names, True))
+            elif len(branches) == 2 and _NULL in branches and names:
+                found.append(UnionOf(at, names, False))
+        for key, value in sorted(node.items()):
+            walk(value, (*at, key))
+
+    walk(doc, ())
+    return found
+
+
+def _renamed(name: str) -> str:
+    return f"{name}Renamed"
+
+
+def rename(old: str) -> Mutation:
+    """`old` renamed everywhere it is named, its title following as a renamed class's does."""
+    ref, new = f"#/components/schemas/{old}", _renamed(old)
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {key: walk(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [walk(value) for value in node]
+        return f"#/components/schemas/{new}" if node == ref else node
+
+    def apply(doc: Document) -> None:
+        rewritten = walk(doc)
+        schemas = rewritten["components"]["schemas"]
+        schemas[new] = {**schemas.pop(old), "title": new}
+        doc.clear()
+        doc.update(rewritten)
+
+    return apply
+
+
+def then(*steps: Mutation) -> Mutation:
+    def apply(doc: Document) -> None:
+        for step in steps:
+            step(doc)
+
+    return apply
+
+
+def _only_object_of(doc: Document, reached: dict[str, set[str]], name: str, body: str) -> bool:
+    schema = doc["components"]["schemas"][name]
+    return schema.get("type") == "object" and "properties" in schema and reached[name] == {body}
+
+
+def _first(candidates: Iterator[str], description: str) -> str:
+    for candidate in candidates:
+        return candidate
+    raise MissingShape(description)
+
+
+def _string_member(doc: Document, component: str, *, avoid: Collection[str] = (), optional: bool = False) -> str | None:
+    """The first member of `component`, by name, that is a string, plain or in a null union."""
+    name: str
+    for name in sorted(doc["components"]["schemas"][component]["properties"]):
+        m = Member(component, name)
+        if (
+            name not in avoid
+            and not (optional and name in m.required(doc))
+            and (plain_string(doc, m) or null_string(doc, m))
+        ):
+            return name
+    return None
+
+
+def _add_branch(union: UnionOf, like: str) -> Mutation:
+    """A branch modelled on `like` joins `union` under a wire name of its own."""
+
+    def apply(doc: Document) -> None:
+        node, schemas = union.node(doc), doc["components"]["schemas"]
+        discriminator = node["discriminator"]
+        branch = copy.deepcopy(schemas[like])
+        branch["title"] = "ContractProbe"
+        branch["properties"][discriminator["propertyName"]] = {"const": "contract-probe", "type": "string"}
+        schemas["ContractProbe"] = branch
+        node["oneOf" if "oneOf" in node else "anyOf"].append({"$ref": "#/components/schemas/ContractProbe"})
+        discriminator["mapping"]["contract-probe"] = "#/components/schemas/ContractProbe"
+
+    return apply
+
+
+def _undiscriminated(union: UnionOf) -> Mutation:
+    """`union` with no discriminator, a plain union of its branches as the framework writes one."""
+
+    def apply(doc: Document) -> None:
+        node = union.node(doc)
+        del node["discriminator"]
+        node["anyOf"] = node.pop("oneOf" if "oneOf" in node else "anyOf")
+
+    return apply
+
+
+def branch_mutations(doc: Document) -> Iterator[tuple[Verdict, str, Mutation, Mutation | None]]:
+    """Renamed union-branch components and changes inside branches, as (verdict, what is done, how,
+    and how both sides are prepared first, where they are)."""
+    schemas, reached, found = doc["components"]["schemas"], contexts(doc), unions(doc)
+    branches = {name for union in found for name in union.components}
+
+    kinds = next(
+        (
+            union
+            for union in found
+            if union.discriminated
+            and len(union.components) >= 2
+            and all(_only_object_of(doc, reached, name, "response") for name in union.components)
+        ),
+        None,
+    )
+    if kinds is None:
+        raise MissingShape("no discriminated union of objects only a response reaches")
+    first, second = kinds.components[:2]
+    discriminator = kinds.node(doc)["discriminator"]["propertyName"]
+    one = _string_member(doc, first, avoid={discriminator})
+    other = _string_member(doc, second, avoid={discriminator, one or ""})
+    if one is None or other is None:
+        raise MissingShape(f"no string member in each of {first} and {second}, under different names")
+
+    def null_branch_of(body: str, *, optional: bool) -> tuple[str, str]:
+        """A null-union branch object only `body` reaches, and a string member of it."""
+        for union in found:
+            for name in union.components if not union.discriminated else ():
+                if _only_object_of(doc, reached, name, body) and (m := _string_member(doc, name, optional=optional)):
+                    return name, m
+        raise MissingShape(f"no null-union branch object only a {body} reaches with a string member")
+
+    in_response, lost = null_branch_of("response", optional=False)
+    in_request, becomes_required = null_branch_of("request", optional=True)
+    nested = _first(
+        (name for union in unions({n: schemas[n] for n in sorted(branches)}) for name in union.components),
+        "no union branch inside another union's branch",
+    )
+    outside = _first(
+        (name for name in sorted(schemas) if name not in branches and _only_object_of(doc, reached, name, "response")),
+        "no object only a response reaches, outside any union",
+    )
+
+    removed = _ROW_OF["response-optional-property-removed"]
+    passes = Verdict(False)
+    yield passes, f"{first}, a branch of a discriminated union, is renamed", rename(first), None
+    yield passes, f"{in_response}, a null-union branch a response carries, is renamed", rename(in_response), None
+    yield passes, f"{in_request}, a null-union branch a request carries, is renamed", rename(in_request), None
+    yield passes, f"{nested}, a union branch inside another union's branch, is renamed", rename(nested), None
+    yield passes, f"{outside}, outside any union, is renamed", rename(outside), None
+    yield (
+        Verdict(True, removed, (one,)),
+        f"{first} is renamed and loses {one}",
+        then(rename(first), Member(_renamed(first), one).remove),
+        None,
+    )
+    yield (
+        Verdict(True, _ROW_OF["response-property-type-changed"], (one,)),
+        f"{first} is renamed and {one} changes type",
+        then(rename(first), _set(Member(_renamed(first), one), _other_type)),
+        None,
+    )
+    yield (
+        Verdict(True, removed, (lost,)),
+        f"{in_response} is renamed and loses {lost}",
+        then(rename(in_response), Member(_renamed(in_response), lost).remove),
+        None,
+    )
+    yield (
+        Verdict(True, _ROW_OF["request-property-became-required"], (becomes_required,)),
+        f"{in_request} is renamed and {becomes_required} becomes required",
+        then(rename(in_request), _require(Member(_renamed(in_request), becomes_required))),
+        None,
+    )
+    probe: Schema = {"type": "string"}
+    yield (
+        passes,
+        f"a member joins both {first} and {second}",
+        then(_add_member(first, probe, False), _add_member(second, probe, False)),
+        None,
+    )
+    yield (
+        Verdict(True, removed, (one, other)),
+        f"{first} loses {one} and {second} loses {other}",
+        then(Member(first, one).remove, Member(second, other).remove),
+        None,
+    )
+    yield (
+        passes,
+        f"{first} and {second} are both renamed and a member joins each",
+        then(
+            rename(first),
+            rename(second),
+            _add_member(_renamed(first), probe, False),
+            _add_member(_renamed(second), probe, False),
+        ),
+        None,
+    )
+    yield (
+        Verdict(True, removed, (one, other)),
+        f"{first} and {second} are both renamed and lose {one} and {other}",
+        then(
+            rename(first), rename(second), Member(_renamed(first), one).remove, Member(_renamed(second), other).remove
+        ),
+        None,
+    )
+    yield Verdict(True), f"a new branch joins the union of {first} and {second}", _add_branch(kinds, second), None
+    yield (
+        Verdict(True),
+        f"{first} is renamed in that union with its discriminator taken away, which reads as a branch added",
+        rename(first),
+        _undiscriminated(kinds),
+    )
+
+
 def prove(doc: Document) -> list[str]:
-    """What each mutation did, and a failure line for each verdict that is not its row's."""
+    """What each mutation did, and a failure line for each verdict that is not the expected one."""
+    cases: list[tuple[Verdict, str, Mutation, Mutation | None]] = [
+        (Verdict(row.fails, row if row.fails else None), said, mutate, None) for row, said, mutate in mutations(doc)
+    ]
+    cases += branch_mutations(doc)
     lines, failures = [], 0
-    for row, said, mutate in mutations(doc):
-        revision = copy.deepcopy(doc)
+    for verdict, said, mutate, prepare in cases:
+        base = doc
+        if prepare:
+            base = copy.deepcopy(doc)
+            prepare(base)
+        revision = copy.deepcopy(base)
         mutate(revision)
-        findings = diff(doc, revision)
-        breaks = [finding for finding in findings if finding.breaks]
-        if row.fails:
-            held = any(finding.row is row for finding in breaks)
-            verdict = "fails" if breaks else "passes"
-        else:
-            held = not breaks
-            verdict = "passes" if held else "fails"
+        findings = diff(base, revision)
+        held = verdict.holds([finding for finding in findings if finding.breaks])
         failures += not held
-        lines.append(f"{'ok  ' if held else 'FAIL'} {said}: {verdict}, as the row says" if held else f"FAIL {said}")
+        lines.append(f"ok   {said}: {verdict}" if held else f"FAIL {said}")
         if not held:
-            lines.append(f"     row: {row.change} ({'fails' if row.fails else 'passes'})")
+            lines.append(f"     expected: {verdict}")
             lines += [
                 f"     {finding.level} {finding.rule}: {finding.operation} {finding.text}" for finding in findings
             ]

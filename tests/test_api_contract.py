@@ -5,6 +5,7 @@ The table of verdicts is not tested here: it needs the pinned differ, and its pr
 contract check's own job (`scripts/api_contract_proof.py`), which runs on every pull request.
 """
 
+import copy
 import importlib
 import os
 import shutil
@@ -101,6 +102,71 @@ class TestNullUnions:
         }
 
         assert api_contract.null_unions_as_one_of(node) == node
+
+
+def _ref(name: str) -> dict[str, str]:
+    return {"$ref": f"#/components/schemas/{name}"}
+
+
+def _document(schemas: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    return {"components": {"schemas": schemas}, "paths": {"/x": {"get": {"body": body}}}}
+
+
+class TestUnionBranches:
+    """What the comparison reads a union's branches as. Its verdicts are proven against the differ
+    with the table's (`scripts/api_contract_proof.py`)."""
+
+    def test_a_null_unions_branch_is_its_component_untitled(self) -> None:
+        a = {"title": "A", "type": "object", "properties": {"b": {"anyOf": [_ref("B"), {"type": "null"}]}}}
+        b = {"title": "B", "type": "string", "enum": ["x"]}
+        document = _document({"A": a, "B": b}, {"anyOf": [_ref("A"), {"type": "null"}]})
+
+        rewritten = api_contract.union_branches_inlined(document)
+
+        inner = {
+            "type": "object",
+            "properties": {"b": {"anyOf": [{"type": "string", "enum": ["x"]}, {"type": "null"}]}},
+        }
+        assert rewritten["paths"]["/x"]["get"]["body"] == {"anyOf": [inner, {"type": "null"}]}
+        assert rewritten["components"]["schemas"]["A"]["properties"]["b"]["anyOf"][0] == {
+            "type": "string",
+            "enum": ["x"],
+        }
+
+    def test_a_discriminated_unions_branch_is_titled_with_its_name_on_the_wire(self) -> None:
+        body = {
+            "discriminator": {"propertyName": "kind", "mapping": {"a": "#/components/schemas/A"}},
+            "oneOf": [_ref("A"), _ref("B")],
+        }
+        schemas = {"A": {"title": "A", "type": "object"}, "B": {"title": "B", "type": "object"}}
+
+        rewritten = api_contract.union_branches_inlined(_document(schemas, body))
+
+        # B has no mapping value, so its component's name is its name on the wire and it stays one.
+        assert rewritten["paths"]["/x"]["get"]["body"]["oneOf"] == [{"title": "a", "type": "object"}, _ref("B")]
+
+    def test_a_union_of_references_with_no_discriminator_is_left_alone(self) -> None:
+        body = {"anyOf": [_ref("A"), _ref("B")]}
+        schemas = {"A": {"title": "A", "type": "object"}, "B": {"title": "B", "type": "object"}}
+
+        assert api_contract.union_branches_inlined(_document(schemas, body))["paths"]["/x"]["get"]["body"] == body
+
+    def test_a_component_that_refers_to_itself_is_inlined_once(self) -> None:
+        node = {"title": "Node", "type": "object", "properties": {"next": {"anyOf": [_ref("Node"), {"type": "null"}]}}}
+        document = _document({"Node": node}, {"anyOf": [_ref("Node"), {"type": "null"}]})
+
+        rewritten = api_contract.union_branches_inlined(document)
+
+        once = {"type": "object", "properties": {"next": {"anyOf": [_ref("Node"), {"type": "null"}]}}}
+        assert rewritten["paths"]["/x"]["get"]["body"] == {"anyOf": [once, {"type": "null"}]}
+
+    def test_leaves_the_document_it_was_given_as_it_was(self) -> None:
+        document = _document({"A": {"title": "A", "type": "object"}}, {"anyOf": [_ref("A"), {"type": "null"}]})
+        before = copy.deepcopy(document)
+
+        api_contract.union_branches_inlined(document)
+
+        assert document == before
 
 
 # -- what is compared with what ----------------------------------------------------------------
