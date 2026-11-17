@@ -771,7 +771,7 @@ class SpeciesSettings(BaseSettings):
     SPECIES_WORMS_RATE_LIMIT_REQUESTS: int = config("SPECIES_WORMS_RATE_LIMIT_REQUESTS", default=120)
     SPECIES_WIKIDATA_RATE_LIMIT_WINDOW_SECONDS: int = config("SPECIES_WIKIDATA_RATE_LIMIT_WINDOW_SECONDS", default=60)
     SPECIES_WIKIDATA_RATE_LIMIT_REQUESTS: int = config("SPECIES_WIKIDATA_RATE_LIMIT_REQUESTS", default=300)
-    # Commons gets a pair of its own because `_claim_provider_slot` indexes its `limits` dict
+    # Commons gets a pair of its own because the slot claim indexes `external_requests._LIMITS`
     # unguarded - a provider with no entry there is a `KeyError`, not a missing throttle.
     # Lower than Wikidata's: this one is charged at most twice per *new* species (the credit
     # call and the byte fetch) rather than once per enriched search candidate, so a number

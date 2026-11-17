@@ -7520,7 +7520,7 @@ the hosted instance's, which leaves gated operations out.
 
 ## External request counts are buffered in Redis, and a move loses rather than doubles
 
-Every outbound fetch, refused slot and cache hit is counted in Redis
+Every fetch, refused slot and cache hit of the shared outbound helper is counted in Redis
 (`core/utils/external_requests.py`) and moved into `daily_external_request` by a worker cron. A
 request is out with no transaction open, so counting in Postgres at the call would reopen one, or
 take a second pooled connection, per request and per cache hit. Rejected: an upsert per event, for

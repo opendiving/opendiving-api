@@ -1,6 +1,10 @@
-"""What this instance asks of other services, counted per UTC day: the services and kinds of
-request there are, how an event ended, and the Redis buffer the worker moves into
-`daily_external_request`.
+"""What this instance asks of other services through `outbound`, counted per UTC day: the
+services and kinds of request there are, how an event ended, and the Redis buffer the worker
+moves into `daily_external_request`.
+
+Only the shared outbound helper counts. Google sign-in's token exchange and the MCP server's
+fetch of a client's metadata document each use a client of their own and are not counted: the
+first has no limit to watch, the second goes to whatever host a connecting client names.
 
 A count is buffered rather than written at the call because a request is out with no
 database transaction open, so writing it there would reopen one, or take a second pooled

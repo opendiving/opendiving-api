@@ -314,8 +314,10 @@ async def read_external_requests(
     """What this instance asked of other services on every UTC day from `from` to `to`
     inclusive, counted by service, kind of request and outcome. Superuser only.
 
-    `providers` lists every service the instance can ask and every kind of request it can send
-    each, whether or not the range holds any. `limit` is the instance's own cap on a service,
+    Counted are the requests for weather and tides, place names, species and their photos, and
+    the profile picture of an account created through Google; signing in with Google and an MCP
+    client's connection are not. `providers` lists every service counted here and every kind of
+    request counted for each, whether or not the range holds any. `limit` is the instance's own cap on a service,
     `requests` in any `window_seconds`, with `per_day` the most that admits in a UTC day rounded
     down; it is `null` for a service the instance sets no cap on.
 
