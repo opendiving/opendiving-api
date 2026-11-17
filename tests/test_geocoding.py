@@ -1126,6 +1126,21 @@ class TestThrottling:
         assert len(provider.requests) == 1
         slept.assert_awaited_once()
 
+    def test_a_slot_granted_on_the_second_try_is_counted_as_answered_and_never_skipped(
+        self, client: TestClient, fake_redis: FakeRedis
+    ):
+        with (
+            _responds(_photon(MOALBOAL_CEBU)),
+            patch("src.app.core.utils.outbound.sleep", new_callable=AsyncMock),
+            patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock) as provider_limit,
+        ):
+            provider_limit.side_effect = [RateLimitException("Too many requests."), None]
+
+            _search(client, "moalboal")
+
+        counted = [key.split(":", 2)[2] for key in fake_redis.counters]
+        assert counted == ["photon:search:ok"]
+
     def test_never_waits_longer_than_a_second(self, client: TestClient, no_redis: None, monkeypatch: Any):
         """Capped independently of the window, so an operator who throttles their own
         Nominatim gently can't turn that into a request held open for a minute."""

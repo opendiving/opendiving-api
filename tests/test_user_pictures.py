@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import httpx
@@ -85,6 +85,7 @@ from src.app.services.user_pictures import (
     store_picture,
 )
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_user, create_user_picture
 from tests.helpers.images import (
     C2PA_PAYLOAD,
@@ -929,6 +930,13 @@ class TestGoogleImport:
     fails because a CDN was slow is a worse outcome than an account that starts with
     initials.
     """
+
+    @pytest.fixture(autouse=True)
+    def counted(self) -> Generator[FakeRedis]:
+        """The fetch is counted, and it reaches no other Redis: no cap, no cache."""
+        redis = FakeRedis()
+        with patch("src.app.core.utils.cache.client", redis):
+            yield redis
 
     @staticmethod
     def _transport(monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:

@@ -35,6 +35,7 @@ from src.app.services import blob_store, species_photos, species_service
 from src.app.services.species_photos import ImageCandidate, PhotoCredit, normalize_file_title
 from src.app.services.species_service import PhotoAttempt, PhotoOutcome
 from tests.conftest import db_available
+from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.generators import create_species
 from tests.helpers.images import jpeg_with_exif, plain_png
 
@@ -46,7 +47,12 @@ _ANY_UUID = "01a11779-b240-78e5-b3b6-983bccb45606"
 
 @pytest.fixture(autouse=True)
 def unthrottled() -> Generator[None]:
-    with patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock):
+    """The provider caps stubbed, and a Redis double for the count every fetch adds: a preview
+    claims no slot, so it reached no Redis before it was counted."""
+    with (
+        patch("src.app.core.utils.rate_limit.enforce_rate_limit", new_callable=AsyncMock),
+        patch("src.app.core.utils.cache.client", FakeRedis()),
+    ):
         yield
 
 

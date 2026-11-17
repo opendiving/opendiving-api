@@ -42,9 +42,10 @@ import logging
 import re
 from collections.abc import Iterator
 from itertools import islice
-from typing import Any, NamedTuple
+from typing import Any, Final, NamedTuple
 
 from ..core.config import settings
+from ..core.utils.external_requests import GeocoderRequest
 from ..core.utils.outbound import Failed, claim_provider_slot, fetch_capped, read_cached, write_cached
 from ..schemas.geocoding import GeocodeResult
 from .marine_areas import water_name
@@ -116,8 +117,10 @@ _MAX_PROVIDER_WAIT_SECONDS = 1.0
 
 # One counter each, so a pin's reverse lookup and a search keystroke never contend for one
 # slot. Named for the wire format, which is what fixes the provider behind each setting.
-_PROVIDER_NOMINATIM = "nominatim"
-_PROVIDER_PHOTON = "photon"
+_PROVIDER_NOMINATIM: Final = "nominatim"
+_PROVIDER_PHOTON: Final = "photon"
+_REVERSE: GeocoderRequest = (_PROVIDER_NOMINATIM, "reverse")
+_SEARCH: GeocoderRequest = (_PROVIDER_PHOTON, "search")
 
 # ~110 m. Reverse lookups are rounded to this before both the cache key and the outbound
 # query, so every pin inside one cell shares one answer - which is the point, since the
@@ -223,7 +226,7 @@ def _cache_key(kind: str, provider_url: str, language: str, discriminator: str) 
     return f"geocode:{_CACHE_VERSION}:{provider}:{language}:{kind}:{discriminator}"
 
 
-async def _cached(key: str) -> list[GeocodeResult] | None:
+async def _cached(key: str, request: GeocoderRequest) -> list[GeocodeResult] | None:
     """The cached results for `key`, or `None` for "nothing usable cached".
 
     An empty *list* is a real cached answer ("the provider had nothing"), and is distinct
@@ -231,7 +234,7 @@ async def _cached(key: str) -> list[GeocodeResult] | None:
     keystroke. Redis being absent or unreachable is a cache miss, not an error: the caller
     then simply asks the provider.
     """
-    return await read_cached(key, lambda rows: [GeocodeResult(**row) for row in rows])
+    return await read_cached(key, lambda rows: [GeocodeResult(**row) for row in rows], counted_as=[request])
 
 
 async def _store(key: str, results: list[GeocodeResult]) -> None:
@@ -250,7 +253,7 @@ def _log_safe(value: Any) -> str:
     return " ".join(str(value).split())[:_LOGGED_VALUE_MAX_LENGTH]
 
 
-async def _fetch(provider: str, base_url: str, path: str, params: dict[str, Any]) -> Any | None:
+async def _fetch(request: GeocoderRequest, base_url: str, path: str, params: dict[str, Any]) -> Any | None:
     """Ask a provider, returning its parsed JSON body - or `None` when we could not ask at all.
 
     That distinction is the one thing this function exists to preserve. "The provider
@@ -280,11 +283,11 @@ async def _fetch(provider: str, base_url: str, path: str, params: dict[str, Any]
     httpx would log the whole URL itself at INFO, which is why `core.setup` pins its logger to
     WARNING.
     """
+    provider = request[0]
     # Both providers share the one configured limit, each on its own counter.
     claimed = await claim_provider_slot(
         f"geocode:provider:{provider}",
-        settings.GEOCODER_PROVIDER_RATE_LIMIT_REQUESTS,
-        settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS,
+        counted_as=request,
         wait_seconds=min(settings.GEOCODER_PROVIDER_RATE_LIMIT_WINDOW_SECONDS, _MAX_PROVIDER_WAIT_SECONDS),
     )
     if not claimed:
@@ -293,6 +296,7 @@ async def _fetch(provider: str, base_url: str, path: str, params: dict[str, Any]
 
     fetched = await fetch_capped(
         f"{base_url.rstrip('/')}{path}",
+        counted_as=request,
         params=params,
         user_agent=settings.GEOCODER_USER_AGENT,
         timeout=_TIMEOUT_SECONDS,
@@ -310,7 +314,7 @@ async def _fetch(provider: str, base_url: str, path: str, params: dict[str, Any]
         return None
 
 
-async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | None:
+async def _request(request: GeocoderRequest, path: str, params: dict[str, Any]) -> list[dict[str, Any]] | None:
     """Ask Nominatim, returning its rows - or `None` when we could not ask at all (`_fetch`)."""
     if not settings.GEOCODER_URL:
         logger.warning("GEOCODER_URL is not configured; geocoding is unavailable.")
@@ -331,7 +335,7 @@ async def _request(path: str, params: dict[str, Any]) -> list[dict[str, Any]] | 
         # it something else (Geoapify uses `apiKey`) is a one-word change here.
         query["key"] = api_key
 
-    payload = await _fetch(_PROVIDER_NOMINATIM, settings.GEOCODER_URL, path, query)
+    payload = await _fetch(request, settings.GEOCODER_URL, path, query)
     if payload is None:
         return None
 
@@ -381,7 +385,7 @@ async def _search_photon(query: str, language: str) -> list[dict[str, Any]] | No
         "limit": _SEARCH_ROWS_REQUESTED,
         "layer": list(_SEARCH_LAYERS),
     }
-    payload = await _fetch(_PROVIDER_PHOTON, settings.GEOCODER_SEARCH_URL, "/api", params)
+    payload = await _fetch(_SEARCH, settings.GEOCODER_SEARCH_URL, "/api", params)
     if payload is None:
         return None
 
@@ -802,11 +806,11 @@ async def reverse_geocode(latitude: float, longitude: float) -> ReverseGeocode:
     lon = round(longitude, _COORDINATE_PRECISION)
 
     key = _cache_key("reverse", settings.GEOCODER_URL, settings.GEOCODER_LANGUAGE, f"{lat}:{lon}")
-    cached = await _cached(key)
+    cached = await _cached(key, _REVERSE)
     if cached is not None:
         return ReverseGeocode(cached[0] if cached else _offshore(lat, lon), asked=True)
 
-    rows = await _request("/reverse", {"lat": lat, "lon": lon})
+    rows = await _request(_REVERSE, "/reverse", {"lat": lat, "lon": lon})
     if rows is None:
         return ReverseGeocode(None, asked=False)
 
@@ -855,7 +859,7 @@ async def search_places(query: str) -> list[GeocodeResult]:
     language = _search_language()
     digest = hashlib.sha256(normalized.encode()).hexdigest()[:32]
     key = _cache_key("search", settings.GEOCODER_SEARCH_URL, language, digest)
-    cached = await _cached(key)
+    cached = await _cached(key, _SEARCH)
     if cached is not None:
         return cached
 

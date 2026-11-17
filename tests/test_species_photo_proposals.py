@@ -808,6 +808,8 @@ class TestTheProposedFilesAtCommons:
                 side_effect=lambda **kwargs: real(transport=httpx.MockTransport(handle), **kwargs),
             ),
             patch.object(species_service, "_claim_provider_slot", AsyncMock(return_value=True)) as slot,
+            # The previews' fetches are counted, and claim no slot that would have reached Redis.
+            patch.object(cache_module, "client", FakeRedis()),
         ):
             found = await species_service.proposed_files(["Fish.jpg", "Gone.jpg", "Fish.jpg"])
 

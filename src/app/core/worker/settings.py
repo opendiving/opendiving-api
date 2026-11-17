@@ -5,6 +5,7 @@ from ...core.config import settings
 from ...mcp.maintenance import purge_expired_mcp_data
 from .functions import (
     fetch_dive_conditions,
+    move_external_request_counts,
     purge_deleted_accounts,
     purge_expired_auth_audit_events,
     purge_expired_authentication_requests,
@@ -93,6 +94,10 @@ class WorkerSettings:
         # an archive restores unread. Idempotent - a file is read once - so a restart loop costs
         # a query that finds nothing. At :15, clear of the sweeps on the hour.
         cron(read_dive_file_fixes, minute=15, run_at_startup=True),
+        # Every five minutes, so the admin's figures trail the requests by no more than that, and
+        # at start, so a deploy does not leave them a turn behind. A run that finds nothing
+        # writes nothing, and one cut off by a restart loses what it took rather than doubling it.
+        cron(move_external_request_counts, minute=set(range(0, 60, 5)), run_at_startup=True),
         # Every minute, with arq's own per-tick ids. Overlap is held off by the run's own Redis
         # lock rather than a fixed `job_id`: a run killed mid-flight by a deploy would park a
         # failed result under that id for `keep_result`, an hour, and silence the cron. Off

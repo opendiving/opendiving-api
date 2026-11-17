@@ -1391,6 +1391,8 @@ class TestCompleteProfile:
             return real_client(*args, **{**kwargs, "transport": transport})
 
         monkeypatch.setattr(outbound.httpx, "AsyncClient", google)
+        # The fetch is counted, and it reaches no other Redis: no cap, no cache.
+        monkeypatch.setattr(cache, "client", FakeRedis())
         s3 = select_s3_backend(monkeypatch)
         s3.explode_on["put_object"] = ClientError({"Error": {"Code": "InternalError"}}, "PutObject")
 

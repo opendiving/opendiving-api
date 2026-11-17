@@ -9,6 +9,7 @@ from .checkin_link import CheckinLink
 from .contact import Contact
 from .course import Course
 from .course_person import CoursePerson
+from .daily_external_request import DailyExternalRequest
 from .daily_total import DailyTotal
 from .dive import Dive
 from .dive_conditions import DiveConditions

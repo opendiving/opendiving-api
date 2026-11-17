@@ -16,7 +16,7 @@ from src.app.services import species_service
 @pytest.mark.parametrize("segment", [".", ".."])
 async def test_a_dot_segment_never_leaves(segment: str) -> None:
     with patch.object(species_service, "_request", new_callable=AsyncMock) as request:
-        assert await species_service._worms("AphiaRecordsByName", segment) is None
+        assert await species_service._worms("by-name", "AphiaRecordsByName", segment) is None
 
     request.assert_not_awaited()
 
@@ -36,7 +36,7 @@ async def test_a_dot_query_is_a_source_that_did_not_answer() -> None:
 @pytest.mark.parametrize(("segment", "sent"), [("...", "..."), ("a..b", "a..b"), (". .", ".%20."), (127405, "127405")])
 async def test_anything_else_with_dots_in_it_is_still_asked(segment: str | int, sent: str) -> None:
     with patch.object(species_service, "_request", new_callable=AsyncMock, return_value=[]) as request:
-        await species_service._worms("AphiaRecordsByName", segment)
+        await species_service._worms("by-name", "AphiaRecordsByName", segment)
 
     assert request.await_args is not None
     (_, url, _) = request.await_args.args

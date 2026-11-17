@@ -12,14 +12,16 @@ import anyio
 import httpx
 import pytest
 
-from src.app.core.config import PROJECT_USER_AGENT
+from src.app.core.config import PROJECT_USER_AGENT, settings
 from src.app.core.exceptions.http_exceptions import RateLimitException
 from src.app.core.utils import outbound, rate_limit
+from src.app.core.utils.external_requests import ExternalRequest
 from src.app.core.utils.outbound import Failed, Fetched, FetchFailure
 from tests.helpers.fake_redis import FakeRedis
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 _URL = "https://provider.example/api"
+_COUNTED_AS: ExternalRequest = ("worms", "record")
 
 
 def _serve(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]) -> list[httpx.Request]:
@@ -38,7 +40,9 @@ def _serve(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], h
 
 
 async def _fetch(url: str = _URL, **kwargs: Any) -> Fetched | Failed:
-    return await outbound.fetch_capped(url, **{"timeout": 1.0, "deadline": 1.0, "max_bytes": 1024, **kwargs})
+    return await outbound.fetch_capped(
+        url, counted_as=_COUNTED_AS, **{"timeout": 1.0, "deadline": 1.0, "max_bytes": 1024, **kwargs}
+    )
 
 
 class TestFetchCapped:
@@ -133,9 +137,13 @@ class TestFetchCapped:
 
 class TestClaimProviderSlot:
     @pytest.mark.asyncio
-    async def test_a_free_slot_is_claimed_under_the_given_key(self):
+    async def test_a_free_slot_is_claimed_under_the_given_key_against_the_services_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(settings, "SPECIES_WORMS_RATE_LIMIT_REQUESTS", 3)
+        monkeypatch.setattr(settings, "SPECIES_WORMS_RATE_LIMIT_WINDOW_SECONDS", 10)
         with patch.object(rate_limit, "enforce_rate_limit", new_callable=AsyncMock) as limit:
-            assert await outbound.claim_provider_slot("p:key", 3, 10) is True
+            assert await outbound.claim_provider_slot("p:key", counted_as=_COUNTED_AS) is True
 
         limit.assert_awaited_once_with("p:key", 3, 10)
 
@@ -145,7 +153,7 @@ class TestClaimProviderSlot:
             patch.object(rate_limit, "enforce_rate_limit", AsyncMock(side_effect=RateLimitException("full"))),
             patch.object(outbound, "sleep", new_callable=AsyncMock) as slept,
         ):
-            assert await outbound.claim_provider_slot("p:key", 1, 1) is False
+            assert await outbound.claim_provider_slot("p:key", counted_as=_COUNTED_AS) is False
 
         slept.assert_not_awaited()
 
@@ -156,7 +164,7 @@ class TestClaimProviderSlot:
             patch.object(rate_limit, "enforce_rate_limit", limit),
             patch.object(outbound, "sleep", new_callable=AsyncMock) as slept,
         ):
-            assert await outbound.claim_provider_slot("p:key", 1, 1, wait_seconds=0.5) is False
+            assert await outbound.claim_provider_slot("p:key", counted_as=_COUNTED_AS, wait_seconds=0.5) is False
 
         slept.assert_awaited_once_with(0.5)
         assert limit.await_count == 2
@@ -168,7 +176,7 @@ class TestProviderCache:
         redis = FakeRedis()
         with patch("src.app.core.utils.cache.client", redis):
             await outbound.write_cached("k", '{"n": 2}', ttl_seconds=60)
-            assert await outbound.read_cached("k", lambda body: body["n"] * 2) == 4
+            assert await outbound.read_cached("k", lambda body: body["n"] * 2, counted_as=[_COUNTED_AS]) == 4
 
         assert redis.expiries == {"k": 60}
 
@@ -176,13 +184,13 @@ class TestProviderCache:
     async def test_no_redis_is_a_miss_and_a_silent_write(self):
         with patch("src.app.core.utils.cache.client", None):
             await outbound.write_cached("k", "[]", ttl_seconds=60)
-            assert await outbound.read_cached("k", list) is None
+            assert await outbound.read_cached("k", list, counted_as=[_COUNTED_AS]) is None
 
     @pytest.mark.asyncio
     async def test_a_failing_redis_is_a_miss_and_a_silent_write(self):
         with patch("src.app.core.utils.cache.client", FakeRedis(failing=True)):
             await outbound.write_cached("k", "[]", ttl_seconds=60)
-            assert await outbound.read_cached("k", list) is None
+            assert await outbound.read_cached("k", list, counted_as=[_COUNTED_AS]) is None
 
     @pytest.mark.asyncio
     async def test_an_entry_that_will_not_decode_or_parse_is_a_miss(self):
@@ -193,8 +201,8 @@ class TestProviderCache:
             raise TypeError("wrong shape")
 
         with patch("src.app.core.utils.cache.client", redis):
-            assert await outbound.read_cached("garbage", list) is None
-            assert await outbound.read_cached("shape", refuse) is None
+            assert await outbound.read_cached("garbage", list, counted_as=[_COUNTED_AS]) is None
+            assert await outbound.read_cached("shape", refuse, counted_as=[_COUNTED_AS]) is None
 
     @pytest.mark.asyncio
     async def test_a_discarded_entry_is_logged_without_the_search_in_its_key(self, caplog: pytest.LogCaptureFixture):
@@ -203,7 +211,9 @@ class TestProviderCache:
         redis.store = {"species:v7:search:my secret reef": b"not json"}
 
         with patch("src.app.core.utils.cache.client", redis), caplog.at_level("WARNING"):
-            assert await outbound.read_cached("species:v7:search:my secret reef", list) is None
+            assert (
+                await outbound.read_cached("species:v7:search:my secret reef", list, counted_as=[_COUNTED_AS]) is None
+            )
 
         assert "species:v7:#" in caplog.text
         assert "secret" not in caplog.text

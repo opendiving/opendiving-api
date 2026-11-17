@@ -11,6 +11,7 @@ from sqlalchemy import CursorResult, Delete, and_, delete, func, or_, select, up
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_auth_audit_events import expired_event_predicate
+from ...crud.crud_daily_external_requests import add_external_requests
 from ...crud.crud_daily_totals import record_monthly_active_accounts, record_sign_ins, snapshot_active_accounts
 from ...crud.crud_user_sessions import swept_session_predicate
 from ...models.auth_audit_event import AuthAuditEvent
@@ -60,6 +61,7 @@ from ..config import configure_logging, settings
 from ..db.database import local_session
 from ..db.token_blacklist import TokenBlacklist
 from ..setup import close_redis_cache_pool, create_redis_cache_pool
+from ..utils import external_requests
 
 asyncio.set_event_loop(uvloop.new_event_loop())
 
@@ -356,6 +358,24 @@ async def record_sign_in_totals(ctx: dict[Any, Any]) -> str:
 
     logger.info("Recorded daily sign-in totals")
     return "Recorded daily sign-in totals"
+
+
+async def move_external_request_counts(ctx: dict[Any, Any]) -> str:
+    """Move the buffered external request counts from Redis into `daily_external_request`.
+
+    What is taken leaves Redis before the commit, so a run that dies in between loses those
+    counts and none is ever written twice.
+    """
+    rows = await external_requests.take_buffered()
+    if not rows:
+        return "No external request counts to move"
+
+    async with local_session() as db:
+        await add_external_requests(db, rows)
+        await db.commit()
+
+    logger.info("Moved %d external request count(s)", len(rows))
+    return f"Moved {len(rows)} external request count(s)"
 
 
 async def purge_unserved_map_tiles(ctx: dict[Any, Any]) -> str:

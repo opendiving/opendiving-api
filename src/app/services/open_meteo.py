@@ -26,14 +26,15 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Final
 
 from ..core.config import settings
+from ..core.utils.external_requests import ExternalRequest, OpenMeteoKind
 from ..core.utils.outbound import Failed, FetchFailure, claim_provider_slot, fetch_capped, read_cached, write_cached
 
 logger = logging.getLogger(__name__)
 
-PROVIDER = "open-meteo"
+PROVIDER: Final = "open-meteo"
 # What answers both requests: the APIs' default, which blends IFS and ERA5 for weather and
 # picks MeteoFrance's models for the sea. Recorded so a later bundled tide model can say it
 # answered instead.
@@ -194,7 +195,7 @@ def _classify(failed: Failed) -> Refused | CouldNotAsk:
 
 
 async def _ask(
-    kind: str,
+    kind: OpenMeteoKind,
     latitude: float,
     longitude: float,
     *,
@@ -210,15 +211,12 @@ async def _ask(
     """`window` is the request's time parameters and `span` the cache key's spelling of them.
     With `models`, each variable comes back once per model, as `{variable}_{model}`."""
     key = _cache_key(kind, latitude, longitude, span, timezone, (*variables, *models))
-    cached = await read_cached(key, _parse)
+    counted_as: ExternalRequest = (PROVIDER, kind)
+    cached = await read_cached(key, _parse, counted_as=[counted_as])
     if cached is not None:
         return cached
 
-    if not await claim_provider_slot(
-        _BUDGET_KEY,
-        settings.DIVE_CONDITIONS_OPEN_METEO_RATE_LIMIT_REQUESTS,
-        settings.DIVE_CONDITIONS_OPEN_METEO_RATE_LIMIT_WINDOW_SECONDS,
-    ):
+    if not await claim_provider_slot(_BUDGET_KEY, counted_as=counted_as):
         return CouldNotAsk.BUDGET
 
     params: dict[str, Any] = {
@@ -241,6 +239,7 @@ async def _ask(
 
     fetched = await fetch_capped(
         f"{hosts[kind]}{_PATHS[kind]}",
+        counted_as=counted_as,
         params=params,
         timeout=timeout,
         deadline=deadline,

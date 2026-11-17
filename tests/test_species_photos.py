@@ -1025,7 +1025,7 @@ class TestCommonsCannotFailAResolve:
         assert "photo" in order
 
 
-async def _worms_answers(endpoint: str, segment: Any, params: Any = None) -> Any:
+async def _worms_answers(kind: str, endpoint: str, segment: Any, params: Any = None) -> Any:
     """WoRMS answering the three calls a resolve makes, and nothing about photos."""
     if endpoint == "AphiaRecordByAphiaID":
         return {

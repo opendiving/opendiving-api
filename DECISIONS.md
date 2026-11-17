@@ -7517,3 +7517,15 @@ published. A finding that depends on the document warns on a pull request and fa
 because a client's pull request may be built on an API one that has not merged. The step clones
 `main` at run time. Rejected: the `:edge` image's document, which trails a merge by its build, and
 the hosted instance's, which leaves gated operations out.
+
+## External request counts are buffered in Redis, and a move loses rather than doubles
+
+Every outbound fetch, refused slot and cache hit is counted in Redis
+(`core/utils/external_requests.py`) and moved into `daily_external_request` by a worker cron. A
+request is out with no transaction open, so counting in Postgres at the call would reopen one, or
+take a second pooled connection, per request and per cache hit. Rejected: an upsert per event, for
+that; in-process counters flushed on a timer, which every restart empties; Redis as the store, which
+everything else here treats as a cache that may come back empty. Each row is one key holding its
+count and both durations, so an eviction drops them together. A move takes each key with `GETDEL`
+before it commits, so one that dies in between loses what it took and never counts it twice.
+Rejected: committing first and clearing after, which doubles a batch.

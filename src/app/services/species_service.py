@@ -46,7 +46,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Final, Literal
 from urllib.parse import quote
 
 import anyio
@@ -58,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
 from ..core.db.database import release_read_transaction
+from ..core.utils.external_requests import CommonsKind, SpeciesRequest, WikidataKind, WormsKind
 from ..core.utils.outbound import Failed, FetchFailure, claim_provider_slot, fetch_capped, read_cached, write_cached
 from ..core.utils.search import LIKE_ESCAPE_CHAR, escape_like
 from ..models.species import Species
@@ -295,9 +296,17 @@ _LANGUAGE_CODE_MAX_LENGTH = 3
 # the geocoder, which waits a beat because each of its lookups has one provider and no other
 # answer, a search here has two more sources - so a saturated provider drops out immediately
 # rather than holding the whole fan-out open.
-_PROVIDER_WORMS = "worms"
-_PROVIDER_WIKIDATA = "wikidata"
-_PROVIDER_COMMONS = "commons"
+_PROVIDER_WORMS: Final = "worms"
+_PROVIDER_WIKIDATA: Final = "wikidata"
+_PROVIDER_COMMONS: Final = "commons"
+# Every request a search's fan-out sends on a miss, which is what a hit on its cache saves.
+_SEARCH_FAN_OUT: tuple[SpeciesRequest, ...] = (
+    (_PROVIDER_WORMS, "by-name"),
+    (_PROVIDER_WORMS, "by-vernacular"),
+    (_PROVIDER_WORMS, "name-part"),
+    (_PROVIDER_WIKIDATA, "search"),
+    (_PROVIDER_WIKIDATA, "entities"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,7 +417,7 @@ async def _cached_search(key: str) -> SpeciesSearchResponse | None:
     distinct from `None` - that distinction is what stops a negative answer being re-asked on
     every keystroke. Redis absent or unreachable is a miss, not an error.
     """
-    return await read_cached(key, lambda body: SpeciesSearchResponse(**body))
+    return await read_cached(key, lambda body: SpeciesSearchResponse(**body), counted_as=_SEARCH_FAN_OUT)
 
 
 async def _store_search(key: str, response: SpeciesSearchResponse, *, complete: bool) -> None:
@@ -433,31 +442,17 @@ async def _store_search(key: str, response: SpeciesSearchResponse, *, complete: 
 # -------------- outbound requests --------------
 
 
-async def _claim_provider_slot(provider: str) -> bool:
-    """Take one slot against the instance-wide cap for `provider`, or report there is none.
+async def _claim_provider_slot(request: SpeciesRequest) -> bool:
+    """Take one slot against the instance-wide cap for the request's provider, or report there
+    is none.
 
     No cap here is published by the provider it throttles - each is self-imposed politeness
     (see `core/config.py`).
     """
-    limits = {
-        _PROVIDER_WORMS: (settings.SPECIES_WORMS_RATE_LIMIT_REQUESTS, settings.SPECIES_WORMS_RATE_LIMIT_WINDOW_SECONDS),
-        _PROVIDER_WIKIDATA: (
-            settings.SPECIES_WIKIDATA_RATE_LIMIT_REQUESTS,
-            settings.SPECIES_WIKIDATA_RATE_LIMIT_WINDOW_SECONDS,
-        ),
-        _PROVIDER_COMMONS: (
-            settings.SPECIES_COMMONS_RATE_LIMIT_REQUESTS,
-            settings.SPECIES_COMMONS_RATE_LIMIT_WINDOW_SECONDS,
-        ),
-    }
-    # Indexed rather than `.get`-ed on purpose: a provider added above without a pair here is a
-    # `KeyError` at the first call, which is loud, where a default would be an unthrottled
-    # third party nobody notices. Every caller of this passes one of the three constants.
-    max_requests, window = limits[provider]
-    return await claim_provider_slot(f"species:provider:{provider}", max_requests, window)
+    return await claim_provider_slot(f"species:provider:{request[0]}", counted_as=request)
 
 
-async def _request(provider: str, url: str, params: dict[str, Any]) -> Any | None:
+async def _request(request: SpeciesRequest, url: str, params: dict[str, Any]) -> Any | None:
     """Ask a provider, returning its parsed body - or `None` when we could not ask at all.
 
     That distinction is the one thing this function exists to preserve, exactly as in the
@@ -473,11 +468,12 @@ async def _request(provider: str, url: str, params: dict[str, Any]) -> Any | Non
     not wait a beat for the cap to free up: a search has two other sources in flight, so
     dropping one immediately degrades the answer rather than the latency.
     """
+    provider = request[0]
     if not url:
         logger.warning("No URL configured for the %s species provider.", provider)
         return None
 
-    if not await _claim_provider_slot(provider):
+    if not await _claim_provider_slot(request):
         logger.warning("Skipping a %s call: this instance is over its provider rate limit.", provider)
         return None
 
@@ -485,6 +481,7 @@ async def _request(provider: str, url: str, params: dict[str, Any]) -> Any | Non
     # name is logged, never the built URL: it carries the diver's typed query.
     fetched = await fetch_capped(
         url,
+        counted_as=request,
         params=params,
         headers={"Accept": "application/json"},
         user_agent=settings.SPECIES_USER_AGENT,
@@ -505,7 +502,9 @@ async def _request(provider: str, url: str, params: dict[str, Any]) -> Any | Non
         return None
 
 
-async def _worms(endpoint: str, segment: str | int, params: dict[str, Any] | None = None) -> Any | None:
+async def _worms(
+    kind: WormsKind, endpoint: str, segment: str | int, params: dict[str, Any] | None = None
+) -> Any | None:
     """Call one of WoRMS's `/{endpoint}/{segment}` routes.
 
     **The segment is percent-encoded here, and that is why this signature takes it apart
@@ -532,14 +531,14 @@ async def _worms(endpoint: str, segment: str | int, params: dict[str, Any] | Non
         return None
     quoted = quote(str(segment), safe="")
     url = f"{settings.WORMS_API_URL.rstrip('/')}/{endpoint}/{quoted}"
-    return await _request(_PROVIDER_WORMS, url, params or {})
+    return await _request((_PROVIDER_WORMS, kind), url, params or {})
 
 
-async def _wikidata(params: dict[str, Any]) -> Any | None:
-    return await _request(_PROVIDER_WIKIDATA, settings.WIKIDATA_API_URL, {**params, "format": "json"})
+async def _wikidata(kind: WikidataKind, params: dict[str, Any]) -> Any | None:
+    return await _request((_PROVIDER_WIKIDATA, kind), settings.WIKIDATA_API_URL, {**params, "format": "json"})
 
 
-async def _commons(params: dict[str, Any]) -> Any | None:
+async def _commons(kind: CommonsKind, params: dict[str, Any]) -> Any | None:
     """Ask Wikimedia Commons' Action API.
 
     `formatversion=2` because this one is read for its *content* rather than for a list of
@@ -548,7 +547,9 @@ async def _commons(params: dict[str, Any]) -> Any | None:
     on version 1 because their readers are written against its shapes and have measured
     comments about them.
     """
-    return await _request(_PROVIDER_COMMONS, settings.COMMONS_API_URL, {**params, "format": "json", "formatversion": 2})
+    return await _request(
+        (_PROVIDER_COMMONS, kind), settings.COMMONS_API_URL, {**params, "format": "json", "formatversion": 2}
+    )
 
 
 # -------------- matching --------------
@@ -1189,7 +1190,7 @@ async def _worms_by_name(query: str) -> _SourceAnswer:
     `marine_only=false` because this app logs freshwater dives too, and WoRMS carries
     brackish and freshwater taxa that the default would hide.
     """
-    rows = await _worms("AphiaRecordsByName", query, {"like": "true", "marine_only": "false"})
+    rows = await _worms("by-name", "AphiaRecordsByName", query, {"like": "true", "marine_only": "false"})
     return _worms_page(rows)
 
 
@@ -1232,12 +1233,13 @@ async def _worms_by_vernacular(query: str) -> _SourceAnswer:
 
     async def records() -> None:
         nonlocal rows
-        rows = await _worms("AphiaRecordsByVernacular", query, {"like": "true"})
+        rows = await _worms("by-vernacular", "AphiaRecordsByVernacular", query, {"like": "true"})
 
     async def annotations() -> None:
         nonlocal vernames
         with anyio.move_on_after(_AJAX_ANNOTATION_BUDGET_SECONDS):
             payload = await _worms(
+                "name-part",
                 "AjaxAphiaRecordsByNamePart",
                 query,
                 # `marine_only` is *not* inert on this endpoint whatever the record calls do:
@@ -1346,6 +1348,7 @@ async def _wikidata_search(query: str) -> _SourceAnswer:
     which is what makes the merge possible.
     """
     payload = await _wikidata(
+        "search",
         {
             "action": "query",
             "generator": "search",
@@ -1354,7 +1357,7 @@ async def _wikidata_search(query: str) -> _SourceAnswer:
             "prop": "entityterms",
             "wbetlanguage": "en",
             "wbetterms": "label|alias",
-        }
+        },
     )
     pages = _wikidata_search_pages(payload)
     if pages is None:
@@ -1535,12 +1538,13 @@ async def _wikidata_entities(qids: list[str]) -> tuple[list[_WikidataEntity], bo
     async def fetch(chunk: list[str]) -> None:
         nonlocal failures
         payload = await _wikidata(
+            "entities",
             {
                 "action": "wbgetentities",
                 "ids": "|".join(chunk),
                 "props": "claims|labels|aliases",
                 "languages": "en",
-            }
+            },
         )
         if not isinstance(payload, dict) or not isinstance(entities := payload.get("entities"), dict):
             failures += 1
@@ -1997,7 +2001,7 @@ async def _worms_vernaculars(aphia_id: int) -> list[tuple[str, str | None]]:
     Japanese vernacular the UI will never render still earns its row by making カクレクマノミ
     find the clownfish.
     """
-    rows = await _worms("AphiaVernacularsByAphiaID", aphia_id)
+    rows = await _worms("vernaculars", "AphiaVernacularsByAphiaID", aphia_id)
     if not isinstance(rows, list):
         return []
 
@@ -2047,7 +2051,7 @@ async def _worms_synonyms(aphia_id: int) -> list[tuple[str, int | None]] | None:
     synonyms: list[tuple[str, int | None]] = []
     offset = 1
     while True:
-        rows = await _worms("AphiaSynonymsByAphiaID", aphia_id, {"offset": offset})
+        rows = await _worms("synonyms", "AphiaSynonymsByAphiaID", aphia_id, {"offset": offset})
         if not isinstance(rows, list):
             return None
         for row in rows:
@@ -2072,12 +2076,13 @@ async def _wikidata_by_aphia_id(aphia_id: int) -> tuple[_WikidataEntity | None, 
     an admin's re-fetch must not read the second as the first and clear a good photo.
     """
     payload = await _wikidata(
+        "by-aphia-id",
         {
             "action": "query",
             "list": "search",
             "srsearch": f"haswbstatement:{_APHIA_PROPERTY}={aphia_id}",
             "srlimit": 1,
-        }
+        },
     )
     qids = _wikidata_qids(payload)
     if qids is None:
@@ -2241,13 +2246,14 @@ async def _commons_imageinfo(file_title: str) -> tuple[str, species_photos.Photo
     fence knew only the second host is exactly how this pipeline once fetched nothing at all.
     """
     payload = await _commons(
+        "image-info",
         {
             "action": "query",
             "prop": "imageinfo",
             "titles": f"File:{file_title}",
             "iiprop": "extmetadata|url",
             "iiurlwidth": species_photos.COMMONS_THUMBNAIL_WIDTH,
-        }
+        },
     )
     if not isinstance(payload, dict) or not isinstance(query := payload.get("query"), dict):
         return None
@@ -2269,7 +2275,7 @@ async def _commons_imageinfo(file_title: str) -> tuple[str, species_photos.Photo
     return url, species_photos.credit_from_imageinfo(info)
 
 
-async def _fetch_media(url: str, *, claim_slot: bool) -> tuple[bytes, str] | None:
+async def _fetch_media(url: str, *, kind: Literal["photo", "photo-preview"]) -> tuple[bytes, str] | None:
     """Fetch image bytes and their content type, or `None` for every way of not getting them.
 
     Modelled on `user_pictures.import_google_avatar`: redirects are not followed, the read is
@@ -2278,7 +2284,7 @@ async def _fetch_media(url: str, *, claim_slot: bool) -> tuple[bytes, str] | Non
     it, which is a setting. It admits the two hosts one `imageinfo` reply can name and nothing
     else.
 
-    `claim_slot` is off only for the previews the admin's picker and proposal review show: a
+    A `photo-preview` claims no slot. It is what the admin's picker and proposal review show: a
     dialog's worth would spend a large share of `SPECIES_COMMONS_RATE_LIMIT_REQUESTS` in one
     click, and a diver's resolve running beside it would then find the counter spent and store a
     completed no-photo verdict. Previews are bounded by each read's cap of `CANDIDATE_LIMIT`
@@ -2293,7 +2299,8 @@ async def _fetch_media(url: str, *, claim_slot: bool) -> tuple[bytes, str] | Non
     if not species_photos.is_photo_byte_source(url):
         logger.warning("Refusing to fetch species photo bytes from an unexpected host.")
         return None
-    if claim_slot and not await _claim_provider_slot(_PROVIDER_COMMONS):
+    request: SpeciesRequest = (_PROVIDER_COMMONS, kind)
+    if kind == "photo" and not await _claim_provider_slot(request):
         logger.warning("Skipping a species photo fetch: this instance is over its Commons rate limit.")
         return None
 
@@ -2302,6 +2309,7 @@ async def _fetch_media(url: str, *, claim_slot: bool) -> tuple[bytes, str] | Non
     async with _MEDIA_LIMITER:
         fetched = await fetch_capped(
             url,
+            counted_as=request,
             user_agent=settings.SPECIES_USER_AGENT,
             timeout=_TIMEOUT_SECONDS,
             deadline=_DEADLINE_SECONDS,
@@ -2317,7 +2325,7 @@ async def _fetch_media(url: str, *, claim_slot: bool) -> tuple[bytes, str] | Non
 
 async def _fetch_photo_bytes(url: str) -> bytes | None:
     """The bytes of a photo the rule or an admin chose, charged to the Commons counter."""
-    fetched = await _fetch_media(url, claim_slot=True)
+    fetched = await _fetch_media(url, kind="photo")
     return fetched[0] if fetched is not None else None
 
 
@@ -2338,12 +2346,13 @@ async def _wikidata_items_by_aphia_ids(aphia_ids: list[int]) -> tuple[list[_Wiki
 
     clause = "|".join(f"{_APHIA_PROPERTY}={aphia_id}" for aphia_id in aphia_ids)
     payload = await _wikidata(
+        "by-aphia-id",
         {
             "action": "query",
             "list": "search",
             "srsearch": f"haswbstatement:{clause}",
             "srlimit": _SYNONYM_ITEM_SEARCH_LIMIT,
-        }
+        },
     )
     qids = _wikidata_qids(payload)
     if qids is None:
@@ -2631,13 +2640,14 @@ async def _category_of_file(file_title: str, *, genus: str | None) -> str | None
     beside its taxon."""
     pages = _query_list(
         await _commons(
+            "file-categories",
             {
                 "action": "query",
                 "prop": "categories",
                 "clshow": "!hidden",
                 "cllimit": 50,
                 "titles": f"File:{file_title}",
-            }
+            },
         ),
         "pages",
     )
@@ -2659,13 +2669,14 @@ async def _category_files(category: str) -> list[str]:
     """A Commons category's files, in its own sortkey order."""
     members = _query_list(
         await _commons(
+            "category-files",
             {
                 "action": "query",
                 "list": "categorymembers",
                 "cmtitle": f"Category:{category}",
                 "cmtype": "file",
                 "cmlimit": _CATEGORY_MEMBER_LIMIT,
-            }
+            },
         ),
         "categorymembers",
     )
@@ -2679,13 +2690,14 @@ async def _preview_infos(titles: list[str]) -> dict[str, dict[str, Any]]:
     Keyed by the normalized title; a file Commons does not have is simply absent."""
     pages = _query_list(
         await _commons(
+            "image-info",
             {
                 "action": "query",
                 "prop": "imageinfo",
                 "titles": "|".join(f"File:{title}" for title in titles),
                 "iiprop": "size|url|extmetadata",
                 "iiurlwidth": _PREVIEW_WIDTH,
-            }
+            },
         ),
         "pages",
     )
@@ -2706,7 +2718,7 @@ async def _preview(info: dict[str, Any]) -> str | None:
     url = info.get("thumburl") or info.get("url")
     if not isinstance(url, str):
         return None
-    fetched = await _fetch_media(url, claim_slot=False)
+    fetched = await _fetch_media(url, kind="photo-preview")
     if fetched is None or fetched[1] not in _PREVIEW_CONTENT_TYPES:
         return None
     data, content_type = fetched
@@ -2863,7 +2875,7 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
     # happens to be, so an assignment inside it is not guaranteed to have run.
     taxon: _Taxon | None = None
     with anyio.move_on_after(_RESOLVE_BUDGET_SECONDS):
-        taxon = _worms_taxon(await _worms("AphiaRecordByAphiaID", aphia_id))
+        taxon = _worms_taxon(await _worms("record", "AphiaRecordByAphiaID", aphia_id))
     if taxon is None:
         # A raw `HTTPException`: `core/exceptions/http_exceptions.py` has no class for 503,
         # the same reason `parse_dive` raises 415 and 409 raw. One message for both "the
@@ -2880,7 +2892,7 @@ async def resolve_species(db: AsyncSession, aphia_id: int) -> Species:
         await release_read_transaction(db)
         valid_taxon: _Taxon | None = None
         with anyio.move_on_after(_RESOLVE_BUDGET_SECONDS):
-            valid_taxon = _worms_taxon(await _worms("AphiaRecordByAphiaID", taxon.valid_aphia_id))
+            valid_taxon = _worms_taxon(await _worms("record", "AphiaRecordByAphiaID", taxon.valid_aphia_id))
         if valid_taxon is None:
             raise HTTPException(status_code=503, detail="Species lookup is temporarily unavailable.")
         taxon = valid_taxon

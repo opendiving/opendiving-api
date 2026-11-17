@@ -225,6 +225,7 @@ class TestCredentials:
             # `bearer_scheme` alone: the access token is read, a key is never resolved.
             ("post", "/api/v1/auth/logout", ["session", "superuser"]),
             ("get", "/api/v1/admin/stats", ["superuser"]),
+            ("get", "/api/v1/admin/external-requests", ["superuser"]),
         ],
     )
     def test_follow_the_dependencies_that_enforce_them(

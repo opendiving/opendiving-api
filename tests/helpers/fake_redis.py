@@ -2,12 +2,15 @@
 
 `@cache` and `delete_keys_by_pattern` (`get`/`set`/`delete`/`scan`), the outbound answer
 cache (`get`/`set` with `ex`), the rate limiter (`incr`/`expire`/`ttl`), the map-tile draw
-claim and the conditions run lock (`set` with `nx`/`px`), the passkey challenge store (`getdel`)
-and the lock's release (`eval`, below). It serves back what
+claim and the conditions run lock (`set` with `nx`/`px`), the passkey challenge store (`getdel`),
+the lock's release and the external request counter (`eval`, below), and the move that takes the
+counts (`scan` and `getdel`). It serves back what
 was written and sweeps by pattern the way the real one does, so a read after a write is stale
 unless something actually dropped the key. Expiries are recorded, never enforced: nothing
 here needs a clock. `writes` lists every key `set` stored, in order, so a test can tell one
-write from two of the same key.
+write from two of the same key. The counter's rows are held in `counters`, with their expiries
+in `counter_expiries`, apart from `store`, so a test of what the app caches reads `store` alone;
+`get`, `getdel`, `delete` and `scan` see both.
 
 Where the real client refuses, so does this: `set` takes what `redis-py`'s encoder takes and
 raises its `DataError` for the rest - `None`, a `bool`, a `dict` - and a `set` without an
@@ -41,6 +44,8 @@ class FakeRedis:
         self.store: dict[str, bytes] = {}
         self.expiries: dict[str, int] = {}
         self.writes: list[str] = []
+        self.counters: dict[str, bytes] = {}
+        self.counter_expiries: dict[str, int] = {}
         self.failing = failing
 
     def _fail_if_down(self) -> None:
@@ -49,7 +54,7 @@ class FakeRedis:
 
     async def get(self, key: str) -> bytes | None:
         self._fail_if_down()
-        return self.store.get(key)
+        return self.store.get(key, self.counters.get(key))
 
     async def set(
         self, key: str, value: object, ex: int | None = None, px: int | None = None, nx: bool = False
@@ -71,7 +76,8 @@ class FakeRedis:
     async def getdel(self, key: str) -> bytes | None:
         self._fail_if_down()
         self.expiries.pop(key, None)
-        return self.store.pop(key, None)
+        self.counter_expiries.pop(key, None)
+        return self.store.pop(key, self.counters.pop(key, None))
 
     async def incr(self, key: str) -> int:
         self._fail_if_down()
@@ -94,19 +100,32 @@ class FakeRedis:
         self._fail_if_down()
         for key in keys:
             self.expiries.pop(key, None)
-        return sum(self.store.pop(key, None) is not None for key in keys)
+            self.counter_expiries.pop(key, None)
+        return sum((self.store.pop(key, None), self.counters.pop(key, None)) != (None, None) for key in keys)
 
     async def scan(self, cursor: int = 0, match: str = "*", count: int | None = None) -> tuple[int, list[str]]:
         self._fail_if_down()
-        return 0, [key for key in self.store if fnmatchcase(key, match)]
+        return 0, [key for key in (*self.store, *self.counters) if fnmatchcase(key, match)]
 
-    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
-        """The one script the app sends: delete `KEYS[1]` only while it holds `ARGV[1]`. Any
-        other script is refused rather than guessed at."""
+    async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> int:
+        """The two scripts the app sends, by what each does. Any other is refused rather than
+        guessed at.
+
+        The lock's release deletes `KEYS[1]` only while it holds `ARGV[1]`. The counter adds one
+        event of `ARGV[1]` milliseconds to each key's `count total slowest`, raising the slowest
+        where it is longer, and sets each key's expiry to `ARGV[2]`."""
         self._fail_if_down()
+        keys, args = [str(key) for key in keys_and_args[:numkeys]], keys_and_args[numkeys:]
+        if script.startswith("-- external-requests:count"):
+            duration, ttl = int(str(args[0])), int(str(args[1]))
+            for key in keys:
+                count, total, slowest = (int(figure) for figure in self.counters.get(key, b"0 0 0").split())
+                self.counters[key] = f"{count + 1} {total + duration} {max(slowest, duration)}".encode()
+                self.counter_expiries[key] = ttl
+            return len(keys)
         if "redis.call('get', KEYS[1]) == ARGV[1]" not in script or numkeys != 1:
             raise NotImplementedError(script)
-        key, expected = keys_and_args
+        (key,), (expected,) = keys, args
         if self.store.get(key) != _encode(expected):
             return 0
         return await self.delete(key)

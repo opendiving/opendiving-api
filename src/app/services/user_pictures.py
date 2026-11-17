@@ -1003,6 +1003,7 @@ async def import_google_avatar(url: str | None) -> StoredAvatar | None:
 
     fetched = await fetch_capped(
         url,
+        counted_as=("google", "avatar"),
         timeout=_GOOGLE_AVATAR_TIMEOUT_SECONDS,
         deadline=_GOOGLE_AVATAR_TIMEOUT_SECONDS,
         max_bytes=MAX_PICTURE_UPLOAD_SIZE,

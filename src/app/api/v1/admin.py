@@ -1,5 +1,6 @@
 """The operator's contract: the invite queue, inviting from it in a batch, the daily totals of
-accounts and sign-ins, and curating the species catalog's photos.
+accounts and sign-ins, the requests the instance sent to other services, and curating the
+species catalog's photos.
 
 **The first routes in `/api/v1` to be superuser-gated.** `is_superuser` has existed on
 `User` since the beginning and until now gated exactly one thing - the docs router on
@@ -36,9 +37,11 @@ from ...api.dependencies import get_current_superuser
 from ...core.config import settings
 from ...core.db.database import async_get_db, release_read_transaction
 from ...core.exceptions.http_exceptions import NotFoundException, UnprocessableEntityException
+from ...core.utils import external_requests
 from ...core.utils.pagination import ItemsPerPageQuery, PageQuery, clamp_pagination
 from ...core.utils.request_context import RequestContext
 from ...crud.crud_auth_audit_events import record_auth_event
+from ...crud.crud_daily_external_requests import external_requests_between
 from ...crud.crud_daily_totals import daily_totals_between, month_start, monthly_active_accounts_between
 from ...crud.crud_invitations import account_exists_for, crud_invitations, live_invitation_from
 from ...crud.crud_invite_requests import delete_invite_requests
@@ -49,6 +52,13 @@ from ...models.species import Species
 from ...models.user import User
 from ...schemas.auth_audit_event import AuthEventType
 from ...schemas.daily_total import DailyMetric, DailyStatsDay, DailyStatsRead, DailyStatsTotals, MonthlyStats
+from ...schemas.external_request import (
+    ExternalRequestCount,
+    ExternalRequestLimit,
+    ExternalRequestProvider,
+    ExternalRequestsDay,
+    ExternalRequestsRead,
+)
 from ...schemas.invitation import (
     AdminInvitationBatchRequest,
     AdminInvitationBatchResponse,
@@ -220,16 +230,29 @@ async def remove_invite_requests(
     return AdminInviteRequestDeleteResponse(removed=removed)
 
 
-# The longest range `GET /admin/stats` answers: the longest run of three calendar months,
-# so one request stays a bounded read however the dates are typed.
+# The longest range `GET /admin/stats` and `GET /admin/external-requests` answer: the longest run
+# of three calendar months, so one request stays a bounded read however the dates are typed.
 MAX_STATS_DAYS = 92
+
+RangeFrom = Annotated[date, Query(alias="from", description="First UTC day of the range, as YYYY-MM-DD")]
+RangeTo = Annotated[date, Query(alias="to", description="Last UTC day of the range, inclusive")]
+
+
+def _days_between(first: date, last: date) -> list[date]:
+    """Every UTC day from `first` to `last` inclusive, or a 422 for a range the routes refuse."""
+    if last < first:
+        raise UnprocessableEntityException("`to` is before `from`.")
+    span = (last - first).days + 1
+    if span > MAX_STATS_DAYS:
+        raise UnprocessableEntityException(f"A range is at most {MAX_STATS_DAYS} days; this one is {span}.")
+    return [first + timedelta(days=offset) for offset in range(span)]
 
 
 @router.get("/stats", response_model=DailyStatsRead)
 async def read_daily_stats(
     db: Annotated[AsyncSession, Depends(async_get_db)],
-    first: Annotated[date, Query(alias="from", description="First UTC day of the range, as YYYY-MM-DD")],
-    last: Annotated[date, Query(alias="to", description="Last UTC day of the range, inclusive")],
+    first: RangeFrom,
+    last: RangeTo,
 ) -> DailyStatsRead:
     """The daily totals for every UTC day from `from` to `to` inclusive, zero-filled, the
     distinct active accounts of every calendar month the range touches, with the instance's
@@ -249,11 +272,7 @@ async def read_daily_stats(
     """
     # Calendar months rather than a rolling thirty days: a month's id set is discarded once
     # the month has closed, and a rolling window would need the ids kept past that.
-    if last < first:
-        raise UnprocessableEntityException("`to` is before `from`.")
-    span = (last - first).days + 1
-    if span > MAX_STATS_DAYS:
-        raise UnprocessableEntityException(f"A range is at most {MAX_STATS_DAYS} days; this one is {span}.")
+    days = _days_between(first, last)
 
     created: dict[date, dict[str, int]] = defaultdict(dict)
     counted: dict[tuple[date, str], int] = {}
@@ -263,7 +282,6 @@ async def read_daily_stats(
         else:
             counted[(row.day, row.metric)] = row.count
 
-    days = [first + timedelta(days=offset) for offset in range(span)]
     monthly = await monthly_active_accounts_between(db, first=first, last=last)
     months = sorted({month_start(day) for day in days})
     return DailyStatsRead(
@@ -284,6 +302,79 @@ async def read_daily_stats(
             accounts=int(await db.scalar(select(func.count()).select_from(User)) or 0),
             active_now=await accounts_with_a_live_session(db),
         ),
+    )
+
+
+@router.get("/external-requests", response_model=ExternalRequestsRead)
+async def read_external_requests(
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    first: RangeFrom,
+    last: RangeTo,
+) -> ExternalRequestsRead:
+    """What this instance asked of other services on every UTC day from `from` to `to`
+    inclusive, counted by service, kind of request and outcome. Superuser only.
+
+    `providers` lists every service the instance can ask and every kind of request it can send
+    each, whether or not the range holds any. `limit` is the instance's own cap on a service,
+    `requests` in any `window_seconds`, with `per_day` the most that admits in a UTC day rounded
+    down; it is `null` for a service the instance sets no cap on.
+
+    `days` holds every day of the range in order, a day with no events with an empty list. A
+    day's entries are ordered by provider, kind and outcome, and each counts at least one event.
+    The outcomes of a request that was sent are "ok", "rate_limited" (the service answered
+    429), "status" (any other status refused), "too_large", "deadline", "transport" and
+    "cancelled"; "skipped" (the instance's own cap had no room) and "cache_hit" sent nothing.
+    A request is counted on the day it ended. `duration_ms_total` and `duration_ms_max` are the
+    total and the longest time the requests took, in whole milliseconds, and `0` for the two
+    outcomes that sent nothing. The counts trail the requests by up to a few minutes, and a
+    cache outage can lose the most recent of them.
+
+    422 for a range running backwards or longer than 92 days.
+    """
+    days = _days_between(first, last)
+
+    counted: dict[date, list[ExternalRequestCount]] = defaultdict(list)
+    for row in await external_requests_between(db, first=first, last=last):
+        counted[row.day].append(
+            ExternalRequestCount(
+                provider=row.provider,
+                kind=row.kind,
+                outcome=row.outcome,
+                count=row.count,
+                duration_ms_total=row.duration_ms_total,
+                duration_ms_max=row.duration_ms_max,
+            )
+        )
+
+    providers = []
+    for provider, kinds in external_requests.DECLARED.items():
+        limit = external_requests.provider_limit(provider)
+        providers.append(
+            ExternalRequestProvider(
+                provider=provider,
+                kinds=list(kinds),
+                limit=ExternalRequestLimit(
+                    requests=limit[0], window_seconds=limit[1], per_day=limit[0] * 86400 // limit[1]
+                )
+                if limit is not None
+                else None,
+            )
+        )
+
+    return ExternalRequestsRead(
+        from_=first,
+        to=last,
+        providers=providers,
+        days=[
+            ExternalRequestsDay(
+                day=day,
+                requests=sorted(
+                    (entry for entry in counted.get(day, []) if entry.count > 0),
+                    key=lambda entry: (entry.provider, entry.kind, entry.outcome),
+                ),
+            )
+            for day in days
+        ],
     )
 
 

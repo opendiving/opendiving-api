@@ -596,10 +596,10 @@ class TestMergingTwoRegisters:
         async def page_with(slow_endpoint: str) -> str:
             real_worms = species_service._worms
 
-            async def paced(endpoint: str, segment: Any, params: Any = None) -> Any:
+            async def paced(kind: Any, endpoint: str, segment: Any, params: Any = None) -> Any:
                 if endpoint == slow_endpoint:
                     await anyio.sleep(0.05)
-                return await real_worms(endpoint, segment, params)
+                return await real_worms(kind, endpoint, segment, params)
 
             with (
                 _registers(
@@ -1657,7 +1657,7 @@ class TestSearchDegrades:
         handles 200 turns every genuine miss into a provider failure - and then never caches
         it, so the next keystroke asks again."""
         with _Providers(lambda request: httpx.Response(204)):
-            rows = await species_service._worms("AphiaRecordsByName", "nothing")
+            rows = await species_service._worms("by-name", "AphiaRecordsByName", "nothing")
 
         assert rows == []
 
@@ -1816,6 +1816,36 @@ class TestCaching:
         assert set(fake_redis.expiries.values()) == {species_service._HIT_TTL_SECONDS}
 
     @pytest.mark.asyncio
+    async def test_a_hit_counts_under_every_request_its_miss_sent_and_sends_none(self, fake_redis: FakeRedis):
+        """The page reads the cache's figure as requests saved, so a hit stands for each
+        request the fan-out would have made, not for one search."""
+        db = _empty_db()
+
+        def counted(outcome: str) -> set[str]:
+            return {key.split(":", 2)[2].rsplit(":", 1)[0] for key in fake_redis.counters if key.endswith(outcome)}
+
+        with _registers(
+            by_name=[CLOWNFISH_RECORD], wikidata_search=WIKIDATA_SEARCH, wikidata_entities=WIKIDATA_ENTITIES
+        ) as providers:
+            await species_service.search_species(db, "amphiprion ocellaris")
+            sent = len(providers.requests)
+            await species_service.search_species(db, "amphiprion ocellaris")
+
+        assert len(providers.requests) == sent
+        assert (
+            counted(":cache_hit")
+            == counted(":ok")
+            == {
+                "worms:by-name",
+                "worms:by-vernacular",
+                "worms:name-part",
+                "wikidata:search",
+                "wikidata:entities",
+            }
+        )
+        assert all(value.startswith(b"1 ") for value in fake_redis.counters.values())
+
+    @pytest.mark.asyncio
     async def test_a_failed_annotation_keeps_the_rows_and_takes_the_short_ttl(self, fake_redis: FakeRedis):
         """The ajax leg adds no rows, so losing it costs nothing a diver can see - which is
         exactly why the hour is worth paying for. Left on the month, the flagship query would
@@ -1864,10 +1894,10 @@ class TestCaching:
         db = _empty_db()
         real_worms = species_service._worms
 
-        async def hang_on_the_annotation(endpoint: str, segment: Any, params: Any = None) -> Any:
+        async def hang_on_the_annotation(kind: Any, endpoint: str, segment: Any, params: Any = None) -> Any:
             if endpoint.startswith("Ajax"):
                 await anyio.sleep(species_service._SEARCH_BUDGET_SECONDS * 10)
-            return await real_worms(endpoint, segment, params)
+            return await real_worms(kind, endpoint, segment, params)
 
         with (
             _registers(by_vernacular=[_worms_record(137102, "Orcinus orca")]),
