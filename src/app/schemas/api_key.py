@@ -114,7 +114,6 @@ class ApiKeyRead(PublicUUIDSchema):
     scope: ApiKeyScope
     scopes: list[str] | None = None
     created_at: datetime
-    last_used_at: datetime | None
     expires_at: datetime | None
 
 
