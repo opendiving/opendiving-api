@@ -719,6 +719,7 @@ class DiveFileInfo(PublicUUIDSchema):
     content_type: str
     byte_size: int
     parser_key: Annotated[str, Field(description="Identifier of the parser that read this file, e.g. `suunto_xml`")]
+    created_at: Annotated[datetime, Field(description="When this file was uploaded")]
     updated_at: datetime | None = None
     entry_latitude: Annotated[
         float | None,
@@ -900,6 +901,13 @@ class RecordingRead(RecordingReadouts):
     profile: Annotated[
         DiveProfileInfo | None,
         Field(default=None, description="Summary of this recording's samples, or null when it has none"),
+    ]
+    created_at: Annotated[
+        datetime,
+        Field(
+            description="When this recording was created. Each of its files carries its own upload time as "
+            "`created_at`, which is the one to show for a file."
+        ),
     ]
     updated_at: datetime | None = None
 

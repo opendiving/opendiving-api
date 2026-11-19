@@ -82,7 +82,12 @@ class TestWhatTheWriteMints:
             updated_at="1",
             mixtures=[{"id": 1, "oxygen": 0.21}],
             recordings=[
-                _recording(uuid="r", updated_at="1", files=[{"uuid": "f", "attach_order": 0, "updated_at": "1"}])
+                _recording(
+                    uuid="r",
+                    created_at="1",
+                    updated_at="1",
+                    files=[{"uuid": "f", "attach_order": 0, "created_at": "1", "updated_at": "1"}],
+                )
             ],
         )
         after = _dive(
@@ -92,7 +97,12 @@ class TestWhatTheWriteMints:
             updated_at="2",
             mixtures=[{"id": 2, "oxygen": 0.21}],
             recordings=[
-                _recording(uuid="s", updated_at="2", files=[{"uuid": "g", "attach_order": 1, "updated_at": "2"}])
+                _recording(
+                    uuid="s",
+                    created_at="2",
+                    updated_at="2",
+                    files=[{"uuid": "g", "attach_order": 1, "created_at": "2", "updated_at": "2"}],
+                )
             ],
         )
 

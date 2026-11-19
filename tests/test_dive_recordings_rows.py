@@ -1466,6 +1466,33 @@ class TestTheDiveRead:
         ]
 
     @pytest.mark.asyncio
+    async def test_the_detail_read_carries_when_each_recording_and_file_was_created(
+        self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
+    ) -> None:
+        """Two instants rather than one, because a merge folds a later recording's files into an
+        earlier one: a file's upload time is its own, never its recording's."""
+        stored = await _attach(async_db, diver, dive, _export())
+        recorded, uploaded = datetime(2026, 9, 8, 18, 0, tzinfo=UTC), datetime(2026, 9, 9, 7, 30, tzinfo=UTC)
+        await async_db.execute(
+            update(DiveRecording).where(DiveRecording.id == stored.recording_id).values(created_at=recorded)
+        )
+        await async_db.execute(update(DiveFile).where(DiveFile.uuid == stored.file_uuid).values(created_at=uploaded))
+        await async_db.commit()
+
+        read = await _cached_read_dive.__wrapped__(  # type: ignore[attr-defined]
+            request=None, user_id=diver.id, uuid=dive.uuid, owner_uuid=diver.uuid, db=async_db
+        )
+
+        (recording,) = read.recordings
+        assert recording.created_at == recorded
+        assert [row.created_at for row in recording.files] == [uploaded]
+        body = read.model_dump(mode="json")["recordings"][0]
+        assert (body["created_at"], body["files"][0]["created_at"]) == (
+            "2026-09-08T18:00:00Z",
+            "2026-09-09T07:30:00Z",
+        )
+
+    @pytest.mark.asyncio
     async def test_a_profile_read_off_a_file_says_file_rather_than_which_format(
         self, volume: Any, async_db: AsyncSession, diver: User, dive: Dive
     ) -> None:

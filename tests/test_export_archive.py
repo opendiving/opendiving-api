@@ -17,6 +17,7 @@ import io
 import json
 import zipfile
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -347,6 +348,7 @@ def _file_info(original_filename: str) -> DiveFileInfo:
         content_type="application/xml",
         byte_size=10,
         parser_key="suunto_xml",
+        created_at=datetime(2026, 9, 8, 18, 0, tzinfo=UTC),
         attach_order=0,
     )
 

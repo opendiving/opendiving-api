@@ -191,6 +191,7 @@ def make_file_row(row_id: int, **overrides: Any) -> ExportFileRow:
         "content_type": "application/json",
         "byte_size": 1024,
         "parser_key": "suunto_json",
+        "created_at": datetime(2026, 9, 8, 18, 0, tzinfo=UTC),
         "attach_order": 0,
     }
     defaults.update(overrides)

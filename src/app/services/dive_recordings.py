@@ -1104,6 +1104,7 @@ async def get_recordings_for_dives(db: AsyncSession, *, dive_ids: Sequence[int])
                 start_on_dive_axis=axis_starts[row.id],
                 files=files.get(row.id, []),
                 profile=profiles.get(row.id),
+                created_at=row.created_at,
                 updated_at=row.updated_at,
             )
         )
@@ -1159,6 +1160,7 @@ async def get_file_infos_for_recordings(
             DiveFile.byte_size,
             DiveFile.original_filename,
             DiveFile.parser_key,
+            DiveFile.created_at,
             DiveFile.updated_at,
             DiveFile.entry_latitude,
             DiveFile.entry_longitude,
@@ -1176,6 +1178,7 @@ async def get_file_infos_for_recordings(
                 byte_size=row.byte_size,
                 original_filename=row.original_filename,
                 parser_key=row.parser_key,
+                created_at=row.created_at,
                 updated_at=row.updated_at,
                 entry_latitude=row.entry_latitude,
                 entry_longitude=row.entry_longitude,

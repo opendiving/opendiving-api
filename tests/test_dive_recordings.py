@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from src.app.main import app
 from src.app.schemas.parsed_dive import ParsedDevice
 from src.app.services.dive_files import relabel_gas_numbers
 from src.app.services.dive_recordings import (
@@ -637,3 +638,17 @@ class TestRelabellingASecondComputersCylinders:
 
         assert mapping == {}
         assert cylinders is None
+
+
+class TestTheDocument:
+    @pytest.mark.parametrize("component", ["RecordingRead", "DiveFileInfo"])
+    def test_publishes_when_each_recording_and_file_was_created(self, component: str) -> None:
+        """Required rather than nullable: the column is `NOT NULL`, so a client can show it
+        unconditionally, where `updated_at` stays null until a row is edited."""
+        schema = app.openapi()["components"]["schemas"][component]
+
+        assert "created_at" in schema["required"]
+        assert (schema["properties"]["created_at"]["type"], schema["properties"]["created_at"]["format"]) == (
+            "string",
+            "date-time",
+        )
