@@ -474,6 +474,7 @@ class _Writer:
                     dive_site_id=site_id,
                     notes=record.children["notes"],
                     created_at=record.values["created_at"],
+                    custom_properties=record.children["custom_properties"],
                 )
             )
             tag_ids = [self._tag_ids[name] for name in record.children.get("tags") or []]
@@ -487,7 +488,11 @@ class _Writer:
         for record in self._plan.commons_to_save():
             site_id = cast(int, record.row_id)
             saved = await save_commons_site(
-                self._db, user_id=self._user_id, dive_site_id=site_id, notes=record.children["notes"]
+                self._db,
+                user_id=self._user_id,
+                dive_site_id=site_id,
+                notes=record.children["notes"],
+                custom_properties=record.children["custom_properties"],
             )
             tag_ids = [self._tag_ids[name] for name in record.children.get("tags") or []]
             if saved and tag_ids:

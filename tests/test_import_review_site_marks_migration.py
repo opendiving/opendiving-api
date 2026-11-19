@@ -16,7 +16,7 @@ from uuid6 import uuid7
 
 from src.app.models.logbook_import import LogbookImport
 from tests.conftest import db_available
-from tests.helpers.generators import create_commons_site, create_dive_site, create_user
+from tests.helpers.generators import create_commons_site, create_user
 from tests.helpers.migrations import migrate, scratch_database, template_database
 
 pytestmark = [
@@ -60,6 +60,20 @@ def _propose(db: Session, user_id: int, site_id: int, status: str) -> None:
     db.commit()
 
 
+def _own_site(db: Session, user_id: int) -> Any:
+    """A private site, with the `id` and `uuid` the tests read. In SQL, for `_propose`'s reason: the
+    saved row `create_dive_site` writes beside it carries columns later revisions add."""
+    site = db.execute(
+        text(
+            "INSERT INTO dive_site (uuid, created_at, user_id, name) "
+            "VALUES (:uuid, :now, :user_id, :name) RETURNING id, uuid"
+        ),
+        {"uuid": uuid7(), "now": datetime.now(UTC), "user_id": user_id, "name": f"Pescador {uuid7().hex[-8:]}"},
+    ).one()
+    db.commit()
+    return site
+
+
 def _review(*site_uuids: Any) -> dict[str, Any]:
     return {
         "dives": [
@@ -78,7 +92,7 @@ class TestTheUpgrade:
         name, engine = scratch
         with Session(engine) as db:
             diver, other = create_user(db), create_user(db)
-            own, waiting, declined, decided = (create_dive_site(db, diver) for _ in range(4))
+            own, waiting, declined, decided = (_own_site(db, diver.id) for _ in range(4))
             record = create_commons_site(db)
             _propose(db, diver.id, waiting.id, "waiting")
             _propose(db, diver.id, declined.id, "declined")
@@ -114,7 +128,7 @@ class TestTheUpgrade:
         name, engine = scratch
         with Session(engine) as db:
             diver = create_user(db)
-            review = _review(create_dive_site(db, diver).uuid)
+            review = _review(_own_site(db, diver.id).uuid)
             stored = LogbookImport(user_id=diver.id, review_shape=2, status="applied", review=review)
             db.add(stored)
             db.commit()

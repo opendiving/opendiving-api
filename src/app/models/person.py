@@ -2,10 +2,10 @@ from sqlalchemy import CheckConstraint, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, TimestampMixin
+from ..core.db.models import CustomPropertiesMixin, PublicUUIDMixin, TimestampMixin
 
 
-class Person(Base, PublicUUIDMixin, TimestampMixin):
+class Person(Base, PublicUUIDMixin, TimestampMixin, CustomPropertiesMixin):
     """An individual the diver was with - a buddy, a guide, an instructor, a fellow student,
     a companion who stayed on the boat - referenced with a role per occasion from dives,
     trips and courses, and from a certification as its instructor.

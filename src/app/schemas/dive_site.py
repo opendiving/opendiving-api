@@ -25,6 +25,7 @@ from ..core.schemas import (
     StoredVocabulary,
     Trimmed,
 )
+from .custom_property import CustomPropertiesRead, CustomPropertiesUpdate, CustomPropertiesWrite
 from .dive import DiveSiteOwner, EntryType, WaterType
 from .location import (
     LOCATION_NAME_MAX,
@@ -324,13 +325,15 @@ class DiveSiteCommonsMatch(PublicUUIDSchema):
     name: StoredName
 
 
-class DiveSiteRead(DiveSiteBase, _DiveSiteMembersRead, DiveSiteSummary, _DiveSiteRelation, PublicUUIDSchema):
+class DiveSiteRead(
+    DiveSiteBase, _DiveSiteMembersRead, DiveSiteSummary, _DiveSiteRelation, CustomPropertiesRead, PublicUUIDSchema
+):
     """Public representation of a dive site, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API), with its tags by name in
     the diver's order and the summary of the diver's dives there.
 
-    `notes`, `tags`, the summary and `created_at` are the reader's, whoever else has the site:
-    on a Commons record they have not saved the first three are empty and `created_at` is when
+    `notes`, `custom_properties`, `tags`, the summary and `created_at` are the reader's, whoever
+    else has the site: on a Commons record they have not saved the first four are empty and `created_at` is when
     the row became a Commons record. So is `proposal`, which no other reader ever sees.
     """
 
@@ -428,7 +431,7 @@ class _DiveSiteMembersWrite(BaseModel):
         return self
 
 
-class DiveSiteCreate(DiveSiteBase, _DiveSiteMembersWrite, WholeCoordinatePair):
+class DiveSiteCreate(DiveSiteBase, _DiveSiteMembersWrite, CustomPropertiesWrite, WholeCoordinatePair):
     model_config = ConfigDict(extra="forbid")
 
     location: Annotated[LocationInput | None, Field(default=None, description=_LOCATION_DESCRIPTION)]
@@ -519,7 +522,7 @@ class DiveSiteUpdate(_DiveSiteUpdateFields, DiveSiteLocationColumnsInput):
     model_config = ConfigDict(extra="forbid")
 
 
-class DiveSiteUpdateRequest(_DiveSiteUpdateFields):
+class DiveSiteUpdateRequest(_DiveSiteUpdateFields, CustomPropertiesUpdate):
     """Request body for `PATCH /dive-site/{uuid}`.
 
     Naming `location` **replaces** the stored place wholesale rather than merging into it:
@@ -530,14 +533,18 @@ class DiveSiteUpdateRequest(_DiveSiteUpdateFields):
 
     model_config = ConfigDict(extra="forbid")
 
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (*_DiveSiteUpdateFields.NON_NULLABLE_FIELDS, "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (
+        *_DiveSiteUpdateFields.NON_NULLABLE_FIELDS,
+        "notes",
+        "custom_properties",
+    )
 
     location: Annotated[LocationInput | None, Field(default=None, description=_LOCATION_DESCRIPTION)]
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
     tags: TagsUpdate
 
 
-class DiveSiteSave(BaseModel):
+class DiveSiteSave(CustomPropertiesWrite):
     """Request body for `PUT /dive-site/{uuid}/saved`: what the diver writes as they save it."""
 
     model_config = ConfigDict(extra="forbid")

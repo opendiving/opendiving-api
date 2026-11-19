@@ -398,6 +398,9 @@ class TestWhatUddfCannotHold:
             {"person_uuid": str(UUIDS["person-sam"]), "role": "student"},
         ]
         assert course["contact_uuid"] == str(UUIDS["contact-school"])
+        assert course["extensions"] == {
+            "opendiving": {"custom_properties": [{"key": "Booking reference", "value": "BO-2026-114"}]}
+        }
 
     @pytest.mark.asyncio
     async def test_the_account_preferences_travel_under_this_producer_s_key(self, monkeypatch):

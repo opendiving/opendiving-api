@@ -21,6 +21,7 @@ from typing import Annotated, Any, ClassVar
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from ..core.schemas import MAX_LIST_ITEMS, NOTES_MAX_LENGTH, RejectsExplicitNulls, StoredVocabulary
+from .custom_property import CUSTOM_PROPERTIES_MAX, CUSTOM_PROPERTY_KEY_MAX, CUSTOM_PROPERTY_VALUE_MAX
 from .dive import BOAT_NAME_MAX, Abundance, Current, DiveStartTime, DiveType, EntryType, WaterType, Waves, Weather
 from .dive_mixture import GasRole, TankUsage
 from .person import PersonReference, PersonReferenceRead
@@ -68,6 +69,16 @@ class DiveDraftSighting(BaseModel):
     notes: Annotated[
         str, Field(default="", max_length=NOTES_MAX_LENGTH, description="What the diver wrote about this sighting")
     ]
+
+
+class DiveDraftCustomProperty(BaseModel):
+    """A custom property as the form holds it: `CustomProperty`'s members, untrimmed, either
+    empty, and a key typed twice kept twice."""
+
+    model_config = _WRITE
+
+    key: Annotated[str, Field(default="", max_length=CUSTOM_PROPERTY_KEY_MAX, description="The key as typed")]
+    value: Annotated[str, Field(default="", max_length=CUSTOM_PROPERTY_VALUE_MAX, description="The value as typed")]
 
 
 class DiveDraftValues(BaseModel):
@@ -152,6 +163,10 @@ class DiveDraftValues(BaseModel):
         list[Annotated[str, Field(max_length=TAG_NAME_MAX)]] | None,
         Field(default=None, max_length=MAX_LIST_ITEMS, description="The tags by name, in the diver's order"),
     ]
+    custom_properties: Annotated[
+        list[DiveDraftCustomProperty] | None,
+        Field(default=None, max_length=CUSTOM_PROPERTIES_MAX, description="The diver's own key-value pairs, in order"),
+    ]
 
     def stored(self) -> dict[str, Any]:
         """What `dive_draft.values` holds: the members given, as JSON."""
@@ -176,6 +191,11 @@ class DiveDraftSightingRead(BaseModel):
     count: int | None = None
     abundance: StoredVocabulary | None = None
     notes: str = ""
+
+
+class DiveDraftCustomPropertyRead(BaseModel):
+    key: str = ""
+    value: str = ""
 
 
 class DiveDraftValuesRead(BaseModel):
@@ -211,6 +231,7 @@ class DiveDraftValuesRead(BaseModel):
     sightings: list[DiveDraftSightingRead] | None = None
     people: list[PersonReferenceRead] | None = None
     tags: list[str] | None = None
+    custom_properties: list[DiveDraftCustomPropertyRead] | None = None
 
 
 class DiveDraftCreate(BaseModel):

@@ -2,10 +2,10 @@ from sqlalchemy import JSON, CheckConstraint, Float, ForeignKey, Index, String, 
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, TimestampMixin
+from ..core.db.models import CustomPropertiesMixin, PublicUUIDMixin, TimestampMixin
 
 
-class Contact(Base, PublicUUIDMixin, TimestampMixin):
+class Contact(Base, PublicUUIDMixin, TimestampMixin, CustomPropertiesMixin):
     """A party a diver deals with - a dive center, a school, a shop, a place they stayed, a
     club, a friend's house - picked from a list rather than typed again.
 

@@ -57,6 +57,7 @@ def _select_people() -> Any:
             Person.email,
             Person.phone,
             Person.notes,
+            Person.custom_properties,
             User.username,
             _dive_count().label("dive_count"),
             Person.created_at,

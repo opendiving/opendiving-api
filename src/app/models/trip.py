@@ -2,10 +2,10 @@ from sqlalchemy import ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, TimestampMixin
+from ..core.db.models import CustomPropertiesMixin, PublicUUIDMixin, TimestampMixin
 
 
-class Trip(Base, PublicUUIDMixin, TimestampMixin):
+class Trip(Base, PublicUUIDMixin, TimestampMixin, CustomPropertiesMixin):
     """A diving trip, which is a name and an ordered sequence of `trip_part` rows.
 
     No dates of its own: a trip's span is the earliest `start_date` and the latest

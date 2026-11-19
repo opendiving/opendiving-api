@@ -57,6 +57,7 @@ from ...schemas.dive import (
 from ...schemas.dive_mixture import DiveMixtureRead, GasRole, TankUsage
 from ...schemas.dive_site import WIKIDATA, WORMS, identifier_problem
 from ...schemas.export import (
+    CUSTOM_PROPERTIES_EXTENSION,
     DIVEJSON_FORMAT,
     DIVEJSON_PRODUCER_KEY,
     DIVEJSON_VERSION,
@@ -181,6 +182,15 @@ def _sayable[T: StrEnum](value: str | None, vocabulary: type[T]) -> T | None:
     return vocabulary(value) if value is not None and _speakable(value, vocabulary) else None
 
 
+def _extensions(custom_properties: list[dict[str, str]], **entries: Any) -> dict[str, Any] | None:
+    """This producer's entry on one record - its custom properties and whatever else the format
+    has no member for - or none where the record holds nothing to put in it."""
+    payload = {name: value for name, value in entries.items() if value is not None}
+    if custom_properties:
+        payload[CUSTOM_PROPERTIES_EXTENSION] = custom_properties
+    return {DIVEJSON_PRODUCER_KEY: payload} if payload else None
+
+
 def _export_course(bundle: ExportBundle, course: Course) -> ExportCourse:
     """One course, as the document spells it. Never omitted: nothing a course stores is a
     REQUIRED member the format could find unreadable."""
@@ -199,6 +209,7 @@ def _export_course(bundle: ExportBundle, course: Course) -> ExportCourse:
         people=_people(bundle.people_for(course)),
         notes=_text(course.notes),
         created_at=course.created_at,
+        extensions=_extensions(course.custom_properties),
     )
 
 
@@ -223,7 +234,7 @@ def _export_person(bundle: ExportBundle, person: Person) -> ExportPerson:
         phone=_filled(person.phone),
         notes=_text(person.notes),
         created_at=person.created_at,
-        extensions=None if linked is None else {DIVEJSON_PRODUCER_KEY: {"user_uuid": linked}},
+        extensions=_extensions(person.custom_properties, user_uuid=linked),
     )
 
 
@@ -248,6 +259,7 @@ def _export_contact(contact: Contact) -> ExportContact:
         position=_position(contact.latitude, contact.longitude),
         notes=_text(contact.notes),
         created_at=contact.created_at,
+        extensions=_extensions(contact.custom_properties),
     )
 
 
@@ -277,6 +289,7 @@ def _export_dive_site(bundle: ExportBundle, site: DiveSite) -> ExportDiveSite:
         tags=[tag.name for tag in bundle.tags_for(site)] or None,
         notes=_text(saved.notes),
         created_at=saved.created_at,
+        extensions=_extensions(saved.custom_properties),
     )
 
 
@@ -498,6 +511,7 @@ def _trip(bundle: ExportBundle, trip: Trip, parts: list[TripPartRead]) -> Export
         people=_people(bundle.people_for(trip)),
         notes=_text(trip.notes),
         created_at=trip.created_at,
+        extensions=_extensions(trip.custom_properties),
     )
 
 
@@ -667,9 +681,12 @@ def _dive(
         cylinders=[_mixture(mixture) for mixture in bundle.mixtures_by_dive[dive.id]],
         recordings=recordings,
         created_at=dive.created_at,
-        extensions=None
-        if (conditions := bundle.conditions_by_dive.get(dive.id)) is None
-        else {DIVEJSON_PRODUCER_KEY: {"conditions": conditions.model_dump(mode="json")}},
+        extensions=_extensions(
+            dive.custom_properties,
+            conditions=None
+            if (conditions := bundle.conditions_by_dive.get(dive.id)) is None
+            else conditions.model_dump(mode="json"),
+        ),
     )
 
 
@@ -718,6 +735,7 @@ def _certifications(bundle: ExportBundle, paths: ArchivePaths | None) -> list[Ex
                 front_file=by_side.get(CertificationSide.FRONT.value),
                 back_file=by_side.get(CertificationSide.BACK.value),
                 created_at=certification.created_at,
+                extensions=_extensions(certification.custom_properties),
             )
         )
     return exported
@@ -789,6 +807,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                     dive_count=item.dive_count,
                     dive_time=item.dive_time,
                     created_at=item.created_at,
+                    extensions=_extensions(item.custom_properties),
                 )
                 for item in bundle.gear_items
             ],
@@ -806,6 +825,7 @@ def _collections(bundle: ExportBundle, paths: ArchivePaths | None) -> list[tuple
                         if (item := bundle.gear_item_by_id.get(item_id))
                     ],
                     created_at=gear_set.created_at,
+                    extensions=_extensions(gear_set.custom_properties),
                 )
                 for gear_set in bundle.gear_sets
             ],

@@ -16,10 +16,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, TimestampMixin
+from ..core.db.models import CustomPropertiesMixin, PublicUUIDMixin, TimestampMixin
 
 
-class GearItem(Base, PublicUUIDMixin, TimestampMixin):
+class GearItem(Base, PublicUUIDMixin, TimestampMixin, CustomPropertiesMixin):
     """A single piece of diving equipment owned (or rented) by a user, e.g. a
     regulator, BCD, drysuit or dive computer.
 

@@ -41,6 +41,7 @@ from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
 from ..models.dive_species import DiveSpecies
 from ..models.dive_tag import DiveTag
+from ..schemas.custom_property import merge_custom_properties
 from ..schemas.dive import DiveReadInternal
 from ..schemas.dive_mixture import DiveMixtureCreate, DiveMixtureRead, as_create
 from ..schemas.dive_profile import DEPTH_SCALE, MILLISECONDS_PER_SECOND
@@ -231,7 +232,12 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     await _move_links(db, from_dive_id=absorbed.id, to_dive_id=survivor.id, dive_number=absorbed.dive_number)
 
     values: dict[str, object] = {
-        "notes": merged_notes(survivor.notes, absorbed.notes, dive_number=absorbed.dive_number)
+        "notes": merged_notes(survivor.notes, absorbed.notes, dive_number=absorbed.dive_number),
+        # Joined as two saved sites' are, so a property only the other dive had is not lost with it.
+        "custom_properties": merge_custom_properties(
+            [prop.model_dump() for prop in survivor.custom_properties],
+            [prop.model_dump() for prop in absorbed.custom_properties],
+        ),
     }
     for column in ("submerged_time", "avg_depth", "max_depth"):
         if (value := getattr(figures, column)) is not None:

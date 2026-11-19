@@ -7540,3 +7540,15 @@ a discriminated union's branch takes its mapping value, its name on the wire: un
 changed at once read as branches added, with no member named. A union of several `$ref` branches
 with no discriminator keeps the raw comparison, its branches having no other name. Rejected: `!` on
 every such rename, documented as a known false positive.
+
+## Custom properties are an ordered JSON list on the record, and a site's sit on the saved row
+
+`custom_properties` is a `JSON` list of `{key, value}` on each of the nine records a diver owns, not
+a table of rows or a JSON object: nothing queries into it, and an object's member order is not
+promised, where the diver's order is what they read. Keys are unique ignoring case and refused, not
+folded, twice, since two values are two facts. A dive site's live on `saved_site` beside its notes,
+so they stay the diver's when the site becomes a Commons record, a Commons record can carry them,
+and replacing a site with a record joins them (`merge_custom_properties`), as merging two dives
+does. They travel in the DiveJSON export under `extensions.opendiving.custom_properties`, which the
+import reads back; UDDF and the CSVs carry none, having no slot for free key-value pairs. Rejected:
+typed values or account-wide property definitions, which a first version does not need.

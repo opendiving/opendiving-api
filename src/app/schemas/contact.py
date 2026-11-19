@@ -15,6 +15,7 @@ from ..core.schemas import (
     StoredVocabulary,
     Trimmed,
 )
+from .custom_property import CustomPropertiesRead, CustomPropertiesUpdate, CustomPropertiesWrite
 from .location import Latitude, Longitude, WholeCoordinatePair
 
 # DiveJSON §6.18's bounds, and the widths of the columns behind them.
@@ -222,7 +223,7 @@ class ContactBase(BaseModel):
     ]
 
 
-class _ContactWriteFields(BaseModel):
+class _ContactWriteFields(CustomPropertiesWrite):
     """The members a write validates and a read does not: the role vocabulary, the email
     address and the website's scheme. A read carries them as the strings they are - see
     *"A stored vocabulary is read back as a string"* in DECISIONS.md."""
@@ -245,7 +246,7 @@ class _ContactWriteFields(BaseModel):
         return canonical_roles(value)
 
 
-class _ContactReadFields(BaseModel):
+class _ContactReadFields(CustomPropertiesRead):
     roles: Annotated[list[StoredVocabulary], Field(default_factory=list)]
     email: str | None = None
     website: str | None = None
@@ -287,7 +288,7 @@ class ContactCreateInternal(ContactBase, _ContactWriteFields, ContactAddressColu
     user_id: int
 
 
-class _ContactUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
+class _ContactUpdateFields(CustomPropertiesUpdate, WholeCoordinatePair, RejectsExplicitNulls):
     """What both update shapes carry, which is everything but the address.
 
     `phone`, `email` and `website` are nullable and stay off `NON_NULLABLE_FIELDS`, so an
@@ -296,7 +297,7 @@ class _ContactUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     they are named together or not at all, and both `null` clears the position.
     """
 
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "roles", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "roles", "notes", "custom_properties")
 
     name: Annotated[
         Annotated[str, Trimmed] | None,

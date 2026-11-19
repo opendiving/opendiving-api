@@ -109,7 +109,12 @@ async def write_gear_set(
 
     gear_item_ids = await _resolve_item_ids(db, gear_set.gear_item_uuids, current_user["id"])
 
-    gear_set_internal = GearSetCreateInternal(name=gear_set.name, weight=gear_set.weight, user_id=current_user["id"])
+    gear_set_internal = GearSetCreateInternal(
+        name=gear_set.name,
+        weight=gear_set.weight,
+        custom_properties=gear_set.custom_properties,
+        user_id=current_user["id"],
+    )
     created_gear_set = await write_or_duplicate(
         db,
         crud_gear_sets.create(

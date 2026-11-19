@@ -38,7 +38,8 @@ Where it differs from the API's own read shapes, and why:
   closure: every uuid a record names is defined in the same document.
 - **Whatever the format has no core member for rides `extensions.opendiving`** (spec
   §5.5): the diver's account preferences, which parser read a stored dive-computer file,
-  the crop this app frames the portrait with, the account a person is linked to, and at
+  the crop this app frames the portrait with, the account a person is linked to, a record's
+  custom properties (`CUSTOM_PROPERTIES_EXTENSION`), and at
   the document's root the markers of the profile's axis unit and temperature scale
   (`EXPORT_EXTENSIONS`). A writer may not invent core
   members, so this is the sanctioned slot.
@@ -93,6 +94,10 @@ DIVEJSON_EXTENSION = "divejson"
 # This producer's key inside every `extensions` object (spec §5.5). Stable by contract -
 # a reader that learned to understand our entries keeps understanding them.
 DIVEJSON_PRODUCER_KEY = "opendiving"
+
+# Where a record's custom properties ride: `extensions.opendiving.custom_properties`, the
+# `{"key", "value"}` list as the API carries it, written only where the record holds one.
+CUSTOM_PROPERTIES_EXTENSION = "custom_properties"
 
 # The document root's `extensions`: which unit this writer's profile axis is in, and which
 # scale its temperature readings are. Every export before the axis moved to milliseconds wrote
@@ -518,6 +523,7 @@ class ExportTrip(PublicUUIDSchema):
     people: ExportPeople
     notes: str | None = None
     created_at: datetime
+    extensions: ExportExtensions = None
 
 
 class ExportCourse(PublicUUIDSchema):
@@ -549,6 +555,7 @@ class ExportCourse(PublicUUIDSchema):
     people: ExportPeople
     notes: str | None = None
     created_at: datetime
+    extensions: ExportExtensions = None
 
 
 class ExportExternalId(BaseModel):
@@ -585,6 +592,7 @@ class ExportDiveSite(PublicUUIDSchema):
     tags: list[str] | None = None
     notes: str | None = None
     created_at: datetime
+    extensions: ExportExtensions = None
 
 
 class ExportSpecies(PublicUUIDSchema):
@@ -625,6 +633,7 @@ class ExportGearItem(PublicUUIDSchema):
     dive_count: int
     dive_time: int
     created_at: datetime
+    extensions: ExportExtensions = None
 
 
 class ExportGearSet(PublicUUIDSchema):
@@ -632,6 +641,7 @@ class ExportGearSet(PublicUUIDSchema):
     weight: float | None = None
     gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list, description="In the set's own order")]
     created_at: datetime
+    extensions: ExportExtensions = None
 
 
 class ExportGearServiceSchedule(PublicUUIDSchema):
@@ -688,6 +698,7 @@ class ExportCertification(PublicUUIDSchema):
     front_file: ExportStoredFile | None = None
     back_file: ExportStoredFile | None = None
     created_at: datetime
+    extensions: ExportExtensions = None
 
 
 class ExportAddress(BaseModel):
@@ -718,6 +729,7 @@ class ExportContact(PublicUUIDSchema):
     position: ExportPosition | None = None
     notes: str | None = None
     created_at: datetime
+    extensions: ExportExtensions = None
 
 
 class ExportPerson(PublicUUIDSchema):

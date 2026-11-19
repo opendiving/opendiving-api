@@ -458,6 +458,7 @@ class ImportTrip(_ReadModel):
     people: _People
     notes: str | None = None
     created_at: datetime | None = None
+    extensions: dict[str, Any] | None = None
 
 
 class ImportCourse(_ReadModel):
@@ -475,6 +476,7 @@ class ImportCourse(_ReadModel):
     training_center: _LegacyTrainingCenter = None
     notes: str | None = None
     created_at: datetime | None = None
+    extensions: dict[str, Any] | None = None
 
 
 class ImportExternalId(_ReadModel):
@@ -513,6 +515,7 @@ class ImportDiveSite(_ReadModel):
     tags: Annotated[list[str], Field(default_factory=list), _Collection]
     notes: str | None = None
     created_at: datetime | None = None
+    extensions: dict[str, Any] | None = None
 
 
 class ImportSpecies(_ReadModel):
@@ -550,6 +553,7 @@ class ImportGearItem(_ReadModel):
     dive_count: int | None = None
     dive_time: int | None = None
     created_at: datetime | None = None
+    extensions: dict[str, Any] | None = None
 
 
 class ImportGearSet(_ReadModel):
@@ -558,6 +562,7 @@ class ImportGearSet(_ReadModel):
     weight: float | None = None
     gear_uuids: Annotated[list[uuid_pkg.UUID], Field(default_factory=list), _Collection]
     created_at: datetime | None = None
+    extensions: dict[str, Any] | None = None
 
 
 class ImportGearServiceSchedule(_ReadModel):
@@ -618,6 +623,7 @@ class ImportCertification(_ReadModel):
     front_file: ImportStoredFile | None = None
     back_file: ImportStoredFile | None = None
     created_at: datetime | None = None
+    extensions: dict[str, Any] | None = None
 
 
 class ImportAddress(_ReadModel):
@@ -651,6 +657,7 @@ class ImportContact(_ReadModel):
     position: ImportPosition | None = None
     notes: str | None = None
     created_at: datetime | None = None
+    extensions: dict[str, Any] | None = None
 
 
 class ImportPerson(_ReadModel):
@@ -1115,7 +1122,7 @@ class ImportPortraitChoice(BaseModel):
 # served as it was stored and never validated again, so a change to any model below - or to
 # what they embed - owes this a bump and a call on the rows already stored: migrate them to the
 # new shape, or retire them. `tests/test_logbook_import_held.py` fails until the number moves.
-REVIEW_SHAPE = 2
+REVIEW_SHAPE = 3
 
 
 class LogbookImportStatus(StrEnum):

@@ -1,7 +1,7 @@
 import uuid as uuid_pkg
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime
+from sqlalchemy import JSON, Boolean, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, MappedAsDataclass, mapped_column
 from uuid6 import uuid7
@@ -46,3 +46,17 @@ class SoftDeleteMixin(MappedAsDataclass):
 
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None, kw_only=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, kw_only=True)
+
+
+class CustomPropertiesMixin(MappedAsDataclass):
+    """Adds `custom_properties`, the diver's own `{"key", "value"}` pairs on a record they own
+    (`schemas/custom_property.py`), in the order they wrote them.
+
+    `JSON` on `contact.roles`' terms: nothing queries into it, and `JSONB` would reorder
+    nothing here but buys nothing either. Every writer stores it conforming - trimmed, keys
+    unique ignoring case. See `PublicUUIDMixin` for why it is `kw_only`.
+    """
+
+    custom_properties: Mapped[list[dict[str, str]]] = mapped_column(
+        JSON, default_factory=list, server_default="[]", kw_only=True
+    )

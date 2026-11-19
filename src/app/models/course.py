@@ -4,10 +4,10 @@ from sqlalchemy import CheckConstraint, Date, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, TimestampMixin
+from ..core.db.models import CustomPropertiesMixin, PublicUUIDMixin, TimestampMixin
 
 
-class Course(Base, PublicUUIDMixin, TimestampMixin):
+class Course(Base, PublicUUIDMixin, TimestampMixin, CustomPropertiesMixin):
     """A training course a diver took - "TDI Advanced Nitrox + Decompression Procedures,
     Blue Ocean, March 2026" - grouping the dives logged on it and the certifications it
     issued.
