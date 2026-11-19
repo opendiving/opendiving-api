@@ -127,7 +127,7 @@ async def export_divejson(
     (<https://divejson.org>) and this app is its reference implementation, so this file is
     lossless where UDDF is not: it carries the dives with their full sample profiles,
     cylinders, sites, trips, training courses, contacts, the people the diver was with, the
-    diver's tags, marine-life sightings, gear and its service history, c-card records and the
+    diver's tags, aquatic-life sightings, gear and its service history, c-card records and the
     check-in details and portrait a dive shop asks for -
     everything the account holds except the binaries themselves, which the file references
     by digest, the profile picture, which it does not name, and the dive drafts, which have
