@@ -1115,7 +1115,7 @@ class ImportPortraitChoice(BaseModel):
 # served as it was stored and never validated again, so a change to any model below - or to
 # what they embed - owes this a bump and a call on the rows already stored: migrate them to the
 # new shape, or retire them. `tests/test_logbook_import_held.py` fails until the number moves.
-REVIEW_SHAPE = 2
+REVIEW_SHAPE = 3
 
 
 class LogbookImportStatus(StrEnum):
