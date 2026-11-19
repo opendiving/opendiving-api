@@ -14,9 +14,10 @@ from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
+from src.app.models.dive_site import DiveSite
 from src.app.models.logbook_import import LogbookImport
-from tests.conftest import db_available
-from tests.helpers.generators import create_commons_site, create_dive_site, create_user
+from tests.conftest import db_available, unique_email, unique_username
+from tests.helpers.generators import create_commons_site, save_dive_site
 from tests.helpers.migrations import migrate, scratch_database, template_database
 
 pytestmark = [
@@ -38,6 +39,29 @@ def below() -> Iterator[str]:
 def scratch(below: str) -> Iterator[tuple[str, Engine]]:
     with scratch_database("site_marks", below) as database:
         yield database
+
+
+def _user(db: Session) -> int:
+    """A user row in this revision's schema, written in SQL: the model names the columns later
+    revisions add, so it can neither insert nor load the row here."""
+    user_id = db.execute(
+        text(
+            'INSERT INTO "user" (name, username, email, is_superuser, is_deleted, uuid, created_at) '
+            "VALUES ('Seed', :username, :email, false, false, :uuid, now()) RETURNING id"
+        ),
+        {"username": unique_username(), "email": unique_email(), "uuid": uuid7()},
+    ).scalar_one()
+    db.commit()
+    return int(user_id)
+
+
+def _site(db: Session, user_id: int) -> DiveSite:
+    site = DiveSite(user_id=user_id, name=f"Pescador {uuid7().hex[-8:]}", location_name="Moalboal, Philippines")
+    db.add(site)
+    db.commit()
+    db.refresh(site)
+    save_dive_site(db, site)
+    return site
 
 
 def _propose(db: Session, user_id: int, site_id: int, status: str) -> None:
@@ -77,16 +101,16 @@ class TestTheUpgrade:
     def test_each_site_reads_as_a_dive_read_now_gives_it(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
         with Session(engine) as db:
-            diver, other = create_user(db), create_user(db)
-            own, waiting, declined, decided = (create_dive_site(db, diver) for _ in range(4))
+            diver, other = _user(db), _user(db)
+            own, waiting, declined, decided = (_site(db, diver) for _ in range(4))
             record = create_commons_site(db)
-            _propose(db, diver.id, waiting.id, "waiting")
-            _propose(db, diver.id, declined.id, "declined")
-            _propose(db, diver.id, decided.id, "declined")
-            _propose(db, diver.id, decided.id, "withdrawn")
-            _propose(db, other.id, record.id, "waiting")
+            _propose(db, diver, waiting.id, "waiting")
+            _propose(db, diver, declined.id, "declined")
+            _propose(db, diver, decided.id, "declined")
+            _propose(db, diver, decided.id, "withdrawn")
+            _propose(db, other, record.id, "waiting")
             stored = LogbookImport(
-                user_id=diver.id,
+                user_id=diver,
                 review_shape=1,
                 status="applied",
                 review=_review(own.uuid, waiting.uuid, declined.uuid, decided.uuid, record.uuid, uuid7()),
@@ -113,9 +137,9 @@ class TestTheUpgrade:
     def test_a_review_at_the_new_shape_is_untouched(self, scratch: tuple[str, Engine]) -> None:
         name, engine = scratch
         with Session(engine) as db:
-            diver = create_user(db)
-            review = _review(create_dive_site(db, diver).uuid)
-            stored = LogbookImport(user_id=diver.id, review_shape=2, status="applied", review=review)
+            diver = _user(db)
+            review = _review(_site(db, diver).uuid)
+            stored = LogbookImport(user_id=diver, review_shape=2, status="applied", review=review)
             db.add(stored)
             db.commit()
             stored_id = stored.id

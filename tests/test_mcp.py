@@ -665,6 +665,13 @@ async def test_scoped_key_account_writes_require_all_provided_fields(
     assert (await mcp_http.patch("/api/v1/user", json={"name": "Allowed"}, headers=key)).status_code == 200
     preferences = await scoped_key(mcp_http, headers, ["preferences:write"])
     assert (await mcp_http.patch("/api/v1/user", json={"name": "Forbidden"}, headers=preferences)).status_code == 403
+    unit_override = {"unit_preferences": {"depth": "imperial"}}
+    assert (await mcp_http.patch("/api/v1/user", json=unit_override, headers=key)).status_code == 403
+    changed = await mcp_http.patch("/api/v1/user", json=unit_override, headers=preferences)
+    assert changed.status_code == 200, changed.text
+    reader = await scoped_key(mcp_http, headers, ["preferences:read"])
+    stored = await mcp_http.get("/api/v1/user", headers=reader)
+    assert stored.json()["unit_preferences"] == {"depth": "imperial"}
     both = await scoped_key(mcp_http, headers, ["profile:write", "preferences:write"])
     assert (
         await mcp_http.patch("/api/v1/user", json={"name": "Both", "units": "imperial"}, headers=both)

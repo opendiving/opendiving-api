@@ -54,6 +54,9 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     # default to backfill the existing rows.
     units: Mapped[str] = mapped_column(String(16), default="metric", server_default="metric")
 
+    # Per-family display overrides; an empty record follows the existing preset.
+    unit_preferences: Mapped[dict[str, str]] = mapped_column(JSON, default_factory=dict, server_default="{}")
+
     # Which dive-form fields this diver currently keeps hidden - `DiveFormField` values in
     # `schemas/dive_form_preset.py`, canonicalized on every write. The account's *current*
     # state, not a preset: applying a preset copies that preset's set in here, and toggling

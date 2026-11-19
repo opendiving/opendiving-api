@@ -15,6 +15,7 @@ PREFERENCE_FIELDS = frozenset(
         "renewal_reminder_emails",
         "year_in_review_emails",
         "units",
+        "unit_preferences",
         "dive_form_hidden_fields",
         "dive_form_preset_uuid",
     }
