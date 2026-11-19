@@ -5757,8 +5757,8 @@ slot; rejected: `variouspieces` for both (loses the grouping) or splitting by ph
 `<buoyancycontroldevice>`, which names the broader kind. Each collapse costs only the sub-category:
 this app's own import reads the kit list under `<diver><owner><equipment>` through the `divejson`
 package's reader, which brings a line cutter or shears back as `knife` and a wing as `bcd`.
-`rebreather` and `scooter` are their own elements; `transmitter` and `backplate` have none and go to
-`<variouspieces>`.
+`rebreather` and `scooter` are their own elements; `transmitter`, `backplate`, `undergarment`,
+`tech_shorts` and `slate` have none and go to `<variouspieces>`.
 
 ## There is no `Course.cost`, and money is a cross-cutting concern this app has not designed yet
 

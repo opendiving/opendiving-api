@@ -185,9 +185,12 @@ _EQUIPMENT_ELEMENT: dict[GearType, str] = {
     GearType.WETSUIT: "suit",
     GearType.DRYSUIT: "suit",
     GearType.VEST: "variouspieces",
+    # Not a `<suit>`: a reader brings back every suit that is not a dry one as a wetsuit.
+    GearType.UNDERGARMENT: "variouspieces",
     GearType.HOOD: "variouspieces",
     GearType.GLOVES: "gloves",
     GearType.BOOTS: "boots",
+    GearType.TECH_SHORTS: "variouspieces",
     GearType.BCD: "buoyancycontroldevice",
     # A backplate has no element in UDDF's equipment vocabulary.
     GearType.BACKPLATE: "variouspieces",
@@ -208,6 +211,7 @@ _EQUIPMENT_ELEMENT: dict[GearType, str] = {
     GearType.LINE_CUTTER: "knife",
     GearType.SHEARS: "knife",
     GearType.COMPASS: "compass",
+    GearType.SLATE: "variouspieces",
     GearType.CAMERA: "variouspieces",
     GearType.OTHER: "variouspieces",
 }

@@ -172,6 +172,9 @@ class TestGearType:
             "cylinder",
         ]
         assert values[values.index("light") : values.index("smb") + 1] == ["light", "scooter", "smb"]
+        assert values[values.index("vest") : values.index("hood") + 1] == ["vest", "undergarment", "hood"]
+        assert values[values.index("boots") : values.index("bcd") + 1] == ["boots", "tech_shorts", "bcd"]
+        assert values[values.index("compass") : values.index("camera") + 1] == ["compass", "slate", "camera"]
 
 
 class TestGearSchemas:

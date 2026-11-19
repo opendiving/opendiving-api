@@ -1801,6 +1801,24 @@ class TestEquipmentMapping:
         various = _tree(document).findall(f".//{UDDF}variouspieces/{UDDF}name")
         assert [e.text for e in various] == ["Signal mirror", "Fox 40"]
 
+    @pytest.mark.asyncio
+    async def test_an_undergarment_tech_shorts_and_a_slate_land_in_variouspieces(self, schema, monkeypatch):
+        """None has an element of its own, and a `<suit>` would read back as a wetsuit, a
+        near type substituted for the true one."""
+        bundle = build_bundle(
+            gear_items=[
+                _gear("Heated undersuit", GearType.UNDERGARMENT),
+                _gear("Cargo shorts", GearType.TECH_SHORTS),
+                _gear("Wrist slate", GearType.SLATE),
+            ]
+        )
+        document = await _render(bundle, monkeypatch=monkeypatch)
+        schema.validate(document)
+        tree = _tree(document)
+        various = tree.findall(f".//{UDDF}variouspieces/{UDDF}name")
+        assert [e.text for e in various] == ["Heated undersuit", "Cargo shorts", "Wrist slate"]
+        assert tree.find(f".//{UDDF}suit") is None
+
 
 class TestPersonNames:
     @pytest.mark.parametrize(

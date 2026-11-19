@@ -41,7 +41,7 @@ class GearItem(Base, PublicUUIDMixin, TimestampMixin):
     # the numeric ranges on `dive`/`dive_mixture`, whose only other validation lives in
     # the frontend's Zod schemas - see DECISIONS.md), so a DB-level copy of the list
     # would buy nothing and would need a DDL change every time a category is added.
-    # 32 chars is generous headroom over the longest current member ("line_cutter"),
+    # 32 chars is generous headroom over the longest current member ("undergarment"),
     # so a new category never needs the column widened.
     #
     # What that argument does *not* license is a read schema typed with the enum. "Every
