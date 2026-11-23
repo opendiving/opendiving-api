@@ -75,14 +75,16 @@ async def read_dive_computer_known_dives(
     client can leave those out before it downloads any.
 
     `serial` is the computer's, and `dives` the dives it lists, each with the uuid the client
-    would give it and the start the computer lists for it. A listed dive is held when a dive
-    of the caller's that is not deleted has its uuid, or has a recording that names the
+    would give it and the start the computer lists for it. A listed dive is held when its uuid
+    is a dive of the caller's that is not deleted, or one merged into such a dive, which then
+    holds it; or when a dive of the caller's that is not deleted has a recording that names the
     serial, compared trimmed and case-folded, and that recording either started within two
     seconds of the listed start, or is one computer's two records of a dive merged into one
     and the listed start falls from its start through the end of its samples. Two starts are
     compared as instants where both carry a UTC offset, and as wall clocks where either does
     not. Nothing else holds a dive: not the same start under another serial, a recording that
-    names no serial or no start, a deleted dive, or another account's.
+    names no serial or no start, a deleted dive, or another account's. A dive the answer holds
+    is one an import of its download adds as no new dive.
 
     Answers one row for each listed dive the logbook holds, in the order listed and each uuid
     once: the listed uuid, and the uuid of the dive that holds it. A listed dive that is not

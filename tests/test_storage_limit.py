@@ -583,11 +583,12 @@ class TestAnImport:
         assert refused.value.status_code == 413
 
     @pytest.mark.asyncio
-    async def test_a_deleted_dive_s_archive_at_the_limit_stores_nothing(
+    async def test_a_deleted_dive_s_archive_at_the_limit_stores_nothing_new(
         self, db: Session, async_db: AsyncSession
     ) -> None:
-        """A dive soft-deleted with its files in place - the admin panel's delete - is skipped,
-        so its archive adds nothing and an account already at the limit is not refused."""
+        """A dive soft-deleted with its files in place - the admin panel's delete - is a new dive
+        to its archive, which takes the file the deleted dive holds rather than a second copy, so
+        an account already at the limit is not refused."""
         diver = create_user(db)
         dive = create_dive(db, diver)
         await _attach(async_db, diver, dive.id)
@@ -598,7 +599,7 @@ class TestAnImport:
 
         result = await _apply(async_db, diver, archive)
 
-        assert result["files"]["restored"] == 0
+        assert result["files"]["restored"] == 1
         assert await _used(async_db, diver) == LIMIT
 
 

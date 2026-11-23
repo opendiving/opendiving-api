@@ -892,11 +892,9 @@ class TestTheFilesKept:
         assert report.members[0].not_kept is ImportMemberNotKept.TOO_LARGE
 
     @pytest.mark.asyncio
-    async def test_a_file_another_recording_holds_is_skipped_with_the_note(
-        self, volume: Any, async_db: AsyncSession, db: Session
-    ) -> None:
+    async def test_a_file_a_dive_holds_names_that_dive(self, volume: Any, async_db: AsyncSession, db: Session) -> None:
         """One set of bytes is one row of one recording, so a copy the gates do not place on
-        that recording is not stored again."""
+        that recording is that recording's, and makes no second dive."""
         diver = create_user(db)
         holder = create_dive(db, diver)
         await _attach(async_db, diver, holder, OCEAN_FIT, "dive.fit")
@@ -912,8 +910,9 @@ class TestTheFilesKept:
 
         assert await _count(async_db, DiveFile, diver) == 1
         assert report.members[0].not_kept is ImportMemberNotKept.ALREADY_STORED
-        assert ImportNoteCode.FILE_SKIPPED in _codes(report)
-        assert [row.outcome for row in report.dives] == [ImportDiveOutcome.NEW]
+        assert ImportNoteCode.FILE_SKIPPED not in _codes(report)
+        assert [(row.outcome, row.uuid) for row in report.dives] == [(ImportDiveOutcome.UNCHANGED, holder.uuid)]
+        assert await _dive_ids(async_db, diver) == [holder.id]
 
     @pytest.mark.asyncio
     async def test_a_file_the_recording_it_reaches_holds_adds_nothing_and_notes_nothing(
@@ -1086,22 +1085,81 @@ async def _delete(db: AsyncSession, dive_uuid: uuid_pkg.UUID | None) -> None:
     await db.commit()
 
 
-class TestADeletedDiveStaysDeleted:
+class TestADeletedDiveIsNewToAnImport:
+    """A dive the diver deleted does not exist to an import: its file, downloaded or imported
+    again, is a new dive, and imported once more it is that dive."""
+
+    @pytest.mark.parametrize(
+        ("file", "same_uuid"),
+        [
+            pytest.param(("dive.json", _unique_export()), True, id="a file whose bytes give its uuid"),
+            pytest.param(("dive.fit", OCEAN_FIT), False, id="a file whose dive takes a new uuid"),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_a_dive_deleted_since_is_skipped(self, volume: Any, async_db: AsyncSession, db: Session) -> None:
+    async def test_a_dive_deleted_since_is_a_new_dive_and_then_that_dive(
+        self, volume: Any, async_db: AsyncSession, db: Session, file: tuple[str, bytes], same_uuid: bool
+    ) -> None:
         diver = create_user(db)
-        files = [("dive.json", _unique_export())]
-        [created] = (await _import(async_db, diver, files)).dives
+        [created] = (await _import(async_db, diver, [file])).dives
         await _delete(async_db, created.uuid)
 
-        review = await _import(async_db, diver, files, apply=False)
-        [skipped] = (await _import(async_db, diver, files)).dives
+        review = await _import(async_db, diver, [file], apply=False)
+        [again] = (await _import(async_db, diver, [file])).dives
+        [once_more] = (await _import(async_db, diver, [file])).dives
 
-        assert [row.outcome for row in review.dives] == [ImportDiveOutcome.SKIPPED]
-        assert skipped.outcome is ImportDiveOutcome.SKIPPED
-        assert skipped.reason is not None and "You deleted this record here" in skipped.reason
-        assert await _dive_ids(async_db, diver) == []
-        assert await _count(async_db, DiveFile, diver) == 0
+        assert [(row.outcome, row.reason) for row in review.dives] == [(ImportDiveOutcome.NEW, None)]
+        assert (again.outcome, again.reason) == (ImportDiveOutcome.NEW, None)
+        assert (again.uuid == created.uuid) is same_uuid
+        assert (once_more.outcome, once_more.uuid) == (ImportDiveOutcome.UNCHANGED, again.uuid)
+        assert len(await _dive_ids(async_db, diver)) == 1
+        assert await _count(async_db, DiveFile, diver) == 1
+        rows = (await async_db.execute(select(Dive.uuid, Dive.is_deleted).where(Dive.user_id == diver.id))).all()
+        assert sorted((row.uuid == again.uuid, row.is_deleted) for row in rows) == [(False, True), (True, False)]
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_dive_with_no_recording_is_a_new_dive_and_then_that_dive(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        logbook = json.dumps(
+            {
+                "format": "divejson",
+                "version": "1.0",
+                "exported_at": "2026-05-02T10:00:00+02:00",
+                "dives": [
+                    {"uuid": str(uuid_pkg.uuid4()), "started_at": "2026-05-01T10:00:00+02:00", "submerged_time": 1800}
+                ],
+            }
+        ).encode()
+        [created] = (await _import(async_db, diver, [("logbook.divejson", logbook)])).dives
+        await _delete(async_db, created.uuid)
+
+        [again] = (await _import(async_db, diver, [("logbook.divejson", logbook)])).dives
+        [once_more] = (await _import(async_db, diver, [("logbook.divejson", logbook)])).dives
+
+        assert (again.outcome, again.uuid) == (ImportDiveOutcome.NEW, created.uuid)
+        assert (once_more.outcome, once_more.uuid) == (ImportDiveOutcome.UNCHANGED, created.uuid)
+        assert len(await _dive_ids(async_db, diver)) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_other_computer_s_file_after_a_deletion_joins_the_new_dive(
+        self, volume: Any, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The JSON and the FIT of one dive, the dive deleted, then each imported again: the
+        first is a new dive, and the second is a reading of that dive's recording."""
+        diver = create_user(db)
+        [created] = (await _import(async_db, diver, PAIR)).dives
+        await _delete(async_db, created.uuid)
+
+        [first] = (await _import(async_db, diver, [PAIR[0]])).dives
+        [second] = (await _import(async_db, diver, [PAIR[1]])).dives
+
+        assert first.outcome is ImportDiveOutcome.NEW
+        assert (second.outcome, second.uuid) == (ImportDiveOutcome.MODIFIED, first.uuid)
+        [dive] = await _logbook(async_db, diver)
+        [recording] = dive["recordings"]
+        assert len(recording["files"]) == 2
 
     @pytest.mark.asyncio
     async def test_a_download_of_a_deleted_dive_fills_the_dive_logged_from_elsewhere(
@@ -1698,11 +1756,11 @@ class TestOneArchive:
         assert len(await _dive_ids(async_db, destination)) == 1
 
     @pytest.mark.asyncio
-    async def test_an_archived_file_another_recording_holds_is_skipped_with_the_note(
+    async def test_an_archived_file_a_dive_holds_names_that_dive(
         self, volume: Any, async_db: AsyncSession, db: Session
     ) -> None:
         """The archive's own files meet the account's the same way a kept file does: the
-        digest is asked after, and a copy is reported rather than refused by the index."""
+        digest is asked after, and a recording whose file the account holds is that dive's."""
         from datetime import UTC, datetime
 
         from src.app.services.export import load_export_bundle
@@ -1728,7 +1786,9 @@ class TestOneArchive:
 
         assert await _count(async_db, DiveFile, destination) == 1
         assert report.files.skipped == 1
-        assert ImportNoteCode.FILE_SKIPPED in _codes(report)
+        assert ImportNoteCode.FILE_SKIPPED not in _codes(report)
+        assert [(row.outcome, row.uuid) for row in report.dives] == [(ImportDiveOutcome.UNCHANGED, holder.uuid)]
+        assert await _dive_ids(async_db, destination) == [holder.id]
 
 
 # The Ocean pair's one tank as the dive stores it once both files have arrived: the FIT's mix

@@ -1433,8 +1433,9 @@ async def merge_two_dives(
     both dives record a UTC offset, by wall clock where either does not. The other dive's
     recordings, files, sites, gear, species, people, tags and notes move onto it, and its
     cylinders fill the blanks of the ones the two dives share and join the list where this
-    one lacks them; the dive itself is deleted, its uuid stops resolving and nothing here
-    can be undone.
+    one lacks them; the dive itself is deleted, no read finds it again and nothing here can be
+    undone. Its uuid is the surviving dive's to an import and to `POST /dive-computers/known-dives`:
+    a file or a document of the merged-away dive adds no dive.
 
     **What happens to the recordings depends on whether one computer or two recorded the
     dive.** The same computer's two records fold into a single recording: the later record's

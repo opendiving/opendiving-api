@@ -330,8 +330,12 @@ async def create_logbook_import(
     `changes`, each member that differs, what it was and what it becomes: adding a file or a
     recording is a change even where no value of the dive moves. An `unchanged` row is a dive you
     have that the import leaves as it is, and a `skipped` row one it will not write, with its
-    `reason`. A dive you deleted here is skipped: no import brings one back, though a deleted
-    dive's recordings can still reach a dive you have, as a new dive's would.
+    `reason`. A dive, certification or service record you deleted is one you do not have: it is
+    created again under its identifier, and nothing the import says speaks of the deleted one. A
+    dive you merged into another is that dive, whether a document names its identifier, brings
+    one computer's reading of either record of it, or brings a file the merged dive holds; so is
+    any dive whose file you already hold. Such a dive's row is the dive's, and only a file it
+    lacks is added to it.
 
     Every other record lands in one of three buckets, per collection, summed over the files:
     **created**, **linked** (an existing record of yours already carries that identifier, or
@@ -535,8 +539,11 @@ async def apply_logbook_import(
     cannot hold it beside what it now records. Everything else `changes` lists - a file, a
     recording, a profile, a position read from the files, a cylinder's link to a gear item - comes
     of the files themselves. What did not arrive is named by a note on the dive. A dive the
-    review showed that has since been deleted or merged away is skipped, and nothing is written
-    for it. A dive the review showed as
+    review showed that has since been deleted or merged away is what any import makes of its
+    files - a new dive, or the dive it was merged into - and is never held to the values the
+    review showed; its row reads that dive, with a note saying the review did not show it, and
+    is the same row as any other the review showed for that dive. Where its file cannot be read
+    at the apply, the row is skipped. A dive the review showed as
     `new` that reached your logbook another way in between takes the outcome and `uuid` of the
     dive that holds it. A dive the review did not show that the files now reach, the logbook
     having moved, is written too, and follows the rows the review showed with a note saying so.

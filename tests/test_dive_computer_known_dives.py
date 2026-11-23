@@ -196,6 +196,39 @@ class TestTheDivesUuid:
         assert await _known(async_db, diver, _listing(PERDIX, (gone.uuid, "2026-10-26T15:03:23"))) == []
 
     @pytest.mark.asyncio
+    async def test_a_dive_merged_into_another_holds_its_uuid_for_the_dive_it_joined_in_as_many_queries(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        """Merged twice over, and the start listed nowhere near either: the uuid alone holds it,
+        for the dive the merges ended in, and a merged dive deleted afterwards holds nothing."""
+        diver = create_user(db)
+        survivor, middle, latest = create_dive(db, diver), create_dive(db, diver), create_dive(db, diver)
+        gone, merged_into_gone = create_dive(db, diver), create_dive(db, diver)
+        for dive, into in ((middle, survivor), (latest, middle), (merged_into_gone, gone)):
+            db.execute(update(Dive).where(Dive.id == dive.id).values(is_deleted=True, merged_into_id=into.id))
+        db.execute(update(Dive).where(Dive.id == gone.id).values(is_deleted=True))
+        db.commit()
+        listed = [(dive.uuid, "2001-01-01T00:00:00") for dive in (latest, middle, merged_into_gone)]
+        statements: list[str] = []
+
+        def record(*args: Any) -> None:
+            statements.append(args[2])
+
+        await _known(async_db, diver, _listing(PERDIX, listed[0]))
+        engine = async_db.bind.sync_engine  # type: ignore[union-attr]
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            await _known(async_db, diver, _listing(PERDIX, listed[0]))
+            for_one = len(statements)
+            statements.clear()
+            known = await _known(async_db, diver, _listing(PERDIX, *listed))
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        assert known == [(latest.uuid, survivor.uuid), (middle.uuid, survivor.uuid)]
+        assert len(statements) == for_one
+
+    @pytest.mark.asyncio
     async def test_another_account_holds_nothing_of_the_caller_s(self, async_db: AsyncSession, db: Session) -> None:
         diver, someone = create_user(db), create_user(db)
         theirs = _recorded(db, someone, PERDIX, WALL_CLOCK)
@@ -312,7 +345,7 @@ class TestTheAnswer:
             event.remove(engine, "before_cursor_execute", record)
 
         assert len(statements) == for_one == 3
-        assert all(statement.lstrip().upper().startswith("SELECT") for statement in statements)
+        assert all(statement.lstrip().upper().startswith(("SELECT", "WITH")) for statement in statements)
         assert len(known) == 6
 
 

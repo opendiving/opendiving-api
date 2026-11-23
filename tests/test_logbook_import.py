@@ -23,6 +23,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import shutil
 import sys
 import uuid as uuid_pkg
@@ -46,7 +47,10 @@ from src.app.api.v1 import dives as dives_module
 from src.app.core.exceptions.http_exceptions import UnprocessableEntityException
 from src.app.core.schemas import NOTES_MAX_LENGTH
 from src.app.core.security import create_dive_file_token
+from src.app.crud.crud_certifications import crud_certifications
 from src.app.crud.crud_checkin_details import read_checkin_details
+from src.app.crud.crud_dives import crud_dives
+from src.app.crud.crud_gear_service_records import crud_gear_service_records
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
 from src.app.models.checkin_details import CheckinDetails, CheckinEmergencyContact, CheckinInsurancePolicy
@@ -88,6 +92,7 @@ from src.app.schemas.logbook_import import (
 )
 from src.app.schemas.user_picture import PictureCrop, PictureKind
 from src.app.services import blob_store, certification_files, dive_reader, libdivecomputer
+from src.app.services import dive_files as dive_files_module
 from src.app.services.dive_files import store_recording_file
 from src.app.services.dive_profiles import (
     IMPORT_PARSER_KEY,
@@ -561,34 +566,92 @@ class TestIdempotence:
         assert _counts(second)["dives"] == (1, 0, 0, 0)
 
 
-class TestADeletedRecordStaysDeleted:
-    """A record the caller deleted here is skipped, never brought back, by any import.
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+# Each soft-deleting collection an import writes, by the model its records become.
+_SOFT_DELETED: dict[str, Any] = {
+    "dives": Dive,
+    "certifications": Certification,
+    "gear_service_records": GearServiceRecord,
+}
+
+
+def _renamed(document: bytes) -> tuple[bytes, dict[str, str]]:
+    """The document with every uuid it carries replaced, consistently, by a fresh one: another
+    account's copy of the same logbook, and the way back to the original's uuids."""
+    fresh: dict[str, str] = {}
+
+    def rename(found: re.Match[str]) -> str:
+        return fresh.setdefault(found.group(0), str(uuid_pkg.uuid4()))
+
+    text = _UUID.sub(rename, document.decode())
+    return text.encode(), {new: old for old, new in fresh.items()}
+
+
+async def _delete_through_the_api(db: AsyncSession, collection: str, uuid: uuid_pkg.UUID) -> None:
+    """What the collection's `DELETE` route does to its row, its Redis aside."""
+    if collection == "dives":
+        dive_id = (await db.execute(select(Dive.id).where(Dive.uuid == uuid))).scalar_one()
+        await dive_files_module.delete_files_for_dive(db=db, dive_id=dive_id, commit=False)
+        await crud_dives.delete(db=db, uuid=uuid)
+    elif collection == "certifications":
+        certification_id = (await db.execute(select(Certification.id).where(Certification.uuid == uuid))).scalar_one()
+        await certification_files.delete_files_for_certification(db=db, certification_id=certification_id, commit=False)
+        await crud_certifications.delete(db=db, uuid=uuid)
+    else:
+        await crud_gear_service_records.delete(db=db, uuid=uuid)
+
+
+def _said(plan: Any, back: dict[str, str]) -> list[tuple[Any, ...]]:
+    """What a plan said, its uuids read as the original document's."""
+    return [
+        (note.code, note.collection, None if note.uuid is None else back.get(str(note.uuid)), note.message)
+        for note in plan.notes
+    ]
+
+
+class TestADeletedRecordIsNothingToAnImport:
+    """A record the caller deleted does not exist to an import: imported again it is created,
+    under the uuid its document gives it, and the deleted row gives that uuid up and stays
+    deleted with everything else it had.
 
     The branch an `is_deleted=False` lookup would break in the worst way: it would call the
     husk's uuid unclaimed, create against it, and hit the full unique index.
     """
 
     @pytest.mark.asyncio
-    async def test_a_deleted_dive_is_skipped_and_stays_deleted(
+    async def test_a_deleted_dive_is_created_again_and_then_links(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
         user, document = seeded
         dive = db.query(Dive).filter(Dive.user_id == user.id).one()
+        dive_id, dive_uuid = dive.id, dive.uuid
         dive.is_deleted = True
         dive.deleted_at = datetime.now(UTC)
         dive.notes = "edited after deletion"
         db.commit()
 
         plan = await _apply(async_db, user.id, document)
+        again = await _apply(async_db, user.id, document)
 
-        assert _counts(plan)["dives"] == (0, 0, 0, 1)
-        [note] = [note for note in plan.notes if note.uuid == dive.uuid and note.code is ImportNoteCode.RECORD_SKIPPED]
-        assert "You deleted this record here" in note.message
-        rows = (await async_db.execute(select(Dive).where(Dive.user_id == user.id))).scalars().all()
-        assert [(row.id, row.is_deleted, row.notes) for row in rows] == [(dive.id, True, "edited after deletion")]
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert ImportNoteCode.RECORD_SKIPPED not in _codes(plan)
+        assert _counts(again)["dives"] == (0, 1, 0, 0)
+        rows = (
+            await async_db.execute(
+                select(Dive.id, Dive.uuid, Dive.is_deleted, Dive.notes)
+                .where(Dive.user_id == user.id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        [deleted] = [row for row in rows if row.id == dive_id]
+        [created] = [row for row in rows if row.id != dive_id]
+        assert (deleted.is_deleted, deleted.notes) == (True, "edited after deletion")
+        assert deleted.uuid != dive_uuid
+        assert (created.uuid, created.is_deleted) == (dive_uuid, False)
 
     @pytest.mark.asyncio
-    async def test_a_deleted_certification_and_service_record_stay_deleted_too(
+    async def test_a_deleted_certification_and_service_record_are_created_again_and_then_link(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
         """Every importable soft-deleting table, not dives alone."""
@@ -600,20 +663,79 @@ class TestADeletedRecordStaysDeleted:
         db.commit()
 
         plan = await _apply(async_db, user.id, document)
+        again = await _apply(async_db, user.id, document)
 
-        counts = _counts(plan)
-        assert counts["certifications"] == (0, 0, 0, 1)
-        assert counts["gear_service_records"] == (0, 0, 0, 1)
+        for collection in ("certifications", "gear_service_records"):
+            assert _counts(plan)[collection] == (1, 0, 0, 0)
+            assert _counts(again)[collection] == (0, 1, 0, 0)
         for model in (Certification, GearServiceRecord):
             flags = (await async_db.execute(select(model.is_deleted).where(model.user_id == user.id))).scalars().all()
-            assert flags == [True]
+            assert sorted(flags) == [False, True]
+
+    @pytest.mark.parametrize("collection", list(_SOFT_DELETED))
+    @pytest.mark.asyncio
+    async def test_the_same_import_with_the_deleted_row_or_without_it(
+        self, seeded: Any, db: Session, async_db: AsyncSession, collection: str
+    ) -> None:
+        """Two accounts holding the same logbook under uuids of their own, but for one record:
+        one deleted it through the api, and the other never had it. The same import into each
+        reads and writes the same, apart from ids the database mints."""
+        _, document = seeded
+        deleted_here, never_had = create_user(db), create_user(db)
+        mine, back_mine = _renamed(document)
+        theirs, back_theirs = _renamed(document)
+        [record] = json.loads(mine)[collection]
+        await _apply(async_db, deleted_here.id, mine)
+        await _delete_through_the_api(async_db, collection, uuid_pkg.UUID(record["uuid"]))
+        await async_db.commit()
+        without = json.loads(theirs)
+        without[collection] = []
+        await _apply(async_db, never_had.id, json.dumps(without).encode())
+
+        here = await _apply(async_db, deleted_here.id, mine)
+        there = await _apply(async_db, never_had.id, theirs)
+
+        assert _counts(here) == _counts(there)
+        assert _counts(here)[collection] == (1, 0, 0, 0)
+        assert here.file_report() == there.file_report()
+        assert _said(here, back_mine) == _said(there, back_theirs)
+        [made_here] = here.writable(collection)
+        [made_there] = there.writable(collection)
+        assert back_mine[str(made_here.uuid)] == back_theirs[str(made_there.uuid)]
+
+        def written(values: dict[str, Any]) -> dict[str, Any]:
+            return {name: value for name, value in values.items() if name != "id" and not name.endswith("_id")}
+
+        assert written(made_here.values) == written(made_there.values)
+        model = _SOFT_DELETED[collection]
+        rows = (
+            await async_db.execute(select(model.uuid, model.is_deleted).where(model.user_id == deleted_here.id))
+        ).all()
+        assert sorted((str(row.uuid) == record["uuid"], row.is_deleted) for row in rows) == [
+            (False, True),
+            (True, False),
+        ]
 
     @pytest.mark.asyncio
-    async def test_a_deleted_certification_s_cards_are_not_written(
+    async def test_another_account_s_deleted_row_remaps_the_record_as_a_live_one_does(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        user, document = seeded
+        db.query(Dive).filter(Dive.user_id == user.id).update({"is_deleted": True, "deleted_at": datetime.now(UTC)})
+        db.commit()
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, document)
+
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert ImportNoteCode.RECORD_REMAPPED_REFERENCES_FOLLOW in _codes(plan)
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_certification_s_cards_come_with_it(
         self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
     ) -> None:
-        """The archive's card is counted as skipped, not restored, and the cards a soft delete
-        from the admin panel left in place stay as they were."""
+        """The archive's card is restored onto the certification the import creates, and the
+        card a soft delete from the admin panel left on the deleted one stays where it is."""
         monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
         user = create_user(db)
         certification = create_certification(db, user)
@@ -642,23 +764,26 @@ class TestADeletedRecordStaysDeleted:
 
         plan = await _apply(async_db, user.id, _zip_of(document, {front: card}), filename="logbook.zip")
 
-        assert _counts(plan)["certifications"] == (0, 0, 0, 1)
-        assert (plan.files_restored, plan.files_skipped) == (0, 1)
-        files = (
+        assert _counts(plan)["certifications"] == (1, 0, 0, 0)
+        assert (plan.files_restored, plan.files_skipped) == (1, 0)
+        created = (
             await async_db.execute(
-                select(CertificationFile.side, CertificationFile.sha256).where(
-                    CertificationFile.certification_id == certification.id
-                )
+                select(Certification.id).where(Certification.user_id == user.id, Certification.is_deleted.is_(False))
             )
-        ).all()
-        assert [tuple(row) for row in files] == [("front", digest)]
+        ).scalar_one()
+        files = (await async_db.execute(select(CertificationFile.certification_id, CertificationFile.side))).all()
+        assert {tuple(row) for row in files if row.certification_id in (certification.id, created)} == {
+            (certification.id, "front"),
+            (created, "front"),
+        }
 
     @pytest.mark.asyncio
-    async def test_a_deleted_dive_s_own_archive_writes_none_of_its_files(
+    async def test_a_file_a_deleted_dive_still_holds_is_the_new_dive_s(
         self, db: Session, async_db: AsyncSession, tmp_path: Any, monkeypatch: Any
     ) -> None:
-        """The account's own archive, re-imported after the dive was deleted, skips the dive
-        and its file, and leaves the file a soft delete from the admin panel left behind."""
+        """The account's own archive, re-imported after the admin panel's delete left the dive
+        its file: the file is the new dive's, held once, and nothing says it is stored
+        elsewhere."""
         monkeypatch.setattr(blob_store, "storage_root", lambda: tmp_path)
         user = create_user(db)
         payload = b'{"deleted": "with its file"}'
@@ -668,10 +793,22 @@ class TestADeletedRecordStaysDeleted:
 
         plan = await _apply(async_db, user.id, archive, filename="logbook.zip")
 
-        assert _counts(plan)["dives"] == (0, 0, 0, 1)
-        assert (plan.files_restored, plan.files_skipped) == (0, 1)
-        stored = (await async_db.execute(select(DiveFile.dive_id, DiveFile.sha256))).all()
-        assert [tuple(row) for row in stored if row.sha256 == digest] == [(dive.id, digest)]
+        assert _counts(plan)["dives"] == (1, 0, 0, 0)
+        assert (plan.files_restored, plan.files_skipped) == (1, 0)
+        assert ImportNoteCode.FILE_SKIPPED not in _codes(plan)
+        created = (
+            await async_db.execute(select(Dive.id).where(Dive.user_id == user.id, Dive.is_deleted.is_(False)))
+        ).scalar_one()
+        stored = (
+            (
+                await async_db.execute(
+                    select(DiveFile.dive_id).where(DiveFile.user_id == user.id, DiveFile.sha256 == digest)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert stored == [created]
         assert (await async_db.execute(select(Dive.is_deleted).where(Dive.id == dive.id))).scalar_one() is True
 
 
@@ -5474,6 +5611,7 @@ class TestTheIntegerColumnCensus:
         ("dive", "trip_id"): "resolved from a row this import wrote",
         ("dive", "course_id"): "resolved from a row this import wrote",
         ("dive", "contact_id"): "resolved from a row this import wrote",
+        ("dive", "merged_into_id"): "written by a merge, never by an import",
         ("dive", "utc_offset_minutes"): "derived from a parsed UTC offset, which Python bounds at a day",
         ("dive_mixture", "id"): "the sequence's",
         ("dive_mixture", "dive_id"): "resolved from a row this import wrote",

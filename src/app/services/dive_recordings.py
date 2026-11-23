@@ -426,11 +426,12 @@ def holds_listed_start(stored: RecordingFacts, start: datetime, offset: int | No
 
     Within the same-recording tolerance of the recording's own start, on the gates' clock;
     or, on a merge's recording, anywhere from its start through the end of its samples, which
-    is where the later record it absorbed began. The serial is the caller's to have compared.
+    is where the later record it absorbed began. The device is the caller's to have compared.
 
-    The span clause is the one thing here no import gate does - a file of a merged span's later
-    half would fill the merge from half a dive. Asked only whether the logbook holds that
-    record, the answer is yes.
+    Asked by the dive-computer list and by logbook import alike (`dive_files.merge_holding`),
+    so a record the list holds is one an import adds no dive for. No gate asks the span clause:
+    a file of a merged span's later half would fill the merge from half a dive, and a record
+    the merge holds belongs to it instead.
     """
     if stored.start_time is None:
         return False

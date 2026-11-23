@@ -10,14 +10,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app import models
 from src.app.models.logbook_import import LogbookImport
 from tests.conftest import db_available
-from tests.helpers.generators import create_dive, create_dive_recording, create_user
+from tests.helpers.generators import create_user
 from tests.helpers.migrations import migrate, scratch_database, template_database
 
 pytestmark = [
@@ -46,14 +46,23 @@ def scratch(below: str) -> Iterator[tuple[str, Engine]]:
 
 
 def _stored_recording(db: Session, diver: models.User) -> tuple[str, str]:
-    """One recording holding one file, at `_RECORDED` and `_UPLOADED`: their uuids."""
-    dive = create_dive(db, diver)
-    recording = create_dive_recording(db, diver, dive)
+    """One recording holding one file, at `_RECORDED` and `_UPLOADED`: their uuids. The dive is
+    written by the revision's own columns, which a later revision's model can outgrow."""
+    dive_id = db.execute(
+        text(
+            "INSERT INTO dive (user_id, dive_number, start_time, submerged_time, notes, uuid, created_at, is_deleted) "
+            "VALUES (:user_id, 1, :start, 1800, '', :uuid, :start, false) RETURNING id"
+        ),
+        {"user_id": diver.id, "start": _RECORDED, "uuid": uuid7()},
+    ).scalar_one()
+    recording = models.DiveRecording(dive_id=dive_id, user_id=diver.id, ordinal=0, start_time=_RECORDED)
+    db.add(recording)
+    db.flush()
     recording.created_at = _RECORDED
     file = models.DiveFile(
         user_id=diver.id,
         recording_id=recording.id,
-        dive_id=dive.id,
+        dive_id=dive_id,
         sha256="c" * 64,
         content_type="application/octet-stream",
         byte_size=1,

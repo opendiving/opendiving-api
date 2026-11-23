@@ -18,9 +18,11 @@ Four rules run through everything below, and each is the format's rather than th
   object when the *caller* already owns it, and is remapped to a fresh one when it belongs
   to somebody else - so a cross-instance migration keeps identity and a cross-account copy
   gets its own.
-- **A record the caller deleted here stays deleted.** Its uuid is never written again, by
-  any import: the record is skipped and noted. A dive's recordings still go through the
-  recording match first, so one that belongs to a dive the caller still has reaches it.
+- **A record the caller deleted does not exist to an import.** It is created under its
+  uuid as though nothing claimed it, the deleted row giving that uuid up as it is written
+  and staying deleted, and nothing the import says speaks of it. A merge is not a deletion:
+  a dive merged into another resolves to the dive it joined, and so does a reading of one
+  record of a merged dive, or a file the logbook already holds.
 - **Nothing is invented** (spec §5.4). A member the document omits imports as absent; where
   the column cannot hold absent and no default honestly means "not recorded", the *record*
   is skipped and reported rather than filled in.

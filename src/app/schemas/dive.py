@@ -1202,7 +1202,7 @@ class DiveMergeRequest(BaseModel):
 
 
 class DiveMergeResult(BaseModel):
-    """What the merge produced: the dive that survived, and the uuid that no longer resolves."""
+    """What the merge produced: the dive that survived, and the uuid no read finds again."""
 
     dive: Annotated[
         DiveReadWithMixtures,

@@ -5853,12 +5853,13 @@ Rejected: an importer-local restatement of §3, which drifts.
 Spec §9's duplicate-member rule is a parsing rule — `json` keeps the last value — so
 `parse_document` and `DuplicateMemberError` in `services/logbook_import/reader.py` reject it.
 
-## A uuid is preserved, matched, skipped or remapped, and which one is a property of the instance
+## A uuid is preserved, matched, created again or remapped, and which one is a property of the instance
 
 Every caller-owned collection takes one of four branches on a document uuid. Unclaimed here: create
 under that uuid, preserving identity across instances. The caller's, live: nothing is written,
-counted as `linked` — the idempotence invariant. The caller's, soft-deleted: skip (next section).
-Another account's: mint a fresh uuid, create under it, remap every reference.
+counted as `linked` — the idempotence invariant; a dive merged into one the caller has resolves to
+it. The caller's, soft-deleted: create under that uuid, as though unclaimed (next section). Another
+account's: mint a fresh uuid, create under it, remap every reference.
 
 A fifth remap — two records of one collection claiming one uuid — is decided in
 `_claim_document_uuid` first and has its own note code; see *The two remaps are two codes, because
@@ -5871,18 +5872,21 @@ source-uuid provenance column, a schema-wide change for one corner case.
 
 `species` is exempt: it belongs to nobody, and import never creates or claims a catalog row.
 
-## A record the caller deleted is never brought back by an import
+## To an import a deleted record does not exist, and a merged-away dive is the dive it joined
 
 A document record whose uuid is the caller's soft-deleted row (`Dive`, `Certification`,
-`GearServiceRecord`) is skipped with a note. A deleted dive's recordings still go through the
-recording gates, so a re-download of a dive the diver deleted and logged again from another source
-fills that dive. Rejected: restoring the row, and creating it under a fresh uuid, which is the same
-restore. Dives have no un-delete path; a trash bin would be its own feature.
+`GearServiceRecord`) is created as though the row were not there: when the writer creates it, the
+deleted row takes a uuid nothing holds, in the same transaction, and stays deleted with everything
+else it had. Bytes only a deleted dive still holds — the admin panel's delete leaves them — are
+moved onto the recording that brings them. Its recordings go through the gates as any new dive's, so
+one the diver logged again from another source is filled. Rejected: skipping it, under which a
+deleted dive could never be imported again; giving the uuid up at deletion, which owes a revision
+over every deleted row; hard-deleting the row; a fresh uuid, which makes a recording-less dive
+imported twice into two.
 
 The dedupe lookup branches on `is_deleted` rather than filtering it: an `is_deleted=False` query
-would call the husk's uuid unclaimed and hit the full `uuid` index. A dive the review showed that is
-deleted or merged away before the apply is skipped by its document dives, ahead of the gates: those
-read live dives alone, so a file's dive would otherwise be created again, or fill the survivor.
+would call the husk's uuid unclaimed and hit the full `uuid` index. A merge is not a deletion:
+`dive.merged_into_id` resolves the merged-away uuid to the dive it joined (`merged_dives.py`).
 
 ## No uniqueness rule anywhere fails an import
 
@@ -6360,9 +6364,10 @@ serials match, with starts within 2 s, `is_same_recording` waives the span claus
 recording `POST /dives/merge` produced: it spans both halves of an interrupted dive under the first
 half's start, and a file of that half alone would fill it. A merge is known by its `merge` profile
 or, where a re-derivation replaced that, by a kept file starting outside the tolerance
-(`holds_another_start`), the files being read only for a pair resting on the serial. Neither half
-then matches, and the merge action folds them again. Rejected: matching a file whose start falls
-inside a merged span.
+(`holds_another_start`), the files being read only for a pair resting on the serial. An import asks
+`merge_holding` first: a record of the same computer whose start `holds_listed_start` places inside
+the merge belongs to it, filling nothing and adding only files the account lacks, unread. Neither
+gate then sees it. The dive form's attach, which asks the gate alone, is unchanged.
 
 ## Of two profiles of one recording, the richer is kept
 
@@ -6444,7 +6449,11 @@ diver typed on the surviving dive's other side is replaced. An `avg_depth` faili
 keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
 as an arrival does, an empty absorbed row not appended; moved profiles use
 `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
-within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
+within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused. The loser
+keeps its uuid and names the survivor in `merged_into_id`, so an import and the dive-computer list
+resolve it; every read still finds it deleted. Merges made before that column are not marked: an
+import finds them by the files the merged dive holds. Rejected: marking them by when the loser was
+deleted, which a duplicate deleted by hand also satisfies.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
@@ -7446,7 +7455,10 @@ A dive's `changes` are the difference between two reads of it around the rolled-
 decide inside SQL, so a predicate over the plan would be a second account of the writer. The apply
 re-runs the pass from the held files, then sets each value entry to its reviewed `after`, because a
 fill never overwrites and an edit made in between would stand against what the diver approved.
-Rejected: writing the after-state directly, a second writer.
+Rejected: writing the after-state directly, a second writer. A reviewed dive deleted or merged away
+since is planned as any import plans it: its row reads the new dive, or the merged one, is never
+held to its reviewed values, which describe a dive that is not there, and carries `review_unshown`;
+one dive is one row. Rejected: skipping it, which leaves a merged dive's file in no dive.
 
 `review` and `notes` are served as stored, so an earlier build's row still answers. A change to any
 schema they embed bumps `REVIEW_SHAPE` and owes a call: migrate the stored rows or retire them.
@@ -7490,14 +7502,14 @@ owing a row on every path that creates a recording.
 ## Which of a computer's dives the logbook holds is the server's answer
 
 `POST /dive-computers/known-dives` takes a computer's serial and the dives it lists, each a uuid and
-a start, and names those the caller's logbook holds: a live dive of that uuid, or a recording of the
-serial, folded, starting within the same-recording tolerance on the gates' clock, or a merge's
-recording whose samples span the start. A wrong "held" hides a dive from the diver who would
-download it, so the rule has one home, `holds_listed_start`. Rejected: listing a computer's
-recordings for the client to compare, which writes the clock rule a second time; the derived uuid
-alone, which misses a recording that joined a dive from another source. The span clause holds what
-the import's gate will not fill: asked only whether the record is in the logbook, a merge's later
-half is. A `POST` for a body no query string carries; it writes nothing.
+a start, and names those the caller's logbook holds: a live dive that uuid resolves to, itself or
+the dive it was merged into, or a recording of the serial, folded, starting within the
+same-recording tolerance on the gates' clock, or a merge's recording whose samples span the start. A
+wrong "held" hides a dive from the diver who would download it, so the rule has one home,
+`holds_listed_start`, which an import asks of a merge's recording too: a dive the list holds is one
+whose download adds none. Rejected: listing a computer's recordings for the client to compare, which
+writes the clock rule a second time; the derived uuid alone, which misses a recording that joined a
+dive from another source. A `POST` for a body no query string carries; it writes nothing.
 
 ## An experimental feature's name is checked for its form, never against a list
 

@@ -727,7 +727,8 @@ class ImportNoteCode(StrEnum):
     # apply created none, and the row is the dive that holds it.
     REVIEW_OVERTAKEN = "review_overtaken"
     # The apply reached a dive the review has no row for, the logbook having moved: the file of
-    # a dive that lost its recording in between makes a dive of its own, which is written.
+    # a dive that lost its recording in between makes a dive of its own, which is written; and
+    # a dive deleted or merged away in between is what the apply's pass made of its files.
     REVIEW_UNSHOWN = "review_unshown"
     # The two remap codes say the same thing about *this* record - it was imported under an
     # identifier other than the one the document gave it, and neither is an error. They
@@ -832,7 +833,7 @@ class ImportCollectionReport(BaseModel):
     training centers and the instructors an export written before either existed names on its
     courses and certifications, which it carries as strings rather than records. Each file's
     records are counted as an import of that file alone would count them, after the files
-    before it. A record the caller deleted here is skipped, never brought back.
+    before it. A record the caller deleted is counted as one the import creates.
     """
 
     collection: Annotated[str, Field(examples=["dives"])]
