@@ -40,13 +40,15 @@ PROVIDER: Final = "open-meteo"
 # answered instead.
 MODEL = "best_match"
 
-# The credit alone, which the map's conditions now carry.
+# The credit alone. The map's conditions now carry it although their air temperature (a models'
+# median) and tide times are derived from the readings: the owner has ruled that the map card shows
+# the provider's credit and no change notice, accepting that it does not indicate the change.
 READINGS_ATTRIBUTION = (
     "[Weather data by Open-Meteo.com](https://open-meteo.com/) "
     "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/))"
 )
-# A dive's record, which carries values derived from the readings: the licence asks that a change
-# be indicated.
+# A dive's record, which carries values derived from the readings and says so: the licence asks
+# that a change be indicated.
 ATTRIBUTION = f"{READINGS_ATTRIBUTION}, with weather, waves and tide times derived from it"
 
 
