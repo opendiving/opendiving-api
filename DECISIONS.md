@@ -7502,15 +7502,14 @@ owing a row on every path that creates a recording.
 
 ## Which of a computer's dives the logbook holds is the server's answer
 
-`POST /dive-computers/known-dives` takes a computer's serial and the dives it lists, each a uuid and
-a start, and names those the caller's logbook holds: a live dive that uuid resolves to, itself or
-the dive it was merged into, or a recording of the serial, folded, starting within the
-same-recording tolerance on the gates' clock, or a merge's recording whose samples span the start. A
-wrong "held" hides a dive from the diver who would download it, so the rule has one home,
-`holds_listed_start`, which an import asks of a merge's recording too: a dive the list holds is one
-whose download adds none. Rejected: listing a computer's recordings for the client to compare, which
-writes the clock rule a second time; the derived uuid alone, which misses a recording that joined a
-dive from another source. A `POST` for a body no query string carries; it writes nothing.
+`POST /dive-computers/known-dives` names which of the dives a computer lists the caller's logbook
+holds: by the uuid, through merges, or by a recording of the serial that `holds_listed_start`
+accepts, the predicate an import asks of a merge's recording too, so a wrong "held", which hides a
+dive from its diver, has one home. Each row also says whether the holding recording keeps the
+computer's `libdivecomputer` original, a merge's only by a file whose fallback start matches the
+listed one, since that download can still add it. It errs toward false: a wrong true leaves an
+original off for good, a wrong false costs one transfer. Rejected: listing recordings for the client
+to compare, writing the clock rule twice; leaving such a dive out, which changes what "held" means.
 
 ## An experimental feature's name is checked for its form, never against a list
 

@@ -20,12 +20,14 @@ from src.app.api.v1 import dives as dives_module
 from src.app.api.v1.dive_computers import read_dive_computer_known_dives
 from src.app.api.v1.dives import _cached_read_dive
 from src.app.models.dive import Dive
+from src.app.models.dive_file import DiveFile
 from src.app.models.dive_profile import DiveProfile
 from src.app.models.dive_recording import DiveRecording
 from src.app.models.user import User
 from src.app.schemas.dive_computer import MAX_LISTED_DIVES, DiveComputerListing
 from src.app.services import blob_store
-from src.app.services.dive_profiles import MERGE_PARSER_KEY
+from src.app.services.dive_profiles import IMPORT_PARSER_KEY, MERGE_PARSER_KEY
+from src.app.services.libdivecomputer import LIBDIVECOMPUTER
 from tests.conftest import db_available
 from tests.helpers.generators import create_dive, create_dive_recording, create_user
 from tests.helpers.held_imports import caller
@@ -70,6 +72,56 @@ def _recorded(db: Session, user: User, serial: str | None, start: datetime | Non
     return dive
 
 
+def _file(
+    db: Session, recording: DiveRecording, parser_key: str, *, fallback_start: datetime | None = None
+) -> DiveFile:
+    """A stored file on a recording, tagged as a computer's original where its key says so."""
+    digest = uuid_pkg.uuid4().hex * 2
+    tagged = parser_key == LIBDIVECOMPUTER
+    row = DiveFile(
+        user_id=recording.user_id,
+        recording_id=recording.id,
+        dive_id=recording.dive_id,
+        sha256=digest,
+        content_type="application/octet-stream",
+        byte_size=1,
+        stored_byte_size=1,
+        original_filename="dive.bin",
+        parser_key=parser_key,
+        storage_key=blob_store.new_key("dive-files", sha256=digest),
+        descriptor_vendor="Suunto" if tagged else None,
+        descriptor_product="Ocean" if tagged else None,
+        descriptor_model=1 if tagged else None,
+        fallback_start=fallback_start,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def _recording_of(db: Session, dive: Dive) -> DiveRecording:
+    return db.execute(select(DiveRecording).where(DiveRecording.dive_id == dive.id)).scalar_one()
+
+
+def _merged(db: Session, user: User, serial: str, start: datetime, offset: int, span_ms: int) -> DiveRecording:
+    """A dive whose one recording is a merge's of `serial`, its samples spanning `span_ms`."""
+    recording = _recording_of(db, _recorded(db, user, serial, start, offset))
+    db.add(
+        DiveProfile(
+            recording_id=recording.id,
+            dive_id=recording.dive_id,
+            source_sha256="m" * 64,
+            parser_key=MERGE_PARSER_KEY,
+            extractor_version=1,
+            duration=span_ms,
+            depth_sample_count=2,
+            data={"depth": {"t": [0, span_ms // 1000], "v": [100, 100]}},
+        )
+    )
+    db.commit()
+    return recording
+
+
 def _listing(serial: str, *dives: tuple[uuid_pkg.UUID, str]) -> DiveComputerListing:
     """The body as the wire carries it."""
     return DiveComputerListing.model_validate_json(
@@ -82,6 +134,15 @@ async def _known(
 ) -> list[tuple[uuid_pkg.UUID, uuid_pkg.UUID]]:
     rows = await read_dive_computer_known_dives(request=Mock(), listing=listing, current_user=caller(user), db=db)
     return [(row.uuid, row.dive_uuid) for row in rows]
+
+
+async def _originals(db: AsyncSession, user: User, serial: str, *starts: str) -> dict[str, bool]:
+    """`has_original` for each of these starts that is held, each listed under a uuid of its own."""
+    listed = {uuid_pkg.uuid4(): start for start in starts}
+    rows = await read_dive_computer_known_dives(
+        request=Mock(), listing=_listing(serial, *listed.items()), current_user=caller(user), db=db
+    )
+    return {listed[row.uuid]: row.has_original for row in rows}
 
 
 async def _held(db: AsyncSession, user: User, serial: str, *starts: str) -> list[str]:
@@ -284,6 +345,120 @@ class TestAMerge:
         assert listed_past not in known
 
 
+class TestTheOriginal:
+    """Whether the holding recording keeps the computer's original: true by one rule, false
+    everywhere else, since a wrong true leaves the original off its dive for good."""
+
+    @pytest.mark.asyncio
+    async def test_a_recording_holding_the_computer_s_original_has_it(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        _file(db, _recording_of(db, _recorded(db, diver, OCEAN, INSTANT, 180)), LIBDIVECOMPUTER)
+
+        assert await _originals(async_db, diver, OCEAN, "2026-10-26T15:03:23+03:00") == {
+            "2026-10-26T15:03:23+03:00": True
+        }
+
+    @pytest.mark.asyncio
+    async def test_an_unlabelled_bin_an_export_and_no_file_are_no_original(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        _file(db, _recording_of(db, _recorded(db, diver, OCEAN, INSTANT, 180)), IMPORT_PARSER_KEY)
+        _file(db, _recording_of(db, _recorded(db, diver, OCEAN, INSTANT + timedelta(days=1), 180)), "suunto_json")
+        _recorded(db, diver, OCEAN, INSTANT + timedelta(days=2), 180)
+
+        assert await _originals(
+            async_db,
+            diver,
+            OCEAN,
+            "2026-10-26T15:03:23+03:00",
+            "2026-10-27T15:03:23+03:00",
+            "2026-10-28T15:03:23+03:00",
+        ) == {
+            "2026-10-26T15:03:23+03:00": False,
+            "2026-10-27T15:03:23+03:00": False,
+            "2026-10-28T15:03:23+03:00": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_an_original_on_another_recording_of_the_dive_is_not_this_computer_s(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        diver = create_user(db)
+        dive = _recorded(db, diver, PERDIX, INSTANT, 180)
+        other: DiveRecording = create_dive_recording(db, diver, dive, ordinal=1)
+        other.device_serial, other.start_time, other.utc_offset_minutes = OCEAN, INSTANT, 180
+        db.commit()
+        _file(db, other, LIBDIVECOMPUTER)
+
+        assert await _originals(async_db, diver, PERDIX, "2026-10-26T15:03:23+03:00") == {
+            "2026-10-26T15:03:23+03:00": False
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_merge_has_the_original_of_the_record_whose_start_its_file_carries(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        """The merge holds both records' starts. Its file's fallback start is the first's, so the
+        first has its original and the second does not; a listed wall clock cannot be put beside
+        that instant, and a merge whose original carries no fallback start has none told."""
+        diver = create_user(db)
+        _file(db, _merged(db, diver, OCEAN, INSTANT, 180, 3_600_000), LIBDIVECOMPUTER, fallback_start=INSTANT)
+        untold = _merged(db, diver, OCEAN, INSTANT + timedelta(days=1), 180, 3_600_000)
+        _file(db, untold, LIBDIVECOMPUTER)
+
+        assert await _originals(
+            async_db,
+            diver,
+            OCEAN,
+            "2026-10-26T15:03:24+03:00",
+            "2026-10-26T15:07:06+03:00",
+            "2026-10-26T15:03:23",
+            "2026-10-27T15:03:23+03:00",
+        ) == {
+            "2026-10-26T15:03:24+03:00": True,
+            "2026-10-26T15:07:06+03:00": False,
+            "2026-10-26T15:03:23": False,
+            "2026-10-27T15:03:23+03:00": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_dive_held_by_its_uuid_is_told_by_its_recordings_of_the_serial(
+        self, async_db: AsyncSession, db: Session
+    ) -> None:
+        """Merged away, it is answered from the surviving dive's recordings; a live dive of the
+        uuid with no original, or with one only from another computer, has none."""
+        diver = create_user(db)
+        survivor = _recorded(db, diver, OCEAN, INSTANT, 180)
+        _file(db, _recording_of(db, survivor), LIBDIVECOMPUTER)
+        merged_away = create_dive(db, diver)
+        db.execute(update(Dive).where(Dive.id == merged_away.id).values(is_deleted=True, merged_into_id=survivor.id))
+        db.commit()
+        bare = _recorded(db, diver, OCEAN, INSTANT + timedelta(days=1), 180)
+        elsewhere = _recorded(db, diver, PERDIX, INSTANT + timedelta(days=2), 180)
+        _file(db, _recording_of(db, elsewhere), LIBDIVECOMPUTER)
+
+        rows = await read_dive_computer_known_dives(
+            request=Mock(),
+            listing=_listing(
+                OCEAN,
+                (merged_away.uuid, "2001-01-01T00:00:00"),
+                (bare.uuid, "2001-01-01T00:00:00"),
+                (elsewhere.uuid, "2001-01-01T00:00:00"),
+            ),
+            current_user=caller(diver),
+            db=async_db,
+        )
+
+        assert [(row.uuid, row.dive_uuid, row.has_original) for row in rows] == [
+            (merged_away.uuid, survivor.uuid, True),
+            (bare.uuid, bare.uuid, False),
+            (elsewhere.uuid, elsewhere.uuid, False),
+        ]
+
+
 class TestTheAnswer:
     @pytest.mark.asyncio
     async def test_the_answer_is_in_the_order_listed_and_each_uuid_once(
@@ -320,7 +495,9 @@ class TestTheAnswer:
     ) -> None:
         diver = create_user(db)
         for day in range(5):
-            _recorded(db, diver, PERDIX, WALL_CLOCK + timedelta(days=day))
+            dive = _recorded(db, diver, PERDIX, WALL_CLOCK + timedelta(days=day))
+            if day % 2:
+                _file(db, _recording_of(db, dive), LIBDIVECOMPUTER)
         _recorded(db, diver, " d9772626", WALL_CLOCK + timedelta(days=9))
         one = [(uuid_pkg.uuid4(), "2026-10-26T15:03:23")]
         many = [
@@ -340,13 +517,16 @@ class TestTheAnswer:
             await _known(async_db, diver, _listing(PERDIX, *one))
             for_one = len(statements)
             statements.clear()
-            known = await _known(async_db, diver, _listing(PERDIX, *many))
+            known = await read_dive_computer_known_dives(
+                request=Mock(), listing=_listing(PERDIX, *many), current_user=caller(diver), db=async_db
+            )
         finally:
             event.remove(engine, "before_cursor_execute", record)
 
         assert len(statements) == for_one == 3
         assert all(statement.lstrip().upper().startswith(("SELECT", "WITH")) for statement in statements)
         assert len(known) == 6
+        assert sum(row.has_original for row in known) == 2
 
 
 class TestWhatIsA422:
