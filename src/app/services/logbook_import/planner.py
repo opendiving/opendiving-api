@@ -873,6 +873,9 @@ class _Planner:
         # dive holds, which are not the account's to an import (`PlannedFile.moves`).
         self._held_on: dict[str, _HeldFile] = {}
         self._released_files: dict[str, int] = {}
+        # The document's dive uuids that name a dive merged into one the caller has, whose link
+        # says so (`_through_merges`).
+        self._merged_away: set[uuid_pkg.UUID] = set()
         # Incoming recordings that belong to dives this account already has - see
         # `PlannedRecordingMatch`. Filled by `_plan_dives`, walked by the writer.
         self._recording_matches: list[PlannedRecordingMatch] = []
@@ -1068,7 +1071,9 @@ class _Planner:
             return None
         self._note(
             ImportNoteCode.RECORD_LINKED,
-            "This record is already in your logbook under the same identifier, so nothing was written for it.",
+            "This dive is one you merged into this one, so nothing was written for it."
+            if collection == "dives" and source_uuid in self._merged_away
+            else "This record is already in your logbook under the same identifier, so nothing was written for it.",
             collection=collection,
             uuid=source_uuid,
         )
@@ -2572,11 +2577,13 @@ class _Planner:
         deleted = [uuid for uuid, row in existing.items() if row.user_id == self._user_id and row.is_deleted]
         if not deleted:
             return {}
-        return {
+        merged = {
             uuid: _ExistingRow(id=target.id, user_id=self._user_id, is_deleted=False)
             for uuid, target in (await resolve_merges(self._db, user_id=self._user_id, uuids=deleted)).items()
             if not target.is_deleted
         }
+        self._merged_away.update(merged)
+        return merged
 
     async def _stored_digests(self) -> None:
         """Which of the digests this file could store the account holds already, and where.

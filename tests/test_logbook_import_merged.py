@@ -156,7 +156,11 @@ class TestAFoldsRecords:
             async_db, diver, [("logbook.divejson", _logbook({"uuid": str(second.uuid), "started_at": SECOND_START}))]
         )
 
-        assert [(row.outcome, row.uuid) for row in report.dives] == [(ImportDiveOutcome.UNCHANGED, first.uuid)]
+        [row] = report.dives
+        assert (row.outcome, row.uuid) == (ImportDiveOutcome.UNCHANGED, first.uuid)
+        assert [note.message for note in row.notes if note.code == ImportNoteCode.RECORD_LINKED.value] == [
+            "This dive is one you merged into this one, so nothing was written for it."
+        ]
         assert await _dive_ids(async_db, diver) == [first.id]
 
     @pytest.mark.parametrize("start", [FIRST_START, A_MINUTE_IN, SECOND_START])

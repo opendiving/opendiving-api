@@ -5855,11 +5855,10 @@ Spec §9's duplicate-member rule is a parsing rule — `json` keeps the last val
 
 ## A uuid is preserved, matched, created again or remapped, and which one is a property of the instance
 
-Every caller-owned collection takes one of four branches on a document uuid. Unclaimed here: create
-under that uuid, preserving identity across instances. The caller's, live: nothing is written,
-counted as `linked` — the idempotence invariant; a dive merged into one the caller has resolves to
-it. The caller's, soft-deleted: create under that uuid, as though unclaimed (next section). Another
-account's: mint a fresh uuid, create under it, remap every reference.
+Every caller-owned collection takes one of four branches on a document uuid. Unclaimed: create under
+that uuid, preserving identity across instances. The caller's, live: nothing is written, counted as
+`linked` — the idempotence invariant. The caller's, soft-deleted: as unclaimed (next section).
+Another account's: mint a fresh uuid, create under it, remap every reference.
 
 A fifth remap — two records of one collection claiming one uuid — is decided in
 `_claim_document_uuid` first and has its own note code; see *The two remaps are two codes, because
@@ -5872,21 +5871,18 @@ source-uuid provenance column, a schema-wide change for one corner case.
 
 `species` is exempt: it belongs to nobody, and import never creates or claims a catalog row.
 
-## To an import a deleted record does not exist, and a merged-away dive is the dive it joined
+## To an import a deleted record does not exist
 
 A document record whose uuid is the caller's soft-deleted row (`Dive`, `Certification`,
-`GearServiceRecord`) is created as though the row were not there: when the writer creates it, the
-deleted row takes a uuid nothing holds, in the same transaction, and stays deleted with everything
-else it had. Bytes only a deleted dive still holds — the admin panel's delete leaves them — are
-moved onto the recording that brings them. Its recordings go through the gates as any new dive's, so
-one the diver logged again from another source is filled. Rejected: skipping it, under which a
-deleted dive could never be imported again; giving the uuid up at deletion, which owes a revision
-over every deleted row; hard-deleting the row; a fresh uuid, which makes a recording-less dive
-imported twice into two.
+`GearServiceRecord`) is created as though the row were not there: the writer gives the row a uuid
+nothing holds, in the same transaction, and it stays deleted. Bytes only a deleted dive holds, as
+the admin panel's delete leaves them, move onto the recording that brings them. Rejected: skipping
+it, under which a deleted dive is never imported again; giving the uuid up at deletion, which owes a
+revision over every deleted row; a fresh uuid, under which a dive with no recording imported twice
+is two dives.
 
 The dedupe lookup branches on `is_deleted` rather than filtering it: an `is_deleted=False` query
-would call the husk's uuid unclaimed and hit the full `uuid` index. A merge is not a deletion:
-`dive.merged_into_id` resolves the merged-away uuid to the dive it joined (`merged_dives.py`).
+would call the husk's uuid unclaimed and hit the full `uuid` index.
 
 ## No uniqueness rule anywhere fails an import
 
@@ -6364,10 +6360,9 @@ serials match, with starts within 2 s, `is_same_recording` waives the span claus
 recording `POST /dives/merge` produced: it spans both halves of an interrupted dive under the first
 half's start, and a file of that half alone would fill it. A merge is known by its `merge` profile
 or, where a re-derivation replaced that, by a kept file starting outside the tolerance
-(`holds_another_start`), the files being read only for a pair resting on the serial. An import asks
-`merge_holding` first: a record of the same computer whose start `holds_listed_start` places inside
-the merge belongs to it, filling nothing and adding only files the account lacks, unread. Neither
-gate then sees it. The dive form's attach, which asks the gate alone, is unchanged.
+(`holds_another_start`), the files being read only for a pair resting on the serial. Neither half
+then matches; an import places such a record on the merge before either gate is asked (*A merge is
+not a deletion*).
 
 ## Of two profiles of one recording, the richer is kept
 
@@ -6449,11 +6444,18 @@ diver typed on the surviving dive's other side is replaced. An `avg_depth` faili
 keeping `usage` and filling the survivor's blank cylinder members from the absorbed rows it pairs,
 as an arrival does, an empty absorbed row not appended; moved profiles use
 `replace_profile_samples`, never `store_profile`. Join rows re-point, collisions stay, notes append
-within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused. The loser
-keeps its uuid and names the survivor in `merged_into_id`, so an import and the dive-computer list
-resolve it; every read still finds it deleted. Merges made before that column are not marked: an
-import finds them by the files the merged dive holds. Rejected: marking them by when the loser was
-deleted, which a duplicate deleted by hand also satisfies.
+within `NOTES_MAX_LENGTH`. `rederive_recording` and `delete_recording` are not reused.
+
+## A merge is not a deletion
+
+`POST /dives/merge` writes `merged_into_id` on the dive it soft-deletes, which keeps its uuid; every
+read still finds it deleted. An import and `POST /dive-computers/known-dives` resolve that uuid
+through merges to the dive it joined (`merged_dives.py`). An import asks `merge_holding` before the
+same-recording gate: a record of the same computer whose start `holds_listed_start` places inside a
+merge's recording belongs to it, filling nothing and adding, unread, only files the account lacks. A
+recording no gate places whose file a live dive holds belongs there too, which finds merges made
+before the column. Rejected: marking those by when the loser was deleted, which a duplicate deleted
+by hand also satisfies; a table of former uuids, which no index holds apart from the dives' own.
 
 ## `PlannedRecordingMatch` carries an ordinal, because a fill can land on a secondary recording
 
@@ -7455,10 +7457,8 @@ A dive's `changes` are the difference between two reads of it around the rolled-
 decide inside SQL, so a predicate over the plan would be a second account of the writer. The apply
 re-runs the pass from the held files, then sets each value entry to its reviewed `after`, because a
 fill never overwrites and an edit made in between would stand against what the diver approved.
-Rejected: writing the after-state directly, a second writer. A reviewed dive deleted or merged away
-since is planned as any import plans it: its row reads the new dive, or the merged one, is never
-held to its reviewed values, which describe a dive that is not there, and carries `review_unshown`;
-one dive is one row. Rejected: skipping it, which leaves a merged dive's file in no dive.
+Rejected: writing the after-state directly, a second writer. A reviewed dive gone since is planned
+as any import plans it, never held to its review; `review_unshown` says so.
 
 `review` and `notes` are served as stored, so an earlier build's row still answers. A change to any
 schema they embed bumps `REVIEW_SHAPE` and owes a call: migrate the stored rows or retire them.
