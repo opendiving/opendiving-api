@@ -12,8 +12,8 @@ the service layer, because each is an HTTP concern:
 - **Any number of files, in any mix of the formats this build reads.** A DiveJSON document,
   the full-export archive, a UDDF file, a Subsurface `.ssrf`, a FIT, a Suunto app export, a
   Suunto DM5 XML export, a Shearwater Cloud database or XML export, or a zip of any of those,
-  each sent as a `file` part - a watch writes one file per dive, and one file per import would
-  cap a diver at ten dives an hour against the rate limit below. Which formats exactly is
+  each sent as a `file` part - a watch writes one file per dive, and one file per reviewed
+  import would cap a diver at ten dives an hour against the rate limit below. Which formats exactly is
   `divejson.read_formats()` and never a list written out here.
 - **Uploaded once, reviewed anywhere, applied as reviewed.** `POST /imports` reads, converts and
   plans, and holds the readable files and the review until the import is applied or discarded,
@@ -25,8 +25,8 @@ the service layer, because each is an HTTP concern:
   export endpoints' docstring records why a whole-logbook endpoint is throttled at all, and
   this one is dearer than any export. The upload reads its own body, after the session, the
   limit and the account's slot have been checked, so a request refused for any of them reads
-  none of it. The apply has a budget of the same size beside it, an upload applied at once spends
-  one of each, and the reads are not limited.
+  none of it. The apply has a budget of the same size beside it, an upload applied at once has a
+  budget of its own, sized for a phone's download, and spends nothing of the other two, and the reads are not limited.
 - **The error taxonomy is `POST /dive/parse`'s.** 415 is "no reader here claims these
   bytes", 422 is "one did, and it failed", 413 is past a bound of the request or over the
   account's storage limit. A file that cannot be read is a row of the report, not a refusal
@@ -163,6 +163,18 @@ async def _enforce_apply_limit(user_id: int) -> None:
     await enforce_rate_limit(
         f"import-apply:user:{user_id}",
         settings.IMPORT_RATE_LIMIT_PER_USER,
+        settings.IMPORT_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+
+async def _enforce_at_once_limit(user_id: int) -> None:
+    """A third budget, apart from both: a phone sends an upload applied at once for each batch of
+    dives a download reads, which is far more often than anyone uploads or applies on the web, and
+    a download spending those budgets would refuse the diver's next import there. It counts
+    requests, not dives, so a refusal still reads no body."""
+    await enforce_rate_limit(
+        f"import-at-once:user:{user_id}",
+        settings.IMPORT_AT_ONCE_RATE_LIMIT_PER_USER,
         settings.IMPORT_RATE_LIMIT_WINDOW_SECONDS,
     )
 
@@ -368,9 +380,11 @@ async def create_logbook_import(
     yours while it was read is a 409 too, naming nothing where that other has already been
     finished.
 
-    Rate limited per account, on a budget of its own; with `apply=true` the request spends one of
-    the apply's budget too. A request over a budget it spends is a 429 and its body is not read,
-    and a repeat under an `Idempotency-Key` spends neither. A 413 when the files
+    Rate limited per account, on a budget of its own. With `apply=true` the request spends a
+    second budget instead, which neither an upload without it nor `POST /import/{uuid}/apply`
+    spends, and nothing of theirs. A
+    request over its budget is a 429 and its body is not read, and a repeat under an
+    `Idempotency-Key` spends nothing. A 413 when the files
     together are past what one import may carry or plan - its `detail` says which - and one
     naming the storage used and the limit when the files the import would store do not fit in
     what your account has left, measured as they would be stored and with your own portrait
@@ -413,8 +427,7 @@ async def _apply_at_once(
         held = await find_hold(db, user_id=user_id, route=route, key=idempotency_key)
         if held is not None:
             return await _replay(db, user_id, held)
-    await _enforce_import_limit(user_id)
-    await _enforce_apply_limit(user_id)
+    await _enforce_at_once_limit(user_id)
     await release_read_transaction(db)
     with await _read(request) as body, await _load(body.parts) as batch:
         newly_resolved = await resolve_catalog_gaps(db, aphia_ids=unresolved_aphia_ids(batch_species(batch)))

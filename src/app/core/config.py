@@ -904,9 +904,13 @@ class LogbookImportSettings(BaseSettings):
     # outbound WoRMS calls - and a diver restoring a backup should not find their next
     # export refused because of it. An import is one upload, and ten an hour is the same
     # generosity the export limit means by ten downloads. Its apply counts apart, on the same
-    # figures.
+    # figures. An upload applied at once spends neither, only the third budget, over the same
+    # window: a phone sends one while a download runs, at most one every 30 seconds, so 240 is
+    # twice that with room for retries and a second device, and a download never spends the
+    # web's imports.
     IMPORT_RATE_LIMIT_WINDOW_SECONDS: int = config("IMPORT_RATE_LIMIT_WINDOW_SECONDS", default=3600)
     IMPORT_RATE_LIMIT_PER_USER: int = config("IMPORT_RATE_LIMIT_PER_USER", default=10)
+    IMPORT_AT_ONCE_RATE_LIMIT_PER_USER: int = config("IMPORT_AT_ONCE_RATE_LIMIT_PER_USER", default=240)
 
     # How long an uploaded import waits to be applied or discarded before it and its files are
     # deleted. Blank keeps it until the diver finishes it; below 1 refuses startup

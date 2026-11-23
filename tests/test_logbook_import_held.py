@@ -1376,9 +1376,31 @@ class TestAppliedAtOnce:
         import_routes.invalidate_dive_caches.assert_awaited_once_with(diver.id)  # type: ignore[attr-defined]
         import_routes.invalidate_trip_caches.assert_awaited_once_with(diver.id)  # type: ignore[attr-defined]
 
+    @pytest.mark.asyncio
+    async def test_it_spends_its_own_budget_and_no_other(
+        self, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        diver = create_user(db)
+        spent: list[tuple[Any, ...]] = []
+
+        async def limit(*args: Any) -> None:
+            spent.append(args)
+
+        monkeypatch.setattr(import_routes, "enforce_rate_limit", limit)
+
+        await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)])
+
+        assert spent == [
+            (
+                f"import-at-once:user:{diver.id}",
+                settings.IMPORT_AT_ONCE_RATE_LIMIT_PER_USER,
+                settings.IMPORT_RATE_LIMIT_WINDOW_SECONDS,
+            )
+        ]
+
     @pytest.mark.parametrize("spent", ["import", "import-apply"])
     @pytest.mark.asyncio
-    async def test_either_budget_spent_is_a_429_before_the_body(
+    async def test_the_other_budgets_spent_leave_it_through(
         self, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch, spent: str
     ) -> None:
         diver = create_user(db)
@@ -1388,28 +1410,46 @@ class TestAppliedAtOnce:
                 raise RateLimitException("Too many")
 
         monkeypatch.setattr(import_routes, "enforce_rate_limit", limit)
-        read = AsyncMock()
+
+        applied = await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)])
+
+        assert [row["outcome"] for row in applied["dives"]] == ["new"]
+
+    @pytest.mark.asyncio
+    async def test_its_budget_spent_is_a_429_before_the_body_and_refuses_nothing_else(
+        self, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        diver = create_user(db)
+
+        async def limit(key: str, *args: Any) -> None:
+            if key.startswith("import-at-once:user:"):
+                raise RateLimitException("Too many")
+
+        monkeypatch.setattr(import_routes, "enforce_rate_limit", limit)
+        read = AsyncMock(side_effect=import_routes.read_import_request)
         monkeypatch.setattr(import_routes, "read_import_request", read)
 
         assert (await _refusal(apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)]))).status_code == 429
         read.assert_not_awaited()
         assert await _rows(async_db, diver) == []
 
+        review = await upload(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        applied = await apply(async_db, diver, review["uuid"])
+
+        assert [row["outcome"] for row in applied["dives"]] == ["new"]
+
     @pytest.mark.asyncio
-    async def test_it_spends_one_from_each_budget(
+    async def test_a_repeat_under_its_key_spends_nothing(
         self, async_db: AsyncSession, db: Session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         diver = create_user(db)
-        spent: list[str] = []
-
-        async def limit(key: str, *args: Any) -> None:
-            spent.append(key)
-
+        await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)], key="walk-1")
+        limit = AsyncMock()
         monkeypatch.setattr(import_routes, "enforce_rate_limit", limit)
 
-        await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)])
+        await apply_at_once(async_db, diver, [("dive.fit", OCEAN_FIT)], key="walk-1")
 
-        assert sorted(spent) == [f"import-apply:user:{diver.id}", f"import:user:{diver.id}"]
+        limit.assert_not_awaited()
 
 
 class TestAppliedAtOnceUnderAKey:

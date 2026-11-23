@@ -6106,8 +6106,11 @@ and `MAX_ARCHIVE_ENTRIES`, as `zipfile` builds an object per entry.
 is a 422 naming the password case; a failing blob member reads as `None`.
 
 The upload and the apply each rate-limit per user on a budget of ten, apart, so one import is one
-call against each and a refused apply cannot repeat its pass freely. An import's reads are not
-limited.
+call against each and a refused apply cannot repeat its pass freely. An upload applied at once
+spends neither, only `IMPORT_AT_ONCE_RATE_LIMIT_PER_USER`, 240 an hour by default: a phone sends one
+per batch of a download, at most one every 30 seconds, and a download spending the web's budgets
+would refuse the diver's next import there. It counts requests, not dives, since counting dives
+reads the archive before it can refuse. An import's reads are not limited.
 
 ## Logbook import reads whatever the converter reads, and the routes are `/imports`
 
