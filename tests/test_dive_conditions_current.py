@@ -132,8 +132,7 @@ class TestAnAnswer:
             "provider": "open-meteo",
             "attribution": (
                 "[Weather data by Open-Meteo.com](https://open-meteo.com/) "
-                "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), "
-                "with air temperature and tide times derived from it"
+                "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/))"
             ),
             "at": "2026-11-09T19:00:00+02:00",
             "position": {"latitude": 28.57, "longitude": 34.54},
@@ -395,10 +394,7 @@ class TestTheAirTemperature:
 
         assert body["weather"]["air_temperature"] == 24.0
         assert body["sea"] == THE_SEA_AT_NOW
-        assert body["attribution"] == (
-            "[Weather data by Open-Meteo.com](https://open-meteo.com/) "
-            "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), with tide times derived from it"
-        )
+        assert body["attribution"] == open_meteo.READINGS_ATTRIBUTION
 
     @pytest.mark.asyncio
     async def test_a_rate_limit_on_the_models_cools_the_worker_down(
@@ -419,10 +415,7 @@ class TestTheAirTemperature:
 
         assert body["weather"]["air_temperature"] == 24.7
         assert body["sea"] is None
-        assert body["attribution"] == (
-            "[Weather data by Open-Meteo.com](https://open-meteo.com/) "
-            "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), with air temperature derived from it"
-        )
+        assert body["attribution"] == open_meteo.READINGS_ATTRIBUTION
 
 
 @needs_db

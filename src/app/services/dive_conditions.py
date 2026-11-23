@@ -1106,7 +1106,7 @@ async def current_conditions(
         values["air_temperature"] = temperature
     return DiveConditionsCurrentRead(
         provider=open_meteo.PROVIDER,
-        attribution=open_meteo.current_attribution(temperature=temperature is not None, tides=sea is not None),
+        attribution=open_meteo.READINGS_ATTRIBUTION,
         # The zone's offset at that hour, not the answer's `utc_offset_seconds`, which is now's.
         at=hour.astimezone(zone),
         position=ConditionsPosition(latitude=rounded_latitude, longitude=rounded_longitude),

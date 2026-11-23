@@ -40,7 +40,7 @@ PROVIDER: Final = "open-meteo"
 # answered instead.
 MODEL = "best_match"
 
-# The credit alone, for an answer that passes the provider's readings on as they came.
+# The credit alone, which the map's conditions now carry.
 READINGS_ATTRIBUTION = (
     "[Weather data by Open-Meteo.com](https://open-meteo.com/) "
     "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/))"
@@ -48,16 +48,6 @@ READINGS_ATTRIBUTION = (
 # A dive's record, which carries values derived from the readings: the licence asks that a change
 # be indicated.
 ATTRIBUTION = f"{READINGS_ATTRIBUTION}, with weather, waves and tide times derived from it"
-
-
-def current_attribution(*, temperature: bool, tides: bool) -> str:
-    """The credit for the map's conditions now, naming what is derived rather than passed on as it
-    came: the air temperature where it is the models' median, the tide state and turns where there
-    is a sea."""
-    derived = [name for name, is_derived in (("air temperature", temperature), ("tide times", tides)) if is_derived]
-    if not derived:
-        return READINGS_ATTRIBUTION
-    return f"{READINGS_ATTRIBUTION}, with {' and '.join(derived)} derived from it"
 
 
 _FREE_HOSTS = {
