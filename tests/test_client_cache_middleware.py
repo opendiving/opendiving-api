@@ -202,10 +202,9 @@ class TestTheRealAuthRoutes:
         import inspect
 
         from src.app.api.v1.auth import check_email_link
-        from src.app.api.v1.invitations import resolve_invite_link
         from src.app.api.v1.users import check_email_change_link
 
-        for endpoint in (check_email_link, check_email_change_link, resolve_invite_link):
+        for endpoint in (check_email_link, check_email_change_link):
             source = inspect.getsource(endpoint)
             assert 'Cache-Control"] = "private, no-store"' in source, (
                 f"{endpoint.__name__} takes a token in its URL and must opt out of public caching"

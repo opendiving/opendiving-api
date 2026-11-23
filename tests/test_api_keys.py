@@ -66,8 +66,6 @@ REFUSING_PREFIXES = (
     "/api/v1/user/session",
     "/api/v1/user/checkin-link",
     "/api/v1/user/connect-link",
-    # Held until its routes go, with `/user/connect-link` replacing them.
-    "/api/v1/user/invite-link",
     "/api/v1/user/email-change",
     "/api/v1/user/download-ticket",
 )

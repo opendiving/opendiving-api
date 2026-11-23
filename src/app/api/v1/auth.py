@@ -771,8 +771,8 @@ async def complete_profile(
 
     On an invite-only instance, 403 for an address with no live invitation unless the token
     carries a live join-channel slug or a member's live connect link, and nothing is created;
-    where a member's link admitted the address, that member's invitations list the new
-    account. The first account on an empty instance is admitted in either mode and is a
+    where a member's link admitted the address, it counts against that member's invitation
+    quota. The first account on an empty instance is admitted in either mode and is a
     superuser. Any pending invite request for the address is dropped.
 
     The account starts with the default dive-form presets and tags, and with the picture of
@@ -866,9 +866,7 @@ async def complete_profile(
         await seed_default_tags(db, user_id=created_user.id)
         if admission.connect_link_owner_id is not None:
             # Before `accept_invitations`, so a live typed invitation from the same member is
-            # the row that statement stamps rather than one this writes beside it. After the
-            # `User` row is built, so the row's `accepted_at` is never earlier than the
-            # account's `created_at`, which is what the listing's name lookup is bounded by.
+            # the row that statement stamps rather than one this writes beside it.
             await record_connect_link_sign_up(
                 db, email=token_data.email.lower(), inviter_id=admission.connect_link_owner_id
             )

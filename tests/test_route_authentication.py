@@ -116,12 +116,6 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "token, to an `<img>` or a fetch that carries no session. An owner with no picture is the dead "
         "token's 404, and every answer is `private, no-store`."
     ),
-    # Held until its route goes, with `/connect-link/{token}` replacing it.
-    ("GET", "/api/v1/invite-link/{token}"): (
-        "Tells the join page whose invite link it was opened with, before anyone has signed in. Answers "
-        "for one token and lists nothing; the token has 128 bits, and a live link is one its owner chose "
-        "to hand out. Every dead token is one 404, and both answers are `private, no-store`."
-    ),
     # 6. The caller holds a check-in link a diver shared, and the token in the path is the
     # credential: a desk opens the page with no account, and its `<img>` tags carry nothing.
     ("GET", "/api/v1/checkin/{token}"): (

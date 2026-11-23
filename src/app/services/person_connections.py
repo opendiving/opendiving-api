@@ -48,13 +48,6 @@ async def connect_to_the_link_owner(db: AsyncSession, *, user_id: int, via: str 
     await db.flush()
 
 
-# Held until `username` leaves the person bodies.
-USERNAME_RETIRED = (
-    "Connecting a person by username is no longer possible. Ask them for their connect link, or add them back "
-    "from Added you."
-)
-
-
 def _refuse(member: str, message: str, value: object) -> RequestValidationError:
     """A refusal on one member of the body, where a form shows it."""
     return RequestValidationError([{"type": "value_error", "loc": ("body", member), "msg": message, "input": value}])
@@ -146,22 +139,6 @@ async def disconnected_by(db: AsyncSession, *, diver_id: int) -> set[int]:
     """The accounts that have disconnected `diver_id`, which an import does not connect to."""
     rows = await db.scalars(select(AccountDisconnect.user_id).where(AccountDisconnect.disconnected_user_id == diver_id))
     return set(rows)
-
-
-# Held until `username` leaves the person bodies: the previous web build sends it on every
-# save, null for a person created with the field blank and the connected account's username
-# for a connected one; the phone's previous build queues null to disconnect.
-async def held_username_change(db: AsyncSession, username: str | None, *, person: PersonReadInternal | None) -> bool:
-    """Whether a `username` the body carried disconnects the person: null on an update does,
-    as it did; null on a create, and the connected account's own username on an update,
-    change nothing; anything else is refused on the member."""
-    if username is None:
-        return person is not None
-    if person is not None and person.connected_user_id is not None:
-        current = await db.scalar(select(User.username).where(User.id == person.connected_user_id))
-        if username == current:
-            return False
-    raise _refuse("username", USERNAME_RETIRED, username)
 
 
 @dataclass(frozen=True, slots=True)

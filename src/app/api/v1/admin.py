@@ -170,8 +170,8 @@ async def invite_batch(
             results.append(AdminInvitationOutcome(email=email, outcome="already_invited"))
             continue
 
-        # Same transaction as the insert, for the same reason the member's route does it:
-        # an address with a live invitation must not also be sitting in this queue. First,
+        # Same transaction as the insert: an address with a live invitation must not also be
+        # sitting in this queue, and the two tables then cannot disagree. First,
         # because whether it was there is what the invitation records: the account it lets
         # in is counted under `waitlist` rather than `invitation`.
         from_queue = await delete_invite_requests(db, emails=[email], commit=False) > 0

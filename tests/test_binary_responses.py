@@ -12,7 +12,7 @@ import pytest
 from fastapi import Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.app.api.v1 import certifications, checkin_links, dives, export, invitations, map_tiles, species, users
+from src.app.api.v1 import certifications, checkin_links, connect_links, dives, export, map_tiles, species, users
 from src.app.schemas.certification import CertificationSide
 from src.app.schemas.user_picture import PictureKind
 from src.app.services.map_tiles import ServedMapTile
@@ -246,13 +246,13 @@ class TestExportDownload:
         }
 
 
-class TestInviteLinkNotFound:
+class TestConnectLinkNotFound:
     @pytest.mark.asyncio
     async def test_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(invitations, "registration_is_invite_only", lambda: False)
-        response: Any = await invitations.resolve_invite_link(token="t", response=Response(), db=DB)
+        monkeypatch.setattr(connect_links, "live_connect_link", AsyncMock(return_value=None))
+        response: Any = await connect_links.resolve_connect_link(token="t", response=Response(), db=DB)
         assert (response.status_code, response.body, _headers(response)) == (
             404,
-            b'{"detail":"This invite link is not active."}',
-            {"content-length": "44", "content-type": "application/json", "cache-control": "private, no-store"},
+            b'{"detail":"This connect link is not active."}',
+            {"content-length": "45", "content-type": "application/json", "cache-control": "private, no-store"},
         )

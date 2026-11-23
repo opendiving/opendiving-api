@@ -5575,20 +5575,20 @@ qualifier: disclosure timing does not turn on who runs the instance. Test: does 
 
 ## An invitation is an allow-list entry, not a bearer token
 
-A typed `invitation` carries no secret; the invitee is admitted because they signed in with the
-invited address. Rejected: a shareable redeemable code (Mastodon, Lemmy, Mealie, Bluesky PDS).
-Sign-in already proves ownership of the address via magic link, code or Google's `email_verified`,
-so a token would add a redemption surface through `/auth/verify` and `/onboarding` while proving
-nothing new; Plausible and Ghost bind the same way. Losing forwardability is the feature: a closed
-beta keyed on addresses keeps "who was invited" coupled to "who signed up". No per-invitation
-expiry; the 90-day retention sweep bounds the address. Revocation stamps `revoked_at` rather than
-deleting, so the quota stays a bound on invitations made. The one forwardable kind is a member's
-connect link, below, which a sign-up through records here as an accepted row.
+The operator's `invitation` (`POST /admin/invitations`) carries no secret; the invitee is admitted
+because they signed in with the invited address. Rejected: a shareable redeemable code (Mastodon,
+Lemmy, Mealie, Bluesky PDS). Sign-in already proves ownership of the address via magic link, code or
+Google's `email_verified`, so a token would add a redemption surface through `/auth/verify` and
+`/onboarding` while proving nothing new; Plausible and Ghost bind the same way. Losing
+forwardability is the feature: a closed beta keyed on addresses keeps "who was invited" coupled to
+"who signed up". No per-invitation expiry; the 90-day retention sweep bounds the address, and a row
+carrying `revoked_at` admits nobody. The one forwardable kind is a member's connect link, below,
+which a sign-up through records here as an accepted row.
 
-## A check-in link is a bearer token, where a typed invitation is not
+## A check-in link is a bearer token, where an invitation by address is not
 
 `POST /user/checkin-link` mints a secret that shows the diver's check-in page to whoever holds it.
-The typed invitation rejected a forwardable secret because forwarding was what it had to prevent;
+An invitation by address rejects a forwardable secret because forwarding is what it has to prevent;
 here forwarding to a desk is the feature. What bounds it instead: only `hash_token` of it is stored,
 it is returned once, it lives `CHECKIN_LINK_TTL` (24 hours), minting revokes the diver's other links
 under a lock on their row, and a deletion request kills it at once. Unknown, expired, revoked and
@@ -5654,44 +5654,38 @@ after the address is proven.
 
 ## The invitation quota is counted from the table, not from the rate limiter
 
-`INVITATIONS_PER_USER` per `INVITATIONS_WINDOW_DAYS` (5 per 1 day) counts `invitation` rows the
-inviter created in the trailing window, revoked and accepted included; Redis is not consulted. The
-rate limiter fails open on a Redis outage and its counters are flushed locally — right for pacing a
-sign-in form, wrong for a bound on who enters a closed instance. Revoked rows count so the quota
-bounds invitations made rather than live ones; a revoke cannot refill the bucket. A sign-up through
-the member's connect link writes an accepted row, so it draws on the same allowance. A rate rather
-than a lifetime allotment (Lemmy's `max_invites_per_user_allowed` shape rejected): five today, five
-more tomorrow. Superusers are exempt structurally — the count is never taken for them.
+`INVITATIONS_PER_USER` per `INVITATIONS_WINDOW_DAYS` (5 per 1 day) bounds how many accounts a
+member's connect link admits to an invite-only instance. It counts the `invitation` rows the member
+holds from the trailing window, whatever their stamps, and each sign-up through the link writes an
+accepted one; Redis is not consulted. The rate limiter fails open on a Redis outage and its counters
+are flushed locally — right for pacing a sign-in form, wrong for a bound on who enters a closed
+instance. A rate rather than a lifetime allotment (Lemmy's `max_invites_per_user_allowed` shape
+rejected): five today, five more tomorrow. Superusers are exempt structurally — the count is never
+taken for them.
 
-## Inviting an address that already has an account is a 409, and that is a disclosure
+## The operator's batch says which addresses already have an account
 
-`POST /user/invitations` answers `409 That address already has an account on this instance.`,
-telling a signed-in caller that an address is registered. Accepted: a `201` that creates nothing
-leaves the inviter hunting for a missing row and reveals the same fact a moment later; Plausible and
-Ghost surface it openly. The quota does not bound this — it counts `invitation` rows via
-`invitations_created_since`, and the 409 returns before anything is created, so a probe is free and
-a 409 stays distinguishable from a 429. So the route carries
-`INVITATION_ATTEMPT_RATE_LIMIT_PER_USER` (20 per magic-link window), applied above the existence
-check, to superusers too, larger than the quota so a mistyped address does not spend a real
-invitation. Same shape as `PATCH /user`'s username check, keyed per user. Rule: an availability
-check that answers distinguishably needs its own throttle; a quota counted from successful writes is
-not one. The comparison is case-insensitive.
+`POST /admin/invitations` reports `already_registered` for an address with an account, and creates
+nothing for it. That discloses nothing: only a superuser reaches the route, and the operator can
+read every account anyway, so no throttle applies. The comparison is case-insensitive. Rule: an
+availability check that answers an ordinary account distinguishably needs a throttle of its own, as
+`PATCH /user`'s username check has; a quota counted from successful writes never charges for a
+refusal, so it is not one.
 
 ## Every account lookup by address is on `lower(User.email)`
 
 `POST /auth/complete` inserts `token_data.email` verbatim and the Google path hands
 `resolve_identity` its `email` claim un-lowercased, so `User.email` may carry capitals; both
 invitation tables store lowercase. The narrow fix is chosen: compare on `lower(User.email)` wherever
-an invitation address meets an account — the `409` on `POST /user/invitations`, `has_account` on
-`GET /admin/invite-requests`, the skip arm of `POST /admin/invitations` — all through
-`crud.crud_invitations.account_exists_for`; `POST /auth/complete`'s delete of a pending request for
-the new account's address; and the revision backfilling `daily_total`, which matches accepted
-invitations to accounts. Sign-in compares the same way, through `crud.crud_users.account_for_email`
-and `account_exists_for`. Rejected: normalising `User.email` on write, which touches the account
-path, the email-change path and every row. `_purge_one_account` is the mirror image: its
-`authentication_request` and `auth_audit_event` deletes compare the stored email raw because those
-tables hold what sign-in wrote, while the two invitation deletes lowercase first; the difference is
-commented at the call site.
+an invitation address meets an account — `has_account` on `GET /admin/invite-requests`, the skip arm
+of `POST /admin/invitations` — all through `crud.crud_invitations.account_exists_for`;
+`POST /auth/complete`'s delete of a pending request for the new account's address; and the revision
+backfilling `daily_total`, which matches accepted invitations to accounts. Sign-in compares the same
+way, through `crud.crud_users.account_for_email` and `account_exists_for`. Rejected: normalising
+`User.email` on write, which touches the account path, the email-change path and every row.
+`_purge_one_account` is the mirror image: its `authentication_request` and `auth_audit_event`
+deletes compare the stored email raw because those tables hold what sign-in wrote, while the two
+invitation deletes lowercase first; the difference is commented at the call site.
 
 ## `invite_request.created_at` needs a `server_default`, unlike every other one in this app
 

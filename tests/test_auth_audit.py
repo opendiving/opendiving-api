@@ -349,13 +349,12 @@ class TestWhichSitesWriteAnEvent:
         assert written["email"] == "stranger@example.com"
 
     @pytest.mark.asyncio
-    async def test_creating_an_invitation_writes_one_event_naming_both_parties(self, mock_db) -> None:
-        """`user_id` the inviter and `email` the invitee, so the row records who did what to
+    async def test_inviting_an_address_writes_one_event_naming_both_parties(self, mock_db) -> None:
+        """`user_id` the operator and `email` the invitee, so the row records who did what to
         whom - and `commit=False`, because it rides the transaction that inserts the
         invitation and clears the request row."""
-        from src.app.api.v1.invitations import create_invitation
-        from src.app.core.config import RegistrationMode, settings
-        from src.app.schemas.invitation import InvitationCreateRequest, InvitationReadInternal
+        from src.app.api.v1.admin import invite_batch
+        from src.app.schemas.invitation import AdminInvitationBatchRequest, InvitationReadInternal
 
         row = InvitationReadInternal(
             id=1,
@@ -368,21 +367,19 @@ class TestWhichSitesWriteAnEvent:
         )
 
         with (
-            patch.object(settings, "REGISTRATION_MODE", RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.account_exists_for", new_callable=AsyncMock, return_value=False),
-            patch("src.app.api.v1.invitations.live_invitation_from", new_callable=AsyncMock, return_value=False),
-            patch("src.app.api.v1.invitations.invitations_created_since", new_callable=AsyncMock, return_value=0),
-            patch("src.app.api.v1.invitations.crud_invitations") as crud,
-            patch("src.app.api.v1.invitations.delete_invite_requests", new_callable=AsyncMock),
-            patch("src.app.api.v1.invitations.send_invitation_email", new_callable=AsyncMock),
-            patch("src.app.api.v1.invitations.record_auth_event", new_callable=AsyncMock) as recorder,
+            patch("src.app.api.v1.admin.account_exists_for", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.admin.live_invitation_from", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.admin.crud_invitations") as crud,
+            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock, return_value=0),
+            patch("src.app.api.v1.admin.send_invitation_email", new_callable=AsyncMock),
+            patch("src.app.api.v1.admin.record_auth_event", new_callable=AsyncMock) as recorder,
         ):
             crud.create = AsyncMock(return_value=row)
 
-            await create_invitation(
+            await invite_batch(
                 _request(),
-                InvitationCreateRequest(email="Friend@Example.com"),
-                {"id": 7, "uuid": uuid7(), "name": "Ada Reef", "is_superuser": False},
+                AdminInvitationBatchRequest(emails=["Friend@Example.com"]),
+                {"id": 7, "uuid": uuid7(), "name": "Ada Reef", "is_superuser": True},
                 mock_db,
             )
 
@@ -666,34 +663,6 @@ class TestTheNamedExclusions:
         # Lowercased, and riding the account's transaction: the address is stored on the
         # invitation in lower case whatever the onboarding token carried.
         assert awaited_kwargs(accepted) == {"email": "invitee@example.com", "commit": False}
-
-    @pytest.mark.asyncio
-    async def test_revoking_an_invitation_is_not_an_auth_event(self, mock_db) -> None:
-        """An invitation is not a credential, so criterion (c) - revoking one at its owner's
-        request - does not reach it. What it is is an allow-list entry, and the row keeps its
-        own `revoked_at` saying when it stopped admitting anybody."""
-        from src.app.api.v1.invitations import revoke_invitation
-        from src.app.core.config import RegistrationMode, settings
-        from src.app.schemas.invitation import InvitationReadInternal
-
-        row = InvitationReadInternal(
-            id=1,
-            uuid=uuid7(),
-            user_id=7,
-            email="friend@example.com",
-            created_at=datetime.now(UTC),
-            accepted_at=None,
-            revoked_at=None,
-        )
-
-        with (
-            patch.object(settings, "REGISTRATION_MODE", RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.fetch_owned_or_raise", new_callable=AsyncMock, return_value=row),
-            patch("src.app.api.v1.invitations.record_auth_event", new_callable=AsyncMock) as recorder,
-        ):
-            await revoke_invitation(uuid7(), {"id": 7, "uuid": uuid7(), "is_superuser": False}, mock_db)
-
-        recorder.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_the_gate_refusing_an_uninvited_address_is_not_an_auth_event(self, mock_db) -> None:

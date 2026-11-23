@@ -92,13 +92,10 @@ NOT_A_DIVERS_OWN_RESOURCE: dict[str, str] = {
         "on a cron - so there is no delete for a case to exercise."
     ),
     "Invitation": (
-        "There is a `DELETE /user/invitation/{uuid}`, and it **revokes rather than removes**: it stamps "
-        "`revoked_at`, and the retention sweep is what deletes the row later. `UserSession`'s reason, "
-        "not `AuthenticationRequest`'s - the resource does offer a delete, and the three behaviour "
-        "classes still have nothing to assert, because the row is deliberately still there once the "
-        "delete has succeeded and a second revoke is a success rather than a 404. Note the one place "
-        "this diverges from `UserSession`: a second delete of an *accepted* invitation is a 409, which "
-        "is a refusal about the row's state rather than about its absence."
+        "The operator's allow-list entry, or the record of a sign-up through a member's connect link, "
+        "not a diver's resource. Nothing offers a delete of it - an unaccepted row is swept 90 days after "
+        "it was made, and an accepted one goes with either account - so there is no delete for a case to "
+        "exercise."
     ),
     "LogbookImport": (
         "`DELETE /import/{uuid}` is its one way out, and `tests/test_logbook_import_held.py` pins it: the "

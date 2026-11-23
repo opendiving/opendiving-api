@@ -35,7 +35,6 @@ from src.app.api.v1.auth import (
     verify_email_code,
     verify_email_link,
 )
-from src.app.api.v1.invitations import create_invitation
 from src.app.api.v1.join_channels import read_join_channel
 from src.app.core.config import AccountSource, RegistrationMode, settings
 from src.app.core.exceptions.http_exceptions import ForbiddenException, NotFoundException
@@ -54,7 +53,7 @@ from src.app.schemas.auth import (
     ProfileCompletionRequest,
 )
 from src.app.schemas.daily_total import DailyMetric
-from src.app.schemas.invitation import AdminInvitationBatchRequest, InvitationCreateRequest
+from src.app.schemas.invitation import AdminInvitationBatchRequest
 from src.app.services.auth_service import IssuedTokens
 from src.app.services.registration_gate import (
     NOT_INVITED,
@@ -589,7 +588,7 @@ class TestTheCreatingTransaction:
 @needs_a_database
 class TestWhereAnInvitationCameFrom:
     """`from_invite_request` is set by the operator's batch exactly when it took a request
-    off the queue, and by nothing a member does."""
+    off the queue."""
 
     @staticmethod
     def _flag(db: Session, email: str) -> list[bool]:
@@ -617,31 +616,6 @@ class TestWhereAnInvitationCameFrom:
                 )
 
         assert self._flag(db, email) == [queued]
-
-    @pytest.mark.asyncio
-    async def test_a_member_inviting_a_queued_address_records_nothing(
-        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
-    ) -> None:
-        """The member did the inviting, whatever the queue held."""
-        member = create_user(db)
-        email = unique_email()
-        db.add(InviteRequest(email=email))
-        db.commit()
-
-        async with async_sessions() as session:
-            with (
-                _mode(RegistrationMode.INVITE),
-                patch("src.app.api.v1.invitations.enforce_rate_limit", new_callable=AsyncMock),
-                patch("src.app.api.v1.invitations.send_invitation_email", new_callable=AsyncMock),
-            ):
-                await create_invitation(
-                    fake_request(),
-                    InvitationCreateRequest(email=email),
-                    {"id": member.id, "name": member.name, "is_superuser": False},
-                    session,
-                )
-
-        assert self._flag(db, email) == [False]
 
     def test_rows_written_before_the_column_read_false(self, db: Session, diver: User) -> None:
         """What the outgoing build's insert gets in a deploy overlap: it names no such

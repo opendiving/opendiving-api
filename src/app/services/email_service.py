@@ -5,8 +5,8 @@ email-change confirmation/notification pair (see `api.v1.users`), the passkey
 added/removed security notices (see `api.v1.passkeys`), the account-deletion
 confirmation that carries the purge date (see `api.v1.users.erase_user`), the scheduled
 emails - the gear-service digest, the renewal reminder and the year in review (see
-`core.worker.functions`) - the invitation into a closed instance (see
-`api.v1.invitations`), and the support form (see `api.v1.support`), all funneling through
+`core.worker.functions`) - the operator's invitation into a closed instance (see
+`api.v1.admin`), and the support form (see `api.v1.support`), all funneling through
 `_send` so the "run a blocking client off the event loop" plumbing only lives in one place.
 
 SMTP rather than any vendor's HTTP API because it is the one interface every provider
@@ -223,8 +223,8 @@ async def send_magic_link_email(email: str, magic_link_url: str, code: str) -> N
 async def send_invitation_email(email: str, inviter_name: str) -> None:
     """Tells `email` that `inviter_name` has invited them to this instance.
 
-    **Carries no token and no query parameter**, because a typed invitation - the only kind
-    that sends this mail - is an allow-list entry rather than a bearer credential: signing in
+    **Carries no token and no query parameter**, because an invitation by address - the only
+    kind that sends this mail - is an allow-list entry rather than a bearer credential: signing in
     already proves ownership of the address, so the invitee simply signs in *with this
     address* and the gate lets them through. A member's connect link is the forwardable kind,
     and nothing is mailed for it. What the mail therefore has to say is precisely that, which is why the address
@@ -258,9 +258,9 @@ async def send_invitation_email(email: str, inviter_name: str) -> None:
     shape, even though nothing here is a credential. The reasoning is the *consequence* of
     a silent failure rather than the sensitivity of the payload: a notice that fails to send
     costs somebody a heads-up they can live without, while an invitation that fails to send
-    is an invitee who never learns they were invited and an inviter whose quota was spent
-    on nothing. The row is already committed by the time this runs, so the address is
-    admitted either way and the operator's job on a 5xx is to tell them another way.
+    is an invitee who never learns they were invited. The row is already committed by the
+    time this runs, so the address is admitted either way and the operator's job is to tell
+    them another way.
     """
     sign_in_url = f"{settings.FRONTEND_URL}/signin"
 

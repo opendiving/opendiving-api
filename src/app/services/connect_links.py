@@ -103,12 +103,11 @@ async def live_connect_link(db: AsyncSession, *, token: str) -> LiveConnectLink 
 
 async def can_still_invite(db: AsyncSession, link: LiveConnectLink) -> bool:
     """Whether the link's owner is under the invitation quota, which is the only bound on what
-    a standing link admits to an invite-only instance. Counted as `POST /user/invitations`
-    counts it, so a sign-up through the link and an invitation typed by address draw on one
-    allowance.
+    a standing link admits to an invite-only instance: the owner's invitation rows in the
+    window, each sign-up through the link among them.
 
     Under the owner's `hold_invitation_quota`, so the sign-up `admit_or_refuse` admits is
-    counted against a typed invitation made at the same moment. The advisory check before
+    counted against another through the same link at the same moment. The advisory check before
     the profile form takes it too and holds it only until its own request commits."""
     if link.owner_is_superuser:
         return True

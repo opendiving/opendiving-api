@@ -62,7 +62,6 @@ from ...services.cache_invalidation import (
 )
 from ...services.person_connections import (
     forget_disconnect,
-    held_username_change,
     refuse_a_second_tie,
     resolve_connection,
 )
@@ -118,13 +117,8 @@ async def write_person(
     that is not live, an id naming no account with a person connected to you, your own
     account, and an account another of your people is connected to are each a 422 on the
     member.
-
-    `username` is retired: null is accepted and changes nothing, and any other value is a
-    422 on the member.
     """
     connected_user_id = await resolve_connection(db, person, owner_id=current_user["id"])
-    if "username" in person.model_fields_set:
-        await held_username_change(db, person.username, person=None)
 
     if await person_name_exists(db=db, user_id=current_user["id"], name=person.name):
         raise DuplicateValueException(_NAME_TAKEN)
@@ -136,7 +130,7 @@ async def write_person(
         crud_people.create(
             db=db,
             object=PersonCreateInternal(
-                **person.model_dump(exclude={"username", "connect_link", "connect_account"}),
+                **person.model_dump(exclude={"connect_link", "connect_account"}),
                 user_id=current_user["id"],
                 connected_user_id=connected_user_id,
             ),
@@ -252,29 +246,21 @@ async def patch_person(
 
     `connect_link` or `connect_account` connects a person who is not connected yet, as on
     create, and is refused alike; a person already connected is a 422 on the member.
-
-    `username` is retired: null disconnects the person, the username of the account it is
-    connected to changes nothing, and any other value is a 422 on the member.
     """
     db_person = await _get_owned_person(db, uuid, current_user)
 
     refuse_a_second_tie(values, db_person)
     connected_user_id = await resolve_connection(db, values, owner_id=db_person.user_id, person_id=db_person.id)
-    disconnects = "username" in values.model_fields_set and await held_username_change(
-        db, values.username, person=db_person
-    )
 
     if values.name is not None and await person_name_exists(
         db=db, user_id=db_person.user_id, name=values.name, exclude_id=db_person.id
     ):
         raise DuplicateValueException(_NAME_TAKEN)
 
-    update_data = values.model_dump(exclude={"username", "connect_link", "connect_account"}, exclude_unset=True)
+    update_data = values.model_dump(exclude={"connect_link", "connect_account"}, exclude_unset=True)
     if connected_user_id is not None:
         await forget_disconnect(db, account_id=connected_user_id, diver_id=db_person.user_id)
         update_data |= {"connected_user_id": connected_user_id, "connection_hidden_at": None}
-    elif disconnects:
-        update_data |= {"connected_user_id": None, "connection_hidden_at": None}
 
     if update_data:
         await write_or_duplicate(

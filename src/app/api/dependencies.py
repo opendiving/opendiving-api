@@ -141,8 +141,8 @@ async def refuse_api_keys(token: Annotated[str, Depends(bearer_scheme)]) -> None
 
     A sibling of `get_current_user` rather than a change to it, as `current_session_uuid` is,
     declared on every route under the `/user/api-key`, `/user/passkey`, `/user/session`,
-    `/user/checkin-link`, `/user/connect-link`, `/user/invite-link` (held until its routes
-    go), `/user/email-change` and `/user/download-ticket` prefixes that takes a session, and on
+    `/user/checkin-link`, `/user/connect-link`, `/user/email-change` and `/user/download-ticket`
+    prefixes that takes a session, and on
     `DELETE /user` - `tests/test_api_keys.py` holds the set to that rule. It decides on the
     prefix alone, without verifying the key: it can only ever refuse more, and
     `get_current_user` still authenticates everything it lets through.

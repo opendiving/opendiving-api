@@ -1,16 +1,12 @@
-"""Schemas for the `invitation` table and the routes over it.
+"""Schemas for the `invitation` table and the operator's batch over it.
 
-The internal/public split is `user_session`'s: `InvitationReadInternal` mirrors the table
-for server-side lookups - including the ownership check `fetch_owned_or_raise` runs on
-`DELETE /user/invitation/{uuid}`, which needs the `user_id` its `OwnedRow` protocol asks
-for - and `InvitationRead` is what an inviter sees. There is no secret to withhold on the
-way out: a typed invitation is an allow-list entry, not a token (see `models/invitation.py`),
-and the one invitation secret there is, a member's connect-link token, lives on its own table
-and is in none of these.
+`InvitationReadInternal` mirrors the table for server-side lookups. No route answers a row:
+the batch reports an outcome per address. An invitation by address is an allow-list entry,
+not a token (see `models/invitation.py`), and the one invitation secret there is, a member's
+connect-link token, lives on its own table and is in none of these.
 """
 
 from datetime import datetime
-from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,10 +30,10 @@ class InvitationCreateInternal(BaseModel):
 class InvitationUpdate(BaseModel):
     """Only ever the two stamps, and never from a request body.
 
-    `accepted_at` is written by the account-creating transaction and `revoked_at` by the
-    inviter's revoke; both go through hand-written statements in `crud.crud_invitations`,
-    so this exists to give the FastCRUD alias its update types rather than to be filled in
-    by anybody.
+    `accepted_at` is written by the account-creating transaction, through a hand-written
+    statement in `crud.crud_invitations`; `revoked_at` is written by nothing, and the gate
+    still reads a stamp a row already carries. This exists to give the FastCRUD alias its
+    update types rather than to be filled in by anybody.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -55,49 +51,6 @@ class InvitationReadInternal(PublicUUIDSchema):
     created_at: datetime
     accepted_at: datetime | None
     revoked_at: datetime | None
-
-
-class InvitationRead(PublicUUIDSchema):
-    """One row of `GET /user/invitations`.
-
-    On a typed row the address is here because the inviter typed it and needs to recognise
-    the row; the two stamps are what the card renders as pending / accepted on a date /
-    revoked. There is no "status" field: three nullable timestamps say more than one enum
-    would, and the client already has to render the date.
-
-    **A row with `from_invite_link` carries no address.** Somebody signed up through the
-    inviter's link with an address the inviter never typed and was never given, so the row
-    names them by `member_name` instead: the current name of the account that sign-up
-    created, or `null` once no account matches - after that person changes their address,
-    say. On a typed row `member_name` is always `null`.
-    """
-
-    email: AccountEmail | None
-    created_at: datetime
-    accepted_at: datetime | None = None
-    revoked_at: datetime | None = None
-    from_invite_link: bool = False
-    member_name: str | None = None
-
-
-class InvitationCreateRequest(BaseModel):
-    """`POST /user/invitations`' body: the address to invite, and nothing else.
-
-    `EmailStr` rather than a bare string, matching `EmailAuthRequest` - a malformed address
-    is a 422 naming the field rather than a row nobody can ever accept.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    email: Annotated[AccountEmail, Field(description="Address to invite")]
-
-
-class InvitationRevokedResponse(BaseModel):
-    """`DELETE /user/invitation/{uuid}`'s answer. A message rather than an empty 204, so a
-    client can show one - the same shape `SessionRevokedResponse` takes for the revoke
-    beside it."""
-
-    message: str = "Invitation revoked"
 
 
 # The cap on `POST /admin/invitations`. A hundred is `DEFAULT_MAX_ITEMS_PER_PAGE`'s number,

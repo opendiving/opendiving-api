@@ -11,8 +11,6 @@ from ..core.schemas import MAX_LIST_ITEMS, NOTES_MAX_LENGTH, PublicUUIDSchema, R
 PERSON_NAME_MAX = 255
 PERSON_EMAIL_MAX = 255
 PERSON_PHONE_MAX = 32
-# A username's own bounds (`schemas/user.py`): nothing longer names an account.
-USERNAME_MAX = 20
 # A connect link's token: `secrets.token_hex(16)`.
 CONNECT_LINK_TOKEN_MAX = 32
 
@@ -47,18 +45,6 @@ PersonEmail = Annotated[
 PersonPhone = Annotated[
     str | None,
     Field(default=None, max_length=PERSON_PHONE_MAX, description="Phone number of the person, free text"),
-]
-# Held until the previous web build and the phone's have left it: the member it sent, which
-# now changes nothing or is refused. `services.person_connections.held_username_change`.
-HeldUsername = Annotated[
-    str | None,
-    Field(
-        default=None,
-        max_length=USERNAME_MAX,
-        description="Retired: connecting a person by username is no longer possible. Only null, or on an update "
-        "the username of the account the person is already connected to, is accepted",
-        examples=["alexm"],
-    ),
 ]
 ConnectLinkToken = Annotated[
     str | None,
@@ -174,16 +160,14 @@ class PersonReadInternal(PublicUUIDSchema):
 
 
 class ConnectsAPerson(BaseModel):
-    """The two ways a person write connects one, and the held `username`: at most one of
-    them in a body."""
+    """The two ways a person write connects one: at most one of them in a body."""
 
-    username: HeldUsername
     connect_link: ConnectLinkToken
     connect_account: ConnectAccount
 
     @model_validator(mode="after")
     def one_way_at_most(self) -> ConnectsAPerson:
-        given = [name for name in ("username", "connect_link", "connect_account") if name in self.model_fields_set]
+        given = [name for name in ("connect_link", "connect_account") if name in self.model_fields_set]
         if len(given) > 1:
             raise ValueError(f"Send one of {', '.join(given)}, not several.")
         return self

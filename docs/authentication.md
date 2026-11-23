@@ -110,14 +110,14 @@ normalisation - its verified address reaches the same funnel, lowercased at the 
 
 An address asks to be let in through `POST /invite-requests`, which is anonymous, answers the same
 `202` for every address and never queries the `user` table. The operator works that queue through
-`GET /admin/invite-requests` and `POST /admin/invitations`; a member invites by typing an address,
-or brings somebody in through their connect link (`/user/connect-link`), both bounded by
-`INVITATIONS_PER_USER` per `INVITATIONS_WINDOW_DAYS`. A typed invitation is an entry against the
-address and carries no secret. A connect link is a bearer token: whoever follows `/connect/<token>`
-may sign up, starts with the member in their people, and lands on the member's list as an accepted
-invitation that shows the new member's name and not their address. In `open` mode the user-facing
-invitation routes answer `404` and the feature is absent rather than idle; the connect link is there
-in every mode, and on an open instance it admits nobody the mode would not admit anyway.
+`GET /admin/invite-requests` and `POST /admin/invitations`, whose invitation is an entry against the
+address and carries no secret. A member brings somebody in through their connect link
+(`/user/connect-link`), a bearer token: whoever follows `/connect/<token>` may sign up and starts
+with the member in their people, and on an invite-only instance the sign-up is recorded as an
+accepted invitation of the member's, bounded by `INVITATIONS_PER_USER` per
+`INVITATIONS_WINDOW_DAYS`. In `open` mode `POST /invite-requests` answers `404` and the feature is
+absent rather than idle; the connect link is there in every mode, and on an open instance it admits
+nobody the mode would not admit anyway.
 
 #### 1. Sign up with email (new user)
 
@@ -621,9 +621,9 @@ What a key is refused:
   a 403 `"This API key is read-only."` before the route runs.
 - **No key may manage credentials, the sign-in address or the account's existence.** The routes
   under `/user/api-key`, `/user/mcp`, `/user/passkey`, `/user/session`, `/user/checkin-link`,
-  `/user/connect-link`, `/user/invite-link`, `/user/email-change` and `/user/download-ticket`, and
-  `DELETE /user`, answer a key with 403 `"This needs a signed-in browser or app, not an API key."`
-  (`refuse_api_keys`), so a stolen key cannot lock its owner out or mint itself a successor.
+  `/user/connect-link`, `/user/email-change` and `/user/download-ticket`, and `DELETE /user`, answer
+  a key with 403 `"This needs a signed-in browser or app, not an API key."` (`refuse_api_keys`), so
+  a stolen key cannot lock its owner out or mint itself a successor.
 - **A key's principal is never a superuser.** The account dict it resolves to carries `is_superuser`
   false whatever the column says, so the operator's routes answer the superuser gate's own 403 and
   `GET /user` reports `false`. A legacy `write` key, or a scoped key holding `species:write`, may

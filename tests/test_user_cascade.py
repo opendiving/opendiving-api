@@ -120,7 +120,7 @@ class TestDeletingAUserTakesEverythingWithIt:
 
     Most of them are the ten `48781087b2b3` had to redeclare. The rest are tables added
     since - `course`, then `user_session`, `auth_audit_event`, `contact`, `checkin_link`,
-    `person`, `invite_link`, `api_key` and `monthly_active_account` - each of which declared `ON DELETE CASCADE` from
+    `person`, `connect_link`, `api_key` and `monthly_active_account` - each of which declared `ON DELETE CASCADE` from
     the outset, which is exactly the case the metadata sweep above cannot distinguish from a
     table that got it right by accident, so they are seeded here too. (No count in this
     sentence on purpose: the previous one said "eleven" and was one model away from being

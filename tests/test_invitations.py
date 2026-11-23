@@ -1,4 +1,4 @@
-"""The invitation routes, the request queue, the operator's queue routes, and `GET /config`.
+"""The request for an invitation, the operator's batch and queue routes, and `GET /config`.
 
 Mostly unit tests calling the handlers directly with a mocked session: what these routes do
 is branch on mode, count, compare and choose a status code, and every one of those is a
@@ -19,7 +19,6 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from fastapi import HTTPException
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
@@ -27,23 +26,14 @@ from uuid6 import uuid7
 
 from src.app.api.v1.admin import invite_batch, read_invite_requests, remove_invite_requests
 from src.app.api.v1.config import read_instance_config
-from src.app.api.v1.invitations import (
-    create_invitation,
-    read_invitations,
-    request_an_invite,
-    revoke_invitation,
-)
+from src.app.api.v1.invitations import request_an_invite
 from src.app.core.config import RegistrationMode, settings
-from src.app.core.exceptions.http_exceptions import NotFoundException, RateLimitException
+from src.app.core.exceptions.http_exceptions import NotFoundException
 from src.app.models.invitation import Invitation
 from src.app.models.invite_request import InviteRequest
 from src.app.models.user import User
 from src.app.schemas.auth_audit_event import AuthEventType
-from src.app.schemas.invitation import (
-    AdminInvitationBatchRequest,
-    InvitationCreateRequest,
-    InvitationReadInternal,
-)
+from src.app.schemas.invitation import AdminInvitationBatchRequest, InvitationReadInternal
 from src.app.schemas.invite_request import AdminInviteRequestDeleteRequest, InviteRequestSubmission
 from src.app.services import map_renderer
 from tests.conftest import db_available, unique_email
@@ -116,30 +106,13 @@ def _internal(**overrides: Any) -> InvitationReadInternal:
 
 
 class TestOpenModeMakesTheFeatureAbsent:
-    """Every route answers 404, which is what lets the web's settings card remove itself
-    with no knowledge of the mode - the self-hiding the sessions and passkeys cards already
-    do. A 403 would tell the card the feature exists and it is not allowed to use it, which
-    is a different and wrong sentence."""
+    """The request route answers 404: there is nothing to ask an open instance's operator
+    for, and a 403 would say the feature exists and the caller may not use it."""
 
     @pytest.mark.asyncio
     async def test_the_anonymous_request_route(self, mock_db) -> None:
         with _mode(RegistrationMode.OPEN), pytest.raises(NotFoundException):
             await request_an_invite(_request(), InviteRequestSubmission(email="a@example.com"), mock_db)
-
-    @pytest.mark.asyncio
-    async def test_the_list_route(self, mock_db) -> None:
-        with _mode(RegistrationMode.OPEN), pytest.raises(NotFoundException):
-            await read_invitations(CALLER, mock_db)
-
-    @pytest.mark.asyncio
-    async def test_the_create_route(self, mock_db) -> None:
-        with _mode(RegistrationMode.OPEN), pytest.raises(NotFoundException):
-            await create_invitation(_request(), InvitationCreateRequest(email="a@example.com"), CALLER, mock_db)
-
-    @pytest.mark.asyncio
-    async def test_the_revoke_route(self, mock_db) -> None:
-        with _mode(RegistrationMode.OPEN), pytest.raises(NotFoundException):
-            await revoke_invitation(uuid7(), CALLER, mock_db)
 
     @pytest.mark.asyncio
     async def test_nothing_is_written_or_rate_limited_on_the_way_out(self, mock_db) -> None:
@@ -238,435 +211,6 @@ class TestRequestAnInvite:
         keys = [call.args[0] for call in limiter.await_args_list]
         # Per-IP first: a request it refuses must not have spent the address's bucket.
         assert keys == ["invite-request:ip:203.0.113.7", "invite-request:email:a@example.com"]
-
-
-class TestReadInvitations:
-    """`GET /user/invitations` - the contract the web client's settings card is built against."""
-
-    @staticmethod
-    def _row(**overrides: Any) -> dict[str, Any]:
-        row = {
-            "uuid": uuid7(),
-            "email": "friend@example.com",
-            "created_at": datetime.now(UTC),
-            "accepted_at": None,
-            "revoked_at": None,
-            "from_invite_link": False,
-            "member_name": None,
-        }
-        return {**row, **overrides}
-
-    @pytest.mark.asyncio
-    async def test_it_pages_the_callers_own_rows(self, mock_db) -> None:
-        row = self._row()
-
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.list_invitations_from", new_callable=AsyncMock) as listed,
-        ):
-            listed.return_value = {"data": [row], "total_count": 1}
-
-            page = await read_invitations(CALLER, mock_db, page=2, items_per_page=10)
-
-        assert awaited_kwargs(listed) == {"user_id": CALLER["id"], "offset": 10, "limit": 10}
-        assert page["total_count"] == 1
-        assert page["data"] == [
-            {
-                "uuid": row["uuid"],
-                "email": "friend@example.com",
-                "created_at": row["created_at"],
-                "accepted_at": None,
-                "revoked_at": None,
-                "from_invite_link": False,
-                "member_name": None,
-            }
-        ]
-
-    @pytest.mark.asyncio
-    async def test_a_link_row_carries_the_members_name_and_never_the_address(self, mock_db) -> None:
-        """The inviter never typed the address a link sign-up used, so the handler drops it
-        even though the row holds it."""
-        row = self._row(accepted_at=datetime.now(UTC), from_invite_link=True, member_name="Grace Reef")
-
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch(
-                "src.app.api.v1.invitations.list_invitations_from",
-                new_callable=AsyncMock,
-                return_value={"data": [row], "total_count": 1},
-            ),
-        ):
-            page = await read_invitations(CALLER, mock_db)
-
-        assert page["data"][0]["email"] is None
-        assert page["data"][0]["member_name"] == "Grace Reef"
-        assert page["data"][0]["from_invite_link"] is True
-
-    @pytest.mark.asyncio
-    async def test_no_internal_id_reaches_the_response(self, mock_db) -> None:
-        """The handler builds the public shape field by field rather than leaving
-        `response_model` to strip whatever the query returned - a route that reused the
-        helper without one would otherwise put a sequential id on the wire."""
-        row = {**self._row(), "id": 4242, "user_id": CALLER["id"]}
-
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch(
-                "src.app.api.v1.invitations.list_invitations_from",
-                new_callable=AsyncMock,
-                return_value={"data": [row], "total_count": 1},
-            ),
-        ):
-            page = await read_invitations(CALLER, mock_db)
-
-        assert "id" not in page["data"][0]
-        assert "user_id" not in page["data"][0]
-
-    @pytest.mark.asyncio
-    async def test_the_pagination_is_clamped(self, mock_db) -> None:
-        """`clamp_pagination`, like every list route: these arrive off the query string, so
-        `?items_per_page=999999999` is a request for the caller's whole table."""
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.list_invitations_from", new_callable=AsyncMock) as listed,
-        ):
-            listed.return_value = {"data": [], "total_count": 0}
-
-            page = await read_invitations(CALLER, mock_db, page=-3, items_per_page=999_999)
-
-        assert awaited_kwargs(listed)["limit"] == 100
-        assert page["page"] == 1
-        assert page["items_per_page"] == 100
-
-
-class TestTheProbeThrottle:
-    """`POST /user/invitations` answers a distinguishable 409 for a registered address, and
-    that refusal creates nothing - so the quota, counted from rows created, never charges
-    for it.
-
-    Without a throttle above the check, a signed-in caller can walk a wordlist through this
-    endpoint and learn who is registered, without bound, and can keep telling the two
-    answers apart even after their quota is spent (409 for a member, 429 for everyone else).
-    `PATCH /user` guards the identical shape for its username-availability check.
-    """
-
-    @staticmethod
-    def _quiet_dependencies() -> tuple:
-        return (
-            patch("src.app.api.v1.invitations.account_exists_for", new_callable=AsyncMock, return_value=True),
-            patch("src.app.api.v1.invitations.live_invitation_from", new_callable=AsyncMock, return_value=False),
-            patch("src.app.api.v1.invitations.invitations_created_since", new_callable=AsyncMock, return_value=0),
-        )
-
-    @pytest.mark.asyncio
-    async def test_the_throttle_runs_before_the_existence_check(self, mock_db) -> None:
-        """Above it, not beside it. A limiter consulted after the lookup would still let the
-        oracle answer on the request that trips it, and - more to the point - would leave the
-        ordering free to drift back."""
-        account, already, quota = self._quiet_dependencies()
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch(
-                "src.app.api.v1.invitations.enforce_rate_limit",
-                new_callable=AsyncMock,
-                side_effect=RateLimitException("slow down"),
-            ),
-            account as looked,
-            already,
-            quota,
-            pytest.raises(RateLimitException),
-        ):
-            await create_invitation(_request(), InvitationCreateRequest(email="member@example.com"), CALLER, mock_db)
-
-        looked.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_refused_probe_is_still_charged(self, mock_db) -> None:
-        """The whole point: the 409 path creates no invitation row, so the quota cannot see
-        it - the throttle is what a probe spends."""
-        account, already, quota = self._quiet_dependencies()
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.enforce_rate_limit", new_callable=AsyncMock) as limiter,
-            account,
-            already,
-            quota,
-            pytest.raises(HTTPException) as refusal,
-        ):
-            await create_invitation(_request(), InvitationCreateRequest(email="member@example.com"), CALLER, mock_db)
-
-        assert refusal.value.status_code == 409
-        limiter.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_it_is_keyed_per_user_and_not_per_ip(self, mock_db) -> None:
-        """The caller is authenticated, so there is a better key than their address - and a
-        per-IP bucket would let one office share one probing budget."""
-        account, already, quota = self._quiet_dependencies()
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.enforce_rate_limit", new_callable=AsyncMock) as limiter,
-            account,
-            already,
-            quota,
-            pytest.raises(HTTPException),
-        ):
-            await create_invitation(_request(), InvitationCreateRequest(email="member@example.com"), CALLER, mock_db)
-
-        key, limit, _window = awaited_args(limiter)
-        assert key == f"invitation-create:user:{CALLER['id']}"
-        assert limit == settings.INVITATION_ATTEMPT_RATE_LIMIT_PER_USER
-
-    @pytest.mark.asyncio
-    async def test_a_superuser_is_throttled_too(self, mock_db) -> None:
-        """Exempt from the quota, which bounds how many people they may invite; not from the
-        backstop against automated probing, which is a different question."""
-        account, already, quota = self._quiet_dependencies()
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.enforce_rate_limit", new_callable=AsyncMock) as limiter,
-            account,
-            already,
-            quota,
-            pytest.raises(HTTPException),
-        ):
-            await create_invitation(_request(), InvitationCreateRequest(email="member@example.com"), OPERATOR, mock_db)
-
-        limiter.assert_awaited_once()
-        assert awaited_args(limiter)[0] == f"invitation-create:user:{OPERATOR['id']}"
-
-
-class TestCreateInvitation:
-    """The five refusals, each a distinct status so the card can show the message verbatim."""
-
-    @staticmethod
-    def _patches(**overrides: Any) -> Any:
-        defaults: dict[str, Any] = {"account": False, "already": False, "sent": 0}
-        defaults.update(overrides)
-        return (
-            patch(
-                "src.app.api.v1.invitations.account_exists_for",
-                new_callable=AsyncMock,
-                return_value=defaults["account"],
-            ),
-            patch(
-                "src.app.api.v1.invitations.live_invitation_from",
-                new_callable=AsyncMock,
-                return_value=defaults["already"],
-            ),
-            patch(
-                "src.app.api.v1.invitations.invitations_created_since",
-                new_callable=AsyncMock,
-                return_value=defaults["sent"],
-            ),
-        )
-
-    @pytest.mark.asyncio
-    async def test_an_address_with_an_account_is_a_409(self, mock_db) -> None:
-        account, already, quota = self._patches(account=True)
-        with _mode(RegistrationMode.INVITE), account, already, quota, pytest.raises(HTTPException) as refusal:
-            await create_invitation(_request(), InvitationCreateRequest(email="member@example.com"), CALLER, mock_db)
-
-        assert refusal.value.status_code == 409
-        assert "already has an account" in refusal.value.detail
-
-    @pytest.mark.asyncio
-    async def test_a_second_live_invitation_from_the_same_inviter_is_a_409(self, mock_db) -> None:
-        account, already, quota = self._patches(already=True)
-        with _mode(RegistrationMode.INVITE), account, already, quota, pytest.raises(HTTPException) as refusal:
-            await create_invitation(_request(), InvitationCreateRequest(email="friend@example.com"), CALLER, mock_db)
-
-        assert refusal.value.status_code == 409
-        assert "already invited" in refusal.value.detail
-
-    @pytest.mark.asyncio
-    async def test_the_quota_is_a_429_naming_the_limit(self, mock_db) -> None:
-        account, already, quota = self._patches(sent=5)
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch.object(settings, "INVITATIONS_PER_USER", 5),
-            patch.object(settings, "INVITATIONS_WINDOW_DAYS", 1),
-            account,
-            already,
-            quota,
-            pytest.raises(HTTPException) as refusal,
-        ):
-            await create_invitation(_request(), InvitationCreateRequest(email="friend@example.com"), CALLER, mock_db)
-
-        assert refusal.value.status_code == 429
-        assert "5 invitations per day" in refusal.value.detail
-
-    @pytest.mark.asyncio
-    async def test_the_quota_is_counted_under_the_inviters_lock(self, mock_db) -> None:
-        """Count-then-insert lets two invitations made at once both count the same number;
-        the per-inviter lock taken first makes the second count the first's row."""
-        account, already, quota = self._patches()
-        order = Mock()
-        with (
-            _mode(RegistrationMode.INVITE),
-            account,
-            already,
-            quota as counted,
-            patch("src.app.api.v1.invitations.hold_invitation_quota", new_callable=AsyncMock) as held,
-            patch("src.app.api.v1.invitations.crud_invitations") as crud,
-            patch("src.app.api.v1.invitations.send_invitation_email", new_callable=AsyncMock),
-        ):
-            crud.create = AsyncMock(
-                return_value=Mock(
-                    uuid=uuid_pkg.uuid4(),
-                    email="friend@example.com",
-                    created_at=datetime.now(UTC),
-                    accepted_at=None,
-                    revoked_at=None,
-                )
-            )
-            order.attach_mock(held, "hold")
-            order.attach_mock(counted, "count")
-
-            await create_invitation(_request(), InvitationCreateRequest(email="friend@example.com"), CALLER, mock_db)
-
-        assert [call[0] for call in order.mock_calls] == ["hold", "count"]
-        held.assert_awaited_once_with(mock_db, user_id=CALLER["id"])
-
-    @pytest.mark.asyncio
-    async def test_a_multi_day_window_reads_as_a_window(self, mock_db) -> None:
-        """ "per 3 days" rather than "per day": the sentence is shown verbatim to a diver,
-        and the singular phrasing is only correct for the default."""
-        account, already, quota = self._patches(sent=2)
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch.object(settings, "INVITATIONS_PER_USER", 2),
-            patch.object(settings, "INVITATIONS_WINDOW_DAYS", 3),
-            account,
-            already,
-            quota,
-            pytest.raises(HTTPException) as refusal,
-        ):
-            await create_invitation(_request(), InvitationCreateRequest(email="friend@example.com"), CALLER, mock_db)
-
-        assert "2 invitations every 3 days" in refusal.value.detail
-
-    @pytest.mark.asyncio
-    async def test_a_superuser_is_exempt_from_the_quota(self, mock_db) -> None:
-        """And the exemption is structural: the count is never even taken, so a superuser
-        cannot be refused by a stale one."""
-        account, already, quota = self._patches(sent=999)
-        with (
-            _mode(RegistrationMode.INVITE),
-            account,
-            already,
-            quota as counted,
-            patch("src.app.api.v1.invitations.crud_invitations") as crud,
-            patch("src.app.api.v1.invitations.delete_invite_requests", new_callable=AsyncMock),
-            patch("src.app.api.v1.invitations.record_auth_event", new_callable=AsyncMock),
-            patch("src.app.api.v1.invitations.send_invitation_email", new_callable=AsyncMock),
-        ):
-            crud.create = AsyncMock(return_value=_internal())
-
-            await create_invitation(_request(), InvitationCreateRequest(email="friend@example.com"), OPERATOR, mock_db)
-
-        counted.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_the_request_row_and_the_audit_row_ride_the_insert_s_transaction(self, mock_db) -> None:
-        """Invariant: an address with a live invitation has no request row. One commit, so
-        the two tables cannot be observed disagreeing."""
-        account, already, quota = self._patches()
-        with (
-            _mode(RegistrationMode.INVITE),
-            account,
-            already,
-            quota,
-            patch("src.app.api.v1.invitations.crud_invitations") as crud,
-            patch("src.app.api.v1.invitations.delete_invite_requests", new_callable=AsyncMock) as cleared,
-            patch("src.app.api.v1.invitations.record_auth_event", new_callable=AsyncMock) as recorder,
-            patch("src.app.api.v1.invitations.send_invitation_email", new_callable=AsyncMock),
-        ):
-            crud.create = AsyncMock(return_value=_internal())
-
-            await create_invitation(_request(), InvitationCreateRequest(email="Friend@Example.com"), CALLER, mock_db)
-
-        assert crud.create.await_args.kwargs["commit"] is False
-        assert crud.create.await_args.kwargs["object"].email == "friend@example.com"
-        assert awaited_kwargs(cleared)["commit"] is False
-        assert awaited_kwargs(cleared)["emails"] == ["friend@example.com"]
-        written = awaited_kwargs(recorder)
-        assert written["event_type"] is AuthEventType.INVITATION_CREATED
-        assert written["user_id"] == CALLER["id"]
-        assert written["email"] == "friend@example.com"
-        assert written["commit"] is False
-        mock_db.commit.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_the_email_is_sent_after_the_commit_and_names_the_inviter(self, mock_db) -> None:
-        """After, deliberately: a send that fails leaves a real invitation rather than
-        rolling one back, because the address is admitted from the commit onwards and the
-        inviter can tell them another way."""
-        account, already, quota = self._patches()
-        with (
-            _mode(RegistrationMode.INVITE),
-            account,
-            already,
-            quota,
-            patch("src.app.api.v1.invitations.crud_invitations") as crud,
-            patch("src.app.api.v1.invitations.delete_invite_requests", new_callable=AsyncMock),
-            patch("src.app.api.v1.invitations.record_auth_event", new_callable=AsyncMock),
-            patch("src.app.api.v1.invitations.send_invitation_email", new_callable=AsyncMock) as mail,
-        ):
-            crud.create = AsyncMock(return_value=_internal())
-
-            await create_invitation(_request(), InvitationCreateRequest(email="friend@example.com"), CALLER, mock_db)
-
-        sent = awaited_kwargs(mail)
-        assert sent == {"email": "friend@example.com", "inviter_name": "Ada Reef"}
-
-
-class TestRevokeInvitation:
-    @pytest.mark.asyncio
-    async def test_an_accepted_invitation_cannot_be_revoked(self, mock_db) -> None:
-        """409 rather than a silent success: the account exists, so the stamp would assert
-        something untrue, and it would take away nothing - the address is admitted by having
-        an account, not by the invitation."""
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch(
-                "src.app.api.v1.invitations.fetch_owned_or_raise",
-                new_callable=AsyncMock,
-                return_value=_internal(accepted_at=datetime.now(UTC)),
-            ),
-            pytest.raises(HTTPException) as refusal,
-        ):
-            await revoke_invitation(uuid7(), CALLER, mock_db)
-
-        assert refusal.value.status_code == 409
-        mock_db.execute.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_a_second_revoke_succeeds_and_writes_nothing(self, mock_db) -> None:
-        """The `UserSession` shape rather than the hard-deleting resources': the row is not
-        what is being removed, and the caller already owns it."""
-        already_revoked = _internal(revoked_at=datetime.now(UTC))
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch(
-                "src.app.api.v1.invitations.fetch_owned_or_raise", new_callable=AsyncMock, return_value=already_revoked
-            ),
-        ):
-            result = await revoke_invitation(uuid7(), CALLER, mock_db)
-
-        assert result.message == "Invitation revoked"
-        mock_db.execute.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_a_pending_invitation_is_stamped(self, mock_db) -> None:
-        with (
-            _mode(RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.fetch_owned_or_raise", new_callable=AsyncMock, return_value=_internal()),
-        ):
-            await revoke_invitation(uuid7(), CALLER, mock_db)
-
-        mock_db.execute.assert_awaited_once()
-        mock_db.commit.assert_awaited_once()
 
 
 class TestTheOperatorsBatch:
@@ -773,6 +317,63 @@ class TestTheOperatorsBatch:
             )
 
         assert [r.outcome for r in response.results] == ["invited"]
+
+    @pytest.mark.asyncio
+    async def test_the_request_row_and_the_audit_row_ride_the_insert_s_transaction(self, mock_db) -> None:
+        """Invariant: an address with a live invitation has no request row. One commit, so
+        the two tables cannot be observed disagreeing."""
+        with (
+            patch("src.app.api.v1.admin.account_exists_for", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.admin.live_invitation_from", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.admin.crud_invitations") as crud,
+            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock, return_value=1) as cleared,
+            patch("src.app.api.v1.admin.record_auth_event", new_callable=AsyncMock) as recorder,
+            patch("src.app.api.v1.admin.send_invitation_email", new_callable=AsyncMock),
+        ):
+            crud.create = AsyncMock(return_value=_internal())
+
+            await invite_batch(
+                _request(), AdminInvitationBatchRequest(emails=["Friend@Example.com"]), OPERATOR, mock_db
+            )
+
+        assert crud.create.await_args.kwargs["commit"] is False
+        assert crud.create.await_args.kwargs["object"].email == "friend@example.com"
+        assert crud.create.await_args.kwargs["object"].from_invite_request is True
+        assert awaited_kwargs(cleared)["commit"] is False
+        assert awaited_kwargs(cleared)["emails"] == ["friend@example.com"]
+        written = awaited_kwargs(recorder)
+        assert written["event_type"] is AuthEventType.INVITATION_CREATED
+        assert written["user_id"] == OPERATOR["id"]
+        assert written["email"] == "friend@example.com"
+        assert written["commit"] is False
+        mock_db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_the_email_is_sent_after_the_commit_and_names_the_operator(self, mock_db) -> None:
+        """After, deliberately: a send that fails leaves a real invitation rather than
+        rolling one back, because the address is admitted from the commit onwards."""
+        order: list[str] = []
+        mock_db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+        with (
+            patch("src.app.api.v1.admin.account_exists_for", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.admin.live_invitation_from", new_callable=AsyncMock, return_value=False),
+            patch("src.app.api.v1.admin.crud_invitations") as crud,
+            patch("src.app.api.v1.admin.delete_invite_requests", new_callable=AsyncMock, return_value=0),
+            patch("src.app.api.v1.admin.record_auth_event", new_callable=AsyncMock),
+            patch(
+                "src.app.api.v1.admin.send_invitation_email",
+                new_callable=AsyncMock,
+                side_effect=lambda **_: order.append("mail"),
+            ) as mail,
+        ):
+            crud.create = AsyncMock(return_value=_internal())
+
+            await invite_batch(
+                _request(), AdminInvitationBatchRequest(emails=["friend@example.com"]), OPERATOR, mock_db
+            )
+
+        assert order == ["commit", "mail"]
+        assert awaited_kwargs(mail) == {"email": "friend@example.com", "inviter_name": OPERATOR["name"]}
 
     @pytest.mark.asyncio
     async def test_removal_lowercases_and_reports_what_actually_went(self, mock_db) -> None:
@@ -1080,12 +681,11 @@ class TestAgainstPostgres:
                 session.add(InviteRequest(email=email))
                 await session.commit()
 
-                caller = {"id": diver.id, "uuid": diver.uuid, "name": diver.name, "is_superuser": False}
-                with (
-                    _mode(RegistrationMode.INVITE),
-                    patch("src.app.api.v1.invitations.send_invitation_email", new_callable=AsyncMock),
-                ):
-                    await create_invitation(_request(), InvitationCreateRequest(email=email.upper()), caller, session)
+                operator = {"id": diver.id, "uuid": diver.uuid, "name": diver.name, "is_superuser": True}
+                with patch("src.app.api.v1.admin.send_invitation_email", new_callable=AsyncMock):
+                    await invite_batch(
+                        _request(), AdminInvitationBatchRequest(emails=[email.upper()]), operator, session
+                    )
 
                 requests = (await session.execute(select(InviteRequest).where(InviteRequest.email == email))).all()
                 invitations = (await session.execute(select(Invitation).where(Invitation.email == email))).all()
