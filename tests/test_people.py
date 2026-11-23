@@ -106,8 +106,8 @@ class TestTheWriteSchema:
             PersonCreate.model_validate({"name": "Alex", "email": "alex@"})
 
     def test_the_create_body_refuses_what_it_does_not_know(self) -> None:
-        """`connected_user_id` in particular: a body names an account by username, and only the
-        route turns that into a row id."""
+        """`connected_user_id` in particular: a body names an account by a connect link or a
+        public id, and only the route turns that into a row id."""
         with pytest.raises(ValidationError):
             PersonCreate.model_validate({"name": "Alex", "connected_user_id": 7})
 
@@ -116,7 +116,7 @@ class TestTheWriteSchema:
         with pytest.raises(ValidationError, match="cannot be null"):
             PersonUpdate.model_validate({field: None})
 
-    @pytest.mark.parametrize("field", ["email", "phone", "username"])
+    @pytest.mark.parametrize("field", ["email", "phone"])
     def test_a_patch_clears_the_nullable_members(self, field: str) -> None:
         values = PersonUpdateRequest.model_validate({field: None})
 
@@ -225,22 +225,6 @@ class TestTheRoutes:
             "invalidate_certification_caches",
         ):
             route_collaborators[name].assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_null_username_disconnects_and_drops_the_hide(self, route_collaborators: dict[str, Any]) -> None:
-        """What the phone's previous build queues to disconnect a person, held as it was."""
-        await people_module.patch_person(
-            request=MagicMock(),
-            uuid=uuid7(),
-            values=PersonUpdateRequest.model_validate({"username": None}),
-            current_user=_current_user(),
-            db=AsyncMock(),
-        )
-
-        assert route_collaborators["update"].await_args.kwargs["object"] == {
-            "connected_user_id": None,
-            "connection_hidden_at": None,
-        }
 
     @pytest.mark.asyncio
     async def test_a_delete_drops_every_family_whose_reads_it_changes(

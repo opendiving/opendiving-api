@@ -150,19 +150,20 @@ class TestRequestAnInvite:
         all: an answer that varied with whether an address has an account would be an
         enumeration oracle for anybody who can reach the port. Asserted the way
         `test_never_queries_whether_the_user_exists` asserts it one endpoint over - by the
-        absence of the call rather than by the sameness of the response, because the
-        response being the same is what a shaping bug looks like from outside.
+        absence of any read rather than by the sameness of the response, because the
+        response being the same is what a shaping bug looks like from outside: with the
+        write and the audit row mocked, the handler touches the session only to commit.
         """
         with (
             _mode(RegistrationMode.INVITE),
             patch("src.app.api.v1.invitations.enforce_rate_limit", new_callable=AsyncMock),
             patch("src.app.api.v1.invitations.record_invite_request", new_callable=AsyncMock),
             patch("src.app.api.v1.invitations.record_auth_event", new_callable=AsyncMock),
-            patch("src.app.api.v1.invitations.account_exists_for", new_callable=AsyncMock) as looked,
         ):
             await request_an_invite(_request(), InviteRequestSubmission(email="a@example.com"), mock_db)
 
-        looked.assert_not_awaited()
+        for read in (mock_db.execute, mock_db.scalar, mock_db.scalars, mock_db.get):
+            read.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_the_message_is_the_same_object_every_time(self, mock_db) -> None:
