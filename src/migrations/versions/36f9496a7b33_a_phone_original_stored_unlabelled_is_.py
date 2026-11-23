@@ -1,7 +1,7 @@
 """a phone original stored unlabelled is labelled for its reader
 
 Revision ID: 36f9496a7b33
-Revises: c705e85dec9b
+Revises: 624702237252
 Create Date: 2026-11-23 22:08:35.586397
 
 Until 2026-11-04 the iOS app uploaded each dive's `.bin` without the tag naming the computer that
@@ -27,7 +27,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "36f9496a7b33"
-down_revision: str | None = "c705e85dec9b"
+down_revision: str | None = "624702237252"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
