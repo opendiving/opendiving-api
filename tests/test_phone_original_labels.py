@@ -370,7 +370,7 @@ class TestTheFixes:
         dive = (
             await async_db.execute(select(Dive.entry_latitude, Dive.entry_longitude).where(Dive.id == stored.dive.id))
         ).one()
-        assert expected["entry_latitude"] is not None
+        assert expected is not None and expected["entry_latitude"] is not None
         assert tuple(dive) == (expected["entry_latitude"], expected["entry_longitude"])
 
 

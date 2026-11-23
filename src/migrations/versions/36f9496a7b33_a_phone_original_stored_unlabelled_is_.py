@@ -40,7 +40,7 @@ depends_on: str | Sequence[str] | None = None
 # not on a merge's recording, whose start is the merged dive's, and only where the file's name -
 # the phone's `…_YYYY-MM-DDTHHMM.bin`, in the dive's wall clock - names the recording's minute,
 # which also catches a merge whose `merge` profile a re-derivation replaced. Elsewhere the file
-# has none, and `POST /dive-computers/known-dives` reads that as not knowing which record it is.
+# has none, which says nothing of its record, where a wrong one would name another record's start.
 LABEL = r"""
 UPDATE dive_file AS f
    SET parser_key = 'libdivecomputer',
