@@ -46,7 +46,15 @@ def _neighbor_query(user_id: int, start_time: datetime, dive_id: int, *, later: 
     pivot = tuple_(literal(start_time, Dive.start_time.type), literal(dive_id, Dive.id.type))
     ordering = (Dive.start_time.asc(), Dive.id.asc()) if later else (Dive.start_time.desc(), Dive.id.desc())
     return (
-        select(Dive.uuid, Dive.dive_number, Dive.start_time, Dive.utc_offset_minutes, Dive.start_date_only)
+        select(
+            Dive.uuid,
+            Dive.dive_number,
+            Dive.start_time,
+            Dive.utc_offset_minutes,
+            Dive.start_date_only,
+            Dive.max_depth,
+            Dive.submerged_time,
+        )
         .where(
             Dive.user_id == user_id,
             Dive.is_deleted.is_(False),
@@ -64,7 +72,7 @@ async def _adjacent_dive(
     if row is None:
         return None
 
-    uuid, dive_number, neighbor_start_time, offset_minutes, date_only = row
+    uuid, dive_number, neighbor_start_time, offset_minutes, date_only, max_depth, submerged_time = row
     return DiveNeighbor(
         uuid=uuid,
         dive_number=dive_number,
@@ -72,6 +80,8 @@ async def _adjacent_dive(
         # prev/next label reads in the timezone that dive was logged in rather than in
         # this one's.
         start_time=combine_dive_start_time(neighbor_start_time, offset_minutes, date_only),
+        max_depth=max_depth,
+        submerged_time=submerged_time,
     )
 
 

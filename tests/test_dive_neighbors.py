@@ -108,6 +108,39 @@ class TestFindDiveNeighbors:
         assert neighbors.previous.start_time == first.start_time.replace(tzinfo=UTC)
 
     @pytest.mark.asyncio
+    async def test_carries_what_tells_the_two_apart(self, db: Session, async_db: AsyncSession, diver: User) -> None:
+        """Each neighbour's own depth and time in the water, which is what a merge dialog
+        offering both shows to tell them apart."""
+        create_dive_log(db, diver, (1, 0), max_depth=18.4, submerged_time=2048)
+        (middle,) = create_dive_log(db, diver, (2, 1))
+        create_dive_log(db, diver, (3, 2), max_depth=31.0, submerged_time=3120)
+
+        neighbors = await _neighbors_of(async_db, middle)
+
+        assert neighbors.previous is not None
+        assert neighbors.next is not None
+        assert (neighbors.previous.max_depth, neighbors.previous.submerged_time) == (18.4, 2048)
+        assert (neighbors.next.max_depth, neighbors.next.submerged_time) == (31.0, 3120)
+
+    @pytest.mark.asyncio
+    async def test_an_unrecorded_depth_is_an_explicit_null(
+        self, db: Session, async_db: AsyncSession, diver: User
+    ) -> None:
+        """Null on the wire rather than an absent member, so a client can tell "no depth
+        recorded" from a server that predates the field."""
+        create_dive_log(db, diver, (1, 0), max_depth=None, submerged_time=900)
+        (second,) = create_dive_log(db, diver, (2, 1))
+
+        neighbors = await _neighbors_of(async_db, second)
+
+        assert neighbors.previous is not None
+        assert neighbors.previous.max_depth is None
+        assert neighbors.previous.submerged_time == 900
+        dumped = neighbors.model_dump(mode="json")["previous"]
+        assert "max_depth" in dumped
+        assert dumped["max_depth"] is None
+
+    @pytest.mark.asyncio
     async def test_the_neighbour_keeps_its_own_utc_offset(
         self, db: Session, async_db: AsyncSession, diver: User
     ) -> None:

@@ -485,17 +485,16 @@ def create_dive_log(
     Separate from `create_dive` rather than layered on it: this exists to arrange a *log*
     whose ordering is the thing under test, so it takes dive numbers and days as data and
     commits the whole set at once. `overrides` reaches the model directly, which is how a
-    test seeds `is_deleted`/`deleted_at` or a `utc_offset_minutes`. They apply to every
-    dive in the call, so a log whose rows differ in one of them takes two calls.
+    test seeds `is_deleted`/`deleted_at`, a `utc_offset_minutes` or a depth and duration.
+    They apply to every dive in the call, so a log whose rows differ in one of them takes
+    two calls.
     """
     dives = [
         models.Dive(
             user_id=user.id,
             dive_number=dive_number,
             start_time=log_day(day),
-            submerged_time=1800,
-            notes="",
-            **overrides,
+            **{"submerged_time": 1800, "notes": "", **overrides},
         )
         for dive_number, day in numbered_days
     ]

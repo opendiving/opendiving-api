@@ -1227,13 +1227,22 @@ class DiveMergeResult(BaseModel):
 
 
 class DiveNeighbor(PublicUUIDSchema):
-    """The bare minimum to link to an adjacent dive: its uuid, and enough to label the
-    link. Not a `DiveRead` - the caller renders a prev/next control, not a dive, and the
+    """An adjacent dive: its uuid, enough to label a link to it, and the depth and time a
+    merge dialog offering both neighbours shows to tell them apart. Not a `DiveRead` - the
+    caller renders a prev/next control or a choice between two dives, not a dive, and the
     full shape would cost the enrichment queries `_cached_read_dives` does per dive.
     """
 
     dive_number: Annotated[int, Field(examples=[5])]
     start_time: Annotated[DiveLocalStartTime, Field(examples=[_START_TIME_EXAMPLE])]
+    # Required, so an unrecorded depth is an explicit null rather than an absent member.
+    max_depth: Annotated[
+        float | None, Field(examples=[18.4], description=f"{_MAX_DEPTH_DESCRIPTION}, or null when unrecorded")
+    ]
+    submerged_time: Annotated[
+        PostgresInteger,
+        Field(examples=[2048], description="The dive computer's time in the water, in seconds, surface time excluded"),
+    ]
 
 
 class DiveNeighbors(BaseModel):

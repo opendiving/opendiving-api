@@ -101,7 +101,9 @@ class TestTheDateOnlyState:
     def test_a_read_shape_serves_and_revalidates_the_bare_date(self) -> None:
         """A cache hit re-validates the stored JSON against the `response_model`, which is
         where Pydantic's `datetime` would widen `"2002-06-18"` to a midnight."""
-        neighbor = DiveNeighbor(uuid=uuid7(), dive_number=3, start_time=date(2002, 6, 18))
+        neighbor = DiveNeighbor(
+            uuid=uuid7(), dive_number=3, start_time=date(2002, 6, 18), max_depth=None, submerged_time=1800
+        )
         dumped = neighbor.model_dump(mode="json")
 
         assert dumped["start_time"] == "2002-06-18"
@@ -117,7 +119,13 @@ class TestTheDateOnlyState:
 
     def test_a_read_shape_still_reads_a_date_time_as_one(self) -> None:
         neighbor = DiveNeighbor.model_validate(
-            {"uuid": str(uuid7()), "dive_number": 3, "start_time": "2002-06-18T00:00:00+02:00"}
+            {
+                "uuid": str(uuid7()),
+                "dive_number": 3,
+                "start_time": "2002-06-18T00:00:00+02:00",
+                "max_depth": 12.0,
+                "submerged_time": 1800,
+            }
         )
 
         assert neighbor.start_time == datetime(2002, 6, 18, tzinfo=timezone(timedelta(hours=2)))

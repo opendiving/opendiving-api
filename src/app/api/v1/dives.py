@@ -1202,10 +1202,12 @@ async def read_dive_neighbors(
 ) -> DiveNeighbors:
     """Return the dives immediately before and after this one in the caller's own log.
 
-    Just enough of each to link to it - uuid, number and start time - so a dive page can
-    offer prev/next without fetching either dive. `previous` is the one logged earlier and
-    `next` the one logged later, which is the reverse of `GET /dives`, where the list runs
-    newest first. Either is null at the ends of the log.
+    Enough of each to link to it and tell the two apart - uuid, number, start time, max depth
+    and submerged time - so a dive page can offer prev/next, or a choice between the two,
+    without fetching either dive. `max_depth` is null where the dive has none recorded.
+    `previous` is the one logged earlier and `next` the one logged later, which is the
+    reverse of `GET /dives`, where the list runs newest first. Either is null at the ends
+    of the log.
 
     Always the whole log: the `trip_uuid`/`course_uuid`/`dive_site_uuid`/`gear_item_uuid` filters on
     `GET /dives` have no counterpart here, so walking prev/next from a dive opened out of a
