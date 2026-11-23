@@ -48,7 +48,7 @@ from ...services.cache_invalidation import (
     invalidate_dive_caches,
 )
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
-from ...services.person_links import resolve_people_references
+from ...services.person_connections import resolve_people_references
 from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["courses"])

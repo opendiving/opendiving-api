@@ -212,10 +212,10 @@ def _people(references: list[ExportReference]) -> list[ExportPersonReference]:
 
 
 def _export_person(bundle: ExportBundle, person: Person) -> ExportPerson:
-    """One person, as §6.20 spells it. A linked one carries its account's public id under
+    """One person, as §6.20 spells it. A connected one carries its account's public id under
     this producer's key - the value that account's own export writes as its diver's `uuid`;
-    an unlinked one carries no entry at all."""
-    linked = bundle.linked_uuid_by_person.get(person.id)
+    one not connected carries no entry at all."""
+    connected = bundle.connected_uuid_by_person.get(person.id)
     return ExportPerson(
         uuid=person.uuid,
         name=person.name,
@@ -223,7 +223,7 @@ def _export_person(bundle: ExportBundle, person: Person) -> ExportPerson:
         phone=_filled(person.phone),
         notes=_text(person.notes),
         created_at=person.created_at,
-        extensions=None if linked is None else {DIVEJSON_PRODUCER_KEY: {"user_uuid": linked}},
+        extensions=None if connected is None else {DIVEJSON_PRODUCER_KEY: {"user_uuid": connected}},
     )
 
 

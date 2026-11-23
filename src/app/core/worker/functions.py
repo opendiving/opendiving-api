@@ -25,6 +25,7 @@ from ...models.gear_service_schedule import GearServiceSchedule
 from ...models.idempotency_hold import IdempotencyHold
 from ...models.invitation import Invitation
 from ...models.invite_request import InviteRequest
+from ...models.person import Person
 from ...models.user import User
 from ...models.user_session import UserSession
 from ...schemas.gear_service import ServiceStatus
@@ -511,6 +512,9 @@ async def _purge_one_account(db: AsyncSession, *, user_id: int, email: str, cuto
     purged_email = email.lower()
     await db.execute(delete(Invitation).where(Invitation.email == purged_email))
     await db.execute(delete(InviteRequest).where(InviteRequest.email == purged_email))
+    # Other divers' people connected to this account are disconnected by the `SET NULL` below,
+    # which clears the key alone; a Hide this account left on one of those ties goes with it.
+    await db.execute(update(Person).where(Person.connected_user_id == user_id).values(connection_hidden_at=None))
     result = cast(
         CursorResult,
         await db.execute(

@@ -158,7 +158,7 @@ from ...services.dive_recordings import (
 )
 from ...services.dive_stats import recalculate_dive_stats
 from ...services.gear_stats import recalculate_gear_dive_counts
-from ...services.person_links import resolve_people_references
+from ...services.person_connections import resolve_people_references
 from ...services.recording_shape import gate_figures
 from ..idempotency import IdempotentCreate
 

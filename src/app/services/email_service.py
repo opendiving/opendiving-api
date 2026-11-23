@@ -226,7 +226,7 @@ async def send_invitation_email(email: str, inviter_name: str) -> None:
     **Carries no token and no query parameter**, because a typed invitation - the only kind
     that sends this mail - is an allow-list entry rather than a bearer credential: signing in
     already proves ownership of the address, so the invitee simply signs in *with this
-    address* and the gate lets them through. A member's invite link is the forwardable kind,
+    address* and the gate lets them through. A member's connect link is the forwardable kind,
     and nothing is mailed for it. What the mail therefore has to say is precisely that, which is why the address
     is in the body rather than only in the `To:` header - a person who forwards this to
     their other mailbox needs to know which one was invited.

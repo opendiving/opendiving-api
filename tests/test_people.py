@@ -1,9 +1,11 @@
-"""People: the record (`models/person.py`), its routes (`api/v1/people.py`), the link to an
-account (`services/person_links.py`), and the four hosts that name one.
+"""People: the record (`models/person.py`), its routes (`api/v1/people.py`), a person write
+connecting one to an account (`services/person_connections.py`), and the four hosts that name
+one. What a tie shows the other side - *Added you*, the pictures, Disconnect - is
+`test_connections.py`'s.
 
 House style per `test_contacts.py`: the schemas and the routes' cache calls with their
 collaborators stubbed, and a Postgres-guarded tail for what only the database settles - the
-name index, the one-link-per-account index, the dive count, the search across the join, and
+name index, the one-tie-per-account index, the dive count, the search across the join, and
 the references on each host.
 """
 
@@ -27,12 +29,7 @@ from src.app.api.v1 import courses as courses_module
 from src.app.api.v1 import dives as dives_module
 from src.app.api.v1 import people as people_module
 from src.app.api.v1 import trips as trips_module
-from src.app.core.exceptions.http_exceptions import (
-    DuplicateValueException,
-    RateLimitException,
-    UnprocessableEntityException,
-)
-from src.app.core.utils import cache as cache_module
+from src.app.core.exceptions.http_exceptions import DuplicateValueException, UnprocessableEntityException
 from src.app.crud.crud_people import (
     get_people_for_dives,
     get_people_page,
@@ -42,7 +39,9 @@ from src.app.crud.crud_people import (
     replace_people_for_trip,
     resolve_person_ids_for_user,
 )
+from src.app.models.account_disconnect import AccountDisconnect
 from src.app.models.certification import Certification
+from src.app.models.connect_link import ConnectLink
 from src.app.models.course_person import CoursePerson
 from src.app.models.dive_person import DivePerson
 from src.app.models.person import Person
@@ -59,11 +58,18 @@ from src.app.schemas.person import (
     PersonUpdate,
     PersonUpdateRequest,
 )
-from src.app.services import person_links
-from src.app.services.person_links import resolve_linked_account, resolve_people_references
+from src.app.services import person_connections
+from src.app.services.connect_links import new_connect_link_token
+from src.app.services.person_connections import resolve_people_references
 from tests.conftest import db_available
-from tests.helpers.fake_redis import FakeRedis
-from tests.helpers.generators import create_course, create_dive, create_person, create_trip, create_user
+from tests.helpers.generators import (
+    create_course,
+    create_dive,
+    create_person,
+    create_trip,
+    create_user,
+    create_user_picture,
+)
 
 USER_ID = 1
 USER_UUID = uuid7()
@@ -100,10 +106,10 @@ class TestTheWriteSchema:
             PersonCreate.model_validate({"name": "Alex", "email": "alex@"})
 
     def test_the_create_body_refuses_what_it_does_not_know(self) -> None:
-        """`linked_user_id` in particular: a body names an account by username, and only the
+        """`connected_user_id` in particular: a body names an account by username, and only the
         route turns that into a row id."""
         with pytest.raises(ValidationError):
-            PersonCreate.model_validate({"name": "Alex", "linked_user_id": 7})
+            PersonCreate.model_validate({"name": "Alex", "connected_user_id": 7})
 
     @pytest.mark.parametrize("field", ["name", "notes"])
     def test_a_patch_may_not_null_a_not_null_column(self, field: str) -> None:
@@ -165,15 +171,11 @@ def route_collaborators(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "exists": AsyncMock(return_value=False),
         "update": AsyncMock(),
         "delete": AsyncMock(),
-        "spend": AsyncMock(),
-        "resolve": AsyncMock(return_value=42),
     }
     monkeypatch.setattr(people_module, "_get_owned_person", stubs["owned"])
     monkeypatch.setattr(people_module, "person_name_exists", stubs["exists"])
     monkeypatch.setattr(people_module.crud_people, "update", stubs["update"])
     monkeypatch.setattr(people_module.crud_people, "delete", stubs["delete"])
-    monkeypatch.setattr(people_module, "spend_link_attempt", stubs["spend"])
-    monkeypatch.setattr(people_module, "resolve_linked_account", stubs["resolve"])
     for name in (
         "invalidate_dive_caches",
         "invalidate_trip_caches",
@@ -225,7 +227,8 @@ class TestTheRoutes:
             route_collaborators[name].assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_unlinking_counts_nothing(self, route_collaborators: dict[str, Any]) -> None:
+    async def test_a_null_username_disconnects_and_drops_the_hide(self, route_collaborators: dict[str, Any]) -> None:
+        """What the phone's previous build queues to disconnect a person, held as it was."""
         await people_module.patch_person(
             request=MagicMock(),
             uuid=uuid7(),
@@ -234,8 +237,10 @@ class TestTheRoutes:
             db=AsyncMock(),
         )
 
-        assert route_collaborators["update"].await_args.kwargs["object"] == {"linked_user_id": None}
-        route_collaborators["spend"].assert_not_awaited()
+        assert route_collaborators["update"].await_args.kwargs["object"] == {
+            "connected_user_id": None,
+            "connection_hidden_at": None,
+        }
 
     @pytest.mark.asyncio
     async def test_a_delete_drops_every_family_whose_reads_it_changes(
@@ -296,16 +301,16 @@ class TestTheDatabase:
             db.commit()
         db.rollback()
 
-    def test_a_person_never_links_to_its_owner(self, db: Session, diver: User) -> None:
-        db.add(Person(user_id=diver.id, name=f"Me {uuid7().hex[-8:]}", linked_user_id=diver.id))
-        with pytest.raises(IntegrityError, match="ck_person_not_linked_to_its_owner"):
+    def test_a_person_never_connects_to_its_owner(self, db: Session, diver: User) -> None:
+        db.add(Person(user_id=diver.id, name=f"Me {uuid7().hex[-8:]}", connected_user_id=diver.id))
+        with pytest.raises(IntegrityError, match="ck_person_not_connected_to_its_owner"):
             db.commit()
         db.rollback()
 
-    def test_one_person_per_linked_account(self, db: Session, diver: User, other_diver: User) -> None:
-        create_person(db, diver, linked_to=other_diver)
-        db.add(Person(user_id=diver.id, name=f"Twice {uuid7().hex[-8:]}", linked_user_id=other_diver.id))
-        with pytest.raises(IntegrityError, match="ux_person_user_id_linked_user_id"):
+    def test_one_person_per_connected_account(self, db: Session, diver: User, other_diver: User) -> None:
+        create_person(db, diver, connected_to=other_diver)
+        db.add(Person(user_id=diver.id, name=f"Twice {uuid7().hex[-8:]}", connected_user_id=other_diver.id))
+        with pytest.raises(IntegrityError, match="ux_person_user_id_connected_user_id"):
             db.commit()
         db.rollback()
 
@@ -356,12 +361,12 @@ class TestTheDatabase:
         assert [row.dive_count for row in page["data"]] == [1]
 
     @pytest.mark.asyncio
-    async def test_the_list_finds_a_person_by_name_or_by_the_linked_username(
+    async def test_the_list_finds_a_person_by_name_or_by_the_connected_username(
         self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        linked = create_person(db, diver, name=f"Alex {uuid7().hex[-8:]}", linked_to=other_diver)
+        connected = create_person(db, diver, name=f"Alex {uuid7().hex[-8:]}", connected_to=other_diver)
         create_person(db, diver, name=f"Sam {uuid7().hex[-8:]}")
-        user_id, username, name = diver.id, other_diver.username, linked.name
+        user_id, username, name = diver.id, other_diver.username, connected.name
 
         by_handle = await get_people_page(async_db, user_id=user_id, offset=0, limit=10, search=username[2:8])
         by_name = await get_people_page(async_db, user_id=user_id, offset=0, limit=10, search=name[:4].lower())
@@ -406,11 +411,11 @@ class TestTheDatabase:
             )
 
     @pytest.mark.asyncio
-    async def test_a_rename_of_the_linked_account_shows_through(
+    async def test_a_rename_of_the_connected_account_shows_through(
         self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
         """The account is stored, never the string."""
-        person = create_person(db, diver, linked_to=other_diver)
+        person = create_person(db, diver, connected_to=other_diver)
         other_diver.username = f"r{uuid7().hex[-12:]}"
         db.commit()
         person_id, renamed = person.id, other_diver.username
@@ -471,132 +476,226 @@ class TestTheDatabase:
         assert stored is not None and stored.instructor_id is None
 
 
+def _link(db: Session, owner: User) -> str:
+    token = new_connect_link_token()
+    db.add(ConnectLink(user_id=owner.id, token=token))
+    db.commit()
+    return token
+
+
+def _refusal(refused: pytest.ExceptionInfo[RequestValidationError]) -> tuple[Any, str]:
+    (error,) = refused.value.errors()
+    return error["loc"], error["msg"]
+
+
+async def _create(async_db: AsyncSession, diver: User, **body: Any) -> Any:
+    return await people_module.write_person(
+        request=MagicMock(),
+        person=PersonCreate.model_validate({"name": f"Alex {uuid7().hex[-6:]}", **body}),
+        current_user=_as(diver),
+        db=async_db,
+    )
+
+
+async def _patch(async_db: AsyncSession, diver: User, person_uuid: Any, **body: Any) -> None:
+    await people_module.patch_person(
+        request=MagicMock(),
+        uuid=person_uuid,
+        values=PersonUpdateRequest.model_validate(body),
+        current_user=_as(diver),
+        db=async_db,
+    )
+
+
+class TestTheConnectMembers:
+    def test_a_body_names_one_way_at_most(self) -> None:
+        with pytest.raises(ValidationError, match="not several"):
+            PersonCreate.model_validate({"name": "A", "connect_link": "a" * 32, "connect_account": str(uuid7())})
+        with pytest.raises(ValidationError, match="not several"):
+            PersonUpdateRequest.model_validate({"username": None, "connect_link": "a" * 32})
+
+
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
-class TestTheLink:
-    """The username resolver answers exactly as the availability check does, and refuses on
-    the field the form shows it on."""
-
-    @pytest.fixture(autouse=True)
-    def _redis(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The limiter runs for real against a counter of our own: the module-level client is
-        bound to the loop that opened it, and each test runs on its own - *"The local suite
-        has no Redis"* in DECISIONS.md."""
-        monkeypatch.setattr(cache_module, "client", FakeRedis())
+class TestConnecting:
+    """A person write connects only from what the other account handed over: its live link,
+    or its own tie to the caller."""
 
     @pytest.mark.asyncio
-    async def test_an_account_is_found_by_its_exact_username(
-        self, async_db: AsyncSession, diver: User, other_diver: User
+    async def test_a_link_connects_a_new_person_and_the_read_carries_username_and_picture(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        assert await resolve_linked_account(async_db, owner_id=diver.id, username=other_diver.username) == (
-            other_diver.id
-        )
+        create_user_picture(db, other_diver)
+        token = _link(db, other_diver)
+        username = other_diver.username
+
+        created = await _create(async_db, diver, connect_link=token)
+
+        assert (created.username, created.avatar_sha256) == (username, "a" * 64)
 
     @pytest.mark.asyncio
-    async def test_an_account_in_its_grace_period_is_found_too(
-        self, db: Session, async_db: AsyncSession, diver: User
+    async def test_an_update_connects_a_person_logged_by_name_months_ago(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        """The availability check calls its username taken; answering otherwise here would
-        reveal the deletion to anyone comparing the two."""
+        person = create_person(db, diver)
+        person_id, person_uuid, token, username = person.id, person.uuid, _link(db, other_diver), other_diver.username
+
+        await _patch(async_db, diver, person_uuid, connect_link=token)
+
+        assert (await people_module._read(async_db, person_id)).username == username
+
+    @pytest.mark.asyncio
+    async def test_a_person_already_connected_is_refused_on_the_member(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        person = create_person(db, diver, connected_to=create_user(db))
+        person_uuid, token = person.uuid, _link(db, other_diver)
+
+        with pytest.raises(RequestValidationError) as refused:
+            await _patch(async_db, diver, person_uuid, connect_link=token)
+
+        assert _refusal(refused) == (("body", "connect_link"), person_connections.ALREADY_CONNECTED)
+
+    @pytest.mark.asyncio
+    async def test_a_dead_link_your_own_and_one_another_person_holds_are_refused_on_the_member(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        holder = create_person(db, diver, connected_to=other_diver)
+        holder_name, theirs, mine = holder.name, _link(db, other_diver), _link(db, diver)
+
+        refusals = []
+        for token in (new_connect_link_token(), mine, theirs):
+            with pytest.raises(RequestValidationError) as refused:
+                await _create(async_db, diver, connect_link=token)
+            refusals.append(_refusal(refused))
+
+        assert refusals == [
+            (("body", "connect_link"), person_connections.NO_SUCH_LINK),
+            (("body", "connect_link"), person_connections.OWN_ACCOUNT),
+            (("body", "connect_link"), f"{holder_name} is already connected to that account."),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_owners_link_is_dead(self, db: Session, async_db: AsyncSession, diver: User) -> None:
         leaving = create_user(db)
+        token = _link(db, leaving)
         leaving.is_deleted = True
         leaving.deleted_at = datetime.now(UTC)
         db.commit()
 
-        assert await resolve_linked_account(async_db, owner_id=diver.id, username=leaving.username) == leaving.id
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("case", ["nobody", "own"])
-    async def test_nobody_and_your_own_account_are_refused_on_the_field(
-        self, case: str, async_db: AsyncSession, diver: User
-    ) -> None:
-        username = f"n{uuid7().hex[-12:]}" if case == "nobody" else diver.username
-
         with pytest.raises(RequestValidationError) as refused:
-            await resolve_linked_account(async_db, owner_id=diver.id, username=username)
+            await _create(async_db, diver, connect_link=token)
 
-        (error,) = refused.value.errors()
-        assert error["loc"] == ("body", "username")
-        assert error["msg"] == (person_links.NO_SUCH_ACCOUNT if case == "nobody" else person_links.OWN_ACCOUNT)
+        assert _refusal(refused)[1] == person_connections.NO_SUCH_LINK
 
     @pytest.mark.asyncio
-    async def test_an_account_another_person_links_is_refused_by_that_persons_name(
+    async def test_adding_back_needs_the_other_accounts_tie(
         self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        holder = create_person(db, diver, linked_to=other_diver)
-        holder_id, holder_name = holder.id, holder.name
+        """An id with no tie and an id naming nobody are one refusal."""
+        stranger = create_user(db)
+        create_person(db, other_diver, connected_to=diver)
+        username, stranger_uuid, other_uuid = other_diver.username, stranger.uuid, other_diver.uuid
 
-        with pytest.raises(RequestValidationError) as refused:
-            await resolve_linked_account(async_db, owner_id=diver.id, username=other_diver.username)
-        # The holder itself may keep it.
-        assert (
-            await resolve_linked_account(
-                async_db, owner_id=diver.id, username=other_diver.username, person_id=holder_id
-            )
-            == other_diver.id
-        )
+        refusals = []
+        for account in (stranger_uuid, uuid7()):
+            with pytest.raises(RequestValidationError) as refused:
+                await _create(async_db, diver, connect_account=str(account))
+            refusals.append(_refusal(refused))
+        created = await _create(async_db, diver, connect_account=str(other_uuid))
 
-        assert holder_name in refused.value.errors()[0]["msg"]
+        assert refusals == [(("body", "connect_account"), person_connections.NO_SUCH_TIE)] * 2
+        assert created.username == username
 
     @pytest.mark.asyncio
-    async def test_a_create_links_and_reads_back_the_username(
+    async def test_adding_back_your_own_account_is_refused_as_such(self, async_db: AsyncSession, diver: User) -> None:
+        with pytest.raises(RequestValidationError) as refused:
+            await _create(async_db, diver, connect_account=str(diver.uuid))
+
+        assert _refusal(refused) == (("body", "connect_account"), person_connections.OWN_ACCOUNT)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("way", ["link", "add back"])
+    async def test_connecting_again_forgets_the_accounts_disconnect(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User, way: str
+    ) -> None:
+        """Either way is that account's consent, so an import may connect the two again."""
+        db.add(AccountDisconnect(user_id=other_diver.id, disconnected_user_id=diver.id))
+        db.commit()
+        body = (
+            {"connect_link": _link(db, other_diver)}
+            if way == "link"
+            else {"connect_account": str(create_person(db, other_diver, connected_to=diver) and other_diver.uuid)}
+        )
+        other_id, diver_id = other_diver.id, diver.id
+
+        await _create(async_db, diver, **body)
+
+        db.expire_all()
+        assert (
+            db.scalar(
+                select(AccountDisconnect.id).where(
+                    AccountDisconnect.user_id == other_id, AccountDisconnect.disconnected_user_id == diver_id
+                )
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_name_already_taken_is_the_duplicate_refusal_whatever_connects_it(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
+    ) -> None:
+        taken = create_person(db, diver).name
+        token = _link(db, other_diver)
+
+        with pytest.raises(DuplicateValueException):
+            await _create(async_db, diver, name=taken.upper(), connect_link=token)
+
+
+@pytest.mark.skipif(not db_available(), reason="No database connection available")
+class TestTheHeldUsername:
+    """What the previous web build and the phone's previous build send, until they are gone."""
+
+    @pytest.mark.asyncio
+    async def test_a_null_on_a_create_changes_nothing(self, async_db: AsyncSession, diver: User) -> None:
+        created = await _create(async_db, diver, username=None)
+
+        assert created.username is None
+
+    @pytest.mark.asyncio
+    async def test_any_username_on_a_create_is_refused_naming_the_connect_link(
         self, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        created = await people_module.write_person(
-            request=MagicMock(),
-            person=PersonCreate.model_validate(
-                {"name": f" Alex {uuid7().hex[-6:]} ", "username": other_diver.username}
-            ),
-            current_user=_as(diver),
-            db=async_db,
-        )
+        with pytest.raises(RequestValidationError) as refused:
+            await _create(async_db, diver, username=other_diver.username)
 
-        assert created.username == other_diver.username
-        assert created.dive_count == 0
-        assert created.name == created.name.strip()
+        assert _refusal(refused) == (("body", "username"), person_connections.USERNAME_RETIRED)
+        assert "connect link" in person_connections.USERNAME_RETIRED
 
     @pytest.mark.asyncio
-    async def test_only_a_change_of_account_counts_against_the_limit(
-        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User, monkeypatch: pytest.MonkeyPatch
+    async def test_on_an_update_the_connected_username_keeps_the_tie_and_another_is_refused(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        person = create_person(db, diver, linked_to=other_diver)
-        third = create_user(db)
-        spend = AsyncMock()
-        monkeypatch.setattr(people_module, "spend_link_attempt", spend)
-        person_uuid, same, different = person.uuid, other_diver.username, third.username
+        person = create_person(db, diver, connected_to=other_diver)
+        person_id, person_uuid, same, other = person.id, person.uuid, other_diver.username, create_user(db).username
 
-        for username in (same, different):
-            await people_module.patch_person(
-                request=MagicMock(),
-                uuid=person_uuid,
-                values=PersonUpdateRequest.model_validate({"username": username}),
-                current_user=_as(diver),
-                db=async_db,
-            )
+        await _patch(async_db, diver, person_uuid, username=same, notes="Kept")
+        with pytest.raises(RequestValidationError) as refused:
+            await _patch(async_db, diver, person_uuid, username=other)
 
-        spend.assert_awaited_once_with(diver.id)
-        assert (await people_module._read(async_db, person.id)).username == different
+        read = await people_module._read(async_db, person_id)
+        assert (read.username, read.notes) == (same, "Kept")
+        assert _refusal(refused)[0] == ("body", "username")
 
     @pytest.mark.asyncio
-    async def test_past_the_limit_a_link_is_a_429(
-        self, async_db: AsyncSession, diver: User, other_diver: User, monkeypatch: pytest.MonkeyPatch
+    async def test_a_null_on_an_update_disconnects(
+        self, db: Session, async_db: AsyncSession, diver: User, other_diver: User
     ) -> None:
-        monkeypatch.setattr(person_links.settings, "PERSON_LINK_RATE_LIMIT_PER_USER", 1)
-        body = {"username": f"n{uuid7().hex[-12:]}"}
+        person = create_person(db, diver, connected_to=other_diver)
+        person_id, person_uuid = person.id, person.uuid
 
-        with pytest.raises(RequestValidationError):
-            await people_module.write_person(
-                request=MagicMock(),
-                person=PersonCreate.model_validate({**body, "name": f"A {uuid7().hex[-6:]}"}),
-                current_user=_as(diver),
-                db=async_db,
-            )
-        with pytest.raises(RateLimitException):
-            await people_module.write_person(
-                request=MagicMock(),
-                person=PersonCreate.model_validate({**body, "name": f"B {uuid7().hex[-6:]}"}),
-                current_user=_as(diver),
-                db=async_db,
-            )
+        await _patch(async_db, diver, person_uuid, username=None)
+
+        assert (await people_module._read(async_db, person_id)).username is None
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")

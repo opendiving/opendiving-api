@@ -20,22 +20,27 @@ of the address - a magic link delivered to it, the code from that email, or Goog
 `email_verified` claim - so the 403 tells them nothing about an address that is not theirs.
 The endpoint that *is* reachable without proving anything, `POST /auth/email/request`,
 stays ignorant of invitations entirely; the one thing it learns is whether the `via` it was
-handed is still a live join link or a member's current invite link, which is a fact about a
+handed is still a live join link or a member's current connect link, which is a fact about a
 link and not about an address.
 
 **What it returns is the door.** `admit_or_refuse` answers with the source the new account
 is counted under in the daily totals: `bootstrap`, `open`, `invitation`, `waitlist`, or the
 join-channel slug the verified identity arrived through. `via` is that slug, or the token
-of a member's invite link. In order: an empty table admits as the operator; open mode admits
+of a member's connect link. In order: an empty table admits as the operator; open mode admits
 under the slug if a configured one came along, else `open`, and a token attributes nothing
 there; in invite mode a configured slug admits under itself, even over an invitation - the
-link is what the person clicked; then a member's live invite link admits under `invitation`
+link is what the person clicked; then a member's live connect link admits under `invitation`
 while its owner is under their quota, naming the owner so the completion can write their
 row; then a live invitation admits, under `waitlist` if the operator sent any of them from
 the queue - including for an address that followed a link whose owner is at quota, since
 the link was never what let that address in; then a link at quota is refused as spent, any
 other `via` as a stale link, and anything left as uninvited. `refuse_uninvited` asks the
 same questions without the lock and without an answer.
+
+**Who admitted the account is not who it starts connected to.** A `via` naming a live connect
+link gives the new account a first person, its owner, whichever door let it in - the link, an
+invitation to the address while the owner is at quota, open registration - and the quota is
+charged only where the link was the door. That is `POST /auth/complete`'s, beside the gate.
 
 **The bootstrap exemption.** While the `user` table is empty, the address is admitted
 whatever the mode, and the row it creates carries `is_superuser = true`. That resolves the
@@ -57,7 +62,7 @@ from ..core.config import AccountSource, RegistrationMode, settings
 from ..core.exceptions.http_exceptions import ForbiddenException
 from ..crud.crud_invitations import invitation_source, live_invitation_exists
 from ..models.user import User
-from .invite_links import LiveInviteLink, can_still_invite, invite_link_exists, live_invite_link
+from .connect_links import LiveConnectLink, can_still_invite, connect_link_exists, live_connect_link
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +78,13 @@ NOT_INVITED = "This address hasn't been invited to this instance yet. You can re
 STALE_JOIN_LINK = "This join link is no longer active. You can request an invitation from the home page."
 
 # `STALE_JOIN_LINK`'s sibling for an instance with no join channels configured, where a dead
-# `via` can only have been a member's invite link - which is never called a join link.
-STALE_INVITE_LINK = "This invite link is no longer active. You can request an invitation from the home page."
+# `via` can only have been a member's connect link - which is never called a join link.
+STALE_CONNECT_LINK = "This connect link is no longer active. You can request an invitation from the home page."
 
 # What an address nobody invited is told when the link it followed belongs to a member who
 # has used up their invitation quota.
-SPENT_INVITE_LINK = (
-    "This invite link can't admit anyone else right now. You can request an invitation from the home page."
+SPENT_CONNECT_LINK = (
+    "This connect link can't admit anyone else right now. You can request an invitation from the home page."
 )
 
 # The advisory-lock key the bootstrap decision is serialised on. `pg_advisory_xact_lock`
@@ -97,7 +102,7 @@ _REGISTRATION_LOCK_KEY = 0x0D1E_0001
 
 def registration_is_invite_only() -> bool:
     """Whether this instance admits only invited addresses, and whoever follows a member's
-    invite link.
+    connect link.
 
     A function rather than a module constant because `settings` is read at import and a
     constant computed here would be a second import-time snapshot for a test to have to
@@ -147,55 +152,56 @@ def configured_channel(via: str | None) -> str | None:
 @dataclass(frozen=True, slots=True)
 class Admission:
     """`admit_or_refuse`'s answer: the door the account is counted under, and - when a
-    member's invite link admitted it - the member whose accepted invitation the completion
+    member's connect link admitted it - the member whose accepted invitation the completion
     writes."""
 
     source: str
-    invite_link_owner_id: int | None = None
+    connect_link_owner_id: int | None = None
 
 
 def _stale_link_sentence() -> str:
     """A dead `via` is called a join link only where join links exist."""
-    return STALE_JOIN_LINK if settings.join_channels else STALE_INVITE_LINK
+    return STALE_JOIN_LINK if settings.join_channels else STALE_CONNECT_LINK
 
 
 async def refuse_a_stale_join_link(db: AsyncSession, via: str | None) -> str | None:
     """What `POST /auth/email/request` records as the request's `via`, refusing a dead link.
 
-    A `via` naming neither a configured channel nor a member's current invite link is a 403
-    in invite mode, before anything is written, so the person reads it on the form they are
-    looking at rather than after the mailbox hop. In open mode it is dropped and the request
-    goes ahead: that mode admits the address anyway, and the sentence's way forward - the
-    request form - does not exist there.
+    A member's current connect link is kept in every mode, since the account it creates
+    starts connected to the link's owner. A `via` naming neither that nor a configured
+    channel is a 403 in invite mode, before anything is written, so the person reads it on
+    the form they are looking at rather than after the mailbox hop. In open mode it is
+    dropped and the request goes ahead: that mode admits the address anyway, and the
+    sentence's way forward - the request form - does not exist there.
 
     This reveals whether a link is live, never anything about an address or an account: the
-    invite-link read is `invite_link_exists`, on that table alone. Whether the link's owner
+    connect-link read is `connect_link_exists`, on that table alone. Whether the link's owner
     is deleted or at quota is the gates' question, asked after the address is proven.
     """
     if via is None or configured_channel(via) is not None:
         return via
+    if await connect_link_exists(db, token=via):
+        return via
     if not registration_is_invite_only():
         return None
-    if await invite_link_exists(db, token=via):
-        return via
     raise ForbiddenException(_stale_link_sentence())
 
 
-async def _admitting_link(db: AsyncSession, via: str | None) -> tuple[LiveInviteLink | None, bool]:
-    """The live invite link `via` names, if any, and whether its owner can still invite.
+async def _admitting_link(db: AsyncSession, via: str | None) -> tuple[LiveConnectLink | None, bool]:
+    """The live connect link `via` names, if any, and whether its owner can still invite.
 
     Read at the moment of each decision, as `configured_channel` is, so a link reset between a
     sign-in request and its completion is refused at the completion.
     """
-    link = await live_invite_link(db, token=via) if via is not None else None
+    link = await live_connect_link(db, token=via) if via is not None else None
     if link is None:
         return None, False
     return link, await can_still_invite(db, link)
 
 
-def _refusal(via: str | None, link: LiveInviteLink | None) -> ForbiddenException:
+def _refusal(via: str | None, link: LiveConnectLink | None) -> ForbiddenException:
     if link is not None:
-        return ForbiddenException(SPENT_INVITE_LINK)
+        return ForbiddenException(SPENT_CONNECT_LINK)
     if via is not None:
         return ForbiddenException(_stale_link_sentence())
     return ForbiddenException(NOT_INVITED)
@@ -230,7 +236,7 @@ async def refuse_uninvited(db: AsyncSession, *, email: str, via: str | None = No
 
 async def admit_or_refuse(db: AsyncSession, *, email: str, via: str | None = None) -> Admission:
     """The authoritative gate. Returns the source the new account is counted under, and the
-    owner of the invite link that admitted it, if one did.
+    owner of the connect link that admitted it, if one did.
 
     **Call it below `release_read_transaction` and inside the transaction that inserts the
     row**, or it decides nothing: the rollback in that helper discards the lock and every
@@ -262,7 +268,7 @@ async def admit_or_refuse(db: AsyncSession, *, email: str, via: str | None = Non
     if link is not None and admits:
         # `invitation` whatever the address's other invitations say about the queue: the
         # link is the door this person used.
-        return Admission(AccountSource.INVITATION, invite_link_owner_id=link.owner_id)
+        return Admission(AccountSource.INVITATION, connect_link_owner_id=link.owner_id)
 
     invited = await invitation_source(db, email=email.lower())
     if invited is not None:

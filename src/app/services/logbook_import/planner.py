@@ -141,7 +141,13 @@ from ..dive_recordings import (
 )
 from ..libdivecomputer import LIBDIVECOMPUTER, Descriptor, descriptor_from, fallback_start_from
 from ..merged_dives import resolve_merges
-from ..person_links import Account, accounts_by_uuid, claim_link_slot, link_budget_remaining
+from ..person_connections import (
+    Account,
+    accounts_by_uuid,
+    claim_connect_slot,
+    connect_budget_remaining,
+    disconnected_by,
+)
 from ..recording_shape import INT32_MAX, Bound, Drop, bounded, finite, gate_figures, in_water_of, shape_recording
 from ..user_pictures import (
     MAX_PICTURE_UPLOAD_SIZE,
@@ -817,7 +823,7 @@ class _Planner:
         newly_resolved_aphia_ids: frozenset[int] = frozenset(),
         check_in: ImportCheckInSubmission | None = None,
         portrait: ImportPortraitChoice | None = None,
-        claim_links: bool = False,
+        claim_connections: bool = False,
         batch_dive_ids: frozenset[int] = frozenset(),
         held: Mapping[str, Callable[[], bytes]] | None = None,
         minted: MintedUuids | None = None,
@@ -888,20 +894,22 @@ class _Planner:
         # Filled by `_plan_contacts`, which runs before anything that references a contact.
         self._contact_index: dict[tuple[str, ...], int] = {}
         self._contact_aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
-        # The same for people by name, plus the accounts the caller's people link and the
-        # ones this document's have linked so far - a link claims a person before a name
-        # does. Filled by `_plan_people`, which runs before anything that references one.
+        # The same for people by name, plus the accounts the caller's people are connected to
+        # and the ones this document's have claimed so far - an account claims a person before
+        # a name does - and the accounts that have disconnected the caller. Filled by
+        # `_plan_people`, which runs before anything that references one.
         self._person_index: dict[tuple[str, ...], int] = {}
         self._person_aliases: dict[tuple[str, ...], uuid_pkg.UUID] = {}
-        self._linked_rows: dict[int, int] = {}
-        self._link_aliases: dict[int, uuid_pkg.UUID] = {}
+        self._connected_rows: dict[int, int] = {}
+        self._connect_aliases: dict[int, uuid_pkg.UUID] = {}
         self._accounts: dict[uuid_pkg.UUID, Account] = {}
-        # **Where a link's count is spent.** The apply claims one slot per link it makes, an
-        # exhausted window dropping that link rather than the import; the upload reads what
+        self._disconnected_by: set[int] = set()
+        # **Where a tie's count is spent.** The apply claims one slot per tie it makes, an
+        # exhausted window dropping that tie rather than the import; the upload reads what
         # the window has left and spends nothing, so the plan is made twice and counted once.
-        # Read on the first link the upload meets, so an import that links nobody never asks.
-        self._claim_links = claim_links
-        self._link_budget: int | None = None
+        # Read on the first tie the upload meets, so an import that connects nobody never asks.
+        self._claim_connections = claim_connections
+        self._connect_budget: int | None = None
         # The caller's tags by `tag_key`, the names of this document's diver's tag list, and
         # the tags this import makes - by key, each its first spelling. Filled by
         # `_plan_dives` and `_plan_tag_list`.
@@ -1650,23 +1658,25 @@ class _Planner:
         people = self._document.people
         existing = await self._rows_by_uuid(Person, [person.uuid for person in people])
         self._person_index = await self._existing_by_key(Person, (Person.name,), lambda row: _key(row[0]))
-        linked = await self._db.execute(
-            select(Person.linked_user_id, Person.id).where(
-                Person.user_id == self._user_id, Person.linked_user_id.is_not(None)
+        connected = await self._db.execute(
+            select(Person.connected_user_id, Person.id).where(
+                Person.user_id == self._user_id, Person.connected_user_id.is_not(None)
             )
         )
-        self._linked_rows = {row.linked_user_id: row.id for row in linked}
+        self._connected_rows = {row.connected_user_id: row.id for row in connected}
         self._accounts = await accounts_by_uuid(
             self._db, [account for person in people if (account := _person_account(person)) is not None]
         )
+        if self._accounts:
+            self._disconnected_by = await disconnected_by(self._db, diver_id=self._user_id)
         for person in people:
             self._claim_document_uuid("people", person)
             self._records["people"][person.uuid] = await self._plan_person(person, existing)
 
     async def _plan_person(self, person: ImportPerson, existing: dict[uuid_pkg.UUID, _ExistingRow]) -> PlannedRecord:
         """One person: the uuid rules, then - for a record this import would create - a claim
-        by link before a claim by name. A person whose entry names an account another of the
-        caller's people already links is that person, whatever its name says."""
+        by account before a claim by name. A person whose entry names an account another of the
+        caller's people is already connected to is that person, whatever its name says."""
         collection = "people"
         if (linked := self._linked(collection, person.uuid, existing)) is not None:
             return linked
@@ -1676,21 +1686,21 @@ class _Planner:
         record = self._resolve(collection, person.uuid, existing)
         account = self._accounts.get(account_uuid) if (account_uuid := _person_account(person)) else None
         if record.action is Action.CREATE and account is not None:
-            row_id = self._linked_rows.get(account.id)
+            row_id = self._connected_rows.get(account.id)
             if row_id is not None:
                 self._note(
                     ImportNoteCode.RECORD_LINKED,
-                    "You already have a person linked to the account this one names, so this record was linked to "
+                    "You already have a person connected to the account this one names, so this record was linked to "
                     "them rather than duplicated.",
                     collection=collection,
                     uuid=person.uuid,
                 )
                 return PlannedRecord(action=Action.LINK, source_uuid=person.uuid, uuid=person.uuid, row_id=row_id)
-            owner = self._link_aliases.get(account.id)
+            owner = self._connect_aliases.get(account.id)
             if owner is not None:
                 self._note(
                     ImportNoteCode.RECORD_LINKED,
-                    "This document carries two people linked to one account; they were imported as one.",
+                    "This document carries two people connected to one account; they were imported as one.",
                     collection=collection,
                     uuid=person.uuid,
                 )
@@ -1717,66 +1727,69 @@ class _Planner:
             "email": self._email(collection, person.uuid, person.email),
             "phone": person.phone,
             "notes": self._notes_text(collection, person.uuid, person.notes),
-            "linked_user_id": await self._account_link(person, account_uuid, account),
+            "connected_user_id": await self._account_connection(person, account_uuid, account),
             "created_at": self._created_at(person.created_at),
         }
         return record
 
-    async def _account_link(
+    async def _account_connection(
         self, person: ImportPerson, account_uuid: uuid_pkg.UUID | None, account: Account | None
     ) -> int | None:
-        """The account a new person links to, from its entry under this producer's key - under
-        the caller's link limit, as a typed username is, and named in the report.
+        """The account a new person is connected to, from its entry under this producer's key -
+        under the caller's limit on connecting people, and named in the report.
 
-        Only an account the username resolver would take: one on this instance (a deleted one
-        in its grace period included), not the caller's, not linked by another of their people.
-        Anything else is dropped with a note and nothing of it is kept.
+        Only an account on this instance (a deleted one in its grace period included), not the
+        caller's, not connected to another of their people, and not one that has disconnected
+        the caller. Anything else is dropped with a note and nothing of it is kept; the last
+        reads as the first does, word for word, so the caller is not told of the disconnect.
         """
         if account_uuid is None:
             return None
-        if account is None:
+        if account is None or account.id in self._disconnected_by:
             self._dropped(
                 "people",
                 person.uuid,
-                "The account this person was linked to is not on this instance, so the person arrives unlinked",
+                "The account this person was connected to is not on this instance, so the person arrives not connected",
             )
             return None
         if account.id == self._user_id:
             self._dropped(
-                "people", person.uuid, "This person was linked to your own account, so the person arrives unlinked"
+                "people",
+                person.uuid,
+                "This person was connected to your own account, so the person arrives not connected",
             )
             return None
-        if account.id in self._linked_rows or account.id in self._link_aliases:
+        if account.id in self._connected_rows or account.id in self._connect_aliases:
             self._dropped(
                 "people",
                 person.uuid,
-                "Another of your people is linked to the account this one names, so this one arrives unlinked",
+                "Another of your people is connected to the account this one names, so this one arrives not connected",
             )
             return None
-        if self._claim_links:
-            if not await claim_link_slot(self._user_id):
+        if self._claim_connections:
+            if not await claim_connect_slot(self._user_id):
                 self._dropped(
                     "people",
                     person.uuid,
-                    "This import is past the limit on linking people, so this one arrives unlinked",
+                    "This import is past the limit on connecting people, so this one arrives not connected",
                 )
                 return None
         else:
-            if self._link_budget is None:
-                self._link_budget = await link_budget_remaining(self._user_id)
-            if self._link_budget <= 0:
+            if self._connect_budget is None:
+                self._connect_budget = await connect_budget_remaining(self._user_id)
+            if self._connect_budget <= 0:
                 self._dropped(
                     "people",
                     person.uuid,
-                    "This import is past the limit on linking people, so this one would arrive unlinked",
+                    "This import is past the limit on connecting people, so this one would arrive not connected",
                 )
                 return None
-            self._link_budget -= 1
-        self._link_aliases[account.id] = person.uuid
+            self._connect_budget -= 1
+        self._connect_aliases[account.id] = person.uuid
         self._note(
-            ImportNoteCode.ACCOUNT_LINKED,
-            f"This person {'was' if self._claim_links else 'will be'} linked to @{account.username}, the account on "
-            "this instance the document names.",
+            ImportNoteCode.ACCOUNT_CONNECTED,
+            f"This person {'was' if self._claim_connections else 'will be'} connected to @{account.username}, the "
+            "account on this instance the document names.",
             collection="people",
             uuid=person.uuid,
         )
@@ -1843,7 +1856,7 @@ class _Planner:
                 "email": None,
                 "phone": None,
                 "notes": "",
-                "linked_user_id": None,
+                "connected_user_id": None,
                 "created_at": datetime.now(UTC),
             },
         )
@@ -3638,7 +3651,7 @@ async def plan_import(
     newly_resolved_aphia_ids: frozenset[int] = frozenset(),
     check_in: ImportCheckInSubmission | None = None,
     portrait: ImportPortraitChoice | None = None,
-    claim_links: bool = False,
+    claim_connections: bool = False,
     batch_dive_ids: frozenset[int] = frozenset(),
     held: Mapping[str, Callable[[], bytes]] | None = None,
     minted: MintedUuids | None = None,
@@ -3646,11 +3659,11 @@ async def plan_import(
     """Plan an import of `loaded` into `user_id`'s logbook. Writes nothing to the database.
 
     `check_in` and `portrait` are what the diver confirmed in the review; the apply passes
-    them and the upload, which has nothing submitted yet, does not. `claim_links` is the
-    apply's too: it spends the link limit for each person it links, where the upload only
-    reads what is left of it. `batch_dive_ids` are the dives the files before this one in the
-    same import wrote, and `held` the bytes of the files they stored. `minted` is the apply's as
-    well: the uuids the upload's pass minted for this file.
+    them and the upload, which has nothing submitted yet, does not. `claim_connections` is
+    the apply's too: it spends the limit on connecting people for each person it connects,
+    where the upload only reads what is left of it. `batch_dive_ids` are the dives the files
+    before this one in the same import wrote, and `held` the bytes of the files they stored.
+    `minted` is the apply's as well: the uuids the upload's pass minted for this file.
     """
     planner = _Planner(
         db,
@@ -3660,7 +3673,7 @@ async def plan_import(
         newly_resolved_aphia_ids=newly_resolved_aphia_ids,
         check_in=check_in,
         portrait=portrait,
-        claim_links=claim_links,
+        claim_connections=claim_connections,
         batch_dive_ids=batch_dive_ids,
         held=held,
         minted=minted,

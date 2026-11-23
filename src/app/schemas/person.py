@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, ClassVar
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator
 
 from ..core.schemas import MAX_LIST_ITEMS, NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 
@@ -13,6 +13,8 @@ PERSON_EMAIL_MAX = 255
 PERSON_PHONE_MAX = 32
 # A username's own bounds (`schemas/user.py`): nothing longer names an account.
 USERNAME_MAX = 20
+# A connect link's token: `secrets.token_hex(16)`.
+CONNECT_LINK_TOKEN_MAX = 32
 
 PERSON_NOT_FOUND = "Person not found."
 
@@ -46,13 +48,33 @@ PersonPhone = Annotated[
     str | None,
     Field(default=None, max_length=PERSON_PHONE_MAX, description="Phone number of the person, free text"),
 ]
-LinkedUsername = Annotated[
+# Held until the previous web build and the phone's have left it: the member it sent, which
+# now changes nothing or is refused. `services.person_connections.held_username_change`.
+HeldUsername = Annotated[
     str | None,
     Field(
         default=None,
         max_length=USERNAME_MAX,
-        description="The exact username of an account on this instance that this person is",
+        description="Retired: connecting a person by username is no longer possible. Only null, or on an update "
+        "the username of the account the person is already connected to, is accepted",
         examples=["alexm"],
+    ),
+]
+ConnectLinkToken = Annotated[
+    str | None,
+    Field(
+        default=None,
+        max_length=CONNECT_LINK_TOKEN_MAX,
+        description="The token of a live connect link: the person is connected to the link's owner",
+        examples=["9f86d081884c7d659a2feaa0c55ad015"],
+    ),
+]
+ConnectAccount = Annotated[
+    uuid_pkg.UUID | None,
+    Field(
+        default=None,
+        description="The public id of an account that has a person connected to you, as `GET /people/added-you` "
+        "lists it: the person is connected to that account",
     ),
 ]
 
@@ -110,9 +132,9 @@ class PersonBase(BaseModel):
 class PersonRead(PublicUUIDSchema):
     """A person as `GET /people` and `GET /person/{uuid}` serve it.
 
-    `username` is the linked account's **current** username - joined on every read, so a
-    rename shows through and a purged account reads null - and nothing else of that account.
-    `dive_count` is the live dives that name the person.
+    `username` and `avatar_sha256` are the connected account's **current** ones - joined on
+    every read, so a rename or a new picture shows through and a purged account reads null -
+    and nothing else of that account. `dive_count` is the live dives that name the person.
     """
 
     name: str
@@ -120,7 +142,16 @@ class PersonRead(PublicUUIDSchema):
     phone: str | None = None
     notes: str = ""
     username: Annotated[
-        str | None, Field(default=None, description="The linked account's current username, or null when unlinked")
+        str | None,
+        Field(default=None, description="The connected account's current username, or null when not connected"),
+    ]
+    avatar_sha256: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="The connected account's picture version, passed as `v` to `GET /person/{uuid}/avatar`; "
+            "null when the person is not connected, the account has no picture or has asked to be deleted",
+        ),
     ]
     dive_count: Annotated[int, Field(description="Live dives whose `people` name this person")]
     created_at: datetime
@@ -132,7 +163,8 @@ class PersonReadInternal(PublicUUIDSchema):
 
     id: int
     user_id: int
-    linked_user_id: int | None = None
+    connected_user_id: int | None = None
+    connection_hidden_at: datetime | None = None
     name: str
     email: str | None = None
     phone: str | None = None
@@ -141,22 +173,36 @@ class PersonReadInternal(PublicUUIDSchema):
     updated_at: datetime | None = None
 
 
-class PersonCreate(PersonBase):
-    model_config = ConfigDict(extra="forbid")
+class ConnectsAPerson(BaseModel):
+    """The two ways a person write connects one, and the held `username`: at most one of
+    them in a body."""
 
-    username: LinkedUsername
+    username: HeldUsername
+    connect_link: ConnectLinkToken
+    connect_account: ConnectAccount
+
+    @model_validator(mode="after")
+    def one_way_at_most(self) -> ConnectsAPerson:
+        given = [name for name in ("username", "connect_link", "connect_account") if name in self.model_fields_set]
+        if len(given) > 1:
+            raise ValueError(f"Send one of {', '.join(given)}, not several.")
+        return self
+
+
+class PersonCreate(PersonBase, ConnectsAPerson):
+    model_config = ConfigDict(extra="forbid")
 
 
 class PersonCreateInternal(PersonBase):
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
-    linked_user_id: int | None = None
+    connected_user_id: int | None = None
 
 
 class PersonUpdate(RejectsExplicitNulls):
     """The column shape of a person's PATCH, which `test_update_explicit_nulls.py` sweeps
-    against the table. The link is `PersonUpdateRequest`'s."""
+    against the table. The tie is `PersonUpdateRequest`'s."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -179,11 +225,9 @@ class PersonUpdate(RejectsExplicitNulls):
     ]
 
 
-class PersonUpdateRequest(PersonUpdate):
-    """Request body for `PATCH /person/{uuid}`. `username` links the person to that account;
-    `null` detaches, and omitting it leaves the link alone."""
-
-    username: LinkedUsername
+class PersonUpdateRequest(PersonUpdate, ConnectsAPerson):
+    """Request body for `PATCH /person/{uuid}`. `connect_link` or `connect_account` connects a
+    person who is not connected yet; omitting both leaves the tie alone."""
 
 
 class PersonUpdateInternal(PersonUpdate):
@@ -191,7 +235,23 @@ class PersonUpdateInternal(PersonUpdate):
 
 
 class PersonLookupItem(PublicUUIDSchema):
-    """One row of `GET /people/lookup`: the name and the linked account's current username."""
+    """One row of `GET /people/lookup`: the name and the connected account's current username."""
 
     name: str
     username: str | None = None
+
+
+class AddedYouRow(PublicUUIDSchema):
+    """One row of `GET /people/added-you`: an account that has the caller in its people, by its
+    public id, its current name, username and picture version."""
+
+    name: str
+    username: str
+    avatar_sha256: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="The account's picture version, passed as `v` to `GET /people/added-you/{uuid}/avatar`; "
+            "null without one",
+        ),
+    ]

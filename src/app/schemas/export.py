@@ -38,7 +38,7 @@ Where it differs from the API's own read shapes, and why:
   closure: every uuid a record names is defined in the same document.
 - **Whatever the format has no core member for rides `extensions.opendiving`** (spec
   §5.5): the diver's account preferences, which parser read a stored dive-computer file,
-  the crop this app frames the portrait with, the account a person is linked to, and at
+  the crop this app frames the portrait with, the account a person is connected to, and at
   the document's root the markers of the profile's axis unit and temperature scale
   (`EXPORT_EXTENSIONS`). A writer may not invent core
   members, so this is the sanctioned slot.
@@ -724,9 +724,9 @@ class ExportPerson(PublicUUIDSchema):
     """An individual the diver was with (spec §6.20). The dives, trips and courses that list
     one, and the certifications it signed, carry its uuid; nothing here points back.
 
-    A person linked to an account on this instance carries that account's public id under
+    A person connected to an account on this instance carries that account's public id under
     this producer's key, as `user_uuid` - the value that account's own export writes as its
-    diver's `uuid`. The format carries no identity for a person, so the link rides here
+    diver's `uuid`. The format carries no identity for a person, so the tie rides here
     (spec §5.5), where an import into this app reads it back.
     """
 

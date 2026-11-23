@@ -277,7 +277,7 @@ class RegistrationMode(Enum):
 
     `open` is what this app did before the setting existed: any address that proves it owns
     itself gets an account. `invite` admits only an address someone already invited, or
-    whoever follows a member's invite link - plus the very first account on an empty
+    whoever follows a member's connect link - plus the very first account on an empty
     instance, which is the operator's own and is admitted in *both* modes (see
     `services.registration_gate`).
 
@@ -308,7 +308,7 @@ class AccountSource(StrEnum):
 # What a join-channel slug may be. The request bodies and the setting's own validator both
 # accept exactly this, so a value that cannot be configured cannot be sent; the resolve
 # route takes any segment and answers one outside it with the same 404 as an unknown slug.
-# A member's invite-link token rides the same `via` field, and is generated to fit it.
+# A member's connect-link token rides the same `via` field, and is generated to fit it.
 JOIN_CHANNEL_SLUG_PATTERN = r"^[a-z0-9-]{1,32}$"
 JOIN_CHANNEL_LABEL_MAX_LENGTH = 40
 
@@ -515,10 +515,10 @@ class MagicLinkSettings(BaseSettings):
     # the rest of the profile (name, avatar, email-preference toggle) reveals nothing and
     # shouldn't 429 a settings page.
     USERNAME_CHANGE_RATE_LIMIT_PER_USER: int = config("USERNAME_CHANGE_RATE_LIMIT_PER_USER", default=5)
-    # Linking a person to an account by username (`POST`/`PATCH /person`) answers whether
-    # that username exists, the oracle above; an import's links count here too. Per user,
-    # over the same window, and spent only by a link that names a different account.
-    PERSON_LINK_RATE_LIMIT_PER_USER: int = config("PERSON_LINK_RATE_LIMIT_PER_USER", default=10)
+    # The people a logbook import connects to the accounts its file names - by public id,
+    # from a file rather than from those accounts' links. Per user, over the same window. A
+    # person write is not counted: its link or tie answers no guess.
+    PERSON_CONNECT_RATE_LIMIT_PER_USER: int = config("PERSON_CONNECT_RATE_LIMIT_PER_USER", default=10)
 
 
 class SMTPTLSMode(Enum):

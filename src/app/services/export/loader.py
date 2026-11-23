@@ -204,9 +204,9 @@ class ExportBundle:
     pictures: dict[PictureKind, UserPicture]
     # By name, as `GET /contacts` lists them.
     contacts: list[Contact]
-    # By name, as `GET /people` lists them, and each linked person's account's public id.
+    # By name, as `GET /people` lists them, and each connected person's account's public id.
     people: list[Person]
-    linked_uuid_by_person: dict[int, uuid_pkg.UUID]
+    connected_uuid_by_person: dict[int, uuid_pkg.UUID]
     # The `(person_id, role)` rows of each host's join table in position order, keyed for
     # every host in the bundle.
     person_ids_by_dive: dict[int, list[tuple[int, str | None]]]
@@ -377,11 +377,11 @@ async def _tag_ids_by_host(
     return by_host
 
 
-async def _linked_uuids(db: AsyncSession, *, user_id: int) -> dict[int, uuid_pkg.UUID]:
-    """Each linked person's account's public id - the one thing of that account an export
+async def _connected_uuids(db: AsyncSession, *, user_id: int) -> dict[int, uuid_pkg.UUID]:
+    """Each connected person's account's public id - the one thing of that account an export
     carries."""
     rows = await db.execute(
-        select(Person.id, User.uuid).join(User, User.id == Person.linked_user_id).where(Person.user_id == user_id)
+        select(Person.id, User.uuid).join(User, User.id == Person.connected_user_id).where(Person.user_id == user_id)
     )
     return {row.id: row.uuid for row in rows}
 
@@ -587,7 +587,7 @@ async def load_export_bundle(db: AsyncSession, *, user_id: int) -> ExportBundle:
         },
         contacts=await _owned(db, Contact, user_id=user_id, order_by=(Contact.name, Contact.id)),
         people=await _owned(db, Person, user_id=user_id, order_by=(Person.name, Person.id)),
-        linked_uuid_by_person=await _linked_uuids(db, user_id=user_id),
+        connected_uuid_by_person=await _connected_uuids(db, user_id=user_id),
         person_ids_by_dive=await _person_ids_by_host(db, DivePerson.dive_id, DivePerson, dive_ids),
         person_ids_by_trip=await _person_ids_by_host(db, TripPerson.trip_id, TripPerson, [trip.id for trip in trips]),
         person_ids_by_course=await _person_ids_by_host(

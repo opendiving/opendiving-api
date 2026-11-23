@@ -173,9 +173,9 @@ def register_admin_views(admin: CRUDAdmin) -> None:
         allowed_actions={"view", "create", "update"},
     )
 
-    # `PersonUpdate`, not `PersonUpdateRequest`: its `username` is a lookup this form does
-    # not make. `ck_person_not_linked_to_its_owner` stands behind the create form's
-    # `linked_user_id`.
+    # `PersonUpdate`, not `PersonUpdateRequest`: its connect members resolve a link or a tie
+    # this form does not. `ck_person_not_connected_to_its_owner` stands behind the create
+    # form's `connected_user_id`.
     admin.add_view(
         model=Person,
         create_schema=PersonCreateInternal,

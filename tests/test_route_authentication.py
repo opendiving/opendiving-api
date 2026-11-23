@@ -105,6 +105,18 @@ ANONYMOUS_BY_DESIGN: dict[tuple[str, str], str] = {
         "Answers for one slug and never lists the others, and a live link is public by design - it is "
         "posted where anyone can follow it."
     ),
+    ("GET", "/api/v1/connect-link/{token}"): (
+        "Tells the connect page whose link it was opened with, by name and picture version, before anyone "
+        "has signed in. Answers for one token and lists nothing; the token has 128 bits, and a live link is "
+        "one its owner chose to hand out. Never the username, which a session is told. Every dead token is "
+        "one 404, and both answers are `private, no-store`."
+    ),
+    ("GET", "/api/v1/connect-link/{token}/avatar"): (
+        "The picture the connect page shows beside the owner's name, for the same holders of the same "
+        "token, to an `<img>` or a fetch that carries no session. An owner with no picture is the dead "
+        "token's 404, and every answer is `private, no-store`."
+    ),
+    # Held until its route goes, with `/connect-link/{token}` replacing it.
     ("GET", "/api/v1/invite-link/{token}"): (
         "Tells the join page whose invite link it was opened with, before anyone has signed in. Answers "
         "for one token and lists nothing; the token has 128 bits, and a live link is one its owner chose "

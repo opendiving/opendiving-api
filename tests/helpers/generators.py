@@ -162,7 +162,7 @@ def create_contact(db: Session, user: models.User, *, roles: list[str] | None = 
 
 
 def create_person(
-    db: Session, user: models.User, *, name: str | None = None, linked_to: models.User | None = None
+    db: Session, user: models.User, *, name: str | None = None, connected_to: models.User | None = None
 ) -> models.Person:
     """A person of this user's, named uniquely because `ux_person_user_id_name_lower` would
     refuse a second run's row of the same name."""
@@ -171,7 +171,7 @@ def create_person(
         models.Person(
             user_id=user.id,
             name=name or f"Alex {uuid7().hex[-8:]}",
-            linked_user_id=None if linked_to is None else linked_to.id,
+            connected_user_id=None if connected_to is None else connected_to.id,
         ),
     )
 

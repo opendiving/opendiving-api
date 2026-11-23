@@ -51,6 +51,7 @@ from src.app.crud.crud_certifications import crud_certifications
 from src.app.crud.crud_checkin_details import read_checkin_details
 from src.app.crud.crud_dives import crud_dives
 from src.app.crud.crud_gear_service_records import crud_gear_service_records
+from src.app.models.account_disconnect import AccountDisconnect
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
 from src.app.models.checkin_details import CheckinDetails, CheckinEmergencyContact, CheckinInsurancePolicy
@@ -221,7 +222,7 @@ async def _apply(
             resolution_ran=True,
             check_in=check_in,
             portrait=portrait,
-            claim_links=True,
+            claim_connections=True,
         )
         await write_import(db, user_id=user_id, loaded=loaded, plan=plan)
         await db.commit()
@@ -3332,9 +3333,9 @@ class TestContacts:
 
 def _seed_people_logbook(db: Session) -> Any:
     """Two people named from all four places one can be - a dive, a trip, a course and a card -
-    one of them linked to another account on this instance."""
+    one of them connected to another account on this instance."""
     user, friend = create_user(db), create_user(db)
-    alex = create_person(db, user, name="Alex Moreno", linked_to=friend)
+    alex = create_person(db, user, name="Alex Moreno", connected_to=friend)
     sam = create_person(db, user, name="Sam")
     sam.email, sam.phone, sam.notes = "sam@example.com", "+34 600 000 000", "Shoots video."
     trip = create_trip(db, user)
@@ -3375,11 +3376,11 @@ def _account_entry(user: Any) -> dict[str, Any]:
 class TestPeople:
     @pytest.fixture(autouse=True)
     def _limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The link limit's Redis, stubbed as *"The local suite has no Redis"* in DECISIONS.md
+        """The connect limit's Redis, stubbed as *"The local suite has no Redis"* in DECISIONS.md
         says of any handler that reaches it: a real client is bound to the loop that opened it,
         and each test runs on its own. A test about the limit patches these itself."""
-        monkeypatch.setattr(planner_module, "link_budget_remaining", AsyncMock(return_value=10))
-        monkeypatch.setattr(planner_module, "claim_link_slot", AsyncMock(return_value=True))
+        monkeypatch.setattr(planner_module, "connect_budget_remaining", AsyncMock(return_value=10))
+        monkeypatch.setattr(planner_module, "claim_connect_slot", AsyncMock(return_value=True))
 
     @pytest.mark.asyncio
     async def test_people_arrive_once_with_every_reference_and_role(self, db: Session, async_db: AsyncSession) -> None:
@@ -3418,15 +3419,16 @@ class TestPeople:
             await async_db.execute(select(Certification).where(Certification.user_id == destination.id))
         ).scalar_one()
         assert card.instructor_id == alex.id
-        # The export's producer entry names the friend's account, which the importer may link.
-        assert alex.linked_user_id == friend.id
-        (linked,) = [note for note in plan.notes if note.code is ImportNoteCode.ACCOUNT_LINKED]
-        assert f"@{friend.username}" in linked.message
+        # The export's producer entry names the friend's account, which the importer may connect.
+        assert alex.connected_user_id == friend.id
+        (connected,) = [note for note in plan.notes if note.code is ImportNoteCode.ACCOUNT_CONNECTED]
+        assert f"@{friend.username}" in connected.message
+        assert connected.code.value == "account_connected"
 
     @pytest.mark.asyncio
-    async def test_a_restore_links_a_deleted_person_again(self, db: Session, async_db: AsyncSession) -> None:
+    async def test_a_restore_connects_a_deleted_person_again(self, db: Session, async_db: AsyncSession) -> None:
         """A hard-deleted row has nothing to restore, so the person is created again - and
-        linked, the link being the one thing of it the export kept under this app's key."""
+        connected, the tie being the one thing of it the export kept under this app's key."""
         source, friend, alex = _seed_people_logbook(db)
         document = await _export(async_db, source.id)
         await async_db.execute(delete(Person).where(Person.id == alex.id))
@@ -3435,11 +3437,11 @@ class TestPeople:
         plan = await _apply(async_db, source.id, document)
 
         assert _counts(plan)["people"] == (1, 1, 0, 0)
-        assert (await _people_of(async_db, source.id))["Alex Moreno"].linked_user_id == friend.id
+        assert (await _people_of(async_db, source.id))["Alex Moreno"].connected_user_id == friend.id
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("case", ["nobody", "the importer", "not our entry"])
-    async def test_an_entry_that_names_no_account_to_link_brings_the_person_unlinked(
+    async def test_an_entry_that_names_no_account_to_connect_brings_the_person_not_connected(
         self, case: str, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
         _, document = seeded
@@ -3454,22 +3456,22 @@ class TestPeople:
         plan = await _apply(async_db, destination.id, _with_people(document, [person]))
 
         assert _counts(plan)["people"] == (1, 0, 0, 0)
-        assert (await _people_of(async_db, destination.id))["Alex"].linked_user_id is None
-        assert ImportNoteCode.ACCOUNT_LINKED not in _codes(plan)
+        assert (await _people_of(async_db, destination.id))["Alex"].connected_user_id is None
+        assert ImportNoteCode.ACCOUNT_CONNECTED not in _codes(plan)
         dropped = [
             note for note in plan.notes if note.collection == "people" and note.code is ImportNoteCode.VALUE_DROPPED
         ]
         assert len(dropped) == (0 if case == "not our entry" else 1)
 
     @pytest.mark.asyncio
-    async def test_a_link_claims_the_person_before_a_name_does(
+    async def test_an_account_claims_the_person_before_a_name_does(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
-        """A person whose entry names an account another of the caller's people links is that
-        person, whatever its name says - and two such entries in one document are one."""
+        """A person whose entry names an account another of the caller's people is connected to
+        is that person, whatever its name says - and two such entries in one document are one."""
         _, document = seeded
         destination, friend = create_user(db), create_user(db)
-        mine = create_person(db, destination, name="Alex M.", linked_to=friend)
+        mine = create_person(db, destination, name="Alex M.", connected_to=friend)
         mine_id = mine.id
         first, second = str(uuid7()), str(uuid7())
         people = [
@@ -3492,8 +3494,8 @@ class TestPeople:
     async def test_two_entries_naming_one_account_are_one_person(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
-        """The second is claimed by the first's link, not by its name, and is not a second
-        link to count."""
+        """The second is claimed by the first's account, not by its name, and is not a second
+        tie to count."""
         _, document = seeded
         destination, friend = create_user(db), create_user(db)
         first, second = str(uuid7()), str(uuid7())
@@ -3506,7 +3508,7 @@ class TestPeople:
 
         assert _counts(plan)["people"] == (1, 1, 0, 0)
         (person,) = (await _people_of(async_db, destination.id)).values()
-        assert (person.name, person.linked_user_id) == ("Alexandra", friend.id)
+        assert (person.name, person.connected_user_id) == ("Alexandra", friend.id)
         dive = (await async_db.execute(select(Dive).where(Dive.user_id == destination.id))).scalar_one()
         on_dive = (
             await async_db.execute(select(DivePerson.person_id).where(DivePerson.dive_id == dive.id))
@@ -3524,22 +3526,22 @@ class TestPeople:
             {"uuid": str(uuid7()), "name": "Two", "extensions": _account_entry(two)},
         ]
         claim = AsyncMock(return_value=True)
-        monkeypatch.setattr(planner_module, "link_budget_remaining", AsyncMock(return_value=1))
-        monkeypatch.setattr(planner_module, "claim_link_slot", claim)
+        monkeypatch.setattr(planner_module, "connect_budget_remaining", AsyncMock(return_value=1))
+        monkeypatch.setattr(planner_module, "claim_connect_slot", claim)
 
         review = await _review(async_db, destination.id, _with_people(document, people))
 
         claim.assert_not_awaited()
         notes = [note for note in review.notes if note.collection == "people"]
-        assert [note.code for note in notes] == [ImportNoteCode.ACCOUNT_LINKED, ImportNoteCode.VALUE_DROPPED]
-        assert "will be linked" in notes[0].message
+        assert [note.code for note in notes] == [ImportNoteCode.ACCOUNT_CONNECTED, ImportNoteCode.VALUE_DROPPED]
+        assert "will be connected" in notes[0].message
         assert await _people_of(async_db, destination.id) == {}
 
     @pytest.mark.asyncio
-    async def test_the_apply_claims_a_slot_per_link_and_drops_what_it_is_refused(
+    async def test_the_apply_claims_a_slot_per_tie_and_drops_what_it_is_refused(
         self, seeded: Any, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An exhausted window drops that link with its note rather than failing the import."""
+        """An exhausted window drops that tie with its note rather than failing the import."""
         _, document = seeded
         destination, one, two = create_user(db), create_user(db), create_user(db)
         people = [
@@ -3547,14 +3549,38 @@ class TestPeople:
             {"uuid": str(uuid7()), "name": "Two", "extensions": _account_entry(two)},
         ]
         claim = AsyncMock(side_effect=[True, False])
-        monkeypatch.setattr(planner_module, "claim_link_slot", claim)
+        monkeypatch.setattr(planner_module, "claim_connect_slot", claim)
 
         plan = await _apply(async_db, destination.id, _with_people(document, people))
 
         assert claim.await_count == 2
         people_here = await _people_of(async_db, destination.id)
-        assert (people_here["One"].linked_user_id, people_here["Two"].linked_user_id) == (one.id, None)
+        assert (people_here["One"].connected_user_id, people_here["Two"].connected_user_id) == (one.id, None)
         assert _counts(plan)["people"] == (2, 0, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_an_account_that_disconnected_the_importer_is_an_account_not_here(
+        self, seeded: Any, db: Session, async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing connects, nothing of the limit is spent, and the note is the one an id naming
+        no account gets, word for word, so the importer is not told of the disconnect."""
+        _, document = seeded
+        destination, gone, unknown = create_user(db), create_user(db), uuid7()
+        db.add(AccountDisconnect(user_id=gone.id, disconnected_user_id=destination.id))
+        db.commit()
+        people = [
+            {"uuid": str(uuid7()), "name": "Gone", "extensions": _account_entry(gone)},
+            {"uuid": str(uuid7()), "name": "Unknown", "extensions": {"opendiving": {"user_uuid": str(unknown)}}},
+        ]
+        claim = AsyncMock(return_value=True)
+        monkeypatch.setattr(planner_module, "claim_connect_slot", claim)
+
+        plan = await _apply(async_db, destination.id, _with_people(document, people))
+
+        claim.assert_not_awaited()
+        assert (await _people_of(async_db, destination.id))["Gone"].connected_user_id is None
+        first, second = [note.message for note in plan.notes if note.collection == "people"]
+        assert first == second
 
     @pytest.mark.asyncio
     async def test_an_export_made_before_people_names_the_instructor_the_diver_has(
@@ -5668,7 +5694,7 @@ class TestTheIntegerColumnCensus:
         ("contact", "user_id"): "the caller's",
         ("person", "id"): "the sequence's",
         ("person", "user_id"): "the caller's",
-        ("person", "linked_user_id"): "an account this instance already has, found by the document's uuid",
+        ("person", "connected_user_id"): "an account this instance already has, found by the document's uuid",
         **{
             (table, column): reason
             for table, host in (("dive_person", "dive"), ("trip_person", "trip"), ("course_person", "course"))

@@ -1,21 +1,29 @@
-"""The people a diver was with: `POST /person`, `GET /people`, `GET /people/lookup` and the
-single-person routes.
+"""The people a diver was with: `POST /person`, `GET /people`, `GET /people/lookup`, the
+single-person routes, and *Added you* - the accounts that have the diver in their people.
 
-No read is cached. A person read carries the linked account's current username and a
-dive count, and both change on writes this diver never makes - the linked account renaming
-or leaving - so a per-owner cache would serve a stale answer for its TTL, and nothing reaches
-another account's keys. The list is one query over tens of rows. What a person's *delete*
-changes is its hosts' cached reads, and those are dropped here.
+No read is cached. A person read carries the connected account's current username, its
+picture version and a dive count, and all three change on writes this diver never makes -
+the connected account renaming, replacing its picture, asking to be deleted, or cutting the
+tie from its *Added you* - so a per-owner cache would serve a stale answer for its TTL, and
+nothing reaches another account's keys. *Added you* changes on other divers' writes alone.
+The lists are one query over tens of rows. What a person's *delete* changes is its hosts'
+cached reads, and those are dropped here.
+
+The pictures are served by `api.account_avatar`, each route deciding whether the caller may
+see that account's: while the tie stands, and never once it has asked to be deleted.
 """
 
 import uuid as uuid_pkg
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import ColumnElement, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...api.account_avatar import serve_account_avatar
 from ...api.dependencies import fetch_owned_or_raise, get_current_user
 from ...core.db.database import async_get_db
 from ...core.exceptions.http_exceptions import DuplicateValueException, NotFoundException
@@ -24,17 +32,21 @@ from ...crud.crud_lookups import get_lookup_page
 from ...crud.crud_people import (
     PERSON_NAME_KEY,
     crud_people,
+    get_added_you_page,
     get_people_page,
     get_person_read,
     person_name_exists,
     person_search_condition,
+    tie_from,
 )
 from ...crud.unique_keys import write_or_duplicate
+from ...models.account_disconnect import AccountDisconnect
 from ...models.dive_person import DivePerson
 from ...models.person import Person
 from ...models.user import User
 from ...schemas.lookup import LookupUntil, lookup_bound
 from ...schemas.person import (
+    AddedYouRow,
     PersonCreate,
     PersonCreateInternal,
     PersonLookupItem,
@@ -48,12 +60,19 @@ from ...services.cache_invalidation import (
     invalidate_dive_caches,
     invalidate_trip_caches,
 )
-from ...services.person_links import resolve_linked_account, spend_link_attempt
+from ...services.person_connections import (
+    forget_disconnect,
+    held_username_change,
+    refuse_a_second_tie,
+    resolve_connection,
+)
 from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["people"])
 
 _NAME_TAKEN = "A person with this name already exists"
+_NO_TIE = "No account with that id has you in its people"
+_VERSION_DESCRIPTION = "Opaque cache-busting version token; ignored by the server"
 
 
 async def _get_owned_person(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> PersonReadInternal:
@@ -91,25 +110,35 @@ async def write_person(
     """Create a person - a buddy, a guide, an instructor, a companion - for the caller.
 
     Names are trimmed and unique per diver, case-insensitively, so a second "Alex" is a 422.
-    `username` links the person to the account on this instance with exactly that username;
-    the link shows you that account's current username and nothing else of it, and tells
-    that account nothing. No such account, your own, or one another of your people already
-    links is a 422 on the field. Linking is rate limited per user, like choosing a username.
+
+    `connect_link`, a live connect link's token, or `connect_account`, the public id of an
+    account that has a person connected to you, connects the new person to that account: you
+    see its picture and current username on the person, and it sees your name, username and
+    picture under its *Added you* until either of you disconnects. At most one of them. A link
+    that is not live, an id naming no account with a person connected to you, your own
+    account, and an account another of your people is connected to are each a 422 on the
+    member.
+
+    `username` is retired: null is accepted and changes nothing, and any other value is a
+    422 on the member.
     """
+    connected_user_id = await resolve_connection(db, person, owner_id=current_user["id"])
+    if "username" in person.model_fields_set:
+        await held_username_change(db, person.username, person=None)
+
     if await person_name_exists(db=db, user_id=current_user["id"], name=person.name):
         raise DuplicateValueException(_NAME_TAKEN)
 
-    linked_user_id: int | None = None
-    if person.username is not None:
-        await spend_link_attempt(current_user["id"])
-        linked_user_id = await resolve_linked_account(db, owner_id=current_user["id"], username=person.username)
-
+    if connected_user_id is not None:
+        await forget_disconnect(db, account_id=connected_user_id, diver_id=current_user["id"])
     created = await write_or_duplicate(
         db,
         crud_people.create(
             db=db,
             object=PersonCreateInternal(
-                **person.model_dump(exclude={"username"}), user_id=current_user["id"], linked_user_id=linked_user_id
+                **person.model_dump(exclude={"username", "connect_link", "connect_account"}),
+                user_id=current_user["id"],
+                connected_user_id=connected_user_id,
             ),
             schema_to_select=PersonReadInternal,
             return_as_model=True,
@@ -129,13 +158,13 @@ async def read_people(
     items_per_page: ItemsPerPageQuery = 10,
     search: Annotated[
         str | None,
-        Query(max_length=255, description="Case-insensitive substring match on the name or the linked username"),
+        Query(max_length=255, description="Case-insensitive substring match on the name or the connected username"),
     ] = None,
 ) -> dict[str, Any]:
-    """List the caller's people by name, each with its linked account's current username and
-    how many live dives name it.
+    """List the caller's people by name, each with its connected account's current username
+    and picture version, and how many live dives name it.
 
-    `search` matches a case-insensitive substring of the name or the linked username.
+    `search` matches a case-insensitive substring of the name or the connected username.
     Out-of-range pagination is clamped, not rejected.
     """
     page, items_per_page = clamp_pagination(page, items_per_page)
@@ -162,10 +191,10 @@ async def lookup_people(
     items_per_page: ItemsPerPageQuery = 10,
     search: Annotated[
         str | None,
-        Query(max_length=255, description="Case-insensitive substring match on the name or the linked username"),
+        Query(max_length=255, description="Case-insensitive substring match on the name or the connected username"),
     ] = None,
 ) -> dict[str, Any]:
-    """The caller's people as a picker lists them: uuid, name and the linked account's current
+    """The caller's people as a picker lists them: uuid, name and the connected account's current
     username, the person on a dive at or before `until` most recently first, then people no
     such dive names, newest created first.
 
@@ -188,7 +217,7 @@ async def lookup_people(
         bound=lookup_bound(until),
         offset=compute_offset(page, items_per_page),
         limit=items_per_page,
-        from_clause=Person.__table__.outerjoin(User.__table__, User.id == Person.linked_user_id),
+        from_clause=Person.__table__.outerjoin(User.__table__, User.id == Person.connected_user_id),
     )
     data["data"] = [PersonLookupItem.model_validate(row).model_dump() for row in data["data"]]
     response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
@@ -219,32 +248,33 @@ async def patch_person(
     """Partially update a person; omitted fields are left untouched.
 
     404 unless the caller owns it. Renaming onto another of the caller's people is a 422. An
-    explicit `null` clears the email or the phone, and `null` for `username` unlinks the
-    person. A `username` naming a different account than the linked one is refused as on
-    create, and counts against the same limit; the one already linked changes nothing.
+    explicit `null` clears the email or the phone.
+
+    `connect_link` or `connect_account` connects a person who is not connected yet, as on
+    create, and is refused alike; a person already connected is a 422 on the member.
+
+    `username` is retired: null disconnects the person, the username of the account it is
+    connected to changes nothing, and any other value is a 422 on the member.
     """
     db_person = await _get_owned_person(db, uuid, current_user)
+
+    refuse_a_second_tie(values, db_person)
+    connected_user_id = await resolve_connection(db, values, owner_id=db_person.user_id, person_id=db_person.id)
+    disconnects = "username" in values.model_fields_set and await held_username_change(
+        db, values.username, person=db_person
+    )
 
     if values.name is not None and await person_name_exists(
         db=db, user_id=db_person.user_id, name=values.name, exclude_id=db_person.id
     ):
         raise DuplicateValueException(_NAME_TAKEN)
 
-    update_data = values.model_dump(exclude={"username"}, exclude_unset=True)
-    if "username" in values.model_fields_set:
-        if values.username is None:
-            update_data["linked_user_id"] = None
-        else:
-            current = (
-                None
-                if db_person.linked_user_id is None
-                else await db.scalar(select(User.username).where(User.id == db_person.linked_user_id))
-            )
-            if values.username != current:
-                await spend_link_attempt(db_person.user_id)
-                update_data["linked_user_id"] = await resolve_linked_account(
-                    db, owner_id=db_person.user_id, username=values.username, person_id=db_person.id
-                )
+    update_data = values.model_dump(exclude={"username", "connect_link", "connect_account"}, exclude_unset=True)
+    if connected_user_id is not None:
+        await forget_disconnect(db, account_id=connected_user_id, diver_id=db_person.user_id)
+        update_data |= {"connected_user_id": connected_user_id, "connection_hidden_at": None}
+    elif disconnects:
+        update_data |= {"connected_user_id": None, "connection_hidden_at": None}
 
     if update_data:
         await write_or_duplicate(
@@ -252,6 +282,163 @@ async def patch_person(
         )
 
     return {"message": "Person updated"}
+
+
+@router.post("/person/{uuid}/disconnect", response_model=PersonRead)
+async def disconnect_person(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> PersonRead:
+    """Disconnect one of the caller's people from the account it is connected to, keeping the
+    person: it loses that account's picture and username, and the caller leaves the account's
+    *Added you*. The account is not told.
+
+    Answers the person, and the same for one that was not connected. 404 unless the caller
+    owns it.
+    """
+    # Records no disconnect: this is the diver dropping their own tie, and an import of their
+    # own file may make it again.
+    db_person = await _get_owned_person(db, uuid, current_user)
+    if db_person.connected_user_id is not None:
+        await db.execute(
+            update(Person)
+            .where(Person.id == db_person.id)
+            .values(connected_user_id=None, connection_hidden_at=None, updated_at=datetime.now(UTC))
+        )
+        await db.commit()
+    return await _read(db, db_person.id)
+
+
+@router.get("/person/{uuid}/avatar", responses={404: {"description": "Not connected, no picture, or not yours"}})
+async def read_person_avatar(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[str | None, Query(description=_VERSION_DESCRIPTION)] = None,
+) -> Response:
+    """The picture of the account one of the caller's people is connected to: its rendition,
+    one WebP.
+
+    404 when the person is not the caller's, is not connected, or the account has no picture
+    or has asked to be deleted. Never stored by a browser or a proxy
+    (`Cache-Control: private, no-store`), with an `ETag`; `If-None-Match` answers 304. Pass
+    `PersonRead.avatar_sha256` as `v`, which the server ignores.
+    """
+    db_person = await _get_owned_person(db, uuid, current_user)
+    account_id = None
+    if db_person.connected_user_id is not None and not await db.scalar(
+        select(User.is_deleted).where(User.id == db_person.connected_user_id)
+    ):
+        account_id = db_person.connected_user_id
+    return await serve_account_avatar(request, db, account_id=account_id)
+
+
+@router.get("/people/added-you", response_model=PaginatedListResponse[AddedYouRow])
+async def read_added_you(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    page: PageQuery = 1,
+    items_per_page: ItemsPerPageQuery = 10,
+) -> dict[str, Any]:
+    """The accounts that have the caller in their people and that the caller has not added:
+    each by its public id, current name, username and picture version, ordered by name.
+
+    Leaves out an account the caller has a person connected to, one the caller has hidden,
+    and one that has asked to be deleted. Each of these accounts sees the caller's name,
+    username and picture. Out-of-range pagination is clamped.
+    """
+    page, items_per_page = clamp_pagination(page, items_per_page)
+    data = await get_added_you_page(
+        db, user_id=current_user["id"], offset=compute_offset(page, items_per_page), limit=items_per_page
+    )
+    data["data"] = [row.model_dump() for row in data["data"]]
+    response: dict[str, Any] = paginated_response(crud_data=data, page=page, items_per_page=items_per_page)
+    return response
+
+
+@router.get(
+    "/people/added-you/{uuid}/avatar", responses={404: {"description": "No tie to you, or no picture: one answer"}}
+)
+async def read_added_you_avatar(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+    v: Annotated[str | None, Query(description=_VERSION_DESCRIPTION)] = None,
+) -> Response:
+    """The picture of an account that has a person connected to the caller.
+
+    404 when the account has no person connected to the caller, has no picture, or has asked
+    to be deleted. Never stored by a browser or a proxy (`Cache-Control: private, no-store`),
+    the 404 included, with an `ETag`; `If-None-Match` answers 304. Pass the row's
+    `avatar_sha256` as `v`, which the server ignores.
+    """
+    tie = await tie_from(db, account_uuid=uuid, user_id=current_user["id"])
+    account_id = None
+    if tie is not None and not await db.scalar(select(User.is_deleted).where(User.id == tie[0])):
+        account_id = tie[0]
+    return await serve_account_avatar(request, db, account_id=account_id)
+
+
+@router.post("/people/added-you/{uuid}/hide")
+async def hide_added_you(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, str]:
+    """Hide an account from the caller's *Added you*. Nothing else changes: the account keeps
+    its person connected to the caller, with the caller's picture.
+
+    The account comes back only when its tie is cut and made again. A second hide succeeds and
+    changes nothing. 404 when the account has no person connected to the caller.
+    """
+    tie = await tie_from(db, account_uuid=uuid, user_id=current_user["id"])
+    if tie is None:
+        raise NotFoundException(_NO_TIE)
+    await db.execute(
+        update(Person)
+        .where(Person.id == tie[1], Person.connection_hidden_at.is_(None))
+        .values(connection_hidden_at=datetime.now(UTC))
+    )
+    await db.commit()
+    return {"message": "Hidden"}
+
+
+@router.post("/people/added-you/{uuid}/disconnect")
+async def disconnect_added_you(
+    request: Request,
+    uuid: uuid_pkg.UUID,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_get_db)],
+) -> dict[str, str]:
+    """Cut an account's tie to the caller: its person stays, as a name with no picture and no
+    username, and it is not told. It can connect again through the caller's connect link while
+    that link stands; an import of a file naming the caller does not connect it again.
+
+    404 when the account has no person connected to the caller.
+    """
+    # The record and the cut are one commit, so an import never sees one without the other.
+    tie = await tie_from(db, account_uuid=uuid, user_id=current_user["id"])
+    if tie is None:
+        raise NotFoundException(_NO_TIE)
+    account_id, person_id = tie
+    await db.execute(
+        update(Person)
+        .where(Person.id == person_id)
+        .values(connected_user_id=None, connection_hidden_at=None, updated_at=datetime.now(UTC))
+    )
+    await db.execute(
+        insert(AccountDisconnect)
+        .values(user_id=current_user["id"], disconnected_user_id=account_id, created_at=datetime.now(UTC))
+        .on_conflict_do_nothing(index_elements=[AccountDisconnect.user_id, AccountDisconnect.disconnected_user_id])
+    )
+    await db.commit()
+    return {"message": "Disconnected"}
 
 
 @router.delete("/person/{uuid}")

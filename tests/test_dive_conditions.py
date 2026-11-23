@@ -966,7 +966,9 @@ class TestExportAndImport:
     @staticmethod
     async def _import(async_db: AsyncSession, user_id: int, document: dict[str, Any]) -> None:
         with await load_one(json.dumps(document).encode(), "logbook.divejson") as loaded:
-            plan = await plan_import(async_db, user_id=user_id, loaded=loaded, resolution_ran=True, claim_links=True)
+            plan = await plan_import(
+                async_db, user_id=user_id, loaded=loaded, resolution_ran=True, claim_connections=True
+            )
             await write_import(async_db, user_id=user_id, loaded=loaded, plan=plan)
             await async_db.commit()
 

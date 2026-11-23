@@ -2,7 +2,7 @@ import uuid as uuid_pkg
 from typing import Any
 
 from fastcrud import FastCRUD
-from sqlalchemy import and_, func, inspect, select
+from sqlalchemy import ColumnElement, and_, func, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -15,6 +15,12 @@ CRUDUser = FastCRUD[User, UserCreateInternal, UserUpdate, UserUpdateInternal, Us
 crud_users = CRUDUser(User)
 
 _CROP_PARTS = ("x", "y", "width", "height")
+
+
+def avatar_of(account_id: Any) -> ColumnElement[bool]:
+    """The join onto the avatar row of the account `account_id` names, for a read that
+    carries another account's `avatar_sha256`."""
+    return and_(UserPicture.user_id == account_id, UserPicture.kind == PictureKind.AVATAR.value)
 
 
 async def read_account(db: AsyncSession, *, uuid: uuid_pkg.UUID) -> dict[str, Any] | None:

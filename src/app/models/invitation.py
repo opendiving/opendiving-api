@@ -22,7 +22,7 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     somebody else, which is the point. There is correspondingly **no secret on this row** -
     nothing here to hash.
 
-    The forwardable exception is the member's invite link (`models.invite_link`), whose
+    The forwardable exception is the member's connect link (`models.connect_link`), whose
     token is the secret and lives on that table. A sign-up through it is recorded here as an
     already-accepted row with `from_invite_link` set, so the member's list shows it.
 
@@ -38,7 +38,7 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     A **live** invitation is one whose `revoked_at` is `NULL`; that is the whole predicate
     the gate asks. Revoking stamps the column rather than deleting the row, so the quota -
     counted over rows created in the trailing window - stays an honest bound on how many
-    invitations one account has made, by address or through its invite link.
+    invitations one account has made, by address or through its connect link.
 
     No `expires_at`, and the absence is a decision: a beta invitee slow to act should not
     have to be re-invited within the week. What bounds the address instead is the retention
@@ -52,7 +52,7 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, primary_key=True, init=False)
 
     # The invited address, lowercased on every write (`api.v1.invitations`, the admin batch
-    # route, and an invite-link sign-up's row in `POST /auth/complete`). Indexed because the
+    # route, and a connect-link sign-up's row in `POST /auth/complete`). Indexed because the
     # gate reads by it on every account creation, and the account purge deletes by it.
     email: Mapped[str] = mapped_column(String(EMAIL_MAX_LENGTH), index=True)
 
@@ -84,7 +84,7 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     # the account. It is a fact about a pending invitation only.
     from_invite_request: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
-    # Whether this row records a sign-up through the inviter's invite link rather than an
+    # Whether this row records a sign-up through the inviter's connect link rather than an
     # address they typed. Written true, already accepted, by `POST /auth/complete` and by
     # nothing else. The inviter never typed the address, so `GET /user/invitations` shows
     # them the new member's name instead of it. Unlike the flag above it is a fact about an
