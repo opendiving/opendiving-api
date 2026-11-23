@@ -82,8 +82,10 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     original_filename: Mapped[str] = mapped_column(String(255))
     # The format id the file was read as - `fit`, `suunto_json`, `uddf`, whatever
     # `divejson.read_formats()` names, or `libdivecomputer` for a dive-computer original the
-    # iOS app tagged - or `divejson_import` for a restored file this build does not read. The
-    # key a stored file is re-read by, and what a backfill's `--parser-key` selects on.
+    # iOS app tagged, or one of a Perdix 3 or an Ocean it uploaded untagged, which revision
+    # `36f9496a7b33` labelled from its recording's model - or `divejson_import` for a restored
+    # file this build does not read. The key a stored file is re-read by, and what a
+    # backfill's `--parser-key` selects on.
     parser_key: Mapped[str] = mapped_column(String(32))
     # Where the bytes are, in whichever store `blob_store` is configured for:
     # `dive-files/{sha256[:2]}/{nonce}_{sha256}.zst`, minted by `blob_store.new_key`; a key
@@ -117,6 +119,8 @@ class DiveFile(Base, PublicUUIDMixin, TimestampMixin):
     descriptor_model: Mapped[int | None] = mapped_column(Integer, default=None)
     # The start the phone's walk fell back on where the computer states none - the file's own,
     # never its recording's - which a re-read passes back so the dive reads to the same instant.
+    # On an Ocean original revision `36f9496a7b33` labelled it is the recording's start, written
+    # only where that start is the file's own, and NULL on a merge's recording.
     fallback_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
     @declared_attr.directive

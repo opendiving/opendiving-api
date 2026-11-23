@@ -7145,6 +7145,18 @@ other. `divejson-raw` is a subprocess with no environment, a timeout and an addr
 because libdivecomputer's parsers trust their input and an archive may name any of them. A
 `fitdecode` bump moves no version: `--force --parser-key fit`.
 
+## A phone original stored unlabelled is labelled from its recording's model
+
+Until 2026-11-04 the iOS app uploaded its `.bin` untagged, stored under `divejson_import`. Revision
+`36f9496a7b33` labels each once: a `.bin` of `application/octet-stream` on a recording whose model
+folds to `Perdix 3` or `Suunto Ocean` takes `libdivecomputer` and the descriptor the app writes for
+that model. Those are the computers the app downloads, so there the label is no guess; every other
+file stays unread. The Ocean's fallback start is the recording's, written off a merge's recording
+and where the file's name gives that minute, since a merge's start is one record's. A labelled
+file's fixes are read only where its dive has no position, the first file by id winning. Rejected:
+labelling from any recording's model, a guess in general; downloading those dives again, which costs
+their transfer.
+
 ## An import is its files imported one at a time
 
 An import of many files writes what each would write imported alone, in one order - archive,

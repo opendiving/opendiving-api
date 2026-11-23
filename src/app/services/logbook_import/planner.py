@@ -3495,9 +3495,11 @@ class _Planner:
         #
         # A dive-computer original reads only with the descriptor its tag carries, so one
         # without a usable descriptor is restored as the import's own key too, as an untagged
-        # one is: nothing could ever read it. One with a descriptor keeps its key and tag even
-        # where this process has no `divejson-raw`, as a stored one does: the bytes cannot give
-        # the tag back, and a reader installed later reads it.
+        # one is: nothing reads it. Revision `36f9496a7b33` labelled, from their recordings'
+        # models, the untagged `.bin` files stored before the phone tagged them; one an archive
+        # restores now stays unread. One with a descriptor keeps its key and tag even where this
+        # process has no `divejson-raw`, as a stored one does: the bytes cannot give the tag
+        # back, and a reader installed later reads it.
         parser_key = _producer_entry(stored, "parser_key")
         descriptor = fallback_start = None
         if parser_key == LIBDIVECOMPUTER:
