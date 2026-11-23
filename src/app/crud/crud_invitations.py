@@ -100,13 +100,9 @@ async def hold_invitation_quota(db: AsyncSession, *, user_id: int) -> None:
 
 
 async def invitations_created_since(db: AsyncSession, *, user_id: int, window_days: int) -> int:
-    """How many invitations this account has made in the trailing window, by address or
-    through its connect link.
-
-    **Revoked rows are counted**, which is the point of counting rows rather than live
-    invitations: the quota bounds invitations made, and revoking one after the send does not
-    unsend it. Accepted ones count too, for the same reason - which is how a sign-up through
-    the member's link, recorded as an accepted row, is charged to the same allowance.
+    """How many invitation rows this account holds from the trailing window: each sign-up
+    through its connect link writes an accepted one, and any other row it holds there is
+    counted whatever its stamps, since the quota bounds invitations made rather than live ones.
 
     Counted from the table rather than from the Redis rate limiter, because that limiter
     fails open on a Redis outage by design (`DECISIONS.md` §"Rate limiting fails open on a
@@ -135,9 +131,8 @@ async def accept_invitations(db: AsyncSession, *, email: str, commit: bool = Fal
     invariant the gate rests on, since a committed account beside an unaccepted invitation
     would leave the address admissible a second time.
 
-    Every live row rather than one: two members may have invited the same friend, and both
-    of them should see that the friend arrived. Revoked rows are left alone - whoever
-    revoked did not invite this account in.
+    Every live row rather than one: two inviters may have invited the same friend, and each
+    row then records the account it let in. A revoked row is left alone - it admits nobody.
 
     Hand-written Core rather than `crud_invitations.update(..., allow_multiple=True)`, for
     the reason `claim_authentication_request` records: FastCRUD implements its zero-match
