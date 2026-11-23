@@ -1247,12 +1247,55 @@ async def store_recording_file(
     return StoredRecordingFile(recording_id=recording_id, file_uuid=file_uuid)
 
 
+# The starts a recording's kept files state, by the recording's id, once read: what
+# `holds_another_start` is asked of. `None` for a recording a file of which could not be read.
+type FileStarts = dict[int, list[tuple[datetime, int | None]] | None]
+
+
+async def _file_starts(
+    db: AsyncSession,
+    candidate: dive_recordings.RecordingCandidate,
+    *,
+    held: Mapping[str, Callable[[], bytes]] | None,
+    starts: FileStarts | None,
+) -> list[tuple[datetime, int | None]] | None:
+    if starts is not None and candidate.id in starts:
+        return starts[candidate.id]
+    found: list[tuple[datetime, int | None]] | None
+    try:
+        files = await load_recording_files(db, recording_id=candidate.id, held=held)
+    except blob_store.BlobMissingError:
+        logger.warning("Recording %s has a missing file; matching it on its span alone", candidate.id)
+        found = None
+    else:
+        found = [
+            start
+            for file in files
+            if (
+                start := (
+                    await run_in_conversion_thread(
+                        extract_file,
+                        file.data,
+                        file.parser_key,
+                        descriptor=file.descriptor,
+                        fallback_start=file.fallback_start,
+                    )
+                ).start
+            )
+            is not None
+        ]
+    if starts is not None:
+        starts[candidate.id] = found
+    return found
+
+
 async def is_same_stored_recording(
     db: AsyncSession,
     incoming: dive_recordings.RecordingFacts,
     candidate: dive_recordings.RecordingCandidate,
     *,
     held: Mapping[str, Callable[[], bytes]] | None = None,
+    starts: FileStarts | None = None,
 ) -> bool:
     """`is_same_recording`, with the one question the candidate query cannot answer.
 
@@ -1260,7 +1303,8 @@ async def is_same_stored_recording(
     candidate is a merge's, and a merge whose `merge` profile a re-derivation replaced is
     known only by its kept files' starts (`holds_another_start`). So those, and only those,
     are read here, off the event loop; every other pair is decided off the candidate's row.
-    `held` is logbook import's, whose own files are not in the store until it has finished.
+    `held` is logbook import's, whose own files are not in the store until it has finished,
+    and `starts` the starts it has read already, which `merge_holding` reads too.
 
     A recording whose files cannot be read is held to the span clause: a second dive the
     merge action can fold is the recoverable mistake, half a dive filled into a merge is not.
@@ -1269,28 +1313,8 @@ async def is_same_stored_recording(
         return False
     if not dive_recordings.spans_apart(incoming, candidate.facts):
         return True
-    try:
-        files = await load_recording_files(db, recording_id=candidate.id, held=held)
-    except blob_store.BlobMissingError:
-        logger.warning("Recording %s has a missing file; matching it on its span alone", candidate.id)
-        return False
-    starts = [
-        start
-        for file in files
-        if (
-            start := (
-                await run_in_conversion_thread(
-                    extract_file,
-                    file.data,
-                    file.parser_key,
-                    descriptor=file.descriptor,
-                    fallback_start=file.fallback_start,
-                )
-            ).start
-        )
-        is not None
-    ]
-    return not dive_recordings.holds_another_start(candidate.facts, starts)
+    found = await _file_starts(db, candidate, held=held, starts=starts)
+    return found is not None and not dive_recordings.holds_another_start(candidate.facts, found)
 
 
 async def first_same_recording(
@@ -1299,11 +1323,46 @@ async def first_same_recording(
     candidates: Sequence[dive_recordings.RecordingCandidate],
     *,
     held: Mapping[str, Callable[[], bytes]] | None = None,
+    starts: FileStarts | None = None,
 ) -> dive_recordings.RecordingCandidate | None:
     """The first candidate `is_same_stored_recording` admits, in the order given."""
     for candidate in candidates:
-        if await is_same_stored_recording(db, incoming, candidate, held=held):
+        if await is_same_stored_recording(db, incoming, candidate, held=held, starts=starts):
             return candidate
+    return None
+
+
+async def merge_holding(
+    db: AsyncSession,
+    incoming: dive_recordings.RecordingFacts,
+    candidates: Sequence[dive_recordings.RecordingCandidate],
+    *,
+    held: Mapping[str, Callable[[], bytes]] | None = None,
+    starts: FileStarts | None = None,
+) -> dive_recordings.RecordingCandidate | None:
+    """The first candidate, in the order given, that is a merge's recording holding this record.
+
+    Logbook import's question, asked before the same-recording gate so that a reading of one
+    record of a merged dive belongs to that dive rather than filling it from half of it. Both
+    sides name a device and are one computer as the gates judge it, whatever their counters,
+    and `holds_listed_start` - the dive-computer list's predicate - accepts the incoming start.
+    A merge's recording is known as the gate knows one: by its `merge` profile, or, for the pair
+    the gate reads its files for, by those files' starts. No other file is read.
+    """
+    if incoming.start_time is None or incoming.device.is_empty:
+        return None
+    for candidate in candidates:
+        facts = candidate.facts
+        if facts.device.is_empty or not dive_recordings.same_device(incoming.device, facts.device):
+            continue
+        if not dive_recordings.holds_listed_start(facts, incoming.start_time, incoming.utc_offset_minutes):
+            continue
+        if facts.merged:
+            return candidate
+        if dive_recordings.is_same_recording(incoming, facts) and dive_recordings.spans_apart(incoming, facts):
+            found = await _file_starts(db, candidate, held=held, starts=starts)
+            if found is not None and dive_recordings.holds_another_start(facts, found):
+                return candidate
     return None
 
 

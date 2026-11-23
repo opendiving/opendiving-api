@@ -240,7 +240,10 @@ class _Writer:
         }
 
     async def _write_row(self, collection: str, model: Any, record: PlannedRecord) -> int:
-        """Insert a new row, recording the id its document uuid now names."""
+        """Insert a new row, recording the id its document uuid now names - after the caller's
+        deleted row under that uuid, if there is one, has given it up for one nothing holds."""
+        if record.releases is not None:
+            await self._db.execute(update(model).where(model.id == record.releases).values(uuid=uuid7()))
         result = await self._db.execute(
             # `uuid` is spelled out rather than left to `PublicUUIDMixin`'s
             # `default_factory`: that is a dataclass-level default applied when the ORM
@@ -722,12 +725,10 @@ class _Writer:
         holds are read in attach order - this import's own from the files it holds, the
         account's from the store - and none of this import's is converted twice.
         """
-        stored = await self._store_blob(
-            planned, kind=DIVE_FILE_KEY_KIND, collection="dives", record_uuid=record_uuid, sniff=False
-        )
-        if stored is None:
+        if not await self._place_dive_file(
+            planned, record_uuid=record_uuid, recording_id=recording_id, dive_id=dive_id
+        ):
             return False
-        await self._insert_dive_file(stored, planned, recording_id=recording_id, dive_id=dive_id)
         kept = self._loaded.kept
         if kept is not None:
             self._staged.extractions[kept.sha256] = kept.extraction
@@ -773,19 +774,31 @@ class _Writer:
         digests: list[str] = []
         parser_key: str | None = None
         for planned_file in planned_files:
-            stored = await self._store_blob(
-                planned_file,
-                kind=DIVE_FILE_KEY_KIND,
-                collection="dives",
-                record_uuid=source_uuid,
-                sniff=False,
-            )
-            if stored is None:
+            if not await self._place_dive_file(
+                planned_file, record_uuid=source_uuid, recording_id=recording_id, dive_id=dive_id
+            ):
                 continue
-            await self._insert_dive_file(stored, planned_file, recording_id=recording_id, dive_id=dive_id)
-            digests.append(stored.digest)
+            digests.append(planned_file.sha256)
             parser_key = parser_key or planned_file.parser_key
         return digests, parser_key
+
+    async def _place_dive_file(
+        self, planned: PlannedFile, *, record_uuid: uuid_pkg.UUID, recording_id: int, dive_id: int
+    ) -> bool:
+        """Store one dive-computer file on a recording, or move there the row of the same bytes a
+        deleted dive holds. Returns whether the recording now holds it."""
+        if planned.moves is not None:
+            await self._db.execute(
+                update(DiveFile).where(DiveFile.id == planned.moves).values(recording_id=recording_id, dive_id=dive_id)
+            )
+            return True
+        stored = await self._store_blob(
+            planned, kind=DIVE_FILE_KEY_KIND, collection="dives", record_uuid=record_uuid, sniff=False
+        )
+        if stored is None:
+            return False
+        await self._insert_dive_file(stored, planned, recording_id=recording_id, dive_id=dive_id)
+        return True
 
     async def _insert_dive_file(
         self, stored: _StoredBlob, planned: PlannedFile, *, recording_id: int, dive_id: int
@@ -851,6 +864,9 @@ class _Writer:
                 files, recording_id = await self._attach_recording(match)
                 self._match_files.append(files)
                 attached.append((index, recording_id))
+            elif match.kind == "belong":
+                self.match_ordinals.append(match.ordinal or 0)
+                self._match_files.append(await self._join_recording(match))
             else:
                 self.match_ordinals.append(match.ordinal or 0)
                 self._match_files.append(await self._fill_recording(match))
@@ -932,6 +948,23 @@ class _Writer:
         return int(
             (await self._db.execute(select(func.count()).where(DiveFile.recording_id == recording_id))).scalar_one()
         )
+
+    async def _join_recording(self, match: PlannedRecordingMatch) -> int:
+        """Store on a stored recording the files of a document recording that is already it.
+        Returns how many it stored.
+
+        The archive's and the imported file alike, unread, as an archive's files of a fill are:
+        nothing of the recording or its dive is filled or re-derived from a reading of one
+        record of a merged dive, and the worker reads their fixes as it reads any unread file.
+        """
+        if match.recording_id is None:  # pragma: no cover - a `belong` always names one
+            return 0
+        planned = match.recording
+        files = [*planned.files, *(() if planned.kept is None else (planned.kept,))]
+        digests, _ = await self._write_recording_files(
+            match.source_uuid, recording_id=match.recording_id, dive_id=match.dive_id, planned_files=files
+        )
+        return len(digests)
 
     async def _fill_recording(self, match: PlannedRecordingMatch) -> int:
         """Fill a stored recording from a second reading of it. Returns how many files it stored."""

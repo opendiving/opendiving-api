@@ -242,6 +242,9 @@ async def merge_dives(db: AsyncSession, *, first: DiveReadInternal, second: Dive
     # dive stays where the files give none.
     await derive_dive_fixes(db, dive_id=survivor.id, clear=False)
 
+    # The absorbed row keeps its uuid and names the dive it became part of, which is what an
+    # import and the dive-computer list resolve that uuid to; every read still finds it deleted.
+    await db.execute(update(Dive).where(Dive.id == absorbed.id).values(merged_into_id=survivor.id))
     await crud_dives.delete(db=db, uuid=absorbed.uuid, commit=False)
 
     return MergedDives(survivor_id=survivor.id, survivor_uuid=survivor.uuid, removed_uuid=absorbed.uuid, folded=folded)

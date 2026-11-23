@@ -14,9 +14,10 @@ one new dive race on its uuid.
 **The review is the contract.** It is what the pass reported, stored as JSON and served as stored,
 never validated against the current schemas - so a row written by an earlier build still answers,
 and a later change to anything it embeds owes `REVIEW_SHAPE` a bump and a call on the stored rows.
-The apply holds to it: the document dives whose reviewed dive has gone are skipped, the uuids the
-first pass minted are minted again, and each modified dive is reconciled to its reviewed values
-(`reconcile.py`).
+The apply holds to it where the logbook still holds what it showed: the uuids the first pass minted
+are minted again, and each modified dive still standing is reconciled to its reviewed values
+(`reconcile.py`). A reviewed dive deleted or merged away since is whatever any import makes of its
+files, a new dive or the merged one, and its row says the review did not show it.
 
 **The slot is checked before the body and claimed last**, under a partial unique index, once the
 review is made and the files are in the store: an upload racing another's does that work too and
@@ -68,7 +69,6 @@ from ..gear_stats import recalculate_gear_dive_counts
 from ..user_pictures import RENDITION_CONTENT_TYPE
 from .batch import BatchDive, BatchReport, file_key, import_batch
 from .parts import ImportPart, ImportRequest
-from .planner import DELETED_HERE
 from .reader import BatchRow, LoadedBatch
 from .reconcile import hold_reviewed_values, review_note, unlanded
 
@@ -521,15 +521,6 @@ async def _live_dives(db: AsyncSession, user_id: int, uuids: Sequence[str]) -> s
     return {str(uuid) for uuid in rows.scalars()}
 
 
-def _gone_sources(rows: Sequence[dict[str, Any]], gone: set[str]) -> dict[str, frozenset[uuid_pkg.UUID]]:
-    by_file: dict[str, set[uuid_pkg.UUID]] = {}
-    for row in rows:
-        if row["dive"]["uuid"] in gone:
-            for source in row["sources"]:
-                by_file.setdefault(source["file"], set()).add(uuid_pkg.UUID(source["dive"]))
-    return {file: frozenset(dives) for file, dives in by_file.items()}
-
-
 @dataclass(slots=True)
 class _SecondPass:
     """The apply's rows, found from the review's: by the dive, and else by the document dives
@@ -562,12 +553,23 @@ class _SecondPass:
             )
         if found is not None:
             self.taken.add(id(found))
-        # Each file of a gone dive skips on its own, and they are all this one row.
+        # Each file of a dive the pass skipped skips on its own, and they are all this one row.
         for source in sources:
             skipped = self.by_source.get((source["file"], source["dive"]))
             if skipped is not None and skipped.uuid is None:
                 self.taken.add(id(skipped))
         return found
+
+    def reached(self, sources: list[dict[str, str]]) -> BatchDive | None:
+        """The dive the pass took a row's document dives to, whichever row has taken it."""
+        return next(
+            (
+                row
+                for source in sources
+                if (row := self.by_source.get((source["file"], source["dive"]))) is not None and row.uuid is not None
+            ),
+            None,
+        )
 
 
 def _adopt(dive: dict[str, Any], settled: BatchDive) -> None:
@@ -597,6 +599,15 @@ def _overtaken_note() -> ImportDiveNote:
     return ImportDiveNote(code=ImportNoteCode.REVIEW_OVERTAKEN, kind=None, collection="dives", message=_OVERTAKEN)
 
 
+def _fold(into: dict[str, Any], notes: dict[str, Any], gone: dict[str, Any]) -> None:
+    """One dive has one row: a gone row whose files came to a dive another row reads is that
+    row, holding the files of both, which the review did not show."""
+    into["members"] = [*into["members"], *(member for member in gone["members"] if member not in into["members"])]
+    unshown = _unshown_note().model_dump(mode="json")
+    if unshown not in notes["notes"]:
+        notes["notes"].append(unshown)
+
+
 class _Application:
     """One apply, settling the review's rows against what its pass did."""
 
@@ -620,12 +631,10 @@ class _Application:
             stored = await self._read(dive["uuid"])
         return [review_note(sentence) for sentence in (*held.moved, *unlanded(held.others, stored))]
 
-    async def settle(self, dive: dict[str, Any], settled: BatchDive | None, gone: set[str]) -> list[ImportDiveNote]:
-        """Bring one reviewed row to what the apply did, answering the notes that adds."""
+    async def settle(self, dive: dict[str, Any], settled: BatchDive | None) -> list[ImportDiveNote]:
+        """Bring one reviewed row whose dive still stands to what the apply did, answering the
+        notes that adds."""
         reviewed = ImportDiveOutcome(dive["outcome"])
-        if dive["uuid"] in gone:
-            _skip_row(dive, DELETED_HERE)
-            return []
         if reviewed is ImportDiveOutcome.MODIFIED:
             return await self._reconcile(dive)
         if settled is None:
@@ -639,6 +648,18 @@ class _Application:
             dive["dive"] = await self._read(dive["uuid"])
         overtaken = reviewed is ImportDiveOutcome.NEW and settled.outcome is not ImportDiveOutcome.SKIPPED
         return [_overtaken_note()] if overtaken else []
+
+    async def settle_gone(self, dive: dict[str, Any], settled: BatchDive | None) -> list[ImportDiveNote]:
+        """Bring a reviewed row whose dive was deleted or merged away since to what the apply's
+        pass made of its document dives, as any import would: never held to the values its
+        review showed, which describe a dive that is not there."""
+        if settled is None:
+            _skip_row(dive, _UNREAD_SINCE)
+            return []
+        _adopt(dive, settled)
+        if settled.outcome is ImportDiveOutcome.NEW:
+            dive["dive"] = settled.dive if settled.dive is not None else await self._read(dive["uuid"])
+        return [_unshown_note()]
 
     async def extra_row(self, row: BatchDive, members: list[int]) -> dict[str, Any]:
         """A dive the second pass reached that the review has no row for. `members` are its files
@@ -671,13 +692,10 @@ async def apply_held(
     await lock_account_imports(db, user_id=user_id)
     review = dict(row.review)
     rows = [dict(dive) for dive in review["dives"]]
-    held = [
-        {"dive": dive, "sources": sources}
-        for dive, sources in zip(rows, row.sources, strict=True)
-        if dive["uuid"] is not None and dive["outcome"] != ImportDiveOutcome.NEW.value
+    shown = [
+        dive["uuid"] for dive in rows if dive["uuid"] is not None and dive["outcome"] != ImportDiveOutcome.NEW.value
     ]
-    uuids = [one["dive"]["uuid"] for one in held]
-    gone = set(uuids) - await _live_dives(db, user_id, uuids)
+    gone = set(shown) - await _live_dives(db, user_id, shown)
 
     report = await import_batch(
         db,
@@ -688,23 +706,42 @@ async def apply_held(
         newly_resolved_aphia_ids=frozenset(row.remaps.get("species", ())),
         check_in=check_in,
         portrait=portrait,
-        gone_dives=_gone_sources(held, gone),
         minted=row.remaps.get("files", {}),
     )
 
     owner_uuid = (await db.execute(select(User.uuid).where(User.id == user_id))).scalar_one()
     application = _Application(db, user_id=user_id, owner_uuid=owner_uuid)
     second = _SecondPass.of(report, batch)
-    notes = []
-    for dive, sources in zip(rows, row.sources, strict=True):
-        # A modified dive still standing is found by its uuid alone: a file of its that lands
-        # elsewhere now is a dive of its own, which the extra rows below show.
-        standing = dive["outcome"] == ImportDiveOutcome.MODIFIED.value and dive["uuid"] not in gone
-        settled = second.take(dive["uuid"], [] if standing else sources)
-        added = await application.settle(dive, settled, gone)
+    notes_of: dict[int, dict[str, Any]] = {}
+    folded: set[int] = set()
+    # Which row each of the pass's dives became, by identity, so a gone row whose dive another
+    # row already reads is that row.
+    row_of: dict[int, int] = {}
+    # The rows whose dive still stands first: a gone row comes to whatever dive the pass made of
+    # its files, and may come to one of theirs.
+    for index in sorted(range(len(rows)), key=lambda one: rows[one]["uuid"] in gone):
+        dive, sources = rows[index], row.sources[index]
+        if dive["uuid"] in gone:
+            settled = second.take(dive["uuid"], sources)
+            reached = second.reached(sources) if settled is None else None
+            if reached is not None and id(reached) in row_of:
+                _fold(rows[row_of[id(reached)]], notes_of[row_of[id(reached)]], dive)
+                folded.add(index)
+                continue
+            added = await application.settle_gone(dive, settled)
+        else:
+            # A modified dive still standing is found by its uuid alone: a file of its that lands
+            # elsewhere now is a dive of its own, which the extra rows below show.
+            standing = dive["outcome"] == ImportDiveOutcome.MODIFIED.value
+            settled = second.take(dive["uuid"], [] if standing else sources)
+            added = await application.settle(dive, settled)
+        if settled is not None:
+            row_of[id(settled)] = index
         said = [] if settled is None else settled.notes
         truncated = 0 if settled is None else settled.notes_truncated
-        notes.append(_row_notes(dive, [*said, *added], truncated))
+        notes_of[index] = _row_notes(dive, [*said, *added], truncated)
+    notes = [notes_of[index] for index in range(len(rows)) if index not in folded]
+    rows = [dive for index, dive in enumerate(rows) if index not in folded]
     reviewed_files = {(member["name"], member["sha256"]): index for index, member in enumerate(review["members"])}
     for extra in report.dives:
         if id(extra) not in second.taken:

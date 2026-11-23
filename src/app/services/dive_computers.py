@@ -44,6 +44,7 @@ from .dive_recordings import (
     holds_listed_start,
     make_primary,
 )
+from .merged_dives import resolve_merges
 
 
 class RepeatedSerialError(ValueError):
@@ -258,25 +259,20 @@ async def _recordings_of(db: AsyncSession, *, user_id: int, serial: str) -> list
 async def known_dives(db: AsyncSession, *, user_id: int, serial: str, dives: Sequence[ListedDive]) -> list[KnownDive]:
     """The listed dives the caller's logbook holds, in the order listed and each uuid once.
 
-    A dive is held by a live dive of its uuid, or by a recording of the serial whose start
-    `holds_listed_start` accepts. Three queries for one listed dive or for 2,000: each listed
-    start is compared only with the recordings whose stored start lies within the gates'
-    candidate window of it, widened by the longest merge's span, found by bisecting the
-    recordings' starts.
+    A dive is held by a live dive its uuid resolves to - the dive of that uuid, or the one it
+    was merged into, as an import resolves it - or by a recording of the serial whose start
+    `holds_listed_start` accepts, the predicate an import asks of a merge's recording. Three
+    queries for one listed dive or for 2,000: each listed start is compared only with the
+    recordings whose stored start lies within the gates' candidate window of it, widened by the
+    longest merge's span, found by bisecting the recordings' starts.
     """
     if not dives:
         return []
-    by_uuid = set(
-        (
-            await db.execute(
-                select(Dive.uuid).where(
-                    Dive.user_id == user_id,
-                    Dive.is_deleted.is_(False),
-                    Dive.uuid.in_({dive.uuid for dive in dives}),
-                )
-            )
-        ).scalars()
-    )
+    by_uuid = {
+        uuid: target.uuid
+        for uuid, target in (await resolve_merges(db, user_id=user_id, uuids={dive.uuid for dive in dives})).items()
+        if not target.is_deleted
+    }
     stored = await _recordings_of(db, user_id=user_id, serial=serial)
     starts = [one.start for one in stored]
     longest_merge = timedelta(
@@ -291,7 +287,7 @@ async def known_dives(db: AsyncSession, *, user_id: int, serial: str, dives: Seq
     for dive in dives:
         if dive.uuid in seen:
             continue
-        holder = dive.uuid if dive.uuid in by_uuid else _holder(dive, stored, starts, longest_merge)
+        holder = by_uuid.get(dive.uuid) or _holder(dive, stored, starts, longest_merge)
         if holder is not None:
             seen.add(dive.uuid)
             known.append(KnownDive(uuid=dive.uuid, dive_uuid=holder))

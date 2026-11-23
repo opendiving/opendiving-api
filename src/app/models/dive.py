@@ -107,6 +107,14 @@ class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     contact_id: Mapped[int | None] = mapped_column(
         ForeignKey("contact.id", ondelete="SET NULL"), default=None, index=True
     )
+    # The dive this one was merged into, on the merged-away dive's own soft-deleted row: what
+    # an import and the dive-computer list resolve its uuid to, so a file of either record of
+    # a merged dive belongs to the dive it became. Every read still treats the row as deleted.
+    # Indexed because the account purge deletes every dive at once, and each deletion checks
+    # this reference.
+    merged_into_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dive.id", ondelete="SET NULL"), default=None, index=True
+    )
 
     # Where the diver got in and where they got out, in decimal degrees. Written by the
     # import path only - a dive computer's own satellite fixes, which the reader reduces to
