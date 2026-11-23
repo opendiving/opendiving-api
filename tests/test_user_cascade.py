@@ -35,6 +35,7 @@ from src.app.models.auth_audit_event import AuthAuditEvent
 from src.app.models.certification import Certification
 from src.app.models.certification_file import CertificationFile
 from src.app.models.checkin_link import CheckinLink
+from src.app.models.connect_link import ConnectLink
 from src.app.models.contact import Contact
 from src.app.models.course import Course
 from src.app.models.course_person import CoursePerson
@@ -52,7 +53,6 @@ from src.app.models.gear_service_record import GearServiceRecord
 from src.app.models.gear_service_schedule import GearServiceSchedule
 from src.app.models.gear_set import GearSet
 from src.app.models.gear_set_item import GearSetItem
-from src.app.models.invite_link import InviteLink
 from src.app.models.logbook_import import LogbookImport, LogbookImportFile
 from src.app.models.monthly_active_account import MonthlyActiveAccount
 from src.app.models.person import Person
@@ -95,8 +95,8 @@ class TestEveryForeignKeyIntoUserCascades:
     the bug this change fixes, and would fail nothing else - the purge would raise on the
     first account that owned one of its rows, in a cron job, in production.
 
-    Two keys are allowed another rule, by name: `person.linked_user_id` names *another*
-    account, whose purge unlinks this diver's person rather than deleting it; and
+    Two keys are allowed another rule, by name: `person.connected_user_id` names *another*
+    account, whose purge disconnects this diver's person rather than deleting it; and
     `dive_site_history.reviewer_id` names the reviewer who accepted a change to a Commons
     record, whose purge leaves the entry naming nobody.
     """
@@ -110,7 +110,7 @@ class TestEveryForeignKeyIntoUserCascades:
             if fk.column.table.name == "user" and fk.ondelete != "CASCADE"
         }
 
-        assert without_cascade == {"person.linked_user_id": "SET NULL", "dive_site_history.reviewer_id": "SET NULL"}
+        assert without_cascade == {"person.connected_user_id": "SET NULL", "dive_site_history.reviewer_id": "SET NULL"}
 
 
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
@@ -187,7 +187,7 @@ class TestDeletingAUserTakesEverythingWithIt:
                     max_depth=18.0,
                     last_dive_on=None,
                 ),
-                InviteLink(user_id=diver.id, token=uuid7().hex),
+                ConnectLink(user_id=diver.id, token=uuid7().hex),
                 MonthlyActiveAccount(month=date(2026, 11, 1), user_id=diver.id),
                 # Declined, the status that bars its file for everyone until the purge takes it.
                 SpeciesPhotoProposal(
@@ -271,7 +271,7 @@ class TestDeletingAUserTakesEverythingWithIt:
             GearServiceRecord,
             GearServiceSchedule,
             GearSet,
-            InviteLink,
+            ConnectLink,
             LogbookImport,
             MonthlyActiveAccount,
             Person,
@@ -318,7 +318,7 @@ class TestAPersonLinkedToAPurgedAccountStays:
     def test_the_person_stays_unlinked(self, db: Session) -> None:
         diver = create_user(db)
         friend = create_user(db)
-        person = create_person(db, diver, linked_to=friend)
+        person = create_person(db, diver, connected_to=friend)
         person_id, friend_id = person.id, friend.id
 
         db.execute(text('DELETE FROM "user" WHERE id = :id'), {"id": friend_id})
@@ -327,4 +327,4 @@ class TestAPersonLinkedToAPurgedAccountStays:
 
         kept = db.get(Person, person_id)
         assert kept is not None
-        assert kept.linked_user_id is None
+        assert kept.connected_user_id is None

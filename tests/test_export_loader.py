@@ -193,13 +193,13 @@ class TestScoping:
 
 class TestPeople:
     @pytest.mark.asyncio
-    async def test_the_callers_people_their_references_and_a_linked_accounts_id(
+    async def test_the_callers_people_their_references_and_a_connected_accounts_id(
         self, db: Session, owner: User, stranger: User
     ):
-        """A linked person carries the one thing of the other account the export writes -
+        """A connected person carries the one thing of the other account the export writes -
         its public id - and a live dive's references come in the diver's order, roles and
         all. The stranger's person, and a soft-deleted dive's references, stay out."""
-        linked = create_person(db, owner, name="Alex", linked_to=stranger)
+        linked = create_person(db, owner, name="Alex", connected_to=stranger)
         plain = create_person(db, owner, name="Sam")
         create_person(db, stranger, name="Theirs")
         live, hidden = _dive(db, owner, number=1), _dive(db, owner, number=2, deleted=True)
@@ -215,7 +215,7 @@ class TestPeople:
         bundle = await _load(owner.id)
 
         assert [person.name for person in bundle.people] == ["Alex", "Sam"]
-        assert bundle.linked_uuid_by_person == {linked.id: stranger.uuid}
+        assert bundle.connected_uuid_by_person == {linked.id: stranger.uuid}
         assert bundle.person_ids_by_dive == {live.id: [(plain.id, "buddy"), (linked.id, None)]}
         assert [(ref.person.name, ref.role) for ref in bundle.people_for(live)] == [("Sam", "buddy"), ("Alex", None)]
 

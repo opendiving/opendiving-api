@@ -17,7 +17,7 @@ class AuthEventType(StrEnum):
     """Every auth event this app records, and the rule that decides membership.
 
     **The rule, which outranks the list.** A site emits an event when it (a) commits a row
-    to an auth table, (b) mints a session, onboarding, restore or invite-link token or an
+    to an auth table, (b) mints a session, onboarding, restore or connect-link token or an
     API key, (c) revokes a credential at its owner's request, (d) ends, revokes or detects
     the replay of a session at the caller's request, or (e) logs a `WARNING` for a failure
     the code itself deems rare and meaningful - which is the class the write-based criteria
@@ -36,7 +36,7 @@ class AuthEventType(StrEnum):
     row created inside `POST /auth/complete`'s transaction (part of account creation, and a
     second row would record one act twice); an invitation being accepted (same commit as
     the account creation that accepts it), which covers the accepted row a sign-up through
-    a member's invite link writes for that member, and an invitation being revoked (not a
+    a member's connect link writes for that member, and an invitation being revoked (not a
     credential, and the row records its own `revoked_at`); the registration gate refusing
     an uninvited address (neither a write, nor rare, nor a WARNING - it is the ordinary
     answer on a closed instance); failed passkey registrations and assertions
@@ -67,13 +67,13 @@ class AuthEventType(StrEnum):
     # Nor does revocation - an invitation is not a credential, so criterion (c) does not
     # reach it, and the row keeps its own `revoked_at`.
     INVITATION_CREATED = "invitation_created"
-    # Criterion (b): a member's invite-link token, made or reset - one event either way, since
+    # Criterion (b): a member's connect-link token, made or reset - one event either way, since
     # a reset is a fresh token. The check-in link mints a token too and emits nothing; the
     # rule names this kind and not that one.
-    INVITE_LINK_CREATED = "invite_link_created"
+    CONNECT_LINK_CREATED = "connect_link_created"
     # Criterion (c): the link is a credential, as an invitation is not, and removing it is
     # its owner revoking it.
-    INVITE_LINK_REMOVED = "invite_link_removed"
+    CONNECT_LINK_REMOVED = "connect_link_removed"
     ACCOUNT_RESTORED = "account_restored"
     PROVIDER_LINKED = "provider_linked"
     PASSKEY_ADDED = "passkey_added"

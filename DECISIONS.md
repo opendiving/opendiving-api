@@ -411,9 +411,12 @@ non-deleted row. "My account" and "someone else's public profile" are distinct, 
 endpoints — full data including `email` from the token versus a limited public subset keyed by
 `{uuid}` — rather than one `/user/{uuid}` route gated by a runtime `if current_user["uuid"] != uuid`
 check a new route can forget. There is no `GET /user/{uuid}`, no `GET /users` and no `read_users`.
-Another user's data reaches a caller only as a check-in link's card for its token holder, and as the
-account a diver linked a person to: its current username, and its public id in the diver's own
-export. Public dive stats would be `GET /profile/{uuid}/dive-stats`.
+Another user's data reaches a caller only as a check-in link's card for its token holder; as a
+connect link's owner, by name and picture to its token holder and by username besides to one with a
+session; as the account a diver's person is connected to, by its current username and picture and by
+its public id in the diver's own export; and as the rows under *Added you*, the name, username and
+picture of each account that has the caller in its people. Public dive stats would be
+`GET /profile/{uuid}/dive-stats`.
 
 ## `CORSMiddleware` is gated on `FrontendSettings`; without it every preflight is a 405
 
@@ -4230,8 +4233,8 @@ already collapses both to `valid=false`.
 ## Every foreign key into `user.id` declares `ondelete="CASCADE"` but two
 
 Every foreign key into `user.id` declares `ondelete="CASCADE"` but two, which are `SET NULL`.
-`person.linked_user_id` names *another* account, whose purge must unlink this diver's person rather
-than delete it. `dive_site_history.reviewer_id` names the reviewer who accepted a change to a
+`person.connected_user_id` names *another* account, whose purge must disconnect this diver's person
+rather than delete it. `dive_site_history.reviewer_id` names the reviewer who accepted a change to a
 Commons record, whose purge must leave the entry naming nobody rather than delete it. `DELETE /user`
 soft-deletes (`SoftDeleteMixin`); the raw `DELETE FROM "user"` is the purge's. Two traps in a
 revision that changes one: autogenerate and `alembic check` do not detect an `ondelete` change, so
@@ -5283,7 +5286,7 @@ exposes these.
 ## Auth audit: Membership is a rule, and the exclusions are half of it
 
 A site emits an event when it (a) commits a row to an auth table, (b) mints a session, onboarding,
-restore or invite-link token or an API key, (c) revokes a credential at its owner's request, (d)
+restore or connect-link token or an API key, (c) revokes a credential at its owner's request, (d)
 ends, revokes or detects the replay of a session at the caller's request, or (e) logs a `WARNING`
 for a failure the code deems rare and meaningful — its own criterion, and how the passkey counter
 regression qualifies.
@@ -5580,7 +5583,7 @@ nothing new; Plausible and Ghost bind the same way. Losing forwardability is the
 beta keyed on addresses keeps "who was invited" coupled to "who signed up". No per-invitation
 expiry; the 90-day retention sweep bounds the address. Revocation stamps `revoked_at` rather than
 deleting, so the quota stays a bound on invitations made. The one forwardable kind is a member's
-invite link, below, which a sign-up through records here as an accepted row.
+connect link, below, which a sign-up through records here as an accepted row.
 
 ## A check-in link is a bearer token, where a typed invitation is not
 
@@ -5593,13 +5596,13 @@ deleted-diver tokens get one 404, carrying `private, no-store` like every respon
 limit: the token has 256 bits. *Rejected:* a week's life, and redacting the policy number and the
 emergency contact's phone, the two things a desk asks for.
 
-## An invite link is a bearer token stored in clear, where a check-in link is hashed
+## A connect link is a bearer token stored in clear, where a check-in link is hashed
 
-`invite_link.token` is kept readable because the Invitations card shows the same link and QR code on
-every visit, and a hash cannot be shown again. What the token admits is bounded instead: a stranger
-to an invite-only instance, counted as the member's invitation and charged to their quota, until the
-member's Reset replaces it in place or Remove deletes it. Anyone who can read the table can already
-read every member's address, which is worse. 128 bits from `secrets.token_hex(16)`, so it fits
+`connect_link.token` is kept readable because People shows the same link and QR code on every visit,
+and a hash cannot be shown again. Its holder sees the member's name and picture, may connect to the
+member, and on an invite-only instance may create an account charged to the member's quota; on an
+open instance anyone may register anyway, so it adds the tie alone, which Disconnect cuts. Reset
+replaces the token in place and Remove deletes it. 128 bits from `secrets.token_hex(16)`, so it fits
 `via`'s slug pattern and column. *Rejected:* hash-at-rest with show-once, right for a link that
 lives a day and wrong for a standing one; a token derived by HMAC from the account and `SECRET_KEY`,
 which ties every link to a key a self-hoster may rotate.
@@ -5656,7 +5659,7 @@ inviter created in the trailing window, revoked and accepted included; Redis is 
 rate limiter fails open on a Redis outage and its counters are flushed locally — right for pacing a
 sign-in form, wrong for a bound on who enters a closed instance. Revoked rows count so the quota
 bounds invitations made rather than live ones; a revoke cannot refill the bucket. A sign-up through
-the member's invite link writes an accepted row, so it draws on the same allowance. A rate rather
+the member's connect link writes an accepted row, so it draws on the same allowance. A rate rather
 than a lifetime allotment (Lemmy's `max_invites_per_user_allowed` shape rejected): five today, five
 more tomorrow. Superusers are exempt structurally — the count is never taken for them.
 
@@ -7074,17 +7077,17 @@ trip family's single reads are keyed under the user like its list, so one per-us
 trips whose parts named the contact. A rename reaches no host's cache: reads carry the uuid, never a
 summary.
 
-## Linking a person confirms an account exists, and nothing else
+## A connection shows each side the other, and only consent or an import makes one
 
-`POST`/`PATCH /person` link a person to the account with exactly that username and store the
-account, so the link survives a rename and a purge clears it. It answers *found* for exactly what
-the availability check calls taken, a deleted account in its grace period included, so comparing the
-two reveals nothing new; it is throttled like choosing a username
-(`PERSON_LINK_RATE_LIMIT_PER_USER`), counting only a change. The linker then sees that account's
-current username, and their own export carries its public id, a uuid7 that dates its creation -
-which that account's export carries anyway. An import links a person by that id, under the same
-limit, and reports the current username, which the file did not carry. *Rejected:* linking by email,
-a second oracle over guessable addresses.
+A person write makes a tie (`person.connected_user_id`) only from what the account handed over: its
+live connect link, or its own tie to the caller, which is adding back. Neither answers a guess - 128
+bits, and an id needs the other side's tie - so nothing throttles them. Reads join the account's
+username and picture live, so a rename, a new picture or a deletion request shows at once. An import
+connects by public id, which travels in every export naming the account, so it can make a tie nobody
+offered: it is throttled (`PERSON_CONNECT_RATE_LIMIT_PER_USER`) and reported, the account sees the
+importer under *Added you*, and its Disconnect is kept (`account_disconnect`) so a later import does
+not connect again, the importer reading an unknown id's note. *Rejected:* connecting by username,
+which showed a face nobody offered.
 
 ## Dive-computer files are stored as zstd frames, and the key says so
 
@@ -7514,15 +7517,14 @@ owing a row on every path that creates a recording.
 
 ## Which of a computer's dives the logbook holds is the server's answer
 
-`POST /dive-computers/known-dives` takes a computer's serial and the dives it lists, each a uuid and
-a start, and names those the caller's logbook holds: a live dive that uuid resolves to, itself or
-the dive it was merged into, or a recording of the serial, folded, starting within the
-same-recording tolerance on the gates' clock, or a merge's recording whose samples span the start. A
-wrong "held" hides a dive from the diver who would download it, so the rule has one home,
-`holds_listed_start`, which an import asks of a merge's recording too: a dive the list holds is one
-whose download adds none. Rejected: listing a computer's recordings for the client to compare, which
-writes the clock rule a second time; the derived uuid alone, which misses a recording that joined a
-dive from another source. A `POST` for a body no query string carries; it writes nothing.
+`POST /dive-computers/known-dives` names which of the dives a computer lists the caller's logbook
+holds: by the uuid, through merges, or by a recording of the serial that `holds_listed_start`
+accepts, the predicate an import asks of a merge's recording too, so a wrong "held", which hides a
+dive from its diver, has one home. Each row also says whether the holding recording keeps the
+computer's `libdivecomputer` original, a merge's only by a file whose fallback start matches the
+listed one, since that download can still add it. It errs toward false: a wrong true leaves an
+original off for good, a wrong false costs one transfer. Rejected: listing recordings for the client
+to compare, writing the clock rule twice; leaving such a dive out, which changes what "held" means.
 
 ## An experimental feature's name is checked for its form, never against a list
 

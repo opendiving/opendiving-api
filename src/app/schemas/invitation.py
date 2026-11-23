@@ -5,7 +5,7 @@ for server-side lookups - including the ownership check `fetch_owned_or_raise` r
 `DELETE /user/invitation/{uuid}`, which needs the `user_id` its `OwnedRow` protocol asks
 for - and `InvitationRead` is what an inviter sees. There is no secret to withhold on the
 way out: a typed invitation is an allow-list entry, not a token (see `models/invitation.py`),
-and the one invitation secret there is, a member's invite-link token, lives on its own table
+and the one invitation secret there is, a member's connect-link token, lives on its own table
 and is in none of these.
 """
 

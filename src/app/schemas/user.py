@@ -111,7 +111,7 @@ class UserCreateInternal(UserBase):
     writes rows, and bypasses the registration gate (`services.registration_gate`) by
     construction. On an `invite`-mode instance the
     completion route creates a row only for an address that holds a live invitation, for one
-    that arrived by a member's live invite link, or for the very first account on an empty
+    that arrived by a member's live connect link, or for the very first account on an empty
     instance - which is `UserBootstrapCreateInternal` below rather than this schema.
     """
 

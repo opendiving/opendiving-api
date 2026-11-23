@@ -1,14 +1,17 @@
-"""Invitations into a closed instance: the member's invitation routes and their invite link,
-and the stranger's two - asking for an invitation, and resolving a member's link.
+"""Invitations into a closed instance: the member's invitation routes, the stranger's request
+for an invitation, and the invite-link routes held for the clients that still call them.
 
 **In `open` mode the feature is absent rather than idle.** Every route here answers `404`,
 which is what lets the web's settings card remove itself without knowing the mode - the
 same self-hiding the sessions and passkeys cards already do on a 404 from their own list
 route. Keeping invitations as an "invite a friend" feature on an open instance would be
-more states to explain on the privacy page for something nobody has asked for.
+more states to explain on the privacy page for something nobody has asked for. The connect
+link, which is not an invitation feature, exists in every mode, in `api.v1.connect_links`.
 
-**The invite-link resolver takes no rate limiter**: its token has 128 bits, which no
-guessing reaches, the check-in routes' argument.
+**The invite-link routes are held** until the previous web build's Invitations card and join
+page, and the phone's previous build, have left them: they answer as they did, open mode's
+404 included, over the connect link's rows, so the link they show is the member's connect
+link. They take no rate limiter, for the connect link's reason.
 
 The operator's own routes are next door in `api.v1.admin`, behind `get_current_superuser`.
 The gate that reads these rows is `services.registration_gate`.
@@ -55,8 +58,8 @@ from ...schemas.invitation import (
 )
 from ...schemas.invite_link import InviteLinkInviter, InviteLinkRead, InviteLinkRemovedResponse
 from ...schemas.invite_request import InviteRequestAccepted, InviteRequestSubmission
+from ...services.connect_links import live_connect_link, read_connect_link, remove_connect_link, replace_connect_link
 from ...services.email_service import send_invitation_email
-from ...services.invite_links import live_invite_link, read_invite_link, remove_invite_link, replace_invite_link
 from ...services.registration_gate import registration_is_invite_only
 
 router = APIRouter(tags=["invitations"])
@@ -139,7 +142,7 @@ async def read_invitations(
 ) -> dict:
     """The caller's own invitations, newest first.
 
-    A row somebody created by following the caller's invite link carries no `email`, and
+    A row somebody created by following the caller's connect link carries no `email`, and
     names that person's account by its current name in `member_name` instead. Out-of-range
     pagination is clamped. 404 on an instance in `open` registration mode.
     """
@@ -190,7 +193,7 @@ async def create_invitation(
       else may have invited them too; each inviter sees their own row.
     - **429** - the attempt throttle, or your quota: the instance's cap on invitations per
       window, counted over the ones you made in the trailing window, revoked ones included,
-      whether by address or by somebody signing up through your invite link. Superusers are
+      whether by address or by somebody signing up through your connect link. Superusers are
       exempt from the quota, not from the throttle.
     - **422** - a malformed address.
 
@@ -245,7 +248,7 @@ async def create_invitation(
             window = _window_phrase(settings.INVITATIONS_WINDOW_DAYS)
             raise RateLimitException(
                 f"You can make {settings.INVITATIONS_PER_USER} invitations {window}, by address or through "
-                "your invite link. Try again later."
+                "your connect link. Try again later."
             )
 
     created = await crud_invitations.create(
@@ -321,24 +324,23 @@ async def revoke_invitation(
     return InvitationRevokedResponse()
 
 
+# Held until every client has left it, as are the next three: `GET /user/connect-link` and
+# its siblings are what replace them.
 @router.get("/user/invite-link", response_model=InviteLinkRead, dependencies=[Depends(refuse_api_keys)])
 async def read_own_invite_link(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> InviteLinkRead:
-    """The caller's invite link, or 404 when they have none.
+    """The caller's invite link, or 404 when they have none. Superseded by
+    `GET /user/connect-link`, whose link this is.
 
     Needs a signed-in session; an API key is refused with a 403. The `token` is in the
     answer every time, so a client can show the same link on every visit. The 404 is also
     what an instance in `open` registration mode answers.
     """
-    # The token is stored in clear so that it can be re-read, unlike a check-in link's: the
-    # Invitations card shows the same link and QR code on every visit. The 404 for open mode
-    # is on purpose - the card reads "no link yet" from it only once the invitations list has
-    # said the feature is here.
     _require_invite_mode()
 
-    link = await read_invite_link(db, user_id=current_user["id"])
+    link = await read_connect_link(db, user_id=current_user["id"])
     if link is None:
         raise NotFoundException("No invite link")
     return InviteLinkRead(token=link.token, created_at=link.created_at)
@@ -352,21 +354,20 @@ async def make_invite_link(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> InviteLinkRead:
-    """Make the caller's invite link, or reset it: a fresh token either way.
+    """Make the caller's invite link, or reset it: a fresh token either way. Superseded by
+    `POST /user/connect-link`, whose link this is.
 
-    Whoever follows `/join?via=<token>` may create an account here, counted as the caller's
-    invitation and charged to their quota. A reset replaces the token in place, so the
-    previous one stops resolving and stops admitting at once. Needs a signed-in session; an
-    API key is refused with a 403. 404 on an instance in `open` registration mode.
+    Whoever follows the link may create an account here, counted as the caller's invitation
+    and charged to their quota. A reset replaces the token in place, so the previous one
+    stops resolving and stops admitting at once. Needs a signed-in session; an API key is
+    refused with a 403. 404 on an instance in `open` registration mode.
     """
-    # No rate limiter: minting is authenticated, and a member pressing it repeatedly churns
-    # one row of their own.
     _require_invite_mode()
 
-    token, created_at = await replace_invite_link(db, user_id=current_user["id"])
+    token, created_at = await replace_connect_link(db, user_id=current_user["id"])
     await record_auth_event(
         db,
-        event_type=AuthEventType.INVITE_LINK_CREATED,
+        event_type=AuthEventType.CONNECT_LINK_CREATED,
         context=RequestContext.from_request(request),
         user_id=current_user["id"],
         commit=False,
@@ -381,7 +382,8 @@ async def erase_invite_link(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> InviteLinkRemovedResponse:
-    """Remove the caller's invite link: it stops resolving and admitting at once.
+    """Remove the caller's invite link: it stops resolving and admitting at once. Superseded
+    by `DELETE /user/connect-link`, whose link this is.
 
     Succeeds with nothing to remove too. The invitations it already produced stay - each is
     an account the caller let in. Needs a signed-in session; an API key is refused with a
@@ -389,10 +391,10 @@ async def erase_invite_link(
     """
     _require_invite_mode()
 
-    if await remove_invite_link(db, user_id=current_user["id"]):
+    if await remove_connect_link(db, user_id=current_user["id"]):
         await record_auth_event(
             db,
-            event_type=AuthEventType.INVITE_LINK_REMOVED,
+            event_type=AuthEventType.CONNECT_LINK_REMOVED,
             context=RequestContext.from_request(request),
             user_id=current_user["id"],
             commit=False,
@@ -414,7 +416,7 @@ async def resolve_invite_link(
     token: str, response: Response, db: Annotated[AsyncSession, Depends(async_get_db)]
 ) -> InviteLinkInviter | JSONResponse:
     """Whose invite link this is: the inviter's name, which the join page shows before its
-    sign-in form.
+    sign-in form. Superseded by `GET /connect-link/{token}`.
 
     Anonymous; the token is the credential. Every refusal - an unknown token, a reset or
     removed one, an owner who has asked for their account to be deleted, an instance in
@@ -424,7 +426,7 @@ async def resolve_invite_link(
     """
     if not registration_is_invite_only():
         return _no_such_invite_link()
-    link = await live_invite_link(db, token=token)
+    link = await live_connect_link(db, token=token)
     if link is None:
         return _no_such_invite_link()
     response.headers["Cache-Control"] = "private, no-store"

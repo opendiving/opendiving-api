@@ -109,7 +109,8 @@ class DiveComputerListing(BaseModel):
 
 
 class KnownDive(BaseModel):
-    """A listed dive the caller's logbook already holds, and the dive that holds it."""
+    """A listed dive the caller's logbook holds, the dive that holds it, and whether that dive
+    keeps the computer's original download of it - the one thing a download of it can still add."""
 
     uuid: Annotated[
         uuid_pkg.UUID,
@@ -118,4 +119,12 @@ class KnownDive(BaseModel):
     dive_uuid: Annotated[
         uuid_pkg.UUID,
         Field(examples=["0193f0e1-2b3c-7d4e-8f50-6a7b8c9d0e1f"], description="The caller's dive that holds it"),
+    ]
+    has_original: Annotated[
+        bool,
+        Field(
+            examples=[False],
+            description="Whether the dive that holds it keeps this computer's original download of the listed dive. "
+            "False wherever that cannot be told without reading a stored file.",
+        ),
     ]

@@ -390,6 +390,8 @@ FETCH_OWNED_ROUTES = [
         OwnedRoute(method, "/api/v1/person/{uuid}", "src.app.api.v1.people:crud_people", "Person not found", extra)
         for method, extra in _CRUD_METHODS
     ),
+    OwnedRoute("POST", "/api/v1/person/{uuid}/disconnect", "src.app.api.v1.people:crud_people", "Person not found"),
+    OwnedRoute("GET", "/api/v1/person/{uuid}/avatar", "src.app.api.v1.people:crud_people", "Person not found"),
     # No `GET`: a tag is read through `GET /tags` and on the dives that carry it.
     *(
         OwnedRoute(method, "/api/v1/tag/{uuid}", "src.app.api.v1.tags:crud_tags", "Tag not found", extra)
@@ -563,6 +565,18 @@ RESOLVER_OWNED_ROUTES = [
         "/api/v1/species-photo-proposal/{uuid}",
         "src.app.services.species_photo_proposals:locked_proposal",
         "Proposal not found",
+    ),
+    # The uuid is another account's, and the tie the caller is asked about is that account's
+    # person connected to the caller: `tie_from` reads it scoped to the caller's id.
+    OwnedRoute("GET", "/api/v1/people/added-you/{uuid}/avatar", "src.app.api.v1.people:tie_from", "Not found"),
+    *(
+        OwnedRoute(
+            "POST",
+            f"/api/v1/people/added-you/{{uuid}}/{action}",
+            "src.app.api.v1.people:tie_from",
+            "No account with that id has you in its people",
+        )
+        for action in ("hide", "disconnect")
     ),
 ]
 

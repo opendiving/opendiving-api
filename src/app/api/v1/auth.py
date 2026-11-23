@@ -79,7 +79,7 @@ from ...crud.crud_authentication_requests import (
     spend_exhausted_code,
 )
 from ...crud.crud_daily_totals import count_account_created
-from ...crud.crud_invitations import accept_invitations, account_exists_for, record_invite_link_sign_up
+from ...crud.crud_invitations import accept_invitations, account_exists_for, record_connect_link_sign_up
 from ...crud.crud_invite_requests import delete_invite_requests
 from ...crud.crud_user_sessions import live_session_for, revoke_session
 from ...crud.crud_users import account_for_email, crud_users
@@ -119,6 +119,7 @@ from ...services.default_tags import seed_default_tags
 from ...services.dive_form_presets import seed_default_presets
 from ...services.email_service import send_magic_link_email
 from ...services.passkey_service import finish_sign_in, start_sign_in
+from ...services.person_connections import connect_to_the_link_owner
 from ...services.refresh_grace import held_successor, hold_successor
 from ...services.registration_gate import admit_or_refuse, refuse_a_stale_join_link, refuse_uninvited
 from ...services.user_pictures import import_google_avatar, seed_google_avatar
@@ -193,7 +194,7 @@ async def _start_onboarding_or_sign_in(
     outcome, which mints no tokens and signs nobody in. That is why `AuthenticatedUser`
     carries the provider: it is the one thing this site cannot work out for itself.
 
-    `via` is the join-channel slug or the member's invite-link token the identity arrived
+    `via` is the join-channel slug or the member's connect-link token the identity arrived
     through, if any. It matters only on the onboarding branch, where it can admit an
     uninvited address and is signed into the onboarding token for the completion to count;
     an existing account signing in through either kind of link is simply signed in.
@@ -302,11 +303,11 @@ async def request_email_link(
     `POST /auth/email/verify-code` takes alongside the code; it is a fresh random value
     either way. The link is redeemed at `POST /auth/email/verify` and needs no id.
 
-    `via` is the join-channel slug or invite-link token of the page the form was on, and is
+    `via` is the join-channel slug or connect-link token of the page the form was on, and is
     carried through to account creation. On an invite-only instance a `via` naming neither a
     live channel nor a member's current link is refused (403) before anything is sent, which
     says whether a link is live and nothing about the address or any account; an open
-    instance drops it.
+    instance drops one that names neither.
     """
     # `request_id` is handed back for one reason: it is the only way to reach
     # `POST /auth/email/verify-code`, which has no email-keyed lookup at all. That keeps the
@@ -468,7 +469,7 @@ async def verify_email_link(
     the outcome is `deletion_pending` or a refusal.
 
     403 on an invite-only instance when the address has no account, no live invitation and
-    arrived through no live join or invite link; nothing is created.
+    arrived through no live join or connect link; nothing is created.
     """
     # Single-use even though resolving the identity is a pure lookup: the sign-in branch mints
     # a fresh refresh cookie good for the whole idle window, so anyone who read the mail after
@@ -627,7 +628,7 @@ async def auth_with_google(
     holds the address where it was not linked yet; `onboarding_required`, with an
     `onboarding_token` for `POST /auth/complete`; or `deletion_pending`, with a
     `restore_token` for `POST /auth/restore` and nothing changed. `via` is the join-channel
-    slug or invite-link token the attempt started from, and 403 on an invite-only instance
+    slug or connect-link token the attempt started from, and 403 on an invite-only instance
     is as for the email flow.
 
     400 when `redirect_uri` is not the callback this instance expects; `detail` names the
@@ -769,14 +770,17 @@ async def complete_profile(
     an account already exists for the address.
 
     On an invite-only instance, 403 for an address with no live invitation unless the token
-    carries a live join-channel slug or a member's live invite link, and nothing is created;
+    carries a live join-channel slug or a member's live connect link, and nothing is created;
     where a member's link admitted the address, that member's invitations list the new
     account. The first account on an empty instance is admitted in either mode and is a
     superuser. Any pending invite request for the address is dropped.
 
     The account starts with the default dive-form presets and tags, and with the picture of
     a Google identity as its avatar, fetched once at creation and never refreshed from
-    Google afterwards.
+    Google afterwards. Where the token carries a member's live connect link, in either mode
+    and whatever admitted the address, it starts with one person too: that member, named as
+    they are and connected to their account, who then sees the new account under their
+    *Added you*.
     """
     # The only place *self-service* registration creates a `User` row - the admin panel's
     # `User` view also writes one and is not registration, and bypasses the gate by
@@ -860,14 +864,17 @@ async def complete_profile(
         # The default tags, on the same terms. The admin panel seeds none, and has no
         # restore to reach for: a tag is typed into being wherever one is used.
         await seed_default_tags(db, user_id=created_user.id)
-        if admission.invite_link_owner_id is not None:
+        if admission.connect_link_owner_id is not None:
             # Before `accept_invitations`, so a live typed invitation from the same member is
             # the row that statement stamps rather than one this writes beside it. After the
             # `User` row is built, so the row's `accepted_at` is never earlier than the
             # account's `created_at`, which is what the listing's name lookup is bounded by.
-            await record_invite_link_sign_up(
-                db, email=token_data.email.lower(), inviter_id=admission.invite_link_owner_id
+            await record_connect_link_sign_up(
+                db, email=token_data.email.lower(), inviter_id=admission.connect_link_owner_id
             )
+        # Whichever door admitted the account: the link, an invitation while the link's owner
+        # is at quota, or open registration. The quota is the row above's alone.
+        await connect_to_the_link_owner(db, user_id=created_user.id, via=token_data.via)
         # In the same transaction as the account, which is the whole invariant: an address
         # whose account exists must have no live invitation left, or the gate would admit
         # it a second time. Every live invitation for it, not one - two members may each

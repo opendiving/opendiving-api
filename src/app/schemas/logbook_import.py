@@ -658,7 +658,7 @@ class ImportPerson(_ReadModel):
 
     `email` is read as the string it is, as a contact's is, and the planner drops one this
     app could not have written. `extensions` is read because this app's own writer puts a
-    linked person's account there, which the planner may link again.
+    connected person's account there, which the planner may connect again.
     """
 
     uuid: uuid_pkg.UUID
@@ -783,9 +783,10 @@ class ImportNoteCode(StrEnum):
     # The diver took the archive's portrait, and the account's changed after the review they
     # chose from, so the account's was kept.
     PORTRAIT_KEPT = "portrait_kept"
-    # A person was linked (apply), or would be (upload), to the account on this instance its
-    # entry names - the sentence names that account's current username.
-    ACCOUNT_LINKED = "account_linked"
+    # A person was connected (apply), or would be (upload), to the account on this instance
+    # its entry names - the sentence names that account's current username. A review stored
+    # before the rename carries `account_linked`, read back as the string it is.
+    ACCOUNT_CONNECTED = "account_connected"
     # The tags the import adds to the caller's list, named in one note. Tags are members of a
     # dive rather than a collection, so no collection report counts them.
     TAGS_CREATED = "tags_created"

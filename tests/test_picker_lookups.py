@@ -337,7 +337,7 @@ def _person_searchable(db: Session, person: Any) -> str:
     from tests.helpers.generators import create_user
 
     friend = create_user(db)
-    person.linked_user_id = friend.id
+    person.connected_user_id = friend.id
     db.commit()
     return str(friend.username)
 

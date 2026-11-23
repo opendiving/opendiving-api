@@ -8,6 +8,7 @@ from .checkin_details import router as checkin_details_router
 from .checkin_links import router as checkin_links_router
 from .commons_export import router as commons_router
 from .config import router as config_router
+from .connect_links import router as connect_links_router
 from .contacts import router as contacts_router
 from .courses import router as courses_router
 from .dive_computers import router as dive_computers_router
@@ -66,6 +67,7 @@ router.include_router(gear_service_router)
 router.include_router(certifications_router)
 router.include_router(checkin_details_router)
 router.include_router(checkin_links_router)
+router.include_router(connect_links_router)
 router.include_router(download_tickets_router)
 router.include_router(species_router)
 router.include_router(species_photo_proposals_router)

@@ -896,13 +896,13 @@ class TestPeople:
         }
 
     @pytest.mark.asyncio
-    async def test_a_linked_person_carries_its_accounts_public_id_under_this_producers_key(self, monkeypatch):
+    async def test_a_connected_person_carries_its_accounts_public_id_under_this_producers_key(self, monkeypatch):
         """The value that account's own export writes as its diver's `uuid`, and nothing else
-        of that account. An unlinked person carries no entry at all."""
+        of that account. A person not connected carries no entry at all."""
         document = await _render(full_bundle(), monkeypatch)
         people = {person["name"]: person for person in document["people"]}
 
-        assert people["Jae Kim"]["extensions"] == {"opendiving": {"user_uuid": str(UUIDS["linked-account"])}}
+        assert people["Jae Kim"]["extensions"] == {"opendiving": {"user_uuid": str(UUIDS["connected-account"])}}
         assert "extensions" not in people["Lina"]
 
     @pytest.mark.asyncio

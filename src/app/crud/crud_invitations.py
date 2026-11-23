@@ -141,7 +141,7 @@ async def hold_invitation_quota(db: AsyncSession, *, user_id: int) -> None:
 
 async def invitations_created_since(db: AsyncSession, *, user_id: int, window_days: int) -> int:
     """How many invitations this account has made in the trailing window, by address or
-    through its invite link.
+    through its connect link.
 
     **Revoked rows are counted**, which is the point of counting rows rather than live
     invitations: the quota bounds invitations made, and revoking one after the send does not
@@ -200,8 +200,8 @@ async def accept_invitations(db: AsyncSession, *, email: str, commit: bool = Fal
     return accepted
 
 
-async def record_invite_link_sign_up(db: AsyncSession, *, email: str, inviter_id: int) -> None:
-    """Give the member whose invite link admitted `email` the accepted row that records it.
+async def record_connect_link_sign_up(db: AsyncSession, *, email: str, inviter_id: int) -> None:
+    """Give the member whose connect link admitted `email` the accepted row that records it.
 
     Called inside `POST /auth/complete`'s creating transaction, after the `User` row is built
     and before `accept_invitations`, and commits nothing. Where the member had already typed

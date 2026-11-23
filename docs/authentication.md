@@ -74,11 +74,13 @@ status must not fall through to its onboarding branch: there is no `onboarding_t
 
 `REGISTRATION_MODE` is `invite` by default. On such an instance the "no account yet" branch above is
 not automatic: the address has to hold a live `invitation` row, or have arrived through a join link
-still listed in `JOIN_CHANNELS` or through a member's current invite link - the `via` the sign-in
+still listed in `JOIN_CHANNELS` or through a member's current connect link - the `via` the sign-in
 request stored or the Google body carried, signed into the onboarding token - or the account is
-refused with a `403` whose `detail` says so. An invite link admits while its owner is under their
+refused with a `403` whose `detail` says so. A connect link admits while its owner is under their
 invitation quota, and the account is counted under `invitation`; once they are at it, the link lets
-in only an address somebody invited anyway.
+in only an address somebody invited anyway. In either mode, an account created with a live connect
+link as its `via` starts with one person, the link's owner, connected, written in the transaction
+that creates it.
 
 The refusal happens **twice**, at two points and for two different reasons, and both are in
 `services.registration_gate`:
@@ -93,7 +95,7 @@ The refusal happens **twice**, at two points and for two different reasons, and 
 Neither is an enumeration oracle. Both run only after the caller has proven the address, so the
 `403` tells them nothing about an address that is not theirs - and `POST /auth/email/request` stays
 ignorant of invitations entirely, exactly as it stays ignorant of accounts. The one thing it checks
-is whether the `via` it was handed is still a live join link or a member's current invite link,
+is whether the `via` it was handed is still a live join link or a member's current connect link,
 which is a fact about a link and reads no account.
 
 **The first account on an empty instance is exempt in both modes**, and is created with
@@ -108,13 +110,14 @@ normalisation - its verified address reaches the same funnel, lowercased at the 
 
 An address asks to be let in through `POST /invite-requests`, which is anonymous, answers the same
 `202` for every address and never queries the `user` table. The operator works that queue through
-`GET /admin/invite-requests` and `POST /admin/invitations`; a member invites from their own
-settings, by typing an address or by sharing their invite link (`/user/invite-link`), both bounded
-by `INVITATIONS_PER_USER` per `INVITATIONS_WINDOW_DAYS`. A typed invitation is an entry against the
-address and carries no secret. An invite link is a bearer token: whoever follows `/join?via=<token>`
-may sign up, and the account lands on the member's list as an accepted invitation that shows the new
-member's name and not their address. In `open` mode the user-facing invitation routes answer `404`
-and the feature is absent rather than idle.
+`GET /admin/invite-requests` and `POST /admin/invitations`; a member invites by typing an address,
+or brings somebody in through their connect link (`/user/connect-link`), both bounded by
+`INVITATIONS_PER_USER` per `INVITATIONS_WINDOW_DAYS`. A typed invitation is an entry against the
+address and carries no secret. A connect link is a bearer token: whoever follows `/connect/<token>`
+may sign up, starts with the member in their people, and lands on the member's list as an accepted
+invitation that shows the new member's name and not their address. In `open` mode the user-facing
+invitation routes answer `404` and the feature is absent rather than idle; the connect link is there
+in every mode, and on an open instance it admits nobody the mode would not admit anyway.
 
 #### 1. Sign up with email (new user)
 
@@ -618,9 +621,9 @@ What a key is refused:
   a 403 `"This API key is read-only."` before the route runs.
 - **No key may manage credentials, the sign-in address or the account's existence.** The routes
   under `/user/api-key`, `/user/mcp`, `/user/passkey`, `/user/session`, `/user/checkin-link`,
-  `/user/invite-link`, `/user/email-change` and `/user/download-ticket`, and `DELETE /user`, answer
-  a key with 403 `"This needs a signed-in browser or app, not an API key."` (`refuse_api_keys`), so
-  a stolen key cannot lock its owner out or mint itself a successor.
+  `/user/connect-link`, `/user/invite-link`, `/user/email-change` and `/user/download-ticket`, and
+  `DELETE /user`, answer a key with 403 `"This needs a signed-in browser or app, not an API key."`
+  (`refuse_api_keys`), so a stolen key cannot lock its owner out or mint itself a successor.
 - **A key's principal is never a superuser.** The account dict it resolves to carries `is_superuser`
   false whatever the column says, so the operator's routes answer the superuser gate's own 403 and
   `GET /user` reports `false`. A legacy `write` key, or a scoped key holding `species:write`, may

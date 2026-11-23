@@ -46,7 +46,7 @@ from ...services.certification_files import (
     store_certification_file,
 )
 from ...services.contact_links import CONTACT_NOT_FOUND, resolve_contact_reference
-from ...services.person_links import resolve_person_reference
+from ...services.person_connections import resolve_person_reference
 from ..idempotency import IdempotentCreate
 
 router = APIRouter(tags=["certifications"])

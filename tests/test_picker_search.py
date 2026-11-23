@@ -110,9 +110,9 @@ class TestSearchClause:
 
 
 class TestThePeopleSearch:
-    def test_it_matches_the_name_or_the_linked_username(self) -> None:
+    def test_it_matches_the_name_or_the_connected_username(self) -> None:
         """A picker finds a friend by the handle they go by as well as by the name the
-        diver wrote, so the linked account's username is the second column - across a join
+        diver wrote, so the connected account's username is the second column - across a join
         the other pickers do not need."""
         sql = _as_sql(person_search_condition("alex"), model=Person)
 
@@ -267,7 +267,7 @@ PAGINATED_LIST_ROUTES: dict[str, tuple[str, ...]] = {
     "gear_sets.py": ("read_gear_sets",),
     "invitations.py": ("read_invitations",),
     "logbook_import.py": ("read_logbook_imports",),
-    "people.py": ("lookup_people", "read_people"),
+    "people.py": ("lookup_people", "read_added_you", "read_people"),
     "species_photo_proposals.py": ("read_species_photo_proposals",),
     "tags.py": ("read_tags",),
     "trips.py": ("lookup_trips", "read_trip_dives", "read_trip_species", "read_trips"),

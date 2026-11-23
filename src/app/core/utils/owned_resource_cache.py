@@ -80,10 +80,10 @@ class OwnedResourceCache[InternalT, PublicT]:
       on). One device's "This device" marker would be served to another. The rows are also
       unpaginated, capped and embedded by nothing, so there is no page worth the risk.
     - `people.py` - uncached because its answer changes on writes its owner never makes. A
-      person read carries the linked account's current username, and a rename or purge of
-      that other account reaches no key of this owner's, so a cache would serve the old one
-      for its TTL. The list is one query - the join, a dive count, a search over two
-      tables - over tens of rows.
+      person read carries the connected account's current username and picture version, and
+      a rename, a new picture or a deletion request of that other account reaches no key of
+      this owner's, so a cache would serve the old one for its TTL. The list is one query -
+      the joins, a dive count, a search over two tables - over tens of rows.
     - `tags.py` - uncached for `people.py`'s cost and a plainer reason: each tag carries the
       count of live dives that name it, which every dive write moves, so a cache would owe an
       invalidation to every dive route for a list of one query over tens of rows.

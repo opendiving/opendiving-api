@@ -360,10 +360,11 @@ async def create_logbook_import(
     inline image framed as it would be stored. It is absent when the archive's is your own,
     framed the same, and a portrait that cannot be offered is explained in the log.
 
-    A person this app exported linked to an account here is proposed linked to it again,
-    within the limit on linking people - an `account_linked` note names the account's
-    current username - where the account still exists, is not yours and no other person of
-    yours links it. Nothing of a link that cannot be made is kept.
+    A person this app exported connected to an account here is proposed connected to it
+    again, within the limit on connecting people - an `account_connected` note names the
+    account's current username - where the account still exists, is not yours, no other
+    person of yours is connected to it, and it has not disconnected you. That account then
+    sees you under its *Added you*. Nothing of a tie that cannot be made is kept.
 
     Species this instance's catalog did not hold are looked up in the World Register of Marine
     Species before the review is made, and stay in the catalog whatever becomes of the import.
@@ -564,9 +565,9 @@ async def apply_logbook_import(
     only while your portrait is still the one the review showed; otherwise yours is kept,
     and a note says so when you had chosen the archive's.
 
-    Each link to an account the import makes counts against the limit on linking people,
-    and one past it is dropped with a note rather than failing the import. A link counts
-    whether or not the import completes.
+    Each person the import connects to an account counts against the limit on connecting
+    people, and one past it arrives not connected, with a note, rather than failing the
+    import. It counts whether or not the import completes.
 
     A 409 when the import is already applied, or another device's apply got there first. Rate
     limited per account, on a budget of its own; a request over it is a 429 and writes nothing. Files

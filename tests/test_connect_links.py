@@ -1,6 +1,6 @@
-"""A member's invite link: the token, the member's three routes, the resolver, the sign-in
-request, the gate's link branches, what the creating transaction writes, and the row the
-inviter reads back.
+"""A member's connect link: the token, the member's three routes, the anonymous reads and the
+signed-in one, the invite-link routes held over the same rows, the sign-in request, the gate's
+link branches, what the creating transaction writes, and the row the inviter reads back.
 
 The routing decisions - which status, which sentence, which questions get asked - are unit
 tests against a mocked session. What the gate reads, what the upsert does under a race and
@@ -26,6 +26,14 @@ from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
 from src.app.api.v1.auth import complete_profile, request_email_link
+from src.app.api.v1.connect_links import (
+    erase_connect_link,
+    make_connect_link,
+    read_connect_link_avatar,
+    read_connect_link_owner,
+    read_own_connect_link,
+    resolve_connect_link,
+)
 from src.app.api.v1.invitations import (
     erase_invite_link,
     make_invite_link,
@@ -37,20 +45,21 @@ from src.app.core.config import JOIN_CHANNEL_SLUG_PATTERN, AccountSource, Regist
 from src.app.core.exceptions.http_exceptions import ForbiddenException, NotFoundException
 from src.app.core.schemas import OnboardingTokenData
 from src.app.crud.crud_invitations import invitations_created_since
+from src.app.models.connect_link import ConnectLink
 from src.app.models.daily_total import DailyTotal
 from src.app.models.invitation import Invitation
-from src.app.models.invite_link import InviteLink
 from src.app.models.invite_request import InviteRequest
+from src.app.models.person import Person
 from src.app.models.user import User
 from src.app.schemas.auth import EmailAuthRequest, ProfileCompletionRequest
 from src.app.schemas.auth_audit_event import AuthEventType
 from src.app.schemas.daily_total import DailyMetric
 from src.app.services.auth_service import IssuedTokens
-from src.app.services.invite_links import LiveInviteLink, invite_link_exists, new_invite_link_token
+from src.app.services.connect_links import LiveConnectLink, connect_link_exists, new_connect_link_token
 from src.app.services.registration_gate import (
     NOT_INVITED,
-    SPENT_INVITE_LINK,
-    STALE_INVITE_LINK,
+    SPENT_CONNECT_LINK,
+    STALE_CONNECT_LINK,
     STALE_JOIN_LINK,
     admit_or_refuse,
     refuse_uninvited,
@@ -60,7 +69,9 @@ from tests.helpers.generators import create_user
 from tests.helpers.mocks import awaited_kwargs, fake_request
 
 CALLER = {"id": 7, "name": "Ada Reef", "is_superuser": False}
-LIVE = LiveInviteLink(owner_id=7, owner_name="Ada Reef", owner_is_superuser=False)
+LIVE = LiveConnectLink(
+    owner_id=7, owner_name="Ada Reef", owner_username="adareef", owner_avatar_sha256="f" * 64, owner_is_superuser=False
+)
 
 
 def _mode(mode: RegistrationMode) -> Any:
@@ -75,17 +86,18 @@ class TestTheToken:
     def test_it_fits_every_seat_a_join_link_slug_takes(self) -> None:
         """`via`'s pattern on both request bodies, the request row's `String(32)` and the web's
         copy of the pattern on the Google attempt record: the token rides all three."""
-        token = new_invite_link_token()
+        token = new_connect_link_token()
 
         assert len(token) == 32
         assert re.fullmatch(JOIN_CHANNEL_SLUG_PATTERN, token)
 
     def test_each_one_is_fresh(self) -> None:
-        assert len({new_invite_link_token() for _ in range(100)}) == 100
+        assert len({new_connect_link_token() for _ in range(100)}) == 100
 
 
-class TestOpenModeMakesTheLinkAbsent:
-    """As every invitation route does: 404, so the card's link block never learns the mode."""
+class TestOpenModeMakesTheHeldRoutesAbsent:
+    """The invite-link routes answer as they did, held for the clients that still call them:
+    404, as every invitation route does, so the card's link block never learns the mode."""
 
     @pytest.mark.asyncio
     async def test_reading_it(self, mock_db) -> None:
@@ -106,7 +118,7 @@ class TestOpenModeMakesTheLinkAbsent:
     async def test_resolving_it_is_the_same_uncacheable_404_and_reads_nothing(self, mock_db) -> None:
         with (
             _mode(RegistrationMode.OPEN),
-            patch("src.app.api.v1.invitations.live_invite_link", new_callable=AsyncMock) as looked_up,
+            patch("src.app.api.v1.invitations.live_connect_link", new_callable=AsyncMock) as looked_up,
         ):
             answer = await resolve_invite_link("a" * 32, Response(), mock_db)
 
@@ -116,13 +128,86 @@ class TestOpenModeMakesTheLinkAbsent:
         looked_up.assert_not_awaited()
 
 
-class TestTheResolver:
+class TestTheConnectLinkIsThereInEveryMode:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", list(RegistrationMode))
+    async def test_the_anonymous_read_answers_the_name_and_picture_and_never_the_username(
+        self, mock_db, mode: RegistrationMode
+    ) -> None:
+        response = Response()
+        with (
+            _mode(mode),
+            patch("src.app.api.v1.connect_links.live_connect_link", new_callable=AsyncMock, return_value=LIVE),
+        ):
+            answer = await resolve_connect_link("a" * 32, response, mock_db)
+
+        assert answer.model_dump() == {"name": "Ada Reef", "avatar_sha256": "f" * 64}  # type: ignore[union-attr]
+        assert response.headers["Cache-Control"] == "private, no-store"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", list(RegistrationMode))
+    async def test_a_dead_token_is_one_uncacheable_404_on_each_read(self, mock_db, mode: RegistrationMode) -> None:
+        with (
+            _mode(mode),
+            patch("src.app.api.v1.connect_links.live_connect_link", new_callable=AsyncMock, return_value=None),
+        ):
+            answers = [
+                await resolve_connect_link("a" * 32, Response(), mock_db),
+                await read_connect_link_owner("a" * 32, Response(), CALLER, mock_db),
+                await read_connect_link_avatar(fake_request(), "a" * 32, mock_db),
+            ]
+
+        for answer in answers:
+            assert isinstance(answer, JSONResponse)
+            assert answer.status_code == 404
+            assert answer.headers["Cache-Control"] == "private, no-store"
+            assert answer.body == answers[0].body  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio
+    async def test_the_members_routes_read_no_mode(self, mock_db) -> None:
+        mock_db.commit = AsyncMock()
+        with (
+            _mode(RegistrationMode.OPEN),
+            patch(
+                "src.app.api.v1.connect_links.replace_connect_link",
+                new_callable=AsyncMock,
+                return_value=("a" * 32, datetime.now(UTC)),
+            ),
+            patch("src.app.api.v1.connect_links.record_auth_event", new_callable=AsyncMock) as recorder,
+        ):
+            made = await make_connect_link(fake_request(), CALLER, mock_db)
+
+        assert made.token == "a" * 32
+        written = awaited_kwargs(recorder)
+        assert written["event_type"] is AuthEventType.CONNECT_LINK_CREATED
+        assert written["user_id"] == CALLER["id"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("there_was_one", [True, False])
+    async def test_removing_it_is_an_event_only_when_there_was_one(self, mock_db, there_was_one: bool) -> None:
+        mock_db.commit = AsyncMock()
+        with (
+            patch(
+                "src.app.api.v1.connect_links.remove_connect_link", new_callable=AsyncMock, return_value=there_was_one
+            ),
+            patch("src.app.api.v1.connect_links.record_auth_event", new_callable=AsyncMock) as recorder,
+        ):
+            answer = await erase_connect_link(fake_request(), CALLER, mock_db)
+
+        assert answer.message == "Connect link removed"
+        if there_was_one:
+            assert awaited_kwargs(recorder)["event_type"] is AuthEventType.CONNECT_LINK_REMOVED
+        else:
+            recorder.assert_not_awaited()
+
+
+class TestTheHeldResolver:
     @pytest.mark.asyncio
     async def test_a_live_link_answers_with_its_owners_name_and_is_not_cacheable(self, mock_db) -> None:
         response = Response()
         with (
             _mode(RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.live_invite_link", new_callable=AsyncMock, return_value=LIVE),
+            patch("src.app.api.v1.invitations.live_connect_link", new_callable=AsyncMock, return_value=LIVE),
         ):
             answer = await resolve_invite_link("a" * 32, response, mock_db)
 
@@ -133,7 +218,7 @@ class TestTheResolver:
     async def test_anything_else_is_one_uncacheable_404(self, mock_db) -> None:
         with (
             _mode(RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.live_invite_link", new_callable=AsyncMock, return_value=None),
+            patch("src.app.api.v1.invitations.live_connect_link", new_callable=AsyncMock, return_value=None),
         ):
             answer = await resolve_invite_link("not-a-token", Response(), mock_db)
 
@@ -142,14 +227,14 @@ class TestTheResolver:
         assert answer.headers["Cache-Control"] == "private, no-store"
 
 
-class TestTheMembersRoutesAudit:
+class TestTheHeldRoutesAudit:
     @pytest.mark.asyncio
     async def test_making_or_resetting_it_is_one_event_on_the_members_account(self, mock_db) -> None:
         mock_db.commit = AsyncMock()
         with (
             _mode(RegistrationMode.INVITE),
             patch(
-                "src.app.api.v1.invitations.replace_invite_link",
+                "src.app.api.v1.invitations.replace_connect_link",
                 new_callable=AsyncMock,
                 return_value=("a" * 32, datetime.now(UTC)),
             ),
@@ -159,7 +244,7 @@ class TestTheMembersRoutesAudit:
 
         assert made.token == "a" * 32
         written = awaited_kwargs(recorder)
-        assert written["event_type"] is AuthEventType.INVITE_LINK_CREATED
+        assert written["event_type"] is AuthEventType.CONNECT_LINK_CREATED
         assert written["user_id"] == CALLER["id"]
         assert "email" not in written
 
@@ -170,20 +255,20 @@ class TestTheMembersRoutesAudit:
         mock_db.commit = AsyncMock()
         with (
             _mode(RegistrationMode.INVITE),
-            patch("src.app.api.v1.invitations.remove_invite_link", new_callable=AsyncMock, return_value=there_was_one),
+            patch("src.app.api.v1.invitations.remove_connect_link", new_callable=AsyncMock, return_value=there_was_one),
             patch("src.app.api.v1.invitations.record_auth_event", new_callable=AsyncMock) as recorder,
         ):
             answer = await erase_invite_link(fake_request(), CALLER, mock_db)
 
         assert answer.message == "Invite link removed"
         if there_was_one:
-            assert awaited_kwargs(recorder)["event_type"] is AuthEventType.INVITE_LINK_REMOVED
+            assert awaited_kwargs(recorder)["event_type"] is AuthEventType.CONNECT_LINK_REMOVED
         else:
             recorder.assert_not_awaited()
 
 
 class TestTheSignInRequest:
-    """`POST /auth/email/request` asks whether a token names an `invite_link` row, and
+    """`POST /auth/email/request` asks whether a token names a `connect_link` row, and
     nothing about any account."""
 
     @staticmethod
@@ -196,9 +281,9 @@ class TestTheSignInRequest:
             patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock),
             patch("src.app.api.v1.auth.send_magic_link_email", new_callable=AsyncMock),
             patch(
-                "src.app.services.registration_gate.invite_link_exists", new_callable=AsyncMock, return_value=known
+                "src.app.services.registration_gate.connect_link_exists", new_callable=AsyncMock, return_value=known
             ) as exists,
-            patch("src.app.services.registration_gate.live_invite_link", new_callable=AsyncMock) as live,
+            patch("src.app.services.registration_gate.live_connect_link", new_callable=AsyncMock) as live,
         ):
             requests.count = AsyncMock(return_value=0)
             requests.create = AsyncMock(return_value=Mock(uuid=uuid7()))
@@ -210,7 +295,7 @@ class TestTheSignInRequest:
 
     @pytest.mark.asyncio
     async def test_a_members_link_rides_the_row(self, mock_db) -> None:
-        token = new_invite_link_token()
+        token = new_connect_link_token()
         seen = await self._request(mock_db, via=token, mode=RegistrationMode.INVITE, known=True, channels=None)
 
         assert seen["refusal"] is None
@@ -219,39 +304,49 @@ class TestTheSignInRequest:
         seen["live"].assert_not_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("channels", "sentence"), [(None, STALE_INVITE_LINK), ("reddit=Reddit", STALE_JOIN_LINK)])
+    @pytest.mark.parametrize(("channels", "sentence"), [(None, STALE_CONNECT_LINK), ("reddit=Reddit", STALE_JOIN_LINK)])
     async def test_a_dead_token_is_refused_with_the_sentence_for_what_the_instance_has(
         self, mock_db, channels: str | None, sentence: str
     ) -> None:
         """With no channel configured, a dead `via` can only have been a member's link, which
         is never called a join link."""
         seen = await self._request(
-            mock_db, via=new_invite_link_token(), mode=RegistrationMode.INVITE, known=False, channels=channels
+            mock_db, via=new_connect_link_token(), mode=RegistrationMode.INVITE, known=False, channels=channels
         )
 
         assert seen["refusal"].detail == sentence
         seen["requests"].create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_open_mode_drops_the_token_without_looking_it_up(self, mock_db) -> None:
+    async def test_open_mode_keeps_a_members_link(self, mock_db) -> None:
+        """The account it creates starts connected to the link's owner, in either mode."""
+        token = new_connect_link_token()
+        seen = await self._request(mock_db, via=token, mode=RegistrationMode.OPEN, known=True, channels=None)
+
+        assert seen["refusal"] is None
+        assert seen["requests"].create.call_args.kwargs["object"].via == token
+        seen["live"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_open_mode_drops_a_dead_token_and_refuses_nothing(self, mock_db) -> None:
         seen = await self._request(
-            mock_db, via=new_invite_link_token(), mode=RegistrationMode.OPEN, known=True, channels=None
+            mock_db, via=new_connect_link_token(), mode=RegistrationMode.OPEN, known=False, channels=None
         )
 
+        assert seen["refusal"] is None
         assert seen["requests"].create.call_args.kwargs["object"].via is None
-        seen["exists"].assert_not_awaited()
 
 
 class TestTheAdvisoryGate:
     """`refuse_uninvited`'s link branches, with the reads mocked."""
 
     @staticmethod
-    async def _ask(mock_db: Any, *, link: LiveInviteLink | None, can_invite: bool, invited: bool) -> Any:
+    async def _ask(mock_db: Any, *, link: LiveConnectLink | None, can_invite: bool, invited: bool) -> Any:
         mock_db.scalar = AsyncMock(return_value=4)
         with (
             _channels(None),
             _mode(RegistrationMode.INVITE),
-            patch("src.app.services.registration_gate.live_invite_link", new_callable=AsyncMock, return_value=link),
+            patch("src.app.services.registration_gate.live_connect_link", new_callable=AsyncMock, return_value=link),
             patch(
                 "src.app.services.registration_gate.can_still_invite", new_callable=AsyncMock, return_value=can_invite
             ),
@@ -278,7 +373,7 @@ class TestTheAdvisoryGate:
     async def test_a_spent_link_refuses_an_uninvited_address_with_a_sentence_of_its_own(self, mock_db) -> None:
         refused, _ = await self._ask(mock_db, link=LIVE, can_invite=False, invited=False)
 
-        assert refused == SPENT_INVITE_LINK
+        assert refused == SPENT_CONNECT_LINK
 
     @pytest.mark.asyncio
     async def test_a_spent_link_steps_aside_for_an_invitation(self, mock_db) -> None:
@@ -290,7 +385,7 @@ class TestTheAdvisoryGate:
     async def test_a_dead_token_is_stale(self, mock_db) -> None:
         refused, _ = await self._ask(mock_db, link=None, can_invite=False, invited=False)
 
-        assert refused == STALE_INVITE_LINK
+        assert refused == STALE_CONNECT_LINK
 
 
 needs_a_database = pytest.mark.skipif(not db_available(), reason="No database connection available")
@@ -301,8 +396,8 @@ def _caller(user: User) -> dict[str, Any]:
 
 
 def _link(db: Session, owner: User) -> str:
-    token = new_invite_link_token()
-    db.add(InviteLink(user_id=owner.id, token=token))
+    token = new_connect_link_token()
+    db.add(ConnectLink(user_id=owner.id, token=token))
     db.commit()
     return token
 
@@ -349,7 +444,7 @@ class TestTheMembersRoutes:
                 assert isinstance(gone, JSONResponse)
 
         db.expire_all()
-        assert db.scalar(select(func.count()).select_from(InviteLink).where(InviteLink.user_id == member.id)) == 0
+        assert db.scalar(select(func.count()).select_from(ConnectLink).where(ConnectLink.user_id == member.id)) == 0
 
     @pytest.mark.asyncio
     async def test_two_first_creates_racing_both_succeed_and_leave_one_row(
@@ -367,7 +462,7 @@ class TestTheMembersRoutes:
             tokens = await asyncio.gather(make(), make())
 
         db.expire_all()
-        stored = db.scalars(select(InviteLink.token).where(InviteLink.user_id == member.id)).all()
+        stored = db.scalars(select(ConnectLink.token).where(ConnectLink.user_id == member.id)).all()
         assert len(stored) == 1
         assert stored[0] in tokens
 
@@ -384,8 +479,8 @@ class TestTheMembersRoutes:
         db.commit()
 
         async with async_sessions() as session:
-            assert await invite_link_exists(session, token=token) is True
-            assert await invite_link_exists(session, token=new_invite_link_token()) is False
+            assert await connect_link_exists(session, token=token) is True
+            assert await connect_link_exists(session, token=new_connect_link_token()) is False
 
     @pytest.mark.asyncio
     async def test_a_deleted_owners_link_resolves_to_nothing(
@@ -432,7 +527,7 @@ class TestTheAuthoritativeGate:
         admission = await self._admit(async_sessions, email=unique_email(), via=_link(db, owner))
 
         assert admission.source == AccountSource.INVITATION
-        assert admission.invite_link_owner_id == owner.id
+        assert admission.connect_link_owner_id == owner.id
 
     @pytest.mark.asyncio
     async def test_the_link_wins_over_an_invitation_from_the_queue(
@@ -445,7 +540,7 @@ class TestTheAuthoritativeGate:
         admission = await self._admit(async_sessions, email=email, via=_link(db, owner))
 
         assert admission.source == AccountSource.INVITATION
-        assert admission.invite_link_owner_id == owner.id
+        assert admission.connect_link_owner_id == owner.id
 
     @pytest.mark.asyncio
     async def test_an_owner_at_quota_refuses_an_uninvited_address(
@@ -458,7 +553,7 @@ class TestTheAuthoritativeGate:
         with patch.object(settings, "INVITATIONS_PER_USER", 1), pytest.raises(ForbiddenException) as refusal:
             await self._admit(async_sessions, email=unique_email(), via=token)
 
-        assert refusal.value.detail == SPENT_INVITE_LINK
+        assert refusal.value.detail == SPENT_CONNECT_LINK
 
     @pytest.mark.asyncio
     async def test_an_owner_at_quota_still_lets_in_an_address_somebody_invited(
@@ -475,7 +570,7 @@ class TestTheAuthoritativeGate:
             admission = await self._admit(async_sessions, email=email, via=token)
 
         assert admission.source == AccountSource.WAITLIST
-        assert admission.invite_link_owner_id is None
+        assert admission.connect_link_owner_id is None
 
     @pytest.mark.asyncio
     async def test_a_superuser_owner_is_never_at_quota(
@@ -488,7 +583,7 @@ class TestTheAuthoritativeGate:
         with patch.object(settings, "INVITATIONS_PER_USER", 1):
             admission = await self._admit(async_sessions, email=unique_email(), via=token)
 
-        assert admission.invite_link_owner_id == owner.id
+        assert admission.connect_link_owner_id == owner.id
 
     @pytest.mark.asyncio
     async def test_a_deleted_owners_link_is_stale(
@@ -503,7 +598,7 @@ class TestTheAuthoritativeGate:
         with pytest.raises(ForbiddenException) as refusal:
             await self._admit(async_sessions, email=unique_email(), via=token)
 
-        assert refusal.value.detail == STALE_INVITE_LINK
+        assert refusal.value.detail == STALE_CONNECT_LINK
 
     @pytest.mark.asyncio
     async def test_a_token_attributes_nothing_on_an_open_instance(
@@ -514,7 +609,7 @@ class TestTheAuthoritativeGate:
         admission = await self._admit(async_sessions, email=unique_email(), via=token, mode=RegistrationMode.OPEN)
 
         assert admission.source == AccountSource.OPEN
-        assert admission.invite_link_owner_id is None
+        assert admission.connect_link_owner_id is None
 
     @pytest.mark.asyncio
     async def test_no_via_is_still_not_invited(
@@ -563,6 +658,118 @@ def _invitation_count(db: Session) -> int:
 def _rows_for(db: Session, *, inviter: User, email: str) -> list[Invitation]:
     db.expire_all()
     return list(db.scalars(select(Invitation).where(Invitation.user_id == inviter.id, Invitation.email == email)))
+
+
+def _people_of(db: Session, email: str) -> list[tuple[str, int | None]]:
+    db.expire_all()
+    created = db.scalars(select(User).where(func.lower(User.email) == email)).one()
+    return [(row.name, row.connected_user_id) for row in db.scalars(select(Person).where(Person.user_id == created.id))]
+
+
+@needs_a_database
+class TestTheFirstPerson:
+    """An account created with a live connect link as its `via` starts with the link's owner
+    in its people, connected, whichever door admitted it; the quota is the link door's alone."""
+
+    @pytest.mark.asyncio
+    async def test_through_the_link_on_an_invite_only_instance(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        owner = create_user(db)
+        token, owner_id, owner_name, email = _link(db, owner), owner.id, owner.name, unique_email()
+
+        async with async_sessions() as session:
+            with _channels(None), _mode(RegistrationMode.INVITE):
+                await _complete(session, _completion(email, via=token))
+
+        assert _people_of(db, email) == [(owner_name, owner_id)]
+
+    @pytest.mark.asyncio
+    async def test_on_an_open_instance_charging_nothing(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        owner = create_user(db)
+        token, owner_id, owner_name, email = _link(db, owner), owner.id, owner.name, unique_email()
+
+        async with async_sessions() as session:
+            with _channels(None), _mode(RegistrationMode.OPEN):
+                await _complete(session, _completion(email, via=token))
+
+        assert _people_of(db, email) == [(owner_name, owner_id)]
+        assert _rows_for(db, inviter=owner, email=email) == []
+
+    @pytest.mark.asyncio
+    async def test_through_an_invitation_while_the_owner_is_at_quota(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        owner = create_user(db)
+        _invite(db, email=unique_email(), inviter=owner)
+        token, owner_id, owner_name, email = _link(db, owner), owner.id, owner.name, unique_email()
+        _invite(db, email=email, inviter=create_user(db, is_super_user=True), from_queue=True)
+
+        async with async_sessions() as session:
+            with _channels(None), _mode(RegistrationMode.INVITE), patch.object(settings, "INVITATIONS_PER_USER", 1):
+                await _complete(session, _completion(email, via=token))
+
+        assert _people_of(db, email) == [(owner_name, owner_id)]
+        assert _rows_for(db, inviter=owner, email=email) == []
+
+    @pytest.mark.asyncio
+    async def test_an_owner_asking_to_be_deleted_connects_nothing(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        owner = create_user(db)
+        token, email = _link(db, owner), unique_email()
+        owner.is_deleted = True
+        owner.deleted_at = datetime.now(UTC)
+        db.commit()
+
+        async with async_sessions() as session:
+            with _channels(None), _mode(RegistrationMode.OPEN):
+                await _complete(session, _completion(email, via=token))
+
+        assert _people_of(db, email) == []
+
+
+@needs_a_database
+class TestTheConnectLinkRoutes:
+    @pytest.mark.asyncio
+    async def test_make_read_reset_and_remove_on_an_open_instance(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        member = create_user(db)
+        caller = _caller(member)
+
+        async with async_sessions() as session:
+            with _mode(RegistrationMode.OPEN):
+                with pytest.raises(NotFoundException):
+                    await read_own_connect_link(caller, session)
+                first = await make_connect_link(fake_request(), caller, session)
+                assert (await read_own_connect_link(caller, session)).token == first.token
+                resolved = await resolve_connect_link(first.token, Response(), session)
+                assert resolved.model_dump() == {"name": member.name, "avatar_sha256": None}  # type: ignore[union-attr]
+
+                second = await make_connect_link(fake_request(), caller, session)
+                stale = await resolve_connect_link(first.token, Response(), session)
+                assert isinstance(stale, JSONResponse)
+
+                await erase_connect_link(fake_request(), caller, session)
+                gone = await resolve_connect_link(second.token, Response(), session)
+                assert isinstance(gone, JSONResponse)
+
+    @pytest.mark.asyncio
+    async def test_the_held_routes_serve_the_same_row(
+        self, db: Session, async_sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        member = create_user(db)
+        caller = _caller(member)
+
+        async with async_sessions() as session:
+            with _mode(RegistrationMode.INVITE):
+                made = await make_connect_link(fake_request(), caller, session)
+                assert (await read_own_invite_link(caller, session)).token == made.token
+                reset = await make_invite_link(fake_request(), caller, session)
+                assert (await read_own_connect_link(caller, session)).token == reset.token
 
 
 @needs_a_database
@@ -618,7 +825,7 @@ class TestTheCreatingTransaction:
         assert row.accepted_at is not None
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("channels", "sentence"), [(None, STALE_INVITE_LINK), ("reddit=Reddit", STALE_JOIN_LINK)])
+    @pytest.mark.parametrize(("channels", "sentence"), [(None, STALE_CONNECT_LINK), ("reddit=Reddit", STALE_JOIN_LINK)])
     async def test_a_link_reset_before_completion_refuses_it_and_creates_nothing(
         self, db: Session, async_sessions: async_sessionmaker[AsyncSession], channels: str | None, sentence: str
     ) -> None:
@@ -632,7 +839,7 @@ class TestTheCreatingTransaction:
         async def reset_from_another_session(_: Any) -> None:
             async with async_sessions() as other:
                 await other.execute(
-                    update(InviteLink).where(InviteLink.user_id == owner.id).values(token=new_invite_link_token())
+                    update(ConnectLink).where(ConnectLink.user_id == owner.id).values(token=new_connect_link_token())
                 )
                 await other.commit()
 
@@ -647,6 +854,7 @@ class TestTheCreatingTransaction:
         assert refusal.value.detail == sentence
         assert db.scalar(select(func.count()).select_from(User).where(func.lower(User.email) == email)) == 0
         assert _rows_for(db, inviter=owner, email=email) == []
+        assert db.scalar(select(func.count()).select_from(Person).where(Person.connected_user_id == owner.id)) == 0
 
     @pytest.mark.asyncio
     async def test_an_owner_at_quota_refuses_and_creates_nothing(
@@ -666,7 +874,7 @@ class TestTheCreatingTransaction:
             ):
                 await _complete(session, _completion(email, via=token))
 
-        assert refusal.value.detail == SPENT_INVITE_LINK
+        assert refusal.value.detail == SPENT_CONNECT_LINK
         assert db.scalar(select(func.count()).select_from(User).where(func.lower(User.email) == email)) == 0
 
 
@@ -737,13 +945,13 @@ class TestCanStillInvite:
     async def test_counts_under_the_owners_lock(self, mock_db) -> None:
         """A sign-up through the link and an invitation typed at the same moment draw on
         one allowance, so the count waits for the other's transaction."""
-        from src.app.services.invite_links import can_still_invite
+        from src.app.services.connect_links import can_still_invite
 
         order = Mock()
         with (
-            patch("src.app.services.invite_links.hold_invitation_quota", new_callable=AsyncMock) as held,
+            patch("src.app.services.connect_links.hold_invitation_quota", new_callable=AsyncMock) as held,
             patch(
-                "src.app.services.invite_links.invitations_created_since", new_callable=AsyncMock, return_value=0
+                "src.app.services.connect_links.invitations_created_since", new_callable=AsyncMock, return_value=0
             ) as counted,
         ):
             order.attach_mock(held, "hold")
@@ -756,9 +964,14 @@ class TestCanStillInvite:
 
     @pytest.mark.asyncio
     async def test_a_superusers_link_takes_no_lock(self, mock_db) -> None:
-        from src.app.services.invite_links import can_still_invite
+        from src.app.services.connect_links import can_still_invite
 
-        with patch("src.app.services.invite_links.hold_invitation_quota", new_callable=AsyncMock) as held:
-            assert await can_still_invite(mock_db, LiveInviteLink(owner_id=1, owner_name="Op", owner_is_superuser=True))
+        with patch("src.app.services.connect_links.hold_invitation_quota", new_callable=AsyncMock) as held:
+            assert await can_still_invite(
+                mock_db,
+                LiveConnectLink(
+                    owner_id=1, owner_name="Op", owner_username="op", owner_avatar_sha256=None, owner_is_superuser=True
+                ),
+            )
 
         held.assert_not_awaited()

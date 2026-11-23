@@ -72,7 +72,7 @@ from ...services.cache_invalidation import (
     invalidate_trip_caches,
 )
 from ...services.dive_list_items import to_dive_list_items
-from ...services.person_links import resolve_people_references
+from ...services.person_connections import resolve_people_references
 from ...services.species_life_list import species_life_list
 from ..idempotency import IdempotentCreate
 

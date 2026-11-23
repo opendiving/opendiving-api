@@ -1,3 +1,4 @@
+from .account_disconnect import AccountDisconnect
 from .api_key import ApiKey
 from .auth_audit_event import AuthAuditEvent
 from .authentication_provider import AuthenticationProvider
@@ -6,6 +7,7 @@ from .certification import Certification
 from .certification_file import CertificationFile
 from .checkin_details import CheckinDetails, CheckinEmergencyContact, CheckinInsurancePolicy
 from .checkin_link import CheckinLink
+from .connect_link import ConnectLink
 from .contact import Contact
 from .course import Course
 from .course_person import CoursePerson
@@ -36,7 +38,6 @@ from .gear_set import GearSet
 from .gear_set_item import GearSetItem
 from .idempotency_hold import IdempotencyHold
 from .invitation import Invitation
-from .invite_link import InviteLink
 from .invite_request import InviteRequest
 from .logbook_import import LogbookImport, LogbookImportFile
 from .map_tile import MapTile

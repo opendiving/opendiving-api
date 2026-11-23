@@ -597,7 +597,7 @@ def _buddy_element(diver: ET.Element, person: Person) -> None:
     The name is split at its first space - the split Subsurface's and Bubbletrail's writers
     make - so a reader joining the two parts gets it back whole, and a one-word name leaves
     `<lastname>` empty, which `personalType` requires present. Then `<contact>` and `<notes>`
-    in `personType`'s order. A person's link to an account has no slot and stays in
+    in `personType`'s order. A person's tie to an account has no slot and stays in
     `logbook.divejson`.
     """
     element = _sub(diver, "buddy", id=_uddf_id("person", person.uuid))
