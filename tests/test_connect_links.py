@@ -673,9 +673,6 @@ class TestTheCreatingTransaction:
         [row] = _rows_for(db, inviter=owner, email=email)
         assert row.accepted_at is not None
         assert row.accepted_at >= created.created_at
-        # Unmapped, and written for the build before this one, which reads it.
-        flag = Invitation.__table__.c.from_invite_link
-        assert db.scalar(select(flag).where(Invitation.__table__.c.id == row.id)) is True
         assert row.from_invite_request is False
         assert _invitation_count(db) == before + 1
         # Everything else the creating transaction does, as for any other door.

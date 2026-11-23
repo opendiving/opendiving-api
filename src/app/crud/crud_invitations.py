@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from fastcrud import FastCRUD
-from sqlalchemy import CursorResult, Table, func, select, update
+from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import AccountSource
@@ -166,13 +166,8 @@ async def record_connect_link_sign_up(db: AsyncSession, *, email: str, inviter_i
     """
     if await live_invitation_from(db, email=email, user_id=inviter_id):
         return
-    row = Invitation(email=email, user_id=inviter_id, accepted_at=datetime.now(UTC))
-    db.add(row)
+    db.add(Invitation(email=email, user_id=inviter_id, accepted_at=datetime.now(UTC)))
     await db.flush()
-    # The previous build still reads the unmapped `from_invite_link` to keep this row's address
-    # from the member it lists the row to, until the column goes a deploy later.
-    table = cast(Table, Invitation.__table__)
-    await db.execute(update(table).where(table.c.id == row.id).values(from_invite_link=True))
 
 
 async def account_exists_for(db: AsyncSession, *, email: str) -> bool:
