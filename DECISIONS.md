@@ -1414,9 +1414,10 @@ lifetime number (UDDF, Subsurface's XML) populates it.
 
 ## `GET /dive/{uuid}/neighbors` is two one-row queries, ordered by `(start_time, id)`
 
-Returns the two dives either side — `uuid`, `dive_number`, `start_time` — not a `DiveRead` per side
-(which costs `_cached_read_dives`' lookups), since after a deep link the client holds no list.
-`next` means later in time, the opposite end of the newest-first `GET /dives` list.
+Returns the two dives either side — `uuid`, `dive_number`, `start_time`, `max_depth`,
+`submerged_time` — not a `DiveRead` per side (which costs `_cached_read_dives`' lookups), since
+after a deep link the client holds no list. `next` means later in time, the opposite end of the
+newest-first `GET /dives` list.
 
 Ordering is `(start_time, id)` as a row comparison: on `start_time` alone a strict `<`/`>` skips a
 tied dive and `<=`/`>=` returns the dive itself.
