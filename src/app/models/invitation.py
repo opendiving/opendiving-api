@@ -49,7 +49,8 @@ class Invitation(Base, PublicUUIDMixin, TimestampMixin):
     __tablename__ = "invitation"
     __mapper_args__ = {"exclude_properties": ["from_invite_link"]}
     # Unmapped, and dropped a deploy later: DECISIONS.md, "A column the serving build maps is
-    # dropped a deploy after it is unmapped". Nothing reads it.
+    # dropped a deploy after it is unmapped". Nothing here reads it; `record_connect_link_sign_up`
+    # still writes it for the previous build.
     __table_args__ = (Column("from_invite_link", Boolean, nullable=False, server_default="false"),)
 
     id: Mapped[int] = mapped_column(autoincrement=True, nullable=False, primary_key=True, init=False)
