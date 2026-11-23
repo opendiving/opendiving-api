@@ -39,7 +39,7 @@ from typing import Any
 from api_document import build
 
 # renovate: datasource=github-releases depName=oasdiff/oasdiff
-OASDIFF_VERSION = "v1.38.0"
+OASDIFF_VERSION = "v1.39.0"
 
 #: The marker, after the type and the optional scope, as the title check spells both.
 MARKER = re.compile(r"^[a-z]+(\([a-z0-9._-]+\))?!: ")
