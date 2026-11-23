@@ -11,21 +11,39 @@ decides, before the diver has ever set it.
 *Show by default***, where that computer stands before the one whose recording the dive shows
 (`show_first_by_default`). Nothing reads the order afterwards, so changing it rewrites no
 dive, and a diver's own choice on a dive stands until a later write adds another recording.
+
+**Which of a computer's listed dives the logbook holds** is answered here and not by a
+client, by the same clock rule and tolerance the import's same-recording gate uses
+(`known_dives`): a dive held by mistake is one the diver is never offered, so the rule has
+one home.
 """
 
+import uuid as uuid_pkg
+from bisect import bisect_left, bisect_right
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.utils.datetime_offset import split_local_start_time
 from ..models.dive import Dive
+from ..models.dive_profile import DiveProfile
 from ..models.dive_recording import DiveRecording
 from ..models.user import User
-from ..schemas.dive_computer import DiveComputerRead
-from .dive_recordings import folded_serial, make_primary
+from ..schemas.dive_computer import DiveComputerRead, KnownDive, ListedDive
+from .dive_profiles import MERGE_PARSER_KEY
+from .dive_recordings import (
+    CANDIDATE_WINDOW,
+    DeviceIdentity,
+    RecordingFacts,
+    folded_serial,
+    holds_listed_start,
+    make_primary,
+)
 
 
 class RepeatedSerialError(ValueError):
@@ -168,3 +186,126 @@ async def show_first_by_default(db: AsyncSession, *, user_id: int, dive_id: int,
         return None
     await make_primary(db, recording_id=recording_id, dive_id=dive_id)
     return int(added.ordinal)
+
+
+@dataclass(frozen=True, slots=True)
+class _Stored:
+    """A recording of the listed computer, on a live dive of the caller's, with its stored
+    start column, which the bisect orders by."""
+
+    start: datetime
+    facts: RecordingFacts
+    dive_uuid: uuid_pkg.UUID
+
+
+async def _recordings_of(db: AsyncSession, *, user_id: int, serial: str) -> list[_Stored]:
+    """The caller's recordings with a start that name this serial, folded, on live dives,
+    ordered by the stored start column.
+
+    The serial's spellings come first, folded here for `_recorded`'s reason, so the second
+    query matches them exactly. Two queries whatever the number of dives listed.
+    """
+    folded = folded_serial(serial)
+    if folded is None:
+        return []
+    spellings = [
+        spelled
+        for spelled in (
+            await db.execute(
+                select(DiveRecording.device_serial)
+                .where(DiveRecording.user_id == user_id, DiveRecording.device_serial.is_not(None))
+                .distinct()
+            )
+        ).scalars()
+        if folded_serial(spelled) == folded
+    ]
+    if not spellings:
+        return []
+    rows = await db.execute(
+        select(
+            DiveRecording.start_time,
+            DiveRecording.utc_offset_minutes,
+            DiveProfile.duration.label("sampled_span"),
+            DiveProfile.parser_key,
+            Dive.uuid.label("dive_uuid"),
+        )
+        .join(Dive, Dive.id == DiveRecording.dive_id)
+        .outerjoin(DiveProfile, DiveProfile.recording_id == DiveRecording.id)
+        .where(
+            DiveRecording.user_id == user_id,
+            DiveRecording.device_serial.in_(spellings),
+            DiveRecording.start_time.is_not(None),
+            Dive.is_deleted.is_(False),
+        )
+        .order_by(DiveRecording.start_time, DiveRecording.id)
+    )
+    return [
+        _Stored(
+            start=row.start_time,
+            facts=RecordingFacts(
+                device=DeviceIdentity(serial=serial),
+                start_time=row.start_time,
+                utc_offset_minutes=row.utc_offset_minutes,
+                sampled_span=row.sampled_span,
+                merged=row.parser_key == MERGE_PARSER_KEY,
+            ),
+            dive_uuid=row.dive_uuid,
+        )
+        for row in rows
+    ]
+
+
+async def known_dives(db: AsyncSession, *, user_id: int, serial: str, dives: Sequence[ListedDive]) -> list[KnownDive]:
+    """The listed dives the caller's logbook holds, in the order listed and each uuid once.
+
+    A dive is held by a live dive of its uuid, or by a recording of the serial whose start
+    `holds_listed_start` accepts. Three queries for one listed dive or for 2,000: each listed
+    start is compared only with the recordings whose stored start lies within the gates'
+    candidate window of it, widened by the longest merge's span, found by bisecting the
+    recordings' starts.
+    """
+    if not dives:
+        return []
+    by_uuid = set(
+        (
+            await db.execute(
+                select(Dive.uuid).where(
+                    Dive.user_id == user_id,
+                    Dive.is_deleted.is_(False),
+                    Dive.uuid.in_({dive.uuid for dive in dives}),
+                )
+            )
+        ).scalars()
+    )
+    stored = await _recordings_of(db, user_id=user_id, serial=serial)
+    starts = [one.start for one in stored]
+    longest_merge = timedelta(
+        milliseconds=max(
+            (one.facts.sampled_span or 0 for one in stored if one.facts.merged),
+            default=0,
+        )
+    )
+
+    known: list[KnownDive] = []
+    seen: set[uuid_pkg.UUID] = set()
+    for dive in dives:
+        if dive.uuid in seen:
+            continue
+        holder = dive.uuid if dive.uuid in by_uuid else _holder(dive, stored, starts, longest_merge)
+        if holder is not None:
+            seen.add(dive.uuid)
+            known.append(KnownDive(uuid=dive.uuid, dive_uuid=holder))
+    return known
+
+
+def _holder(
+    dive: ListedDive, stored: list[_Stored], starts: list[datetime], longest_merge: timedelta
+) -> uuid_pkg.UUID | None:
+    """The dive of the first recording, by stored start, that holds this listed start."""
+    start, offset = split_local_start_time(dive.started_at)
+    low = bisect_left(starts, start - CANDIDATE_WINDOW - longest_merge)
+    high = bisect_right(starts, start + CANDIDATE_WINDOW)
+    for one in stored[low:high]:
+        if holds_listed_start(one.facts, start, offset):
+            return one.dive_uuid
+    return None

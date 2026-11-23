@@ -7484,6 +7484,18 @@ the list and its footer would be untrue; ordering the unplaced by their earliest
 new computer with older dives moves ahead partway through its first download; a table of computers,
 owing a row on every path that creates a recording.
 
+## Which of a computer's dives the logbook holds is the server's answer
+
+`POST /dive-computers/known-dives` takes a computer's serial and the dives it lists, each a uuid and
+a start, and names those the caller's logbook holds: a live dive of that uuid, or a recording of the
+serial, folded, starting within the same-recording tolerance on the gates' clock, or a merge's
+recording whose samples span the start. A wrong "held" hides a dive from the diver who would
+download it, so the rule has one home, `holds_listed_start`. Rejected: listing a computer's
+recordings for the client to compare, which writes the clock rule a second time; the derived uuid
+alone, which misses a recording that joined a dive from another source. The span clause holds what
+the import's gate will not fill: asked only whether the record is in the logbook, a merge's later
+half is. A `POST` for a body no query string carries; it writes nothing.
+
 ## An experimental feature's name is checked for its form, never against a list
 
 `EXPERIMENTAL_FEATURES` refuses at startup an entry that is neither `all` nor a slug, and accepts

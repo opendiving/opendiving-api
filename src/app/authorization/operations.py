@@ -163,6 +163,8 @@ OPERATIONS = (
     Operation("patch_dive_recording", "PATCH", "/api/v1/dive/{uuid}/recording/{rid}", ("dives:write",)),
     Operation("read_dive_computers", "GET", "/api/v1/dive-computers", ("dives:read",)),
     Operation("write_dive_computer_order", "PUT", "/api/v1/dive-computers/order", ("dives:write",)),
+    # A POST for its body's size alone, which writes nothing.
+    Operation("read_dive_computer_known_dives", "POST", "/api/v1/dive-computers/known-dives", ("dives:read",)),
     Operation("write_dive_draft", "POST", "/api/v1/dive-draft", ("drafts:write",)),
     Operation("read_dive_drafts", "GET", "/api/v1/dive-drafts", ("drafts:read",)),
     Operation("read_one_dive_draft", "GET", "/api/v1/dive-draft/{uuid}", ("drafts:read",)),

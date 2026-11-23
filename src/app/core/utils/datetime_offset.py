@@ -99,6 +99,14 @@ def full_date_is_a_date(value: Any) -> Any:
     return value
 
 
+def refuse_full_date(value: Any) -> Any:
+    """Pydantic `BeforeValidator` for a `datetime` that must carry a time of day: a bare
+    `YYYY-MM-DD`, which Pydantic would read as midnight, is refused instead."""
+    if (isinstance(value, str) and _FULL_DATE.fullmatch(value)) or type(value) is date:
+        raise ValueError("must be a date and time, not a date alone")
+    return value
+
+
 def split_start_time(start_time: datetime) -> tuple[datetime, int]:
     """Decompose an offset-aware datetime into (its UTC instant, its UTC offset in minutes).
 
