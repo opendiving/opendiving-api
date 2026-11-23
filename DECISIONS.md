@@ -5599,15 +5599,13 @@ emergency contact's phone, the two things a desk asks for.
 ## A connect link is a bearer token stored in clear, where a check-in link is hashed
 
 `connect_link.token` is kept readable because People shows the same link and QR code on every visit,
-and a hash cannot be shown again. Whoever holds it sees the member's name and picture, and with a
-session their username; may put the member in their people, connected, which shows the member their
-name, username and picture; and on an invite-only instance may create an account, counted as the
-member's invitation and charged to their quota. On an open instance anyone may register anyway, so
-the link adds the tie alone, which Disconnect cuts. All of it ends when Reset replaces the token in
-place or Remove deletes it. 128 bits from `secrets.token_hex(16)`, so it fits `via`'s slug pattern
-and column. *Rejected:* hash-at-rest with show-once, right for a link that lives a day and wrong for
-a standing one; a token derived by HMAC from the account and `SECRET_KEY`, which ties every link to
-a key a self-hoster may rotate.
+and a hash cannot be shown again. Its holder sees the member's name and picture, may connect to the
+member, and on an invite-only instance may create an account charged to the member's quota; on an
+open instance anyone may register anyway, so it adds the tie alone, which Disconnect cuts. Reset
+replaces the token in place and Remove deletes it. 128 bits from `secrets.token_hex(16)`, so it fits
+`via`'s slug pattern and column. *Rejected:* hash-at-rest with show-once, right for a link that
+lives a day and wrong for a standing one; a token derived by HMAC from the account and `SECRET_KEY`,
+which ties every link to a key a self-hoster may rotate.
 
 ## The registration gate sits below `release_read_transaction`, and that is the whole design
 
@@ -7081,16 +7079,15 @@ summary.
 
 ## A connection shows each side the other, and only consent or an import makes one
 
-A person's tie (`person.connected_user_id`) shows the diver the account's current username and
-picture, and shows the account the diver's name, username and picture under *Added you*, where it
-can add back, hide or disconnect. Reads join both live, so a rename, a new picture or a deletion
-request shows at once. A person write makes a tie only from what the account handed over: its live
-connect link, or its own tie to the caller, which is adding back. Neither answers a guess - 128
-bits, and an id needs the other side's tie - so nothing throttles them. An import connects by public
-id, which travels in every export naming the account, so it can make a tie nobody offered: it is
-throttled (`PERSON_CONNECT_RATE_LIMIT_PER_USER`) and reported, and the account's Disconnect is kept
-(`account_disconnect`) so a later import does not connect again, the importer reading an unknown
-id's note. *Rejected:* connecting by username, which showed a face nobody offered.
+A person write makes a tie (`person.connected_user_id`) only from what the account handed over: its
+live connect link, or its own tie to the caller, which is adding back. Neither answers a guess - 128
+bits, and an id needs the other side's tie - so nothing throttles them. Reads join the account's
+username and picture live, so a rename, a new picture or a deletion request shows at once. An import
+connects by public id, which travels in every export naming the account, so it can make a tie nobody
+offered: it is throttled (`PERSON_CONNECT_RATE_LIMIT_PER_USER`) and reported, the account sees the
+importer under *Added you*, and its Disconnect is kept (`account_disconnect`) so a later import does
+not connect again, the importer reading an unknown id's note. *Rejected:* connecting by username,
+which showed a face nobody offered.
 
 ## Dive-computer files are stored as zstd frames, and the key says so
 
