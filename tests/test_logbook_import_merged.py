@@ -204,7 +204,11 @@ class TestAFoldsRecords:
         [after] = await _recordings(async_db, first)
         assert (after.duration, after.max_depth, after.start_time) == stored
         joined = (
-            await async_db.execute(select(DiveFile.fixes_read).where(DiveFile.original_filename == "trimmed.json"))
+            await async_db.execute(
+                select(DiveFile.fixes_read).where(
+                    DiveFile.user_id == diver.id, DiveFile.original_filename == "trimmed.json"
+                )
+            )
         ).scalar_one()
         assert joined is False, "stored unread, for the worker"
 
