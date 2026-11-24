@@ -9,24 +9,10 @@ construction - so what the public shape actually withholds is the internal ids, 
 
 import uuid as uuid_pkg
 from datetime import datetime
-from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
-from ..core.schemas import PublicUUIDSchema
-
-
-class IdleTimeout(StrEnum):
-    """How long a session may sit unused before it ends, chosen once at sign-in.
-
-    A vocabulary rather than a number of days, so the window stays the operator's
-    (`REFRESH_TOKEN_EXPIRE_DAYS` and `EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS`) and a client can
-    only ask for one of the two an instance offers. Backed by a plain `VARCHAR`, like
-    `AuthEventType`: the enum is the enforcement.
-    """
-
-    STANDARD = "standard"
-    EXTENDED = "extended"
+from ..core.schemas import IdleTimeout, PublicUUIDSchema
 
 
 class UserSessionCreateInternal(BaseModel):

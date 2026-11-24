@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from src.app.api.v1.auth import (
+    _start_onboarding_or_sign_in,
     auth_with_google,
     check_email_link,
     complete_profile,
@@ -31,9 +32,10 @@ from src.app.core.exceptions.http_exceptions import (
     RateLimitException,
     UnauthorizedException,
 )
-from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
-from src.app.core.security import ALGORITHM, SECRET_KEY, hash_sign_in_code
+from src.app.core.schemas import GoogleUserInfo, IdleTimeout, OnboardingTokenData
+from src.app.core.security import ALGORITHM, SECRET_KEY, TokenType, hash_sign_in_code
 from src.app.core.utils import cache, outbound
+from src.app.core.utils.request_context import RequestContext
 from src.app.schemas.auth import (
     EmailAuthRequest,
     EmailCodeVerifyRequest,
@@ -41,8 +43,7 @@ from src.app.schemas.auth import (
     GoogleAuthRequest,
     ProfileCompletionRequest,
 )
-from src.app.schemas.user_session import IdleTimeout
-from src.app.services.auth_service import AuthenticatedUser, IssuedTokens
+from src.app.services.auth_service import AuthenticatedUser, IssuedTokens, OnboardingRequired
 from src.app.services.user_pictures import StoredAvatar
 from tests.helpers.fake_redis import FakeRedis
 from tests.helpers.fake_s3 import select_s3_backend
@@ -549,6 +550,55 @@ class TestVerifyEmailLink:
             assert outcome.status == "onboarding_required"
             assert outcome.onboarding_token is not None
             assert outcome.email == "new@example.com"
+
+    @pytest.mark.parametrize(
+        ("body", "minted"),
+        [
+            ({}, IdleTimeout.STANDARD),
+            ({"idle_timeout": "standard"}, IdleTimeout.STANDARD),
+            ({"idle_timeout": "extended"}, IdleTimeout.EXTENDED),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_session_is_minted_with_the_idle_timeout_the_body_asked_for(
+        self, mock_db, body: dict, minted: IdleTimeout
+    ):
+        """A native client handed the link redeems it as the code is redeemed, and the web,
+        which sends only the token, keeps the window it always had."""
+        auth_request = {
+            "id": 1,
+            "email": "existing@example.com",
+            "used_at": None,
+            "invalidated_at": None,
+            "expires_at": datetime.now(UTC) + timedelta(minutes=10),
+        }
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.resolve_identity", new_callable=AsyncMock) as mock_resolve,
+            patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
+        ):
+            mock_requests.get = AsyncMock(return_value=auth_request)
+            mock_resolve.return_value = AuthenticatedUser(user={"id": 1, "uuid": USER_UUID}, provider="email")
+            mock_issue.return_value = IssuedTokens(access_token="a", refresh_token="r", max_age=60)
+            stub_claim(mock_db)
+
+            request_body = EmailVerifyRequest.model_validate({"token": "good", **body})
+            outcome = await verify_email_link(_request(), request_body, Mock(), mock_db)
+
+        assert outcome.status == "authenticated"
+        assert awaited_kwargs(mock_issue)["idle_timeout"] is minted
+
+
+class TestEmailVerifyRequestSchema:
+    def test_the_idle_timeout_defaults_to_standard(self):
+        assert EmailVerifyRequest(token="good").idle_timeout is IdleTimeout.STANDARD
+
+    @pytest.mark.parametrize("value", ["forever", "Extended", "", 90, None])
+    def test_any_other_idle_timeout_is_a_422(self, value: object):
+        with pytest.raises(ValidationError):
+            EmailVerifyRequest.model_validate({"token": "good", "idle_timeout": value})
 
 
 CODE = "481052"
@@ -1172,6 +1222,121 @@ class TestAuthWithGoogle:
 
 class TestCompleteProfile:
     """`POST /auth/complete` - the only place a `User` row is ever created."""
+
+    @staticmethod
+    async def _onboarding_token_from(route: str, asked: dict, mock_db) -> str:
+        """Sign in by email through `route` as an address with no account, with `asked` in
+        the body, and hand back the onboarding token the outcome carries."""
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as mock_requests,
+            patch("src.app.api.v1.auth.resolve_identity", new_callable=AsyncMock) as mock_resolve,
+            patch("src.app.api.v1.auth.refuse_uninvited", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock),
+            patch(
+                "src.app.api.v1.auth.charge_code_attempt", new_callable=AsyncMock, return_value=hash_sign_in_code(CODE)
+            ),
+        ):
+            mock_requests.get = AsyncMock(return_value=_code_request(email="new@example.com"))
+            mock_resolve.return_value = OnboardingRequired(
+                email="new@example.com", provider="email", provider_user_id=None, name=None, avatar=None
+            )
+            stub_claim(mock_db)
+
+            if route == "link":
+                body = EmailVerifyRequest.model_validate({"token": "good", **asked})
+                outcome = await verify_email_link(_request(), body, Mock(), mock_db)
+            else:
+                code_body = EmailCodeVerifyRequest.model_validate({"request_id": REQUEST_UUID, "code": CODE, **asked})
+                outcome = await verify_email_code(_request(), code_body, Mock(), mock_db)
+
+        assert outcome.status == "onboarding_required"
+        assert outcome.onboarding_token is not None
+        return outcome.onboarding_token
+
+    @staticmethod
+    async def _window_of_the_account_created_with(onboarding_token: str, mock_db) -> IdleTimeout:
+        """Complete a profile with `onboarding_token`, read for real, and hand back the window
+        the account's first session was minted with."""
+        with (
+            patch("src.app.core.security.crud_token_blacklist") as mock_token_blacklist,
+            patch("src.app.api.v1.auth.crud_users") as mock_users,
+            patch("src.app.api.v1.auth.account_for_email", new=email_lookups_on(mock_users)[0]),
+            patch("src.app.api.v1.auth.account_exists_for", new=email_lookups_on(mock_users)[1]),
+            patch("src.app.api.v1.auth.crud_authentication_providers") as mock_providers,
+            patch("src.app.api.v1.auth.seed_default_presets", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.seed_default_tags", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.blacklist_token", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as mock_issue,
+        ):
+            mock_token_blacklist.exists = AsyncMock(return_value=False)
+            mock_users.exists = AsyncMock(return_value=False)
+            mock_users.create = AsyncMock(return_value=Mock(id=42, uuid=USER_UUID))
+            mock_providers.create = AsyncMock(return_value=None)
+            mock_db.commit = AsyncMock(return_value=None)
+            mock_issue.return_value = IssuedTokens(access_token="a", refresh_token="r", max_age=60)
+
+            outcome = await complete_profile(
+                _request(),
+                ProfileCompletionRequest(onboarding_token=onboarding_token, name="New Person", username="newperson"),
+                Mock(),
+                mock_db,
+            )
+
+        assert outcome.status == "authenticated"
+        window: IdleTimeout = awaited_kwargs(mock_issue)["idle_timeout"]
+        return window
+
+    @pytest.mark.parametrize("route", ["link", "code"])
+    @pytest.mark.parametrize(
+        ("asked", "window"),
+        [
+            ({}, IdleTimeout.STANDARD),
+            ({"idle_timeout": "standard"}, IdleTimeout.STANDARD),
+            ({"idle_timeout": "extended"}, IdleTimeout.EXTENDED),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_account_starts_with_the_window_its_sign_in_asked_for(
+        self, mock_db, route: str, asked: dict, window: IdleTimeout
+    ):
+        """The phone asks for `extended` when it redeems the email, and the account it then
+        creates has to keep it: the completion request carries nothing but the token."""
+        onboarding_token = await self._onboarding_token_from(route, asked, mock_db)
+
+        assert await self._window_of_the_account_created_with(onboarding_token, mock_db) is window
+
+    @pytest.mark.asyncio
+    async def test_an_onboarding_token_naming_no_window_starts_a_standard_session(self, mock_db):
+        """One minted before the claim existed and still unspent across the deploy that adds
+        it."""
+        claims = {
+            "email": "new@example.com",
+            "provider": "email",
+            "exp": datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=settings.ONBOARDING_TOKEN_EXPIRE_MINUTES),
+            "jti": uuid_pkg.uuid4().hex,
+            "token_type": TokenType.ONBOARDING,
+        }
+        onboarding_token = jwt.encode(claims, SECRET_KEY.get_secret_value(), algorithm=ALGORITHM)
+
+        assert await self._window_of_the_account_created_with(onboarding_token, mock_db) is IdleTimeout.STANDARD
+
+    @pytest.mark.asyncio
+    async def test_a_sign_in_that_asks_for_no_window_hands_over_a_standard_one(self, mock_db):
+        """As Google's does: its route passes no window to the handoff."""
+        identity = OnboardingRequired(
+            email="new@example.com", provider="google", provider_user_id="g-1", name="New Person", avatar=None
+        )
+        with (
+            patch("src.app.api.v1.auth.refuse_uninvited", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.record_auth_event", new_callable=AsyncMock),
+        ):
+            outcome = await _start_onboarding_or_sign_in(
+                Mock(), identity, db=mock_db, context=RequestContext(ip="1.2.3.4", user_agent="TestAgent/1.0")
+            )
+
+        assert outcome.onboarding_token is not None
+        assert await self._window_of_the_account_created_with(outcome.onboarding_token, mock_db) is IdleTimeout.STANDARD
 
     @pytest.mark.asyncio
     async def test_invalid_onboarding_token_raises_unauthorized(self, mock_db):

@@ -1,5 +1,6 @@
 import uuid as uuid_pkg
 from datetime import date, datetime
+from enum import StrEnum
 from typing import Annotated, ClassVar, Self
 
 from pydantic import BaseModel, BeforeValidator, EmailStr, Field, StringConstraints, model_validator
@@ -180,12 +181,26 @@ class GoogleUserInfo(BaseModel):
 
 
 # -------------- onboarding (temporary, pre-account session) --------------
+class IdleTimeout(StrEnum):
+    """How long a session may sit unused before it ends, chosen once at sign-in.
+
+    A vocabulary rather than a number of days, so the window stays the operator's
+    (`REFRESH_TOKEN_EXPIRE_DAYS` and `EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS`) and a client can
+    only ask for one of the two an instance offers. Stored in `user_session.idle_timeout`, a
+    plain `VARCHAR` like `AuthEventType`'s column: the enum is the enforcement. Here rather
+    than beside the session schemas because the onboarding and restore tokens carry it too.
+    """
+
+    STANDARD = "standard"
+    EXTENDED = "extended"
+
+
 class OnboardingTokenData(BaseModel):
     """Decoded payload of a short-lived onboarding JWT (see `create_onboarding_token`/
     `verify_onboarding_token` in `core.security`), issued once an email or Google
     identity has been verified but no `User` row exists for it yet. Never persisted -
-    it only ever lives inside the signed token itself, carried by the frontend from
-    `/auth/email/verify` or `/auth/google` to `/auth/complete`.
+    it only ever lives inside the signed token itself, carried by the client from
+    `/auth/email/verify`, `/auth/email/verify-code` or `/auth/google` to `/auth/complete`.
     """
 
     email: str
@@ -197,6 +212,9 @@ class OnboardingTokenData(BaseModel):
     # through, signed into the token so `/auth/complete` hands the gate the one it was
     # verified with and no other.
     via: str | None = None
+    # The window the sign-in asked for, signed in so the account's first session has it
+    # without `/auth/complete` having to be asked again.
+    idle_timeout: IdleTimeout = IdleTimeout.STANDARD
 
 
 class DiveFileTokenData(BaseModel):

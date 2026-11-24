@@ -42,7 +42,7 @@ from src.app.api.v1.sessions import read_sessions
 from src.app.core.config import settings
 from src.app.core.db.database import async_engine
 from src.app.core.exceptions.http_exceptions import RateLimitException, UnauthorizedException
-from src.app.core.schemas import GoogleUserInfo, OnboardingTokenData
+from src.app.core.schemas import GoogleUserInfo, IdleTimeout, OnboardingTokenData
 from src.app.core.security import (
     ALGORITHM,
     SECRET_KEY,
@@ -63,7 +63,6 @@ from src.app.schemas.auth import (
     ProfileCompletionRequest,
     RestoreRequest,
 )
-from src.app.schemas.user_session import IdleTimeout
 from src.app.services.auth_service import (
     AuthenticatedUser,
     DeletionPending,
@@ -307,6 +306,29 @@ class TestTheOutcomeOnEveryEntryPoint:
                 EmailCodeVerifyRequest(request_id=REQUEST_UUID, code="481052", idle_timeout=idle_timeout),
                 Mock(),
                 mock_db,
+            )
+
+        assert outcome.status == "deletion_pending"
+        assert outcome.restore_token is not None
+        assert await _window_of(outcome.restore_token, mock_db) is idle_timeout
+
+    @pytest.mark.parametrize("idle_timeout", list(IdleTimeout))
+    @pytest.mark.asyncio
+    async def test_the_link_signs_its_window_into_the_restore_token(self, mock_db, idle_timeout: IdleTimeout):
+        """The same as the code's, for a phone handed the link rather than typing the code."""
+        with (
+            patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
+            patch("src.app.api.v1.auth.crud_authentication_requests") as requests,
+            patch("src.app.services.auth_service.crud_authentication_providers"),
+            patch("src.app.services.auth_service.crud_users") as users,
+            patch("src.app.services.auth_service.account_for_email", new=email_lookups_on(users)[0]),
+        ):
+            requests.get = AsyncMock(return_value=_live_auth_request())
+            users.get = AsyncMock(return_value=_pending_row())
+            stub_claim(mock_db)
+
+            outcome = await verify_email_link(
+                _request(), EmailVerifyRequest(token="good", idle_timeout=idle_timeout), Mock(), mock_db
             )
 
         assert outcome.status == "deletion_pending"

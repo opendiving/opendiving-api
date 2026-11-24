@@ -81,6 +81,6 @@ class UserSession(Base, PublicUUIDMixin):
     # is snapshotted from the rows still here (`swept_session_predicate`).
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
-    # `schemas.user_session.IdleTimeout`, chosen at sign-in and never changed: which of the
+    # `core.schemas.IdleTimeout`, chosen at sign-in and never changed: which of the
     # two operator windows `expires_at` slides by.
     idle_timeout: Mapped[str] = mapped_column(String(16), default="standard", server_default="standard")

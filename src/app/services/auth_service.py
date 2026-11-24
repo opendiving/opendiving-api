@@ -18,6 +18,7 @@ from fastapi import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
+from ..core.schemas import IdleTimeout
 from ..core.security import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, create_refresh_token
 from ..core.utils.request_context import RequestContext
 from ..crud.crud_auth_audit_events import record_auth_event
@@ -27,7 +28,6 @@ from ..crud.crud_users import account_for_email, crud_users
 from ..models.user_session import UserSession
 from ..schemas.auth_audit_event import AuthEventType
 from ..schemas.authentication_provider import AuthenticationProviderCreate
-from ..schemas.user_session import IdleTimeout
 
 
 @dataclass(frozen=True)

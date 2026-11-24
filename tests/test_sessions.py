@@ -40,6 +40,7 @@ from uuid6 import uuid7
 from src.app.api.dependencies import get_current_user
 from src.app.api.v1.sessions import _LIST_LIMIT, erase_other_sessions, erase_session, read_sessions
 from src.app.core.exceptions.http_exceptions import NotFoundException, UnauthorizedException
+from src.app.core.schemas import IdleTimeout
 from src.app.core.security import (
     ALGORITHM,
     SECRET_KEY,
@@ -60,7 +61,7 @@ from src.app.crud.crud_user_sessions import (
 )
 from src.app.models.user import User
 from src.app.models.user_session import UserSession
-from src.app.schemas.user_session import IdleTimeout, UserSessionReadInternal, to_public_session
+from src.app.schemas.user_session import UserSessionReadInternal, to_public_session
 from src.app.services.auth_service import issue_tokens
 from tests.conftest import db_available
 from tests.helpers.mocks import FakeTokenBlacklist, awaited_kwargs, fake_request

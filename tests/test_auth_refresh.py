@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from src.app.api.v1.auth import _elapsed, _reuse_grace, refresh_access_token
 from src.app.core.config import settings
 from src.app.core.exceptions.http_exceptions import UnauthorizedException
-from src.app.core.schemas import TokenData
+from src.app.core.schemas import IdleTimeout, TokenData
 from src.app.core.security import blacklist_token, create_refresh_token, token_session_id
 from src.app.core.utils import cache
 from src.app.core.utils.request_context import RequestContext
@@ -34,7 +34,7 @@ from src.app.crud.crud_user_sessions import revoke_session
 from src.app.models.user import User
 from src.app.models.user_session import UserSession
 from src.app.schemas.auth_audit_event import AuthEventType
-from src.app.schemas.user_session import IdleTimeout, UserSessionReadInternal
+from src.app.schemas.user_session import UserSessionReadInternal
 from src.app.services.auth_service import IssuedTokens, issue_tokens
 from tests.conftest import db_available
 from tests.helpers.fake_redis import FakeRedis

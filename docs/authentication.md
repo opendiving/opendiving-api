@@ -558,16 +558,18 @@ well - see *Session refresh & logout* above.
 **A native client.** An app with no cookie jar reads the refresh token off the `Set-Cookie` header
 of the sign-in or refresh response, keeps it in its own secure storage, and sends it back as a
 `Cookie: refresh_token=...` header on the two routes that read it, `POST /auth/refresh` and
-`POST /auth/logout`. It signs in with the six-digit code (`POST /auth/email/verify-code`) and asks
-for `"idle_timeout": "extended"`, which buys it a session that survives
+`POST /auth/logout`. It signs in with the six-digit code (`POST /auth/email/verify-code`), or by
+redeeming the link's token itself (`POST /auth/email/verify`) when the link is handed to it, and
+asks either for `"idle_timeout": "extended"`, which buys it a session that survives
 `EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS` (90 by default) of disuse rather than a week — at the cost of a
-stolen device staying signed in that much longer, until the session is revoked from *Sessions*. Only
-that route takes the member; a `deletion_pending` outcome from it carries the window into the
-restore token, so `POST /auth/restore` starts the session it asked for. Every other sign-in starts a
-`standard` session, and the web sends nothing. A client that loses a refresh reply should retry once
-with the same cookie within the grace, after a short pause, and the server answers with the pair it
-already minted. A script or a sync job is better served by an API key (below), which needs no
-refresh at all.
+stolen device staying signed in that much longer, until the session is revoked from *Sessions*. A
+`deletion_pending` outcome carries the window into the restore token, so `POST /auth/restore` starts
+the session it asked for, and an `onboarding_required` one carries it into the onboarding token, so
+a native client can create the account with `POST /auth/complete` and be signed in with the same
+window. Google and passkey sign-ins start a `standard` session, and the web sends nothing. A client
+that loses a refresh reply should retry once with the same cookie within the grace, after a short
+pause, and the server answers with the pair it already minted. A script or a sync job is better
+served by an API key (below), which needs no refresh at all.
 
 **Upgrading signs everyone out once.** Neither half of a pair minted before this feature carries a
 `sid`, and both halves are now refused for want of one - the access token on its next request, the

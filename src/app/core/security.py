@@ -16,10 +16,9 @@ from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 from jose import JWTError, jwt
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..schemas.user_session import IdleTimeout
 from .config import settings
 from .db.crud_token_blacklist import crud_token_blacklist
 from .exceptions.http_exceptions import UnauthorizedException
@@ -27,6 +26,7 @@ from .schemas import (
     DiveFileTokenData,
     DownloadTokenData,
     GoogleUserInfo,
+    IdleTimeout,
     OnboardingTokenData,
     TokenBlacklistCreate,
     TokenBlacklistRead,
@@ -591,7 +591,7 @@ def token_subject(token: str) -> str | None:
 # -------------- onboarding tokens --------------
 async def create_onboarding_token(data: OnboardingTokenData) -> str:
     """Creates a short-lived (`settings.ONBOARDING_TOKEN_EXPIRE_MINUTES`) JWT carrying a
-    verified-but-accountless identity from `/auth/email/verify` or `/auth/google` to
+    verified-but-accountless identity from either email route or `/auth/google` to
     `/auth/complete`. Never persisted anywhere - the signature and expiry are all that
     back it, same as access/refresh tokens - but it *is* recorded in the token
     blacklist once used (see `blacklist_token`), making it single-use. Being blacklisted
@@ -605,6 +605,7 @@ async def create_onboarding_token(data: OnboardingTokenData) -> str:
         "name": data.name,
         "avatar": data.avatar,
         "via": data.via,
+        "idle_timeout": str(data.idle_timeout),
         "exp": expire,
         "jti": _new_jti(),
         "token_type": TokenType.ONBOARDING,
@@ -617,6 +618,10 @@ async def verify_onboarding_token(token: str, db: AsyncSession) -> OnboardingTok
     """Validates an onboarding JWT: not blacklisted (i.e. not already used to complete
     a profile), not expired, and well-formed. Returns the identity it carries, or
     `None` if any of that fails.
+
+    A token with no `idle_timeout` claim is `standard`. Only a token minted before the claim
+    existed lacks one, and those are honoured across the deploy that adds it; the default can
+    come out once that deploy is `ONBOARDING_TOKEN_EXPIRE_MINUTES` old.
     """
     is_blacklisted = await crud_token_blacklist.exists(db, token=token)
     if is_blacklisted:
@@ -635,14 +640,18 @@ async def verify_onboarding_token(token: str, db: AsyncSession) -> OnboardingTok
     if not email or not provider:
         return None
 
-    return OnboardingTokenData(
-        email=email,
-        provider=provider,
-        provider_user_id=payload.get("provider_user_id"),
-        name=payload.get("name"),
-        avatar=payload.get("avatar"),
-        via=payload.get("via"),
-    )
+    try:
+        return OnboardingTokenData(
+            email=email,
+            provider=provider,
+            provider_user_id=payload.get("provider_user_id"),
+            name=payload.get("name"),
+            avatar=payload.get("avatar"),
+            via=payload.get("via"),
+            idle_timeout=payload.get("idle_timeout", IdleTimeout.STANDARD),
+        )
+    except ValidationError:
+        return None
 
 
 # -------------- restore tokens --------------

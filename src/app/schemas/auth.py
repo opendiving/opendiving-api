@@ -6,8 +6,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..core.config import JOIN_CHANNEL_SLUG_PATTERN
-from ..core.schemas import AccountEmail
-from .user_session import IdleTimeout
+from ..core.schemas import AccountEmail, IdleTimeout
 
 # -------------- email magic link --------------
 # The join-channel slug a sign-in arrived through, from `/join?via=<slug>`, or the token of
@@ -51,20 +50,26 @@ class EmailAuthRequestResponse(BaseModel):
     request_id: uuid_pkg.UUID
 
 
+# How long the session a sign-in by email starts may sit unused, on either half of the email.
+# A native client asks for `extended`, and the web sends nothing. On a `deletion_pending`
+# outcome it is the window of the session a restore starts, and on `onboarding_required` the
+# one the account's first session starts with.
+RequestedIdleTimeout = Annotated[
+    IdleTimeout,
+    Field(description="How long the new session may sit unused before it ends: the standard or the extended window"),
+]
+
+
 class EmailVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     token: Annotated[str, Field(description="Token from the sign-in link in the email")]
+    idle_timeout: RequestedIdleTimeout = IdleTimeout.STANDARD
 
 
 class EmailCodeVerifyRequest(BaseModel):
     """`POST /auth/email/verify-code` - the six-digit code from the sign-in email, plus
     the `request_id` that `POST /auth/email/request` handed back to the tab that asked.
-
-    `idle_timeout` is how long the session may then sit unused - the one a restore starts,
-    when the outcome is `deletion_pending` - and only this route takes it: the code is the
-    one way in a native client has, and the other sign-ins are a browser's. `extended` asks
-    for the operator's longer window; the web sends nothing.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -80,12 +85,7 @@ class EmailCodeVerifyRequest(BaseModel):
         str,
         Field(examples=["481052"], description="Six-digit code from the sign-in email; spaces and hyphens are ignored"),
     ]
-    idle_timeout: Annotated[
-        IdleTimeout,
-        Field(
-            description="How long the new session may sit unused before it ends: the standard or the extended window"
-        ),
-    ] = IdleTimeout.STANDARD
+    idle_timeout: RequestedIdleTimeout = IdleTimeout.STANDARD
 
     @field_validator("code")
     @classmethod
