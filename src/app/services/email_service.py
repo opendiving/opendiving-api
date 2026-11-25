@@ -23,7 +23,7 @@ import math
 import smtplib
 import ssl
 from collections.abc import Awaitable
-from datetime import datetime
+from datetime import UTC, datetime
 from email.message import EmailMessage
 
 import anyio
@@ -386,9 +386,7 @@ async def send_api_key_created_email(
     """
     access = {"write": "read and change", "read": "read", "scoped": "use the selected permissions on"}[scope]
     # The time as well as the day, since a key can last as little as an hour.
-    until = (
-        f"until {expires_at:%H:%M} UTC on {expires_at:%-d %B %Y}" if expires_at is not None else "until it is revoked"
-    )
+    until = f"until {expires_at.astimezone(UTC):%H:%M UTC on %-d %B %Y}" if expires_at else "until it is revoked"
     if not settings.SMTP_HOST:
         logger.warning(
             "SMTP_HOST not configured; API-key-created notice for %s: %s (%s..., %s)", email, key_name, prefix, scope
