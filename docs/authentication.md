@@ -587,10 +587,10 @@ stored, logged, emailed or audited; the row keeps its hash and its first twelve 
 `prefix` a list row and an email name it by.
 
 - `POST /user/api-keys` - `name`, `scope` (`scoped` | `read` | `write`), `scopes` and `lifetime`
-  (`30d` | `90d` | `1y` | `never`). A `scoped` key requires a nonempty list of distinct supported
-  permissions; legacy `read` and `write` keys omit `scopes`. The server computes `expires_at`. 409
-  at `API_KEY_MAX_PER_USER` keys (expired ones count), 429 past `API_KEY_CREATE_RATE_LIMIT_PER_USER`
-  creations in the auth window.
+  (`1h` | `1d` | `7d` | `30d` | `90d` | `1y` | `never`). A `scoped` key requires a nonempty list of
+  distinct supported permissions; legacy `read` and `write` keys omit `scopes`. The server computes
+  `expires_at`. 409 at `API_KEY_MAX_PER_USER` keys (expired ones count), 429 past
+  `API_KEY_CREATE_RATE_LIMIT_PER_USER` creations in the auth window.
 - `GET /user/api-key-permissions` - the supported permission vocabulary, shared with MCP.
 - `GET /user/api-keys` - every key on the account, oldest first, expired ones included, with
   `last_used_at` stamped at most once per five minutes.

@@ -252,13 +252,20 @@ class TestTheSecret:
         assert generate_api_key()[0] != secret
 
     @pytest.mark.parametrize(
-        ("lifetime", "days"),
-        [(ApiKeyLifetime.THIRTY_DAYS, 30), (ApiKeyLifetime.NINETY_DAYS, 90), (ApiKeyLifetime.ONE_YEAR, 365)],
+        ("lifetime", "duration"),
+        [
+            (ApiKeyLifetime.ONE_HOUR, timedelta(hours=1)),
+            (ApiKeyLifetime.ONE_DAY, timedelta(days=1)),
+            (ApiKeyLifetime.SEVEN_DAYS, timedelta(days=7)),
+            (ApiKeyLifetime.THIRTY_DAYS, timedelta(days=30)),
+            (ApiKeyLifetime.NINETY_DAYS, timedelta(days=90)),
+            (ApiKeyLifetime.ONE_YEAR, timedelta(days=365)),
+        ],
     )
-    def test_a_lifetime_is_a_number_of_days_from_now(self, lifetime: ApiKeyLifetime, days: int) -> None:
+    def test_a_lifetime_is_a_duration_from_now(self, lifetime: ApiKeyLifetime, duration: timedelta) -> None:
         now = datetime(2026, 10, 28, 12, tzinfo=UTC)
 
-        assert lifetime.expires_at(now) == now + timedelta(days=days)
+        assert lifetime.expires_at(now) == now + duration
 
     def test_never_is_no_expiry(self) -> None:
         assert ApiKeyLifetime.NEVER.expires_at(datetime.now(UTC)) is None
@@ -547,6 +554,18 @@ class TestCreatingAKey:
 
         assert response.status_code == 201
         assert response.json()["expires_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_shortest_lifetime_is_an_hour(
+        self, http: httpx.AsyncClient, async_db: AsyncSession, diver: User
+    ) -> None:
+        response = await _create(http, await _browser(async_db, diver), lifetime="1h")
+
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert datetime.fromisoformat(body["expires_at"]) - datetime.fromisoformat(body["created_at"]) == pytest.approx(
+            timedelta(hours=1), abs=timedelta(seconds=5)
+        )
 
     @pytest.mark.asyncio
     async def test_a_client_cannot_send_a_date(

@@ -28,14 +28,27 @@ class ApiKeyLifetime(StrEnum):
     """How long a key lasts, chosen at creation. A vocabulary rather than a date, so the
     server computes `expires_at` and a client never sends one."""
 
+    ONE_HOUR = "1h"
+    ONE_DAY = "1d"
+    SEVEN_DAYS = "7d"
     THIRTY_DAYS = "30d"
     NINETY_DAYS = "90d"
     ONE_YEAR = "1y"
     NEVER = "never"
 
     def expires_at(self, now: datetime) -> datetime | None:
-        days = {"30d": 30, "90d": 90, "1y": 365}.get(self.value)
-        return None if days is None else now + timedelta(days=days)
+        duration = _DURATIONS.get(self)
+        return None if duration is None else now + duration
+
+
+_DURATIONS = {
+    ApiKeyLifetime.ONE_HOUR: timedelta(hours=1),
+    ApiKeyLifetime.ONE_DAY: timedelta(days=1),
+    ApiKeyLifetime.SEVEN_DAYS: timedelta(days=7),
+    ApiKeyLifetime.THIRTY_DAYS: timedelta(days=30),
+    ApiKeyLifetime.NINETY_DAYS: timedelta(days=90),
+    ApiKeyLifetime.ONE_YEAR: timedelta(days=365),
+}
 
 
 class ApiKeyCreate(BaseModel):
@@ -56,7 +69,9 @@ class ApiKeyCreate(BaseModel):
         ApiKeyScope,
         Field(description="scoped grants only the listed permissions; read and write preserve legacy access"),
     ]
-    lifetime: Annotated[ApiKeyLifetime, Field(description="How long the key stays valid: 30d, 90d, 1y or never")]
+    lifetime: Annotated[
+        ApiKeyLifetime, Field(description="How long the key stays valid: 1h, 1d, 7d, 30d, 90d, 1y or never")
+    ]
     scopes: list[str] | None = Field(
         default=None, description="Explicit permissions for a scoped key; omitted for legacy read/write keys"
     )

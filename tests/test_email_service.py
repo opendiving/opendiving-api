@@ -326,7 +326,7 @@ class TestSendApiKeyCreatedEmail:
 
         assert "&lt;b&gt;laptop&lt;/b&gt;" in body
         assert "<code>odk_abcdefgh</code>" in body
-        assert "can read your logbook until 28 October 2027" in body
+        assert "can read your logbook until 09:30 UTC on 28 October 2027" in body
         assert 'href="https://app.example.com/settings/authentication">revoke it' in body
 
     @pytest.mark.asyncio

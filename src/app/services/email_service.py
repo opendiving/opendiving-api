@@ -385,7 +385,10 @@ async def send_api_key_created_email(
     notices do.
     """
     access = {"write": "read and change", "read": "read", "scoped": "use the selected permissions on"}[scope]
-    until = f"until {expires_at:%-d %B %Y}" if expires_at is not None else "until it is revoked"
+    # The time as well as the day, since a key can last as little as an hour.
+    until = (
+        f"until {expires_at:%H:%M} UTC on {expires_at:%-d %B %Y}" if expires_at is not None else "until it is revoked"
+    )
     if not settings.SMTP_HOST:
         logger.warning(
             "SMTP_HOST not configured; API-key-created notice for %s: %s (%s..., %s)", email, key_name, prefix, scope
