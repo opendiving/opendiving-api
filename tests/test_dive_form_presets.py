@@ -368,9 +368,7 @@ class TestTheUserColumn:
 
             assert result == {"message": "User updated"}
             written = mock_crud.update.call_args.kwargs["object"]
-            assert written == {
-                "dive_form_hidden_fields": [DiveFormField.ALTITUDE, DiveFormField.NOTES]
-            }
+            assert written == {"dive_form_hidden_fields": [DiveFormField.ALTITUDE, DiveFormField.NOTES]}
 
     def test_an_explicit_null_is_rejected(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
