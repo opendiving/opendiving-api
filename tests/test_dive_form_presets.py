@@ -334,7 +334,7 @@ class TestAStoredFieldNameOutsideTheVocabulary:
 
 class TestTheUserColumn:
     """`user.dive_form_hidden_fields` - the account's current state, read on `GET /user` and
-    written on `PATCH /user`, the same two-endpoint surface `units` has.
+    written on `PATCH /user`, the same two-endpoint surface `unit_preferences` has.
 
     `test_update_explicit_nulls.py` covers the `NON_NULLABLE_FIELDS` half structurally, off
     the SQLAlchemy metadata; the null case here is that guard seen from the caller's side.
@@ -368,7 +368,7 @@ class TestTheUserColumn:
 
             assert result == {"message": "User updated"}
             written = mock_crud.update.call_args.kwargs["object"]
-            assert written.model_dump(exclude_unset=True) == {
+            assert written == {
                 "dive_form_hidden_fields": [DiveFormField.ALTITUDE, DiveFormField.NOTES]
             }
 
@@ -428,7 +428,7 @@ class TestTheUserColumn:
             await patch_user(Mock(), values, current_user_dict, mock_db)
 
             presets.exists.assert_not_awaited()
-            assert users.update.call_args.kwargs["object"].model_dump(exclude_unset=True) == {
+            assert users.update.call_args.kwargs["object"] == {
                 "dive_form_hidden_fields": [],
                 "dive_form_preset_uuid": None,
             }
