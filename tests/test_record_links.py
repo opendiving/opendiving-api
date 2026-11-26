@@ -24,6 +24,7 @@ from src.app.api.v1 import courses as courses_module
 from src.app.api.v1 import gear_items as gear_items_module
 from src.app.api.v1 import people as people_module
 from src.app.api.v1 import trips as trips_module
+from src.app.core.utils import cache as cache_module
 from src.app.crud.crud_contacts import crud_contacts
 from src.app.crud.crud_users import read_account
 from src.app.models.user import User
@@ -257,6 +258,12 @@ def _contact_row(db: Session, uuid: Any) -> tuple[Any, ...]:
 @pytest.mark.skipif(not db_available(), reason="No database connection available")
 class TestTheRoutes:
     """Scenarios 1 and 2 of the shim, through the routes and the column behind them."""
+
+    @pytest.fixture(autouse=True)
+    def no_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The routes' invalidations reach whatever Redis client an earlier test left behind;
+        none is what these assertions read."""
+        monkeypatch.setattr(cache_module, "client", None)
 
     @pytest_asyncio.fixture
     async def account(self, diver: User, async_db: AsyncSession) -> dict[str, Any]:
