@@ -14,7 +14,9 @@ matching the wrapping by hand.
 
 - Location: `src/`
 
-- Credentials: `src/.env` (keep safe, but logging to console is OK locally)
+- Credentials: `src/.env`. Don't echo its values, or any other token or private key, into command
+  output, diagnostics, commits or PR text. The sign-in links the API logs when `SMTP_HOST` is unset
+  (*Auth flow* below) are a deliberate local-only exception.
 
 - **`cp src/.env.example src/.env` is not a working configuration, on purpose.** The template's
   `SECRET_KEY` is a published placeholder and startup rejects it in every environment — generate one
@@ -96,6 +98,26 @@ matching the wrapping by hand.
   a maintainer's setting, and the hook checks before it blocks"* in `DECISIONS.md`.
 
 Test, lint, format and type-check commands are in `CONTRIBUTING.md`.
+
+## Contribution checks
+
+Read `CONTRIBUTING.md` before editing. For an API contract or configuration change, identify
+companion changes using its *Changes that span both repos* section and the install-bundle guidance
+above. State the migration and deployment order in the PR. A pushed companion branch with no open PR
+does not satisfy the cross-repository contribution rule.
+
+The MCP layer (`src/app/mcp/`) reuses API handlers and must keep their contract;
+`docs/mcp-design.md` says how. Read it before changing a tool.
+
+Account-preference changes cover persistence, omission, explicit nulls, replacement and reset
+semantics, including rejection without losing saved state. Trace exports, shared views, background
+jobs and older clients that consume the preference. For measurement preferences, read "Measurements
+are metric in the database and on the wire; `units` is who's looking" in `DECISIONS.md`.
+
+For review fixes, inspect review bodies, inline comments and discussion attachments. Reconcile each
+item with the current diff, rationale comments, documentation and PR description. State what remains
+unverified or blocked. Run the relevant contribution checks and report skipped database-backed tests
+as a verification gap, not a successful database test run.
 
 ## Constraints
 
