@@ -1,11 +1,12 @@
 import math
 import uuid as uuid_pkg
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import Any, NamedTuple
 
 from fastcrud import FastCRUD
 from sqlalchemy import (
+    JSON,
     ColumnElement,
     Select,
     String,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     null,
     or_,
     select,
+    text,
     true,
     tuple_,
     update,
@@ -36,6 +38,7 @@ from ..models.dive_site_tag import DiveSiteTag
 from ..models.dive_species import DiveSpecies
 from ..models.saved_site import SavedSite
 from ..models.tag import Tag
+from ..schemas.custom_property import merge_custom_properties
 from ..schemas.dive_site import (
     DiveSiteCommonsMatch,
     DiveSiteCreateInternal,
@@ -168,13 +171,15 @@ def commons_records_carrying(entries: Iterable[tuple[str, str]]) -> Select[Any]:
 def _select_sites(user_id: int, *, on_the_list_only: bool) -> Select[Any]:
     """Every mapped column of a site, with what this diver's saved row says of it, if they have one.
 
-    `notes` and `created_at` are the saved row's. A Commons record the diver has not saved has
-    no such row, so it reads with no notes and the date it became a Commons record.
+    `notes`, `custom_properties` and `created_at` are the saved row's. A Commons record the diver
+    has not saved has no such row, so it reads with no notes, no properties and the date it became
+    a Commons record.
     """
     site_columns = [column for column in inspect(DiveSite).columns if column.key != "created_at"]
     return select(
         *site_columns,
         func.coalesce(SavedSite.notes, "").label("notes"),
+        func.coalesce(SavedSite.custom_properties, text("'[]'::json"), type_=JSON).label("custom_properties"),
         func.coalesce(SavedSite.created_at, DiveSite.created_at).label("created_at"),
         SavedSite.id.is_not(None).label("saved"),
     ).join_from(
@@ -195,10 +200,26 @@ async def get_readable_dive_site(db: AsyncSession, *, uuid: uuid_pkg.UUID, user_
     return None if row is None else dict(row)
 
 
-def add_saved_site(db: AsyncSession, *, user_id: int, dive_site_id: int, notes: str, created_at: datetime) -> None:
+def add_saved_site(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    dive_site_id: int,
+    notes: str,
+    created_at: datetime,
+    custom_properties: list[dict[str, str]],
+) -> None:
     """Put a new site on its owner's list, in the transaction that creates it. Stamped with the
     site's own `created_at`, so a read answers the instant the create did."""
-    db.add(SavedSite(user_id=user_id, dive_site_id=dive_site_id, notes=notes, created_at=created_at))
+    db.add(
+        SavedSite(
+            user_id=user_id,
+            dive_site_id=dive_site_id,
+            notes=notes,
+            created_at=created_at,
+            custom_properties=custom_properties,
+        )
+    )
 
 
 async def is_saved(db: AsyncSession, *, user_id: int, dive_site_id: int) -> bool:
@@ -209,13 +230,25 @@ async def is_saved(db: AsyncSession, *, user_id: int, dive_site_id: int) -> bool
 
 
 async def save_commons_site(
-    db: AsyncSession, *, user_id: int, dive_site_id: int, notes: str, created_at: datetime | None = None
+    db: AsyncSession,
+    *,
+    user_id: int,
+    dive_site_id: int,
+    notes: str,
+    created_at: datetime | None = None,
+    custom_properties: list[dict[str, str]] | None = None,
 ) -> bool:
     """Whether this put the record on the diver's list, which it does not where it already is:
     a retry changes nothing, and two at once leave one row. Does not commit."""
     written = await db.scalar(
         insert(SavedSite)
-        .values(user_id=user_id, dive_site_id=dive_site_id, notes=notes, created_at=created_at or datetime.now(UTC))
+        .values(
+            user_id=user_id,
+            dive_site_id=dive_site_id,
+            notes=notes,
+            created_at=created_at or datetime.now(UTC),
+            custom_properties=custom_properties or [],
+        )
         .on_conflict_do_nothing(constraint=_SAVED_SITE_KEY)
         .returning(SavedSite.id)
     )
@@ -258,12 +291,13 @@ async def remove_saved_commons_site(db: AsyncSession, *, user_id: int, dive_site
     await db.execute(delete(SavedSite).where(SavedSite.user_id == user_id, SavedSite.dive_site_id == dive_site_id))
 
 
-async def replace_saved_site_notes(db: AsyncSession, *, user_id: int, dive_site_id: int, notes: str) -> bool:
-    """Whether the diver had this site on their list to write the notes to. Does not commit."""
+async def update_saved_site(db: AsyncSession, *, user_id: int, dive_site_id: int, values: Mapping[str, Any]) -> bool:
+    """Whether the diver had this site on their list to write `notes` or `custom_properties` to.
+    Does not commit."""
     written = await db.scalar(
         update(SavedSite)
         .where(SavedSite.user_id == user_id, SavedSite.dive_site_id == dive_site_id)
-        .values(notes=notes, updated_at=datetime.now(UTC))
+        .values(**values, updated_at=datetime.now(UTC))
         .returning(SavedSite.id)
     )
     return written is not None
@@ -273,24 +307,33 @@ async def replace_site_with_record(db: AsyncSession, *, user_id: int, site_id: i
     """Put a Commons record where a diver's own site stands, and delete the site. Does not commit.
 
     The diver's dives name the record at the same positions, their notes join any they had on
-    it, their tags are the union, and the record is on their list with the date the site
+    it, their custom properties join theirs (`merge_custom_properties`), their tags are the
+    union, and the record is on their list with the date the site
     entered it. The site's uuid goes on meaning the record to them alone. Their proposals on the
     site go with the row, so a caller keeping one moves it first.
     """
     site_row = (
         await db.execute(
-            select(SavedSite.notes, SavedSite.created_at).where(
+            select(SavedSite.notes, SavedSite.created_at, SavedSite.custom_properties).where(
                 SavedSite.user_id == user_id, SavedSite.dive_site_id == site_id
             )
         )
     ).one()
     await save_commons_site(db, user_id=user_id, dive_site_id=record_id, notes="", created_at=site_row.created_at)
-    held = await db.scalar(
-        select(SavedSite.notes).where(SavedSite.user_id == user_id, SavedSite.dive_site_id == record_id)
-    )
-    if site_row.notes and site_row.notes != held:
-        joined = "\n\n".join(notes for notes in (held, site_row.notes) if notes)
-        await replace_saved_site_notes(db, user_id=user_id, dive_site_id=record_id, notes=joined)
+    held = (
+        await db.execute(
+            select(SavedSite.notes, SavedSite.custom_properties).where(
+                SavedSite.user_id == user_id, SavedSite.dive_site_id == record_id
+            )
+        )
+    ).one()
+    joined: dict[str, Any] = {}
+    if site_row.notes and site_row.notes != held.notes:
+        joined["notes"] = "\n\n".join(notes for notes in (held.notes, site_row.notes) if notes)
+    if site_row.custom_properties:
+        joined["custom_properties"] = merge_custom_properties(held.custom_properties, site_row.custom_properties)
+    if joined:
+        await update_saved_site(db, user_id=user_id, dive_site_id=record_id, values=joined)
 
     await replace_dive_site_on_dives(db=db, user_id=user_id, from_dive_site_id=site_id, to_dive_site_id=record_id)
 

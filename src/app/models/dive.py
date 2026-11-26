@@ -4,10 +4,10 @@ from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, In
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
+from ..core.db.models import CustomPropertiesMixin, PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
 
 
-class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
+class Dive(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin, CustomPropertiesMixin):
     __tablename__ = "dive"
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)

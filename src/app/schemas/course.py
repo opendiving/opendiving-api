@@ -16,6 +16,7 @@ from ..core.schemas import (
 )
 from .certification import CertificationAgency, validate_agency_pairing
 from .contact import CONTACT_UUID_DESCRIPTION
+from .custom_property import CustomPropertiesRead, CustomPropertiesUpdate, CustomPropertiesWrite
 from .link import LinksRead, LinksUpdate, LinksWrite
 from .person import PeopleRead, PeopleUpdate, PeopleWrite
 
@@ -93,7 +94,7 @@ class CourseBase(BaseModel):
         return self
 
 
-class _CourseWrite(CourseBase):
+class _CourseWrite(CourseBase, CustomPropertiesWrite):
     """The agency pairing, on the whole-object writes only - for `_CertificationWrite`'s
     reason. The date ordering stays on the base: `ck_course_date_range` keeps a stored row
     from ever breaking it. The links are here because a read takes them as stored."""
@@ -106,7 +107,7 @@ class _CourseWrite(CourseBase):
         return self
 
 
-class CourseRead(CourseBase, PublicUUIDSchema):
+class CourseRead(CourseBase, CustomPropertiesRead, PublicUUIDSchema):
     """Public representation of a course, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API).
     """
@@ -125,7 +126,7 @@ class CourseRead(CourseBase, PublicUUIDSchema):
     created_at: datetime
 
 
-class CourseReadInternal(CourseBase, PublicUUIDSchema):
+class CourseReadInternal(CourseBase, CustomPropertiesRead, PublicUUIDSchema):
     """Mirrors the actual `course` table columns (integer PK/FK), for server-side lookups
     only - never returned directly over the API (use `CourseRead` for the public shape,
     which additionally resolves `user_id` to the owning user's `uuid`).
@@ -164,7 +165,7 @@ class CourseCreateInternal(_CourseWrite):
     contact_id: int | None = None
 
 
-class CourseUpdate(RejectsExplicitNulls):
+class CourseUpdate(CustomPropertiesUpdate, RejectsExplicitNulls):
     """Partial update.
 
     Unlike `CourseCreate` this validates neither the `agency`/`agency_other` pairing nor the
@@ -180,7 +181,7 @@ class CourseUpdate(RejectsExplicitNulls):
     # instructor's number misremembered, the dates of a course that turned out to be `planned`
     # after all, and the agency of one that turns out to have run under none are all real
     # edits. `agency_other` in particular is half of moving a course off `agency="other"`.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "status", "links", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "status", "links", "notes", "custom_properties")
 
     name: Annotated[
         Annotated[str, Trimmed] | None,

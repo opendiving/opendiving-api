@@ -226,7 +226,13 @@ async def write_trip(
 
     # Only the trip's own columns reach `TripCreateInternal`, which is `extra="forbid"`:
     # parts are rows in another table.
-    trip_internal = TripCreateInternal(name=trip.name, notes=trip.notes, links=trip.links, user_id=current_user["id"])
+    trip_internal = TripCreateInternal(
+        name=trip.name,
+        notes=trip.notes,
+        links=trip.links,
+        custom_properties=trip.custom_properties,
+        user_id=current_user["id"],
+    )
     created_trip = await write_or_duplicate(
         db,
         crud_trips.create(
@@ -698,7 +704,7 @@ async def patch_trip(
         raise DuplicateValueException(_NAME_TAKEN)
 
     update_data = values.model_dump(
-        include={"name", "links", "notes"},
+        include={"name", "links", "notes", "custom_properties"},
         exclude_unset=True,
     )
 

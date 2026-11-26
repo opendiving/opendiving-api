@@ -398,6 +398,9 @@ class TestWhatUddfCannotHold:
             {"person_uuid": str(UUIDS["person-sam"]), "role": "student"},
         ]
         assert course["contact_uuid"] == str(UUIDS["contact-school"])
+        assert course["extensions"] == {
+            "opendiving": {"custom_properties": [{"key": "Booking reference", "value": "BO-2026-114"}]}
+        }
 
     @pytest.mark.asyncio
     async def test_the_account_preferences_travel_under_this_producer_s_key(self, monkeypatch):
@@ -906,6 +909,23 @@ class TestPeople:
 
         assert people["Jae Kim"]["extensions"] == {"opendiving": {"user_uuid": str(UUIDS["connected-account"])}}
         assert "extensions" not in people["Lina"]
+
+    @pytest.mark.asyncio
+    async def test_a_connected_person_keeps_custom_properties_beside_the_account_id(self, monkeypatch):
+        bundle = full_bundle()
+        connected = next(person for person in bundle.people if person.id == 1)
+        connected.custom_properties = [{"key": "Agency", "value": "PADI"}]
+
+        document = await _render(bundle, monkeypatch)
+        people = {person["name"]: person for person in document["people"]}
+
+        assert people["Jae Kim"]["extensions"] == {
+            "opendiving": {
+                "user_uuid": str(UUIDS["connected-account"]),
+                "custom_properties": [{"key": "Agency", "value": "PADI"}],
+            }
+        }
+        _assert_conforms(document)
 
     @pytest.mark.asyncio
     async def test_every_host_references_its_people_with_their_roles(self, monkeypatch):

@@ -86,6 +86,7 @@ class DiveFormField(StrEnum):
     RATING = "rating"
     TAGS = "tags"
     NOTES = "notes"
+    CUSTOM_PROPERTIES = "custom_properties"
 
     # First among the per-cylinder keys, and it has to stay there: revision `e41fcd2a6308`
     # inserted it into every stored set before the set's first of them.

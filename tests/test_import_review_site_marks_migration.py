@@ -14,10 +14,9 @@ from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session
 from uuid6 import uuid7
 
-from src.app.models.dive_site import DiveSite
 from src.app.models.logbook_import import LogbookImport
 from tests.conftest import db_available, unique_email, unique_username
-from tests.helpers.generators import create_commons_site, save_dive_site
+from tests.helpers.generators import create_commons_site
 from tests.helpers.migrations import migrate, scratch_database, template_database
 
 pytestmark = [
@@ -55,15 +54,6 @@ def _user(db: Session) -> int:
     return int(user_id)
 
 
-def _site(db: Session, user_id: int) -> DiveSite:
-    site = DiveSite(user_id=user_id, name=f"Pescador {uuid7().hex[-8:]}", location_name="Moalboal, Philippines")
-    db.add(site)
-    db.commit()
-    db.refresh(site)
-    save_dive_site(db, site)
-    return site
-
-
 def _propose(db: Session, user_id: int, site_id: int, status: str) -> None:
     # In SQL: the model carries columns later revisions add, which this database is below.
     db.execute(
@@ -84,6 +74,20 @@ def _propose(db: Session, user_id: int, site_id: int, status: str) -> None:
     db.commit()
 
 
+def _own_site(db: Session, user_id: int) -> Any:
+    """A private site, with the `id` and `uuid` the tests read. In SQL, for `_propose`'s reason: the
+    saved row `create_dive_site` writes beside it carries columns later revisions add."""
+    site = db.execute(
+        text(
+            "INSERT INTO dive_site (uuid, created_at, user_id, name) "
+            "VALUES (:uuid, :now, :user_id, :name) RETURNING id, uuid"
+        ),
+        {"uuid": uuid7(), "now": datetime.now(UTC), "user_id": user_id, "name": f"Pescador {uuid7().hex[-8:]}"},
+    ).one()
+    db.commit()
+    return site
+
+
 def _review(*site_uuids: Any) -> dict[str, Any]:
     return {
         "dives": [
@@ -102,7 +106,7 @@ class TestTheUpgrade:
         name, engine = scratch
         with Session(engine) as db:
             diver, other = _user(db), _user(db)
-            own, waiting, declined, decided = (_site(db, diver) for _ in range(4))
+            own, waiting, declined, decided = (_own_site(db, diver) for _ in range(4))
             record = create_commons_site(db)
             _propose(db, diver, waiting.id, "waiting")
             _propose(db, diver, declined.id, "declined")
@@ -138,7 +142,7 @@ class TestTheUpgrade:
         name, engine = scratch
         with Session(engine) as db:
             diver = _user(db)
-            review = _review(_site(db, diver).uuid)
+            review = _review(_own_site(db, diver).uuid)
             stored = LogbookImport(user_id=diver, review_shape=2, status="applied", review=review)
             db.add(stored)
             db.commit()

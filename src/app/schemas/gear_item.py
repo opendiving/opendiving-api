@@ -14,6 +14,7 @@ from ..core.schemas import (
     StoredVocabulary,
     Trimmed,
 )
+from .custom_property import CustomPropertiesRead, CustomPropertiesUpdate, CustomPropertiesWrite
 from .gear_service import GearServiceScheduleInfo
 from .link import LinksRead, LinksUpdate, LinksWrite
 
@@ -142,7 +143,7 @@ class GearItemInfo(PublicUUIDSchema):
     material: StoredVocabulary | None = None
 
 
-class GearItemRead(GearItemBase, PublicUUIDSchema):
+class GearItemRead(GearItemBase, CustomPropertiesRead, PublicUUIDSchema):
     """Public representation of a gear item, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API).
     """
@@ -180,7 +181,7 @@ class GearItemRead(GearItemBase, PublicUUIDSchema):
     created_at: datetime
 
 
-class GearItemReadInternal(GearItemBase, PublicUUIDSchema):
+class GearItemReadInternal(GearItemBase, CustomPropertiesRead, PublicUUIDSchema):
     """Mirrors the actual `gear_item` table columns (integer PK/FK), for server-side
     lookups only - never returned directly over the API (use `GearItemRead` for the
     public shape, which additionally resolves `user_id` to the owning user's `uuid`).
@@ -209,7 +210,7 @@ VesselWorkingPressure = Annotated[
 ]
 
 
-class GearItemCreate(GearItemBase):
+class GearItemCreate(GearItemBase, CustomPropertiesWrite):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     volume: VesselVolume
@@ -217,7 +218,7 @@ class GearItemCreate(GearItemBase):
     links: LinksWrite
 
 
-class GearItemCreateInternal(GearItemBase):
+class GearItemCreateInternal(GearItemBase, CustomPropertiesWrite):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     user_id: int
@@ -226,7 +227,7 @@ class GearItemCreateInternal(GearItemBase):
     links: LinksWrite
 
 
-class GearItemUpdate(RejectsExplicitNulls):
+class GearItemUpdate(CustomPropertiesUpdate, RejectsExplicitNulls):
     """Partial update. `is_archived` doubles as the archive/unarchive control - the API
     derives `archived_at` from it rather than letting callers set the timestamp directly.
     """
@@ -236,7 +237,14 @@ class GearItemUpdate(RejectsExplicitNulls):
     # `brand` and `type` are genuinely nullable, so clearing either is a real edit -
     # `patch_gear_item` reads an explicit `brand` null through `model_fields_set` when it
     # re-checks (brand, name) uniqueness.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes", "rented", "is_archived", "links")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (
+        "name",
+        "notes",
+        "rented",
+        "is_archived",
+        "links",
+        "custom_properties",
+    )
 
     name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
     brand: Annotated[GearBrand | None, BlankIsNone, Field(default=None, description=_BRAND_DESCRIPTION)]

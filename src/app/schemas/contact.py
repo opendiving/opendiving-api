@@ -14,6 +14,7 @@ from ..core.schemas import (
     StoredVocabulary,
     Trimmed,
 )
+from .custom_property import CustomPropertiesRead, CustomPropertiesUpdate, CustomPropertiesWrite
 from .link import LINK_URL_MAX, Link, LinkRead, LinksRead, LinksUpdate, LinksWrite, canonical_links, check_link_url
 from .location import Latitude, Longitude, WholeCoordinatePair
 
@@ -233,7 +234,7 @@ class ContactBase(BaseModel):
     ]
 
 
-class _ContactWriteFields(BaseModel):
+class _ContactWriteFields(CustomPropertiesWrite):
     """The members a write validates and a read does not: the role vocabulary, the email
     address and the links. A read carries them as the strings they are - see
     *"A stored vocabulary is read back as a string"* in DECISIONS.md."""
@@ -256,7 +257,7 @@ class _ContactWriteFields(BaseModel):
         return canonical_roles(value)
 
 
-class _ContactReadFields(BaseModel):
+class _ContactReadFields(CustomPropertiesRead):
     roles: Annotated[list[StoredVocabulary], Field(default_factory=list)]
     email: str | None = None
     links: LinksRead
@@ -318,7 +319,7 @@ class ContactCreateInternal(ContactBase, _ContactWriteFields, ContactAddressColu
     user_id: int
 
 
-class _ContactUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
+class _ContactUpdateFields(CustomPropertiesUpdate, WholeCoordinatePair, RejectsExplicitNulls):
     """What both update shapes carry, which is everything but the address.
 
     `phone` and `email` are nullable and stay off `NON_NULLABLE_FIELDS`, so an explicit null
@@ -327,7 +328,7 @@ class _ContactUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     they are named together or not at all, and both `null` clears the position.
     """
 
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "roles", "links", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "roles", "links", "notes", "custom_properties")
 
     name: Annotated[
         Annotated[str, Trimmed] | None,

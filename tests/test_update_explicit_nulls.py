@@ -115,6 +115,9 @@ CLEARED_ONLY_IN_PAIRS = {
 # neither this tuple nor `SCHEMAS_AND_TABLES` - the drift one level up from the columns,
 # and the one that let `DiveUpdate` be the only guarded schema for as long as it was.
 UNGUARDED_UPDATE_SCHEMAS = (
+    # A mixin, not a body: every update schema carrying `custom_properties` inherits it and
+    # names the field in its own `NON_NULLABLE_FIELDS`, which the sweeps above hold.
+    "CustomPropertiesUpdate",
     # Admin-panel-only. CRUDAdmin's form handler forwards non-empty strings and coerced
     # bools, so a `None` never reaches them.
     "DiveMixtureUpdate",

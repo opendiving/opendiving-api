@@ -14,6 +14,7 @@ from ..core.schemas import (
     Trimmed,
 )
 from .contact import CONTACT_UUID_DESCRIPTION
+from .custom_property import CustomPropertiesRead, CustomPropertiesUpdate, CustomPropertiesWrite
 
 INSTRUCTOR_UUID_DESCRIPTION = "Public id of the person who signed the card as its instructor"
 
@@ -188,7 +189,7 @@ class CertificationBase(BaseModel):
     ]
 
 
-class _CertificationWrite(CertificationBase):
+class _CertificationWrite(CertificationBase, CustomPropertiesWrite):
     """The pairing, on the whole-object writes only. A read must not run it: the admin panel
     writes through `CertificationUpdate`, which cannot check a pair, so a stored row can hold a
     broken one - and a read refusing it 500s every read of that row, the repairing PATCH's own
@@ -200,7 +201,7 @@ class _CertificationWrite(CertificationBase):
         return self
 
 
-class CertificationRead(CertificationBase, PublicUUIDSchema):
+class CertificationRead(CertificationBase, CustomPropertiesRead, PublicUUIDSchema):
     """Public representation of a certification, keyed by its opaque `uuid` rather than
     the sequential internal `id` (which is never exposed over the API).
     """
@@ -229,7 +230,7 @@ class CertificationRead(CertificationBase, PublicUUIDSchema):
     created_at: datetime
 
 
-class CertificationReadInternal(CertificationBase, PublicUUIDSchema):
+class CertificationReadInternal(CertificationBase, CustomPropertiesRead, PublicUUIDSchema):
     """Mirrors the actual `certification` table columns (integer PK/FK), for server-side
     lookups only - never returned directly over the API (use `CertificationRead` for the
     public shape, which additionally resolves `user_id`/`course_id` to the owning user's
@@ -280,7 +281,7 @@ class CertificationCreateInternal(_CertificationWrite):
     instructor_id: int | None = None
 
 
-class CertificationUpdate(RejectsExplicitNulls):
+class CertificationUpdate(CustomPropertiesUpdate, RejectsExplicitNulls):
     """Partial update.
 
     Unlike `CertificationCreate` this does *not* validate `agency`/`agency_other` against
@@ -294,7 +295,7 @@ class CertificationUpdate(RejectsExplicitNulls):
     # `agency_other` is nullable and stays off this list - clearing it is half of moving
     # a certification off `agency="other"`, and `patch_certification` validates the pair
     # against the merged result.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("agency", "name", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("agency", "name", "notes", "custom_properties")
 
     agency: Annotated[
         CertificationAgency | None,

@@ -13,6 +13,7 @@ from ..core.schemas import (
     validate_date_range,
 )
 from ..core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE
+from .custom_property import CustomPropertiesRead, CustomPropertiesUpdate, CustomPropertiesWrite
 from .link import LinksRead, LinksUpdate, LinksWrite
 from .location import LocationInput, LocationRead
 from .person import PeopleRead, PeopleUpdate, PeopleWrite
@@ -89,7 +90,7 @@ class TripBase(BaseModel):
     notes: Annotated[str, Field(default="", max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
 
 
-class TripRead(TripBase, PublicUUIDSchema):
+class TripRead(TripBase, CustomPropertiesRead, PublicUUIDSchema):
     """Public representation of a trip, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API).
 
@@ -136,7 +137,7 @@ class TripRead(TripBase, PublicUUIDSchema):
     created_at: datetime
 
 
-class TripReadInternal(TripBase, PublicUUIDSchema):
+class TripReadInternal(TripBase, CustomPropertiesRead, PublicUUIDSchema):
     """Mirrors the actual `trip` table columns (integer PK/FK), for server-side lookups
     only - never returned directly over the API (use `TripRead` for the public shape,
     which additionally resolves `user_id` to the owning user's `uuid` and embeds the parts).
@@ -149,7 +150,7 @@ class TripReadInternal(TripBase, PublicUUIDSchema):
     created_at: datetime
 
 
-class TripCreate(TripBase):
+class TripCreate(TripBase, CustomPropertiesWrite):
     model_config = ConfigDict(extra="forbid")
 
     parts: Annotated[
@@ -164,16 +165,16 @@ class TripCreate(TripBase):
     links: LinksWrite
 
 
-class TripCreateInternal(TripBase):
+class TripCreateInternal(TripBase, CustomPropertiesWrite):
     model_config = ConfigDict(extra="forbid")
     user_id: int
     links: LinksWrite
 
 
-class TripUpdate(RejectsExplicitNulls):
+class TripUpdate(CustomPropertiesUpdate, RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
 
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "links", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "links", "notes", "custom_properties")
 
     name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
     links: LinksUpdate

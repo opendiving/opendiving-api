@@ -42,7 +42,8 @@ DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
         # contact and people are hidden because each asks about a record the diver has to have
         # created first, bottom temperature because reading one off a computer is the point at
         # which this stops being the shortest form the app can offer, and the dive's type and
-        # its conditions for the same reason. The per-cylinder keys only matter
+        # its conditions for the same reason, and custom properties, which are for what such
+        # an entry never needs. The per-cylinder keys only matter
         # once Gas Mixtures is shown again, and they are hidden so that showing it gives a
         # plain tank card rather than a technical one - helium among them, since a holiday
         # diver's cylinder holds air or nitrox and the answer is always zero, and the vessel
@@ -69,6 +70,7 @@ DEFAULT_PRESETS: tuple[DefaultPreset, ...] = (
             DiveFormField.GEAR_ITEM_UUIDS,
             DiveFormField.WEIGHT,
             DiveFormField.SIGHTINGS,
+            DiveFormField.CUSTOM_PROPERTIES,
             DiveFormField.MIXTURE_GEAR_ITEM,
             DiveFormField.MIXTURE_PO2_LIMIT,
             DiveFormField.MIXTURE_HELIUM,

@@ -2,15 +2,15 @@ from sqlalchemy import ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import TimestampMixin
+from ..core.db.models import CustomPropertiesMixin, TimestampMixin
 
 
-class SavedSite(Base, TimestampMixin):
+class SavedSite(Base, TimestampMixin, CustomPropertiesMixin):
     """A dive site on one diver's list, with what is theirs alone about it.
 
     `dive_site` holds what is true of the place, and this row the diver's relation to it: their
-    notes, and in `created_at` when the site entered their logbook, which is what a site read
-    answers. A private site has one for its owner, written with the site; a Commons record gains
+    notes and custom properties, and in `created_at` when the site entered their logbook, which is
+    what a site read answers. A private site has one for its owner, written with the site; a Commons record gains
     one per diver who logs a dive there, saves it, imports it or replaces a site of theirs with it,
     and loses it when they remove it.
     So a read of a diver's sites starts here, and a diver's private text sits nowhere on the row

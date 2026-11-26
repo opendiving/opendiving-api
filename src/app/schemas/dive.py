@@ -16,6 +16,7 @@ from ..core.schemas import (
     StoredVocabulary,
 )
 from ..core.utils.datetime_offset import full_date_is_a_date, require_utc_offset
+from .custom_property import CustomPropertiesRead, CustomPropertiesUpdate, CustomPropertiesWrite
 from .dive_conditions import DiveConditionsRead
 from .dive_mixture import DiveMixtureCreate, DiveMixtureRead
 from .dive_profile import DepthOutline, DiveProfileInfo
@@ -592,7 +593,7 @@ SightingsUpdate = Annotated[
 ]
 
 
-class DiveRead(DiveBase, DiveTechScalars, PublicUUIDSchema):
+class DiveRead(DiveBase, DiveTechScalars, CustomPropertiesRead, PublicUUIDSchema):
     """Public representation of a dive, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API). Cross-resource
     references (owning user, trip, training course, contact) are likewise exposed via their
@@ -667,7 +668,7 @@ class DiveListItem(DiveRead):
     tags: Annotated[list[str], Field(default_factory=list, description="The dive's tags, in the diver's order")]
 
 
-class DiveReadInternal(DiveBase, DiveTechScalars, PublicUUIDSchema):
+class DiveReadInternal(DiveBase, DiveTechScalars, CustomPropertiesRead, PublicUUIDSchema):
     """Mirrors the actual `dive` table columns (integer PK/FK), for server-side lookups
     only - never returned directly over the API (use `DiveRead`/`DiveReadWithMixtures`
     for the public shape, which additionally resolves `user_id`/`trip_id`/`course_id`/
@@ -1374,7 +1375,7 @@ class DiveRenumberResult(BaseModel):
     ]
 
 
-class DiveCreate(DiveBase):
+class DiveCreate(DiveBase, CustomPropertiesWrite):
     # `allow_inf_nan=False` is on every write shape and on no read one: Postgres takes a `NaN`
     # past a one-sided `CHECK`, and a read schema must never be able to reject its own table
     # (`DiveMixtureBase`). `test_write_schema_bounds.py` holds every write shape to it.
@@ -1404,7 +1405,7 @@ class DiveCreate(DiveBase):
     ]
 
 
-class DiveCreateInternal(DiveBase):
+class DiveCreateInternal(DiveBase, CustomPropertiesWrite):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     start_time: datetime  # the column, never the public spelling
@@ -1444,7 +1445,7 @@ class DiveCreateRequest(DiveCreate):
     tags: TagsWrite
 
 
-class DiveUpdate(RejectsExplicitNulls):
+class DiveUpdate(CustomPropertiesUpdate, RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     # `dive_number`, `start_time`, `submerged_time` and `notes` map to `NOT NULL` columns (see
@@ -1453,7 +1454,13 @@ class DiveUpdate(RejectsExplicitNulls):
     # was `if values.start_time is not None`, so an explicit null skipped the split-and-store
     # branch, still reached the database from `model_dump`, and left `utc_offset_minutes`
     # describing the *previous* start time.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("dive_number", "start_time", "submerged_time", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = (
+        "dive_number",
+        "start_time",
+        "submerged_time",
+        "notes",
+        "custom_properties",
+    )
 
     dive_number: Annotated[
         PostgresInteger | None, Field(examples=[5], default=None, description="The diver's own number for this dive")
@@ -1559,7 +1566,7 @@ class DiveUpdateRequest(DiveUpdate):
     tags: TagsUpdate
 
 
-class DiveUpdateInternal(BaseModel):
+class DiveUpdateInternal(CustomPropertiesUpdate):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     dive_number: Annotated[int | None, Field(examples=[5], default=None)]

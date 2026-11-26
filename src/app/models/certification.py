@@ -4,10 +4,10 @@ from sqlalchemy import Date, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
+from ..core.db.models import CustomPropertiesMixin, PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
 
 
-class Certification(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
+class Certification(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin, CustomPropertiesMixin):
     """A diving certification a user holds - "PADI Advanced Open Water Diver, #1234567,
     June 2019" - together with photos or scans of the physical c-card.
 

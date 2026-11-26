@@ -73,7 +73,7 @@ from tests.test_logbook_import_batch import _logbook as _what_is_stored
 pytestmark = pytest.mark.skipif(not db_available(), reason="No database connection available")
 
 # The digest `_shape_digest` answers at `REVIEW_SHAPE`. It moves with the number, on purpose.
-EMBEDDED_SHAPE = "609297a75f52c2d6aeea3d19c52d0bffe695a577fa2d18a08584c8145c248fff"
+EMBEDDED_SHAPE = "e1b2b1c6035cc59d9427bfea88ab78001bd1fe9e014c864b22beceae39e52362"
 
 FIXTURES = Path(__file__).parent / "fixtures" / "dive_files"
 OCEAN_FIT = (FIXTURES / "suunto-ocean-2026.fit").read_bytes()
@@ -1296,7 +1296,7 @@ class TestTheShapeOfWhatIsStored:
         """A review is served as it was stored, so a change to a schema it embeds reaches rows no
         deploy rewrites. If this fails, bump `REVIEW_SHAPE`, make the call on the stored rows -
         migrate them or retire them - and only then write the new digest and number here."""
-        assert (REVIEW_SHAPE, _shape_digest()) == (3, EMBEDDED_SHAPE)
+        assert (REVIEW_SHAPE, _shape_digest()) == (4, EMBEDDED_SHAPE)
 
     def test_a_change_of_wording_moves_nothing(self) -> None:
         first = _without_docs({"title": "A", "description": "x", "examples": [1], "properties": {"title": {}}})

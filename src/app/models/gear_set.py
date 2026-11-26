@@ -2,10 +2,10 @@ from sqlalchemy import Float, ForeignKey, Index, String, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
-from ..core.db.models import PublicUUIDMixin, TimestampMixin
+from ..core.db.models import CustomPropertiesMixin, PublicUUIDMixin, TimestampMixin
 
 
-class GearSet(Base, PublicUUIDMixin, TimestampMixin):
+class GearSet(Base, PublicUUIDMixin, TimestampMixin, CustomPropertiesMixin):
     """A named, reusable grouping of a user's gear items, e.g. "Sidemount",
     "Tech - trimix" or "Warm water rec".
 

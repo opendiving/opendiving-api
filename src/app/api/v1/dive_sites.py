@@ -40,12 +40,12 @@ from ...crud.crud_dive_sites import (
     in_the_commons,
     is_saved,
     remove_saved_commons_site,
-    replace_saved_site_notes,
     replace_site_with_record,
     resolve_dive_site_ids_for_user,
     save_commons_site,
     save_named_commons_sites,
     search_condition,
+    update_saved_site,
 )
 from ...crud.crud_lookups import get_lookup_page
 from ...crud.crud_species import resolve_species_ids
@@ -99,8 +99,10 @@ from .dive_site_proposals import require_commons_primary
 router = APIRouter(tags=["dive-sites"])
 
 _NAME_TAKEN = "A dive site with this name already exists at this location"
-_SHARED_MEMBER_REFUSED = "A Commons site's shared details cannot be changed here; only your notes and tags can"
-_NOT_SAVED_REFUSED = "Save this Commons site to your sites before adding notes or tags"
+_SHARED_MEMBER_REFUSED = (
+    "A Commons site's shared details cannot be changed here; only your notes, tags and custom properties can"
+)
+_NOT_SAVED_REFUSED = "Save this Commons site to your sites before adding notes, tags or custom properties"
 
 
 async def _get_row_under_uuid(db: AsyncSession, uuid: uuid_pkg.UUID, current_user: dict) -> DiveSiteReadInternal:
@@ -255,8 +257,10 @@ async def write_dive_site(
         raise DuplicateValueException(_NAME_TAKEN)
 
     tag_ids = await _resolved_tag_ids(db, user_id=current_user["id"], names=dive_site.tags)
+    # The diver's, on their saved row with the notes, so they stay theirs if the site joins the Commons.
+    custom_properties = dive_site.model_dump(include={"custom_properties"})["custom_properties"]
     dive_site_internal = DiveSiteCreateInternal(
-        **dive_site.model_dump(exclude={"location", "notes", "tags"}),
+        **dive_site.model_dump(exclude={"location", "notes", "tags", "custom_properties"}),
         **location_columns(location, DIVE_SITE_LOCATION_PREFIX),
         user_id=current_user["id"],
     )
@@ -274,6 +278,7 @@ async def write_dive_site(
         dive_site_id=created_dive_site.id,
         notes=dive_site.notes,
         created_at=created_dive_site.created_at,
+        custom_properties=custom_properties,
     )
     if tag_ids:
         await write_or_422(
@@ -294,7 +299,7 @@ async def write_dive_site(
     matches = await _commons_matches_of(db, [created], user_id=current_user["id"])
     # No dive can name a site that did not exist, so a new one has nothing to summarise.
     return _to_public_dive_site(
-        {**created, "notes": dive_site.notes, "saved": True},
+        {**created, "notes": dive_site.notes, "custom_properties": custom_properties, "saved": True},
         tags=tags,
         summary=DiveSiteSummary(),
         commons_match=matches.get(created_dive_site.id),
@@ -969,25 +974,29 @@ async def save_dive_site(
     db: Annotated[AsyncSession, Depends(async_get_db)],
     values: Annotated[DiveSiteSave | None, Body()] = None,
 ) -> dict[str, Any]:
-    """Save a Commons record to the caller's list, with the notes and tags the optional body
-    carries, answering the site as `GET /dive-site/{uuid}` reads it.
+    """Save a Commons record to the caller's list, with the notes, tags and custom properties the
+    optional body carries, answering the site as `GET /dive-site/{uuid}` reads it.
 
     Idempotent. On a site already on the list - saved before, or the caller's own - nothing
     changes, the body included, so a retry cannot overwrite what the caller wrote since. Change
-    notes and tags on a saved record with `PATCH /dive-site/{uuid}`.
+    notes, tags and custom properties on a saved record with `PATCH /dive-site/{uuid}`.
 
     `tags` are by name, each matched to the diver's tag of that name or created. 404 when no such
     site exists, and the same 404 for another user's private site.
     """
     user_id = current_user["id"]
     db_dive_site = await _get_readable_dive_site(db, uuid, current_user)
-    notes, tag_names = ("", []) if values is None else (values.notes, values.tags)
+    values = values or DiveSiteSave.model_validate({})
 
     if db_dive_site.user_id is None and await save_commons_site(
-        db, user_id=user_id, dive_site_id=db_dive_site.id, notes=notes
+        db,
+        user_id=user_id,
+        dive_site_id=db_dive_site.id,
+        notes=values.notes,
+        custom_properties=values.model_dump(include={"custom_properties"})["custom_properties"],
     ):
         # After the save, so a retry that changes nothing makes no tag either.
-        tag_ids = await _resolved_tag_ids(db, user_id=user_id, names=tag_names)
+        tag_ids = await _resolved_tag_ids(db, user_id=user_id, names=values.tags)
         if tag_ids:
             await write_or_422(
                 db,
@@ -1007,7 +1016,7 @@ async def _patch_saved_commons_site(
     # Before either write, and before a tag is made: no tag ever sits on a site off the list.
     if not await is_saved(db, user_id=user_id, dive_site_id=site.id):
         raise HTTPException(status_code=409, detail=_NOT_SAVED_REFUSED)
-    if values.model_fields_set - {"notes", "tags"}:
+    if values.model_fields_set - {"notes", "tags", "custom_properties"}:
         raise ForbiddenException(_SHARED_MEMBER_REFUSED)
 
     tag_ids = None if values.tags is None else await _resolved_tag_ids(db, user_id=user_id, names=values.tags)
@@ -1015,9 +1024,10 @@ async def _patch_saved_commons_site(
         await write_or_422(
             db, replace_tags_for_dive_site(db, site.id, tag_ids, user_id=user_id, commit=False), TAG_NOT_FOUND
         )
-    if values.notes is not None:
-        await replace_saved_site_notes(db, user_id=user_id, dive_site_id=site.id, notes=values.notes)
-    if tag_ids is not None or values.notes is not None:
+    saved = values.model_dump(include={"notes", "custom_properties"}, exclude_unset=True)
+    if saved:
+        await update_saved_site(db, user_id=user_id, dive_site_id=site.id, values=saved)
+    if tag_ids is not None or saved:
         await db.commit()
         await invalidate_dive_site_caches(user_id)
 
@@ -1032,13 +1042,13 @@ async def patch_dive_site(
 ) -> dict[str, str]:
     """Partially update a dive site; omitted fields are left untouched.
 
-    On a Commons record the caller has saved, `notes` and `tags` alone can be sent, and they are
-    the caller's: a body naming any other member is a 403 and writes nothing. On a Commons record
-    the caller has not saved, every body is a 409 and writes nothing: `PUT /dive-site/{uuid}/saved`
-    saves it first, and can carry both.
+    On a Commons record the caller has saved, `notes`, `tags` and `custom_properties` alone can be
+    sent, and they are the caller's: a body naming any other member is a 403 and writes nothing.
+    On a Commons record the caller has not saved, every body is a 409 and writes nothing:
+    `PUT /dive-site/{uuid}/saved` saves it first, and can carry all three.
 
     The uuid of a site the caller replaced with a Commons record is a `PATCH` on that record, so
-    `notes` overwrite theirs on it and `tags` replace them.
+    `notes` overwrite theirs on it and `tags` and `custom_properties` replace them.
 
     Everything below is about the caller's own site. 404 on another user's private site, exactly
     as for a site that doesn't exist. Uniqueness is re-checked against the *resulting* name and
@@ -1101,7 +1111,7 @@ async def patch_dive_site(
         if depth_from is not None and depth_to is not None and depth_from > depth_to:
             raise UnprocessableEntityException(DEPTH_RANGE_MESSAGE)
 
-    update_data = values.model_dump(exclude_unset=True, exclude={"location", "notes", "tags"})
+    update_data = values.model_dump(exclude_unset=True, exclude={"location", "notes", "tags", "custom_properties"})
     if replaces_location:
         update_data |= location_columns(values.location, DIVE_SITE_LOCATION_PREFIX)
     # Against the name the site ends up with, so a rename onto another name drops that one
@@ -1138,12 +1148,11 @@ async def patch_dive_site(
         await write_or_422(
             db, replace_tags_for_dive_site(db, db_dive_site.id, tag_ids, user_id=owner_id, commit=False), TAG_NOT_FOUND
         )
-    if values.notes is not None and not await replace_saved_site_notes(
-        db, user_id=owner_id, dive_site_id=db_dive_site.id, notes=values.notes
-    ):
+    saved = values.model_dump(include={"notes", "custom_properties"}, exclude_unset=True)
+    if saved and not await update_saved_site(db, user_id=owner_id, dive_site_id=db_dive_site.id, values=saved):
         raise NotFoundException("Dive site not found")
 
-    if update_data or tag_ids is not None or values.notes is not None:
+    if update_data or tag_ids is not None or saved:
         await db.commit()
         await invalidate_dive_site_caches(owner_id)
         # Dive reads embed this site's name, locality and position, so a rename, a new
@@ -1174,8 +1183,8 @@ async def erase_dive_site(
     """Delete the caller's own dive site, or remove a saved Commons record from their list,
     optionally moving the dives logged at it to another site.
 
-    A Commons record stays for everyone: what goes is the caller's notes and tags on it and
-    their dives' links to it. 404 on a Commons record the caller has not saved, on another
+    A Commons record stays for everyone: what goes is the caller's notes, tags and custom
+    properties on it and their dives' links to it. 404 on a Commons record the caller has not saved, on another
     user's private site and on the uuid of a site the caller replaced with a Commons record,
     exactly as for a site that doesn't exist, and a second `DELETE` on the same uuid is a 404 too.
 

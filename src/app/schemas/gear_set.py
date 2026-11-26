@@ -5,6 +5,7 @@ from typing import Annotated, ClassVar
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.schemas import MAX_LIST_ITEMS, PublicUUIDSchema, RejectsExplicitNulls, StoredName, Trimmed
+from .custom_property import CustomPropertiesRead, CustomPropertiesUpdate, CustomPropertiesWrite
 from .gear_item import GearItemInfo
 
 _NAME_DESCRIPTION = "Name of this gear set"
@@ -23,7 +24,7 @@ class GearSetBase(BaseModel):
     ]
 
 
-class GearSetRead(GearSetBase, PublicUUIDSchema):
+class GearSetRead(GearSetBase, CustomPropertiesRead, PublicUUIDSchema):
     """Public representation of a gear set, keyed by its opaque `uuid` rather than the
     sequential internal `id` (which is never exposed over the API), with its member
     items embedded in the order they were added.
@@ -35,7 +36,7 @@ class GearSetRead(GearSetBase, PublicUUIDSchema):
     gear_items: Annotated[list[GearItemInfo], Field(default_factory=list, description="Items in the set, in order")]
 
 
-class GearSetReadInternal(GearSetBase, PublicUUIDSchema):
+class GearSetReadInternal(GearSetBase, CustomPropertiesRead, PublicUUIDSchema):
     """Mirrors the actual `gear_set` table columns (integer PK/FK), for server-side
     lookups only - never returned directly over the API (use `GearSetRead`).
     """
@@ -46,13 +47,13 @@ class GearSetReadInternal(GearSetBase, PublicUUIDSchema):
     created_at: datetime
 
 
-class GearSetCreateInternal(GearSetBase):
+class GearSetCreateInternal(GearSetBase, CustomPropertiesWrite):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     user_id: int
 
 
-class GearSetCreateRequest(GearSetBase):
+class GearSetCreateRequest(GearSetBase, CustomPropertiesWrite):
     """Request body for creating a gear set, including its member items."""
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
@@ -65,12 +66,12 @@ class GearSetCreateRequest(GearSetBase):
     ]
 
 
-class GearSetUpdate(RejectsExplicitNulls):
+class GearSetUpdate(CustomPropertiesUpdate, RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     # `weight` is nullable - a set that no longer prefills a ballast figure is a real
     # state, so clearing it stays allowed.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name",)
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "custom_properties")
 
     name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
     weight: Annotated[
