@@ -28,10 +28,9 @@ Where it differs from the API's own read shapes, and why:
   Celsius, a dive's submerged time seconds and the profile axis milliseconds - which is the
   format's own canonical system (spec §5.1), so the app's wire values travel unchanged. The
   embedded profile keeps the integer scales `GET /dive/{uuid}/recording/{rid}/profile` uses,
-  which the spec fixes too. The diver's `units`
-  preference is account data, says which system they read in, and changes none of it
-  (DECISIONS.md, *"Measurements are metric in the database and on the wire; `units` is
-  who's looking"*).
+  which the spec fixes too. The diver's `unit_preferences` are account data, say which
+  system they read each family in, and change none of it (DECISIONS.md, *"Measurements are
+  metric in the database and on the wire; `unit_preferences` is who's looking"*).
 - **Records reference each other by public `uuid`**, never by internal integer id - an
   implementation detail of this database that would be actively misleading in a file
   meant to outlive it. Spec §5.3 makes that the format's rule and adds referential
@@ -211,7 +210,7 @@ class ExportDiver(PublicUUIDSchema):
     to each reader, so this app's crop rides the file's own `extensions.opendiving` and an
     import into this app keeps it. The avatar has no member.
 
-    `units`, `unit_preferences`, the email opt-outs (`gear_service_emails`, `renewal_reminder_emails`,
+    `unit_preferences`, the email opt-outs (`gear_service_emails`, `renewal_reminder_emails`,
     `year_in_review_emails`), the dive form's hidden fields and presets, and the order of the
     diver's dive computers are application preferences rather than logbook data, so the format
     gives them no core member and they travel under this producer's key (spec §6.1). They are

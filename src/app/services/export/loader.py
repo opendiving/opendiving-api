@@ -188,7 +188,7 @@ class ExportBundle:
     item_ids_by_set: dict[int, list[int]]
     # The account's saved dive-form presets, alphabetically, as `GET /dive-form-presets`
     # serves them. Not logbook data - they ride in the `diver` member's extension, for
-    # the reason that member carries `units` at all.
+    # the reason that member carries `unit_preferences` at all.
     dive_form_presets: list[DiveFormPreset]
     schedules: list[GearServiceSchedule]
     service_records: list[GearServiceRecord]

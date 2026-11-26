@@ -4579,7 +4579,7 @@ class TestTheDiversIdentityAndSettingsAreNeverApplied:
             destination.name,
             destination.username,
             destination.email,
-            destination.units,
+            dict(destination.unit_preferences),
             list(destination.dive_form_hidden_fields),
         )
 
@@ -4591,7 +4591,7 @@ class TestTheDiversIdentityAndSettingsAreNeverApplied:
             after.name,
             after.username,
             after.email,
-            after.units,
+            dict(after.unit_preferences),
             list(after.dive_form_hidden_fields),
         ) == before
 

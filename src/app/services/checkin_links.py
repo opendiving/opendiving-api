@@ -202,7 +202,7 @@ async def checkin_summary(db: AsyncSession, link: LiveCheckinLink) -> CheckinSum
             **details.model_dump(),
             name=account["name"],
             portrait_sha256=account["portrait_sha256"],
-            units=account["unit_preferences"].get("depth", account["units"]),
+            unit_preferences=account["unit_preferences"],
         ),
         diving=link.figures,
         certifications=certifications,

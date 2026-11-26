@@ -2992,22 +2992,18 @@ column `NULL` on most rows would step one diver's trend by 3%. UDDF carries `alt
 gains `water_type` and `altitude_m`. Any future `GET /dives` filter must join `_cached_read_dives`'
 `key_prefix`.
 
-## Measurements are metric in the database and on the wire; `units` is who's looking
+## Measurements are metric in the database and on the wire; `unit_preferences` is who's looking
 
-`user.units` (`metric`/`imperial`) changes nothing the API serves. Every stored measurement is
-metric (`max_depth` metres, `bottom_temperature` Celsius, `weight` kilograms, pressures bar,
+`user.unit_preferences` changes nothing the API serves. Every stored measurement is metric
+(`max_depth` metres, `bottom_temperature` Celsius, `weight` kilograms, pressures bar,
 `sac_bar_per_min`); the client converts at display and entry. The API never converts: every dive
 read is `@cache`d under a user-scoped key, so a viewer-dependent response would need the preference
-in the key, and `?units=` adds a forked contract. `src/` holds no conversion code. Exports do not
-bend: `logbook.divejson` carries values as served (the preferences ride on `ExportDiver`),
-`dives.csv` keeps `_m`/`_kg`/`_bar` suffixes, UDDF is SI. `units` is the preset; `unit_preferences`
-holds per-family overrides for depth, pressure, volume, weight and temperature. A family without an
-override follows `units`. `UnitSystem` is a `StrEnum` over `VARCHAR(16)`, no `CHECK`. It sits on
-`UserRead` and `UserUpdate` (`extra="forbid"`), and `"units"` is in
-`UserUpdate.NON_NULLABLE_FIELDS`, pinned by
-`test_update_explicit_nulls.py::test_the_declared_fields_match_the_table`. `server_default="metric"`
-is load-bearing: a `NOT NULL` column on a populated table needs a server-side default, and
-`default=` is invisible to autogenerate.
+in the key, and `?units=` adds a forked contract. Exports do not bend: `logbook.divejson` carries
+values as served, `dives.csv` keeps `_m`/`_kg`/`_bar` suffixes, UDDF is SI. The record always holds
+all five families, `metric` or `imperial` each, and there is no preset beside it; a client's
+"Metric" sets all five. `PATCH /user` merges the families it names in the UPDATE itself. *Rejected:*
+replacing the record, which makes a client read before it writes and lets two devices changing
+different families overwrite each other.
 
 ## The attribution string is a wire format, so its shape is part of the API contract
 
@@ -5789,7 +5785,8 @@ Conformance runs through the `divejson` runtime dependency: `divejson.validate_d
 reference rule set (spec §3's beyond-schema rules included) and `divejson.load_schema()` serves the
 schema. Only the UDDF XSD is vendored.
 
-`units`, `gear_service_emails` and a dive file's `parser_key` live under `extensions.opendiving`.
+`unit_preferences`, `gear_service_emails` and a dive file's `parser_key` live under
+`extensions.opendiving`.
 
 The writer emits no nulls (`exclude_none=True` in `envelope._encode`); absence is the only spelling
 of "not recorded" (§5.4). An empty `notes` is written absent: the `NOT NULL` column's `""` cannot
@@ -6279,11 +6276,11 @@ touches no user row. `GET /dive-form-presets` is not Redis-cached and is named i
 `OwnedResourceCache`'s opt-out list. Nothing embeds a preset, so there is no second cache to
 invalidate; the panel reads the list once when it opens. Caching buys one Redis round trip per form
 and costs an invalidation obligation on five mutating routes. `PATCH /user` carries the current
-state through the path `units` already takes.
+state through the path `unit_preferences` already takes.
 
 ## Presets and the hidden-fields preference travel in the archive
 
-Both ride the `diver` member's `extensions.opendiving` payload beside `units` and
+Both ride the `diver` member's `extensions.opendiving` payload beside `unit_preferences` and
 `gear_service_emails`; logbook import reports them and never applies them, per *The `diver` member's
 identity and settings are never applied, and its check-in details only as confirmed*. They are UI
 configuration, but `/export/archive`'s docstring promises nothing in the account is reachable only
@@ -6503,11 +6500,11 @@ outside `ServiceKind` 500s `GET /gear-items` and `GET /gear-service-due` through
 `GearServiceScheduleInfo`.
 
 Applied to every stored vocabulary — `gear_item.type`, `dive.water_type`, `gear_item.material`,
-`dive_mixture.role`/`usage`, `course.agency`/`status`, `certification.agency`, `user.units`,
-`user.dive_form_hidden_fields`, `dive_form_preset.hidden_fields`; derive the list, never trust it.
-`user.units` is the one a schema sweep misses, since `get_current_user` validates through `UserRead`
-on every request. `certification_file.side` is exempt: structural, and server-written from a
-validated path parameter.
+`dive_mixture.role`/`usage`, `course.agency`/`status`, `certification.agency`,
+`user.unit_preferences`, `user.dive_form_hidden_fields`, `dive_form_preset.hidden_fields`; derive
+the list, never trust it. `user.unit_preferences` is the one a schema sweep misses, since
+`GET /user` validates through `UserRead` on every request. `certification_file.side` is exempt:
+structural, and server-written from a validated path parameter.
 
 *Rejected:* a DB `CHECK` (every vocabulary addition becomes DDL); dropping the row
 (`GearServiceDueResponse.truncated` exists because silent under-reporting is the wrong failure);

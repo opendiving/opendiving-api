@@ -135,8 +135,9 @@ class RejectsExplicitNulls(BaseModel):
         """`model_fields_set` is what separates "sent as null" from "not sent" - the same
         distinction `DiveUpdate.trip_uuid` relies on for the opposite purpose.
         """
+        # Read from `__dict__`: a deprecated field warns on attribute access.
         nulled = [
-            name for name in self.NON_NULLABLE_FIELDS if name in self.model_fields_set and getattr(self, name) is None
+            name for name in self.NON_NULLABLE_FIELDS if name in self.model_fields_set and self.__dict__[name] is None
         ]
         if nulled:
             fields = ", ".join(nulled)

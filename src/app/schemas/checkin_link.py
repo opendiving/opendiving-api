@@ -1,13 +1,14 @@
 import uuid as uuid_pkg
 from datetime import date, datetime
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # `checkin_link.total_dives` is a Postgres `integer`, and so is the `user_dive_stats` column the
 # logged count comes from.
 from ..core.schemas import POSTGRES_INTEGER_MAX, StoredVocabulary
 from .checkin_details import CheckinDetailsRead
+from .user import DEPRECATED_UNITS_DESCRIPTION, UnitPreferences, UnitSystem
 
 
 class CheckinLinkCreate(BaseModel):
@@ -55,12 +56,23 @@ class CheckinFigures(BaseModel):
 
 class CheckinDiver(CheckinDetailsRead):
     """What the check-in page prints about the diver: the check-in details, the name as
-    `UserRead` names it, and the `units` it prints the depth in. `portrait_sha256` is null
-    when there is no portrait, and the avatar and the sign-in address are never here."""
+    `UserRead` names it, and the account's `unit_preferences`, whose depth family the page
+    prints the depth in. `portrait_sha256` is null when there is no portrait, and the avatar
+    and the sign-in address are never here."""
 
     name: str
     portrait_sha256: str | None = None
-    units: StoredVocabulary
+    unit_preferences: UnitPreferences
+    # Derived, as on `UserRead`, for the clients built before `unit_preferences` was here.
+    units: Annotated[
+        StoredVocabulary,
+        Field(default=UnitSystem.METRIC, deprecated=True, description=DEPRECATED_UNITS_DESCRIPTION),
+    ]
+
+    @model_validator(mode="after")
+    def _units_follow_depth(self) -> Self:
+        self.units = self.unit_preferences.depth
+        return self
 
 
 class CheckinCertification(BaseModel):

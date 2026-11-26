@@ -25,7 +25,7 @@ class TokenBlacklist(Base):
     # the column a stolen cookie's blast radius is measured against. Read by
     # `api.v1.auth._handle_revoked_refresh` and by nothing else.
     #
-    # `server_default` for the same reason `user.units` has one: the column is NOT NULL, so
+    # `server_default` for the same reason `user.gear_service_emails` has one: the column is NOT NULL, so
     # the migration adding it needs a server-side default to backfill existing rows. Every
     # row written since is stamped explicitly by `core.security._blacklist_one`.
     revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

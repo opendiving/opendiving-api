@@ -29,6 +29,7 @@ from ...models.person import Person
 from ...models.user import User
 from ...models.user_session import UserSession
 from ...schemas.gear_service import ServiceStatus
+from ...schemas.user import UnitPreferences
 from ...services import blob_store, map_tiles
 from ...services.blob_keys import BLOB_KEY_COLUMNS
 from ...services.checkin_links import swept_checkin_link_predicate
@@ -1015,7 +1016,7 @@ async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) ->
     async with local_session() as db:
         candidates = (
             await db.execute(
-                select(User.id, User.email, User.units, User.unit_preferences)
+                select(User.id, User.email, User.unit_preferences)
                 .where(
                     User.is_deleted.is_(False),
                     User.year_in_review_emails.is_(True),
@@ -1038,7 +1039,7 @@ async def send_year_in_review(ctx: dict[Any, Any], today: date | None = None) ->
                 if review is None:
                     continue
                 await send_year_in_review_email(
-                    candidate.email, review, candidate.unit_preferences.get("depth", candidate.units)
+                    candidate.email, review, UnitPreferences.model_validate(candidate.unit_preferences).depth
                 )
                 await db.execute(update(User).where(User.id == candidate.id).values(year_in_review_sent_for=year))
                 await db.commit()

@@ -45,7 +45,7 @@ from ...crud.crud_invitations import account_exists_for
 from ...crud.crud_trip_parts import get_places_for_user
 from ...crud.crud_user_dive_stats import crud_user_dive_stats
 from ...crud.crud_user_sessions import revoke_session
-from ...crud.crud_users import crud_users
+from ...crud.crud_users import account_update_values, crud_users
 from ...models.dive_site import DiveSite
 from ...models.user import User
 from ...schemas.auth import LinkCheckResponse
@@ -161,9 +161,11 @@ async def patch_user(
 ) -> dict[str, str]:
     """Partially update the caller's own profile.
 
-    A field absent from the body is left as it is. The email is not among the fields:
-    changing it takes the confirmation round-trip that starts at
-    `POST /user/email-change/request`. The check-in details have
+    A field absent from the body is left as it is, and so is a measurement family absent
+    from `unit_preferences`: it changes the families it names, and `{}` changes nothing. The
+    deprecated `units` sets all five families, before any `unit_preferences` in the same body.
+    The email is not among the fields: changing it takes the confirmation round-trip that
+    starts at `POST /user/email-change/request`. The check-in details have
     `PATCH /user/checkin-details`. A `username` another account holds is a 422, and a
     username change is rate limited per account; the rest of the profile is not.
     `dive_form_preset_uuid` names one of the caller's own presets or is `null`; anything
@@ -191,7 +193,7 @@ async def patch_user(
         raise UnprocessableEntityException("Dive form preset not found.")
 
     try:
-        await crud_users.update(db=db, object=values, uuid=current_user["uuid"])
+        await crud_users.update(db=db, object=account_update_values(values), uuid=current_user["uuid"])
     except IntegrityError:
         await db.rollback()
         # The `exists` check above loses to a concurrent claim of the same name. Anything
