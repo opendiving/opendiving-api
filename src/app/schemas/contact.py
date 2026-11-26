@@ -24,6 +24,7 @@ CONTACT_EMAIL_MAX = 255
 ADDRESS_LINE_MAX = 255
 ADDRESS_POSTCODE_MAX = 32
 
+
 class ContactRole(StrEnum):
     """What a contact is to the diver, and the whole vocabulary of it - DiveJSON §6.18's
     `roles`, value for value and in its order.
@@ -94,8 +95,10 @@ def links_after_website(stored: list[LinkRead], website: str | None) -> list[dic
     if website is None:
         entries = rest
     else:
-        entries = [Link(url=website), *rest]
+        entries = [Link(url=website, label=None), *rest]
     return [entry.model_dump() for entry in canonical_links(entries)]
+
+
 ContactEmail = Annotated[
     EmailStr | None,
     Field(
@@ -302,7 +305,7 @@ class ContactCreate(ContactBase, _ContactWriteFields, WholeCoordinatePair):
         if "website" in self.model_fields_set:
             if "links" in self.model_fields_set:
                 raise ValueError(WEBSITE_WITH_LINKS)
-            self.links = [] if self.website is None else [Link(url=self.website)]
+            self.links = canonical_links([] if self.website is None else [Link(url=self.website, label=None)])
         return self
 
 
@@ -369,7 +372,7 @@ class ContactUpdateRequest(_ContactUpdateFields):
 
     Naming `address` **replaces** the stored one whole, as a dive site's `location` is
     replaced: a partial one would leave the old street under a new country. An explicit
-    null clears it. `website` is read against the stored links by `links_after_website`.
+    null clears it. `website`, sent without `links`, acts on the first stored link.
     """
 
     model_config = ConfigDict(extra="forbid")

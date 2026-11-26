@@ -102,13 +102,16 @@ class LinkRead(BaseModel):
 def canonical_links(entries: Iterable[Link]) -> list[Link]:
     """The diver's order, with an address named twice kept where it first appears - the same
     entry twice says nothing more, as a site's registry entries are folded. Compared exactly:
-    a trailing slash makes another address."""
+    a trailing slash makes another address.
+
+    Each entry comes back with both members set, so a PATCH's `exclude_unset` dump stores the
+    label too, null where none was sent."""
     seen: set[str] = set()
     kept: list[Link] = []
     for entry in entries:
         if entry.url not in seen:
             seen.add(entry.url)
-            kept.append(entry)
+            kept.append(Link.model_construct(url=entry.url, label=entry.label))
     return kept
 
 

@@ -7064,6 +7064,29 @@ equal sets are two equal lists; reads widen it to `list[str]`. A set rather than
 because a resort is a dive center with rooms and a scalar could never become a set later.
 *Rejected:* a single `type` with a `resort` member, which files one party two ways.
 
+## A record's links are a JSON column on its own table
+
+A contact, a person, a course, a gear item and a trip each store `links`, a `JSON` list of
+`{"url", "label"}` objects, the shape `dive_site.external_ids` is stored in: nothing queries into
+the entries, and a read takes the record's own row. Every write stores the list canonical
+(`canonical_links`), both members on each entry and an address named twice kept where it first
+appears, and a read never refuses what is stored. The app keeps http and https with a host and no
+whitespace, at most 20 entries, stricter than DiveJSON, and an import drops what the write would
+refuse with a note. *Rejected:* a child table, which needs an owner column per record kind, a
+position and a second query on every list read, for entries nothing queries into.
+
+## A contact's `website` is its first link
+
+While a client still writes `website`, the contact's wire shapes keep it as one rule: a read derives
+it from the first link; a write naming `links` takes the list whole; a write naming `website` alone
+changes nothing when it equals the stored first address, which is the echo of a client saving the
+whole record, replaces that entry's address and clears its label otherwise, or removes it on null;
+naming both is a 422. The column stays on the table, unmapped, for the build before this one, and
+two triggers keep it the first link's address on any write naming `links`, so the admin panel's
+writes are covered too. Removing the member drops the triggers and their function before the column,
+and deletes this entry. *Rejected:* an accepted-and-ignored `website`, the shape *"The dive-site
+location contract changes without a write shim"* turns down.
+
 ## Deleting a contact invalidates five cache families
 
 A dive, a course, a certification, a service record and a trip part carry a contact's uuid, and

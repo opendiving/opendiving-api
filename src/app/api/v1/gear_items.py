@@ -102,7 +102,9 @@ async def write_gear_item(
     """Create a gear item for the caller.
 
     Uniqueness is on `brand` *and* `name` together, so the same model from two brands is
-    fine; a repeat of both is a 422.
+    fine; a repeat of both is a 422. `links` - a manual, a product page - keep their order, at
+    most 20, an address named twice kept once; each is an absolute http or https address with
+    no whitespace.
     """
     if await gear_item_name_exists(db=db, user_id=current_user["id"], name=gear_item.name, brand=gear_item.brand):
         raise DuplicateValueException(_NAME_TAKEN)
@@ -366,7 +368,7 @@ async def patch_gear_item(
     404 unless the caller owns it. A `brand` and `name` the caller already has on another
     item is a 422. A changed `volume` is written to every dive cylinder linked to the item
     in the same request, so a tank never disagrees with its vessel after a correction;
-    clearing the volume leaves the tanks' figures standing.
+    clearing the volume leaves the tanks' figures standing. `links` replaces the list whole.
     """
     db_gear_item = await _get_owned_gear_item(db, uuid, current_user)
 

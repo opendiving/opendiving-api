@@ -109,6 +109,8 @@ async def write_person(
     """Create a person - a buddy, a guide, an instructor, a companion - for the caller.
 
     Names are trimmed and unique per diver, case-insensitively, so a second "Alex" is a 422.
+    `links` are the person's own pages, in the diver's order, at most 20, an address named
+    twice kept once; each is an absolute http or https address with no whitespace.
 
     `connect_link`, a live connect link's token, or `connect_account`, the public id of an
     account that has a person connected to you, connects the new person to that account: you
@@ -242,7 +244,7 @@ async def patch_person(
     """Partially update a person; omitted fields are left untouched.
 
     404 unless the caller owns it. Renaming onto another of the caller's people is a 422. An
-    explicit `null` clears the email or the phone.
+    explicit `null` clears the email or the phone. `links` replaces the list whole.
 
     `connect_link` or `connect_account` connects a person who is not connected yet, as on
     create, and is refused alike; a person already connected is a 422 on the member.

@@ -163,7 +163,9 @@ async def write_course(
     `/certification`, not from here.
 
     `contact_uuid` names who ran the course and `people` who was on it, its instructors by
-    role; one of either that isn't the caller's own, or doesn't exist, is a 422.
+    role; one of either that isn't the caller's own, or doesn't exist, is a 422. `links` keep
+    their order, at most 20, an address named twice kept once; each is an absolute http or
+    https address with no whitespace.
     """
     contact_id: int | None = None
     if course.contact_uuid is not None:
@@ -502,7 +504,7 @@ async def patch_course(
     either one past the stored other is a 422. Passing `null` for `contact_uuid` unlinks the
     course's contact, which is distinct from omitting the key; a contact that isn't the
     caller's own is a 422. `people` replaces the course's people wholesale, every one the
-    caller's own.
+    caller's own, and `links` the list.
     """
     db_course = await _get_owned_course(db, uuid, current_user)
 

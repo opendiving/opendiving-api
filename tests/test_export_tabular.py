@@ -16,6 +16,7 @@ import csv
 import io
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -319,6 +320,25 @@ class TestTheNormalizedFiles:
         assert resort["contact_uuid"] == str(UUIDS["contact-resort"])
         # A name and a role and nothing else - the school the migration made of a string.
         assert by_name["Blue Ocean"]["country"] == ""
+
+    def test_every_record_s_links_are_one_cell_with_each_label_in_brackets(self):
+        bundle = full_bundle()
+
+        def cell(writer: Any, header: tuple[str, ...], row: int = 1) -> str:
+            return _parse(_render(writer(bundle)))[row][header.index("links")]
+
+        contacts = {row[0]: row for row in _parse(_render(write_contacts_csv(bundle)))[1:]}
+        assert contacts["Blue Ocean Resort"][CONTACTS_HEADER.index("links")] == (
+            "https://blueocean.example; https://blueocean.example/booking (Booking)"
+        )
+        assert contacts["Gear Hub"][CONTACTS_HEADER.index("links")] == ""
+        assert cell(write_people_csv, PEOPLE_HEADER, row=3) == "https://video.example/sam (Channel)"
+        assert cell(write_courses_csv, COURSES_HEADER) == "https://learn.example/tdi-adp"
+        assert cell(write_trips_csv, TRIPS_HEADER) == "https://liveaboard.example/itinerary (Itinerary)"
+        gear = {row[0]: row for row in _parse(_render(write_gear_items_csv(bundle)))[1:]}
+        assert "https://maker.example/manual.pdf (Manual)" in [
+            row[GEAR_ITEMS_HEADER.index("links")] for row in gear.values()
+        ]
 
     def test_a_contacts_position_is_two_columns_beside_its_address(self):
         """As `dive-sites.csv` carries a site's pin; empty for a contact with none."""

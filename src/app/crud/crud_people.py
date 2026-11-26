@@ -60,6 +60,7 @@ def _select_people() -> Any:
             Person.name,
             Person.email,
             Person.phone,
+            Person.links,
             Person.notes,
             User.username,
             UserPicture.rendition_sha256.label("avatar_sha256"),

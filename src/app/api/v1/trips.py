@@ -214,7 +214,8 @@ async def write_trip(
     keep the order given; index 0 is the one shown wherever only a single part fits. A part's
     `accommodation_uuid` names the contact the diver stayed at; one that is not the caller's
     own - or does not exist - is a 422. `people` names who came on the trip, each with a role
-    or none, and is refused the same way.
+    or none, and is refused the same way. `links` keep their order, at most 20, an address
+    named twice kept once; each is an absolute http or https address with no whitespace.
 
     The trip, its parts and its people are stored together or not at all.
     """
@@ -687,7 +688,7 @@ async def patch_trip(
     and omitting the key leaves them alone. Each part's own `end_date` must be on or after
     its `start_date`, which is a 422 naming the part, and a part's `accommodation_uuid` must
     name one of the caller's contacts. `people` is replaced the same way as `parts`, and
-    every person in it must be the caller's.
+    every person in it must be the caller's. `links` replaces the list whole.
     """
     db_trip = await _get_owned_trip(db, uuid, current_user)
 

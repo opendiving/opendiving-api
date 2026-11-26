@@ -30,7 +30,7 @@ import uuid as uuid_pkg
 import zipfile
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import divejson
@@ -6529,3 +6529,117 @@ class TestTheImportGates:
         assert ImportNoteCode.RECORDING_FILLED not in _codes(plan)
         profile = (await async_db.execute(select(DiveProfile).where(DiveProfile.dive_id == dive.id))).scalar_one()
         assert profile.parser_key == MERGE_PARSER_KEY
+
+
+class TestLinks:
+    """A record's links through an export and back, and what the app's own bounds do to a
+    document it did not write."""
+
+    LINKS: ClassVar[list[dict[str, Any]]] = [
+        {"url": "https://blueocean.example/booking", "label": "Booking"},
+        {"url": "https://blueocean.example/", "label": None},
+    ]
+
+    def _seed(self, db: Session) -> tuple[Any, Contact]:
+        source, contact = _seed_contact_logbook(db)
+        person = create_person(db, source)
+        rows: list[Any] = [
+            contact,
+            person,
+            db.execute(select(Course).where(Course.user_id == source.id)).scalar_one(),
+            db.execute(select(GearItem).where(GearItem.user_id == source.id)).scalar_one(),
+            db.execute(select(Trip).where(Trip.user_id == source.id)).scalar_one(),
+        ]
+        for row in rows:
+            row.links = self.LINKS
+        db.commit()
+        return source, contact
+
+    @pytest.mark.asyncio
+    async def test_every_record_s_list_arrives_in_order_with_its_labels(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        source, _ = self._seed(db)
+        document = await _export(async_db, source.id)
+        parsed = json.loads(document)
+        divejson.validate_document(parsed)
+        for collection in ("contacts", "people", "courses", "gear", "trips"):
+            (record,) = parsed[collection]
+            assert record["links"] == [
+                {"url": link["url"], **({"label": link["label"]} if link["label"] else {})} for link in self.LINKS
+            ]
+        assert "website" not in parsed["contacts"][0]
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, document)
+
+        models: tuple[Any, ...] = (Contact, Person, Course, GearItem, Trip)
+        for model in models:
+            (row,) = (await async_db.execute(select(model).where(model.user_id == destination.id))).scalars().all()
+            assert row.links == self.LINKS, model.__name__
+
+    @pytest.mark.asyncio
+    async def test_an_entry_the_app_refuses_and_those_past_its_bound_are_dropped_with_a_note(
+        self, seeded: Any, db: Session, async_db: AsyncSession
+    ) -> None:
+        """Duplicates are folded before the bound is counted, so a repeat never costs a distinct
+        address its place."""
+        _, document = seeded
+        parsed = json.loads(document)
+        contact_uuid = str(uuid7())
+        distinct = [{"url": f"https://blueocean.example/{n}"} for n in range(22)]
+        parsed["contacts"] = [
+            {
+                "uuid": contact_uuid,
+                "name": f"Links {uuid7().hex[-8:]}",
+                "links": [{"url": "mailto:info@blueocean.example"}, distinct[0], *distinct],
+            }
+        ]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        messages = [note.message for note in plan.notes if note.collection == "contacts"]
+        assert [message for message in messages if message.startswith("Link 1 ")]
+        assert [message for message in messages if "past this app's 20" in message] == [
+            "The link to https://blueocean.example/20 was past this app's 20, and was dropped",
+            "The link to https://blueocean.example/21 was past this app's 20, and was dropped",
+        ]
+        contact = (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalar_one()
+        assert contact.links == [{"url": link["url"], "label": None} for link in distinct[:20]]
+
+    @pytest.mark.asyncio
+    async def test_an_older_export_s_website_is_ignored(self, seeded: Any, db: Session, async_db: AsyncSession) -> None:
+        _, document = seeded
+        parsed = json.loads(document)
+        parsed["contacts"] = [
+            {"uuid": str(uuid7()), "name": f"Old {uuid7().hex[-8:]}", "website": "https://old.example"}
+        ]
+        destination = create_user(db)
+
+        plan = await _apply(async_db, destination.id, json.dumps(parsed).encode())
+
+        assert not [note for note in plan.notes if note.collection == "contacts"]
+        contact = (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalar_one()
+        assert contact.links == []
+
+    @pytest.mark.asyncio
+    async def test_uddf_carries_a_contact_s_and_a_buddy_s_addresses_without_their_labels(
+        self, db: Session, async_db: AsyncSession
+    ) -> None:
+        source, contact = self._seed(db)
+        bundle = await load_export_bundle(async_db, user_id=source.id)
+        uddf = b"".join([chunk async for chunk in write_uddf(async_db, bundle, exported_at=datetime.now(UTC))])
+        destination = create_user(db)
+
+        await _apply(async_db, destination.id, uddf, "logbook.uddf")
+
+        unlabelled = [{"url": link["url"], "label": None} for link in self.LINKS]
+        imported = (
+            await async_db.execute(
+                select(Contact).where(Contact.user_id == destination.id, Contact.name == contact.name)
+            )
+        ).scalar_one()
+        assert imported.links == unlabelled
+        (person,) = (await async_db.execute(select(Person).where(Person.user_id == destination.id))).scalars().all()
+        assert person.links == unlabelled
