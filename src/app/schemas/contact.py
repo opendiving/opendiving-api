@@ -2,10 +2,9 @@ import uuid as uuid_pkg
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, ClassVar
-from urllib.parse import urlsplit
+from typing import Annotated, Any, ClassVar, Self
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from ..core.schemas import (
     NOTES_MAX_LENGTH,
@@ -15,18 +14,15 @@ from ..core.schemas import (
     StoredVocabulary,
     Trimmed,
 )
+from .link import LINK_URL_MAX, Link, LinkRead, LinksRead, LinksUpdate, LinksWrite, canonical_links, check_link_url
 from .location import Latitude, Longitude, WholeCoordinatePair
 
 # DiveJSON §6.18's bounds, and the widths of the columns behind them.
 CONTACT_NAME_MAX = 255
 CONTACT_PHONE_MAX = 32
 CONTACT_EMAIL_MAX = 255
-CONTACT_WEBSITE_MAX = 512
 ADDRESS_LINE_MAX = 255
 ADDRESS_POSTCODE_MAX = 32
-
-WEBSITE_MESSAGE = "website must be an absolute http or https URL, e.g. https://example.com"
-
 
 class ContactRole(StrEnum):
     """What a contact is to the diver, and the whole vocabulary of it - DiveJSON §6.18's
@@ -62,32 +58,44 @@ def canonical_roles(values: Iterable[ContactRole]) -> list[ContactRole]:
     return [role for role in ContactRole if role in present]
 
 
-def check_website(value: str | None) -> str | None:
-    """An absolute `http`/`https` URL with a host, or a `ValueError`.
-
-    DiveJSON types the member `format: uri`, and no checker in either repository enforces
-    that, so this is the one place it holds: the column stores a URL a link can open. A
-    bare host is refused rather than given a scheme - the client prepends `https://`, and a
-    guess made here would be a second copy of that rule.
-    """
-    if value is None:
-        return None
-    parts = urlsplit(value)
-    if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
-        raise ValueError(WEBSITE_MESSAGE)
-    return value
+def _website(value: str | None) -> str | None:
+    return None if value is None else check_link_url(value)
 
 
+# The contact's first link's address under the member's old name, for a client that writes no
+# `links` yet; it leaves the wire once none does. See *"A contact's `website` is its first
+# link"* in DECISIONS.md.
 ContactWebsite = Annotated[
     str | None,
     Field(
         default=None,
-        max_length=CONTACT_WEBSITE_MAX,
+        max_length=LINK_URL_MAX,
         examples=["https://blueocean.example"],
-        description="Absolute http or https URL of the contact's website",
+        description="The first link's address, for a client that does not send `links`; not with `links`",
     ),
-    AfterValidator(check_website),
+    AfterValidator(_website),
 ]
+WEBSITE_WITH_LINKS = "Send links or website, not both"
+
+
+def links_after_website(stored: list[LinkRead], website: str | None) -> list[dict[str, Any]] | None:
+    """A contact's links once a write naming `website` alone has landed, or `None` where it
+    changes nothing.
+
+    The address equal to the stored first one is the echo of a client that sends the whole
+    record on every save, and leaves the list as it is. Another one replaces the first entry's
+    address and clears its label, the label having named the old page, or becomes the only
+    entry; null removes the first entry.
+    """
+    first = stored[0].url if stored else None
+    if website == first:
+        return None
+    rest = [Link.model_validate(entry.model_dump()) for entry in stored[1:]]
+    if website is None:
+        entries = rest
+    else:
+        entries = [Link(url=website), *rest]
+    return [entry.model_dump() for entry in canonical_links(entries)]
 ContactEmail = Annotated[
     EmailStr | None,
     Field(
@@ -199,7 +207,7 @@ class ContactAddressColumns(BaseModel):
 # -------------- contact --------------
 class ContactBase(BaseModel):
     """What every shape of a contact carries apart from the members whose write and read
-    types differ - `roles`, `email` and `website` - and the address, which the wire nests
+    types differ - `roles`, `email` and `links` - and the address, which the wire nests
     and the table does not.
 
     The position is flat on the wire as in the table, as a dive site's pin is. Only the write
@@ -224,7 +232,7 @@ class ContactBase(BaseModel):
 
 class _ContactWriteFields(BaseModel):
     """The members a write validates and a read does not: the role vocabulary, the email
-    address and the website's scheme. A read carries them as the strings they are - see
+    address and the links. A read carries them as the strings they are - see
     *"A stored vocabulary is read back as a string"* in DECISIONS.md."""
 
     roles: Annotated[
@@ -237,7 +245,7 @@ class _ContactWriteFields(BaseModel):
         ),
     ]
     email: ContactEmail
-    website: ContactWebsite
+    links: LinksWrite
 
     @field_validator("roles")
     @classmethod
@@ -248,16 +256,25 @@ class _ContactWriteFields(BaseModel):
 class _ContactReadFields(BaseModel):
     roles: Annotated[list[StoredVocabulary], Field(default_factory=list)]
     email: str | None = None
-    website: str | None = None
+    links: LinksRead
 
 
 class ContactRead(ContactBase, _ContactReadFields, PublicUUIDSchema):
     """Public representation of a contact, keyed by its opaque `uuid`."""
 
     name: StoredName
+    website: Annotated[
+        str | None,
+        Field(default=None, description="The first link's address, or null with no links; read `links` instead"),
+    ]
     address: ContactAddressRead | None = None
     user_uuid: uuid_pkg.UUID
     created_at: datetime
+
+    @model_validator(mode="after")
+    def _website_is_the_first_link(self) -> Self:
+        self.website = self.links[0].url if self.links else None
+        return self
 
 
 class ContactReadInternal(ContactBase, _ContactReadFields, ContactAddressColumns, PublicUUIDSchema):
@@ -271,11 +288,22 @@ class ContactReadInternal(ContactBase, _ContactReadFields, ContactAddressColumns
 
 
 class ContactCreate(ContactBase, _ContactWriteFields, WholeCoordinatePair):
+    """`website` alone stores a single link with no label, and null or nothing stores none."""
+
     model_config = ConfigDict(extra="forbid")
 
+    website: ContactWebsite
     address: Annotated[
         ContactAddressInput | None, Field(default=None, description="Postal address; `country` required")
     ]
+
+    @model_validator(mode="after")
+    def _website_is_the_first_link(self) -> Self:
+        if "website" in self.model_fields_set:
+            if "links" in self.model_fields_set:
+                raise ValueError(WEBSITE_WITH_LINKS)
+            self.links = [] if self.website is None else [Link(url=self.website)]
+        return self
 
 
 class ContactCreateInternal(ContactBase, _ContactWriteFields, ContactAddressColumns, WholeCoordinatePair):
@@ -290,13 +318,13 @@ class ContactCreateInternal(ContactBase, _ContactWriteFields, ContactAddressColu
 class _ContactUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     """What both update shapes carry, which is everything but the address.
 
-    `phone`, `email` and `website` are nullable and stay off `NON_NULLABLE_FIELDS`, so an
-    explicit null clears them. `roles` is not nullable: a contact with no role is the empty
-    list. `latitude` and `longitude` are nullable too, but answer to `WholeCoordinatePair`:
+    `phone` and `email` are nullable and stay off `NON_NULLABLE_FIELDS`, so an explicit null
+    clears them. `roles` and `links` are not nullable: a contact with no role or no link is
+    the empty list. `latitude` and `longitude` are nullable too, but answer to `WholeCoordinatePair`:
     they are named together or not at all, and both `null` clears the position.
     """
 
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "roles", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "roles", "links", "notes")
 
     name: Annotated[
         Annotated[str, Trimmed] | None,
@@ -312,7 +340,7 @@ class _ContactUpdateFields(WholeCoordinatePair, RejectsExplicitNulls):
     ]
     phone: ContactPhone
     email: ContactEmail
-    website: ContactWebsite
+    links: LinksUpdate
     notes: Annotated[
         str | None,
         Field(
@@ -341,11 +369,12 @@ class ContactUpdateRequest(_ContactUpdateFields):
 
     Naming `address` **replaces** the stored one whole, as a dive site's `location` is
     replaced: a partial one would leave the old street under a new country. An explicit
-    null clears it.
+    null clears it. `website` is read against the stored links by `links_after_website`.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    website: ContactWebsite
     address: Annotated[
         ContactAddressInput | None,
         Field(
@@ -353,6 +382,12 @@ class ContactUpdateRequest(_ContactUpdateFields):
             description="Replaces the postal address whole; `country` required. Null clears it, omitting leaves it",
         ),
     ]
+
+    @model_validator(mode="after")
+    def _links_or_website(self) -> Self:
+        if {"website", "links"} <= self.model_fields_set:
+            raise ValueError(WEBSITE_WITH_LINKS)
+        return self
 
 
 class ContactUpdateInternal(ContactUpdate):

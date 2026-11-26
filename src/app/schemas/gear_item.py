@@ -15,6 +15,7 @@ from ..core.schemas import (
     Trimmed,
 )
 from .gear_service import GearServiceScheduleInfo
+from .link import LinksRead, LinksUpdate, LinksWrite
 
 
 class GearType(StrEnum):
@@ -175,6 +176,7 @@ class GearItemRead(GearItemBase, PublicUUIDSchema):
         list[GearServiceScheduleInfo],
         Field(default_factory=list, description="Service schedules attached to this item"),
     ]
+    links: LinksRead
     created_at: datetime
 
 
@@ -195,6 +197,7 @@ class GearItemReadInternal(GearItemBase, PublicUUIDSchema):
     archived_at: datetime | None = None
     dive_count: int = 0
     dive_time: int = 0
+    links: LinksRead
     created_at: datetime
 
 
@@ -211,6 +214,7 @@ class GearItemCreate(GearItemBase):
 
     volume: VesselVolume
     working_pressure: VesselWorkingPressure
+    links: LinksWrite
 
 
 class GearItemCreateInternal(GearItemBase):
@@ -219,6 +223,7 @@ class GearItemCreateInternal(GearItemBase):
     user_id: int
     volume: VesselVolume
     working_pressure: VesselWorkingPressure
+    links: LinksWrite
 
 
 class GearItemUpdate(RejectsExplicitNulls):
@@ -231,7 +236,7 @@ class GearItemUpdate(RejectsExplicitNulls):
     # `brand` and `type` are genuinely nullable, so clearing either is a real edit -
     # `patch_gear_item` reads an explicit `brand` null through `model_fields_set` when it
     # re-checks (brand, name) uniqueness.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes", "rented", "is_archived")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes", "rented", "is_archived", "links")
 
     name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
     brand: Annotated[GearBrand | None, BlankIsNone, Field(default=None, description=_BRAND_DESCRIPTION)]
@@ -244,6 +249,7 @@ class GearItemUpdate(RejectsExplicitNulls):
     volume: VesselVolume
     working_pressure: VesselWorkingPressure
     material: Annotated[CylinderMaterial | None, Field(default=None, description=_MATERIAL_DESCRIPTION)]
+    links: LinksUpdate
 
 
 class GearItemUpdateInternal(GearItemUpdate):

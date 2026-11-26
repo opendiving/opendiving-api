@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -39,6 +39,8 @@ class Person(Base, PublicUUIDMixin, TimestampMixin):
     )
     email: Mapped[str | None] = mapped_column(String(255), default=None)
     phone: Mapped[str | None] = mapped_column(String(32), default=None)
+    # `{"url", "label"}` objects (`schemas/link.py`), in the diver's order, possibly none.
+    links: Mapped[list[dict[str, str | None]]] = mapped_column(JSON, default_factory=list, server_default="[]")
     notes: Mapped[str] = mapped_column(Text, default="")
     # Every write that cuts or makes a tie writes this null with it, the purge included, whose
     # `SET NULL` clears the key alone. No check ties the two: it would refuse that `SET NULL`

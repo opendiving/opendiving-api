@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -51,6 +52,8 @@ class GearItem(Base, PublicUUIDMixin, TimestampMixin):
     # `StoredVocabulary` instead - see *"A stored vocabulary is read back as a string"*
     # in DECISIONS.md for the 500 that taught this.
     type: Mapped[str | None] = mapped_column(String(32), default=None)
+    # `{"url", "label"}` objects (`schemas/link.py`), in the diver's order, possibly none.
+    links: Mapped[list[dict[str, str | None]]] = mapped_column(JSON, default_factory=list, server_default="[]")
     notes: Mapped[str] = mapped_column(Text, default="")
     # Rented gear is a property of the item itself rather than of a dive: a diver
     # typically adds "rented BCD (Blue Ocean, Koh Tao)" as its own item and archives

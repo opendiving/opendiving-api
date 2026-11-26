@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Index, String, Text, func
+from sqlalchemy import JSON, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -18,6 +18,8 @@ class Trip(Base, PublicUUIDMixin, TimestampMixin):
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(255))
+    # `{"url", "label"}` objects (`schemas/link.py`), in the diver's order, possibly none.
+    links: Mapped[list[dict[str, str | None]]] = mapped_column(JSON, default_factory=list, server_default="[]")
     notes: Mapped[str] = mapped_column(Text, default="")
 
     @declared_attr.directive

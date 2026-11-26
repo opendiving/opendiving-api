@@ -6,6 +6,7 @@ from typing import Annotated, ClassVar
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator
 
 from ..core.schemas import MAX_LIST_ITEMS, NOTES_MAX_LENGTH, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
+from .link import LinksRead, LinksUpdate, LinksWrite
 
 # DiveJSON §6.20's bounds, and the widths of the columns behind them.
 PERSON_NAME_MAX = 255
@@ -110,6 +111,9 @@ class PersonBase(BaseModel):
     name: PersonName
     email: PersonEmail
     phone: PersonPhone
+    # The person's own pages - a profile, a social account - to open, never an identity: two
+    # people with one address are two people, and nothing matches on it.
+    links: LinksWrite
     notes: Annotated[
         str, Field(default="", max_length=NOTES_MAX_LENGTH, description="The diver's free-text notes on the person")
     ]
@@ -126,6 +130,7 @@ class PersonRead(PublicUUIDSchema):
     name: str
     email: str | None = None
     phone: str | None = None
+    links: LinksRead
     notes: str = ""
     username: Annotated[
         str | None,
@@ -154,6 +159,7 @@ class PersonReadInternal(PublicUUIDSchema):
     name: str
     email: str | None = None
     phone: str | None = None
+    links: LinksRead
     notes: str = ""
     created_at: datetime
     updated_at: datetime | None = None
@@ -190,7 +196,7 @@ class PersonUpdate(RejectsExplicitNulls):
 
     model_config = ConfigDict(extra="forbid")
 
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "links", "notes")
 
     name: Annotated[
         str | None,
@@ -199,6 +205,7 @@ class PersonUpdate(RejectsExplicitNulls):
     ]
     email: PersonEmail
     phone: PersonPhone
+    links: LinksUpdate
     notes: Annotated[
         str | None,
         Field(

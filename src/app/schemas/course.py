@@ -16,6 +16,7 @@ from ..core.schemas import (
 )
 from .certification import CertificationAgency, validate_agency_pairing
 from .contact import CONTACT_UUID_DESCRIPTION
+from .link import LinksRead, LinksUpdate, LinksWrite
 from .person import PeopleRead, PeopleUpdate, PeopleWrite
 
 
@@ -95,7 +96,9 @@ class CourseBase(BaseModel):
 class _CourseWrite(CourseBase):
     """The agency pairing, on the whole-object writes only - for `_CertificationWrite`'s
     reason. The date ordering stays on the base: `ck_course_date_range` keeps a stored row
-    from ever breaking it."""
+    from ever breaking it. The links are here because a read takes them as stored."""
+
+    links: LinksWrite
 
     @model_validator(mode="after")
     def _check_agency_other(self) -> Self:
@@ -118,6 +121,7 @@ class CourseRead(CourseBase, PublicUUIDSchema):
     contact_uuid: Annotated[uuid_pkg.UUID | None, Field(default=None, description=CONTACT_UUID_DESCRIPTION)]
     # Its instructors among them, by role.
     people: PeopleRead
+    links: LinksRead
     created_at: datetime
 
 
@@ -134,6 +138,7 @@ class CourseReadInternal(CourseBase, PublicUUIDSchema):
     id: int
     user_id: int
     contact_id: int | None = None
+    links: LinksRead
     created_at: datetime
 
 
@@ -175,7 +180,7 @@ class CourseUpdate(RejectsExplicitNulls):
     # instructor's number misremembered, the dates of a course that turned out to be `planned`
     # after all, and the agency of one that turns out to have run under none are all real
     # edits. `agency_other` in particular is half of moving a course off `agency="other"`.
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "status", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "status", "links", "notes")
 
     name: Annotated[
         Annotated[str, Trimmed] | None,
@@ -210,6 +215,7 @@ class CourseUpdate(RejectsExplicitNulls):
             description="The instructor's number, as printed on the card; null clears it",
         ),
     ]
+    links: LinksUpdate
     notes: Annotated[
         str | None,
         Field(

@@ -124,6 +124,13 @@ def _people_cell(references: list[ExportReference]) -> str | None:
     return cell or None
 
 
+def _links_cell(links: list[dict[str, Any]]) -> str | None:
+    """A record's links as one cell: addresses in the diver's order, each with its label in
+    brackets where it has one, joined as `_people_cell` joins names."""
+    cell = "; ".join(link["url"] if not link.get("label") else f"{link['url']} ({link['label']})" for link in links)
+    return cell or None
+
+
 def _agency_cell(agency: str | None, agency_other: str | None) -> str | None:
     """The agency the diver named: `agency_other` stands in for `other` and for nothing else.
 
@@ -318,6 +325,7 @@ TRIPS_HEADER = (
     "start_date",
     "end_date",
     "dives",
+    "links",
     "notes",
     "trip_uuid",
 )
@@ -355,6 +363,7 @@ def write_trips_csv(bundle: ExportBundle) -> Iterator[str]:
                 None if start_date is None else start_date.isoformat(),
                 None if end_date is None else end_date.isoformat(),
                 counts.get(trip.id, 0),
+                _links_cell(trip.links),
                 trip.notes,
                 str(trip.uuid),
             )
@@ -376,6 +385,7 @@ COURSES_HEADER = (
     "people",
     "dives",
     "certifications",
+    "links",
     "notes",
     "course_uuid",
 )
@@ -412,6 +422,7 @@ def write_courses_csv(bundle: ExportBundle) -> Iterator[str]:
                 _people_cell(bundle.people_for(course)),
                 dive_counts.get(course.id, 0),
                 certification_counts.get(course.id, 0),
+                _links_cell(course.links),
                 course.notes,
                 str(course.uuid),
             )
@@ -517,6 +528,7 @@ GEAR_ITEMS_HEADER = (
     "dive_count",
     "dive_time_seconds",
     "sets",
+    "links",
     "notes",
     "gear_item_uuid",
 )
@@ -545,6 +557,7 @@ def write_gear_items_csv(bundle: ExportBundle) -> Iterator[str]:
                 item.dive_count,
                 item.dive_time,
                 "; ".join(sets_by_item.get(item.id, [])),
+                _links_cell(item.links),
                 item.notes,
                 str(item.uuid),
             )
@@ -683,7 +696,7 @@ CONTACTS_HEADER = (
     "roles",
     "phone",
     "email",
-    "website",
+    "links",
     "street",
     "city",
     "postcode",
@@ -709,7 +722,7 @@ def write_contacts_csv(bundle: ExportBundle) -> Iterator[str]:
                 "; ".join(contact.roles),
                 contact.phone,
                 contact.email,
-                contact.website,
+                _links_cell(contact.links),
                 contact.address_street,
                 contact.address_city,
                 contact.address_postcode,
@@ -724,7 +737,7 @@ def write_contacts_csv(bundle: ExportBundle) -> Iterator[str]:
     return _rows_to_csv(CONTACTS_HEADER, rows())
 
 
-PEOPLE_HEADER = ("name", "email", "phone", "dives", "notes", "person_uuid")
+PEOPLE_HEADER = ("name", "email", "phone", "dives", "links", "notes", "person_uuid")
 
 
 def write_people_csv(bundle: ExportBundle) -> Iterator[str]:
@@ -741,6 +754,7 @@ def write_people_csv(bundle: ExportBundle) -> Iterator[str]:
                 person.email,
                 person.phone,
                 dive_counts.get(person.id, 0),
+                _links_cell(person.links),
                 person.notes,
                 str(person.uuid),
             )

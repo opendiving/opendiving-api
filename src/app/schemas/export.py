@@ -501,6 +501,17 @@ class ExportPersonReference(BaseModel):
 ExportPeople = Annotated[list[ExportPersonReference], Field(default_factory=list, description="In the diver's order")]
 
 
+class ExportLink(BaseModel):
+    """One of a record's links (spec §6.18): the address, and the label where it has one."""
+
+    url: str
+    label: str | None = None
+
+
+# Written only where a record has some: an empty list says nothing a missing member does not.
+ExportLinks = Annotated[list[ExportLink] | None, Field(default=None, description="In the diver's order")]
+
+
 class ExportTrip(PublicUUIDSchema):
     """A trip as a sequence of parts, with no dates of its own (spec §6.8).
 
@@ -516,6 +527,7 @@ class ExportTrip(PublicUUIDSchema):
     ]
     # Who came on the trip, which no walk of its dives derives.
     people: ExportPeople
+    links: ExportLinks
     notes: str | None = None
     created_at: datetime
 
@@ -547,6 +559,7 @@ class ExportCourse(PublicUUIDSchema):
     contact_uuid: uuid_pkg.UUID | None = None
     # Its instructors among them, by role.
     people: ExportPeople
+    links: ExportLinks
     notes: str | None = None
     created_at: datetime
 
@@ -615,6 +628,7 @@ class ExportGearItem(PublicUUIDSchema):
     name: str
     brand: str | None = None
     type: GearType | None = None
+    links: ExportLinks
     notes: str | None = None
     rented: bool
     archived: bool
@@ -713,7 +727,7 @@ class ExportContact(PublicUUIDSchema):
     roles: list[ContactRole] | None = None
     phone: str | None = None
     email: str | None = None
-    website: str | None = None
+    links: ExportLinks
     address: ExportAddress | None = None
     position: ExportPosition | None = None
     notes: str | None = None
@@ -733,6 +747,7 @@ class ExportPerson(PublicUUIDSchema):
     name: str
     email: str | None = None
     phone: str | None = None
+    links: ExportLinks
     notes: str | None = None
     created_at: datetime
     extensions: ExportExtensions = None

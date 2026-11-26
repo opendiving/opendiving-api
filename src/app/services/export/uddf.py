@@ -77,6 +77,9 @@ reading the XSD, and each is exported in `logbook.divejson`/CSV instead:
   `<trippart>` links only a dive base and UDDF has no course, so every person still goes
   out as a `<buddy>` and those references do not; on a dive, `instructor`, `student`,
   `companion` and no role at all go out as the plain link a reader takes for `buddy`.
+- **A link's label, and the links of a trip, a course and a gear item.** `<homepage>` is a
+  bare address, and only a contact block has one: a gear item's `<manufacturer>` takes a
+  contact block, but a manual's address there would say it is the maker's homepage.
 - **A contact's position.** None of `divebaseType`, `shopType` and a part's
   `<accomodation>` carries a `<geography>`, and `addressType` holds no coordinates. A trip
   part's own `<geography>` is the part's place, not the contact's, so the position goes
@@ -605,11 +608,7 @@ def _buddy_element(diver: ET.Element, person: Person) -> None:
     personal = _sub(element, "personal")
     _sub(personal, "firstname", words[0] if words else "")
     _sub(personal, "lastname", " ".join(words[1:]))
-    listed = [(tag, value) for tag, value in (("phone", person.phone), ("email", person.email)) if value]
-    if listed:
-        block = _sub(element, "contact")
-        for tag, value in listed:
-            _sub(block, tag, value)
+    _contact_block(element, person.phone, person.email, person.links)
     if person.notes:
         _sub(_sub(element, "notes"), "para", person.notes)
 
@@ -648,6 +647,18 @@ def _is_shop(contact: Contact) -> bool:
     return list(contact.roles) == ["shop"]
 
 
+def _contact_block(element: ET.Element, phone: str | None, email: str | None, links: list[dict[str, Any]]) -> None:
+    """A `<contact>` holding whichever of these are present, or nothing where none is.
+    `contactType` is an `xs:sequence` in this order, and `<homepage>` repeats; a link's label
+    has no slot."""
+    listed = [(tag, value) for tag, value in (("phone", phone), ("email", email)) if value]
+    listed += [("homepage", link["url"]) for link in links]
+    if listed:
+        block = _sub(element, "contact")
+        for tag, value in listed:
+            _sub(block, tag, value)
+
+
 def _contact_contents(element: ET.Element, contact: Contact, guides: Iterable[tuple[str, uuid_pkg.UUID]] = ()) -> None:
     """A contact's `<address>`, `<contact>` and `<notes>`, in the order a base, a shop and a
     part's copy all declare them - and a base's `<guide>`s between the last two, where
@@ -655,7 +666,7 @@ def _contact_contents(element: ET.Element, contact: Contact, guides: Iterable[tu
 
     The address only with its country, which `addressType` requires and the column
     constraint guarantees whenever anything else is stored. One `<contact>` holds whichever
-    of the phone, the email and the website are present.
+    of the phone, the email and the links are present, a `<homepage>` per link.
     """
     if contact.address_country:
         address = _sub(element, "address")
@@ -670,16 +681,7 @@ def _contact_contents(element: ET.Element, contact: Contact, guides: Iterable[tu
         ):
             if value:
                 _sub(address, tag, value)
-    # `contactType` is an `xs:sequence`, and this is its order.
-    listed = [
-        (tag, value)
-        for tag, value in (("phone", contact.phone), ("email", contact.email), ("homepage", contact.website))
-        if value
-    ]
-    if listed:
-        block = _sub(element, "contact")
-        for tag, value in listed:
-            _sub(block, tag, value)
+    _contact_block(element, contact.phone, contact.email, contact.links)
     for guide_id, person_uuid in guides:
         _sub(_sub(element, "guide", id=guide_id), "link", ref=_uddf_id("person", person_uuid))
     if contact.notes:

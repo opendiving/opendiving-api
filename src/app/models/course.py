@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import CheckConstraint, Date, ForeignKey, Index, String, Text
+from sqlalchemy import JSON, CheckConstraint, Date, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -65,6 +65,8 @@ class Course(Base, PublicUUIDMixin, TimestampMixin):
     contact_id: Mapped[int | None] = mapped_column(
         ForeignKey("contact.id", ondelete="SET NULL"), default=None, index=True
     )
+    # `{"url", "label"}` objects (`schemas/link.py`), in the diver's order, possibly none.
+    links: Mapped[list[dict[str, str | None]]] = mapped_column(JSON, default_factory=list, server_default="[]")
     notes: Mapped[str] = mapped_column(Text, default="")
 
     @declared_attr.directive

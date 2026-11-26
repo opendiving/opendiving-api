@@ -892,6 +892,7 @@ class TestPeople:
             "name": "Sam Ortiz",
             "email": "sam@example.com",
             "phone": "+34 600 000 000",
+            "links": [{"url": "https://video.example/sam", "label": "Channel"}],
             "notes": "Shoots video.",
             "created_at": people["Sam Ortiz"]["created_at"],
         }

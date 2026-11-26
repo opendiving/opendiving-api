@@ -47,7 +47,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from ..core.utils.datetime_offset import full_date_is_a_date
 from .certification import CertificationAgency
 from .checkin_details import CheckinDetailsUpdate, EmergencyContact, InsurancePolicy
-from .contact import ADDRESS_POSTCODE_MAX, CONTACT_EMAIL_MAX, CONTACT_WEBSITE_MAX, ContactRole
+from .contact import ADDRESS_POSTCODE_MAX, CONTACT_EMAIL_MAX, ContactRole
 from .course import CourseStatus
 from .dive import (
     Abundance,
@@ -186,6 +186,20 @@ class ImportEmergencyContact(_ReadModel):
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
     relationship: Annotated[str | None, Field(default=None, max_length=_SHORT_MAX)]
+
+
+class ImportLink(_ReadModel):
+    """One of a record's links (spec §6.18), read as the strings it holds: the format admits
+    any scheme and this app keeps http and https, so the planner judges each entry with the
+    app's write shape and drops one it refuses with a note."""
+
+    url: str | None = None
+    label: str | None = None
+
+
+# A record's links. A contact's `website`, the member they replace, is not read: §5.6's
+# unknown member, so an older export's contact arrives with none.
+_Links = Annotated[list[ImportLink], Field(default_factory=list), _Collection]
 
 
 class ImportInsurance(_ReadModel):
@@ -456,6 +470,7 @@ class ImportTrip(_ReadModel):
     # failing, the same tolerance §5.6 asks for that a dive's `recordings` gets above.
     parts: Annotated[list[ImportTripPart], Field(default_factory=list), _Collection]
     people: _People
+    links: _Links
     notes: str | None = None
     created_at: datetime | None = None
 
@@ -473,6 +488,7 @@ class ImportCourse(_ReadModel):
     contact_uuid: uuid_pkg.UUID | None = None
     people: _People
     training_center: _LegacyTrainingCenter = None
+    links: _Links
     notes: str | None = None
     created_at: datetime | None = None
 
@@ -546,6 +562,7 @@ class ImportGearItem(_ReadModel):
     working_pressure: float | None = None
     # A string for `type`'s reason: a value outside `CylinderMaterial` reads as absent.
     material: str | None = None
+    links: _Links
     # Derived (spec §5.7): read so the report can say it was, recomputed on import.
     dive_count: int | None = None
     dive_time: int | None = None
@@ -635,10 +652,9 @@ class ImportAddress(_ReadModel):
 class ImportContact(_ReadModel):
     """A party the diver dealt with (spec §6.18).
 
-    `email` and `website` are read as the strings they are. The format's own check on an
-    email is an `@` and it checks a website not at all, while this app's write schema refuses
-    what `EmailStr` or an absolute `http(s)` URL would not accept - so the planner drops such
-    a value with a note rather than one bad address failing a logbook.
+    `email` is read as the string it is. The format's own check on an email is an `@`, while
+    this app's write schema refuses what `EmailStr` would not accept - so the planner drops
+    such a value with a note rather than one bad address failing a logbook, as it does a link.
     """
 
     uuid: uuid_pkg.UUID
@@ -646,7 +662,7 @@ class ImportContact(_ReadModel):
     roles: Annotated[list[ContactRole] | None, _unknown_items_dropped(ContactRole), Field(default=None)]
     phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
     email: Annotated[str | None, Field(default=None, max_length=CONTACT_EMAIL_MAX)]
-    website: Annotated[str | None, Field(default=None, max_length=CONTACT_WEBSITE_MAX)]
+    links: _Links
     address: ImportAddress | None = None
     position: ImportPosition | None = None
     notes: str | None = None
@@ -665,6 +681,7 @@ class ImportPerson(_ReadModel):
     name: Annotated[str | None, Field(default=None, max_length=_NAME_MAX)]
     email: Annotated[str | None, Field(default=None, max_length=PERSON_EMAIL_MAX)]
     phone: Annotated[str | None, Field(default=None, max_length=_PHONE_MAX)]
+    links: _Links
     notes: str | None = None
     created_at: datetime | None = None
     extensions: dict[str, Any] | None = None

@@ -28,6 +28,7 @@ from ...schemas.contact import (
     ContactUpdateRequest,
     address_columns,
     address_from_row,
+    links_after_website,
 )
 from ...schemas.lookup import LookupUntil
 from ...services.cache_invalidation import (
@@ -104,14 +105,17 @@ async def write_contact(
 
     Names are unique per user, case-insensitively, so a second "Blue Ocean" is a 422.
     `roles` is a set in any order and comes back in vocabulary order with duplicates
-    folded; it may be empty. `address` is optional, and when present needs its `country`.
-    `latitude` and `longitude` are optional and come together, or the create is a 422.
+    folded; it may be empty. `links` keep their order, at most 20, an address named twice
+    kept once; each is an absolute http or https address with no whitespace. `website` alone
+    stores one link with no label, and naming it beside `links` is a 422. `address` is
+    optional, and when present needs its `country`. `latitude` and `longitude` are optional
+    and come together, or the create is a 422.
     """
     if await contact_name_exists(db=db, user_id=current_user["id"], name=contact.name):
         raise DuplicateValueException(_NAME_TAKEN)
 
     contact_internal = ContactCreateInternal(
-        **contact.model_dump(exclude={"address"}),
+        **contact.model_dump(exclude={"address", "website"}),
         **address_columns(contact.address),
         user_id=current_user["id"],
     )
@@ -281,10 +285,12 @@ async def patch_contact(
     """Partially update a contact; omitted fields are left untouched.
 
     404 unless the caller owns it. Renaming to a name the caller already has on another
-    contact is a 422. An explicit `null` clears the phone, the email, the website or the
-    address; naming `address` replaces the stored one whole. `roles` replaces the set.
-    `latitude` and `longitude` are named together or not at all - one alone is a 422 - and
-    both `null` clears the position.
+    contact is a 422. An explicit `null` clears the phone, the email or the address; naming
+    `address` replaces the stored one whole. `roles` replaces the set, and `links` the list.
+    `website` alone acts on the first link: the stored first address changes nothing, another
+    address replaces it and clears its label or becomes the only link, and `null` removes it.
+    Naming both `website` and `links` is a 422. `latitude` and `longitude` are named together
+    or not at all - one alone is a 422 - and both `null` clears the position.
     """
     db_contact = await _get_owned_contact(db, uuid, current_user)
 
@@ -293,9 +299,13 @@ async def patch_contact(
     ):
         raise DuplicateValueException(_NAME_TAKEN)
 
-    update_data = values.model_dump(exclude_unset=True, exclude={"address"})
+    update_data = values.model_dump(exclude_unset=True, exclude={"address", "website"})
     if "address" in values.model_fields_set:
         update_data |= address_columns(values.address)
+    if "website" in values.model_fields_set:
+        links = links_after_website(db_contact.links, values.website)
+        if links is not None:
+            update_data["links"] = links
 
     if update_data:
         await write_or_duplicate(

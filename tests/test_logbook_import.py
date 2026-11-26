@@ -3226,7 +3226,7 @@ class TestContacts:
     async def test_what_the_app_would_refuse_is_dropped_and_the_contact_kept(
         self, seeded: Any, db: Session, async_db: AsyncSession
     ) -> None:
-        """The format's email check is an `@` and its website check is none; the app's are
+        """The format's email check is an `@` and its link takes any scheme; the app's are
         stricter, and one bad listing must not fail a logbook. An unknown role is dropped from
         the set and the rest kept (§5.6's list rule), and an address with no country goes."""
         _, document = seeded
@@ -3238,7 +3238,7 @@ class TestContacts:
                 "name": "Blue Ocean",
                 "roles": ["resort", "shop", "shop"],
                 "email": "info@",
-                "website": "blueocean.example",
+                "links": [{"url": "blueocean.example"}, {"url": "https://blueocean.example/", "label": "Site"}],
                 "phone": "+20 69 364 0000",
                 "address": {"city": "Dahab"},
             }
@@ -3250,13 +3250,13 @@ class TestContacts:
 
         messages = [note.message for note in plan.notes if note.collection == "contacts"]
         assert any("email" in message for message in messages)
-        assert any("website" in message for message in messages)
+        assert any(message.startswith("Link 1 ") for message in messages)
         assert any("no country" in message for message in messages)
         contact = (await async_db.execute(select(Contact).where(Contact.user_id == destination.id))).scalar_one()
-        assert (contact.roles, contact.email, contact.website, contact.phone) == (
+        assert (contact.roles, contact.email, contact.links, contact.phone) == (
             ["shop"],
             None,
-            None,
+            [{"url": "https://blueocean.example/", "label": "Site"}],
             "+20 69 364 0000",
         )
         assert contact.address_city is None

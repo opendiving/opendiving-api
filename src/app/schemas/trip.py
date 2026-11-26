@@ -13,6 +13,7 @@ from ..core.schemas import (
     validate_date_range,
 )
 from ..core.utils.pagination import DEFAULT_MAX_ITEMS_PER_PAGE
+from .link import LinksRead, LinksUpdate, LinksWrite
 from .location import LocationInput, LocationRead
 from .person import PeopleRead, PeopleUpdate, PeopleWrite
 
@@ -130,6 +131,7 @@ class TripRead(TripBase, PublicUUIDSchema):
         list[uuid_pkg.UUID],
         Field(description="The contacts the trip's own live dives name, each once, the newest dive's first"),
     ]
+    links: LinksRead
     user_uuid: uuid_pkg.UUID
     created_at: datetime
 
@@ -143,6 +145,7 @@ class TripReadInternal(TripBase, PublicUUIDSchema):
     name: StoredName
     id: int
     user_id: int
+    links: LinksRead
     created_at: datetime
 
 
@@ -158,19 +161,22 @@ class TripCreate(TripBase):
         ),
     ]
     people: PeopleWrite
+    links: LinksWrite
 
 
 class TripCreateInternal(TripBase):
     model_config = ConfigDict(extra="forbid")
     user_id: int
+    links: LinksWrite
 
 
 class TripUpdate(RejectsExplicitNulls):
     model_config = ConfigDict(extra="forbid")
 
-    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "notes")
+    NON_NULLABLE_FIELDS: ClassVar[tuple[str, ...]] = ("name", "links", "notes")
 
     name: Annotated[Annotated[str, Trimmed] | None, Field(max_length=255, default=None, description=_NAME_DESCRIPTION)]
+    links: LinksUpdate
     notes: Annotated[str | None, Field(default=None, max_length=NOTES_MAX_LENGTH, description=_NOTES_DESCRIPTION)]
 
 

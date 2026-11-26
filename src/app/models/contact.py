@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, CheckConstraint, Float, ForeignKey, Index, String, Text, func
+from sqlalchemy import JSON, CheckConstraint, Column, Float, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 from ..core.db.database import Base
@@ -25,6 +25,11 @@ class Contact(Base, PublicUUIDMixin, TimestampMixin):
     """
 
     __tablename__ = "contact"
+    # `website` is unmapped and dropped a deploy later: DECISIONS.md, "A column the serving
+    # build maps is dropped a deploy after it is unmapped". Nothing here reads or writes it;
+    # the trigger `contact_website_mirror` keeps it the first link's address for the previous
+    # build, which reads it.
+    __mapper_args__ = {"exclude_properties": ["website"]}
 
     id: Mapped[int] = mapped_column("id", autoincrement=True, nullable=False, primary_key=True, init=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
@@ -35,7 +40,8 @@ class Contact(Base, PublicUUIDMixin, TimestampMixin):
     roles: Mapped[list[str]] = mapped_column(JSON, default_factory=list, server_default="[]")
     phone: Mapped[str | None] = mapped_column(String(32), default=None)
     email: Mapped[str | None] = mapped_column(String(255), default=None)
-    website: Mapped[str | None] = mapped_column(String(512), default=None)
+    # `{"url", "label"}` objects (`schemas/link.py`), in the diver's order, possibly none.
+    links: Mapped[list[dict[str, str | None]]] = mapped_column(JSON, default_factory=list, server_default="[]")
     # The postal address, flat and prefixed as a dive site's locality is under `location_`;
     # the wire nests it as one `address` object. `address_country` is what says whether
     # there is an address at all - `ck_contact_address_has_country` below.
@@ -56,6 +62,7 @@ class Contact(Base, PublicUUIDMixin, TimestampMixin):
     @classmethod
     def __table_args__(cls) -> tuple:
         return (
+            Column("website", String(512), nullable=True),
             # An address is anchored on its country (DiveJSON §6.19 and UDDF's `<address>`
             # both require one), so a row with a street and no country is an address no
             # export can write. The request schema requires the country already; this is

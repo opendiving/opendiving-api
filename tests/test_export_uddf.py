@@ -236,7 +236,7 @@ class TestContacts:
     @pytest.mark.asyncio
     async def test_a_contact_carries_its_address_contact_block_and_notes(self, monkeypatch):
         """Owner decision on the diver's own email aside: this is a listing the diver chose to
-        record, so the email goes out with the phone and the website."""
+        record, so the email goes out with the phone and every link, a `<homepage>` each."""
         tree = _tree(await _render(full_bundle(), monkeypatch=monkeypatch))
         resort = tree.find(f"{UDDF}divesite/{UDDF}divebase[@id='contact-{UUIDS['contact-resort']}']")
         assert resort is not None
@@ -245,7 +245,10 @@ class TestContacts:
         assert resort.findtext(f"{UDDF}address/{UDDF}province") == "South Sinai"
         assert resort.findtext(f"{UDDF}contact/{UDDF}phone") == "+20 69 364 0000"
         assert resort.findtext(f"{UDDF}contact/{UDDF}email") == "info@blueocean.example"
-        assert resort.findtext(f"{UDDF}contact/{UDDF}homepage") == "https://blueocean.example"
+        assert [element.text for element in resort.findall(f"{UDDF}contact/{UDDF}homepage")] == [
+            "https://blueocean.example",
+            "https://blueocean.example/booking",
+        ]
         assert resort.findtext(f"{UDDF}notes/{UDDF}para") == "Ask for Ahmed."
 
     @pytest.mark.asyncio
@@ -325,7 +328,7 @@ class TestContacts:
         resort = named["Blue Ocean Resort"]
         assert resort["phone"] == "+20 69 364 0000"
         assert resort["email"] == "info@blueocean.example"
-        assert resort["website"] == "https://blueocean.example"
+        assert resort["links"] == [{"url": "https://blueocean.example"}, {"url": "https://blueocean.example/booking"}]
         assert resort["address"]["country"] == "Egypt"
         assert resort["roles"] == ["dive_center", "accommodation"]
         dive = next(dive for dive in converted["dives"] if dive.get("contact_uuid"))
@@ -360,13 +363,15 @@ class TestPeople:
             "Lina",
             None,
         )
-        # `personType`'s order, and `contactType`'s phone before email.
+        # `personType`'s order, and `contactType`'s phone, email and a homepage per link; the
+        # label has no slot.
         assert [child.tag for child in sam] == [f"{UDDF}personal", f"{UDDF}contact", f"{UDDF}notes"]
         contact = sam.find(f"{UDDF}contact")
         assert contact is not None
         assert [(child.tag, child.text) for child in contact] == [
             (f"{UDDF}phone", "+34 600 000 000"),
             (f"{UDDF}email", "sam@example.com"),
+            (f"{UDDF}homepage", "https://video.example/sam"),
         ]
 
     @pytest.mark.asyncio
