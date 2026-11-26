@@ -97,6 +97,7 @@ from ...schemas.gear_service import ServiceKind
 from ...schemas.location import DIVE_SITE_LOCATION_PREFIX, LocationRead, location_from_row
 from ...schemas.person import PersonRole
 from ...schemas.trip import TripPartRead
+from ...schemas.user import UnitPreferences
 from ...schemas.user_picture import PictureKind
 from ..dive_profiles import LoadedProfile, load_profile, to_read_schema
 from ..libdivecomputer import spell_instant
@@ -429,8 +430,8 @@ def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
         # The account-level preferences. They are here because `/export/archive` says
         # nothing in the account is reachable only through the app - and under this
         # producer's key because they are application settings rather than logbook data,
-        # which the format gives no core member (spec §6.1). `units` in particular is the
-        # diver's own setting travelling with a document whose measurements deliberately do
+        # which the format gives no core member (spec §6.1). `unit_preferences` in particular is
+        # the diver's own setting travelling with a document whose measurements deliberately do
         # not bend to it (see `schemas/export.py`).
         #
         # The presets are `{name, hidden_fields}` and nothing else: `uuid`, `user_uuid` and
@@ -440,8 +441,7 @@ def _diver(bundle: ExportBundle, paths: ArchivePaths | None) -> ExportDiver:
         # travels by name for the same reason; the name is unique within the account.
         extensions={
             DIVEJSON_PRODUCER_KEY: {
-                "units": user.units,
-                "unit_preferences": dict(user.unit_preferences),
+                "unit_preferences": UnitPreferences.model_validate(user.unit_preferences).model_dump(),
                 "gear_service_emails": user.gear_service_emails,
                 "renewal_reminder_emails": user.renewal_reminder_emails,
                 "year_in_review_emails": user.year_in_review_emails,

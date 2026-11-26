@@ -325,46 +325,35 @@ class TestAgainstPostgres:
         assert answers == {(404, b'{"detail":"Not found"}', NO_STORE)}
 
     @pytest.mark.asyncio
-    async def test_mixed_unit_preferences_persist_and_the_shared_depth_follows_them(
+    async def test_a_patch_merges_unit_families_and_the_shared_depth_follows_them(
         self, db: Session, http: httpx.AsyncClient, sign_in: SignIn
     ) -> None:
         diver = create_user(db)
         token = await _mint(http, sign_in, diver)
-        preferences = {
-            "depth": "imperial",
-            "pressure": "metric",
-            "volume": "imperial",
-            "weight": "imperial",
-            "temperature": "metric",
-        }
-        changed = await http.patch("/api/v1/user", json={"unit_preferences": preferences})
-        assert changed.status_code == 200
-        await sign_in(diver)
-        account = (await http.get("/api/v1/user")).json()
-        assert account["units"] == "metric"
-        assert account["unit_preferences"] == preferences
-        summary = (await http.get(f"/api/v1/checkin/{token}")).json()
-        assert summary["diver"]["units"] == "imperial"
-        assert summary["diving"]["max_depth"] == FIGURES["max_depth"]
-        changed = await http.patch("/api/v1/user", json={"year_in_review_emails": False})
-        assert changed.status_code == 200
-        await sign_in(diver)
-        assert (await http.get("/api/v1/user")).json()["unit_preferences"] == preferences
-        for invalid in (None, {"depth": "cubits"}, {"unknown": "metric"}, {"pressure": None}):
-            changed = await http.patch("/api/v1/user", json={"unit_preferences": invalid})
-            assert changed.status_code == 422
+        stored = dict.fromkeys(("depth", "pressure", "volume", "weight", "temperature"), "metric")
+
+        async def patch_and_read(body: object) -> int:
+            status = (await http.patch("/api/v1/user", json=body)).status_code
             await sign_in(diver)
-            assert (await http.get("/api/v1/user")).json()["unit_preferences"] == preferences
-        changed = await http.patch("/api/v1/user", json={"unit_preferences": {"temperature": "imperial"}})
-        assert changed.status_code == 200
-        await sign_in(diver)
-        assert (await http.get("/api/v1/user")).json()["unit_preferences"] == {"temperature": "imperial"}
-        assert (await http.get(f"/api/v1/checkin/{token}")).json()["diver"]["units"] == "metric"
-        changed = await http.patch("/api/v1/user", json={"units": "metric", "unit_preferences": {}})
-        assert changed.status_code == 200
-        await sign_in(diver)
-        assert (await http.get("/api/v1/user")).json()["unit_preferences"] == {}
-        assert (await http.get(f"/api/v1/checkin/{token}")).json()["diver"]["units"] == "metric"
+            account = (await http.get("/api/v1/user")).json()
+            summary = (await http.get(f"/api/v1/checkin/{token}")).json()["diver"]
+            assert account["unit_preferences"] == summary["unit_preferences"] == stored
+            assert account["units"] == summary["units"] == stored["depth"]
+            return status
+
+        assert await patch_and_read({"year_in_review_emails": False}) == 200
+        stored |= {"depth": "imperial", "volume": "imperial"}
+        assert await patch_and_read({"unit_preferences": {"depth": "imperial", "volume": "imperial"}}) == 200
+        stored |= {"pressure": "imperial"}
+        assert await patch_and_read({"unit_preferences": {"pressure": "imperial"}}) == 200
+        assert await patch_and_read({"unit_preferences": {}}) == 200
+        for invalid in (None, {"depth": "cubits"}, {"unknown": "metric"}, {"pressure": None}):
+            assert await patch_and_read({"unit_preferences": invalid}) == 422
+        # The quick choice of the web build before every family was on the account.
+        stored = dict.fromkeys(stored, "metric")
+        assert await patch_and_read({"units": "metric", "unit_preferences": {}}) == 200
+        stored = dict.fromkeys(stored, "imperial") | {"temperature": "metric"}
+        assert await patch_and_read({"units": "imperial", "unit_preferences": {"temperature": "metric"}}) == 200
 
     @pytest.mark.asyncio
     async def test_the_summary_is_what_the_signed_in_endpoints_say(
@@ -440,7 +429,7 @@ class TestAgainstPostgres:
         account = UserRead.model_validate(await read_account(async_db, uuid=diver.uuid)).model_dump(mode="json")
         details = await http.get("/api/v1/user/checkin-details")
         assert summary["diver"] == details.json() | {
-            field: account[field] for field in ("name", "portrait_sha256", "units")
+            field: account[field] for field in ("name", "portrait_sha256", "unit_preferences", "units")
         }
         assert summary["diver"].keys() == CheckinDiver.model_fields.keys()
         assert [contact["name"] for contact in summary["diver"]["emergency_contacts"]] == ["Sam", "Kim"]

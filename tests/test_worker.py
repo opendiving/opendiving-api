@@ -923,7 +923,7 @@ def _review(year: int = 2025) -> YearInReview:
 
 
 def _candidate(user_id: int):
-    return SimpleNamespace(id=user_id, email=f"diver{user_id}@example.com", units="metric", unit_preferences={})
+    return SimpleNamespace(id=user_id, email=f"diver{user_id}@example.com", unit_preferences={})
 
 
 def _year_in_review_patches(session, reviews):
@@ -964,7 +964,7 @@ class TestSendYearInReview:
         assert mark["year_in_review_sent_for"] == 2025
 
     @pytest.mark.asyncio
-    async def test_email_uses_the_independent_depth_preference(self) -> None:
+    async def test_the_email_prints_depth_in_the_depth_family(self) -> None:
         candidate = _candidate(1)
         candidate.unit_preferences = {"depth": "imperial", "temperature": "metric"}
         session = _RecordingSession([candidate])

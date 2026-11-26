@@ -1,6 +1,7 @@
+import json
 import uuid as uuid_pkg
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, func
+from sqlalchemy import JSON, Boolean, Column, ForeignKey, Index, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
@@ -8,9 +9,17 @@ from ..core.db.database import Base
 from ..core.db.models import PublicUUIDMixin, SoftDeleteMixin, TimestampMixin
 from ..core.schemas import EMAIL_MAX_LENGTH
 
+# Every measurement family at `metric`: what a new account holds. `UNIT_FAMILIES` in
+# `schemas/user.py` is the vocabulary of the keys, and `UnitSystem` of the values.
+METRIC_UNIT_PREFERENCES = dict.fromkeys(("depth", "pressure", "volume", "weight", "temperature"), "metric")
+
 
 class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "user"
+    # Unmapped, and dropped a deploy later: DECISIONS.md, "A column the serving build maps is
+    # dropped a deploy after it is unmapped". `unit_preferences` holds every family, and nothing
+    # here reads or writes `units`.
+    __mapper_args__ = {"exclude_properties": ["units"]}
 
     id: Mapped[int] = mapped_column(autoincrement=True, primary_key=True, init=False)
 
@@ -42,20 +51,14 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
     renewal_reminder_emails: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     year_in_review_emails: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
-    # Which measurement system this diver reads and types in - `metric` or `imperial`
-    # (`UnitSystem` in `schemas/user.py` is the vocabulary; the column is a plain
-    # `VARCHAR`, the `GearItem.type` shape). Stored server-side rather than per device
-    # so every client the diver signs into agrees, and nothing the API serves varies by
-    # it: measurements are metric everywhere and this says who is looking (see
-    # DECISIONS.md).
-    #
-    # Same `default`/`server_default` pair as `gear_service_emails` above, for the same
-    # reason - the column is NOT NULL, so the migration adding it needs a server-side
-    # default to backfill the existing rows.
-    units: Mapped[str] = mapped_column(String(16), default="metric", server_default="metric")
-
-    # Per-family display overrides; an empty record follows the existing preset.
-    unit_preferences: Mapped[dict[str, str]] = mapped_column(JSON, default_factory=dict, server_default="{}")
+    # Which measurement system this diver reads and types in, for each measurement family -
+    # `metric` or `imperial`, every family always present (`UnitPreferences` in
+    # `schemas/user.py`). Stored server-side rather than per device so every client the diver
+    # signs into agrees, and nothing the API serves varies by it: measurements are metric
+    # everywhere and this says who is looking (see DECISIONS.md).
+    unit_preferences: Mapped[dict[str, str]] = mapped_column(
+        JSON, default_factory=lambda: dict(METRIC_UNIT_PREFERENCES), server_default=json.dumps(METRIC_UNIT_PREFERENCES)
+    )
 
     # Which dive-form fields this diver currently keeps hidden - `DiveFormField` values in
     # `schemas/dive_form_preset.py`, canonicalized on every write. The account's *current*
@@ -128,4 +131,5 @@ class User(Base, PublicUUIDMixin, TimestampMixin, SoftDeleteMixin):
             # could fail to build on an existing instance. Uniqueness stays where it was; this
             # index only makes the lookup cheap.
             Index("ix_user_email_lower", func.lower(cls.email)),
+            Column("units", String(16), nullable=False, server_default="metric"),
         )

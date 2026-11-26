@@ -1,9 +1,9 @@
 import uuid as uuid_pkg
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, Self, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..core.schemas import AccountEmail, PublicUUIDSchema, RejectsExplicitNulls, StoredVocabulary
 from .dive_form_preset import DiveFormField, canonical_hidden_fields
@@ -11,13 +11,43 @@ from .user_picture import PictureCrop
 
 
 class UnitSystem(StrEnum):
-    """The quick preset and vocabulary for each measurement family's override."""
+    """The vocabulary of each measurement family's system."""
 
     METRIC = "metric"
     IMPERIAL = "imperial"
 
 
 UnitPreferenceDimension = Literal["depth", "pressure", "volume", "weight", "temperature"]
+UNIT_FAMILIES: tuple[UnitPreferenceDimension, ...] = get_args(UnitPreferenceDimension)
+
+
+class UnitPreferences(BaseModel):
+    """The account's system for every measurement family - the whole units setting.
+
+    `StoredVocabulary` because the record is a JSON column with no `CHECK`: see *"A stored
+    vocabulary is read back as a string"* in DECISIONS.md. A family a stored record lacks reads
+    as metric rather than failing the read.
+    """
+
+    depth: Annotated[StoredVocabulary, Field(description="Depth, distance, altitude and visibility")]
+    pressure: Annotated[StoredVocabulary, Field(description="Pressure and SAC")]
+    volume: Annotated[StoredVocabulary, Field(description="Gas volume, RMV and cylinder size")]
+    weight: Annotated[StoredVocabulary, Field(description="Weight")]
+    temperature: Annotated[StoredVocabulary, Field(description="Temperature")]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _a_missing_family_reads_as_metric(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return dict.fromkeys(UNIT_FAMILIES, UnitSystem.METRIC.value) | data
+        return data
+
+
+def _metric_everywhere() -> UnitPreferences:
+    return UnitPreferences.model_validate({})
+
+
+DEPRECATED_UNITS_DESCRIPTION = "Deprecated: the depth family's system. Read unit_preferences"
 
 
 class UserBase(BaseModel):
@@ -60,16 +90,16 @@ class UserRead(PublicUUIDSchema):
     # toggle above on what the default is and isn't for.
     renewal_reminder_emails: bool = True
     year_in_review_emails: bool = True
-    # Feeds the settings page's units toggle, and every measurement the web app renders.
-    # Same note as its neighbour above on what the default is and isn't for.
-    # `StoredVocabulary`, not `UnitSystem` - `user.units` is a plain `VARCHAR(16)` with
-    # no DB `CHECK`, like every other vocabulary column, and `get_current_user` validates
-    # the whole row through this schema on every authenticated request. See *"A stored
-    # vocabulary is read back as a string"* in DECISIONS.md. `UserUpdate` keeps the enum.
-    units: StoredVocabulary = UnitSystem.METRIC
+    # Every measurement a client renders picks its system from one of these families.
     unit_preferences: Annotated[
-        dict[str, StoredVocabulary],
-        Field(default_factory=dict, description="Per-family unit overrides; absent families follow units"),
+        UnitPreferences,
+        Field(default_factory=_metric_everywhere, description="The measurement system of each family"),
+    ]
+    # Derived from `unit_preferences` for the clients built before it held every family; the
+    # column it once read is off the mapper.
+    units: Annotated[
+        StoredVocabulary,
+        Field(default=UnitSystem.METRIC, deprecated=True, description=DEPRECATED_UNITS_DESCRIPTION),
     ]
     # Which dive-form fields this diver keeps hidden. Read on `GET /user` and carried by
     # `get_current_user`, so the form's first paint already omits them - which is the whole
@@ -87,6 +117,11 @@ class UserRead(PublicUUIDSchema):
     # `UserBootstrapCreateInternal`) and any promoted by hand - and false under an API key
     # whatever the column says, since a key's principal is never the operator.
     is_superuser: bool = False
+
+    @model_validator(mode="after")
+    def _units_follow_depth(self) -> Self:
+        self.units = self.unit_preferences.depth
+        return self
 
 
 class UserReadInternal(UserRead):
@@ -185,18 +220,22 @@ class UserUpdate(RejectsExplicitNulls):
     year_in_review_emails: Annotated[
         bool | None, Field(default=None, description="Email me a review of my diving year each January")
     ]
-    # Same `extra="forbid"` reasoning as its neighbour: without this field the settings
-    # page's units select would 422 rather than save.
+    # Accepted from the clients built before `unit_preferences` held every family. It sets all
+    # five, and any `unit_preferences` in the same body applies after it, so the earlier web
+    # build's quick choice, `{units, unit_preferences: {}}`, still lands on every family.
     units: Annotated[
-        UnitSystem | None, Field(default=None, description="Measurement system to display and accept values in")
+        UnitSystem | None,
+        Field(default=None, deprecated=True, description="Deprecated: sets every family in unit_preferences"),
     ]
+    # Merged into the stored record rather than replacing it, so a client changing one family
+    # needs no read first, and two devices changing different families keep both changes.
     unit_preferences: Annotated[
         dict[UnitPreferenceDimension, UnitSystem] | None,
         Field(
             default=None,
             description=(
-                "Replace per-family overrides for depth, pressure, volume, weight and temperature; "
-                "an empty object follows units"
+                "The families to change - depth, pressure, volume, weight, temperature; "
+                "a family left out keeps its system"
             ),
         ),
     ]

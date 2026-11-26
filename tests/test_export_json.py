@@ -406,9 +406,9 @@ class TestWhatUddfCannotHold:
 
         They ride `extensions.opendiving` because they are application preferences, not
         logbook data, and the format gives them no core member (spec §6.1) - a writer may
-        not invent one. `units` in particular travels as *account data*: it says which
-        system the diver reads in, and every measurement in this document stays metric
-        regardless.
+        not invent one. `unit_preferences` in particular travels as *account data*: it says
+        which system the diver reads each family in, and every measurement in this document
+        stays metric regardless.
 
         The dive-form settings are here for that promise and nothing else - they configure
         a form no reader of this document has. A preset travels as `{name, hidden_fields}`:
@@ -419,8 +419,13 @@ class TestWhatUddfCannotHold:
         document = await _render(full_bundle(), monkeypatch)
         assert document["diver"]["extensions"] == {
             "opendiving": {
-                "units": "metric",
-                "unit_preferences": {},
+                "unit_preferences": {
+                    "depth": "metric",
+                    "pressure": "metric",
+                    "volume": "metric",
+                    "weight": "metric",
+                    "temperature": "metric",
+                },
                 "gear_service_emails": True,
                 "renewal_reminder_emails": True,
                 "year_in_review_emails": True,

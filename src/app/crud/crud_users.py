@@ -2,19 +2,40 @@ import uuid as uuid_pkg
 from typing import Any
 
 from fastcrud import FastCRUD
-from sqlalchemy import ColumnElement, and_, func, inspect, select
+from sqlalchemy import JSON, ColumnElement, and_, cast, func, inspect, literal, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from ..models.user import User
 from ..models.user_picture import UserPicture
-from ..schemas.user import UserCreateInternal, UserDelete, UserReadInternal, UserUpdate, UserUpdateInternal
+from ..schemas.user import (
+    UNIT_FAMILIES,
+    UserCreateInternal,
+    UserDelete,
+    UserReadInternal,
+    UserUpdate,
+    UserUpdateInternal,
+)
 from ..schemas.user_picture import PictureKind
 
 CRUDUser = FastCRUD[User, UserCreateInternal, UserUpdate, UserUpdateInternal, UserDelete, UserReadInternal]
 crud_users = CRUDUser(User)
 
 _CROP_PARTS = ("x", "y", "width", "height")
+
+
+def account_update_values(values: UserUpdate) -> dict[str, Any]:
+    """`PATCH /user`'s column values. The families it names are merged into the stored
+    `unit_preferences` by the UPDATE itself, so two devices changing different families at once
+    both land; the deprecated `units` names every family, before the body's own families."""
+    written = values.model_dump(exclude_unset=True)
+    families = dict.fromkeys(UNIT_FAMILIES, written.pop("units")) if "units" in written else {}
+    families |= written.pop("unit_preferences", {})
+    if families:
+        merged = cast(User.unit_preferences, JSONB).op("||", return_type=JSONB)(cast(literal(families, JSONB), JSONB))
+        written["unit_preferences"] = cast(merged, JSON)
+    return written
 
 
 def avatar_of(account_id: Any) -> ColumnElement[bool]:

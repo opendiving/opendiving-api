@@ -112,7 +112,7 @@ The MCP layer (`src/app/mcp/`) reuses API handlers and must keep their contract;
 Account-preference changes cover persistence, omission, explicit nulls, replacement and reset
 semantics, including rejection without losing saved state. Trace exports, shared views, background
 jobs and older clients that consume the preference. For measurement preferences, read "Measurements
-are metric in the database and on the wire; `units` is who's looking" in `DECISIONS.md`.
+are metric in the database and on the wire; `unit_preferences` is who's looking" in `DECISIONS.md`.
 
 For review fixes, inspect review bodies, inline comments and discussion attachments. Reconcile each
 item with the current diff, rationale comments, documentation and PR description. State what remains

@@ -4,13 +4,15 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request
 from uuid6 import uuid7
 
 from src.app.api.v1.users import patch_user, read_current_user
 from src.app.core.exceptions.http_exceptions import DuplicateValueException
-from src.app.schemas.user import UnitSystem, UserRead, UserUpdate
+from src.app.crud.crud_users import account_update_values
+from src.app.schemas.user import UNIT_FAMILIES, UserRead, UserUpdate
 
 # Note: there is no `POST /user` endpoint to test here anymore - account creation only
 # happens via `POST /auth/complete` (see `tests/test_auth.py`).
@@ -49,7 +51,9 @@ class TestPatchUser:
             result = await patch_user(Mock(), user_update, current_user_dict, mock_db)
 
             assert result == {"message": "User updated"}
-            mock_crud.update.assert_called_once_with(db=mock_db, object=user_update, uuid=current_user_dict["uuid"])
+            mock_crud.update.assert_called_once_with(
+                db=mock_db, object={"name": "New Name"}, uuid=current_user_dict["uuid"]
+            )
 
     @pytest.mark.asyncio
     async def test_patch_user_duplicate_username(self, mock_db, current_user_dict):
@@ -112,8 +116,8 @@ class TestIsSuperuserOnTheCallersOwnRecord:
     """
 
     def test_it_defaults_to_false(self):
-        """The same reasoning as `units` beside it: a row read back without the key must
-        still answer, and the safe answer is "not an operator"."""
+        """A row read back without the key must still answer, and the safe answer is "not an
+        operator"."""
         values = UserRead.model_validate(
             {"uuid": uuid7(), "name": "Ada Lovelace", "username": "ada", "email": "ada@example.com"}
         )
@@ -142,93 +146,98 @@ class TestIsSuperuserOnTheCallersOwnRecord:
 
 
 class TestUnitsPreference:
-    """`units` - the account-level metric-or-imperial toggle.
+    """`unit_preferences` - the account's system for each measurement family.
 
     Nothing the API serves is converted by it (see DECISIONS.md's *"Measurements are
-    metric in the database and on the wire; `units` is who's looking"*), so the whole
-    server-side surface is the two schemas these cover: it is read on `GET /user` and
-    written on `PATCH /user`, and that is all.
+    metric in the database and on the wire; `unit_preferences` is who's looking"*), so the
+    server-side surface is the schemas these cover and the write `PATCH /user` makes.
+    The merge itself runs in Postgres, and `test_check_in_links.py` holds it there.
 
     `test_update_explicit_nulls.py` covers the `NON_NULLABLE_FIELDS` half structurally,
-    off the SQLAlchemy metadata; the null case here is the same guard seen from the
+    off the SQLAlchemy metadata; the null cases here are the same guard seen from the
     caller's side.
     """
 
-    def test_an_untouched_account_reads_as_metric(self):
-        """The Python-side default, and the reason it exists: a row read back from a
-        database where the hand-written `ALTER TABLE` hasn't run yet has no `units` key
-        at all, and `GET /user` still has to answer.
-        """
+    def test_an_account_read_without_the_record_reads_as_metric_everywhere(self):
+        values = UserRead.model_validate(
+            {"uuid": uuid7(), "name": "Ada Lovelace", "username": "ada", "email": "ada@example.com"}
+        )
+
+        assert values.unit_preferences.model_dump() == dict.fromkeys(UNIT_FAMILIES, "metric")
+        assert values.model_dump()["units"] == "metric"
+
+    def test_a_family_the_stored_record_lacks_reads_as_metric_and_units_follows_depth(self):
         values = UserRead.model_validate(
             {
                 "uuid": uuid7(),
                 "name": "Ada Lovelace",
                 "username": "ada",
                 "email": "ada@example.com",
+                "unit_preferences": {"depth": "imperial", "pressure": "fathoms"},
             }
         )
 
-        assert values.units is UnitSystem.METRIC
+        assert values.model_dump(include={"units", "unit_preferences"}) == {
+            "units": "imperial",
+            "unit_preferences": {
+                "depth": "imperial",
+                "pressure": "fathoms",
+                "volume": "metric",
+                "weight": "metric",
+                "temperature": "metric",
+            },
+        }
 
-    @pytest.mark.asyncio
-    async def test_patch_user_saves_the_units_preference(self, mock_db, current_user_dict):
-        """The field has to be on `UserUpdate` as well as `UserRead`: the schema is
-        `extra="forbid"`, so an omission here would 422 the settings toggle rather than
-        save it.
-        """
-        user_update = UserUpdate(units=UnitSystem.IMPERIAL)
-
-        with patch("src.app.api.v1.users.crud_users") as mock_crud:
-            mock_crud.exists = AsyncMock(return_value=False)
-            mock_crud.update = AsyncMock(return_value=None)
-
-            result = await patch_user(Mock(), user_update, current_user_dict, mock_db)
-
-            assert result == {"message": "User updated"}
-            written = mock_crud.update.call_args.kwargs["object"]
-            assert written.model_dump(exclude_unset=True) == {"units": UnitSystem.IMPERIAL}
-
-    def test_a_value_outside_the_vocabulary_is_rejected(self):
-        """`UnitSystem` is the only place the vocabulary is written down - there is no DB
-        `CHECK` mirroring it (the `GearItem.type` decision), so this rejection is the
-        whole enforcement.
-        """
-        with pytest.raises(ValidationError) as exc_info:
-            UserUpdate(units="cubits")  # type: ignore[arg-type]
-
-        assert "units" in str(exc_info.value)
-
-    def test_an_explicit_null_is_rejected(self):
-        """The column is `NOT NULL`, so `{"units": null}` is a 422 rather than an UPDATE
-        that reaches Postgres and comes back a 500 - see `RejectsExplicitNulls`.
-        """
-        with pytest.raises(ValidationError) as exc_info:
-            UserUpdate.model_validate({"units": None})
-
-        assert "cannot be null" in str(exc_info.value)
-
-
-class TestGranularUnits:
-    @pytest.mark.parametrize("value", [None, {"depth": "cubits"}, {"unknown": "metric"}, {"pressure": None}])
-    def test_invalid_preferences_are_rejected(self, value):
+    @pytest.mark.parametrize(
+        "value", [None, {"depth": "cubits"}, {"unknown": "metric"}, {"pressure": None}, [], "imperial"]
+    )
+    def test_an_invalid_record_is_rejected(self, value):
         with pytest.raises(ValidationError):
             UserUpdate.model_validate({"unit_preferences": value})
 
-    def test_preferences_replace_whole_record_and_allow_reset(self):
-        values = UserUpdate.model_validate({"unit_preferences": {"depth": "imperial", "pressure": "metric"}})
-        assert values.model_dump(exclude_unset=True) == {
-            "unit_preferences": {"depth": "imperial", "pressure": "metric"}
-        }
-        assert UserUpdate.model_validate({"unit_preferences": {}}).model_dump(exclude_unset=True) == {
-            "unit_preferences": {}
-        }
+    @pytest.mark.parametrize("value", [None, "cubits"])
+    def test_an_invalid_units_is_rejected(self, value):
+        with pytest.raises(ValidationError) as exc_info:
+            UserUpdate.model_validate({"units": value})
+
+        assert "units" in str(exc_info.value)
+
+    def test_the_families_named_are_merged_into_the_stored_record(self):
+        written, families = _unit_write(
+            UserUpdate.model_validate({"unit_preferences": {"pressure": "imperial"}, "name": "Ada Lovelace"})
+        )
+
+        assert written == {"name": "Ada Lovelace"}
+        assert families == {"pressure": "imperial"}
+
+    def test_units_sets_every_family_before_the_body_s_own(self):
+        _, families = _unit_write(
+            UserUpdate.model_validate({"units": "imperial", "unit_preferences": {"temperature": "metric"}})
+        )
+
+        assert families == dict.fromkeys(UNIT_FAMILIES, "imperial") | {"temperature": "metric"}
+
+    def test_an_empty_record_writes_nothing(self):
+        assert account_update_values(UserUpdate.model_validate({"unit_preferences": {}})) == {}
 
     @pytest.mark.asyncio
-    async def test_patch_saves_mixed_units(self, mock_db, current_user_dict):
-        values = UserUpdate.model_validate({"unit_preferences": {"depth": "imperial", "temperature": "metric"}})
-        with patch("src.app.api.v1.users.crud_users") as crud:
-            crud.update = AsyncMock()
-            await patch_user(Mock(), values, current_user_dict, mock_db)
-            assert crud.update.call_args.kwargs["object"].model_dump(exclude_unset=True) == {
-                "unit_preferences": {"depth": "imperial", "temperature": "metric"}
-            }
+    async def test_patch_user_writes_the_merge(self, mock_db, current_user_dict):
+        with patch("src.app.api.v1.users.crud_users") as mock_crud:
+            mock_crud.update = AsyncMock(return_value=None)
+
+            result = await patch_user(
+                Mock(), UserUpdate.model_validate({"units": "imperial"}), current_user_dict, mock_db
+            )
+
+        assert result == {"message": "User updated"}
+        written = mock_crud.update.call_args.kwargs["object"]
+        assert set(written) == {"unit_preferences"}
+
+
+def _unit_write(values: UserUpdate) -> tuple[dict, dict]:
+    """The column values `PATCH /user` writes, with the families its merge binds."""
+    written = account_update_values(values)
+    compiled = written.pop("unit_preferences").compile(dialect=postgresql.dialect())
+    assert "||" in str(compiled)
+    [families] = compiled.params.values()
+    return written, families
