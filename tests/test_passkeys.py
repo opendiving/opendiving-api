@@ -10,6 +10,7 @@ pattern (`tests/test_auth.py`).
 design rests on, and a stub that just returned a stored value would assert it away.
 """
 
+import json
 import logging
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
+from webauthn.helpers import base64url_to_bytes
 
 from src.app.api.v1.auth import passkey_sign_in_options, passkey_sign_in_verify
 from src.app.api.v1.passkeys import (
@@ -33,6 +36,8 @@ from src.app.core.exceptions.http_exceptions import (
     NotFoundException,
     UnauthorizedException,
 )
+from src.app.core.schemas import IdleTimeout
+from src.app.core.security import verify_restore_token
 from src.app.schemas.webauthn_credential import (
     PasskeyRegistrationVerifyRequest,
     PasskeySignInVerifyRequest,
@@ -42,7 +47,7 @@ from src.app.schemas.webauthn_credential import (
 from src.app.services.auth_service import IssuedTokens
 from src.app.services.passkey_challenges import ChallengeStoreUnavailable
 from tests.helpers.fake_redis import FakeRedis
-from tests.helpers.mocks import fake_request, stub_claim
+from tests.helpers.mocks import awaited_kwargs, fake_request, stub_claim
 from tests.helpers.webauthn import SoftAuthenticator
 
 USER_UUID = uuid_pkg.uuid4()
@@ -53,6 +58,11 @@ CREDENTIAL_UUID = uuid_pkg.uuid4()
 # derivation the moment it changed.
 RP_ID = settings.passkey_rp_id
 ORIGIN = settings.passkey_origin
+
+# An instance whose web address is HTTPS on the default port, as the flagship's is: the one
+# shape of `FRONTEND_URL` whose origin a native app's client data can match, since an app
+# names `https://` and the relying party id with no port.
+NATIVE_FRONTEND_URL = "https://dive.example.com"
 
 
 _request = fake_request
@@ -103,6 +113,27 @@ def redis_client():
 
 
 @pytest.fixture
+def native_instance():
+    with patch.object(settings, "FRONTEND_URL", NATIVE_FRONTEND_URL):
+        yield
+
+
+def _assert_shaped_as_a_native_app_sends_it(credential: dict[str, Any]) -> None:
+    """The members a native client builds itself, rather than a browser handing them over.
+
+    No contract check reads inside `credential`, so these assertions are what hold the shape
+    an app depends on: if the verifier stops accepting it, the test that sent it fails.
+    """
+    assert credential["authenticatorAttachment"] in ("platform", "cross-platform")
+    assert credential["clientExtensionResults"] == {}
+    assert "transports" not in credential["response"]
+    if "authenticatorData" in credential["response"]:
+        assert isinstance(credential["response"]["userHandle"], str)
+    client_data = json.loads(base64url_to_bytes(credential["response"]["clientDataJSON"]))
+    assert client_data["origin"] == f"https://{settings.passkey_rp_id}"
+
+
+@pytest.fixture
 def no_rate_limits():
     with (
         patch("src.app.api.v1.auth.enforce_rate_limit", new_callable=AsyncMock),
@@ -111,10 +142,12 @@ def no_rate_limits():
         yield
 
 
-async def _register_credential(mock_db, redis_client, *, user: dict[str, Any] | None = None) -> _Ceremony:
+async def _register_credential(
+    mock_db, redis_client, *, user: dict[str, Any] | None = None, device: SoftAuthenticator | None = None
+) -> _Ceremony:
     """Drive a full registration and hand back the credential row it would have written."""
     account = user or _user()
-    device = SoftAuthenticator(rp_id=RP_ID, origin=ORIGIN)
+    device = device or SoftAuthenticator(rp_id=RP_ID, origin=ORIGIN)
 
     with patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud:
         crud.get_multi = AsyncMock(return_value={"data": []})
@@ -204,6 +237,35 @@ class TestRegistration:
 
         assert ceremony.stored.credential_id == ceremony.device.credential_id
         assert ceremony.stored.public_key
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("native_instance")
+    async def test_a_native_apps_attestation_is_accepted(self, mock_db, redis_client):
+        device = SoftAuthenticator.native_app(settings.passkey_rp_id)
+        account = _user()
+
+        with patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud:
+            crud.get_multi = AsyncMock(return_value={"data": []})
+            crud.create = AsyncMock(
+                side_effect=lambda **kwargs: _stored(
+                    **kwargs["object"].model_dump(), uuid=CREDENTIAL_UUID, id=1, last_used_at=None
+                )
+            )
+
+            options = (await passkey_registration_options(account, mock_db)).options
+            attestation = device.register(options)
+            _assert_shaped_as_a_native_app_sends_it(attestation)
+
+            with patch("src.app.api.v1.passkeys.send_passkey_added_email", new_callable=AsyncMock):
+                created = await passkey_registration_verify(
+                    _request(),
+                    PasskeyRegistrationVerifyRequest(credential=attestation, name="iPhone"),
+                    account,
+                    mock_db,
+                )
+
+        assert created.name == "iPhone"
+        assert crud.create.call_args.kwargs["object"].credential_id == device.credential_id
 
     @pytest.mark.asyncio
     async def test_it_sends_the_security_email(self, mock_db, redis_client):
@@ -518,6 +580,64 @@ class TestSignInVerify:
         assert "sign_count" in recorded
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("native_instance")
+    async def test_a_native_apps_assertion_signs_in(self, mock_db, redis_client):
+        ceremony = await _register_credential(
+            mock_db, redis_client, device=SoftAuthenticator.native_app(settings.passkey_rp_id)
+        )
+        body = await self._assert_with(mock_db, redis_client, ceremony)
+        _assert_shaped_as_a_native_app_sends_it(body["credential"])
+        stub_claim(mock_db, won=True)
+
+        with (
+            patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud,
+            patch("src.app.services.passkey_service.crud_users") as users,
+            patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
+        ):
+            crud.get = AsyncMock(return_value=ceremony.stored)
+            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
+            issue.return_value = IssuedTokens(access_token="at", refresh_token="r", max_age=60)
+
+            body["idle_timeout"] = "extended"
+            outcome = await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
+
+        assert outcome.status == "authenticated"
+        assert awaited_kwargs(issue)["idle_timeout"] is IdleTimeout.EXTENDED
+
+    @pytest.mark.parametrize(
+        ("asked", "minted"),
+        [
+            ({}, IdleTimeout.STANDARD),
+            ({"idle_timeout": "standard"}, IdleTimeout.STANDARD),
+            ({"idle_timeout": "extended"}, IdleTimeout.EXTENDED),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_session_is_minted_with_the_idle_timeout_the_body_asked_for(
+        self, mock_db, redis_client, asked: dict, minted: IdleTimeout
+    ):
+        """As for the email's code: the member reaches the one mint this route makes, and its
+        absence is `standard`, which is what the web sends."""
+        ceremony = await _register_credential(mock_db, redis_client)
+        body = await self._assert_with(mock_db, redis_client, ceremony)
+        stub_claim(mock_db, won=True)
+
+        with (
+            patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud,
+            patch("src.app.services.passkey_service.crud_users") as users,
+            patch("src.app.api.v1.auth.issue_tokens", new_callable=AsyncMock) as issue,
+        ):
+            crud.get = AsyncMock(return_value=ceremony.stored)
+            users.get = AsyncMock(return_value={"id": 7, "uuid": USER_UUID, "is_deleted": False})
+            issue.return_value = IssuedTokens(access_token="at", refresh_token="r", max_age=60)
+
+            request_body = PasskeySignInVerifyRequest.model_validate({**body, **asked})
+            outcome = await passkey_sign_in_verify(_request(), request_body, Mock(), mock_db)
+
+        assert outcome.status == "authenticated"
+        assert awaited_kwargs(issue)["idle_timeout"] is minted
+
+    @pytest.mark.asyncio
     async def test_a_synced_passkey_reporting_zero_forever_still_signs_in(self, mock_db, redis_client):
         """iCloud/Google-synced passkeys never increment. `0 -> 0` is legal and must not
         be mistaken for a clone."""
@@ -723,6 +843,43 @@ class TestSignInVerify:
         issue.assert_not_called()
         assert not any("UPDATE webauthn_credential" in str(call.args[0]) for call in mock_db.execute.call_args_list)
 
+    @pytest.mark.parametrize("idle_timeout", list(IdleTimeout))
+    @pytest.mark.asyncio
+    async def test_the_restore_it_offers_keeps_the_window_asked_for(
+        self, mock_db, redis_client, idle_timeout: IdleTimeout
+    ):
+        """The restore request carries nothing but the token, so the window the phone asked
+        for here has to ride in it, as it does from the email's code."""
+        ceremony = await _register_credential(mock_db, redis_client)
+        body = await self._assert_with(mock_db, redis_client, ceremony)
+
+        with (
+            patch("src.app.services.passkey_service.crud_webauthn_credentials") as crud,
+            patch("src.app.services.passkey_service.crud_users") as users,
+        ):
+            crud.get = AsyncMock(return_value=ceremony.stored)
+            users.get = AsyncMock(
+                return_value={
+                    "id": 7,
+                    "uuid": USER_UUID,
+                    "email": "diver@example.com",
+                    "is_deleted": True,
+                    "deleted_at": datetime.now(UTC) - timedelta(days=2),
+                }
+            )
+
+            outcome = await passkey_sign_in_verify(
+                _request(), PasskeySignInVerifyRequest(**body, idle_timeout=idle_timeout), Mock(), mock_db
+            )
+
+        assert outcome.status == "deletion_pending"
+        assert outcome.restore_token is not None
+        with patch("src.app.core.security.crud_token_blacklist") as blacklist:
+            blacklist.exists = AsyncMock(return_value=False)
+            grant = await verify_restore_token(outcome.restore_token, mock_db)
+        assert grant is not None
+        assert grant.idle_timeout is idle_timeout
+
     @pytest.mark.asyncio
     async def test_the_loser_of_a_concurrent_assertion_gets_no_session(self, mock_db, redis_client):
         """Both requests carry the same valid assertion; the conditional UPDATE is what
@@ -764,6 +921,17 @@ class TestSignInVerify:
             await passkey_sign_in_verify(_request(), PasskeySignInVerifyRequest(**body), Mock(), mock_db)
 
         assert "webauthn_credential.sign_count = " in str(mock_db.execute.call_args.args[0])
+
+
+class TestSignInVerifyRequestSchema:
+    def test_the_idle_timeout_defaults_to_standard(self):
+        body = PasskeySignInVerifyRequest(flow_id="f", credential={})
+        assert body.idle_timeout is IdleTimeout.STANDARD
+
+    @pytest.mark.parametrize("value", ["forever", "Extended", "", 90, None])
+    def test_any_other_idle_timeout_is_a_422(self, value: object):
+        with pytest.raises(ValidationError):
+            PasskeySignInVerifyRequest.model_validate({"flow_id": "f", "credential": {}, "idle_timeout": value})
 
 
 @pytest.mark.usefixtures("no_rate_limits")

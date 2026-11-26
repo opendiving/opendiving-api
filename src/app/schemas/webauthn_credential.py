@@ -12,7 +12,8 @@ from typing import Annotated, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.schemas import PublicUUIDSchema, RejectsExplicitNulls
+from ..core.schemas import IdleTimeout, PublicUUIDSchema, RejectsExplicitNulls
+from .auth import RequestedIdleTimeout
 
 # What the client may put in the `name` field, and what the column takes.
 NAME_MAX_LENGTH = 50
@@ -122,13 +123,14 @@ class PasskeySignInVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     flow_id: Annotated[str, Field(description="Identifier returned with the passkey sign-in options")]
-    # The raw `PublicKeyCredential` from `navigator.credentials.get()`, passed through
-    # untouched: py_webauthn parses and validates it, and re-declaring its shape here
+    # The `PublicKeyCredential` as the WebAuthn specification gives it in JSON, passed
+    # through untouched: py_webauthn parses and validates it, and re-declaring its shape here
     # would be a second parser to keep in step with the spec.
     credential: Annotated[
         dict[str, Any],
-        Field(description="Assertion returned by the browser's WebAuthn get() call, passed through unchanged"),
+        Field(description="Assertion the client's WebAuthn get() ceremony returned, as WebAuthn's JSON, unchanged"),
     ]
+    idle_timeout: RequestedIdleTimeout = IdleTimeout.STANDARD
 
 
 class PasskeyRegistrationVerifyRequest(BaseModel):
@@ -136,7 +138,9 @@ class PasskeyRegistrationVerifyRequest(BaseModel):
 
     credential: Annotated[
         dict[str, Any],
-        Field(description="Attestation returned by the browser's WebAuthn create() call, passed through unchanged"),
+        Field(
+            description="Attestation the client's WebAuthn create() ceremony returned, as WebAuthn's JSON, unchanged"
+        ),
     ]
     name: Annotated[
         str,

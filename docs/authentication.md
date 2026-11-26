@@ -291,7 +291,7 @@ sequenceDiagram
     API-->>FE: {flow_id, options} - allowCredentials empty,\nso this names no account
 
     U->>FE: Picks the passkey, unlocks it (Face ID / PIN)
-    FE->>API: POST /auth/passkey/verify\n{flow_id, assertion}
+    FE->>API: POST /auth/passkey/verify\n{flow_id, assertion, idle_timeout?}
     API->>R: GETDEL the challenge - spent on the attempt,\neven if verification then fails
     API->>API: Verify signature, RP ID and origin\nagainst FRONTEND_URL
     API->>DB: credential_id -> credential -> user
@@ -313,6 +313,10 @@ The `deletion_pending` branch is the one outcome that is *not* the uniform 401, 
 holding no credential, while a caller who has just produced a valid assertion is not. Placed any
 earlier it would be a credential-existence oracle. It also returns before the counter is recorded,
 so reaching the offer writes nothing.
+
+`idle_timeout` is optional and taken as the email routes take it: a native client asks for
+`extended`, the web sends nothing and gets `standard`, and a `deletion_pending` outcome carries the
+window into the restore token.
 
 A counter that has gone *backwards* (stored > 0, presented ≤ stored) is the cloned-authenticator
 signal: the assertion is refused and a `WARNING` is logged. A synced passkey reports `0` forever,
@@ -558,18 +562,23 @@ well - see *Session refresh & logout* above.
 **A native client.** An app with no cookie jar reads the refresh token off the `Set-Cookie` header
 of the sign-in or refresh response, keeps it in its own secure storage, and sends it back as a
 `Cookie: refresh_token=...` header on the two routes that read it, `POST /auth/refresh` and
-`POST /auth/logout`. It signs in with the six-digit code (`POST /auth/email/verify-code`), or by
-redeeming the link's token itself (`POST /auth/email/verify`) when the link is handed to it, and
-asks either for `"idle_timeout": "extended"`, which buys it a session that survives
+`POST /auth/logout`. It signs in with the six-digit code (`POST /auth/email/verify-code`), by
+redeeming the link's token itself (`POST /auth/email/verify`) when the link is handed to it, or with
+a passkey (`POST /auth/passkey/verify`) where its build is associated with the instance's domain,
+and asks each for `"idle_timeout": "extended"`, which buys it a session that survives
 `EXTENDED_REFRESH_TOKEN_EXPIRE_DAYS` (90 by default) of disuse rather than a week — at the cost of a
 stolen device staying signed in that much longer, until the session is revoked from *Sessions*. A
 `deletion_pending` outcome carries the window into the restore token, so `POST /auth/restore` starts
 the session it asked for, and an `onboarding_required` one carries it into the onboarding token, so
 a native client can create the account with `POST /auth/complete` and be signed in with the same
-window. Google and passkey sign-ins start a `standard` session, and the web sends nothing. A client
-that loses a refresh reply should retry once with the same cookie within the grace, after a short
-pause, and the server answers with the pair it already minted. A script or a sync job is better
-served by an API key (below), which needs no refresh at all.
+window. Google sign-ins start a `standard` session, and the web sends nothing. A passkey it adds
+(`POST /user/passkey/verify`) carries the `name` it chooses, and each ceremony's credential is the
+specification's JSON whose client data names the origin `https://` and the relying party's id, with
+no port. The API accepts one origin, `FRONTEND_URL`'s, so a native client's ceremonies verify
+wherever that address is HTTPS on the default port. A client that loses a refresh reply should retry
+once with the same cookie within the grace, after a short pause, and the server answers with the
+pair it already minted. A script or a sync job is better served by an API key (below), which needs
+no refresh at all.
 
 **Upgrading signs everyone out once.** Neither half of a pair minted before this feature carries a
 `sid`, and both halves are now refused for want of one - the access token on its next request, the

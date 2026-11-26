@@ -15,7 +15,8 @@ signs whatever it is given.
 Deliberately minimal, and only in the ways the app never exercises: ES256 only (which
 `generate_registration_options` lists first and every platform authenticator supports),
 `attestation: "none"` only (which is what the app asks for), and no CTAP transport layer -
-this stands in for `navigator.credentials`, not for a USB device.
+this stands in for `navigator.credentials`, or for a native app's passkey API, not for a USB
+device.
 """
 
 import hashlib
@@ -60,8 +61,23 @@ class SoftAuthenticator:
     sign_count: int = 0
     backed_up: bool = True
     user_verified: bool = True
+    # Answers as an app on Apple's platforms builds the JSON from what its passkey API hands
+    # back, rather than as a browser: see `native_app`.
+    native: bool = False
     credential_id: bytes = field(default=b"", init=False)
+    user_handle: str | None = field(default=None, init=False)
     _private_key: ec.EllipticCurvePrivateKey | None = field(default=None, init=False, repr=False)
+
+    @classmethod
+    def native_app(cls, rp_id: str) -> SoftAuthenticator:
+        """A device answering for a native app associated with `rp_id`.
+
+        Its client data names the origin `https://` and the relying party id, with no port.
+        An assertion carries the `userHandle` the registration named, as a string; both
+        ceremonies name an `authenticatorAttachment`; a registration lists no `transports`,
+        which the platform does not report to an app.
+        """
+        return cls(rp_id=rp_id, origin=f"https://{rp_id}", native=True)
 
     def register(self, options: dict[str, Any], *, origin: str | None = None) -> dict[str, Any]:
         """Answer creation options with an attestation - `navigator.credentials.create()`.
@@ -70,22 +86,19 @@ class SoftAuthenticator:
         wrong site without building a second authenticator.
         """
         self.credential_id = hashlib.sha256(options["challenge"].encode()).digest()
+        self.user_handle = options["user"]["id"]
         self._private_key = ec.generate_private_key(ec.SECP256R1())
 
         authenticator_data = self._authenticator_data(include_credential=True)
         attestation_object = cbor2.dumps({"fmt": "none", "attStmt": {}, "authData": authenticator_data})
 
-        return {
-            "id": b64url(self.credential_id),
-            "rawId": b64url(self.credential_id),
-            "type": "public-key",
-            "response": {
-                "clientDataJSON": self._client_data("webauthn.create", options["challenge"], origin),
-                "attestationObject": b64url(attestation_object),
-                "transports": ["internal", "hybrid"],
-            },
-            "clientExtensionResults": {},
+        response: dict[str, Any] = {
+            "clientDataJSON": self._client_data("webauthn.create", options["challenge"], origin),
+            "attestationObject": b64url(attestation_object),
         }
+        if not self.native:
+            response["transports"] = ["internal", "hybrid"]
+        return self._credential(response)
 
     def authenticate(self, options: dict[str, Any], *, origin: str | None = None) -> dict[str, Any]:
         """Answer assertion options with a signature - `navigator.credentials.get()`.
@@ -104,18 +117,26 @@ class SoftAuthenticator:
             ec.ECDSA(hashes.SHA256()),
         )
 
-        return {
-            "id": b64url(self.credential_id),
-            "rawId": b64url(self.credential_id),
-            "type": "public-key",
-            "response": {
+        return self._credential(
+            {
                 "clientDataJSON": client_data,
                 "authenticatorData": b64url(authenticator_data),
                 "signature": b64url(signature),
-                "userHandle": None,
-            },
+                "userHandle": self.user_handle if self.native else None,
+            }
+        )
+
+    def _credential(self, response: dict[str, Any]) -> dict[str, Any]:
+        credential: dict[str, Any] = {
+            "id": b64url(self.credential_id),
+            "rawId": b64url(self.credential_id),
+            "type": "public-key",
+            "response": response,
             "clientExtensionResults": {},
         }
+        if self.native:
+            credential["authenticatorAttachment"] = "platform"
+        return credential
 
     def _client_data(self, ceremony: str, challenge: str, origin: str | None) -> str:
         # Built by hand rather than with `json.dumps` on a dict so the key order is fixed:

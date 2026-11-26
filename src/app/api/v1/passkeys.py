@@ -59,8 +59,8 @@ async def passkey_registration_options(
     current_user: Annotated[dict, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(async_get_db)],
 ) -> PasskeyRegistrationOptions:
-    """Step 1 of adding a passkey: a challenge and the creation options the browser passes to
-    `navigator.credentials.create()`, bound to the caller's account.
+    """Step 1 of adding a passkey: a challenge and the creation options the client passes to
+    its WebAuthn create() ceremony, bound to the caller's account.
 
     Needs a signed-in session's bearer token; an API key is refused (403). Rate limited per
     account. 409 when the account already holds as many passkeys as the instance allows.
@@ -98,7 +98,8 @@ async def passkey_registration_verify(
     and emails the account that one was added.
 
     Needs a signed-in session's bearer token; an API key is refused (403). `credential` is
-    the attestation as the browser returned it. 201 with the new passkey.
+    the attestation as the client's WebAuthn ceremony returned it, in the specification's
+    JSON. 201 with the new passkey.
 
     400 when the registration expired or was superseded by a newer options request, or when
     the attestation does not verify; start again from `POST /user/passkey/options`. 409 when

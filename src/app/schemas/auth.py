@@ -50,8 +50,9 @@ class EmailAuthRequestResponse(BaseModel):
     request_id: uuid_pkg.UUID
 
 
-# How long the session a sign-in by email starts may sit unused, on either half of the email.
-# A native client asks for `extended`, and the web sends nothing. On a `deletion_pending`
+# How long the session a sign-in by email or by passkey starts may sit unused: either half of
+# the email, or a passkey's assertion. A native client asks for `extended`, and the web sends
+# nothing. On a `deletion_pending`
 # outcome it is the window of the session a restore starts, and on `onboarding_required` the
 # one the account's first session starts with.
 RequestedIdleTimeout = Annotated[

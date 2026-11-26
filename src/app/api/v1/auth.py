@@ -198,9 +198,9 @@ async def _start_onboarding_or_sign_in(
     uninvited address and is signed into the onboarding token for the completion to count;
     an existing account signing in through either kind of link is simply signed in.
 
-    `idle_timeout` is the window a sign-in asked for: either email route takes it, for a
-    native client, while Google and passkeys are a browser's and pass `standard`. The first
-    branch starts the session with it; the second and third sign it into the onboarding and
+    `idle_timeout` is the window a sign-in asked for: both email routes and the passkey
+    route take it, for a native client, while Google is a browser's and passes `standard`.
+    The first branch starts the session with it; the second and third sign it into the onboarding and
     restore tokens, so the session `POST /auth/complete` or `POST /auth/restore` starts is
     the one the sign-in asked for.
     """
@@ -686,11 +686,11 @@ async def auth_with_google(
 
 @router.post("/passkey/options", response_model=PasskeySignInOptions)
 async def passkey_sign_in_options(request: Request) -> PasskeySignInOptions:
-    """Step 1 of signing in with a passkey: a challenge and the assertion options the browser
-    hands to `navigator.credentials.get()`.
+    """Step 1 of signing in with a passkey: a challenge and the assertion options the client
+    hands to its WebAuthn get() ceremony.
 
     Anonymous, and rate limited per IP. The request names no account and takes no
-    identifier: `allowCredentials` is empty, and the assertion the browser produces carries
+    identifier: `allowCredentials` is empty, and the assertion the client gets back carries
     the credential that names one. `flow_id` identifies the challenge and goes back with the
     assertion to `POST /auth/passkey/verify`; a challenge is good for one attempt.
 
@@ -730,10 +730,14 @@ async def passkey_sign_in_verify(
     that registered the credential.
 
     Anonymous, and rate limited per IP. `flow_id` is the one the options came with and
-    `credential` is the assertion as the browser returned it. The outcome is `authenticated`,
-    with an access token in the body and a `refresh_token` cookie, or `deletion_pending`,
-    with a `restore_token` for `POST /auth/restore`, when the account is inside its deletion
-    grace period; never `onboarding_required`, since a passkey exists only on an account.
+    `credential` is the assertion as the client's WebAuthn ceremony returned it, in the
+    specification's JSON. The outcome is `authenticated`, with an access token in the body
+    and a `refresh_token` cookie, or `deletion_pending`, with a `restore_token` for
+    `POST /auth/restore`, when the account is inside its deletion grace period; never
+    `onboarding_required`, since a passkey exists only on an account.
+
+    `idle_timeout` is taken as the email routes take it: `standard` or `extended`, the window
+    of the session this starts, or of the one `POST /auth/restore` then starts.
 
     The challenge is spent on the attempt, success or not, so a failed attempt starts again
     from `POST /auth/passkey/options`. Every failure - an unknown credential, an expired or
@@ -754,7 +758,7 @@ async def passkey_sign_in_verify(
 
     context = RequestContext.from_request(request)
     outcome = await finish_sign_in(db=db, flow_id=body.flow_id, credential=body.credential, context=context)
-    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context)
+    return await _start_onboarding_or_sign_in(response, outcome, db=db, context=context, idle_timeout=body.idle_timeout)
 
 
 @router.post("/complete", response_model=AuthOutcome)

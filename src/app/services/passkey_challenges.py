@@ -56,7 +56,7 @@ def _client() -> cache.Redis:
 async def store_sign_in_challenge() -> tuple[str, bytes]:
     """Mint a challenge for an anonymous assertion and return `(flow_id, challenge)`.
 
-    The `flow_id` is what the browser hands back to `POST /auth/passkey/verify`, and it
+    The `flow_id` is what the client hands back to `POST /auth/passkey/verify`, and it
     is the only thing that names this challenge - the ceremony identifies no account, so
     there is nothing else it could be keyed on.
     """
