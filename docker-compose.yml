@@ -129,7 +129,7 @@ services:
       - files-data:/data/files
 
   db:
-    image: postgres:18
+    image: postgres:19
     restart: unless-stopped
     env_file:
       - ./src/.env

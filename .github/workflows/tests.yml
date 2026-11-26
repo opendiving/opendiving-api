@@ -35,7 +35,7 @@ jobs:
     # on every run and that behaviour was effectively untested in CI.
     services:
       postgres:
-        image: postgres:18
+        image: postgres:19
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
